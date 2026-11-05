@@ -1,0 +1,12 @@
+[package]
+name = "zel-packages"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zel-cmdline = { workspace = true }
+zel-starlark = { workspace = true }
+zel-util = { workspace = true }
+zel-vfs = { workspace = true }
+

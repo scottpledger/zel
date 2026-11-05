@@ -1,0 +1,6 @@
+# Zel default build configuration
+common --check_direct_dependencies=warning
+common --test_env=PATH
+
+# Release optimization flags
+build:release -c opt

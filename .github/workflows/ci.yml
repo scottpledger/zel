@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - "release-*"
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Format & Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check Rust formatting
+        run: cargo fmt --all -- --check
+
+      - name: Check Cargo compilation & Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test & Self-Host (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run Cargo workspace unit & integration tests
+        run: cargo test --workspace --locked
+
+      - name: Run packaging, wrapper & Bazelisk compatibility tests (Unix)
+        if: runner.os != 'Windows'
+        run: ./scripts/zel_compat_test.sh
+
+      - name: Verify self-hosted build of //crates:zel (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ./target/debug/zel --output_base=/tmp/zel-ci-selfhost build //crates:zel
+          ./target/debug/zel --output_base=/tmp/zel-ci-selfhost build //crates:zel
+
+  bazel-rules-rs:
+    name: Build & Test via Bazel (@rules_rs)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache Bazel disk & repository cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/bazel-repo
+            ~/.cache/bazel-disk
+          key: bazel-rules-rs-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'MODULE.bazel.lock', 'crates/BUILD.bazel') }}
+          restore-keys: |
+            bazel-rules-rs-${{ runner.os }}-
+
+      - name: Build and test //crates/... with Bazel
+        run: |
+          bazel test             --repository_cache=~/.cache/bazel-repo             --disk_cache=~/.cache/bazel-disk             //crates/...

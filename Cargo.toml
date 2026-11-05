@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/zel-proto",
+    "crates/zel-util",
+    "crates/zel-vfs",
+    "crates/zel-events",
+    "crates/zel-cmdline",
+    "crates/zel-options",
+    "crates/zel-starlark",
+    "crates/zel-packages",
+    "crates/zel-bzlmod",
+    "crates/zel-query",
+    "crates/zel-analysis",
+    "crates/zel-rules",
+    "crates/zel-sandbox",
+    "crates/zel-remote",
+    "crates/zel-exec",
+    "crates/zel-skyframe",
+    "crates/zel-server",
+    "crates/zel-client",
+    "crates/zel-ffi-bridge",
+]
+
+[workspace.package]
+version = "10.0.0-prerelease"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/scottpledger/zel"
+
+[workspace.dependencies]
+zel-proto = { path = "crates/zel-proto" }
+zel-util = { path = "crates/zel-util" }
+zel-vfs = { path = "crates/zel-vfs" }
+zel-events = { path = "crates/zel-events" }
+zel-cmdline = { path = "crates/zel-cmdline" }
+zel-options = { path = "crates/zel-options" }
+zel-starlark = { path = "crates/zel-starlark" }
+zel-packages = { path = "crates/zel-packages" }
+zel-bzlmod = { path = "crates/zel-bzlmod" }
+zel-query = { path = "crates/zel-query" }
+zel-analysis = { path = "crates/zel-analysis" }
+zel-rules = { path = "crates/zel-rules" }
+zel-sandbox = { path = "crates/zel-sandbox" }
+zel-remote = { path = "crates/zel-remote" }
+zel-exec = { path = "crates/zel-exec" }
+zel-skyframe = { path = "crates/zel-skyframe" }
+zel-server = { path = "crates/zel-server" }
+zel-client = { path = "crates/zel-client" }
+zel-ffi-bridge = { path = "crates/zel-ffi-bridge" }

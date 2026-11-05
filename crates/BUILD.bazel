@@ -1,0 +1,400 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@rules_rs//rs:rust_binary.bzl", "rust_binary")
+load("@rules_rs//rs:rust_library.bzl", "rust_library")
+load("@rules_rs//rs:rust_shared_library.bzl", "rust_shared_library")
+load("@rules_rs//rs:rust_test.bzl", "rust_test")
+
+package(
+    default_applicable_licenses = ["//:license"],
+    default_visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "srcs",
+    srcs = glob(["**"]),
+    visibility = ["//visibility:public"],
+)
+
+rust_library(
+    name = "zel_proto",
+    srcs = glob(["zel-proto/src/**/*.rs"]),
+    crate_name = "zel_proto",
+    edition = "2021",
+)
+
+rust_test(
+    name = "zel_proto_test",
+    crate = ":zel_proto",
+)
+
+rust_library(
+    name = "zel_util",
+    srcs = glob(["zel-util/src/**/*.rs"]),
+    crate_name = "zel_util",
+    edition = "2021",
+    deps = [":zel_proto"],
+)
+
+rust_test(
+    name = "zel_util_test",
+    crate = ":zel_util",
+)
+
+rust_library(
+    name = "zel_vfs",
+    srcs = glob(["zel-vfs/src/**/*.rs"]),
+    crate_name = "zel_vfs",
+    edition = "2021",
+    deps = [":zel_util"],
+)
+
+rust_test(
+    name = "zel_vfs_test",
+    crate = ":zel_vfs",
+)
+
+rust_library(
+    name = "zel_events",
+    srcs = glob(["zel-events/src/**/*.rs"]),
+    crate_name = "zel_events",
+    edition = "2021",
+    deps = [
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_events_test",
+    crate = ":zel_events",
+)
+
+rust_library(
+    name = "zel_cmdline",
+    srcs = glob(["zel-cmdline/src/**/*.rs"]),
+    crate_name = "zel_cmdline",
+    edition = "2021",
+    deps = [
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_cmdline_test",
+    crate = ":zel_cmdline",
+)
+
+rust_library(
+    name = "zel_options",
+    srcs = glob(["zel-options/src/**/*.rs"]),
+    crate_name = "zel_options",
+    edition = "2021",
+    deps = [
+        ":zel_proto",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_options_test",
+    crate = ":zel_options",
+)
+
+rust_library(
+    name = "zel_starlark",
+    srcs = glob(["zel-starlark/src/**/*.rs"]),
+    crate_name = "zel_starlark",
+    edition = "2021",
+    deps = [
+        ":zel_cmdline",
+        ":zel_events",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_starlark_test",
+    crate = ":zel_starlark",
+)
+
+rust_library(
+    name = "zel_packages",
+    srcs = glob(["zel-packages/src/**/*.rs"]),
+    crate_name = "zel_packages",
+    edition = "2021",
+    deps = [
+        ":zel_cmdline",
+        ":zel_events",
+        ":zel_starlark",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_packages_test",
+    crate = ":zel_packages",
+)
+
+rust_library(
+    name = "zel_bzlmod",
+    srcs = glob(["zel-bzlmod/src/**/*.rs"]),
+    crate_name = "zel_bzlmod",
+    edition = "2021",
+    deps = [
+        ":zel_cmdline",
+        ":zel_starlark",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_bzlmod_test",
+    crate = ":zel_bzlmod",
+)
+
+rust_library(
+    name = "zel_query",
+    srcs = glob(["zel-query/src/**/*.rs"]),
+    crate_name = "zel_query",
+    edition = "2021",
+    deps = [
+        ":zel_cmdline",
+        ":zel_packages",
+        ":zel_starlark",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_query_test",
+    crate = ":zel_query",
+)
+
+rust_library(
+    name = "zel_analysis",
+    srcs = glob(["zel-analysis/src/**/*.rs"]),
+    crate_name = "zel_analysis",
+    edition = "2021",
+    deps = [
+        ":zel_cmdline",
+        ":zel_packages",
+        ":zel_starlark",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_analysis_test",
+    crate = ":zel_analysis",
+)
+
+rust_library(
+    name = "zel_rules",
+    srcs = glob(["zel-rules/src/**/*.rs"]),
+    crate_name = "zel_rules",
+    edition = "2021",
+    deps = [
+        ":zel_analysis",
+        ":zel_cmdline",
+        ":zel_packages",
+        ":zel_starlark",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_rules_test",
+    crate = ":zel_rules",
+)
+
+rust_library(
+    name = "zel_sandbox",
+    srcs = glob(["zel-sandbox/src/**/*.rs"]),
+    crate_name = "zel_sandbox",
+    edition = "2021",
+    deps = [
+        ":zel_proto",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_sandbox_test",
+    crate = ":zel_sandbox",
+)
+
+rust_library(
+    name = "zel_remote",
+    srcs = glob(["zel-remote/src/**/*.rs"]),
+    crate_name = "zel_remote",
+    edition = "2021",
+    deps = [
+        ":zel_proto",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_remote_test",
+    crate = ":zel_remote",
+)
+
+rust_library(
+    name = "zel_exec",
+    srcs = glob(["zel-exec/src/**/*.rs"]),
+    crate_name = "zel_exec",
+    edition = "2021",
+    deps = [
+        ":zel_analysis",
+        ":zel_cmdline",
+        ":zel_events",
+        ":zel_remote",
+        ":zel_sandbox",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_exec_test",
+    crate = ":zel_exec",
+)
+
+rust_library(
+    name = "zel_skyframe",
+    srcs = glob(["zel-skyframe/src/**/*.rs"]),
+    crate_name = "zel_skyframe",
+    edition = "2021",
+    deps = [
+        ":zel_analysis",
+        ":zel_cmdline",
+        ":zel_packages",
+        ":zel_rules",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_skyframe_test",
+    crate = ":zel_skyframe",
+)
+
+rust_library(
+    name = "zel_server",
+    srcs = glob(
+        ["zel-server/src/**/*.rs"],
+        exclude = ["zel-server/src/main.rs"],
+    ),
+    crate_name = "zel_server",
+    edition = "2021",
+    deps = [
+        ":zel_analysis",
+        ":zel_bzlmod",
+        ":zel_cmdline",
+        ":zel_events",
+        ":zel_exec",
+        ":zel_options",
+        ":zel_packages",
+        ":zel_proto",
+        ":zel_query",
+        ":zel_remote",
+        ":zel_rules",
+        ":zel_sandbox",
+        ":zel_skyframe",
+        ":zel_starlark",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_server_test",
+    crate = ":zel_server",
+)
+
+rust_binary(
+    name = "zel-server-bin",
+    srcs = ["zel-server/src/main.rs"],
+    edition = "2021",
+    deps = [
+        ":zel_options",
+        ":zel_proto",
+        ":zel_server",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_library(
+    name = "zel_client_lib",
+    srcs = glob(
+        ["zel-client/src/**/*.rs"],
+        exclude = ["zel-client/src/main.rs"],
+    ),
+    crate_name = "zel_client",
+    edition = "2021",
+    deps = [
+        ":zel_cmdline",
+        ":zel_options",
+        ":zel_proto",
+        ":zel_server",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_client_test",
+    crate = ":zel_client_lib",
+)
+
+rust_binary(
+    name = "zel",
+    srcs = ["zel-client/src/main.rs"],
+    edition = "2021",
+    deps = [
+        ":zel_client_lib",
+        ":zel_options",
+        ":zel_proto",
+        ":zel_server",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+copy_file(
+    name = "zel-exe",
+    src = ":zel",
+    out = "zel.exe",
+    allow_symlink = True,
+    is_executable = True,
+)
+
+rust_shared_library(
+    name = "zel_ffi_bridge",
+    srcs = glob(["zel-ffi-bridge/src/**/*.rs"]),
+    crate_name = "zel_ffi_bridge",
+    edition = "2021",
+    deps = [
+        ":zel_cmdline",
+        ":zel_skyframe",
+        ":zel_util",
+        ":zel_vfs",
+    ],
+)
+
+rust_test(
+    name = "zel_ffi_bridge_test",
+    crate = ":zel_ffi_bridge",
+)

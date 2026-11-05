@@ -1,0 +1,15 @@
+[package]
+name = "zel-ffi-bridge"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+zel-cmdline = { workspace = true }
+zel-skyframe = { workspace = true }
+zel-util = { workspace = true }
+zel-vfs = { workspace = true }
+

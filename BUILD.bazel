@@ -1,0 +1,57 @@
+load("@bazel_skylib//rules:copy_file.bzl", "copy_file")
+load("@rules_license//rules:license.bzl", "license")
+load("@rules_shell//shell:sh_binary.bzl", "sh_binary")
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
+package(default_visibility = ["//visibility:public"])
+
+license(
+    name = "license",
+    package_name = "zel",
+    copyright_notice = "Copyright © 2026 The Zel Authors. All rights reserved.",
+    license_kinds = [
+        "@rules_license//licenses/spdx:Apache-2.0",
+    ],
+    license_text = "LICENSE",
+)
+
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+])
+
+alias(
+    name = "zel",
+    actual = "//crates:zel",
+)
+
+alias(
+    name = "zel-server",
+    actual = "//crates:zel-server-bin",
+)
+
+copy_file(
+    name = "zel-exe",
+    src = "//crates:zel",
+    out = "zel.exe",
+    allow_symlink = True,
+    is_executable = True,
+)
+
+sh_binary(
+    name = "package-zel",
+    srcs = ["scripts/package_zel.sh"],
+)
+
+sh_test(
+    name = "zel_compat_test",
+    size = "medium",
+    srcs = ["scripts/zel_compat_test.sh"],
+    data = [
+        "scripts/package_zel.sh",
+        "scripts/zel.sh",
+        "//crates:srcs",
+    ],
+    tags = ["local"],
+)

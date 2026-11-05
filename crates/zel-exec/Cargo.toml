@@ -1,0 +1,15 @@
+[package]
+name = "zel-exec"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zel-analysis = { workspace = true }
+zel-cmdline = { workspace = true }
+zel-events = { workspace = true }
+zel-remote = { workspace = true }
+zel-sandbox = { workspace = true }
+zel-util = { workspace = true }
+zel-vfs = { workspace = true }
+

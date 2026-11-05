@@ -1,0 +1,16 @@
+# Cargo build output
+/target/
+# Packaging output
+/dist/
+# Bazel symlinks
+/bazel-*
+/zel-*
+# Local user config
+/user.bazelrc
+/user.zelrc
+# macOS / Editor files
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/

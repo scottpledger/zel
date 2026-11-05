@@ -1,0 +1,12 @@
+[package]
+name = "zel-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zel-cmdline = { workspace = true }
+zel-packages = { workspace = true }
+zel-util = { workspace = true }
+zel-vfs = { workspace = true }
+

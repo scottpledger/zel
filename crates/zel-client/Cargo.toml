@@ -1,0 +1,18 @@
+[package]
+name = "zel-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zel"
+path = "src/main.rs"
+
+[dependencies]
+zel-cmdline = { workspace = true }
+zel-options = { workspace = true }
+zel-proto = { workspace = true }
+zel-server = { workspace = true }
+zel-util = { workspace = true }
+zel-vfs = { workspace = true }
+
