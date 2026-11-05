@@ -16,6 +16,14 @@
 //! Mirrors `src/main/cpp/blaze.cc` (workspace discovery, `.bazelrc` loading, server lifecycle,
 //! gRPC `CommandServer` connection, streaming `RunResponse`, and `ExecRequest` execution).
 
+pub mod bazelisk;
+
+pub use bazelisk::{
+    escape_bazelisk_source_name, plan_invocation, populate_bazelisk_cache_entry,
+    resolve_version_binary, resolve_version_spec, BazeliskEnv, LauncherAction, ResolvedVersionSpec,
+    VersionSource,
+};
+
 use std::collections::HashSet;
 use std::io::{self, BufReader, BufWriter, Write};
 use std::net::{TcpListener, TcpStream};
@@ -27,7 +35,8 @@ use zel_options::{split_command_line, BazelrcConfig, StartupOptions};
 use zel_proto::command_server::{PingRequest, PingResponse, RunRequest, RunResponse, ServerInfo};
 use zel_proto::grpc_framing::{read_grpc_frame, write_grpc_frame};
 use zel_server::{
-    create_default_runtime, serve_command_server, BlazeDirectories, BlazeRuntime, RpcMethod,
+    cleanup_server_status_files, create_default_runtime, serve_command_server, BlazeDirectories,
+    BlazeRuntime, RpcMethod,
 };
 use zel_util::ExitCode;
 use zel_vfs::{FileSystem, PathFragment};
@@ -145,17 +154,96 @@ pub fn read_existing_server_info(
     ServerInfo::decode(&bytes).ok()
 }
 
+/// Reads `$OUTPUT_BASE/server/build_label.txt` if present.
+pub fn read_existing_server_build_label(
+    fs: &dyn FileSystem,
+    output_base: &PathFragment,
+) -> Option<String> {
+    let label_path = output_base
+        .get_relative_str("server")
+        .get_relative_str("build_label.txt");
+    let bytes = fs.read_file(&label_path).ok()?;
+    let label = String::from_utf8_lossy(&bytes).trim().to_string();
+    if label.is_empty() {
+        None
+    } else {
+        Some(label)
+    }
+}
+
 /// Entrypoint for running a CLI invocation and returning the numeric exit code.
-pub fn execute_cli<O: Write, E: Write>(
+pub fn execute_cli<O: Write + Send, E: Write + Send>(
     raw_args: &[String],
     cwd: &PathFragment,
     fs: Arc<dyn FileSystem>,
     stdout_writer: &mut O,
     stderr_writer: &mut E,
 ) -> i32 {
+    let proc_env = BazeliskEnv::from_process_env();
+    let is_host_fs = proc_env
+        .current_exe
+        .as_ref()
+        .is_some_and(|exe| fs.exists(exe, true));
+    let env = if is_host_fs {
+        proc_env
+    } else {
+        BazeliskEnv::default()
+    };
+    execute_cli_with_env(raw_args, cwd, fs, &env, stdout_writer, stderr_writer)
+}
+
+/// Entrypoint for running a CLI invocation with an explicit `BazeliskEnv` configuration.
+pub fn execute_cli_with_env<O: Write + Send, E: Write + Send>(
+    raw_args: &[String],
+    cwd: &PathFragment,
+    fs: Arc<dyn FileSystem>,
+    env: &BazeliskEnv,
+    stdout_writer: &mut O,
+    stderr_writer: &mut E,
+) -> i32 {
     // Internal flag used when spawning the background server process
     if raw_args.first().map(|s| s.as_str()) == Some("--internal_server_daemon") {
         return run_background_daemon(&raw_args[1..]);
+    }
+
+    let workspace_dir = find_workspace_root(fs.as_ref(), cwd);
+
+    // Built-in Bazelisk version resolution, enforcement, and wrapper delegation
+    match bazelisk::plan_invocation(fs.as_ref(), cwd, &workspace_dir, raw_args, env) {
+        Ok(LauncherAction::RunInProcess { spec }) => {
+            if let Some(ref warn) = spec.warn_message {
+                let _ = writeln!(stderr_writer, "{warn}");
+            }
+        }
+        Ok(LauncherAction::ExecExternal {
+            program,
+            args,
+            env_vars,
+            spec,
+        }) => {
+            if let Some(ref warn) = spec.warn_message {
+                let _ = writeln!(stderr_writer, "{warn}");
+            }
+            match bazelisk::execute_external_action(
+                &program,
+                &args,
+                &env_vars,
+                cwd,
+                env.inherit_stdio,
+                stdout_writer,
+                stderr_writer,
+            ) {
+                Ok(code) => return code,
+                Err(e) => {
+                    let _ = writeln!(stderr_writer, "ERROR: {e}");
+                    return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+                }
+            }
+        }
+        Err(e) => {
+            let _ = writeln!(stderr_writer, "ERROR: {e}");
+            return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+        }
     }
 
     let (mut startup, command, raw_cmd_args) = match split_command_line(raw_args) {
@@ -169,11 +257,9 @@ pub fn execute_cli<O: Write, E: Write>(
     // Fast path for `zel --version` / `bazel --version` (does not start server or load rc files)
     if command == "version" && raw_cmd_args.iter().any(|a| a == "--startup_version") {
         let prefix = zel_server::version_product_prefix();
-        let _ = writeln!(stdout_writer, "{prefix} {}", zel_server::build_label());
+        let _ = writeln!(stdout_writer, "{prefix} {}", env.current_version);
         return ExitCode::SUCCESS.numeric_exit_code();
     }
-
-    let workspace_dir = find_workspace_root(fs.as_ref(), cwd);
 
     // Load .zelrc and .bazelrc files unless --ignore_all_rc_files is set
     let mut rc_config = BazelrcConfig::default();
@@ -254,8 +340,8 @@ pub fn execute_cli<O: Write, E: Write>(
     let home = std::env::var("HOME").ok();
     let output_user_root = startup.resolve_output_user_root(&user, home.as_deref());
     let output_base = startup.resolve_output_base(&workspace_dir, &user, home.as_deref());
-    let install_base =
-        startup.resolve_install_base("zel-0.0.1-install-key", &user, home.as_deref());
+    let install_key = format!("zel-{}-install-key", env.current_version);
+    let install_base = startup.resolve_install_base(&install_key, &user, home.as_deref());
 
     let mut full_argv_bytes = Vec::with_capacity(1 + expanded_cmd_args.len());
     full_argv_bytes.push(effective_cmd.as_bytes().to_vec());
@@ -280,15 +366,58 @@ pub fn execute_cli<O: Write, E: Write>(
     if !startup.batch {
         if let Some(info) = read_existing_server_info(fs.as_ref(), &output_base) {
             if ping_server(&info.address, &info.request_cookie, &info.response_cookie) {
-                run_req.cookie = info.request_cookie.clone();
-                if let Ok(resp) = send_run_request(
-                    &info.address,
-                    &run_req,
-                    &info.response_cookie,
-                    stdout_writer,
-                    stderr_writer,
-                ) {
-                    return resp.exit_code;
+                let server_version_matches =
+                    read_existing_server_build_label(fs.as_ref(), &output_base)
+                        .map(|srv_ver| {
+                            bazelisk::normalize_version(&srv_ver)
+                                == bazelisk::normalize_version(&env.current_version)
+                        })
+                        .unwrap_or(false);
+
+                if server_version_matches {
+                    run_req.cookie = info.request_cookie.clone();
+                    if let Ok(resp) = send_run_request(
+                        &info.address,
+                        &run_req,
+                        &info.response_cookie,
+                        stdout_writer,
+                        stderr_writer,
+                    ) {
+                        return resp.exit_code;
+                    }
+                } else {
+                    // Existing server is running a different or unknown Zel version; shut it down
+                    // and wait for it to clean up its status files before starting the new server
+                    let shutdown_req = RunRequest {
+                        cookie: info.request_cookie.clone(),
+                        arg: vec![b"shutdown".to_vec()],
+                        block_for_lock: true,
+                        client_description: format!("pid={}", std::process::id()),
+                        ..Default::default()
+                    };
+                    let mut sink_out = Vec::new();
+                    let mut sink_err = Vec::new();
+                    let _ = send_run_request(
+                        &info.address,
+                        &shutdown_req,
+                        &info.response_cookie,
+                        &mut sink_out,
+                        &mut sink_err,
+                    );
+                    let server_dir = output_base.get_relative_str("server");
+                    for _ in 0..400 {
+                        let status_cleared =
+                            read_existing_server_info(fs.as_ref(), &output_base).is_none();
+                        let server_alive =
+                            ping_server(&info.address, &info.request_cookie, &info.response_cookie);
+                        if status_cleared && !server_alive {
+                            break;
+                        }
+                        thread::sleep(Duration::from_millis(5));
+                    }
+                    if !ping_server(&info.address, &info.request_cookie, &info.response_cookie) {
+                        cleanup_server_status_files(fs.as_ref(), &server_dir);
+                    }
                 }
             }
         }
@@ -451,7 +580,7 @@ mod tests {
             &mut out,
             &mut err,
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
         assert!(String::from_utf8_lossy(&out).contains("Build label: 0.0.1"));
 
         // 2. Test `bazel canonicalize-flags --config=opt`
@@ -468,7 +597,7 @@ mod tests {
             &mut out,
             &mut err,
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
         assert_eq!(
             String::from_utf8_lossy(&out).trim(),
             "--compilation_mode=opt"
@@ -488,7 +617,320 @@ mod tests {
             &mut out,
             &mut err,
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, 0, "stderr: {}", String::from_utf8_lossy(&err));
         assert_eq!(String::from_utf8_lossy(&out).trim(), "//app:hello");
+    }
+
+    #[test]
+    fn test_version_resolution_precedence_and_files() {
+        let fs = Arc::new(InMemoryFileSystem::default());
+        let ws = PathFragment::create("/workspace");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.write_file(
+            &ws.get_relative_str("MODULE.zel"),
+            b"module(name = \"ws\")\n",
+        )
+        .unwrap();
+        fs.write_file(&ws.get_relative_str(".bazelversion"), b"# comment\n8.0.0\n")
+            .unwrap();
+
+        let mut env = BazeliskEnv {
+            current_version: "0.0.1".to_string(),
+            os_name: "darwin".to_string(),
+            arch_name: "arm64".to_string(),
+            raw_arch_name: "aarch64".to_string(),
+            ..BazeliskEnv::default()
+        };
+
+        // 1. .bazelversion is picked up when .zelversion and env vars are absent
+        let spec = resolve_version_spec(fs.as_ref(), &ws, &ws, &env).unwrap();
+        assert_eq!(spec.version, "8.0.0");
+        assert_eq!(
+            spec.source,
+            VersionSource::BazelVersionFile(ws.get_relative_str(".bazelversion"))
+        );
+
+        // 2. .zelversion takes precedence over .bazelversion
+        fs.write_file(&ws.get_relative_str(".zelversion"), b"0.0.2\n")
+            .unwrap();
+        let spec = resolve_version_spec(fs.as_ref(), &ws, &ws, &env).unwrap();
+        assert_eq!(spec.version, "0.0.2");
+        assert_eq!(
+            spec.source,
+            VersionSource::ZelVersionFile(ws.get_relative_str(".zelversion"))
+        );
+
+        // 3. USE_BAZEL_VERSION takes precedence over .zelversion and .bazelversion
+        env.use_bazel_version = Some("9.1.0".to_string());
+        let spec = resolve_version_spec(fs.as_ref(), &ws, &ws, &env).unwrap();
+        assert_eq!(spec.version, "9.1.0");
+        assert_eq!(spec.source, VersionSource::UseBazelVersionEnv);
+
+        // 4. USE_ZEL_VERSION takes highest precedence
+        env.use_zel_version = Some("v0.0.3".to_string());
+        let spec = resolve_version_spec(fs.as_ref(), &ws, &ws, &env).unwrap();
+        assert_eq!(spec.version, "v0.0.3");
+        assert_eq!(spec.source, VersionSource::UseZelVersionEnv);
+    }
+
+    #[test]
+    fn test_version_enforcement_and_sibling_delegation() {
+        let fs = Arc::new(InMemoryFileSystem::default());
+        let ws = PathFragment::create("/workspace");
+        let bin_dir = PathFragment::create("/usr/local/bin");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.create_directory_and_parents(&bin_dir).unwrap();
+        fs.write_file(&ws.get_relative_str("MODULE.bazel"), b"")
+            .unwrap();
+        fs.write_file(&ws.get_relative_str(".zelversion"), b"0.0.2\n")
+            .unwrap();
+
+        let env = BazeliskEnv {
+            current_exe: Some(bin_dir.get_relative_str("zel")),
+            current_version: "0.0.1".to_string(),
+            no_download: true,
+            os_name: "darwin".to_string(),
+            arch_name: "arm64".to_string(),
+            raw_arch_name: "aarch64".to_string(),
+            ..BazeliskEnv::default()
+        };
+
+        // 1. Missing required version with no_download=true produces a version enforcement error
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = execute_cli_with_env(
+            &["--batch".to_string(), "version".to_string()],
+            &ws,
+            Arc::clone(&fs) as Arc<dyn FileSystem>,
+            &env,
+            &mut out,
+            &mut err,
+        );
+        assert_ne!(code, 0);
+        let err_str = String::from_utf8_lossy(&err);
+        assert!(err_str.contains("requires Zel version '0.0.2'"));
+
+        // 2. Installing sibling binary `zel-0.0.2-darwin-arm64` resolves to ExecExternal
+        let sibling = bin_dir.get_relative_str("zel-0.0.2-darwin-arm64");
+        fs.write_file(&sibling, b"#!/bin/sh\n").unwrap();
+        let action = plan_invocation(fs.as_ref(), &ws, &ws, &["build".to_string()], &env).unwrap();
+        match action {
+            LauncherAction::ExecExternal { program, .. } => {
+                assert_eq!(program, sibling);
+            }
+            other => panic!("Expected ExecExternal, got {other:?}"),
+        }
+
+        // 3. Matching version runs in-process without external delegation
+        fs.write_file(&ws.get_relative_str(".zelversion"), b"v0.0.1\n")
+            .unwrap();
+        let action = plan_invocation(fs.as_ref(), &ws, &ws, &["build".to_string()], &env).unwrap();
+        assert!(matches!(action, LauncherAction::RunInProcess { .. }));
+    }
+
+    #[test]
+    fn test_auto_download_and_sha256_verification() {
+        let fs = Arc::new(InMemoryFileSystem::default());
+        let ws = PathFragment::create("/workspace");
+        let mirror = PathFragment::create("/mirror/releases");
+        let cache_home = PathFragment::create("/cache/zel-home");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.create_directory_and_parents(&mirror.get_relative_str("9.3.1"))
+            .unwrap();
+        fs.write_file(&ws.get_relative_str("MODULE.bazel"), b"")
+            .unwrap();
+        fs.write_file(&ws.get_relative_str(".bazelversion"), b"9.3.1\n")
+            .unwrap();
+
+        let fake_bin_bytes = b"fake-zel-9.3.1-binary-payload";
+        let fake_sha = zel_util::sha256::hex_digest(fake_bin_bytes);
+        let release_art = mirror
+            .get_relative_str("9.3.1")
+            .get_relative_str("zel-9.3.1-linux-x86_64");
+        let release_sha = mirror
+            .get_relative_str("9.3.1")
+            .get_relative_str("zel-9.3.1-linux-x86_64.sha256");
+        fs.write_file(&release_art, fake_bin_bytes).unwrap();
+        fs.write_file(
+            &release_sha,
+            format!("{fake_sha}  zel-9.3.1-linux-x86_64\n").as_bytes(),
+        )
+        .unwrap();
+
+        let mut env = BazeliskEnv {
+            current_version: "0.0.1".to_string(),
+            base_url: Some(format!("file://{}", mirror)),
+            home_dir: Some(cache_home.clone()),
+            os_name: "linux".to_string(),
+            arch_name: "x86_64".to_string(),
+            raw_arch_name: "x86_64".to_string(),
+            ..BazeliskEnv::default()
+        };
+
+        let action = plan_invocation(fs.as_ref(), &ws, &ws, &["info".to_string()], &env).unwrap();
+        let expected_cached = cache_home
+            .get_relative_str("downloads/zel")
+            .get_relative_str("zel-9.3.1-linux-x86_64");
+        match action {
+            LauncherAction::ExecExternal { program, .. } => {
+                assert_eq!(program, expected_cached);
+            }
+            other => panic!("Expected ExecExternal, got {other:?}"),
+        }
+        assert_eq!(
+            fs.read_file(&expected_cached).unwrap(),
+            fake_bin_bytes.to_vec()
+        );
+
+        // Verify tampered SHA-256 is rejected
+        env.verify_sha256 =
+            Some("0000000000000000000000000000000000000000000000000000000000000000".to_string());
+        let err = plan_invocation(fs.as_ref(), &ws, &ws, &["info".to_string()], &env).unwrap_err();
+        assert!(err.contains("SHA-256 checksum mismatch"));
+    }
+
+    #[test]
+    fn test_workspace_wrapper_delegation_and_fallback_env() {
+        let fs = Arc::new(InMemoryFileSystem::default());
+        let ws = PathFragment::create("/workspace");
+        let tools_dir = ws.get_relative_str("tools");
+        let exe_path = PathFragment::create("/usr/local/bin/zel");
+        fs.create_directory_and_parents(&tools_dir).unwrap();
+        fs.write_file(&ws.get_relative_str("MODULE.bazel"), b"")
+            .unwrap();
+        let wrapper = tools_dir.get_relative_str("zel");
+        fs.write_file(&wrapper, b"#!/bin/sh\nexec \"$ZEL_REAL\" \"$@\"\n")
+            .unwrap();
+
+        let env = BazeliskEnv {
+            current_exe: Some(exe_path.clone()),
+            current_version: "0.0.1".to_string(),
+            fallback_version: Some((
+                "USE_ZEL_FALLBACK_VERSION".to_string(),
+                "warn:0.0.1".to_string(),
+            )),
+            ..BazeliskEnv::default()
+        };
+
+        let action = plan_invocation(fs.as_ref(), &ws, &ws, &["build".to_string()], &env).unwrap();
+        match action {
+            LauncherAction::ExecExternal {
+                program,
+                env_vars,
+                spec,
+                ..
+            } => {
+                assert_eq!(program, wrapper);
+                assert!(spec.warn_message.is_some());
+                assert!(env_vars.contains(&("ZEL_REAL".to_string(), exe_path.to_string())));
+                assert!(env_vars.contains(&("BAZEL_REAL".to_string(), exe_path.to_string())));
+                assert!(env_vars.contains(&("ZEL_SKIP_WRAPPER".to_string(), "true".to_string())));
+                assert!(
+                    env_vars.contains(&("BAZELISK_SKIP_WRAPPER".to_string(), "true".to_string()))
+                );
+            }
+            other => panic!("Expected ExecExternal to tools/zel wrapper, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_bazeliskrc_and_bazelisk_cache_interoperability() {
+        let fs = Arc::new(InMemoryFileSystem::default());
+        let ws = PathFragment::create("/workspace");
+        let bhome = PathFragment::create("/cache/bazelisk-home");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.write_file(&ws.get_relative_str("MODULE.bazel"), b"")
+            .unwrap();
+        fs.write_file(
+            &ws.get_relative_str(".bazeliskrc"),
+            b"BAZELISK_BASE_URL=https://github.com/scottpledger/zel/releases/download\nBAZELISK_HOME=/cache/bazelisk-home\n",
+        )
+        .unwrap();
+        fs.write_file(&ws.get_relative_str(".bazelversion"), b"9.3.1\n")
+            .unwrap();
+
+        let env = BazeliskEnv {
+            current_version: "0.0.1".to_string(),
+            no_download: true,
+            os_name: "darwin".to_string(),
+            arch_name: "arm64".to_string(),
+            raw_arch_name: "aarch64".to_string(),
+            ..BazeliskEnv::default()
+        };
+
+        // Populate Bazelisk's content-addressable cache (`downloads/metadata/...` + `downloads/sha256/<sha>/bin/bazel`)
+        let payload = b"#!/bin/sh\necho \"bazel 9.3.1\"\n";
+        let sha_bin = populate_bazelisk_cache_entry(
+            fs.as_ref(),
+            &bhome,
+            "9.3.1",
+            "https://github.com/scottpledger/zel/releases/download",
+            payload,
+            &env,
+        )
+        .unwrap();
+
+        // `zel` resolves the binary from Bazelisk's metadata/sha256 cache configured via `.bazeliskrc`
+        let action = plan_invocation(fs.as_ref(), &ws, &ws, &["info".to_string()], &env).unwrap();
+        match action {
+            LauncherAction::ExecExternal { program, .. } => {
+                assert_eq!(program, sha_bin);
+            }
+            other => panic!("Expected ExecExternal to cached sha256 binary, got {other:?}"),
+        }
+
+        // When invoked by external `bazelisk` (`bazelisk_skip_wrapper = true`), `.bazelversion` was
+        // already handled by `bazelisk`, so `zel` runs in-process.
+        let mut under_bazelisk = env.clone();
+        under_bazelisk.bazelisk_skip_wrapper = true;
+        let action = plan_invocation(
+            fs.as_ref(),
+            &ws,
+            &ws,
+            &["info".to_string()],
+            &under_bazelisk,
+        )
+        .unwrap();
+        assert!(matches!(action, LauncherAction::RunInProcess { .. }));
+
+        // If `.zelversion` is also present, `zel` enforces `.zelversion` even when invoked via `bazelisk`
+        fs.write_file(&ws.get_relative_str(".zelversion"), b"9.3.1\n")
+            .unwrap();
+        let action = plan_invocation(
+            fs.as_ref(),
+            &ws,
+            &ws,
+            &["info".to_string()],
+            &under_bazelisk,
+        )
+        .unwrap();
+        match action {
+            LauncherAction::ExecExternal { program, .. } => {
+                assert_eq!(program, sha_bin);
+            }
+            other => panic!(
+                "Expected ExecExternal when .zelversion differs under bazelisk, got {other:?}"
+            ),
+        }
+
+        // Workspace `.bazeliskrc` (`USE_BAZEL_VERSION`) takes precedence over user home `.zeliskrc` (`USE_ZEL_VERSION`)
+        let user_home = PathFragment::create("/home/user");
+        fs.create_directory_and_parents(&user_home).unwrap();
+        fs.write_file(
+            &ws.get_relative_str(".bazeliskrc"),
+            b"USE_BAZEL_VERSION=9.3.1\nBAZELISK_HOME=/cache/bazelisk-home\n",
+        )
+        .unwrap();
+        fs.write_file(
+            &user_home.get_relative_str(".zeliskrc"),
+            b"USE_ZEL_VERSION=0.0.1\n",
+        )
+        .unwrap();
+        let mut with_home_env = env.clone();
+        with_home_env.user_home = Some(user_home);
+        let merged = with_home_env.with_rc_files(fs.as_ref(), &ws);
+        let spec = resolve_version_spec(fs.as_ref(), &ws, &ws, &merged).unwrap();
+        assert_eq!(spec.version, "9.3.1");
+        assert_eq!(spec.source, VersionSource::UseBazelVersionEnv);
     }
 }

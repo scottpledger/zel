@@ -93,7 +93,7 @@ function get_realpath() {
 function get_workspace_root() {
   workspace_dir="${PWD}"
   while [[ "${workspace_dir}" != / ]]; do
-    if [[ -e "${workspace_dir}/WORKSPACE" || -e "${workspace_dir}/WORKSPACE.bazel" || -e "${workspace_dir}/MODULE.bazel" ]]; then
+    if [[ -e "${workspace_dir}/MODULE.zel" || -e "${workspace_dir}/MODULE.bazel" || -e "${workspace_dir}/REPO.bazel" || -e "${workspace_dir}/WORKSPACE.zel" || -e "${workspace_dir}/WORKSPACE.bazel" || -e "${workspace_dir}/WORKSPACE" ]]; then
       readonly workspace_dir
       return
     fi
@@ -110,10 +110,16 @@ readonly os_arch_suffix="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
 function get_bazel_version() {
   bazel_version=""
 
-  if [[ -n ${USE_BAZEL_VERSION:-} ]]; then
+  if [[ -n ${USE_ZEL_VERSION:-} ]]; then
+    reason="specified in \$USE_ZEL_VERSION"
+    bazel_version="${USE_ZEL_VERSION}"
+  elif [[ -n ${USE_BAZEL_VERSION:-} ]]; then
     reason="specified in \$USE_BAZEL_VERSION"
     bazel_version="${USE_BAZEL_VERSION}"
-  elif [[ -e "${workspace_dir}/.bazelversion" ]]; then
+  elif [[ -n "${workspace_dir}" && -e "${workspace_dir}/.zelversion" ]]; then
+    reason="specified in ${workspace_dir}/.zelversion"
+    read -r bazel_version < "${workspace_dir}/.zelversion" || true
+  elif [[ -n "${workspace_dir}" && -e "${workspace_dir}/.bazelversion" ]]; then
     reason="specified in ${workspace_dir}/.bazelversion"
     # The "read" can fail if the .bazelversion file does not contain a final
     # newline character. It will still correctly assign the read data to the
@@ -125,22 +131,29 @@ function get_bazel_version() {
     read -r bazel_version < "${workspace_dir}/.bazelversion" || true
   fi
 
+  # Strip optional leading 'v' if followed by a digit.
+  if [[ "${bazel_version}" =~ ^v[0-9] ]]; then
+    bazel_version="${bazel_version#v}"
+  fi
+
   # If we read an empty string or the magic word "latest" from .bazelversion or
   # $USE_BAZEL_VERSION, then we should use the latest available stable version.
   # This mimics the behavior of Bazelisk.
   if [[ -z $bazel_version || $bazel_version == "latest" ]]; then
-    if [[ -x "${wrapper_dir}/bazel-real" ]]; then
-      reason="${reason:-"automatically selected bazel-real"}"
+    if [[ -x "${wrapper_dir}/zel-real" || -x "${wrapper_dir}/bazel-real" ]]; then
+      reason="${reason:-"automatically selected real binary"}"
       bazel_version="real"
     else
-      # Find the latest Bazel version installed on the system.
+      # Find the latest Zel or Bazel version installed on the system.
       reason="${reason:-"automatically selected latest available version"}"
-      bazel_version="$(basename "$(find -H "${wrapper_dir}" -maxdepth 1 -name 'bazel-[0-9]*-${os_arch_suffix}' -type f | sort -V | tail -n 1)")"
+      bazel_version="$(basename "$(find -H "${wrapper_dir}" -maxdepth 1 \( -name "zel-[0-9]*-${os_arch_suffix}" -o -name "bazel-[0-9]*-${os_arch_suffix}" \) -type f | sort -V | tail -n 1)")"
       if [[ -z $bazel_version ]]; then
-        bazel_version="$(basename "$(find -H "${wrapper_dir}" -maxdepth 1 -name 'bazel-[0-9]*' -type f | sort -V | tail -n 1)")"
+        bazel_version="$(basename "$(find -H "${wrapper_dir}" -maxdepth 1 \( -name 'zel-[0-9]*' -o -name 'bazel-[0-9]*' \) -type f | sort -V | tail -n 1)")"
       fi
-      # Remove the "bazel-" prefix from the file name.
+      # Remove the "zel-" or "bazel-" prefix and optional os_arch_suffix from the file name.
+      bazel_version="${bazel_version#"zel-"}"
       bazel_version="${bazel_version#"bazel-"}"
+      bazel_version="${bazel_version%"-${os_arch_suffix}"}"
     fi
   fi
 
@@ -150,33 +163,42 @@ function get_bazel_version() {
 
 get_bazel_version
 
-BAZEL_REAL="${wrapper_dir}/bazel-${bazel_version}-${os_arch_suffix}"
-
-# Try without the architecture suffix.
-if [[ ! -x ${BAZEL_REAL} ]]; then
-  BAZEL_REAL="${wrapper_dir}/bazel-${bazel_version}"
-fi
-
-# Last try: Maybe `bazel-real` is actually the requested correct version?
-readonly bazel_real_path="${wrapper_dir}/bazel-real"
-if [[ ! -x ${BAZEL_REAL} && -x ${bazel_real_path} ]]; then
-  # Note that "bazel --version" is very fast and doesn't start the Bazel server,
-  # as opposed to "bazel version".
-  readonly bazel_real_version="$("${bazel_real_path}" --version | grep '^bazel ' | cut -d' ' -f2)"
-  if [[ $bazel_real_version == $bazel_version ]]; then
-    BAZEL_REAL="${bazel_real_path}"
+BAZEL_REAL=""
+for candidate in \
+  "${wrapper_dir}/zel-${bazel_version}-${os_arch_suffix}" \
+  "${wrapper_dir}/zel-${bazel_version}" \
+  "${wrapper_dir}/bazel-${bazel_version}-${os_arch_suffix}" \
+  "${wrapper_dir}/bazel-${bazel_version}"; do
+  if [[ -x "${candidate}" ]]; then
+    BAZEL_REAL="${candidate}"
+    break
   fi
-fi
+done
 
-# If the repository contains a checked-in executable set by $BAZEL_WRAPPER
-# (defaults to tools/bazel), we assume that they know what they're doing and
-# have their own way of versioning Bazel. Thus, we don't have to print our
-# helpful messages or error out in case we couldn't find a binary.
-BAZEL_WRAPPER=${BAZEL_WRAPPER:-"tools/bazel"}
-readonly wrapper="${workspace_dir}/${BAZEL_WRAPPER}"
-if [[ -x "$wrapper" && -f "$wrapper" ]]; then
-  export BAZEL_REAL
-  exec -a "$0" "${wrapper}" "$@"
+# Last try: Maybe `zel-real` or `bazel-real` is actually the requested correct version?
+for real_cand in "${wrapper_dir}/zel-real" "${wrapper_dir}/bazel-real"; do
+  if [[ ! -x "${BAZEL_REAL}" && -x "${real_cand}" ]]; then
+    real_ver="$("${real_cand}" --version | awk 'NR==1 {print $2}')"
+    if [[ "${real_ver}" == "${bazel_version}" || "${bazel_version}" == "real" ]]; then
+      BAZEL_REAL="${real_cand}"
+      break
+    fi
+  fi
+done
+ZEL_REAL="${BAZEL_REAL}"
+
+# If the repository contains a checked-in executable set by $ZEL_WRAPPER / $BAZEL_WRAPPER
+# (defaults to tools/zel or tools/bazel), we assume that they know what they're doing and
+# have their own way of versioning Zel/Bazel.
+if [[ -n "${workspace_dir}" ]]; then
+  for wrapper_rel in "${ZEL_WRAPPER:-}" "${BAZEL_WRAPPER:-}" "tools/zel" "tools/bazel"; do
+    [[ -n "${wrapper_rel}" ]] || continue
+    wrapper="${workspace_dir}/${wrapper_rel}"
+    if [[ -x "${wrapper}" && -f "${wrapper}" ]]; then
+      export BAZEL_REAL ZEL_REAL
+      exec -a "$0" "${wrapper}" "$@"
+    fi
+  done
 fi
 
 if [[ -z $bazel_version ]]; then

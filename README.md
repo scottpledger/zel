@@ -25,7 +25,7 @@ Zel is organized into a 19-crate zero-external-dependency Rust workspace under `
 | `zel-exec` | `SkyframeActionExecutor`, symlink forest planting, incremental `CompactPersistentActionCache`, and test runner |
 | `zel-skyframe` | Incremental evaluation graph (`InMemoryMemoizingEvaluator`, `ParallelEvaluator`, dirty tracking, cycle detection) |
 | `zel-server` | Persistent background daemon (`zel-server`), `BlazeDirectories`, `BlazeRuntime`, and command dispatcher |
-| `zel-client` | `zel` CLI client, workspace discovery, server lock/ping/spawn lifecycle, and `--batch` execution |
+| `zel-client` | `zel` CLI client, built-in Bazelisk version manager/launcher, workspace discovery, server lifecycle, and `--batch` execution |
 | `zel-ffi-bridge` | C-ABI / FFI shared library bridge |
 
 ## Building & Testing
@@ -54,7 +54,18 @@ bazel test //crates/...
 ./target/release/zel --output_base=/tmp/zel-ob build //crates:zel
 ```
 
-## Using with Bazelisk
+## Version Enforcement & Bazelisk Compatibility
+
+`zel` includes a built-in Bazelisk-compatible version manager and launcher:
+
+- **Version Resolution Order:**
+  1. `USE_ZEL_VERSION` or `USE_BAZEL_VERSION` environment variable (supports version strings, `latest`, `<owner>/<repo>/<version>`, or direct executable paths)
+  2. `.zelversion` or `.bazelversion` file in the workspace root
+  3. `USE_ZEL_FALLBACK_VERSION` or `USE_BAZEL_FALLBACK_VERSION` (`error`, `warn:<version>`, `silent:<version>`, or `<version>`)
+- **Resolution & Auto-Download:** When the required version differs from the running `zel` binary, `zel` searches sibling binaries (`zel-<version>-<os>-<arch>`), the local cache (`$ZEL_HOME` / `$BAZELISK_HOME`), or automatically downloads and SHA-256 verifies the requested release from `$ZEL_BASE_URL` / `$BAZELISK_BASE_URL` (defaulting to GitHub Releases). Set `ZEL_NO_DOWNLOAD=1` (or `BAZELISK_NO_DOWNLOAD=1`) to enforce strict offline version checking.
+- **Workspace Wrapper Delegation:** Automatically delegates to `tools/zel` or `tools/bazel` (or `$ZEL_WRAPPER` / `$BAZEL_WRAPPER`) with `ZEL_REAL` and `BAZEL_REAL` pointing to the resolved binary.
+
+### Using with External Bazelisk
 
 Use a published release directly via `bazelisk`:
 
