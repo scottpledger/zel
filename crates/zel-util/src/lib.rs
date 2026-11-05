@@ -169,6 +169,7 @@ impl Clock for JavaClock {
 
 /// RFC 1321 MD5 implementation (used by Bazel to compute `$OUTPUT_BASE` directory names
 /// from the workspace directory path and for `Fingerprint`).
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 pub mod md5 {
     const S: [u32; 64] = [
         7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
@@ -253,6 +254,7 @@ pub mod md5 {
 }
 
 /// FIPS 180-4 SHA-256 implementation for content digests and action caching.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 pub mod sha256 {
     const K: [u32; 64] = [
         0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
