@@ -85,7 +85,7 @@ if [[ -z "${VERSION}" ]]; then
   elif [[ -f "${WORKSPACE_ROOT}/.bazelversion" ]]; then
     VERSION="$(head -n 1 "${WORKSPACE_ROOT}/.bazelversion" | tr -d '[:space:]')"
   else
-    VERSION="0.1.0"
+    VERSION="0.0.1"
   fi
 fi
 

@@ -255,7 +255,7 @@ pub fn execute_cli<O: Write, E: Write>(
     let output_user_root = startup.resolve_output_user_root(&user, home.as_deref());
     let output_base = startup.resolve_output_base(&workspace_dir, &user, home.as_deref());
     let install_base =
-        startup.resolve_install_base("zel-10.0.0-install-key", &user, home.as_deref());
+        startup.resolve_install_base("zel-0.0.1-install-key", &user, home.as_deref());
 
     let mut full_argv_bytes = Vec::with_capacity(1 + expanded_cmd_args.len());
     full_argv_bytes.push(effective_cmd.as_bytes().to_vec());
@@ -452,7 +452,7 @@ mod tests {
             &mut err,
         );
         assert_eq!(code, 0);
-        assert!(String::from_utf8_lossy(&out).contains("Build label: 10.0.0-prerelease"));
+        assert!(String::from_utf8_lossy(&out).contains("Build label: 0.0.1"));
 
         // 2. Test `bazel canonicalize-flags --config=opt`
         out.clear();

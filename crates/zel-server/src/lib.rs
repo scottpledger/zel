@@ -45,7 +45,7 @@ use zel_skyframe::{
 use zel_util::{ExitCode, Os};
 use zel_vfs::{DirentType, FileSystem, LocalFileSystem, PathFragment};
 
-pub const ZEL_RELEASE_VERSION: &str = "release 10.0.0-prerelease (zel)";
+pub const ZEL_RELEASE_VERSION: &str = "release 0.0.1 (zel)";
 pub const BAZEL_RELEASE_VERSION: &str = ZEL_RELEASE_VERSION;
 
 pub fn build_label() -> String {
@@ -58,7 +58,7 @@ pub fn build_label() -> String {
     }
     option_env!("ZEL_EMBED_LABEL")
         .or(option_env!("BAZEL_EMBED_LABEL"))
-        .unwrap_or("10.0.0-prerelease")
+        .unwrap_or("0.0.1")
         .to_string()
 }
 
@@ -1624,7 +1624,7 @@ mod tests {
             br#"
 module(
     name = "bazel",
-    version = "10.0.0-prerelease",
+    version = "0.0.1",
 )
 bazel_dep(name = "rules_rs", version = "0.1.3")
 bazel_dep(name = "rules_cc", version = "0.2.25")
@@ -1701,7 +1701,7 @@ rust_binary(
         let mod_resp = rt.dispatch_command(&mod_req, "resp");
         assert_eq!(mod_resp.exit_code, 0);
         let mod_out = String::from_utf8_lossy(&mod_resp.standard_output);
-        assert!(mod_out.contains("<root> (bazel@10.0.0-prerelease)"));
+        assert!(mod_out.contains("<root> (bazel@0.0.1)"));
         assert!(mod_out.contains("rules_rs@0.1.3"));
     }
 

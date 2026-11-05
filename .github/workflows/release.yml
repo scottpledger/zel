@@ -8,9 +8,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Release version label (e.g., 0.1.0 or 9.3.1)"
+        description: "Release version label (e.g., 0.0.1 or 9.3.1)"
         required: true
-        default: "0.1.0"
+        default: "0.0.1"
 
 permissions:
   contents: write
@@ -31,7 +31,7 @@ jobs:
             bazel_os: linux
             bazel_arch: arm64
             rust_target: aarch64-unknown-linux-gnu
-          - runner: macos-13
+          - runner: macos-14
             bazel_os: darwin
             bazel_arch: x86_64
             rust_target: x86_64-apple-darwin
@@ -70,7 +70,12 @@ jobs:
       - name: Build and package release binaries
         shell: bash
         run: |
-          ./scripts/package_zel.sh             --version "${{ steps.version.outputs.version }}"             --os "${{ matrix.bazel_os }}"             --arch "${{ matrix.bazel_arch }}"             --target "${{ matrix.rust_target }}"             --output-dir dist/release
+          ./scripts/package_zel.sh \
+            --version "${{ steps.version.outputs.version }}" \
+            --os "${{ matrix.bazel_os }}" \
+            --arch "${{ matrix.bazel_arch }}" \
+            --target "${{ matrix.rust_target }}" \
+            --output-dir dist/release
 
       - name: Upload release artifacts
         uses: actions/upload-artifact@v4
@@ -104,5 +109,7 @@ jobs:
           if gh release view "${TAG}" >/dev/null 2>&1; then
             gh release upload "${TAG}" release-assets/* --clobber
           else
-            gh release create "${TAG}" release-assets/*               --title "Zel ${TAG}"               --generate-notes
+            gh release create "${TAG}" release-assets/* \
+              --title "Zel ${TAG}" \
+              --generate-notes
           fi

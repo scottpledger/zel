@@ -86,4 +86,7 @@ jobs:
 
       - name: Build and test //crates/... with Bazel
         run: |
-          bazel test             --repository_cache=~/.cache/bazel-repo             --disk_cache=~/.cache/bazel-disk             //crates/...
+          bazel test \
+            --repository_cache=~/.cache/bazel-repo \
+            --disk_cache=~/.cache/bazel-disk \
+            //crates/...

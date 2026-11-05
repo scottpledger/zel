@@ -56,11 +56,19 @@ bazel test //crates/...
 
 ## Using with Bazelisk
 
-Package Zel into Bazelisk-compatible release binaries (`zel-<version>-<os>-<arch>` and `bazel-<version>-<os>-<arch>`):
+Use a published release directly via `bazelisk`:
 
 ```bash
-./scripts/package_zel.sh --version 9.3.1 --output-dir dist/release
-USE_BAZEL_VERSION=$PWD/dist/release/bazel-9.3.1-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) bazel info release
+BAZELISK_BASE_URL=https://github.com/scottpledger/zel/releases/download \
+  USE_BAZEL_VERSION=0.0.1 \
+  bazel info release
+```
+
+Or package Zel locally into Bazelisk-compatible release binaries (`zel-<version>-<os>-<arch>` and `bazel-<version>-<os>-<arch>`):
+
+```bash
+./scripts/package_zel.sh --version 0.0.1 --output-dir dist/release
+USE_BAZEL_VERSION=$PWD/dist/release/bazel-0.0.1-$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m) bazel info release
 ```
 
 ## License
