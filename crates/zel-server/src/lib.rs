@@ -62,11 +62,24 @@ pub fn build_label() -> String {
         .to_string()
 }
 
+pub fn release_version() -> String {
+    format!("release {} (zel)", build_label())
+}
+
 /// Returns `"bazel"` when invoked under a `bazel*` binary name or with `BAZEL_EMBED_LABEL` /
-/// `BAZELISK_SKIP_WRAPPER` set (for seamless Bazelisk & `bazel.sh` compatibility), and `"zel"`
-/// otherwise.
+/// external `BAZELISK_SKIP_WRAPPER` set (for seamless Bazelisk & `bazel.sh` compatibility), and
+/// `"zel"` otherwise.
 pub fn version_product_prefix() -> &'static str {
-    if std::env::var("BAZEL_EMBED_LABEL").is_ok() || std::env::var("BAZELISK_SKIP_WRAPPER").is_ok()
+    if let Ok(explicit) = std::env::var("ZEL_PRODUCT_PREFIX") {
+        if explicit == "bazel" {
+            return "bazel";
+        } else if explicit == "zel" {
+            return "zel";
+        }
+    }
+    if std::env::var("BAZEL_EMBED_LABEL").is_ok()
+        || (std::env::var("BAZELISK_SKIP_WRAPPER").is_ok()
+            && std::env::var("ZEL_SKIP_WRAPPER").is_err())
     {
         return "bazel";
     }
@@ -565,7 +578,7 @@ impl BlazeRuntime {
             self.dirs.output_path().to_string(),
         );
         map.insert("package_path".to_string(), "%workspace%".to_string());
-        map.insert("release".to_string(), BAZEL_RELEASE_VERSION.to_string());
+        map.insert("release".to_string(), release_version());
         map.insert(
             "repository_cache".to_string(),
             self.dirs
@@ -1443,6 +1456,10 @@ pub fn write_server_status_files(
         &server_dir.get_relative_str("server.pid.txt"),
         pid.to_string().as_bytes(),
     )?;
+    fs.write_file(
+        &server_dir.get_relative_str("build_label.txt"),
+        build_label().as_bytes(),
+    )?;
 
     let info = ServerInfo {
         pid,
@@ -1463,6 +1480,7 @@ pub fn cleanup_server_status_files(fs: &dyn FileSystem, server_dir: &PathFragmen
         "request_cookie",
         "response_cookie",
         "server.pid.txt",
+        "build_label.txt",
         "server_info.rawproto",
     ] {
         let _ = fs.delete(&server_dir.get_relative_str(name));
