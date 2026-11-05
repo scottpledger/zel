@@ -1697,7 +1697,7 @@ impl EvalContext {
         }
         match elem {
             Value::List(items) | Value::Tuple(items) => {
-                for (v, item) in var_names.iter().zip(items.into_iter()) {
+                for (v, item) in var_names.iter().zip(items) {
                     self.globals.insert(v.clone(), item);
                 }
                 Ok(())
