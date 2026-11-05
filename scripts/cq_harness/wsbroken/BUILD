@@ -1,0 +1,5 @@
+package_group(name="pg", packages=["//a/...", "//b"], includes=[])
+exports_files(["top.txt","defs.bzl"])
+alias(name="top_alias", actual="//a:lib")
+test_suite(name="all_tests", tests=["//b:t1","//b:t2"])
+test_suite(name="tagged", tags=["fast"])

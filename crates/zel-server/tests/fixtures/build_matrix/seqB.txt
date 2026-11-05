@@ -1,0 +1,23 @@
+build //:gen //:gen2
+build //:gen //:gen2
+build //:gen2
+build --check_up_to_date //:gen
+build //:gen
+build --check_up_to_date //:gen
+build --explain=/tmp/vb4/exs.txt //:gen
+build //:bad
+build //:bad
+build --keep_going //:bad //:gen
+build -s //:gen3
+build -s //:gen3
+build --subcommands //:gen3
+build --action_env=FOO=1 //:gen
+build --action_env=FOO=1 //:gen
+build --stamp //:gen
+build --compilation_mode=opt //:gen
+build -c fastbuild //:gen
+run //:bin -- a
+run //:bin -- b c
+run --run_in_cwd //:bin
+build --nobuild //:bin
+build --noexperimental_convenience_symlinks //:bin

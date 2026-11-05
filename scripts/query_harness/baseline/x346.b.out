@@ -1,0 +1,55 @@
+# @WS@/a/BUILD:10:15
+config_setting(
+  name = "def_cs",
+  define_values = {"FOO": "bar"},
+)
+# Rule def_cs instantiated at (most recent call last):
+#   @WS@/a/BUILD:10:15 in <toplevel>
+
+# @WS@/a/BUILD:12:8
+genrule(
+  name = "gg",
+  srcs = ["@@//a:sel", "@@ext+//lib:data"],
+  tools = ["@@//b:tool"],
+  outs = ["@@//a:gg.out"],
+  cmd = "cat $(SRCS) > $@ ; echo $(location :sel) >> $@",
+)
+# Rule gg instantiated at (most recent call last):
+#   @WS@/a/BUILD:12:8 in <toplevel>
+
+# @WS@/a/BUILD:9:15
+config_setting(
+  name = "opt_cs",
+  values = {"compilation_mode": "opt"},
+)
+# Rule opt_cs instantiated at (most recent call last):
+#   @WS@/a/BUILD:9:15 in <toplevel>
+
+# @WS@/a/BUILD:11:10
+filegroup(
+  name = "sel",
+  srcs = select({"@@//a:opt_cs": ["@@//a:x.txt"], "@@//a:def_cs": ["@@//a:y.txt"], "@@//conditions:default": ["@@//a:z.txt"]}),
+)
+# Rule sel instantiated at (most recent call last):
+#   @WS@/a/BUILD:11:10 in <toplevel>
+
+# @WS@/b/BUILD:2:5
+xbin(
+  name = "tool",
+  visibility = ["@@//visibility:public"],
+  srcs = ["@@//b:tool.cc"],
+)
+# Rule tool instantiated at (most recent call last):
+#   @WS@/b/BUILD:2:5 in <toplevel>
+# Rule xbin defined at (most recent call last):
+#   @WS@/defs.bzl:34:12 in <toplevel>
+
+# @OB@/external/ext+/lib/BUILD:1:10
+filegroup(
+  name = "data",
+  visibility = ["@@//visibility:public"],
+  srcs = ["@@ext+//lib:d.txt"],
+)
+# Rule data instantiated at (most recent call last):
+#   @OB@/external/ext+/lib/BUILD:1:10 in <toplevel>
+

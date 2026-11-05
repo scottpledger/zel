@@ -1,0 +1,7 @@
+--- a/f.txt
++++ b/f.txt
+@@ -35,4 +35,2 @@
+ eps 1
+-alpha 0
+-	Tab
+ beta 0

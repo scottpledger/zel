@@ -1,0 +1,10 @@
+gamma 0
+alpha 1
+x 0
+delta 1
+  indent 2
+ 0
+alpha 2
+beta 2
+{ 3
+return 0; 1

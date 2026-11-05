@@ -1,0 +1,9 @@
+# @WS@/BUILD:5:11
+test_suite(
+  name = "tagged",
+  tags = ["fast"],
+  _implicit_tests = [],
+)
+# Rule tagged instantiated at (most recent call last):
+#   @WS@/BUILD:5:11 in <toplevel>
+

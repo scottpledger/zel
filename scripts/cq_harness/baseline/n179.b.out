@@ -1,0 +1,10 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:lib2 (2d89340)"
+  "//a:lib2 (2d89340)" -> "//a:lib (2d89340)"
+  "//a:lib (2d89340)"
+  "//a:lib (2d89340)" -> "@ext//lib:data (2d89340)"
+  "@ext//lib:data (2d89340)"
+  "@ext//lib:data (2d89340)" -> "@ext//lib:d.txt (null)"
+  "@ext//lib:d.txt (null)"
+}

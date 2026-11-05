@@ -1,0 +1,5 @@
+package(default_visibility = ["//visibility:public"])
+filegroup(name = "d", srcs = ["d1.txt", "//data/sub:d2.txt"])
+exports_files(["d1.txt"], visibility = ["//app:__pkg__"])
+package_group(name = "pg", packages = ["//app/...", "//lib"], includes = ["//data:pg2"])
+package_group(name = "pg2", packages = ["-//lib/x", "//tools"])

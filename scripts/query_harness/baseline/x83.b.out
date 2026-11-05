@@ -1,0 +1,3 @@
+filegroup rule //d:bad
+filegroup rule //d:dep_bad
+filegroup rule //d:ok

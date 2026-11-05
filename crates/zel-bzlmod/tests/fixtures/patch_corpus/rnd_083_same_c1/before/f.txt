@@ -1,0 +1,14 @@
+gamma 0
+gamma 1
+beta 3
+	Tab 3
+ 2
+beta
+alpha 3
+beta
+return 0;
+delta 3
+} 1
+y 1
+beta 2
+y 0

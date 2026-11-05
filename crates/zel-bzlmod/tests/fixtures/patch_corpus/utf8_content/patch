@@ -1,0 +1,6 @@
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+ héllo
+-wörld
++WORLD

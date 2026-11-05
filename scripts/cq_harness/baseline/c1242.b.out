@@ -1,0 +1,14 @@
+bazel-out/darwin_arm64-fastbuild/bin/b/t1
+external/bazel_tools/tools/test/dummy.sh
+external/bazel_tools/tools/test/generate-xml.sh
+external/bazel_tools/tools/test/test-setup.sh
+external/bazel_tools/tools/test/collect_coverage.sh
+bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage
+bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt
+b/t.cc
+bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt
+a/y.txt
+external/ext+/lib/d.txt
+a/x.txt
+a/z.txt
+external/rules_shell+/shell/runfiles/runfiles.bash

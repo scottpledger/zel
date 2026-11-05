@@ -1,0 +1,16 @@
+--- a/f.txt
++++ b/f.txt
+@@ -17,12 +17,9 @@
+ {
+ 	Tab 2
+ y
+-delta 2
++NEW delta 2
+ return 0; 1
+ 	Tab 1
+ y
+ delta
+ 	Tab 2
+-eps
+-x 2
+-  indent 0

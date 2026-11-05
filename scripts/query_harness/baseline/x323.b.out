@@ -1,0 +1,333 @@
+# @WS@/a/BUILD:4:8
+catrule(
+  name = "lib",
+  tags = ["fast", "manual"],
+  srcs = ["@@//a:x.txt", "@@//a:srcs_fg", "@@ext+//lib:data"],
+  tag_x = "lib",
+)
+# Rule lib instantiated at (most recent call last):
+#   @WS@/a/BUILD:4:8 in <toplevel>
+# Rule catrule defined at (most recent call last):
+#   @WS@/defs.bzl:6:15 in <toplevel>
+
+# @WS@/a/BUILD:5:8
+catrule(
+  name = "lib2",
+  tags = ["fast"],
+  srcs = ["@@//a:lib", "@@//a:y.txt"],
+)
+# Rule lib2 instantiated at (most recent call last):
+#   @WS@/a/BUILD:5:8 in <toplevel>
+# Rule catrule defined at (most recent call last):
+#   @WS@/defs.bzl:6:15 in <toplevel>
+
+# @WS@/a/BUILD:3:10
+filegroup(
+  name = "srcs_fg",
+  srcs = ["@@//a:x.txt", "@@//a:y.txt", "@@//a:z.txt"],
+)
+# Rule srcs_fg instantiated at (most recent call last):
+#   @WS@/a/BUILD:3:10 in <toplevel>
+
+# @WS@/b/BUILD:3:7
+x_test(
+  name = "t1",
+  tags = ["fast"],
+  size = "small",
+  srcs = ["@@//b:t.cc"],
+  data = ["@@//a:lib2"],
+)
+# Rule t1 instantiated at (most recent call last):
+#   @WS@/b/BUILD:3:7 in <toplevel>
+# Rule x_test defined at (most recent call last):
+#   @WS@/defs.bzl:35:14 in <toplevel>
+
+# @OB@/external/bazel_tools/src/conditions/BUILD:115:15
+config_setting(
+  name = "windows",
+  visibility = ["@@//visibility:public"],
+  constraint_values = ["@@platforms//os:windows"],
+)
+# Rule windows instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/src/conditions/BUILD:115:15 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/build_defs/build_info/BUILD:24:22
+bazel_java_build_info(
+  name = "java_build_info",
+)
+# Rule java_build_info instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/build_defs/build_info/BUILD:24:22 in <toplevel>
+# Rule bazel_java_build_info defined at (most recent call last):
+#   @OB@/external/bazel_tools/tools/build_defs/build_info/bazel_java_build_info.bzl:93:29 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/cpp/BUILD:21:15
+toolchain_type(
+  name = "toolchain_type",
+)
+# Rule toolchain_type instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/cpp/BUILD:21:15 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/jdk/BUILD:191:10
+alias(
+  name = "current_java_toolchain",
+  actual = "@@rules_java+//toolchains:current_java_toolchain",
+)
+# Rule current_java_toolchain instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/jdk/BUILD:191:10 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/jdk/BUILD:48:24
+java_plugins_flag_alias(
+  name = "java_plugins_flag_alias",
+)
+# Rule java_plugins_flag_alias instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/jdk/BUILD:48:24 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/jdk/BUILD:201:20
+launcher_flag_alias(
+  name = "launcher_flag_alias",
+  visibility = ["@@//visibility:public"],
+)
+# Rule launcher_flag_alias instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/jdk/BUILD:201:20 in <toplevel>
+# Rule launcher_flag_alias defined at (most recent call last):
+#   @OB@/external/bazel_tools/tools/jdk/launcher_flag_alias.bzl:32:27 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/jdk/BUILD:34:15
+toolchain_type(
+  name = "runtime_toolchain_type",
+)
+# Rule runtime_toolchain_type instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/jdk/BUILD:34:15 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/jdk/BUILD:23:15
+toolchain_type(
+  name = "toolchain_type",
+)
+# Rule toolchain_type instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/jdk/BUILD:23:15 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/launcher/BUILD:15:24
+current_launcher_binary(
+  name = "launcher",
+)
+# Rule launcher instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/launcher/BUILD:15:24 in <toplevel>
+# Rule current_launcher_binary defined at (most recent call last):
+#   @OB@/external/bazel_tools/tools/build_defs.bzl:106:55 in <toplevel>
+#   @OB@/external/bazel_tools/tools/build_defs.bzl:100:16 in _make_current_toolchain_rule
+
+# @OB@/external/bazel_tools/tools/launcher/BUILD:36:15
+toolchain_type(
+  name = "launcher_maker_toolchain_type",
+)
+# Rule launcher_maker_toolchain_type instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/launcher/BUILD:36:15 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/launcher/BUILD:34:15
+toolchain_type(
+  name = "launcher_toolchain_type",
+)
+# Rule launcher_toolchain_type instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/launcher/BUILD:34:15 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/test/BUILD:111:10
+sh_binary(
+  name = "collect_coverage",
+  srcs = ["@@bazel_tools//tools/test:collect_coverage.sh"],
+)
+# Rule collect_coverage instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:111:10 in <toplevel>
+# Rule sh_binary defined at (most recent call last):
+#   @OB@/external/rules_shell+/shell/private/sh_binary.bzl:22:36      in <toplevel>
+#   @OB@/external/rules_shell+/shell/private/sh_executable.bzl:173:16 in make_sh_executable_rule
+
+# @OB@/external/bazel_tools/tools/test/BUILD:126:6
+alias(
+  name = "coverage_report_generator",
+  actual = "@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:coverage_report_generator",
+)
+# Rule coverage_report_generator instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:126:6 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/test/BUILD:121:10
+filegroup(
+  name = "coverage_support",
+  srcs = ["@@bazel_tools//tools/test:collect_coverage.sh"],
+)
+# Rule coverage_support instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:121:10 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/test/BUILD:96:10
+filegroup(
+  name = "runtime",
+  srcs = ["@@bazel_tools//tools/test:test-setup.sh"],
+)
+# Rule runtime instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:96:10 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/test/BUILD:101:10
+filegroup(
+  name = "test_setup",
+  srcs = ["@@bazel_tools//tools/test:test-setup.sh"],
+)
+# Rule test_setup instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:101:10 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/test/BUILD:136:10
+filegroup(
+  name = "test_wrapper",
+  srcs = select({"@@bazel_tools//src/conditions:windows": ["@@bazel_tools//tools/test:tw.exe"], "@@//conditions:default": ["@@bazel_tools//tools/test:dummy.sh"]}),
+)
+# Rule test_wrapper instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:136:10 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/test/BUILD:106:10
+filegroup(
+  name = "test_xml_generator",
+  srcs = ["@@bazel_tools//tools/test:generate-xml.sh"],
+)
+# Rule test_xml_generator instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:106:10 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/test/BUILD:148:10
+filegroup(
+  name = "xml_writer",
+  srcs = select({"@@bazel_tools//src/conditions:windows": ["@@bazel_tools//tools/test:xml.exe"], "@@//conditions:default": ["@@bazel_tools//tools/test:dummy.sh"]}),
+)
+# Rule xml_writer instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:148:10 in <toplevel>
+
+# @OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:11:12
+java_binary(
+  name = "Main",
+  generator_name = "Main",
+  generator_function = "java_binary",
+  generator_location = "@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:11:12",
+  runtime_deps = ["@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_lib"],
+  launcher = "@@bazel_tools//tools/jdk:launcher_flag_alias",
+  main_class = "com.google.devtools.coverageoutputgenerator.Main",
+  create_executable = True,
+)
+# Rule Main instantiated at (most recent call last):
+#   @OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:11:12 in <toplevel>
+#   @OB@/external/rules_java+/java/java_binary.bzl:27:17                                        in java_binary
+#   @OB@/external/rules_java+/java/bazel/rules/bazel_java_binary_wrapper.bzl:39:42              in java_binary
+#   @OB@/external/rules_java+/java/common/rules/java_binary_wrapper.bzl:51:18                   in register_legacy_java_binary_rules
+# Rule java_binary defined at (most recent call last):
+#   @OB@/external/rules_java+/java/bazel/rules/bazel_java_binary.bzl:476:31 in <toplevel>
+#   @OB@/external/rules_java+/java/bazel/rules/bazel_java_binary.bzl:373:28 in make_java_binary
+#   @OB@/external/rules_java+/java/bazel/rules/bazel_java_binary.bzl:313:16 in make_binary_rule
+
+# @OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:6:12
+java_import(
+  name = "all_lcov_merger_lib",
+  generator_name = "all_lcov_merger_lib",
+  generator_function = "java_import",
+  generator_location = "@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:6:12",
+  jars = ["@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_tools_deploy.jar"],
+)
+# Rule all_lcov_merger_lib instantiated at (most recent call last):
+#   @OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:6:12 in <toplevel>
+#   @OB@/external/rules_java+/java/java_import.bzl:27:17                                       in java_import
+# Rule java_import defined at (most recent call last):
+#   @OB@/external/rules_java+/java/bazel/rules/bazel_java_import.bzl:38:19 in <toplevel>
+
+# @OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:23:6
+alias(
+  name = "coverage_report_generator",
+  actual = "@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main",
+)
+# Rule coverage_report_generator instantiated at (most recent call last):
+#   @OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:23:6 in <toplevel>
+
+# @OB@/external/ext+/lib/BUILD:1:10
+filegroup(
+  name = "data",
+  visibility = ["@@//visibility:public"],
+  srcs = ["@@ext+//lib:d.txt"],
+)
+# Rule data instantiated at (most recent call last):
+#   @OB@/external/ext+/lib/BUILD:1:10 in <toplevel>
+
+# @OB@/external/platforms/os/BUILD:14:19
+constraint_setting(
+  name = "os",
+)
+# Rule os instantiated at (most recent call last):
+#   @OB@/external/platforms/os/BUILD:14:19 in <toplevel>
+
+# @OB@/external/platforms/os/BUILD:46:17
+constraint_value(
+  name = "windows",
+  constraint_setting = "@@platforms//os:os",
+)
+# Rule windows instantiated at (most recent call last):
+#   @OB@/external/platforms/os/BUILD:46:17 in <toplevel>
+
+# @OB@/external/rules_java+/BUILD:26:8
+_license(
+  name = "license",
+  visibility = ["@@//visibility:public"],
+  tags = [],
+  generator_name = "license",
+  generator_function = "license",
+  generator_location = "@OB@/external/rules_java+/BUILD:26:8",
+  testonly = False,
+  package_metadata = [],
+  license_text = "@@rules_java+//:LICENSE",
+  package_name = "rules_java",
+)
+# Rule license instantiated at (most recent call last):
+#   @OB@/external/rules_java+/BUILD:26:8                  in <toplevel>
+#   @OB@/external/rules_license+/rules/license.bzl:124:13 in license
+# Rule _license defined at (most recent call last):
+#   @OB@/external/rules_license+/rules/license.bzl:35:16 in <toplevel>
+
+# @OB@/external/rules_java+/toolchains/BUILD:97:21
+java_toolchain_alias(
+  name = "current_java_toolchain",
+)
+# Rule current_java_toolchain instantiated at (most recent call last):
+#   @OB@/external/rules_java+/toolchains/BUILD:97:21 in <toplevel>
+# Rule java_toolchain_alias defined at (most recent call last):
+#   @OB@/external/rules_java+/toolchains/java_toolchain_alias.bzl:107:28 in <toplevel>
+
+# @OB@/external/rules_shell+/shell/BUILD:15:15
+toolchain_type(
+  name = "toolchain_type",
+  visibility = ["@@//visibility:public"],
+)
+# Rule toolchain_type instantiated at (most recent call last):
+#   @OB@/external/rules_shell+/shell/BUILD:15:15 in <toplevel>
+
+# @OB@/external/rules_shell+/shell/runfiles/BUILD:4:6
+alias(
+  name = "runfiles",
+  visibility = ["@@//visibility:public"],
+  actual = "@@rules_shell+//shell/runfiles:runfiles_impl",
+)
+# Rule runfiles instantiated at (most recent call last):
+#   @OB@/external/rules_shell+/shell/runfiles/BUILD:4:6 in <toplevel>
+
+# @OB@/external/rules_shell+/shell/runfiles/BUILD:16:14
+root_symlinks(
+  name = "runfiles_at_legacy_location",
+  tags = ["manual"],
+  root_symlinks = {"@@rules_shell+//shell/runfiles:runfiles.bash": "bazel_tools/tools/bash/runfiles/runfiles.bash"},
+)
+# Rule runfiles_at_legacy_location instantiated at (most recent call last):
+#   @OB@/external/rules_shell+/shell/runfiles/BUILD:16:14 in <toplevel>
+# Rule root_symlinks defined at (most recent call last):
+#   @OB@/external/rules_shell+/shell/private/root_symlinks.bzl:46:21 in <toplevel>
+
+# @OB@/external/rules_shell+/shell/runfiles/BUILD:10:11
+sh_library(
+  name = "runfiles_impl",
+  tags = ["manual"],
+  data = ["@@rules_shell+//shell/runfiles:runfiles_at_legacy_location"],
+)
+# Rule runfiles_impl instantiated at (most recent call last):
+#   @OB@/external/rules_shell+/shell/runfiles/BUILD:10:11 in <toplevel>
+# Rule sh_library defined at (most recent call last):
+#   @OB@/external/rules_shell+/shell/private/sh_library.bzl:46:18 in <toplevel>
+

@@ -1,0 +1,18 @@
+action 'Cat @@//a:lib2'
+  Mnemonic: CatIt
+  Target: //a:lib2
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69
+  Inputs: [a/y.txt, bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt]
+
+action 'Cat @@//a:lib'
+  Mnemonic: CatIt
+  Target: //a:lib
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8
+  Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt]
+

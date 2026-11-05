@@ -1,0 +1,67 @@
+action 'Executing genrule //a:gg'
+  Mnemonic: Genrule
+  Target: //a:gg
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542
+  Inputs: [a/z.txt, bazel-out/darwin_arm64-opt-exec/bin/b/tool, bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/gg.out]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec /bin/bash \
+    -c \
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out')
+# Configuration: 2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c
+# Execution platform: @@platforms//host:host
+
+action 'Writing script b/tool [for tool]'
+  Mnemonic: FileWrite
+  Target: //b:tool
+  Configuration: darwin_arm64-opt-exec
+  Execution platform: @@platforms//host:host
+  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool]
+  IsExecutable: true
+  FileWriteContents: [IyEvYmluL3NoCnRydWUK]
+
+action 'Writing repo mapping manifest for //b:tool [for tool]'
+  Mnemonic: RepoMappingManifest
+  Target: //b:tool
+  Configuration: darwin_arm64-opt-exec
+  Execution platform: @@platforms//host:host
+  ActionKey: 9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.repo_mapping]
+  IsExecutable: false
+  FileWriteContents: [LHZxLF9tYWluCg==]
+
+action 'Creating source manifest for //b:tool [for tool]'
+  Mnemonic: SourceSymlinkManifest
+  Target: //b:tool
+  Configuration: darwin_arm64-opt-exec
+  Execution platform: @@platforms//host:host
+  ActionKey: e346326417c6d035de7958c9d53a1d985c71b8977bd881813c6084ab02bda792
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles_manifest]
+  IsExecutable: false
+  FileWriteContents: [X21haW4vYi90b29sIC9wcml2YXRlL3RtcC9jcWgvb2JiMC9leGVjcm9vdC9fbWFpbi9iYXplbC1vdXQvZGFyd2luX2FybTY0LW9wdC1leGVjL2Jpbi9iL3Rvb2wKX3JlcG9fbWFwcGluZyAvcHJpdmF0ZS90bXAvY3FoL29iYjAvZXhlY3Jvb3QvX21haW4vYmF6ZWwtb3V0L2Rhcndpbl9hcm02NC1vcHQtZXhlYy9iaW4vYi90b29sLnJlcG9fbWFwcGluZwo=]
+
+action 'Creating runfiles tree bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles [for tool]'
+  Mnemonic: SymlinkTree
+  Target: //b:tool
+  Configuration: darwin_arm64-opt-exec
+  Execution platform: @@platforms//host:host
+  ActionKey: 9d08d249af1fb388108eb2399cb831dc2a7d2046b2f108ae6cad2a57b326aabf
+  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+runfiles for //b:tool
+  Mnemonic: RunfilesTree
+  Target: //b:tool
+  Configuration: darwin_arm64-opt-exec
+  Execution platform: @@platforms//host:host
+  ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
+  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool, bazel-out/darwin_arm64-opt-exec/bin/b/tool.repo_mapping, bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles/MANIFEST]
+  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles]
+

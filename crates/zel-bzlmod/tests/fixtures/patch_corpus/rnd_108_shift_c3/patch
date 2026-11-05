@@ -1,0 +1,10 @@
+--- a/f.txt
++++ b/f.txt
+@@ -14,7 +14,6 @@
+ 	Tab 3
+ delta 3
+ y
+-  indent 0
+ eps 2
+ }
+ gamma 3

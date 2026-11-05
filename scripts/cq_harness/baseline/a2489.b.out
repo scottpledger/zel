@@ -1,0 +1,24 @@
+{
+  "actions": [{
+    "targetId": 1,
+    "actionKey": "c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69",
+    "mnemonic": "CatIt",
+    "configurationId": 1,
+    "executionPlatform": "@@platforms//host:host"
+  }],
+  "targets": [{
+    "id": 1,
+    "label": "//a:lib2",
+    "ruleClassId": 1
+  }],
+  "configuration": [{
+    "id": 1,
+    "mnemonic": "darwin_arm64-fastbuild",
+    "platformName": "darwin_arm64",
+    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+  }],
+  "ruleClasses": [{
+    "id": 1,
+    "name": "catrule"
+  }]
+}

@@ -237,6 +237,8 @@ impl fmt::Display for RepositoryName {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepositoryMapping {
     entries: HashMap<String, RepositoryName>,
+    /// Apparent names in `ImmutableMap` insertion order when known (empty: unordered).
+    order: Vec<String>,
     owner_repo: RepositoryName,
 }
 
@@ -248,7 +250,24 @@ impl RepositoryMapping {
     pub fn new(entries: HashMap<String, RepositoryName>, owner_repo: RepositoryName) -> Self {
         Self {
             entries,
+            order: Vec::new(),
             owner_repo,
+        }
+    }
+
+    /// A mapping that remembers the iteration order of Bazel's `ImmutableMap` of entries.
+    pub fn new_ordered(ordered: Vec<(String, RepositoryName)>, owner_repo: RepositoryName) -> Self {
+        let order: Vec<String> = ordered.iter().map(|(a, _)| a.clone()).collect();
+        Self { entries: ordered.into_iter().collect(), order, owner_repo }
+    }
+
+    /// All `(apparent name, canonical repository)` entries (used to invert the mapping when
+    /// printing labels in their display form).
+    pub fn entries(&self) -> Box<dyn Iterator<Item = (&String, &RepositoryName)> + '_> {
+        if self.order.len() == self.entries.len() && !self.order.is_empty() {
+            Box::new(self.order.iter().filter_map(move |k| self.entries.get_key_value(k)))
+        } else {
+            Box::new(self.entries.iter())
         }
     }
 
@@ -320,6 +339,131 @@ impl fmt::Display for PackageIdentifier {
     }
 }
 
+/// `LabelParser.Parts`: the syntactic decomposition of a raw label string (`Parts.parse`), validated
+/// (repo name, package name, target name) in the same order as `validateAndCreate`.
+struct LabelParts {
+    repo: Option<String>,
+    repo_is_canonical: bool,
+    pkg_is_absolute: bool,
+    pkg: String,
+    pkg_ends_with_triple_dots: bool,
+    target: String,
+}
+
+impl LabelParts {
+    fn parse(raw: &str) -> Result<Self, LabelSyntaxError> {
+        let repo_is_canonical = raw.starts_with("@@");
+        let double_slash = raw.find("//");
+        let repo: Option<String>;
+        let start_of_package: usize;
+        let pkg_is_absolute: bool;
+        if raw.starts_with('@') {
+            match double_slash {
+                None => {
+                    let repo = raw[if repo_is_canonical { 2 } else { 1 }..].to_string();
+                    return Self::validate_and_create(
+                        Some(repo.clone()),
+                        repo_is_canonical,
+                        true,
+                        "",
+                        false,
+                        &repo,
+                    );
+                }
+                Some(d) => {
+                    repo = Some(raw[if repo_is_canonical { 2 } else { 1 }..d].to_string());
+                    start_of_package = d + 2;
+                    pkg_is_absolute = true;
+                }
+            }
+        } else {
+            pkg_is_absolute = double_slash == Some(0);
+            start_of_package = if double_slash == Some(0) { 2 } else { 0 };
+            repo = None;
+        }
+        let colon = raw[start_of_package..].find(':').map(|i| i + start_of_package);
+        let raw_pkg = &raw[start_of_package..colon.unwrap_or(raw.len())];
+        let dots = raw_pkg.ends_with("/...") || raw_pkg == "...";
+        let strip = |p: &str| -> String {
+            if let Some(x) = p.strip_suffix("/...") {
+                x.to_string()
+            } else if p == "..." {
+                String::new()
+            } else {
+                p.to_string()
+            }
+        };
+        let (pkg, target) = if colon.is_none() && dots {
+            (strip(raw_pkg), String::new())
+        } else if colon.is_none() && !pkg_is_absolute {
+            (String::new(), raw[start_of_package..].to_string())
+        } else {
+            let pkg = strip(raw_pkg);
+            let target = match colon {
+                Some(c) => raw[c + 1..].to_string(),
+                None => pkg[pkg.rfind('/').map(|i| i + 1).unwrap_or(0)..].to_string(),
+            };
+            (pkg, target)
+        };
+        Self::validate_and_create(repo, repo_is_canonical, pkg_is_absolute, &pkg, dots, &target)
+            .map(|mut p| {
+                p.pkg_is_absolute = pkg_is_absolute;
+                p
+            })
+    }
+
+    fn validate_and_create(
+        repo: Option<String>,
+        repo_is_canonical: bool,
+        pkg_is_absolute: bool,
+        pkg: &str,
+        dots: bool,
+        target: &str,
+    ) -> Result<Self, LabelSyntaxError> {
+        if let Some(r) = &repo {
+            RepositoryName::validate(r)?;
+        }
+        let perhaps = if pkg.ends_with(&format!("/{target}")) {
+            format!(" (perhaps you meant \":{target}\"?)")
+        } else {
+            String::new()
+        };
+        if let Err(err) = validator::validate_package_name(pkg) {
+            return Err(LabelSyntaxError(format!("invalid package name '{pkg}': {err}{perhaps}")));
+        }
+        let mut target = target.to_string();
+        if !(dots && target.is_empty()) {
+            if let Err(err) = validator::validate_target_name(&target) {
+                return Err(LabelSyntaxError(format!(
+                    "invalid target name '{target}': {err}{perhaps}"
+                )));
+            }
+            if let Some(t) = target.strip_suffix("/.") {
+                target = t.to_string();
+            }
+        }
+        Ok(Self {
+            repo,
+            repo_is_canonical,
+            pkg_is_absolute,
+            pkg: pkg.to_string(),
+            pkg_ends_with_triple_dots: dots,
+            target,
+        })
+    }
+}
+
+
+/// Validates like `PackageIdentifier.parse` (`[@repo]//pkg` or `pkg`; errors as `LabelSyntaxException`).
+pub fn validate_package_identifier(input: &str) -> Result<(), LabelSyntaxError> {
+    if input.contains(':') {
+        return Err(LabelSyntaxError(format!(
+            "invalid package identifier '{input}': contains ':'"
+        )));
+    }
+    LabelParts::parse(&format!("{input}:dummy_target")).map(|_| ())
+}
+
 /// A parsed Bazel target label (`@@repo//pkg:target`), matching `Label.java`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Label {
@@ -349,77 +493,24 @@ impl Label {
         raw: &str,
         repo_mapping: &RepositoryMapping,
     ) -> Result<Self, LabelSyntaxError> {
-        if !raw.starts_with("//") && !raw.starts_with('@') {
+        let parts = LabelParts::parse(raw)?;
+        if parts.pkg_ends_with_triple_dots {
             return Err(LabelSyntaxError(format!(
-                "invalid label '{raw}': absolute label must start with '//' or '@'"
+                "invalid label '{raw}': package name cannot contain '...'"
             )));
         }
-
-        let (repo, rest) = if let Some(after_at_at) = raw.strip_prefix("@@") {
-            match after_at_at.find("//") {
-                Some(idx) => {
-                    let repo_str = &after_at_at[..idx];
-                    (RepositoryName::create(repo_str)?, &after_at_at[idx..])
-                }
-                None => {
-                    let repo = RepositoryName::create(after_at_at)?;
-                    let target = if after_at_at.is_empty() {
-                        return Err(LabelSyntaxError("empty repository shorthand".to_string()));
-                    } else {
-                        after_at_at
-                    };
-                    let pkg = PackageIdentifier::create(repo, PathFragment::empty())?;
-                    return Self::create(pkg, target);
-                }
-            }
-        } else if let Some(after_at) = raw.strip_prefix('@') {
-            match after_at.find("//") {
-                Some(idx) => {
-                    let apparent = &after_at[..idx];
-                    RepositoryName::validate(apparent)?;
-                    (repo_mapping.get(apparent), &after_at[idx..])
-                }
-                None => {
-                    RepositoryName::validate(after_at)?;
-                    let mapped = repo_mapping.get(after_at);
-                    let target = if after_at.is_empty() {
-                        return Err(LabelSyntaxError("empty repository shorthand".to_string()));
-                    } else {
-                        after_at
-                    };
-                    let pkg = PackageIdentifier::create(mapped, PathFragment::empty())?;
-                    return Self::create(pkg, target);
-                }
-            }
-        } else {
-            (repo_mapping.get(""), raw)
-        };
-
-        let after_slashes = rest.strip_prefix("//").ok_or_else(|| {
-            LabelSyntaxError(format!("invalid label '{raw}': missing '//' separator"))
-        })?;
-
-        let (pkg_str, target_str) = match after_slashes.find(':') {
-            Some(colon_idx) => (&after_slashes[..colon_idx], &after_slashes[colon_idx + 1..]),
-            None => {
-                let default_target = match after_slashes.rfind('/') {
-                    Some(slash_idx) => &after_slashes[slash_idx + 1..],
-                    None => after_slashes,
-                };
-                (after_slashes, default_target)
-            }
-        };
-
-        if let Err(err) = validator::validate_package_name(pkg_str) {
-            let mut msg = format!("invalid package name '{pkg_str}': {err}");
-            if pkg_str.ends_with(&format!("/{target_str}")) {
-                msg.push_str(&format!(" (perhaps you meant \":{target_str}\"?)"));
-            }
-            return Err(LabelSyntaxError(msg));
+        if !parts.pkg_is_absolute {
+            return Err(LabelSyntaxError(format!(
+                "invalid label '{raw}': absolute label must begin with '@' or '//'"
+            )));
         }
-
-        let pkg = PackageIdentifier::create(repo, PathFragment::create(pkg_str))?;
-        Self::create(pkg, target_str)
+        let repo = match parts.repo.as_deref() {
+            None => repo_mapping.get(""),
+            Some(r) if parts.repo_is_canonical => RepositoryName::create(r)?,
+            Some(r) => repo_mapping.get(r),
+        };
+        let pkg = PackageIdentifier::create(repo, PathFragment::create(&parts.pkg))?;
+        Self::create(pkg, &parts.target)
     }
 
     pub fn package_identifier(&self) -> &PackageIdentifier {
@@ -442,6 +533,15 @@ impl Label {
         format!("{}:{}", self.package_identifier.canonical_form(), self.name)
     }
 
+    pub fn unambiguous_canonical_form(&self) -> String {
+        let repo_prefix = if self.repository().is_main() {
+            "@@".to_string()
+        } else {
+            self.repository().name_with_at()
+        };
+        format!("{repo_prefix}//{}:{}", self.package_name(), self.name)
+    }
+
     pub fn shorthand_form(&self) -> String {
         let pkg = self.package_name();
         let last_seg = pkg.rsplit('/').next().unwrap_or(pkg);
@@ -462,95 +562,218 @@ impl fmt::Display for Label {
 /// Target pattern kinds matching `com.google.devtools.build.lib.cmdline.TargetPattern`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TargetPattern {
-    /// A single target, e.g. `//foo/bar:baz` or `foo/bar`.
+    /// A bare path such as `foo/bar/baz` (no colon, not `//`-prefixed), interpreted as a
+    /// file/target by looking up the enclosing package (`InterpretPathAsTarget`). `path` is the
+    /// path relative to the workspace root (the client's relative directory already applied).
+    PathAsTarget { original: String, path: String },
+    /// A single target, e.g. `//foo/bar:baz`.
     SingleTarget(Label),
-    /// All targets in a package, e.g. `//foo/bar:all` or `//foo/bar:*`.
+    /// All targets in a package: `//foo/bar:all` (rules only) or `:*` / `:all-targets`.
     TargetsInPackage {
         package: PackageIdentifier,
         include_files: bool,
     },
-    /// All targets recursively below a directory, e.g. `//foo/...` or `//foo/...:all`.
+    /// All targets recursively below a directory: `//foo/...` (rules only) or `//foo/...:*`.
     TargetsBelowDirectory {
         directory: PackageIdentifier,
         include_files: bool,
     },
 }
 
-impl TargetPattern {
-    pub fn parse(raw: &str, relative_dir: &PathFragment) -> Result<Self, LabelSyntaxError> {
-        let normalized = if raw == "..." || raw.starts_with("...:") {
-            if relative_dir.is_empty() {
-                format!("//{raw}")
-            } else {
-                format!("//{relative_dir}/{raw}")
-            }
-        } else if !raw.starts_with("//") && !raw.starts_with('@') {
-            if let Some(stripped) = raw.strip_prefix(':') {
-                format!("//{relative_dir}:{stripped}")
-            } else if relative_dir.is_empty() {
-                format!("//{raw}")
-            } else {
-                format!("//{relative_dir}/{raw}")
+/// Port of `LabelParser.Parts`.
+struct Parts {
+    repo: Option<String>,
+    repo_is_canonical: bool,
+    pkg_is_absolute: bool,
+    pkg: String,
+    pkg_ends_with_triple_dots: bool,
+    target: String,
+}
+
+fn strip_trailing_triple_dots(pkg: &str) -> String {
+    if let Some(p) = pkg.strip_suffix("/...") {
+        p.to_string()
+    } else if pkg == "..." {
+        String::new()
+    } else {
+        pkg.to_string()
+    }
+}
+
+fn perhaps_you_meant(pkg: &str, target: &str) -> String {
+    if pkg.ends_with(&format!("/{target}")) {
+        format!(" (perhaps you meant \":{target}\"?)")
+    } else {
+        String::new()
+    }
+}
+
+impl Parts {
+    fn parse(raw: &str) -> Result<Self, LabelSyntaxError> {
+        let repo_is_canonical = raw.starts_with("@@");
+        let double_slash = raw.find("//");
+        let repo: Option<String>;
+        let start_of_package: usize;
+        let pkg_is_absolute: bool;
+        if raw.starts_with('@') {
+            let skip = if repo_is_canonical { 2 } else { 1 };
+            match double_slash {
+                None => {
+                    let r = raw[skip..].to_string();
+                    return Self::validate_and_create(
+                        Some(r.clone()),
+                        repo_is_canonical,
+                        true,
+                        String::new(),
+                        false,
+                        r,
+                    );
+                }
+                Some(ds) => {
+                    repo = Some(raw[skip..ds].to_string());
+                    start_of_package = ds + 2;
+                    pkg_is_absolute = true;
+                }
             }
         } else {
-            raw.to_string()
-        };
-
-        // Check for `...` recursive wildcard
-        if let Some(base) = normalized
-            .strip_suffix("/...:all")
-            .or_else(|| normalized.strip_suffix("/..."))
-        {
-            let dir_str = if base == "//" || base.is_empty() {
-                "//"
-            } else {
-                base
+            pkg_is_absolute = double_slash == Some(0);
+            start_of_package = if pkg_is_absolute { 2 } else { 0 };
+            repo = None;
+        }
+        let colon = raw[start_of_package..].find(':').map(|i| i + start_of_package);
+        let raw_pkg = &raw[start_of_package..colon.unwrap_or(raw.len())];
+        let ends_dots = raw_pkg.ends_with("/...") || raw_pkg == "...";
+        let (pkg, target);
+        if colon.is_none() && ends_dots {
+            pkg = strip_trailing_triple_dots(raw_pkg);
+            target = String::new();
+        } else if colon.is_none() && !pkg_is_absolute {
+            pkg = String::new();
+            target = raw[start_of_package..].to_string();
+        } else {
+            pkg = strip_trailing_triple_dots(raw_pkg);
+            target = match colon {
+                Some(c) => raw[c + 1..].to_string(),
+                None => pkg.rsplit('/').next().unwrap_or("").to_string(),
             };
-            let pkg_str = dir_str.strip_prefix("//").unwrap_or("");
-            let pkg = PackageIdentifier::create_in_main_repo(pkg_str)?;
-            return Ok(Self::TargetsBelowDirectory {
-                directory: pkg,
+        }
+        Self::validate_and_create(repo, repo_is_canonical, pkg_is_absolute, pkg, ends_dots, target)
+    }
+
+    fn validate_and_create(
+        repo: Option<String>,
+        repo_is_canonical: bool,
+        pkg_is_absolute: bool,
+        pkg: String,
+        pkg_ends_with_triple_dots: bool,
+        target: String,
+    ) -> Result<Self, LabelSyntaxError> {
+        if let Some(r) = &repo {
+            RepositoryName::validate(r)?;
+        }
+        if let Err(e) = validator::validate_package_name(&pkg) {
+            return Err(LabelSyntaxError(format!(
+                "invalid package name '{pkg}': {e}{}",
+                perhaps_you_meant(&pkg, &target)
+            )));
+        }
+        let mut target = target;
+        if !(pkg_ends_with_triple_dots && target.is_empty()) {
+            if let Err(e) = validator::validate_target_name(&target) {
+                return Err(LabelSyntaxError(format!(
+                    "invalid target name '{target}': {e}{}",
+                    perhaps_you_meant(&pkg, &target)
+                )));
+            }
+            if let Some(t) = target.strip_suffix("/.") {
+                target = t.to_string();
+            }
+        }
+        Ok(Self {
+            repo,
+            repo_is_canonical,
+            pkg_is_absolute,
+            pkg,
+            pkg_ends_with_triple_dots,
+            target,
+        })
+    }
+}
+
+impl TargetPattern {
+    /// Parses `raw` against the main repository, relative to `relative_dir` (the client's working
+    /// directory relative to the workspace root), with no repository mapping.
+    pub fn parse(raw: &str, relative_dir: &PathFragment) -> Result<Self, LabelSyntaxError> {
+        Self::parse_with(
+            raw,
+            relative_dir,
+            &RepositoryName::main(),
+            &RepositoryMapping::always_fallback(),
+        )
+    }
+
+    /// Port of `TargetPattern.Parser.parse`.
+    pub fn parse_with(
+        raw: &str,
+        relative_dir: &PathFragment,
+        current_repo: &RepositoryName,
+        mapping: &RepositoryMapping,
+    ) -> Result<Self, LabelSyntaxError> {
+        let parts = Parts::parse(raw).map_err(|e| LabelSyntaxError(e.0))?;
+        let has_colon = raw.contains(':');
+        // `foo/bar/baz` is treated as a file path.
+        if !parts.pkg_is_absolute
+            && current_repo.is_main()
+            && parts.pkg.is_empty()
+            && !parts.pkg_ends_with_triple_dots
+            && !has_colon
+        {
+            return Ok(Self::PathAsTarget {
+                original: raw.to_string(),
+                path: relative_dir.get_relative_str(&parts.target).path_string().to_string(),
+            });
+        }
+        let repo = match &parts.repo {
+            None => current_repo.clone(),
+            Some(r) if parts.repo_is_canonical => RepositoryName::create_unvalidated(r.clone()),
+            Some(r) => mapping.get(r),
+        };
+        let pkg_fragment = if parts.pkg_is_absolute {
+            PathFragment::create(&parts.pkg)
+        } else {
+            relative_dir.get_relative_str(&parts.pkg)
+        };
+        let package = PackageIdentifier::create(repo, pkg_fragment)?;
+        if parts.pkg_ends_with_triple_dots {
+            return match parts.target.as_str() {
+                "" | "all" => Ok(Self::TargetsBelowDirectory {
+                    directory: package,
+                    include_files: false,
+                }),
+                "*" | "all-targets" => Ok(Self::TargetsBelowDirectory {
+                    directory: package,
+                    include_files: true,
+                }),
+                _ => Err(LabelSyntaxError(format!(
+                    "Invalid target pattern {raw}: '...' can only be used with wildcard targets"
+                ))),
+            };
+        }
+        if has_colon && parts.target == "all" {
+            return Ok(Self::TargetsInPackage {
+                package,
                 include_files: false,
             });
         }
-        if let Some(base) = normalized
-            .strip_suffix("/...:*")
-            .or_else(|| normalized.strip_suffix("/...:all-targets"))
-        {
-            let pkg_str = base.strip_prefix("//").unwrap_or("");
-            let pkg = PackageIdentifier::create_in_main_repo(pkg_str)?;
-            return Ok(Self::TargetsBelowDirectory {
-                directory: pkg,
+        if has_colon && (parts.target == "*" || parts.target == "all-targets") {
+            return Ok(Self::TargetsInPackage {
+                package,
                 include_files: true,
             });
         }
-        if normalized == "//..." || normalized == "//...:all" {
-            return Ok(Self::TargetsBelowDirectory {
-                directory: PackageIdentifier::create_in_main_repo("")?,
-                include_files: false,
-            });
-        }
-
-        // Check for `:all`, `:*`, `:all-targets`
-        if let Some(pkg_part) = normalized.strip_suffix(":all") {
-            let pkg_str = pkg_part.strip_prefix("//").unwrap_or(pkg_part);
-            return Ok(Self::TargetsInPackage {
-                package: PackageIdentifier::create_in_main_repo(pkg_str)?,
-                include_files: false,
-            });
-        }
-        if let Some(pkg_part) = normalized
-            .strip_suffix(":*")
-            .or_else(|| normalized.strip_suffix(":all-targets"))
-        {
-            let pkg_str = pkg_part.strip_prefix("//").unwrap_or(pkg_part);
-            return Ok(Self::TargetsInPackage {
-                package: PackageIdentifier::create_in_main_repo(pkg_str)?,
-                include_files: true,
-            });
-        }
-
-        let label = Label::parse_canonical(&normalized)?;
+        let label = Label::create(package, &parts.target).map_err(|e| {
+            LabelSyntaxError(format!("invalid target name: '{}'; {}", parts.target, e.0))
+        })?;
         Ok(Self::SingleTarget(label))
     }
 }
@@ -569,18 +792,74 @@ pub struct SignedTargetPattern {
 
 impl SignedTargetPattern {
     pub fn parse(raw: &str, relative_dir: &PathFragment) -> Result<Self, LabelSyntaxError> {
-        if let Some(stripped) = raw.strip_prefix('-') {
-            Ok(Self {
+        Self::parse_with(
+            raw,
+            relative_dir,
+            &RepositoryName::main(),
+            &RepositoryMapping::always_fallback(),
+        )
+    }
+
+    /// Port of `SignedTargetPattern.parse`: a leading `-` negates the pattern.
+    pub fn parse_with(
+        raw: &str,
+        relative_dir: &PathFragment,
+        current_repo: &RepositoryName,
+        mapping: &RepositoryMapping,
+    ) -> Result<Self, LabelSyntaxError> {
+        match raw.strip_prefix('-') {
+            Some(rest) => Ok(Self {
                 sign: PatternSign::Negative,
-                pattern: TargetPattern::parse(stripped, relative_dir)?,
-            })
-        } else {
-            let stripped = raw.strip_prefix('+').unwrap_or(raw);
-            Ok(Self {
+                pattern: TargetPattern::parse_with(rest, relative_dir, current_repo, mapping)?,
+            }),
+            None => Ok(Self {
                 sign: PatternSign::Positive,
-                pattern: TargetPattern::parse(stripped, relative_dir)?,
-            })
+                pattern: TargetPattern::parse_with(raw, relative_dir, current_repo, mapping)?,
+            }),
         }
+    }
+}
+
+/// Reads target patterns from the command line and/or `--target_pattern_file`
+/// (`TargetPatternsHelper.readFrom`, without the `--target_query` variants).
+///
+/// `cwd` is the client's working directory used to resolve a relative pattern file.
+pub fn read_target_patterns(
+    residue: &[String],
+    target_pattern_file: &str,
+    cwd: &std::path::Path,
+) -> Result<Vec<String>, String> {
+    if target_pattern_file.is_empty() {
+        return Ok(residue.to_vec());
+    }
+    if !residue.is_empty() {
+        return Err(
+            "Command-line target pattern and --target_pattern_file cannot both be specified"
+                .to_string(),
+        );
+    }
+    let path = cwd.join(target_pattern_file);
+    let bytes = std::fs::read(&path).map_err(|e| {
+        format!(
+            "I/O error reading from {}: {}",
+            path.display(),
+            io_error_message(&e)
+        )
+    })?;
+    // ISO-8859-1: bytes map 1:1 to chars.
+    let text: String = bytes.iter().map(|&b| b as char).collect();
+    Ok(text
+        .lines()
+        .map(|l| l.split('#').next().unwrap_or("").trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect())
+}
+
+fn io_error_message(e: &std::io::Error) -> String {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => "No such file or directory".to_string(),
+        std::io::ErrorKind::PermissionDenied => "Permission denied".to_string(),
+        _ => e.to_string(),
     }
 }
 
@@ -616,6 +895,14 @@ mod tests {
         assert!(Label::parse_canonical("//foo:bar/").is_err());
     }
 
+    fn pat(raw: &str, rel: &str) -> Result<TargetPattern, String> {
+        TargetPattern::parse(raw, &PathFragment::create(rel)).map_err(|e| e.0)
+    }
+
+    fn pkg(p: &str) -> PackageIdentifier {
+        PackageIdentifier::create_in_main_repo(p).unwrap()
+    }
+
     #[test]
     fn test_target_patterns() {
         let rel = PathFragment::empty();
@@ -623,12 +910,141 @@ mod tests {
         assert_eq!(
             p1,
             TargetPattern::TargetsBelowDirectory {
-                directory: PackageIdentifier::create_in_main_repo("src/test").unwrap(),
+                directory: pkg("src/test"),
                 include_files: false,
             }
         );
-
         let p2 = SignedTargetPattern::parse("-//src/test/shell:all", &rel).unwrap();
         assert_eq!(p2.sign, PatternSign::Negative);
+    }
+
+    #[test]
+    fn pattern_forms() {
+        use TargetPattern::*;
+        let single = |l: &str| SingleTarget(Label::parse_canonical(l).unwrap());
+        assert_eq!(pat("//foo:bar", "").unwrap(), single("//foo:bar"));
+        assert_eq!(pat("//foo/bar", "").unwrap(), single("//foo/bar:bar"));
+        assert_eq!(pat("//foo:all", "").unwrap(), TargetsInPackage { package: pkg("foo"), include_files: false });
+        assert_eq!(pat("//foo:*", "").unwrap(), TargetsInPackage { package: pkg("foo"), include_files: true });
+        assert_eq!(pat("//foo:all-targets", "").unwrap(), TargetsInPackage { package: pkg("foo"), include_files: true });
+        assert_eq!(pat("//:all", "").unwrap(), TargetsInPackage { package: pkg(""), include_files: false });
+        assert_eq!(pat("//...", "").unwrap(), TargetsBelowDirectory { directory: pkg(""), include_files: false });
+        assert_eq!(pat("//...:all", "").unwrap(), TargetsBelowDirectory { directory: pkg(""), include_files: false });
+        assert_eq!(pat("//...:*", "").unwrap(), TargetsBelowDirectory { directory: pkg(""), include_files: true });
+        assert_eq!(pat("//foo/...:all-targets", "").unwrap(), TargetsBelowDirectory { directory: pkg("foo"), include_files: true });
+        // A package that happens to be named `all` is still a package.
+        assert_eq!(pat("//foo/all", "").unwrap(), single("//foo/all:all"));
+        // `...` needs a wildcard target.
+        assert_eq!(
+            pat("//foo/...:bar", "").unwrap_err(),
+            "Invalid target pattern //foo/...:bar: '...' can only be used with wildcard targets"
+        );
+    }
+
+    #[test]
+    fn relative_patterns_use_client_directory() {
+        use TargetPattern::*;
+        let single = |l: &str| SingleTarget(Label::parse_canonical(l).unwrap());
+        assert_eq!(pat(":util", "src/core").unwrap(), single("//src/core:util"));
+        assert_eq!(pat("sub:x", "src/core").unwrap(), single("//src/core/sub:x"));
+        assert_eq!(pat("sub/x:y", "a").unwrap(), single("//a/sub/x:y"));
+        assert_eq!(pat("...", "src/core").unwrap(), TargetsBelowDirectory { directory: pkg("src/core"), include_files: false });
+        assert_eq!(pat("sub/...", "src/core").unwrap(), TargetsBelowDirectory { directory: pkg("src/core/sub"), include_files: false });
+        assert_eq!(pat(":all", "src/core").unwrap(), TargetsInPackage { package: pkg("src/core"), include_files: false });
+        assert_eq!(pat("...:*", "x").unwrap(), TargetsBelowDirectory { directory: pkg("x"), include_files: true });
+        // Absolute patterns ignore the client directory.
+        assert_eq!(pat("//top:t", "src/core").unwrap(), single("//top:t"));
+        // Bare paths are interpreted as files/targets.
+        assert_eq!(
+            pat("foo/bar.cc", "src").unwrap(),
+            PathAsTarget { original: "foo/bar.cc".into(), path: "src/foo/bar.cc".into() }
+        );
+        assert_eq!(
+            pat("foo", "").unwrap(),
+            PathAsTarget { original: "foo".into(), path: "foo".into() }
+        );
+    }
+
+    #[test]
+    fn external_repo_patterns() {
+        use TargetPattern::*;
+        let mut entries = HashMap::new();
+        entries.insert("rules_rs".to_string(), RepositoryName::create("rules_rs+1.0").unwrap());
+        let mapping = RepositoryMapping::new(entries, RepositoryName::main());
+        let parse = |raw: &str| {
+            TargetPattern::parse_with(raw, &PathFragment::empty(), &RepositoryName::main(), &mapping)
+                .map_err(|e| e.0)
+        };
+        let ext = |p: &str| {
+            PackageIdentifier::create(RepositoryName::create("rules_rs+1.0").unwrap(), PathFragment::create(p)).unwrap()
+        };
+        assert_eq!(parse("@rules_rs//...").unwrap(), TargetsBelowDirectory { directory: ext(""), include_files: false });
+        assert_eq!(parse("@rules_rs//src:all").unwrap(), TargetsInPackage { package: ext("src"), include_files: false });
+        assert_eq!(parse("@rules_rs//:*").unwrap(), TargetsInPackage { package: ext(""), include_files: true });
+        assert_eq!(parse("@@rules_rs+1.0//src/...").unwrap(), TargetsBelowDirectory { directory: ext("src"), include_files: false });
+        assert_eq!(
+            parse("@rules_rs//a:b").unwrap(),
+            SingleTarget(Label::create(ext("a"), "b").unwrap())
+        );
+        assert_eq!(
+            parse("@rules_rs").unwrap(),
+            SingleTarget(Label::create(ext(""), "rules_rs").unwrap())
+        );
+        // Unmapped apparent names pass through.
+        assert!(matches!(
+            parse("@other//x:y").unwrap(),
+            SingleTarget(l) if l.repository().name() == "other"
+        ));
+    }
+
+    #[test]
+    fn pattern_syntax_errors() {
+        assert_eq!(
+            pat("//foo//bar", "").unwrap_err(),
+            "invalid package name 'foo//bar': package names may not contain '//' path separators (perhaps you meant \":bar\"?)"
+        );
+        assert!(pat("//foo:bar baz/../x", "").unwrap_err().starts_with("invalid target name 'bar baz/../x':"));
+        assert!(pat("//foo:", "").unwrap_err().starts_with("invalid target name '':"));
+        assert!(pat("//foo/..:x", "").unwrap_err().starts_with("invalid package name 'foo/..':"));
+        assert!(pat(":/abs", "").unwrap_err().contains("target names may not start with '/'"));
+        // perhaps-you-meant
+        let e = pat("//foo/bar:bar/", "").unwrap_err();
+        assert!(e.starts_with("invalid target name 'bar/':"), "{e}");
+    }
+
+    #[test]
+    fn signed_patterns() {
+        let rel = PathFragment::empty();
+        let neg = SignedTargetPattern::parse("-//a/...", &rel).unwrap();
+        assert_eq!(neg.sign, PatternSign::Negative);
+        assert_eq!(neg.pattern, TargetPattern::TargetsBelowDirectory { directory: pkg("a"), include_files: false });
+        let pos = SignedTargetPattern::parse("//a:b", &rel).unwrap();
+        assert_eq!(pos.sign, PatternSign::Positive);
+        // Bazel has no `+` prefix.
+        assert!(SignedTargetPattern::parse("+//a:b", &rel).is_err());
+        // Negative relative pattern uses the client directory.
+        let n = SignedTargetPattern::parse("-:t", &PathFragment::create("x")).unwrap();
+        assert!(matches!(n.pattern, TargetPattern::SingleTarget(l) if l.canonical_form() == "//x:t"));
+    }
+
+    #[test]
+    fn target_pattern_file() {
+        let dir = std::env::temp_dir().join(format!("zel-tpf-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("pats.txt"), "//a:b # comment\n\n  //c/...  \n# only comment\n-//c/d\n").unwrap();
+        let got = read_target_patterns(&[], "pats.txt", &dir).unwrap();
+        assert_eq!(got, vec!["//a:b", "//c/...", "-//c/d"]);
+        assert_eq!(
+            read_target_patterns(&["//x".to_string()], "pats.txt", &dir).unwrap_err(),
+            "Command-line target pattern and --target_pattern_file cannot both be specified"
+        );
+        let err = read_target_patterns(&[], "missing.txt", &dir).unwrap_err();
+        assert!(err.starts_with("I/O error reading from "), "{err}");
+        assert!(err.ends_with("missing.txt: No such file or directory"), "{err}");
+        assert_eq!(
+            read_target_patterns(&["//x".to_string()], "", &dir).unwrap(),
+            vec!["//x"]
+        );
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

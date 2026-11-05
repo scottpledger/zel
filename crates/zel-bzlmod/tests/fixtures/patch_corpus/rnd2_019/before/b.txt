@@ -1,0 +1,11 @@
+y
+gamma
+y 1
+beta
+	Tab 3
+x 0
+eps 0
+eps
+return 0; 0
+} 1
+NEW return 0;

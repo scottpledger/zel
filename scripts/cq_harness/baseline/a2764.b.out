@@ -1,0 +1,12 @@
+6 total actions.
+
+Mnemonics:
+  Genrule: 2
+  CatIt: 4
+
+Configurations:
+  darwin_arm64-opt: 1
+  darwin_arm64-fastbuild: 5
+
+Execution Platforms:
+  @@platforms//host:host: 6

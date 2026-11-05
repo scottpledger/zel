@@ -1,0 +1,15 @@
+:genrule//a:gg*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c:xbin//b:toolBaBz.txt
+BexternalB
+ext+B	libBd.txt
+"B	bazel-outB
+darwin_arm64-opt-execB		bin
+*kdarwin_arm64-opt-execdarwin_arm64"@77e8473c8c1c4b4ef1825b4b7ffc50dc3ee606e358c10cba8c77f21ec5fe49d9(q@c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"	FileWrite(Jhr@@platforms//host:host�Bb	B
+tool
+Btool.runfiles
+Btool.repo_mapping
+x@9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a"RepoMappingManifest(Jhr@@platforms//host:host"Bbazel_toolsBtoolsBgenruleBgenrule-setup.sh
+"	Btool.runfiles_manifest
+z@e346326417c6d035de7958c9d53a1d985c71b8977bd881813c6084ab02bda792"SourceSymlinkManifest(Jhr@@platforms//host:hostBdarwin_arm64-fastbuildB	binBaBgg.out
+�@2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542"Genrule(2	/bin/bash2-c2�source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out:$
+PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:host"BMANIFEST
+	s@9d08d249af1fb388108eb2399cb831dc2a7d2046b2f108ae6cad2a57b326aabf"SymlinkTree(BJ	h	r@@platforms//host:host"	t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:host

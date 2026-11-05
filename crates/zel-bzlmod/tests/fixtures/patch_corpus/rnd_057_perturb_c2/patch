@@ -1,0 +1,16 @@
+--- a/f.txt
++++ b/f.txt
+@@ -1,5 +1,5 @@
+ } 0
+ x 1
+-  indent 3
++NEW   indent 3
+ gamma 2
+ x
+@@ -9,4 +9,6 @@
+  3
+ alpha
++  indent
++eps 2
+ delta 2
+ eps 0

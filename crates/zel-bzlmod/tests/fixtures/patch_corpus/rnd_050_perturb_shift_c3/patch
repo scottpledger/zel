@@ -1,0 +1,11 @@
+--- a/f.txt
++++ b/f.txt
+@@ -3,7 +3,7 @@
+ alpha
+ x
+ return 0; 1
+-x 0
++NEW x 0
+ }
+ { 1
+ eps 2

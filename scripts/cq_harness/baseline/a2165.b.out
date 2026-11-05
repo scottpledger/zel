@@ -1,0 +1,6 @@
+:catrule
+//a:sm_cat*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272cBaBx.txt
+By.txt
+"B	bazel-outBdarwin_arm64-fastbuildB	binBaB
+sm_cat.txt
+�@ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea"CatIt(2	/bin/bash2-c2Gcat a/x.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txtBJhr@@platforms//host:host

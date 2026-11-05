@@ -1,0 +1,36 @@
+gamma
+gamma
+alpha
+{
+
+{ 0
+eps 1
+gamma 1
+alpha 2
+delta
+} 0
+eps
+eps 3
+beta
+}
+	Tab
+ 2
+return 0;
+} 1
+  indent
+delta 3
+	Tab 3
+	Tab
+	Tab 2
+alpha 0
+beta 1
+
+  indent
+} 2
+delta 1
+y 1
+gamma 3
+ 2
+delta 0
+delta
+alpha 0

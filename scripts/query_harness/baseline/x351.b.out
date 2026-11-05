@@ -1,0 +1,29 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:gg"
+  "//a:gg" -> "//a:sel"
+  "//a:gg" -> "@ext//lib:data"
+  "//a:gg" -> "@bazel_tools//tools/genrule:genrule-setup.sh"
+  "//a:gg" -> "//b:tool"
+  "//b:tool"
+  "//b:tool" -> "//b:tool.cc"
+  "//b:tool.cc"
+  "@bazel_tools//tools/genrule:genrule-setup.sh"
+  "@ext//lib:data"
+  "@ext//lib:data" -> "@ext//lib:d.txt"
+  "@ext//lib:d.txt"
+  "//a:sel"
+  "//a:sel" -> "//a:opt_cs"
+  "//a:sel" -> "//a:def_cs"
+  "//a:sel" -> "//a:x.txt"
+  [label="//a:opt_cs"];
+  "//a:sel" -> "//a:y.txt"
+  [label="//a:def_cs"];
+  "//a:sel" -> "//a:z.txt"
+  [label="//conditions:default"];
+  "//a:z.txt"
+  "//a:y.txt"
+  "//a:x.txt"
+  "//a:def_cs"
+  "//a:opt_cs"
+}

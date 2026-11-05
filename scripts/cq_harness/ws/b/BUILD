@@ -1,0 +1,7 @@
+load("//:defs.bzl","xbin","x_test","xlib")
+xbin(name="tool", srcs=["tool.cc"], visibility=["//visibility:public"])
+x_test(name="t1", srcs=["t.cc"], data=["//a:lib2"], size="small", tags=["fast"])
+x_test(name="t2", srcs=["t.cc"], deps=[":shlib"], tags=["slow","manual"], timeout="long")
+xlib(name="shlib", srcs=["t.cc"], data=["//c:cdata"], visibility=["//c:__pkg__"])
+genrule(name="mk", outs=["mk.txt"], cmd="echo hi > $@", visibility=["//visibility:private"])
+exports_files(["tool.sh","t.sh"], visibility=["//visibility:public"])

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "c070cd3e2a2e",
+ "classified_as": "STRICT",
+ "cmd": "build --keep_going //:gpartial //:g1",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "2e87b31885ac2891",
+  "2e87b31885ac2891",
+  "2e87b31885ac2891",
+  "2e87b31885ac2891",
+  "2e87b31885ac2891",
+  "2e87b31885ac2891"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:9:8: declared output 'p2.out' was not created by genrule. This is probably because the genrule actually didn't create this output, or because the output was a directory and the genrule was run remotely (note that only the contents of declared file outputs are copied from genrules run remotely)\nERROR: WS/BUILD:9:8: Executing genrule //:gpartial failed: not all outputs were created or valid\nINFO: Build succeeded for only 1 of 2 top-level targets\nINFO: Found 2 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 3 processes: 1 internal, 2 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:9:8: declared output 'p2.out' was not created by genrule. This is probably because the genrule actually didn't create this output, or because the output was a directory and the genrule was run remotely (note that only the contents of declared file outputs are copied from genrules run remotely)\nERROR: WS/BUILD:9:8: Executing genrule //:gpartial failed: not all outputs were created or valid\nINFO: Build succeeded for only 1 of 2 top-level targets\nINFO: Found 2 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 3 processes: 1 internal, 2 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:9:8: declared output 'p2.out' was not created by genrule. This is probably because the genrule actually didn't create this output, or because the output was a directory and the genrule was run remotely (note that only the contents of declared file outputs are copied from genrules run remotely)\nERROR: WS/BUILD:9:8: Executing genrule //:gpartial failed: not all outputs were created or valid\nINFO: Build succeeded for only 1 of 2 top-level targets\nINFO: Found 2 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 3 processes: 1 internal, 2 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:9:8: declared output 'p2.out' was not created by genrule. This is probably because the genrule actually didn't create this output, or because the output was a directory and the genrule was run remotely (note that only the contents of declared file outputs are copied from genrules run remotely)\nERROR: WS/BUILD:9:8: Executing genrule //:gpartial failed: not all outputs were created or valid\nINFO: Build succeeded for only 1 of 2 top-level targets\nINFO: Found 2 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 3 processes: 1 internal, 2 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:9:8: declared output 'p2.out' was not created by genrule. This is probably because the genrule actually didn't create this output, or because the output was a directory and the genrule was run remotely (note that only the contents of declared file outputs are copied from genrules run remotely)\nERROR: WS/BUILD:9:8: Executing genrule //:gpartial failed: not all outputs were created or valid\nINFO: Build succeeded for only 1 of 2 top-level targets\nINFO: Found 2 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 3 processes: 1 internal, 2 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:9:8: declared output 'p2.out' was not created by genrule. This is probably because the genrule actually didn't create this output, or because the output was a directory and the genrule was run remotely (note that only the contents of declared file outputs are copied from genrules run remotely)\nERROR: WS/BUILD:9:8: Executing genrule //:gpartial failed: not all outputs were created or valid\nINFO: Build succeeded for only 1 of 2 top-level targets\nINFO: Found 2 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 3 processes: 1 internal, 2 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

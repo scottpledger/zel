@@ -16,14 +16,27 @@
 //! Mirrors `src/main/java/com/google/devtools/build/skyframe` and `build/lib/skyframe`.
 
 use std::any::Any;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
 use std::fmt;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use zel_analysis::{BuildConfigurationKey, ConfiguredTarget};
 use zel_cmdline::{Label, PackageIdentifier};
 use zel_packages::{Package, Target};
 use zel_rules::analyze_target;
 use zel_vfs::{FileSystem, PathFragment, RootedPath};
+
+pub mod cycles;
+pub mod diff;
+pub mod engine;
+pub mod executor;
+pub mod recording_fs;
+
+pub use cycles::{CycleInfo, CyclesReporter};
+pub use executor::{loading_signature, SkyframeExecutor, SyncReport};
+pub use engine::{
+    Environment, ErrorInfo, EvaluationOptions, EvaluationResult, EvaluationStats,
+    InMemoryMemoizingEvaluator, Version,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SkyFunctionName(pub &'static str);
@@ -35,6 +48,7 @@ impl SkyFunctionName {
     pub const PACKAGE_LOOKUP: Self = Self("PACKAGE_LOOKUP");
     pub const BZL_LOAD: Self = Self("BZL_LOAD");
     pub const PACKAGE: Self = Self("PACKAGE");
+    pub const PACKAGE_LOAD: Self = Self("PACKAGE_LOAD");
     pub const CONFIGURED_TARGET: Self = Self("CONFIGURED_TARGET");
     pub const ACTION_EXECUTION: Self = Self("ACTION_EXECUTION");
     pub const PRECOMPUTED: Self = Self("PRECOMPUTED");
@@ -50,13 +64,19 @@ impl fmt::Display for SkyFunctionName {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SkyKey {
     FileState(RootedPath),
+    DirectoryListingState(RootedPath),
     PackageLookup(PackageIdentifier),
     Package(PackageIdentifier),
+    /// Loads a package through the server's `PackageLoader`, yielding the loader's exact
+    /// `Result<Package, PackageLoadError>` (see [`PackageLoadValue`]).
+    PackageLoad(PackageIdentifier),
     ConfiguredTarget {
         label: Label,
         config_hash: String,
     },
     Precomputed(String),
+    /// Execution of one action, identified by its primary output exec path.
+    ActionExecution(String),
     Custom {
         function_name: SkyFunctionName,
         argument: String,
@@ -67,8 +87,11 @@ impl SkyKey {
     pub fn function_name(&self) -> SkyFunctionName {
         match self {
             Self::FileState(_) => SkyFunctionName::FILE_STATE,
+            Self::DirectoryListingState(_) => SkyFunctionName::DIRECTORY_LISTING,
+            Self::ActionExecution(_) => SkyFunctionName::ACTION_EXECUTION,
             Self::PackageLookup(_) => SkyFunctionName::PACKAGE_LOOKUP,
             Self::Package(_) => SkyFunctionName::PACKAGE,
+            Self::PackageLoad(_) => SkyFunctionName::PACKAGE_LOAD,
             Self::ConfiguredTarget { .. } => SkyFunctionName::CONFIGURED_TARGET,
             Self::Precomputed(_) => SkyFunctionName::PRECOMPUTED,
             Self::Custom { function_name, .. } => *function_name,
@@ -80,8 +103,11 @@ impl fmt::Display for SkyKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FileState(rp) => write!(f, "FILE_STATE:[{}]", rp.as_path()),
+            Self::DirectoryListingState(rp) => write!(f, "DIRECTORY_LISTING_STATE:[{}]", rp.as_path()),
+            Self::ActionExecution(id) => write!(f, "ACTION_EXECUTION:[{id}]"),
             Self::PackageLookup(pkg) => write!(f, "PACKAGE_LOOKUP:[{pkg}]"),
             Self::Package(pkg) => write!(f, "PACKAGE:[{pkg}]"),
+            Self::PackageLoad(pkg) => write!(f, "PACKAGE_LOAD:[{pkg}]"),
             Self::ConfiguredTarget { label, config_hash } => {
                 write!(f, "CONFIGURED_TARGET:[{label}@{config_hash}]")
             }
@@ -100,15 +126,50 @@ pub trait SkyValue: Any + fmt::Debug + Send + Sync {
     fn eq_value(&self, other: &dyn SkyValue) -> bool;
 }
 
+/// `FileStateValue`: the observable state of one path (not following symlinks).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileStateValue {
-    RegularFile { size: u64, digest: Vec<u8> },
+    /// `mtime_ms` is recorded for stat-based diff detection but does not take part in value
+    /// equality: a touched-but-identical file is a pruned change.
+    RegularFile { size: u64, digest: Vec<u8>, mtime_ms: u64, observed_ms: u64 },
     Directory,
     Symlink { target: PathFragment },
     NonExistent,
 }
 
 impl SkyValue for FileStateValue {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn eq_value(&self, other: &dyn SkyValue) -> bool {
+        match (self, other.as_any().downcast_ref::<Self>()) {
+            (
+                Self::RegularFile { size: s1, digest: d1, .. },
+                Some(Self::RegularFile { size: s2, digest: d2, .. }),
+            ) => s1 == s2 && d1 == d2,
+            (a, Some(b)) => a == b,
+            _ => false,
+        }
+    }
+}
+
+/// Entry kind in a [`DirectoryListingStateValue`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EntryKind {
+    File,
+    Directory,
+    Symlink,
+    Unknown,
+}
+
+/// `DirectoryListingStateValue`: sorted names and kinds of a directory's entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryListingStateValue {
+    pub exists: bool,
+    pub entries: Vec<(String, EntryKind)>,
+}
+
+impl SkyValue for DirectoryListingStateValue {
     fn as_any(&self) -> &dyn Any {
         self
     }
@@ -214,45 +275,6 @@ impl fmt::Display for SkyFunctionError {
     }
 }
 
-/// `SkyFunction.Environment` passed to `SkyFunction::compute`.
-/// Mirrors Bazel's `env.getValue()` / `env.valuesMissing()` contract.
-pub struct Environment<'a> {
-    available_values: &'a HashMap<SkyKey, Arc<dyn SkyValue>>,
-    requested_deps: Vec<SkyKey>,
-    values_missing: bool,
-}
-
-impl<'a> Environment<'a> {
-    pub fn new(available_values: &'a HashMap<SkyKey, Arc<dyn SkyValue>>) -> Self {
-        Self {
-            available_values,
-            requested_deps: Vec::new(),
-            values_missing: false,
-        }
-    }
-
-    pub fn get_value(&mut self, key: &SkyKey) -> Option<Arc<dyn SkyValue>> {
-        if !self.requested_deps.contains(key) {
-            self.requested_deps.push(key.clone());
-        }
-        match self.available_values.get(key) {
-            Some(v) => Some(Arc::clone(v)),
-            None => {
-                self.values_missing = true;
-                None
-            }
-        }
-    }
-
-    pub fn values_missing(&self) -> bool {
-        self.values_missing
-    }
-
-    pub fn into_requested_deps(self) -> Vec<SkyKey> {
-        self.requested_deps
-    }
-}
-
 /// Core `SkyFunction` trait matching `com.google.devtools.build.skyframe.SkyFunction`.
 pub trait SkyFunction: Send + Sync {
     /// Computes the `SkyValue` for `key`. Returns `Ok(None)` when `env.values_missing()` is true.
@@ -263,226 +285,71 @@ pub trait SkyFunction: Send + Sync {
     ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError>;
 }
 
-#[derive(Debug, Clone)]
-pub struct NodeEntry {
-    pub value: Arc<dyn SkyValue>,
-    pub direct_deps: Vec<SkyKey>,
-    pub reverse_deps: HashSet<SkyKey>,
-    pub dirty: bool,
-}
-
-#[derive(Debug)]
-pub struct EvaluationResult {
-    pub values: HashMap<SkyKey, Arc<dyn SkyValue>>,
-    pub errors: HashMap<SkyKey, SkyFunctionError>,
-    pub cycles: Vec<Vec<SkyKey>>,
-}
-
-impl EvaluationResult {
-    pub fn has_error(&self) -> bool {
-        !self.errors.is_empty() || !self.cycles.is_empty()
-    }
-
-    pub fn get<T: SkyValue>(&self, key: &SkyKey) -> Option<&T> {
-        self.values.get(key)?.as_any().downcast_ref::<T>()
-    }
-}
-
-/// Incremental memoizing evaluator matching `InMemoryMemoizingEvaluator`.
-pub struct InMemoryMemoizingEvaluator {
-    functions: HashMap<SkyFunctionName, Arc<dyn SkyFunction>>,
-    graph: RwLock<HashMap<SkyKey, NodeEntry>>,
-}
-
-impl Default for InMemoryMemoizingEvaluator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl InMemoryMemoizingEvaluator {
-    pub fn new() -> Self {
-        Self {
-            functions: HashMap::new(),
-            graph: RwLock::new(HashMap::new()),
-        }
-    }
-
-    pub fn register_function(
-        &mut self,
-        name: SkyFunctionName,
-        func: Arc<dyn SkyFunction>,
-    ) -> &mut Self {
-        self.functions.insert(name, func);
-        self
-    }
-
-    pub fn inject_precomputed(&self, key: SkyKey, value: Arc<dyn SkyValue>) {
-        let mut graph = self.graph.write().unwrap();
-        let mut rdeps_to_dirty = None;
-        if let Some(existing) = graph.get_mut(&key) {
-            if !existing.value.eq_value(value.as_ref()) {
-                existing.value = value;
-                rdeps_to_dirty = Some(
-                    existing
-                        .reverse_deps
-                        .iter()
-                        .cloned()
-                        .collect::<Vec<SkyKey>>(),
-                );
-            }
-            existing.dirty = false;
-        } else {
-            graph.insert(
-                key,
-                NodeEntry {
-                    value,
-                    direct_deps: Vec::new(),
-                    reverse_deps: HashSet::new(),
-                    dirty: false,
-                },
-            );
-        }
-        if let Some(rdeps) = rdeps_to_dirty {
-            Self::mark_dirty_recursive(&mut graph, &rdeps);
-        }
-    }
-
-    /// Marks `keys` and their transitive reverse dependencies as dirty in the Skyframe graph.
-    pub fn invalidate(&self, keys: &[SkyKey]) {
-        let mut graph = self.graph.write().unwrap();
-        Self::mark_dirty_recursive(&mut graph, keys);
-    }
-
-    fn mark_dirty_recursive(graph: &mut HashMap<SkyKey, NodeEntry>, keys: &[SkyKey]) {
-        let mut stack: Vec<SkyKey> = keys.to_vec();
-        let mut visited = HashSet::new();
-        while let Some(k) = stack.pop() {
-            if !visited.insert(k.clone()) {
-                continue;
-            }
-            if let Some(entry) = graph.get_mut(&k) {
-                entry.dirty = true;
-                for rdep in &entry.reverse_deps {
-                    stack.push(rdep.clone());
-                }
-            }
-        }
-    }
-
-    pub fn evaluate(&self, roots: &[SkyKey]) -> EvaluationResult {
-        let mut result = EvaluationResult {
-            values: HashMap::new(),
-            errors: HashMap::new(),
-            cycles: Vec::new(),
-        };
-        let mut visiting = Vec::new();
-        for root in roots {
-            let _ = self.evaluate_key(root, &mut visiting, &mut result);
-        }
-        result
-    }
-
-    fn evaluate_key(
-        &self,
-        key: &SkyKey,
-        visiting: &mut Vec<SkyKey>,
-        result: &mut EvaluationResult,
-    ) -> Option<Arc<dyn SkyValue>> {
-        if let Some(pos) = visiting.iter().position(|k| k == key) {
-            let mut cycle = visiting[pos..].to_vec();
-            cycle.push(key.clone());
-            result.cycles.push(cycle);
-            return None;
-        }
-
-        // Fast path: clean node already in graph
-        {
-            let graph = self.graph.read().unwrap();
-            if let Some(entry) = graph.get(key) {
-                if !entry.dirty {
-                    result.values.insert(key.clone(), Arc::clone(&entry.value));
-                    return Some(Arc::clone(&entry.value));
-                }
-            }
-        }
-
-        let func = match self.functions.get(&key.function_name()) {
-            Some(f) => Arc::clone(f),
-            None => {
-                result.errors.insert(
-                    key.clone(),
-                    SkyFunctionError::persistent(format!(
-                        "No SkyFunction registered for {}",
-                        key.function_name()
-                    )),
-                );
-                return None;
-            }
-        };
-
-        visiting.push(key.clone());
-        let mut available: HashMap<SkyKey, Arc<dyn SkyValue>> = HashMap::new();
-
-        loop {
-            let mut env = Environment::new(&available);
-            match func.compute(key, &mut env) {
-                Ok(Some(val)) => {
-                    let deps = env.into_requested_deps();
-                    visiting.pop();
-                    let mut graph = self.graph.write().unwrap();
-                    for dep in &deps {
-                        if let Some(dep_entry) = graph.get_mut(dep) {
-                            dep_entry.reverse_deps.insert(key.clone());
-                        }
-                    }
-                    let existing_rdeps = graph
-                        .get(key)
-                        .map(|e| e.reverse_deps.clone())
-                        .unwrap_or_default();
-                    graph.insert(
-                        key.clone(),
-                        NodeEntry {
-                            value: Arc::clone(&val),
-                            direct_deps: deps,
-                            reverse_deps: existing_rdeps,
-                            dirty: false,
-                        },
-                    );
-                    result.values.insert(key.clone(), Arc::clone(&val));
-                    return Some(val);
-                }
-                Ok(None) => {
-                    let deps = env.into_requested_deps();
-                    let mut any_failed = false;
-                    for dep in deps {
-                        if available.contains_key(&dep) {
-                            continue;
-                        }
-                        if let Some(dep_val) = self.evaluate_key(&dep, visiting, result) {
-                            available.insert(dep, dep_val);
-                        } else {
-                            any_failed = true;
-                        }
-                    }
-                    if any_failed {
-                        visiting.pop();
-                        return None;
-                    }
-                }
-                Err(err) => {
-                    visiting.pop();
-                    result.errors.insert(key.clone(), err);
-                    return None;
-                }
-            }
-        }
-    }
-}
-
-/// Built-in `FILE_STATE` SkyFunction backed by `zel_vfs::FileSystem`.
+/// Built-in `FILE_STATE` SkyFunction backed by `zel_vfs::FileSystem`. Digests are cached by
+/// `(path, size, mtime)` so re-checking an unchanged file does not re-read it.
 pub struct FileStateFunction {
     pub fs: Arc<dyn FileSystem>,
+    digests: std::sync::Mutex<std::collections::HashMap<PathFragment, (u64, u64, Vec<u8>)>>,
+}
+
+impl FileStateFunction {
+    pub fn new(fs: Arc<dyn FileSystem>) -> Self {
+        Self { fs, digests: Default::default() }
+    }
+
+    /// Computes the current state of `path` (shared with the diff checker).
+    pub fn compute_state(&self, full_path: &PathFragment) -> Result<FileStateValue, SkyFunctionError> {
+        // Taken *before* the stat so that "racy" detection is conservative.
+        let observed_ms = diff::now_ms();
+        match self.fs.stat(full_path, false) {
+            Ok(st) => {
+                if st.is_symlink {
+                    let target = self
+                        .fs
+                        .read_symbolic_link(full_path)
+                        .map_err(|e| SkyFunctionError::transient(e.to_string()))?;
+                    Ok(FileStateValue::Symlink { target })
+                } else if st.is_directory {
+                    Ok(FileStateValue::Directory)
+                } else {
+                    // A cached digest is trusted only if the file's mtime is meaningful (non-zero)
+                    // and was not racy when the digest was computed.
+                    let cached = self
+                        .digests
+                        .lock()
+                        .unwrap()
+                        .get(full_path)
+                        .filter(|(sz, mt, _)| *sz == st.size && *mt == st.last_modified_time_ms && *mt != 0)
+                        .map(|(_, _, d)| d.clone());
+                    let digest = match cached {
+                        Some(d) => d,
+                        None => {
+                            let d = self
+                                .fs
+                                .get_digest(full_path)
+                                .map_err(|e| SkyFunctionError::transient(e.to_string()))?;
+                            let racy = observed_ms.saturating_sub(st.last_modified_time_ms) < diff::RACY_WINDOW_MS;
+                            if !racy {
+                                self.digests
+                                    .lock()
+                                    .unwrap()
+                                    .insert(full_path.clone(), (st.size, st.last_modified_time_ms, d.clone()));
+                            }
+                            d
+                        }
+                    };
+                    Ok(FileStateValue::RegularFile {
+                        size: st.size,
+                        digest,
+                        mtime_ms: st.last_modified_time_ms,
+                        observed_ms,
+                    })
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(FileStateValue::NonExistent),
+            Err(e) => Err(SkyFunctionError::transient(e.to_string())),
+        }
+    }
 }
 
 impl SkyFunction for FileStateFunction {
@@ -494,39 +361,62 @@ impl SkyFunction for FileStateFunction {
         let SkyKey::FileState(rooted_path) = key else {
             return Err(SkyFunctionError::persistent("Expected FileState SkyKey"));
         };
-        let full_path = rooted_path.as_path();
-        match self.fs.stat(&full_path, false) {
-            Ok(st) => {
-                if st.is_symlink {
-                    let target = self
-                        .fs
-                        .read_symbolic_link(&full_path)
-                        .map_err(|e| SkyFunctionError::transient(e.to_string()))?;
-                    Ok(Some(Arc::new(FileStateValue::Symlink { target })))
-                } else if st.is_directory {
-                    Ok(Some(Arc::new(FileStateValue::Directory)))
-                } else {
-                    let digest = self
-                        .fs
-                        .get_digest(&full_path)
-                        .map_err(|e| SkyFunctionError::transient(e.to_string()))?;
-                    Ok(Some(Arc::new(FileStateValue::RegularFile {
-                        size: st.size,
-                        digest,
-                    })))
-                }
+        Ok(Some(Arc::new(self.compute_state(&rooted_path.as_path())?)))
+    }
+}
+
+/// Built-in `DIRECTORY_LISTING_STATE` SkyFunction (`DirectoryListingStateFunction`).
+pub struct DirectoryListingStateFunction {
+    pub fs: Arc<dyn FileSystem>,
+}
+
+impl DirectoryListingStateFunction {
+    pub fn compute_state(fs: &dyn FileSystem, path: &PathFragment) -> Result<DirectoryListingStateValue, SkyFunctionError> {
+        match fs.readdir(path) {
+            Ok(entries) => {
+                let mut v: Vec<(String, EntryKind)> = entries
+                    .into_iter()
+                    .map(|e| {
+                        (
+                            e.name,
+                            match e.dirent_type {
+                                zel_vfs::DirentType::File => EntryKind::File,
+                                zel_vfs::DirentType::Directory => EntryKind::Directory,
+                                zel_vfs::DirentType::Symlink => EntryKind::Symlink,
+                                zel_vfs::DirentType::Unknown => EntryKind::Unknown,
+                            },
+                        )
+                    })
+                    .collect();
+                v.sort();
+                Ok(DirectoryListingStateValue { exists: true, entries: v })
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                Ok(Some(Arc::new(FileStateValue::NonExistent)))
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.kind() == std::io::ErrorKind::NotADirectory => {
+                Ok(DirectoryListingStateValue { exists: false, entries: vec![] })
             }
             Err(e) => Err(SkyFunctionError::transient(e.to_string())),
         }
     }
 }
 
+impl SkyFunction for DirectoryListingStateFunction {
+    fn compute(
+        &self,
+        key: &SkyKey,
+        _env: &mut Environment<'_>,
+    ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        let SkyKey::DirectoryListingState(rp) = key else {
+            return Err(SkyFunctionError::persistent("Expected DirectoryListingState SkyKey"));
+        };
+        Ok(Some(Arc::new(Self::compute_state(self.fs.as_ref(), &rp.as_path())?)))
+    }
+}
+
 /// Built-in `PACKAGE_LOOKUP` SkyFunction that checks `BUILD.bazel` then `BUILD`.
 pub struct PackageLookupFunction {
     pub workspace_root: PathFragment,
+    /// Resolver of external repositories (per runtime; see [`zel_packages::lookup::RepoResolverSlot`]).
+    pub repo_resolver: zel_packages::lookup::RepoResolverSlot,
 }
 
 impl SkyFunction for PackageLookupFunction {
@@ -541,22 +431,46 @@ impl SkyFunction for PackageLookupFunction {
             ));
         };
         let pkg_frag = pkg_id.package_fragment();
+        // Packages of external repositories live under the repository's own root.
+        let repo_root = if pkg_id.repository().is_main() {
+            self.workspace_root.clone()
+        } else {
+            match self
+                .repo_resolver
+                .get()
+                .and_then(|r| r.repo_root(pkg_id.repository()))
+            {
+                Some(root) => root,
+                None => {
+                    let repo_display = format!("@@[unknown repo '{}' requested from @@]", pkg_id.repository().name());
+                    return Err(SkyFunctionError::persistent(format!(
+                        "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: No repository visible as '@{}' from main repository",
+                        pkg_frag,
+                        pkg_id.repository().name()
+                    )))
+                }
+            }
+        };
         let build_bazel_rp = RootedPath::to_rooted_path(
-            self.workspace_root.clone(),
+            repo_root.clone(),
             pkg_frag.get_relative_str("BUILD.bazel"),
         )
         .map_err(SkyFunctionError::persistent)?;
         let build_rp = RootedPath::to_rooted_path(
-            self.workspace_root.clone(),
+            repo_root.clone(),
             pkg_frag.get_relative_str("BUILD"),
         )
         .map_err(SkyFunctionError::persistent)?;
 
-        let v1 = env.get_value(&SkyKey::FileState(build_bazel_rp.clone()));
-        let v2 = env.get_value(&SkyKey::FileState(build_rp.clone()));
+        let mut vs = env.get_values(&[
+            SkyKey::FileState(build_bazel_rp.clone()),
+            SkyKey::FileState(build_rp.clone()),
+        ]);
         if env.values_missing() {
             return Ok(None);
         }
+        let v2 = vs.pop().flatten();
+        let v1 = vs.pop().flatten();
 
         if let Some(fs1) = v1.and_then(|v| v.as_any().downcast_ref::<FileStateValue>().cloned()) {
             if matches!(fs1, FileStateValue::RegularFile { .. }) {
@@ -582,9 +496,58 @@ impl SkyFunction for PackageLookupFunction {
     }
 }
 
-/// Built-in `PACKAGE` SkyFunction that loads and evaluates a package's `BUILD` / `BUILD.bazel` file.
+/// Dependencies discovered by running an opaque loader under the recording file system.
+struct Discovered<T> {
+    result: T,
+    keys: Vec<SkyKey>,
+}
+
+/// Shared helper: run `load` with recording, memoizing the outcome across function restarts so a
+/// restart (needed to fetch the discovered FILE_STATE deps) does not re-run the loader.
+fn load_with_recording<T: Clone>(
+    pending: &std::sync::Mutex<std::collections::HashMap<SkyKey, Discovered<T>>>,
+    key: &SkyKey,
+    env: &mut Environment<'_>,
+    load: impl FnOnce() -> T,
+) -> Option<T> {
+    let existing = pending.lock().unwrap().get(key).map(|d| (d.result.clone(), d.keys.clone()));
+    let (result, keys) = match existing {
+        Some(x) => x,
+        None => {
+            recording_fs::start_recording();
+            let result = load();
+            let rec = recording_fs::finish_recording();
+            let keys = recording_fs::dependency_keys(&rec);
+            pending.lock().unwrap().insert(key.clone(), Discovered { result: result.clone(), keys: keys.clone() });
+            (result, keys)
+        }
+    };
+    env.get_values(&keys);
+    if env.values_missing() {
+        return None;
+    }
+    pending.lock().unwrap().remove(key);
+    Some(result)
+}
+
+/// Built-in `PACKAGE` SkyFunction that loads and evaluates a package's `BUILD` / `BUILD.bazel`
+/// file. Every file read / directory listed while evaluating the BUILD file (the BUILD file,
+/// loaded `.bzl` files, `glob()` directories, ...) is recorded and becomes a real dependency.
 pub struct PackageFunction {
     pub fs: Arc<dyn FileSystem>,
+    pending: std::sync::Mutex<std::collections::HashMap<SkyKey, Discovered<Result<Package, String>>>>,
+    repo_resolver: zel_packages::lookup::RepoResolverSlot,
+}
+
+impl PackageFunction {
+    pub fn new(fs: Arc<dyn FileSystem>) -> Self {
+        Self::with_resolver(fs, Default::default())
+    }
+
+    /// Like [`new`](Self::new) with the per-runtime external repository resolver slot.
+    pub fn with_resolver(fs: Arc<dyn FileSystem>, repo_resolver: zel_packages::lookup::RepoResolverSlot) -> Self {
+        Self { fs, pending: Default::default(), repo_resolver }
+    }
 }
 
 impl SkyFunction for PackageFunction {
@@ -615,21 +578,28 @@ impl SkyFunction for PackageFunction {
         if env.values_missing() {
             return Ok(None);
         }
-
-        let content_bytes = self
-            .fs
-            .read_file(&build_rp.as_path())
-            .map_err(|e| SkyFunctionError::transient(e.to_string()))?;
-        let content = String::from_utf8_lossy(&content_bytes);
-
-        let workspace_root = build_rp.root().clone();
-        let (targets, package_opt) = match Package::evaluate_build_file(
-            pkg_id.clone(),
-            &workspace_root,
-            build_rp.as_path(),
-            &content,
-            Arc::clone(&self.fs),
-        ) {
+        let recording_fs = recording_fs::RecordingFileSystem::new(Arc::clone(&self.fs));
+        let outcome = load_with_recording(&self.pending, key, env, || {
+            let content_bytes = recording_fs
+                .read_file(&build_rp.as_path())
+                .map_err(|e| e.to_string())?;
+            let content = String::from_utf8_lossy(&content_bytes);
+            let workspace_root = build_rp.root().clone();
+            let resolver: Arc<dyn zel_packages::lookup::RepoResolver> =
+                match self.repo_resolver.get() {
+                    Some(r) => r,
+                    None => Arc::new(zel_packages::SimpleRepoResolver::new(workspace_root)),
+                };
+            Package::evaluate_build_file_with(
+                pkg_id.clone(),
+                build_rp.as_path(),
+                &content,
+                Arc::clone(&recording_fs),
+                resolver,
+            )
+        });
+        let Some(outcome) = outcome else { return Ok(None) };
+        let (targets, package_opt) = match outcome {
             Ok(pkg) => {
                 let mut map = BTreeMap::new();
                 for rule in pkg.rules() {
@@ -645,14 +615,9 @@ impl SkyFunction for PackageFunction {
                         },
                     );
                 }
-                if map.is_empty() {
-                    if let Ok(fallback) = parse_build_targets(pkg_id, &content) {
-                        map = fallback;
-                    }
-                }
                 (map, Some(pkg))
             }
-            Err(_) => (parse_build_targets(pkg_id, &content)?, None),
+            Err(e) => return Err(SkyFunctionError::transient(e)),
         };
 
         Ok(Some(Arc::new(PackageValue {
@@ -664,9 +629,103 @@ impl SkyFunction for PackageFunction {
     }
 }
 
+/// Value of a `PACKAGE_LOAD` node: exactly what `PackageLoader::load_package_uncached` returned
+/// (successful package incl. its events, or the load error).
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackageLoadValue(pub Result<Package, zel_packages::PackageLoadError>);
+
+impl SkyValue for PackageLoadValue {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn eq_value(&self, other: &dyn SkyValue) -> bool {
+        other.as_any().downcast_ref::<Self>() == Some(self)
+    }
+}
+
+/// The loader the `PACKAGE_LOAD` function uses (it changes per command: flags such as
+/// `--deleted_packages`). Installed by the executor right before evaluating.
+#[derive(Default)]
+pub struct PackageLoadContext {
+    /// Weak: the loader's config points back at the package cache (avoids a reference cycle).
+    pub loader: std::sync::Mutex<Option<std::sync::Weak<zel_packages::PackageLoader>>>,
+    /// Number of times the loader actually ran (as opposed to being served from the graph).
+    pub loads: std::sync::atomic::AtomicUsize,
+}
+
+/// `PACKAGE_LOAD`: runs the server's `PackageLoader` under the recording file system and records
+/// every observed file/directory as a dependency. The `loading_options` precomputed node makes
+/// all packages depend on the loading configuration.
+pub struct PackageLoadFunction {
+    pub ctx: Arc<PackageLoadContext>,
+    pending: std::sync::Mutex<std::collections::HashMap<SkyKey, Discovered<PackageLoadValue>>>,
+}
+
+pub const LOADING_OPTIONS_KEY: &str = "package_loading_options";
+
+impl PackageLoadFunction {
+    pub fn new(ctx: Arc<PackageLoadContext>) -> Self {
+        Self { ctx, pending: Default::default() }
+    }
+}
+
+impl SkyFunction for PackageLoadFunction {
+    fn compute(
+        &self,
+        key: &SkyKey,
+        env: &mut Environment<'_>,
+    ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        let SkyKey::PackageLoad(pkg_id) = key else {
+            return Err(SkyFunctionError::persistent("Expected PackageLoad SkyKey"));
+        };
+        if env.get_value(&SkyKey::Precomputed(LOADING_OPTIONS_KEY.to_string())).is_none() {
+            return Ok(None);
+        }
+        let loader = self
+            .ctx
+            .loader
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .ok_or_else(|| SkyFunctionError::persistent("no PackageLoader installed for PACKAGE_LOAD"))?;
+        let ctx = &self.ctx;
+        let out = load_with_recording(&self.pending, key, env, || {
+            ctx.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            PackageLoadValue(loader.load_package_uncached(pkg_id))
+        });
+        Ok(out.map(|v| Arc::new(v) as Arc<dyn SkyValue>))
+    }
+}
+
+/// Produces the package loader, analysis configuration and top-level configuration used by a
+/// dependency-aware [`ConfiguredTargetFunction`] (invoked once per computation so that file
+/// changes are always observed).
+pub type AnalysisSetup = Arc<
+    dyn Fn() -> (Arc<zel_packages::PackageLoader>, zel_rules::AnalysisConfig, BuildConfigurationKey)
+        + Send
+        + Sync,
+>;
+
 /// Built-in `CONFIGURED_TARGET` SkyFunction that analyzes a target in a `PackageValue`.
+///
+/// With `analysis: Some(..)` the target is analysed by [`zel_rules::TargetResolver`] with full
+/// dependency analysis (dependencies, transitions, toolchain resolution, visibility);
+/// analysis errors become persistent errors carrying Bazel's message. Without it the legacy
+/// leaf-rule path ([`analyze_target`]) is used.
 pub struct ConfiguredTargetFunction {
     pub default_config: BuildConfigurationKey,
+    pub analysis: Option<AnalysisSetup>,
+}
+
+impl ConfiguredTargetFunction {
+    pub fn new(default_config: BuildConfigurationKey) -> Self {
+        Self { default_config, analysis: None }
+    }
+
+    pub fn with_analysis(default_config: BuildConfigurationKey, setup: AnalysisSetup) -> Self {
+        Self { default_config, analysis: Some(setup) }
+    }
 }
 
 impl SkyFunction for ConfiguredTargetFunction {
@@ -684,6 +743,12 @@ impl SkyFunction for ConfiguredTargetFunction {
         let Some(pkg_val_any) = env.get_value(&pkg_key) else {
             return Ok(None);
         };
+        if let Some(setup) = &self.analysis {
+            let (loader, acfg, cfg) = setup();
+            let resolver = zel_rules::TargetResolver::new(loader, acfg);
+            let ct = resolver.analyze(label, &cfg).map_err(SkyFunctionError::persistent)?;
+            return Ok(Some(Arc::new(ConfiguredTargetValue { configured_target: (*ct).clone() })));
+        }
         let pkg_val = pkg_val_any
             .as_any()
             .downcast_ref::<PackageValue>()
@@ -711,6 +776,7 @@ impl SkyFunction for ConfiguredTargetFunction {
                 cmd: rt.cmd.clone(),
                 executable: rt.rule_class.ends_with("_binary"),
                 testonly: rt.rule_class.ends_with("_test"),
+                extra: Default::default(),
             })
         } else {
             Target::InputFile {
@@ -726,235 +792,7 @@ impl SkyFunction for ConfiguredTargetFunction {
     }
 }
 
-/// Parses Starlark rule instantiations in a `BUILD` file (`cc_binary`, `cc_library`, `java_library`,
-/// `java_binary`, `rust_library`, `rust_binary`, `genrule`, `filegroup`, `sh_binary`, `sh_test`, etc.).
-pub fn parse_build_targets(
-    pkg_id: &PackageIdentifier,
-    build_content: &str,
-) -> Result<BTreeMap<String, RuleTarget>, SkyFunctionError> {
-    let mut targets = BTreeMap::new();
-    let mut pos = 0;
-    let bytes = build_content.as_bytes();
-
-    while pos < bytes.len() {
-        // Skip whitespace and comments
-        if bytes[pos].is_ascii_whitespace() {
-            pos += 1;
-            continue;
-        }
-        if bytes[pos] == b'#' {
-            while pos < bytes.len() && bytes[pos] != b'\n' {
-                pos += 1;
-            }
-            continue;
-        }
-        if bytes[pos].is_ascii_alphabetic() || bytes[pos] == b'_' {
-            let ident_start = pos;
-            while pos < bytes.len() && (bytes[pos].is_ascii_alphanumeric() || bytes[pos] == b'_') {
-                pos += 1;
-            }
-            let ident = &build_content[ident_start..pos];
-            while pos < bytes.len() && (bytes[pos] == b' ' || bytes[pos] == b'\t') {
-                pos += 1;
-            }
-            if pos < bytes.len() && bytes[pos] == b'(' {
-                let args_start = pos + 1;
-                let mut depth = 1usize;
-                pos += 1;
-                let mut in_str: Option<u8> = None;
-                while pos < bytes.len() && depth > 0 {
-                    let b = bytes[pos];
-                    if let Some(q) = in_str {
-                        if b == b'\\' {
-                            pos += 2;
-                            continue;
-                        } else if b == q {
-                            in_str = None;
-                        }
-                    } else if b == b'"' || b == b'\'' {
-                        in_str = Some(b);
-                    } else if b == b'#' {
-                        while pos < bytes.len() && bytes[pos] != b'\n' {
-                            pos += 1;
-                        }
-                        continue;
-                    } else if b == b'(' {
-                        depth += 1;
-                    } else if b == b')' {
-                        depth -= 1;
-                    }
-                    pos += 1;
-                }
-                let args_body = &build_content[args_start..pos.saturating_sub(1)];
-                if !matches!(
-                    ident,
-                    "load" | "package" | "licenses" | "exports_files" | "select" | "glob"
-                ) {
-                    if let Some(name) = extract_string_kwarg(args_body, "name") {
-                        if let Ok(label) = Label::create(pkg_id.clone(), &name) {
-                            let srcs = extract_list_kwarg(args_body, "srcs");
-                            let deps = extract_list_kwarg(args_body, "deps");
-                            let outs = extract_list_kwarg(args_body, "outs");
-                            let cmd = extract_string_kwarg(args_body, "cmd");
-                            targets.insert(
-                                name,
-                                RuleTarget {
-                                    label,
-                                    rule_class: ident.to_string(),
-                                    srcs,
-                                    deps,
-                                    cmd,
-                                    outs,
-                                },
-                            );
-                        }
-                    }
-                }
-                continue;
-            }
-        }
-        pos += 1;
-    }
-
-    Ok(targets)
-}
-
-fn extract_string_kwarg(body: &str, key: &str) -> Option<String> {
-    for part in body.lines() {
-        let trimmed = part.trim();
-        if let Some(rest) = trimmed.strip_prefix(key) {
-            let rest = rest.trim_start();
-            if let Some(after_eq) = rest.strip_prefix('=') {
-                let after_eq = after_eq.trim_start();
-                let quote = after_eq.chars().next()?;
-                if quote == '"' || quote == '\'' {
-                    let after_q = &after_eq[1..];
-                    let end_idx = after_q.find(quote)?;
-                    return Some(after_q[..end_idx].to_string());
-                }
-            }
-        }
-    }
-    None
-}
-
-fn extract_list_kwarg(body: &str, key: &str) -> Vec<String> {
-    let pattern = key.to_string();
-    let mut search_from = 0;
-    while let Some(rel_idx) = body[search_from..].find(&pattern) {
-        let idx = search_from + rel_idx;
-        let before_ok = idx == 0
-            || !body.as_bytes()[idx - 1].is_ascii_alphanumeric()
-                && body.as_bytes()[idx - 1] != b'_';
-        let after = &body[idx + pattern.len()..];
-        let after_trimmed = after.trim_start();
-        if before_ok {
-            if let Some(after_eq) = after_trimmed.strip_prefix('=') {
-                let after_eq = after_eq.trim_start();
-                if let Some(after_bracket) = after_eq.strip_prefix('[') {
-                    if let Some(end_bracket) = after_bracket.find(']') {
-                        let list_content = &after_bracket[..end_bracket];
-                        let mut items = Vec::new();
-                        let mut chars = list_content.chars();
-                        while let Some(c) = chars.next() {
-                            if c == '"' || c == '\'' {
-                                let mut s = String::new();
-                                for nc in chars.by_ref() {
-                                    if nc == c {
-                                        break;
-                                    }
-                                    s.push(nc);
-                                }
-                                items.push(s);
-                            }
-                        }
-                        return items;
-                    }
-                }
-            }
-        }
-        search_from = idx + pattern.len();
-    }
-    Vec::new()
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use zel_vfs::InMemoryFileSystem;
-
-    #[test]
-    fn test_skyframe_package_loading_and_invalidation() {
-        let fs = Arc::new(InMemoryFileSystem::default());
-        let ws = PathFragment::create("/workspace");
-        let pkg_dir = ws.get_relative_str("foo");
-        fs.create_directory_and_parents(&pkg_dir).unwrap();
-        let build_file = pkg_dir.get_relative_str("BUILD");
-        fs.write_file(
-            &build_file,
-            br#"
-cc_library(
-    name = "lib",
-    srcs = ["lib.cc"],
-)
-cc_binary(
-    name = "bin",
-    srcs = ["main.cc"],
-    deps = [":lib"],
-)
-"#,
-        )
-        .unwrap();
-
-        let mut evaluator = InMemoryMemoizingEvaluator::new();
-        evaluator
-            .register_function(
-                SkyFunctionName::FILE_STATE,
-                Arc::new(FileStateFunction {
-                    fs: Arc::clone(&fs) as Arc<dyn FileSystem>,
-                }),
-            )
-            .register_function(
-                SkyFunctionName::PACKAGE_LOOKUP,
-                Arc::new(PackageLookupFunction {
-                    workspace_root: ws.clone(),
-                }),
-            )
-            .register_function(
-                SkyFunctionName::PACKAGE,
-                Arc::new(PackageFunction {
-                    fs: Arc::clone(&fs) as Arc<dyn FileSystem>,
-                }),
-            );
-
-        let pkg_id = PackageIdentifier::create_in_main_repo("foo").unwrap();
-        let pkg_key = SkyKey::Package(pkg_id.clone());
-        let res = evaluator.evaluate(std::slice::from_ref(&pkg_key));
-        assert!(!res.has_error());
-
-        let pkg_val = res.get::<PackageValue>(&pkg_key).unwrap();
-        assert_eq!(pkg_val.targets.len(), 2);
-        assert_eq!(pkg_val.targets["bin"].rule_class, "cc_binary");
-        assert_eq!(pkg_val.targets["bin"].deps, vec![":lib"]);
-
-        // Now modify the BUILD file and invalidate its FileState node
-        fs.write_file(
-            &build_file,
-            br#"
-cc_binary(
-    name = "new_bin",
-    srcs = ["main.cc"],
-)
-"#,
-        )
-        .unwrap();
-        let build_rp =
-            RootedPath::to_rooted_path(ws.clone(), PathFragment::create("foo/BUILD")).unwrap();
-        evaluator.invalidate(&[SkyKey::FileState(build_rp)]);
-
-        let res2 = evaluator.evaluate(std::slice::from_ref(&pkg_key));
-        let pkg_val2 = res2.get::<PackageValue>(&pkg_key).unwrap();
-        assert_eq!(pkg_val2.targets.len(), 1);
-        assert!(pkg_val2.targets.contains_key("new_bin"));
-    }
-}
+mod engine_tests;
+#[cfg(test)]
+mod tests;

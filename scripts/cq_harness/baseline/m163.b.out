@@ -1,0 +1,127 @@
+action 'Executing genrule //b:mk'
+  Mnemonic: Genrule
+  Target: //b:mk
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: a2ea7327c75916fea1c58312150dde5b059b770dd237a76dd2417be46caf9856
+  Inputs: [external/bazel_tools/tools/genrule/genrule-setup.sh]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/mk.txt]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec /bin/bash \
+    -c \
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo hi > bazel-out/k8-fastbuild/bin/b/mk.txt')
+# Configuration: 4d1be72401ba892d08e723bc2b89b364d2c892b184c81b0e3b71ceeeac145767
+# Execution platform: @@platforms//host:host
+
+action 'Writing script b/t1'
+  Mnemonic: FileWrite
+  Target: //b:t1
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
+  Inputs: []
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t1]
+  IsExecutable: true
+
+action 'Writing repo mapping manifest for //b:t1'
+  Mnemonic: RepoMappingManifest
+  Target: //b:t1
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d
+  Inputs: []
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t1.repo_mapping]
+  IsExecutable: false
+
+action 'Creating source manifest for //b:t1'
+  Mnemonic: SourceSymlinkManifest
+  Target: //b:t1
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: f119a4f94fa73ab566cd3862e4d27d422800be1fbfa54c57486946e39baa300f
+  Inputs: []
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t1.runfiles_manifest]
+  IsExecutable: false
+
+action 'Creating runfiles tree bazel-out/k8-fastbuild/bin/b/t1.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //b:t1
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: d0b1fa58f9c4d943fafb63cfe0bc9cd41784c97621574f010dbab624c6efde4b
+  Inputs: [bazel-out/k8-fastbuild/bin/b/t1.runfiles_manifest]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t1.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+runfiles for //b:t1
+  Mnemonic: RunfilesTree
+  Target: //b:t1
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
+  Inputs: [bazel-out/k8-fastbuild/bin/a/lib2.txt, bazel-out/k8-fastbuild/bin/b/t1, bazel-out/k8-fastbuild/bin/b/t1.repo_mapping, bazel-out/k8-fastbuild/bin/b/t1.runfiles/MANIFEST]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t1.runfiles]
+
+action 'Testing //b:t1'
+  Mnemonic: TestRunner
+  Target: //b:t1
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 205428c674ece34895c9d37069735603ac04f06cc7f559f119763b18bb7e84d8
+  Inputs: [bazel-out/k8-fastbuild/bin/b/t1.runfiles, external/bazel_tools/tools/test/generate-xml.sh, external/bazel_tools/tools/test/test-setup.sh]
+  Outputs: [bazel-out/k8-fastbuild/testlogs/b/t1/test.cache_status, bazel-out/k8-fastbuild/testlogs/b/t1/test.log, bazel-out/k8-fastbuild/testlogs/b/t1/test.outputs (TreeArtifact), bazel-out/k8-fastbuild/testlogs/b/t1/test.xml]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/bazel_tools/tools/test/test-setup.sh \
+    b/t1)
+# Configuration: 03899c4a23074a4a152f51ebbfbc6437a8a0f7ce275b328bd961d6c8fa289f2d
+# Execution platform: @@platforms//host:host
+
+action 'Writing script b/tool'
+  Mnemonic: FileWrite
+  Target: //b:tool
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
+  Inputs: []
+  Outputs: [bazel-out/k8-fastbuild/bin/b/tool]
+  IsExecutable: true
+
+action 'Writing repo mapping manifest for //b:tool'
+  Mnemonic: RepoMappingManifest
+  Target: //b:tool
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a
+  Inputs: []
+  Outputs: [bazel-out/k8-fastbuild/bin/b/tool.repo_mapping]
+  IsExecutable: false
+
+action 'Creating source manifest for //b:tool'
+  Mnemonic: SourceSymlinkManifest
+  Target: //b:tool
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 852ba2380277f30495f6b5288a4983ff67275b9ebf8b33d97b89a4e68f6d1808
+  Inputs: []
+  Outputs: [bazel-out/k8-fastbuild/bin/b/tool.runfiles_manifest]
+  IsExecutable: false
+
+action 'Creating runfiles tree bazel-out/k8-fastbuild/bin/b/tool.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //b:tool
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 43a0b27d193eba9eec58502452e0dffa068bef355b492335b5120b98f311622a
+  Inputs: [bazel-out/k8-fastbuild/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/tool.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+runfiles for //b:tool
+  Mnemonic: RunfilesTree
+  Target: //b:tool
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
+  Inputs: [bazel-out/k8-fastbuild/bin/b/tool, bazel-out/k8-fastbuild/bin/b/tool.repo_mapping, bazel-out/k8-fastbuild/bin/b/tool.runfiles/MANIFEST]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/tool.runfiles]
+

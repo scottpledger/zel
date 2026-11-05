@@ -1,0 +1,14 @@
+action 'Cat @@//a:lib'
+  Mnemonic: CatIt
+  Target: //a:lib
+  Configuration: darwin_arm64-opt
+  Execution platform: @@platforms//host:host
+  ActionKey: e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329
+  Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/darwin_arm64-opt/bin/a/lib.txt]
+  Command Line: (exec /bin/bash \
+    -c \
+    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txt')
+# Configuration: 4dbca48503f0171038dc35628fc0e3ca9c94963532732206b65978118f9e0a3f
+# Execution platform: @@platforms//host:host
+

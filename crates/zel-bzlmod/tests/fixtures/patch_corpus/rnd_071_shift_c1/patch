@@ -1,0 +1,14 @@
+--- a/f.txt
++++ b/f.txt
+@@ -16,3 +16,2 @@
+ alpha
+-delta
+ }
+@@ -32,2 +31,4 @@
+ alpha 0
++return 0;
++{
+   indent
+@@ -37 +38,2 @@
+ alpha
++  indent 3

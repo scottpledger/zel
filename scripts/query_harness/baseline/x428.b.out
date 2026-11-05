@@ -1,0 +1,90 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="filegroup" location="@OB@/external/ext+/lib/BUILD:1:10" name="@ext//lib:data">
+        <string name="name" value="data"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="@ext//lib:d.txt"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="@ext//lib:d.txt"/>
+    </rule>
+    <rule class="genrule" location="@OB@/external/ext+/lib/BUILD:2:8" name="@ext//lib:gen">
+        <string name="name" value="gen"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="toolchains"/>
+        <list name="srcs"/>
+        <list name="tools"/>
+        <list name="outs">
+            <output value="@ext//lib:g.out"/>
+        </list>
+        <string name="cmd" value="echo ext &gt; $@"/>
+        <string name="cmd_bash" value=""/>
+        <string name="cmd_bat" value=""/>
+        <string name="cmd_ps" value=""/>
+        <boolean name="output_to_bindir" value="false"/>
+        <boolean name="local" value="false"/>
+        <string name="message" value=""/>
+        <list name="output_licenses"/>
+        <boolean name="executable" value="false"/>
+        <boolean name="$is_executable" value="false"/>
+        <boolean name="heuristic_label_expansion" value="false"/>
+        <label name="$genrule_setup" value="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <tristate name="stamp" value="NO"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-output name="@ext//lib:g.out"/>
+    </rule>
+</query>

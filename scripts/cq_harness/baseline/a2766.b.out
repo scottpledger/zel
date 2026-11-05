@@ -1,0 +1,10 @@
+1 total action.
+
+Mnemonics:
+  Genrule: 1
+
+Configurations:
+  darwin_arm64-fastbuild: 1
+
+Execution Platforms:
+  @@platforms//host:host: 1

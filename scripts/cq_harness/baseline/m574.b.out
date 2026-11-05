@@ -1,0 +1,40 @@
+action 'Creating runfiles tree bazel-out/darwin_arm64-fastbuild/bin/b/t1.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //b:t1
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 2d3875d14b12b47496a9004d1f82c6bcf72e8c046ffdd9e3c962823de9b5c1fe
+  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t1.runfiles_manifest]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t1.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+action 'Creating runfiles tree bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //b:t2
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 30a0f1d28876513357ac5520ee17b3b0a52de7b9c0db45b08d32e6b95e9144a3
+  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles_manifest]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+action 'Creating runfiles tree bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //b:tool
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 7dc5a94dd5304ba87abeb760f1f8f4a43319e6ba0b28414858e2bf1ad1e22529
+  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+action 'Creating runfiles tree bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles [for tool]'
+  Mnemonic: SymlinkTree
+  Target: //b:tool
+  Configuration: darwin_arm64-opt-exec
+  Execution platform: @@platforms//host:host
+  ActionKey: 9d08d249af1fb388108eb2399cb831dc2a7d2046b2f108ae6cad2a57b326aabf
+  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+

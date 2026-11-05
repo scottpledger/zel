@@ -18,6 +18,22 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use zel_proto::failure_details::FailureDetail;
 
+/// The Bazel release whose behavior Zel emulates (the spec is the Bazel 9.3.2 source tree). Everything
+/// that reports or checks "the Bazel version" (`version`, `info release`, `native.bazel_version`,
+/// `bazel_compatibility`, BEP `build_tool_version`, ...) derives from this one constant. The single
+/// documented deviation is the product name (`zel`); an explicit `ZEL_EMBED_LABEL`/`BAZEL_EMBED_LABEL`
+/// replaces the label exactly like Bazel's `--embed_label`-style build stamping.
+pub const BAZEL_COMPAT_VERSION: &str = "9.3.2";
+/// `BlazeVersionInfo.getReleaseName()` of [`BAZEL_COMPAT_VERSION`].
+pub const BAZEL_COMPAT_RELEASE_NAME: &str = "release 9.3.2";
+
+pub mod action_env;
+pub mod deflate;
+pub mod java_regex;
+pub mod json;
+pub mod resource_converter;
+pub mod terminal;
+
 /// Exit codes shared by Bazel client and server, matching `ExitCode.java`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExitCode {
@@ -45,6 +61,8 @@ impl ExitCode {
     pub const BLAZE_INTERNAL_ERROR: Self = Self::new(37, "BLAZE_INTERNAL_ERROR", true);
     pub const PUBLISH_ERROR: Self = Self::new(38, "PUBLISH_ERROR", true);
     pub const REMOTE_CACHE_EVICTED: Self = Self::new(39, "REMOTE_CACHE_EVICTED", true);
+    /// `TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR` in `ExitCode.java` (name `PUBLISH_ERROR`).
+    pub const TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR: Self = Self::PUBLISH_ERROR;
     pub const PERSISTENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR: Self =
         Self::new(45, "PERSISTENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR", false);
     pub const EXTERNAL_DEPS_ERROR: Self = Self::new(48, "EXTERNAL_DEPS_ERROR", false);
@@ -60,11 +78,51 @@ impl ExitCode {
     pub const fn numeric_exit_code(&self) -> i32 {
         self.code
     }
+
+    pub const fn is_infrastructure_failure(&self) -> bool {
+        self.infrastructure_failure
+    }
+
+    /// Every *registered* exit code (`ExitCode.values()`); excludes `PARSING_FAILURE` and
+    /// `PARTIAL_ANALYSIS_FAILURE`, which duplicate numeric codes and are unregistered in Java.
+    pub fn values() -> &'static [ExitCode] {
+        &[
+            Self::SUCCESS,
+            Self::BUILD_FAILURE,
+            Self::COMMAND_LINE_ERROR,
+            Self::TESTS_FAILED,
+            Self::NO_TESTS_FOUND,
+            Self::RUN_FAILURE,
+            Self::ANALYSIS_FAILURE,
+            Self::INTERRUPTED,
+            Self::LOCK_HELD_NOBLOCK_FOR_LOCK,
+            Self::REMOTE_ENVIRONMENTAL_ERROR,
+            Self::OOM_ERROR,
+            Self::REMOTE_ERROR,
+            Self::LOCAL_ENVIRONMENTAL_ERROR,
+            Self::BLAZE_INTERNAL_ERROR,
+            Self::TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR,
+            Self::REMOTE_CACHE_EVICTED,
+            Self::PERSISTENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR,
+            Self::EXTERNAL_DEPS_ERROR,
+        ]
+    }
+
+    /// `ExitCode.forCode(int)`: only registered codes are returned.
+    pub fn for_code(code: i32) -> Option<ExitCode> {
+        Self::values().iter().copied().find(|c| c.code == code)
+    }
+
+    /// Maps a numeric code to the best-known `ExitCode`, falling back to an anonymous one.
+    pub fn from_numeric(code: i32) -> ExitCode {
+        Self::for_code(code).unwrap_or(ExitCode::new(code, "UNKNOWN", false))
+    }
 }
 
 impl fmt::Display for ExitCode {
+    /// Java's `ExitCode.toString()` is the bare name.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} ({})", self.name, self.code)
+        write!(f, "{}", self.name)
     }
 }
 
@@ -99,6 +157,45 @@ impl DetailedExitCode {
 
     pub fn is_success(&self) -> bool {
         self.exit_code == ExitCode::SUCCESS
+    }
+
+    /// `DetailedExitCode.of(FailureDetail)`: derives the exit code from the detail's metadata.
+    /// Returns `None` if the detail has no category/known code.
+    pub fn of_detail(failure_detail: FailureDetail) -> Option<Self> {
+        let n = failure_detail.exit_code()?;
+        Some(Self {
+            exit_code: ExitCode::from_numeric(n),
+            failure_detail: Some(failure_detail),
+        })
+    }
+
+    /// Priority per `DetailedExitCodeComparator.getPriority`: infrastructure (4) > ordinary (2) >
+    /// null (0), +1 when a failure detail is attached.
+    pub fn priority(code: Option<&DetailedExitCode>) -> i32 {
+        match code {
+            None => 0,
+            Some(c) => {
+                (if c.exit_code.infrastructure_failure { 4 } else { 2 })
+                    + i32::from(c.failure_detail.is_some())
+            }
+        }
+    }
+
+    /// `chooseMoreImportantWithFirstIfTie`.
+    pub fn choose_more_important(
+        first: Option<DetailedExitCode>,
+        second: Option<DetailedExitCode>,
+    ) -> Option<DetailedExitCode> {
+        if Self::priority(first.as_ref()) >= Self::priority(second.as_ref()) {
+            first
+        } else {
+            second
+        }
+    }
+
+    /// Serialized `FailureDetail` proto for `--failure_detail_out` / `failure_detail.rawproto`.
+    pub fn failure_detail_rawproto(&self) -> Option<Vec<u8>> {
+        self.failure_detail.as_ref().map(FailureDetail::encode_to_vec)
     }
 }
 
@@ -445,5 +542,49 @@ mod tests {
             sha256::hex_digest(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
+    }
+}
+
+#[cfg(test)]
+mod exit_code_tests {
+    use super::*;
+    use zel_proto::failure_details::{Category, FailureDetail, InterruptedCode};
+
+    #[test]
+    fn registry_matches_java() {
+        assert_eq!(ExitCode::values().len(), 18);
+        assert_eq!(ExitCode::for_code(1), Some(ExitCode::BUILD_FAILURE));
+        assert_eq!(ExitCode::for_code(3), Some(ExitCode::TESTS_FAILED));
+        assert_eq!(ExitCode::for_code(38).unwrap().name, "PUBLISH_ERROR");
+        assert_eq!(ExitCode::for_code(5), None);
+        assert_eq!(ExitCode::BUILD_FAILURE.to_string(), "BUILD_FAILURE");
+    }
+
+    #[test]
+    fn priority_ordering() {
+        let infra = DetailedExitCode::from_exit_code(ExitCode::OOM_ERROR);
+        let plain = DetailedExitCode::of(
+            ExitCode::BUILD_FAILURE,
+            FailureDetail::new("x", Category::Interrupted(InterruptedCode::Interrupted)),
+        );
+        assert_eq!(DetailedExitCode::priority(None), 0);
+        assert_eq!(DetailedExitCode::priority(Some(&infra)), 4);
+        assert_eq!(DetailedExitCode::priority(Some(&plain)), 3);
+        let c = DetailedExitCode::choose_more_important(Some(plain.clone()), Some(infra.clone()));
+        assert_eq!(c, Some(infra.clone()));
+        // Ties keep the first.
+        let a = DetailedExitCode::from_exit_code(ExitCode::BUILD_FAILURE);
+        let b = DetailedExitCode::from_exit_code(ExitCode::TESTS_FAILED);
+        assert_eq!(DetailedExitCode::choose_more_important(Some(a.clone()), Some(b)), Some(a));
+    }
+
+    #[test]
+    fn exit_code_from_detail_metadata() {
+        let fd = FailureDetail::new("m", Category::named("spawn", "TIMEOUT").unwrap());
+        let d = DetailedExitCode::of_detail(fd).unwrap();
+        assert_eq!(d.exit_code.code, 1);
+        let fd = FailureDetail::new("m", Category::Interrupted(InterruptedCode::Interrupted));
+        assert_eq!(DetailedExitCode::of_detail(fd).unwrap().exit_code, ExitCode::INTERRUPTED);
+        assert!(d.failure_detail_rawproto().is_some());
     }
 }

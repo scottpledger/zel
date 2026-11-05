@@ -1,0 +1,14 @@
+  indent
+{ 3
+alpha 0
+alpha 1
+delta 1
+gamma 0
+	Tab 2
+  indent
+{ 3
+alpha 0
+alpha 1
+delta 1
+gamma 0
+	Tab 2

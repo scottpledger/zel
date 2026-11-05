@@ -1,0 +1,8 @@
+# @WS@/BUILD:3:6
+alias(
+  name = "top_alias",
+  actual = "//a:lib",
+)
+# Rule top_alias instantiated at (most recent call last):
+#   @WS@/BUILD:3:6 in <toplevel>
+

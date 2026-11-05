@@ -1,0 +1,2 @@
+NoTransition -> @ext//lib:gen (2d89340)
+  $genrule_setup#@bazel_tools//tools/genrule:genrule-setup.sh#(null transition) -> 

@@ -1,0 +1,6 @@
+//a:cl (2d89340)
+//a:cl2 (2d89340)
+//a:c.cc (null)
+@bazel_tools//tools:host_platform (c07488d)
+@@platforms//host:host (c07488d)
+//a:c.h (null)

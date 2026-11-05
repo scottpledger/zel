@@ -16,11 +16,61 @@
 //! `BUILD` / `.bzl` evaluator.
 //! Mirrors `src/main/java/com/google/devtools/build/lib/packages`.
 
+pub mod aspect;
+pub mod attr;
+pub mod builtins;
+pub mod glob;
+pub mod loader;
+pub mod lookup;
+pub mod pkg_spec;
+pub mod provider;
+pub mod resolve;
+pub mod rule_class;
+pub mod rule_defs_gen;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use zel_cmdline::{Label, PackageIdentifier};
-use zel_starlark::{EvalContext, LoadStatement, Value};
+use zel_starlark::{LoadStatement, Value};
 use zel_vfs::{FileSystem, PathFragment};
+
+pub use attr::{AttrType, AttrValue, Attribute};
+pub use loader::{BzlOverride, LoaderConfig, PackageCache, PackageLoadError, PackageLoader};
+pub use lookup::{PackageEvent, PackageLookupConfig, RepoResolver, SimpleRepoResolver};
+pub use resolve::{PackageErrors, PatternError, PatternResolver, ResolveOutcome};
+pub use rule_class::RuleClass;
+
+/// Extra per-rule information of the typed model (`Rule.java`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct RuleExtra {
+    /// The rule class (schema) this rule was instantiated from.
+    pub rule_class: Option<Arc<RuleClass>>,
+    /// Explicitly-set, type-converted attribute values (defaults are *not* stored; see
+    /// [`RuleInstance::attr_or_default`]).
+    pub attr_values: BTreeMap<String, AttrValue>,
+    /// `/path/BUILD:line:col` of the call that created the rule.
+    pub location: Option<String>,
+    /// `generator_name` (the enclosing macro's `name`), if created by a macro.
+    pub generator_name: Option<String>,
+    /// `generator_function` (the macro function name).
+    pub generator_function: Option<String>,
+    /// `generator_location` (BUILD file location of the macro call).
+    pub generator_location: Option<String>,
+    /// Call stack frames from BUILD down to instantiation.
+    pub instantiation_stack: Vec<(String, String)>,
+    /// Name of the symbolic macro instance that declared this rule.
+    pub macro_instance: Option<String>,
+    /// Visibility after applying `package(default_visibility = ...)`.
+    pub effective_visibility: Vec<Label>,
+    /// `true` if the `visibility` attribute was set explicitly.
+    pub visibility_explicit: bool,
+    /// Attributes whose value comes from a `package()` default, not from the rule call (they are
+    /// present in `attr_values` but not *explicitly specified*).
+    pub pkg_default_attrs: Vec<String>,
+    /// The `features` the rule call itself passed, when the package merged its own features
+    /// into `attr_values["features"]` (query shows only the rule's own list).
+    pub own_features: Option<AttrValue>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RuleInstance {
@@ -36,6 +86,7 @@ pub struct RuleInstance {
     pub cmd: Option<String>,
     pub executable: bool,
     pub testonly: bool,
+    pub extra: RuleExtra,
 }
 
 impl RuleInstance {
@@ -45,6 +96,52 @@ impl RuleInstance {
 
     pub fn is_binary_rule(&self) -> bool {
         self.rule_class.ends_with("_binary") || self.executable
+    }
+
+    /// Labels this rule depends on: the labels of all label-typed attributes (including every
+    /// `select()` branch and key) except visibility/compatibility metadata and outputs.
+    pub fn dependency_labels(&self) -> Vec<Label> {
+        const NON_DEPS: &[&str] = &[
+            "visibility",
+            "compatible_with",
+            "restricted_to",
+            "package_metadata",
+            "aspect_hints",
+        ];
+        let mut out: Vec<Label> = Vec::new();
+        for (name, v) in &self.extra.attr_values {
+            if NON_DEPS.contains(&name.as_str()) {
+                continue;
+            }
+            let is_output = self
+                .extra
+                .rule_class
+                .as_ref()
+                .and_then(|rc| rc.attr(name))
+                .map(|a| matches!(a.ty, AttrType::Output | AttrType::OutputList))
+                .unwrap_or(false);
+            if is_output {
+                continue;
+            }
+            for l in v.labels() {
+                if !out.contains(&l) {
+                    out.push(l);
+                }
+            }
+        }
+        out
+    }
+
+    /// The value of attribute `name`: explicit value, else the rule class default.
+    pub fn attr_or_default(&self, name: &str) -> Option<AttrValue> {
+        if let Some(v) = self.extra.attr_values.get(name) {
+            return Some(v.clone());
+        }
+        self.extra
+            .rule_class
+            .as_ref()
+            .and_then(|rc| rc.attr(name))
+            .map(|a| a.default_value())
     }
 }
 
@@ -62,6 +159,12 @@ pub enum Target {
         label: Label,
         packages: Vec<String>,
     },
+    /// `environment_group()` (a target of kind `environment group`).
+    EnvironmentGroup {
+        label: Label,
+        environments: Vec<Label>,
+        defaults: Vec<Label>,
+    },
 }
 
 impl Target {
@@ -71,6 +174,7 @@ impl Target {
             Self::InputFile { label } => label,
             Self::OutputFile { label, .. } => label,
             Self::PackageGroup { label, .. } => label,
+            Self::EnvironmentGroup { label, .. } => label,
         }
     }
 
@@ -80,8 +184,40 @@ impl Target {
             Self::InputFile { .. } => "source file".to_string(),
             Self::OutputFile { .. } => "generated file".to_string(),
             Self::PackageGroup { .. } => "package group".to_string(),
+            Self::EnvironmentGroup { .. } => "environment group".to_string(),
         }
     }
+
+    pub fn has_tag(&self, tag: &str) -> bool {
+        match self {
+            Self::Rule(r) => {
+                if let Some(crate::attr::AttrValue::StrList(l)) = r.attr_or_default("tags") {
+                    for s in l {
+                        if s == tag {
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Package-wide defaults set by `package()` / `repo()` (`PackageArgs.java`).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PackageArgs {
+    pub default_visibility: Option<Vec<Label>>,
+    pub default_testonly: Option<bool>,
+    pub default_deprecation: Option<String>,
+    pub default_compatible_with: Vec<Label>,
+    pub default_restricted_to: Vec<Label>,
+    pub features: Vec<String>,
+    pub licenses: Vec<String>,
+    pub default_package_metadata: Vec<Label>,
+    pub default_hdrs_check: Option<String>,
+    pub transitive_visibility: Option<Label>,
 }
 
 /// An evaluated Bazel `BUILD` / `BUILD.bazel` package.
@@ -92,10 +228,30 @@ pub struct Package {
     pub targets: BTreeMap<String, Target>,
     pub loads: Vec<LoadStatement>,
     pub default_visibility: Vec<String>,
+    pub args: PackageArgs,
+    /// Visibility declared through `exports_files(..., visibility = ...)`, by file name.
+    pub exported_files: BTreeMap<String, Vec<Label>>,
+    /// `package_group` includes, by group name.
+    pub group_includes: BTreeMap<String, Vec<Label>>,
+    /// `/path/BUILD:line:col` of the call that declared each target, by target name (for
+    /// package groups, files declared by `exports_files` and generated files).
+    pub target_locations: BTreeMap<String, String>,
+    /// `environment_group()` declarations: name → (environments, defaults).
+    pub environment_groups: BTreeMap<String, (Vec<Label>, Vec<Label>)>,
+    /// Targets declared by a symbolic macro outside that macro's namespace
+    /// (`target name → macro instance name`); enforced at analysis time.
+    pub macro_namespace_violating_targets: BTreeMap<String, String>,
+    /// Messages produced while loading (errors, warnings, `print()` output).
+    pub events: Vec<PackageEvent>,
+    /// `true` if loading reported errors (the package may be partial).
+    pub contains_errors: bool,
 }
 
 impl Package {
-    /// Evaluates a `BUILD` file's Starlark source (and any local `.bzl` files it loads) into a `Package`.
+    /// Evaluates a `BUILD` file's Starlark source (and any `.bzl` files it loads) into a `Package`.
+    ///
+    /// Convenience wrapper over [`PackageLoader`] for a workspace rooted at `workspace_root`.
+    /// Returns `Err` with the rendered error events if the package contains errors.
     pub fn evaluate_build_file(
         id: PackageIdentifier,
         workspace_root: &PathFragment,
@@ -103,133 +259,32 @@ impl Package {
         source: &str,
         fs: Arc<dyn FileSystem>,
     ) -> Result<Self, String> {
-        let pkg_dir = workspace_root.get_relative(id.package_fragment());
-        let mut ctx = EvalContext::new(pkg_dir.clone(), Some(Arc::clone(&fs)));
+        let resolver: Arc<dyn lookup::RepoResolver> =
+            Arc::new(SimpleRepoResolver::new(workspace_root.clone()));
+        Self::evaluate_build_file_with(id, build_file, source, fs, resolver)
+    }
 
-        // Pre-evaluate loaded local `.bzl` files when present in the workspace
-        let mut temp_ctx = EvalContext::new(pkg_dir.clone(), Some(Arc::clone(&fs)));
-        let _ = temp_ctx.eval_str(source);
-        for load in &temp_ctx.loads {
-            if let Some(bzl_path) =
-                resolve_local_bzl_path(workspace_root, id.package_fragment(), &load.module_label)
-            {
-                if let Ok(bzl_bytes) = fs.read_file(&bzl_path) {
-                    let bzl_src = String::from_utf8_lossy(&bzl_bytes);
-                    let mut bzl_ctx = EvalContext::new(
-                        bzl_path
-                            .parent_directory()
-                            .unwrap_or_else(PathFragment::empty),
-                        Some(Arc::clone(&fs)),
-                    );
-                    if bzl_ctx.eval_str(&bzl_src).is_ok() {
-                        for (local_sym, exported_sym) in &load.symbols {
-                            if let Some(val) = bzl_ctx.globals.get(exported_sym) {
-                                ctx.globals.insert(local_sym.clone(), val.clone());
-                            }
-                        }
-                    }
-                }
-            }
+    /// Like [`evaluate_build_file`](Self::evaluate_build_file) with an explicit external
+    /// repository resolver.
+    pub fn evaluate_build_file_with(
+        id: PackageIdentifier,
+        build_file: PathFragment,
+        source: &str,
+        fs: Arc<dyn FileSystem>,
+        resolver: Arc<dyn lookup::RepoResolver>,
+    ) -> Result<Self, String> {
+        let loader = PackageLoader::new(LoaderConfig::new(fs, resolver));
+        let pkg = loader.evaluate_source(&id, &build_file, source);
+        if pkg.contains_errors {
+            return Err(pkg
+                .events
+                .iter()
+                .filter(|e| e.kind == lookup::EventKind::Error)
+                .map(|e| e.render())
+                .collect::<Vec<_>>()
+                .join("\n"));
         }
-
-        ctx.eval_str(source).map_err(|e| e.to_string())?;
-
-        let mut targets = BTreeMap::new();
-        for exported in &ctx.exports_files {
-            if let Ok(lbl) = Label::create(id.clone(), exported) {
-                targets.insert(exported.clone(), Target::InputFile { label: lbl });
-            }
-        }
-
-        for call in ctx.rule_calls {
-            let Some(Value::String(name)) = call.kwargs.get("name").cloned() else {
-                continue;
-            };
-            let Ok(label) = Label::create(id.clone(), &name) else {
-                continue;
-            };
-
-            if call.rule_class == "package_group" {
-                let packages = call
-                    .kwargs
-                    .get("packages")
-                    .map(|v| v.to_string_list())
-                    .unwrap_or_default();
-                targets.insert(name.clone(), Target::PackageGroup { label, packages });
-                continue;
-            }
-
-            let srcs = extract_attr_strings(&call.kwargs, &["srcs", "src"]);
-            let deps = extract_attr_strings(&call.kwargs, &["deps", "actual", "crate"]);
-            let outs = extract_attr_strings(&call.kwargs, &["outs", "out"]);
-            let tools = extract_attr_strings(&call.kwargs, &["tools", "tool"]);
-            let data = extract_attr_strings(&call.kwargs, &["data"]);
-            let visibility = extract_attr_strings(&call.kwargs, &["visibility"]);
-            let cmd = call
-                .kwargs
-                .get("cmd")
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            let executable = call
-                .kwargs
-                .get("executable")
-                .map(|v| v.is_truthy())
-                .unwrap_or_else(|| call.rule_class.ends_with("_binary"));
-            let testonly = call
-                .kwargs
-                .get("testonly")
-                .map(|v| v.is_truthy())
-                .unwrap_or(false);
-
-            // Register source files and generated output files in the package target map
-            for src in &srcs {
-                let clean = src.strip_prefix(':').unwrap_or(src);
-                if !clean.starts_with("//")
-                    && !clean.starts_with('@')
-                    && !targets.contains_key(clean)
-                {
-                    if let Ok(src_lbl) = Label::create(id.clone(), clean) {
-                        targets.insert(clean.to_string(), Target::InputFile { label: src_lbl });
-                    }
-                }
-            }
-            for out_file in &outs {
-                let clean = out_file.strip_prefix(':').unwrap_or(out_file);
-                if let Ok(out_lbl) = Label::create(id.clone(), clean) {
-                    targets.insert(
-                        clean.to_string(),
-                        Target::OutputFile {
-                            label: out_lbl,
-                            generating_rule: label.clone(),
-                        },
-                    );
-                }
-            }
-
-            let rule = RuleInstance {
-                label,
-                rule_class: call.rule_class,
-                attrs: call.kwargs,
-                srcs,
-                deps,
-                outs,
-                tools,
-                data,
-                visibility,
-                cmd,
-                executable,
-                testonly,
-            };
-            targets.insert(name.clone(), Target::Rule(rule));
-        }
-
-        Ok(Self {
-            id,
-            build_file,
-            targets,
-            loads: ctx.loads,
-            default_visibility: Vec::new(),
-        })
+        Ok(pkg)
     }
 
     pub fn rules(&self) -> impl Iterator<Item = &RuleInstance> {
@@ -240,88 +295,5 @@ impl Package {
     }
 }
 
-fn extract_attr_strings(kwargs: &BTreeMap<String, Value>, keys: &[&str]) -> Vec<String> {
-    let mut out = Vec::new();
-    for &k in keys {
-        if let Some(val) = kwargs.get(k) {
-            match val {
-                Value::String(s) => out.push(s.clone()),
-                Value::Label(l) => out.push(l.canonical_form()),
-                _ => out.extend(val.to_string_list()),
-            }
-        }
-    }
-    out
-}
-
-fn resolve_local_bzl_path(
-    workspace_root: &PathFragment,
-    pkg_fragment: &PathFragment,
-    module_label: &str,
-) -> Option<PathFragment> {
-    if module_label.starts_with('@') {
-        return None;
-    }
-    if let Some(after_slashes) = module_label.strip_prefix("//") {
-        let (pkg_part, file_part) = after_slashes.split_once(':')?;
-        Some(
-            workspace_root
-                .get_relative_str(pkg_part)
-                .get_relative_str(file_part),
-        )
-    } else {
-        module_label.strip_prefix(':').map(|rel_file| {
-            workspace_root
-                .get_relative(pkg_fragment)
-                .get_relative_str(rel_file)
-        })
-    }
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use zel_vfs::InMemoryFileSystem;
-
-    #[test]
-    fn test_package_bzl_load_and_macro_expansion() {
-        let fs = Arc::new(InMemoryFileSystem::default());
-        let ws = PathFragment::create("/workspace");
-        let pkg_dir = ws.get_relative_str("src");
-        fs.create_directory_and_parents(&pkg_dir).unwrap();
-
-        fs.write_file(
-            &pkg_dir.get_relative_str("macros.bzl"),
-            br#"
-def declare_pair(base):
-    rust_library(
-        name = base + "_lib",
-        srcs = [base + ".rs"],
-    )
-    rust_test(
-        name = base + "_test",
-        crate = ":" + base + "_lib",
-    )
-"#,
-        )
-        .unwrap();
-
-        let build_src = r#"
-load(":macros.bzl", "declare_pair")
-declare_pair("engine")
-"#;
-        let pkg_id = PackageIdentifier::create_in_main_repo("src").unwrap();
-        let pkg = Package::evaluate_build_file(
-            pkg_id,
-            &ws,
-            pkg_dir.get_relative_str("BUILD"),
-            build_src,
-            fs,
-        )
-        .unwrap();
-
-        let rule_names: Vec<&str> = pkg.rules().map(|r| r.label.name()).collect();
-        assert_eq!(rule_names, vec!["engine_lib", "engine_test"]);
-        assert!(pkg.targets.contains_key("engine.rs"));
-    }
-}
+mod tests;

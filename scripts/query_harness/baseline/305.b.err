@@ -1,0 +1,4 @@
+Loading: 0 packages loaded
+ERROR: Skipping '//a': no such target '//a:a': target 'a' not declared in package 'a' defined by @WS@/a/BUILD
+WARNING: --keep_going specified, ignoring errors. Results may be inaccurate
+INFO: Empty results

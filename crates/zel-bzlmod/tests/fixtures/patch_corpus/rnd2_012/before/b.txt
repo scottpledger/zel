@@ -1,0 +1,15 @@
+gamma
+y 1
+} 2
+eps 0
+gamma
+}
+delta 0
+} 3
+gamma 1
+	Tab
+{ 1
+x 2
+}
+  indent
+ 1

@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 zel-proto = { workspace = true }
+zel-sandbox = { workspace = true }
 zel-util = { workspace = true }
 zel-vfs = { workspace = true }
 

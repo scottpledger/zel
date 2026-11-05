@@ -1,0 +1,13 @@
+NoTransition -> @ext//lib:gen (2d89340)
+  $genrule_setup#@bazel_tools//tools/genrule:genrule-setup.sh#(null transition) -> 
+NoTransition -> @bazel_tools//tools:host_platform (c07488d)
+NoTransition -> @@platforms//host:host (c07488d)
+  constraint_values#@@platforms//cpu:aarch64#NoTransition -> 
+  constraint_values#@@platforms//os:osx#NoTransition -> 
+@bazel_tools//tools/genrule:genrule-setup.sh (null)
+NoConfigTransition -> @@platforms//cpu:aarch64 (c07488d)
+  constraint_setting#@@platforms//cpu:cpu#NoTransition -> 
+NoConfigTransition -> @@platforms//os:osx (c07488d)
+  constraint_setting#@@platforms//os:os#NoTransition -> 
+NoConfigTransition -> @@platforms//cpu:cpu (c07488d)
+NoConfigTransition -> @@platforms//os:os (c07488d)

@@ -1,0 +1,5 @@
+test_suite rule //:tagged
+catrule rule //a:lib
+catrule rule //a:lib2
+genrule rule //a:lm
+x_test rule //b:t1

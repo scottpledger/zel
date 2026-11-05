@@ -1,0 +1,7 @@
+//:BUILD
+//:defs.bzl
+//a:BUILD
+//b:BUILD
+//c:BUILD
+//d:BUILD
+//pg:BUILD

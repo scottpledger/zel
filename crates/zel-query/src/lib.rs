@@ -12,737 +12,233 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Bazel Query, Cquery, and Aquery AST, evaluator, and output formatters.
-//! Mirrors `src/main/java/com/google/devtools/build/lib/query2`.
+//! Bazel Query, Cquery, and Aquery: language parser, evaluation engine, environments and
+//! output formatters. Mirrors `src/main/java/com/google/devtools/build/lib/query2`.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use zel_cmdline::{Label, PackageIdentifier, TargetPattern};
-use zel_packages::{Package, Target};
-use zel_vfs::PathFragment;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum QueryExpr {
-    TargetPattern(String),
-    Var(String),
-    Deps {
-        target: Box<QueryExpr>,
-        max_depth: Option<usize>,
-    },
-    Rdeps {
-        universe: Box<QueryExpr>,
-        target: Box<QueryExpr>,
-        max_depth: Option<usize>,
-    },
-    SomePath {
-        from: Box<QueryExpr>,
-        to: Box<QueryExpr>,
-    },
-    AllPaths {
-        from: Box<QueryExpr>,
-        to: Box<QueryExpr>,
-    },
-    Kind {
-        pattern: String,
-        input: Box<QueryExpr>,
-    },
-    Filter {
-        pattern: String,
-        input: Box<QueryExpr>,
-    },
-    Attr {
-        attr_name: String,
-        pattern: String,
-        input: Box<QueryExpr>,
-    },
-    Tests(Box<QueryExpr>),
-    Siblings(Box<QueryExpr>),
-    BuildFiles(Box<QueryExpr>),
-    Union(Box<QueryExpr>, Box<QueryExpr>),
-    Except(Box<QueryExpr>, Box<QueryExpr>),
-    Intersect(Box<QueryExpr>, Box<QueryExpr>),
-    Let {
-        var_name: String,
-        val: Box<QueryExpr>,
-        body: Box<QueryExpr>,
-    },
-}
-
-impl QueryExpr {
-    pub fn parse(raw: &str) -> Result<Self, String> {
-        let tokens = tokenize_query(raw);
-        let mut pos = 0;
-        parse_query_union(&tokens, &mut pos)
-    }
-}
-
-fn tokenize_query(raw: &str) -> Vec<String> {
-    let mut tokens = Vec::new();
-    let mut chars = raw.chars().peekable();
-    while let Some(&c) = chars.peek() {
-        if c.is_whitespace() {
-            chars.next();
-            continue;
-        }
-        if matches!(c, '(' | ')' | ',' | '+' | '^' | '=') {
-            tokens.push(c.to_string());
-            chars.next();
-            continue;
-        }
-        if c == '"' || c == '\'' {
-            let quote = chars.next().unwrap();
-            let mut s = String::new();
-            for nc in chars.by_ref() {
-                if nc == quote {
-                    break;
-                }
-                s.push(nc);
-            }
-            tokens.push(s);
-            continue;
-        }
-        let mut word = String::new();
-        while let Some(&nc) = chars.peek() {
-            if nc.is_whitespace() || matches!(nc, '(' | ')' | ',' | '+' | '^' | '=') {
-                break;
-            }
-            word.push(nc);
-            chars.next();
-        }
-        tokens.push(word);
-    }
-    tokens
-}
-
-fn parse_query_union(tokens: &[String], pos: &mut usize) -> Result<QueryExpr, String> {
-    if tokens.get(*pos).map(|s| s.as_str()) == Some("let") {
-        *pos += 1;
-        let var_name = tokens
-            .get(*pos)
-            .ok_or_else(|| "Expected variable name after 'let'".to_string())?
-            .trim_start_matches('$')
-            .to_string();
-        *pos += 1;
-        if tokens.get(*pos).map(|s| s.as_str()) == Some("=") {
-            *pos += 1;
-        }
-        let val = parse_query_union(tokens, pos)?;
-        if tokens.get(*pos).map(|s| s.as_str()) == Some("in") {
-            *pos += 1;
-        }
-        let body = parse_query_union(tokens, pos)?;
-        return Ok(QueryExpr::Let {
-            var_name,
-            val: Box::new(val),
-            body: Box::new(body),
-        });
-    }
-
-    let mut lhs = parse_query_primary(tokens, pos)?;
-    while let Some(op) = tokens.get(*pos).map(|s| s.as_str()) {
-        match op {
-            "+" | "union" => {
-                *pos += 1;
-                let rhs = parse_query_primary(tokens, pos)?;
-                lhs = QueryExpr::Union(Box::new(lhs), Box::new(rhs));
-            }
-            "-" | "except" => {
-                *pos += 1;
-                let rhs = parse_query_primary(tokens, pos)?;
-                lhs = QueryExpr::Except(Box::new(lhs), Box::new(rhs));
-            }
-            "^" | "intersect" => {
-                *pos += 1;
-                let rhs = parse_query_primary(tokens, pos)?;
-                lhs = QueryExpr::Intersect(Box::new(lhs), Box::new(rhs));
-            }
-            _ => break,
-        }
-    }
-    Ok(lhs)
-}
-
-fn parse_query_primary(tokens: &[String], pos: &mut usize) -> Result<QueryExpr, String> {
-    let tok = tokens
-        .get(*pos)
-        .ok_or_else(|| "Unexpected end of query expression".to_string())?
-        .clone();
-    *pos += 1;
-
-    if tok == "(" {
-        let inner = parse_query_union(tokens, pos)?;
-        if tokens.get(*pos).map(|s| s.as_str()) == Some(")") {
-            *pos += 1;
-        }
-        return Ok(inner);
-    }
-
-    if let Some(var_name) = tok.strip_prefix('$') {
-        return Ok(QueryExpr::Var(var_name.to_string()));
-    }
-
-    if tokens.get(*pos).map(|s| s.as_str()) == Some("(") {
-        *pos += 1; // eat '('
-        let mut args_raw = Vec::new();
-        while *pos < tokens.len() && tokens[*pos] != ")" {
-            if tokens[*pos] == "," {
-                *pos += 1;
-                continue;
-            }
-            args_raw.push(parse_query_union(tokens, pos)?);
-        }
-        if tokens.get(*pos).map(|s| s.as_str()) == Some(")") {
-            *pos += 1;
-        }
-
-        match tok.as_str() {
-            "deps" => {
-                let target = args_raw
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| "deps() requires at least 1 argument".to_string())?;
-                let max_depth = args_raw.get(1).and_then(expr_as_usize);
-                Ok(QueryExpr::Deps {
-                    target: Box::new(target),
-                    max_depth,
-                })
-            }
-            "rdeps" => {
-                if args_raw.len() < 2 {
-                    return Err("rdeps() requires at least 2 arguments".to_string());
-                }
-                let max_depth = args_raw.get(2).and_then(expr_as_usize);
-                Ok(QueryExpr::Rdeps {
-                    universe: Box::new(args_raw[0].clone()),
-                    target: Box::new(args_raw[1].clone()),
-                    max_depth,
-                })
-            }
-            "somepath" => {
-                if args_raw.len() < 2 {
-                    return Err("somepath() requires 2 arguments".to_string());
-                }
-                Ok(QueryExpr::SomePath {
-                    from: Box::new(args_raw[0].clone()),
-                    to: Box::new(args_raw[1].clone()),
-                })
-            }
-            "allpaths" => {
-                if args_raw.len() < 2 {
-                    return Err("allpaths() requires 2 arguments".to_string());
-                }
-                Ok(QueryExpr::AllPaths {
-                    from: Box::new(args_raw[0].clone()),
-                    to: Box::new(args_raw[1].clone()),
-                })
-            }
-            "kind" => {
-                if args_raw.len() < 2 {
-                    return Err("kind() requires 2 arguments".to_string());
-                }
-                let pat = expr_as_string(&args_raw[0]);
-                Ok(QueryExpr::Kind {
-                    pattern: pat,
-                    input: Box::new(args_raw[1].clone()),
-                })
-            }
-            "filter" => {
-                if args_raw.len() < 2 {
-                    return Err("filter() requires 2 arguments".to_string());
-                }
-                let pat = expr_as_string(&args_raw[0]);
-                Ok(QueryExpr::Filter {
-                    pattern: pat,
-                    input: Box::new(args_raw[1].clone()),
-                })
-            }
-            "attr" => {
-                if args_raw.len() < 3 {
-                    return Err("attr() requires 3 arguments".to_string());
-                }
-                Ok(QueryExpr::Attr {
-                    attr_name: expr_as_string(&args_raw[0]),
-                    pattern: expr_as_string(&args_raw[1]),
-                    input: Box::new(args_raw[2].clone()),
-                })
-            }
-            "tests" => {
-                let inner = args_raw
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "tests() requires 1 argument".to_string())?;
-                Ok(QueryExpr::Tests(Box::new(inner)))
-            }
-            "siblings" => {
-                let inner = args_raw
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "siblings() requires 1 argument".to_string())?;
-                Ok(QueryExpr::Siblings(Box::new(inner)))
-            }
-            "buildfiles" | "loadfiles" => {
-                let inner = args_raw
-                    .into_iter()
-                    .next()
-                    .ok_or_else(|| "buildfiles() requires 1 argument".to_string())?;
-                Ok(QueryExpr::BuildFiles(Box::new(inner)))
-            }
-            other => Err(format!("Unknown query function: '{other}'")),
-        }
-    } else {
-        Ok(QueryExpr::TargetPattern(tok))
-    }
-}
-
-fn expr_as_string(expr: &QueryExpr) -> String {
-    match expr {
-        QueryExpr::TargetPattern(s) => s.clone(),
-        _ => String::new(),
-    }
-}
-
-fn expr_as_usize(expr: &QueryExpr) -> Option<usize> {
-    match expr {
-        QueryExpr::TargetPattern(s) => s.parse().ok(),
-        _ => None,
-    }
-}
-
-/// Evaluates `QueryExpr` over a map of loaded `Package`s.
-pub struct QueryEnvironment {
-    pub packages: BTreeMap<PackageIdentifier, Package>,
-}
-
-impl QueryEnvironment {
-    pub fn new(packages: BTreeMap<PackageIdentifier, Package>) -> Self {
-        Self { packages }
-    }
-
-    pub fn evaluate(&self, expr: &QueryExpr) -> Result<Vec<Target>, String> {
-        let mut vars = HashMap::new();
-        let labels = self.eval_labels(expr, &mut vars)?;
-        let mut out = Vec::new();
-        for lbl in labels {
-            if let Some(t) = self.lookup_target(&lbl) {
-                out.push(t);
-            }
-        }
-        Ok(out)
-    }
-
-    fn eval_labels(
-        &self,
-        expr: &QueryExpr,
-        vars: &mut HashMap<String, BTreeSet<Label>>,
-    ) -> Result<BTreeSet<Label>, String> {
-        match expr {
-            QueryExpr::TargetPattern(pat_str) => self.resolve_pattern(pat_str),
-            QueryExpr::Var(name) => vars
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("Undefined query variable '${name}'")),
-            QueryExpr::Let {
-                var_name,
-                val,
-                body,
-            } => {
-                let bound = self.eval_labels(val, vars)?;
-                vars.insert(var_name.clone(), bound);
-                self.eval_labels(body, vars)
-            }
-            QueryExpr::Union(a, b) => {
-                let mut s = self.eval_labels(a, vars)?;
-                s.extend(self.eval_labels(b, vars)?);
-                Ok(s)
-            }
-            QueryExpr::Except(a, b) => {
-                let s1 = self.eval_labels(a, vars)?;
-                let s2 = self.eval_labels(b, vars)?;
-                Ok(s1.difference(&s2).cloned().collect())
-            }
-            QueryExpr::Intersect(a, b) => {
-                let s1 = self.eval_labels(a, vars)?;
-                let s2 = self.eval_labels(b, vars)?;
-                Ok(s1.intersection(&s2).cloned().collect())
-            }
-            QueryExpr::Kind { pattern, input } => {
-                let base = self.eval_labels(input, vars)?;
-                let pat_clean = pattern.trim_end_matches(" rule");
-                Ok(base
-                    .into_iter()
-                    .filter(|lbl| {
-                        self.lookup_target(lbl)
-                            .map(|t| t.target_kind().contains(pat_clean))
-                            .unwrap_or(false)
-                    })
-                    .collect())
-            }
-            QueryExpr::Filter { pattern, input } => {
-                let base = self.eval_labels(input, vars)?;
-                Ok(base
-                    .into_iter()
-                    .filter(|lbl| lbl.canonical_form().contains(pattern))
-                    .collect())
-            }
-            QueryExpr::Attr {
-                attr_name,
-                pattern,
-                input,
-            } => {
-                let base = self.eval_labels(input, vars)?;
-                Ok(base
-                    .into_iter()
-                    .filter(|lbl| {
-                        if let Some(Target::Rule(r)) = self.lookup_target(lbl) {
-                            if let Some(val) = r.attrs.get(attr_name) {
-                                return val.to_string().contains(pattern);
-                            }
-                        }
-                        false
-                    })
-                    .collect())
-            }
-            QueryExpr::Tests(inner) => {
-                let base = self.eval_labels(inner, vars)?;
-                Ok(base
-                    .into_iter()
-                    .filter(|lbl| {
-                        if let Some(Target::Rule(r)) = self.lookup_target(lbl) {
-                            r.is_test_rule()
-                        } else {
-                            false
-                        }
-                    })
-                    .collect())
-            }
-            QueryExpr::Siblings(inner) => {
-                let base = self.eval_labels(inner, vars)?;
-                let mut pkgs = BTreeSet::new();
-                for lbl in base {
-                    pkgs.insert(lbl.package_identifier().clone());
-                }
-                let mut out = BTreeSet::new();
-                for pkg_id in pkgs {
-                    if let Some(pkg) = self.packages.get(&pkg_id) {
-                        for t in pkg.targets.values() {
-                            out.insert(t.label().clone());
-                        }
-                    }
-                }
-                Ok(out)
-            }
-            QueryExpr::BuildFiles(inner) => {
-                let base = self.eval_labels(inner, vars)?;
-                let mut out = BTreeSet::new();
-                for lbl in base {
-                    if let Ok(build_lbl) = Label::create(lbl.package_identifier().clone(), "BUILD")
-                    {
-                        out.insert(build_lbl);
-                    }
-                }
-                Ok(out)
-            }
-            QueryExpr::Deps { target, max_depth } => {
-                let roots = self.eval_labels(target, vars)?;
-                Ok(self.bfs_deps(&roots, *max_depth))
-            }
-            QueryExpr::Rdeps {
-                universe,
-                target,
-                max_depth,
-            } => {
-                let univ = self.eval_labels(universe, vars)?;
-                let targets = self.eval_labels(target, vars)?;
-                let univ_closed = self.bfs_deps(&univ, None);
-                Ok(self.bfs_rdeps(&univ_closed, &targets, *max_depth))
-            }
-            QueryExpr::SomePath { from, to } | QueryExpr::AllPaths { from, to } => {
-                let starts = self.eval_labels(from, vars)?;
-                let ends = self.eval_labels(to, vars)?;
-                let forward = self.bfs_deps(&starts, None);
-                let backward = self.bfs_rdeps(&forward, &ends, None);
-                Ok(forward.intersection(&backward).cloned().collect())
-            }
-        }
-    }
-
-    fn bfs_deps(&self, roots: &BTreeSet<Label>, max_depth: Option<usize>) -> BTreeSet<Label> {
-        let mut visited = BTreeSet::new();
-        let mut queue = VecDeque::new();
-        for r in roots {
-            visited.insert(r.clone());
-            queue.push_back((r.clone(), 0usize));
-        }
-
-        while let Some((curr, depth)) = queue.pop_front() {
-            if let Some(max_d) = max_depth {
-                if depth >= max_d {
-                    continue;
-                }
-            }
-            for dep in self.direct_deps(&curr) {
-                if visited.insert(dep.clone()) {
-                    queue.push_back((dep, depth + 1));
-                }
-            }
-        }
-        visited
-    }
-
-    fn bfs_rdeps(
-        &self,
-        universe: &BTreeSet<Label>,
-        targets: &BTreeSet<Label>,
-        max_depth: Option<usize>,
-    ) -> BTreeSet<Label> {
-        let mut rdeps_map: HashMap<Label, Vec<Label>> = HashMap::new();
-        for u in universe {
-            for dep in self.direct_deps(u) {
-                rdeps_map.entry(dep).or_default().push(u.clone());
-            }
-        }
-
-        let mut visited = BTreeSet::new();
-        let mut queue = VecDeque::new();
-        for t in targets {
-            if universe.contains(t) {
-                visited.insert(t.clone());
-                queue.push_back((t.clone(), 0usize));
-            }
-        }
-
-        while let Some((curr, depth)) = queue.pop_front() {
-            if let Some(max_d) = max_depth {
-                if depth >= max_d {
-                    continue;
-                }
-            }
-            if let Some(parents) = rdeps_map.get(&curr) {
-                for p in parents {
-                    if visited.insert(p.clone()) {
-                        queue.push_back((p.clone(), depth + 1));
-                    }
-                }
-            }
-        }
-        visited
-    }
-
-    pub fn direct_deps(&self, label: &Label) -> Vec<Label> {
-        let mut out = Vec::new();
-        if let Some(Target::Rule(r)) = self.lookup_target(label) {
-            for raw_dep in r.deps.iter().chain(r.srcs.iter()).chain(r.tools.iter()) {
-                if let Some(dep_lbl) =
-                    Self::resolve_relative_label(label.package_identifier(), raw_dep)
-                {
-                    out.push(dep_lbl);
-                }
-            }
-        }
-        out
-    }
-
-    pub fn resolve_relative_label(pkg_id: &PackageIdentifier, raw: &str) -> Option<Label> {
-        if raw.starts_with("//") || raw.starts_with('@') {
-            Label::parse_canonical(raw).ok()
-        } else {
-            let name = raw.strip_prefix(':').unwrap_or(raw);
-            Label::create(pkg_id.clone(), name).ok()
-        }
-    }
-
-    fn lookup_target(&self, label: &Label) -> Option<Target> {
-        let pkg = self.packages.get(label.package_identifier())?;
-        pkg.targets.get(label.name()).cloned()
-    }
-
-    fn resolve_pattern(&self, pat_str: &str) -> Result<BTreeSet<Label>, String> {
-        let pat =
-            TargetPattern::parse(pat_str, &PathFragment::empty()).map_err(|e| e.to_string())?;
-        let mut out = BTreeSet::new();
-        match pat {
-            TargetPattern::SingleTarget(lbl) => {
-                out.insert(lbl);
-            }
-            TargetPattern::TargetsInPackage {
-                package,
-                include_files,
-            } => {
-                if let Some(pkg) = self.packages.get(&package) {
-                    for t in pkg.targets.values() {
-                        if include_files || matches!(t, Target::Rule(_)) {
-                            out.insert(t.label().clone());
-                        }
-                    }
-                }
-            }
-            TargetPattern::TargetsBelowDirectory {
-                directory,
-                include_files,
-            } => {
-                for (pkg_id, pkg) in &self.packages {
-                    if pkg_id
-                        .package_fragment()
-                        .starts_with(directory.package_fragment())
-                    {
-                        for t in pkg.targets.values() {
-                            if include_files || matches!(t, Target::Rule(_)) {
-                                out.insert(t.label().clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// Formats query results according to `--output={label,label_kind,build,package,graph,xml}`.
-    pub fn format_results(&self, targets: &[Target], output_format: &str) -> String {
-        let mut out = String::new();
-        match output_format {
-            "label_kind" => {
-                for t in targets {
-                    out.push_str(&format!(
-                        "{} {}\n",
-                        t.target_kind(),
-                        t.label().canonical_form()
-                    ));
-                }
-            }
-            "package" => {
-                let mut pkgs = BTreeSet::new();
-                for t in targets {
-                    pkgs.insert(t.label().package_name().to_string());
-                }
-                for p in pkgs {
-                    out.push_str(&p);
-                    out.push('\n');
-                }
-            }
-            "build" => {
-                for t in targets {
-                    if let Target::Rule(r) = t {
-                        out.push_str(&format!(
-                            "{}(\n  name = \"{}\",\n)\n",
-                            r.rule_class,
-                            r.label.name()
-                        ));
-                    }
-                }
-            }
-            "graph" => {
-                out.push_str("digraph mygraph {\n  node [shape=box];\n");
-                for t in targets {
-                    let lbl = t.label();
-                    out.push_str(&format!("  \"{}\"\n", lbl.canonical_form()));
-                    for dep in self.direct_deps(lbl) {
-                        out.push_str(&format!(
-                            "  \"{}\" -> \"{}\"\n",
-                            lbl.canonical_form(),
-                            dep.canonical_form()
-                        ));
-                    }
-                }
-                out.push_str("}\n");
-            }
-            "xml" => {
-                out.push_str("<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n");
-                for t in targets {
-                    match t {
-                        Target::Rule(r) => {
-                            out.push_str(&format!(
-                                "  <rule class=\"{}\" name=\"{}\"/>\n",
-                                r.rule_class,
-                                r.label.canonical_form()
-                            ));
-                        }
-                        other => {
-                            out.push_str(&format!(
-                                "  <source-file name=\"{}\"/>\n",
-                                other.label().canonical_form()
-                            ));
-                        }
-                    }
-                }
-                out.push_str("</query>\n");
-            }
-            _ => {
-                for t in targets {
-                    out.push_str(&t.label().canonical_form());
-                    out.push('\n');
-                }
-            }
-        }
-        out
-    }
-}
+pub mod action_key;
+pub mod aquery;
+pub mod engine;
+pub mod format;
+pub mod java_order;
+pub mod parse;
+pub mod pb;
+pub mod post_analysis;
+pub mod regex;
+pub mod starlark_out;
+pub mod target_env;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use zel_vfs::{FileSystem, InMemoryFileSystem};
+mod tests;
 
-    #[test]
-    fn test_query_deps_rdeps_kind_and_set_ops() {
-        let fs = Arc::new(InMemoryFileSystem::default());
-        let ws = PathFragment::create("/workspace");
-        let pkg_dir = ws.get_relative_str("app");
-        fs.create_directory_and_parents(&pkg_dir).unwrap();
-        let build_src = r#"
-cc_library(
-    name = "util",
-    srcs = ["util.cc"],
-)
-cc_library(
-    name = "core",
-    srcs = ["core.cc"],
-    deps = [":util"],
-)
-cc_binary(
-    name = "server",
-    srcs = ["server.cc"],
-    deps = [":core"],
-)
-cc_test(
-    name = "core_test",
-    srcs = ["core_test.cc"],
-    deps = [":core"],
-)
-"#;
-        let pkg_id = PackageIdentifier::create_in_main_repo("app").unwrap();
-        let pkg = Package::evaluate_build_file(
-            pkg_id.clone(),
-            &ws,
-            pkg_dir.get_relative_str("BUILD"),
-            build_src,
-            fs,
-        )
-        .unwrap();
+use engine::{Engine, QueryEnv};
+use format::FormatOpts;
+use target_env::{QueryOpts, TargetEnv};
+use zel_packages::PatternResolver;
 
-        let mut packages = BTreeMap::new();
-        packages.insert(pkg_id, pkg);
-        let qenv = QueryEnvironment::new(packages);
+/// Exit codes used by the query commands.
+pub mod exit {
+    pub const SUCCESS: i32 = 0;
+    pub const COMMAND_LINE_ERROR: i32 = 2;
+    pub const PARTIAL_ANALYSIS_FAILURE: i32 = 3;
+    pub const ANALYSIS_FAILURE: i32 = 7;
+    pub const BUILD_FAILURE_CODE: i32 = 1;
+}
 
-        // 1. deps(//app:server)
-        let expr1 = QueryExpr::parse("kind('cc_library', deps(//app:server))").unwrap();
-        let res1 = qenv.evaluate(&expr1).unwrap();
-        let labels1: Vec<String> = res1.iter().map(|t| t.label().canonical_form()).collect();
-        assert_eq!(labels1, vec!["//app:core", "//app:util"]);
+/// Everything a finished query command produces.
+#[derive(Debug, Default)]
+pub struct QueryOutcome {
+    pub stdout: Vec<u8>,
+    /// Lines for stderr (without trailing newline), already prefixed (`ERROR: `, `INFO: `, ...).
+    pub stderr: Vec<String>,
+    pub exit_code: i32,
+}
 
-        // 2. rdeps(//app:all, //app:util)
-        let expr2 = QueryExpr::parse("rdeps(//app:all, //app:util) - //app:util").unwrap();
-        let res2 = qenv.evaluate(&expr2).unwrap();
-        let labels2: Vec<String> = res2.iter().map(|t| t.label().canonical_form()).collect();
-        assert_eq!(
-            labels2,
-            vec!["//app:core", "//app:core_test", "//app:server"]
-        );
+/// `OutputFormatters.formatterNames`.
+pub fn formatter_names() -> String {
+    format::FORMATTERS.join(", ")
+}
 
-        // 3. tests(//app:all)
-        let expr3 = QueryExpr::parse("tests(//app:all)").unwrap();
-        let res3 = qenv.evaluate(&expr3).unwrap();
-        assert_eq!(res3.len(), 1);
-        assert_eq!(res3[0].label().canonical_form(), "//app:core_test");
+/// Runs a `query` command.
+pub fn run_query(resolver: &PatternResolver, expr_str: &str, opts: &QueryOpts, fmt: &FormatOpts) -> QueryOutcome {
+    let mut outcome = QueryOutcome::default();
+    let mut opts = opts.clone();
+    let streamed = format::is_streamed(&fmt.output)
+        && matches!(fmt.order, format::OrderOutput::No | format::OrderOutput::Auto);
+    opts.sky = streamed && (!opts.universe_scope.is_empty() || opts.infer_universe_scope);
+    // `QueryEnvironmentBasedCommand`: YES requires a streaming formatter and ordering.
+    if opts.graphless_query == Some(true) && !streamed {
+        outcome.stderr.push(format!(
+            "ERROR: --experimental_graphless_query requires --order_output=no or --order_output=auto and an --output option that supports streaming; valid values are: {}",
+            format::FORMATTERS.iter().filter(|f| format::is_streamed(f)).cloned().collect::<Vec<_>>().join(", ")
+        ));
+        outcome.exit_code = exit::COMMAND_LINE_ERROR;
+        return outcome;
     }
+    let graphless = streamed && !opts.sky && opts.graphless_query != Some(false);
+    let opts = &opts;
+    let mut env = TargetEnv::new(resolver, opts.clone());
+    let functions = env.functions();
+    let expr = match parse::parse(expr_str, &functions) {
+        Ok(e) => e,
+        Err(e) => {
+            outcome.stderr.push(format!(
+                "ERROR: Error while parsing '{}': {}",
+                parse::truncate(expr_str),
+                e.0
+            ));
+            outcome.exit_code = exit::COMMAND_LINE_ERROR;
+            return outcome;
+        }
+    };
+    if !format::FORMATTERS.contains(&fmt.output.as_str()) {
+        outcome.stderr.push(format!(
+            "ERROR: Invalid output format '{}'. Valid values are: {}",
+            fmt.output,
+            formatter_names()
+        ));
+        outcome.exit_code = exit::COMMAND_LINE_ERROR;
+        return outcome;
+    }
+    if fmt.output == "location" {
+        let mut names = std::collections::BTreeSet::new();
+        expr.function_names(&mut names);
+        if names.contains("buildfiles") || names.contains("loadfiles") {
+            outcome.stderr.push(
+                "ERROR: Query expressions involving 'buildfiles' or 'loadfiles' cannot be used with --output=location"
+                    .to_string(),
+            );
+            outcome.exit_code = exit::COMMAND_LINE_ERROR;
+            return outcome;
+        }
+    }
+    if fmt.order != format::OrderOutput::Auto && fmt.order != format::OrderOutput::Full && fmt.order != format::OrderOutput::Deps {
+        // `no` is accepted by all formatters that stream; non-streaming formatters ignore it.
+    }
+    env.toplevel = expr.to_truncated_string();
+    let mut patterns = Vec::new();
+    expr.collect_target_patterns(&mut patterns);
+    let patterns_for_preload = patterns.clone();
+    let universe: Vec<String> =
+        if opts.universe_scope.is_empty() { patterns } else { opts.universe_scope.clone() };
+
+    let eval_result;
+    let mut diag_errors: Vec<String> = Vec::new();
+    let mut had_errors = false;
+    let mut missing_graph: Vec<String> = Vec::new();
+    {
+        let mut engine = Engine::new(&mut env, opts.keep_going, universe);
+        engine.diag.graphless = graphless;
+        let preload = engine.env.preload_patterns(&patterns_for_preload, &mut engine.diag);
+        eval_result = match preload {
+            Ok(()) => engine.eval(&expr),
+            Err(e) => Err(e),
+        };
+        diag_errors.extend(engine.diag.errors.drain(..));
+        had_errors |= engine.diag.had_error;
+        missing_graph = std::mem::take(&mut engine.diag.missing_graph);
+    }
+    if !missing_graph.is_empty() {
+        outcome.stderr.push(format!("WARNING: Targets were missing from graph: [{}]", missing_graph.join(", ")));
+    }
+    // Error events of loaded packages (`ErrorSensingEventHandler`) make the evaluation fail
+    // (`--nokeep_going`) or partial (`--keep_going`).
+    let mut event_errors = false;
+    for ev in env.take_events() {
+        event_errors |= ev.kind == zel_packages::lookup::EventKind::Error;
+        outcome.stderr.push(ev.render());
+    }
+    had_errors |= event_errors;
+    match eval_result {
+        Err(e) => {
+            for l in diag_errors {
+                outcome.stderr.push(format!("ERROR: {l}"));
+            }
+            outcome.stderr.push(format!("ERROR: {}", e.describe(&expr)));
+            outcome.exit_code = exit::ANALYSIS_FAILURE;
+            return outcome;
+        }
+        Ok(_) if event_errors && !opts.keep_going => {
+            for l in diag_errors {
+                outcome.stderr.push(format!("ERROR: {l}"));
+            }
+            outcome.stderr.push(format!("ERROR: Evaluation of query \"{}\" failed", expr.to_truncated_string()));
+            outcome.exit_code = exit::ANALYSIS_FAILURE;
+            return outcome;
+        }
+        Ok(set) => {
+            for e in diag_errors {
+                outcome.stderr.push(format!("ERROR: {e}"));
+            }
+            let nodes = set.to_vec();
+            match format::format_targets(&env, &nodes, fmt, expr.is_somepath()) {
+                Ok(bytes) => outcome.stdout = bytes,
+                Err(e) => {
+                    outcome.stderr.push(format!("ERROR: {e}"));
+                    outcome.exit_code = exit::ANALYSIS_FAILURE;
+                    return outcome;
+                }
+            }
+            // The `--keep_going` warning is emitted by `evaluateQueryInternal`; the command
+            // reports `Empty results` afterwards.
+            if had_errors {
+                outcome
+                    .stderr
+                    .push("WARNING: --keep_going specified, ignoring errors. Results may be inaccurate".to_string());
+                outcome.exit_code = exit::PARTIAL_ANALYSIS_FAILURE;
+            }
+            if nodes.is_empty() {
+                outcome.stderr.push("INFO: Empty results".to_string());
+            }
+        }
+    }
+    outcome
+}
+
+/// The `genquery` rule's `GenQuery.executeQuery`: evaluates `expression` over everything the loader
+/// can see and prints it with the `--output` formatter of `opts` (default `label`). Options follow
+/// `GenQuery.java`: `--keep_going`, `--universe_scope`, `--order_*` and `--experimental_graphless_query`
+/// are rejected, locations are relative, results are ordered, `nodep_deps` defaults to off.
+/// `strict`/`scope` are not enforced (the real rule restricts the universe to `scope`).
+pub fn run_genquery(
+    loader: &std::sync::Arc<zel_packages::PackageLoader>,
+    expression: &str,
+    _scope: &[String],
+    _strict: bool,
+    opts: &[String],
+) -> Result<Vec<u8>, String> {
+    let mut qopts = QueryOpts::default();
+    let mut fmt = FormatOpts::default();
+    qopts.nodep_deps = false;
+    fmt.nodep_deps = false;
+    fmt.relative_locations = true;
+    fmt.order = format::OrderOutput::Full;
+    for o in opts {
+        let o = o.as_str();
+        let bad = |name: &str| format!("error while parsing query options: option --{name} is not allowed");
+        match o {
+            "--keep_going" | "--nokeep_going" => return Err("option --keep_going is not allowed".to_string()),
+            "--implicit_deps" => qopts.implicit_deps = true,
+            "--noimplicit_deps" => qopts.implicit_deps = false,
+            "--tool_deps" => qopts.tool_deps = true,
+            "--notool_deps" => qopts.tool_deps = false,
+            "--nodep_deps" => qopts.nodep_deps = true,
+            "--nonodep_deps" => qopts.nodep_deps = false,
+            "--relative_locations" | "--norelative_locations" => {}
+            _ if o.starts_with("--output=") => fmt.output = o["--output=".len()..].to_string(),
+            _ if o.starts_with("--universe_scope") => return Err("option --universe_scope is not allowed".to_string()),
+            _ if o.starts_with("--order_output") => return Err("option --order_output is not allowed".to_string()),
+            _ if o.contains("order_results") => return Err(format!("option --{} is not allowed", o.trim_start_matches("--"))),
+            _ if o.contains("graphless_query") => return Err("option --experimental_graphless_query is not allowed".to_string()),
+            _ => return Err(format!("error while parsing query options: Unrecognized option: {o}")),
+        }
+        let _ = bad;
+    }
+    fmt.implicit_deps = qopts.implicit_deps;
+    fmt.tool_deps = qopts.tool_deps;
+    let resolver = PatternResolver::new(loader.clone(), zel_vfs::PathFragment::empty());
+    let outcome = run_query(&resolver, expression, &qopts, &fmt);
+    if outcome.exit_code != exit::SUCCESS {
+        return Err(outcome.stderr.join("\n").trim_start_matches("ERROR: ").to_string());
+    }
+    Ok(outcome.stdout)
 }

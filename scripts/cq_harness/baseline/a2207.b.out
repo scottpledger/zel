@@ -1,0 +1,10 @@
+:catrule//a:lib//a:lib2*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272cBaB	bazel-outBx.txtBdarwin_arm64-fastbuildB	binBa
+Blib.txt
+By.txt"
+B	z.txt
+	B
+lib2.txt
+
+BexternalB
+ext+B	libBd.txt
+�@c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69"CatIt(2	/bin/bash2-c2lcat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txtBJhr@@platforms//host:host"�@2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8"CatIt(2	/bin/bash2-c2lcat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txtBJhr@@platforms//host:host

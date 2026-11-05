@@ -1,0 +1,19 @@
+digraph mygraph {
+  node [shape=box];
+  "@ext//lib:gen (2d89340)"
+  "@ext//lib:gen (2d89340)" -> "@bazel_tools//tools:host_platform (c07488d)"
+  "@ext//lib:gen (2d89340)" -> "@bazel_tools//tools/genrule:genrule-setup.sh (null)"
+  "@ext//lib:gen (2d89340)" -> "@@platforms//host:host (c07488d)"
+  "@bazel_tools//tools/genrule:genrule-setup.sh (null)"
+  "@bazel_tools//tools:host_platform (c07488d)"
+  "@bazel_tools//tools:host_platform (c07488d)" -> "@@platforms//host:host (c07488d)"
+  "@@platforms//host:host (c07488d)"
+  "@@platforms//host:host (c07488d)" -> "@@platforms//cpu:aarch64 (c07488d)"
+  "@@platforms//host:host (c07488d)" -> "@@platforms//os:osx (c07488d)"
+  "@@platforms//os:osx (c07488d)"
+  "@@platforms//os:osx (c07488d)" -> "@@platforms//os:os (c07488d)"
+  "@@platforms//os:os (c07488d)"
+  "@@platforms//cpu:aarch64 (c07488d)"
+  "@@platforms//cpu:aarch64 (c07488d)" -> "@@platforms//cpu:cpu (c07488d)"
+  "@@platforms//cpu:cpu (c07488d)"
+}

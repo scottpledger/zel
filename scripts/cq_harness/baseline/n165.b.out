@@ -1,0 +1,3 @@
+bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt
+bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt
+external/ext+/lib/d.txt

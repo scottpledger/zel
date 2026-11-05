@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "8e8808aff3da",
+ "classified_as": "ORDERLESS",
+ "cmd": "query '//b:all' --output=maxrank --keep_going",
+ "distinct": 5,
+ "harness": "query",
+ "hashes": [
+  "143ea018f6b875ec",
+  "9233e7d5831e7c87",
+  "9042759f6de100ac",
+  "9042759f6de100ac",
+  "2a381fad5dae02f9",
+  "580bf94df455cf8b"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "0 //b:tool\n0 //b:t2\n0 //b:mk\n0 //b:t1\n1 //b:shlib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //b:t1\n0 //b:mk\n0 //b:tool\n0 //b:t2\n1 //b:shlib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //b:t1\n0 //b:mk\n0 //b:t2\n0 //b:tool\n1 //b:shlib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //b:t1\n0 //b:mk\n0 //b:t2\n0 //b:tool\n1 //b:shlib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //b:t2\n0 //b:mk\n0 //b:t1\n0 //b:tool\n1 //b:shlib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //b:mk\n0 //b:tool\n0 //b:t1\n0 //b:t2\n1 //b:shlib\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

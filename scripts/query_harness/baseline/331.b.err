@@ -1,0 +1,2 @@
+Loading: 0 packages loaded
+ERROR: Error while parsing 'rbuildfiles(nonexistent)': unknown function 'rbuildfiles' at 'rbuildfiles ( nonexistent'; expected one of ['allpaths', 'attr', 'buildfiles', 'deps', 'executables', 'filter', 'kind', 'labels', 'loadfiles', 'rdeps', 'same_pkg_direct_rdeps', 'siblings', 'some', 'somepath', 'tests', 'visible']

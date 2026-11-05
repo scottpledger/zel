@@ -1,0 +1,4 @@
+module(name="ext", version="1.0", compatibility_level=1)
+ext = use_extension("//:ext.bzl","ext")
+ext.mk(name="from_ext")
+use_repo(ext,"from_ext")

@@ -1,0 +1,7 @@
+:xbin//b:tool*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272cB	bazel-outBdarwin_arm64-fastbuildB	binBbB
+tool
+q@c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"	FileWrite(Jhr@@platforms//host:host�Btool.repo_mapping
+x@9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a"RepoMappingManifest(Jhr@@platforms//host:hostBtool.runfiles_manifest
+z@827f0fe2457d4ac47eabfc4f2b14ab9e6c9df2718ccaebed65b7884201f1812d"SourceSymlinkManifest(Jhr@@platforms//host:host"B	tool.runfilesBMANIFEST	
+s@7dc5a94dd5304ba87abeb760f1f8f4a43319e6ba0b28414858e2bf1ad1e22529"SymlinkTree(BJhr@@platforms//host:host"
+	t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:host

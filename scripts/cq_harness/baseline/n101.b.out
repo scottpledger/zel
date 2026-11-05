@@ -1,0 +1,5 @@
+//a:c.h (null)
+NoTransition -> //a:cl (d2c2765)
+  srcs#//a:c.cc#(null transition) -> 
+  srcs#//a:c.h#(null transition) -> 
+  deps#//a:cl2#NoTransition -> 

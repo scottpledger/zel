@@ -1,0 +1,5 @@
+source file //a:x.txt (null)
+filegroup rule //a:srcs_fg (2d89340)
+filegroup rule @ext//lib:data (2d89340)
+filegroup rule //a:srcs_fg (7e2fa55)
+filegroup rule @ext//lib:data (7e2fa55)

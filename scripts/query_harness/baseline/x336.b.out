@@ -1,0 +1,269 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="config_setting" location="@WS@/a/BUILD:10:15" name="//a:def_cs">
+        <string name="name" value="def_cs"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="manual"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <dict name="values"/>
+        <dict name="define_values">
+            <pair>
+                <string value="FOO"/>
+                <string value="bar"/>
+            </pair>
+        </dict>
+        <dict name="flag_values"/>
+        <list name=":flag_alias_settings"/>
+        <list name="constraint_values"/>
+    </rule>
+    <rule class="genrule" location="@WS@/a/BUILD:12:8" name="//a:gg">
+        <string name="name" value="gg"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="toolchains"/>
+        <list name="srcs">
+            <label value="//a:sel"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <list name="tools">
+            <label value="//b:tool"/>
+        </list>
+        <list name="outs">
+            <output value="//a:gg.out"/>
+        </list>
+        <string name="cmd" value="cat $(SRCS) &gt; $@ ; echo $(location :sel) &gt;&gt; $@"/>
+        <string name="cmd_bash" value=""/>
+        <string name="cmd_bat" value=""/>
+        <string name="cmd_ps" value=""/>
+        <boolean name="output_to_bindir" value="false"/>
+        <boolean name="local" value="false"/>
+        <string name="message" value=""/>
+        <list name="output_licenses"/>
+        <boolean name="executable" value="false"/>
+        <boolean name="$is_executable" value="false"/>
+        <boolean name="heuristic_label_expansion" value="false"/>
+        <label name="$genrule_setup" value="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <tristate name="stamp" value="NO"/>
+        <rule-input name="//a:sel"/>
+        <rule-input name="//b:tool"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-input name="@ext//lib:data"/>
+        <rule-output name="//a:gg.out"/>
+    </rule>
+    <rule class="config_setting" location="@WS@/a/BUILD:9:15" name="//a:opt_cs">
+        <string name="name" value="opt_cs"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="manual"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <dict name="values">
+            <pair>
+                <string value="compilation_mode"/>
+                <string value="opt"/>
+            </pair>
+        </dict>
+        <dict name="define_values"/>
+        <dict name="flag_values"/>
+        <list name=":flag_alias_settings"/>
+        <list name="constraint_values"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:11:10" name="//a:sel">
+        <string name="name" value="sel"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies">
+            <label value="//a:opt_cs"/>
+            <label value="//a:def_cs"/>
+        </list>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+            <label value="//a:z.txt"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="//a:def_cs"/>
+        <rule-input name="//a:opt_cs"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+        <rule-input name="//a:z.txt"/>
+    </rule>
+    <source-file location="@WS@/a/x.txt:1:1" name="//a:x.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/y.txt:1:1" name="//a:y.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/z.txt:1:1" name="//a:z.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="xbin" location="@WS@/b/BUILD:2:5" name="//b:tool">
+        <string name="name" value="tool"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="args"/>
+        <list name="output_licenses"/>
+        <boolean name="$is_executable" value="true"/>
+        <list name="srcs">
+            <label value="//b:tool.cc"/>
+        </list>
+        <list name="deps"/>
+        <list name="data"/>
+        <rule-input name="//b:tool.cc"/>
+    </rule>
+    <source-file location="@WS@/b/tool.cc:1:1" name="//b:tool.cc">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/genrule/genrule-setup.sh:1:1" name="@bazel_tools//tools/genrule:genrule-setup.sh">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@OB@/external/ext+/lib/d.txt:1:1" name="@ext//lib:d.txt">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/ext+/lib/BUILD:1:10" name="@ext//lib:data">
+        <string name="name" value="data"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="@ext//lib:d.txt"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="@ext//lib:d.txt"/>
+    </rule>
+</query>

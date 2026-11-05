@@ -1,0 +1,25 @@
+# @WS@/a/BUILD:4:8
+catrule(
+  name = "lib",
+  tags = ["fast", "manual"],
+  srcs = ["//a:x.txt", "//a:srcs_fg", "@ext//lib:data"],
+  tag_x = "lib",
+)
+# Rule lib instantiated at (most recent call last):
+#   @WS@/a/BUILD:4:8 in <toplevel>
+# Rule catrule defined at (most recent call last):
+#   @WS@/defs.bzl:6:15 in <toplevel>
+
+# @WS@/b/BUILD:3:7
+x_test(
+  name = "t1",
+  tags = ["fast"],
+  size = "small",
+  srcs = ["//b:t.cc"],
+  data = ["//a:lib2"],
+)
+# Rule t1 instantiated at (most recent call last):
+#   @WS@/b/BUILD:3:7 in <toplevel>
+# Rule x_test defined at (most recent call last):
+#   @WS@/defs.bzl:35:14 in <toplevel>
+

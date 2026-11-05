@@ -1,0 +1,9 @@
+--- a/f.txt
++++ b/f.txt
+@@ -1,5 +1,2 @@
+ y 2
+-  indent 3
+-alpha
+-{ 3
+-alpha
++NEW   indent 3

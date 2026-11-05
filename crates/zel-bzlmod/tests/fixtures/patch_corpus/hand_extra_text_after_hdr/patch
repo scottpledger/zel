@@ -1,0 +1,5 @@
+--- a/f.txt
++++ b/f.txt
+@@ -3 +3 @@ some function()
+-line 3
++THREE

@@ -1,0 +1,15 @@
+NoTransition -> //a:sel (2d89340)
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:opt_cs (2d89340)
+//a:z.txt (null)
+NoTransition -> @bazel_tools//tools:host_platform (c07488d)
+NoTransition -> //a:def_cs (2d89340)
+NoTransition -> @@platforms//host:host (c07488d)
+  constraint_values#@@platforms//cpu:aarch64#NoTransition -> 
+  constraint_values#@@platforms//os:osx#NoTransition -> 
+NoConfigTransition -> @@platforms//cpu:aarch64 (c07488d)
+  constraint_setting#@@platforms//cpu:cpu#NoTransition -> 
+NoConfigTransition -> @@platforms//os:osx (c07488d)
+  constraint_setting#@@platforms//os:os#NoTransition -> 
+NoConfigTransition -> @@platforms//cpu:cpu (c07488d)
+NoConfigTransition -> @@platforms//os:os (c07488d)

@@ -1,0 +1,2 @@
+@OB@/external/ext+/lib/BUILD:1:10: filegroup rule @ext//lib:data
+@OB@/external/ext+/lib/BUILD:2:8: genrule rule @ext//lib:gen

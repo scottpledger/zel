@@ -1,0 +1,20 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //a:gg (0 packages loaded, 0 targets configured)
+INFO: Analyzed target //a:gg (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+ERROR: Error doing post analysis query: Unknown configuration ID 'exec'.
+config()'s second argument must identify a unique configuration.
+
+Valid values:
+ 'target' for the default configuration
+ 'null' for source files (which have no configuration)
+ an arbitrary configuration's full or short ID
+
+A short ID is any prefix of a full ID. cquery shows short IDs. 'bazel config' shows full IDs.
+
+For more help, see https://bazel.build/docs/cquery.
+INFO: Elapsed time: 0.058s, Critical Path: 0.00s
+INFO: 0 processes.
+INFO: Build completed successfully, 0 total actions

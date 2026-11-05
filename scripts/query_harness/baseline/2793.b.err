@@ -1,0 +1,1 @@
+ERROR: While parsing option --flag_alias=a=b: --flag_alias only supports Starlark build settings.

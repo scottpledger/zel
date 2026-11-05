@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "ba078bbd46bc",
+ "classified_as": "ORDERLESS",
+ "cmd": "test --runs_per_test=2 --test_output=all //:t_fail",
+ "distinct": 5,
+ "harness": "build",
+ "hashes": [
+  "998e52a9c5e6161b",
+  "20154372eb78c2ec",
+  "c64e925d35c6a457",
+  "c64e925d35c6a457",
+  "81f0a9f490175b89",
+  "904b30a646f4a519"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "rm -f /tmp/vb5-flaky-*",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nINFO: From Testing //:t_fail (run 2 of 2):\nINFO: From Testing //:t_fail (run 1 of 2):\nINFO: Found 1 test target...\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "==================== Test output for //:t_fail (run 2 of 2):\nfailing\nerr\n================================================================================\n==================== Test output for //:t_fail (run 1 of 2):\nfailing\nerr\n================================================================================\n//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nINFO: From Testing //:t_fail (run 2 of 2):\nINFO: From Testing //:t_fail (run 1 of 2):\nINFO: Found 1 test target...\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "==================== Test output for //:t_fail (run 2 of 2):\nfailing\nerr\n================================================================================\n==================== Test output for //:t_fail (run 1 of 2):\nfailing\nerr\n================================================================================\n//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nINFO: From Testing //:t_fail (run 1 of 2):\nINFO: From Testing //:t_fail (run 2 of 2):\nINFO: Found 1 test target...\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "==================== Test output for //:t_fail (run 1 of 2):\nfailing\nerr\n================================================================================\n==================== Test output for //:t_fail (run 2 of 2):\nfailing\nerr\n================================================================================\n//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nINFO: From Testing //:t_fail (run 1 of 2):\nINFO: From Testing //:t_fail (run 2 of 2):\nINFO: Found 1 test target...\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "==================== Test output for //:t_fail (run 1 of 2):\nfailing\nerr\n================================================================================\n==================== Test output for //:t_fail (run 2 of 2):\nfailing\nerr\n================================================================================\n//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nINFO: From Testing //:t_fail (run 1 of 2):\nINFO: From Testing //:t_fail (run 2 of 2):\nINFO: Found 1 test target...\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "==================== Test output for //:t_fail (run 1 of 2):\nfailing\nerr\n================================================================================\n==================== Test output for //:t_fail (run 2 of 2):\nfailing\nerr\n================================================================================\n//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nINFO: From Testing //:t_fail (run 2 of 2):\nINFO: From Testing //:t_fail (run 1 of 2):\nINFO: Found 1 test target...\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "==================== Test output for //:t_fail (run 2 of 2):\nfailing\nerr\n================================================================================\n==================== Test output for //:t_fail (run 1 of 2):\nfailing\nerr\n================================================================================\n//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  }
+ ],
+ "workspace": "ws1"
+}

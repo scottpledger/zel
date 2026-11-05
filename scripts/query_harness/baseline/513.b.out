@@ -1,0 +1,9 @@
+catrule rule //a:lib
+filegroup rule //a:srcs_fg
+trule rule //a:tr
+source file //a:x.txt
+source file //a:y.txt
+source file //a:z.txt
+package group @bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist
+source file @ext//lib:d.txt
+filegroup rule @ext//lib:data

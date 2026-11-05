@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "43b573adcf31",
+ "classified_as": "ORDERLESS",
+ "cmd": "query 'deps(//a:lib2)' --noorder_results --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "a204d30f57123260",
+  "947b7aff3b5ecf1f",
+  "1ee5467a33143a64",
+  "383e850dfecb9e43",
+  "2d948290ee48f467",
+  "8098dbc819a24375"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:srcs_fg\n@ext//lib:d.txt\n//a:lib2\n@ext//lib:data\n//a:z.txt\n//a:y.txt\n//a:lib\n//a:x.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:x.txt\n@ext//lib:d.txt\n//a:lib\n@ext//lib:data\n//a:y.txt\n//a:srcs_fg\n//a:z.txt\n//a:lib2\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:lib\n//a:y.txt\n@ext//lib:d.txt\n//a:z.txt\n@ext//lib:data\n//a:lib2\n//a:srcs_fg\n//a:x.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:lib\n//a:srcs_fg\n//a:y.txt\n@ext//lib:d.txt\n@ext//lib:data\n//a:lib2\n//a:x.txt\n//a:z.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:lib2\n//a:y.txt\n//a:z.txt\n//a:srcs_fg\n//a:lib\n//a:x.txt\n@ext//lib:data\n@ext//lib:d.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "@ext//lib:data\n//a:lib2\n//a:srcs_fg\n//a:z.txt\n//a:y.txt\n//a:lib\n//a:x.txt\n@ext//lib:d.txt\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

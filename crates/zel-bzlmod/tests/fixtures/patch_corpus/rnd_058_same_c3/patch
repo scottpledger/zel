@@ -1,0 +1,10 @@
+--- a/f.txt
++++ b/f.txt
+@@ -10,6 +10,7 @@
+ return 0;
+ {
+ gamma 1
++{ 0
+ delta
+ beta 3
+ {

@@ -1,0 +1,25 @@
+# @WS@/c/BUILD:1:10
+filegroup(
+  name = "cdata",
+  visibility = ["//visibility:public"],
+  srcs = ["//c:d.txt"],
+)
+# Rule cdata instantiated at (most recent call last):
+#   @WS@/c/BUILD:1:10 in <toplevel>
+
+# @WS@/d/BUILD:3:10
+filegroup(
+  name = "dep_bad",
+  srcs = ["//d:bad", "//d:ok"],
+)
+# Rule dep_bad instantiated at (most recent call last):
+#   @WS@/d/BUILD:3:10 in <toplevel>
+
+# @WS@/d/BUILD:2:10
+filegroup(
+  name = "ok",
+  srcs = ["//c:cdata"],
+)
+# Rule ok instantiated at (most recent call last):
+#   @WS@/d/BUILD:2:10 in <toplevel>
+

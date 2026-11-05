@@ -1,0 +1,4 @@
+bazel-out/darwin_arm64-fastbuild/bin/b/mk.txt
+bazel-out/darwin_arm64-fastbuild/bin/b/t1
+bazel-out/darwin_arm64-fastbuild/bin/b/t2
+bazel-out/darwin_arm64-fastbuild/bin/b/tool

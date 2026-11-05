@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "8fa94839af7d",
+ "classified_as": "STRICT",
+ "cmd": "build --notrack_incremental_state //:ga",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "fbb41d5715cb89f0",
+  "fbb41d5715cb89f0",
+  "fbb41d5715cb89f0",
+  "fbb41d5715cb89f0",
+  "fbb41d5715cb89f0",
+  "fbb41d5715cb89f0"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "WARNING: --notrack_incremental_state was specified, but without --nokeep_state_after_build. Inmemory state from this build will not be reusable, but it will not get fully wiped until the beginning of the next build. Use --nokeep_state_after_build to clean up eagerly.\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: --notrack_incremental_state was specified, but without --nokeep_state_after_build. Inmemory state from this build will not be reusable, but it will not get fully wiped until the beginning of the next build. Use --nokeep_state_after_build to clean up eagerly.\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: --notrack_incremental_state was specified, but without --nokeep_state_after_build. Inmemory state from this build will not be reusable, but it will not get fully wiped until the beginning of the next build. Use --nokeep_state_after_build to clean up eagerly.\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: --notrack_incremental_state was specified, but without --nokeep_state_after_build. Inmemory state from this build will not be reusable, but it will not get fully wiped until the beginning of the next build. Use --nokeep_state_after_build to clean up eagerly.\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: --notrack_incremental_state was specified, but without --nokeep_state_after_build. Inmemory state from this build will not be reusable, but it will not get fully wiped until the beginning of the next build. Use --nokeep_state_after_build to clean up eagerly.\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: --notrack_incremental_state was specified, but without --nokeep_state_after_build. Inmemory state from this build will not be reusable, but it will not get fully wiped until the beginning of the next build. Use --nokeep_state_after_build to clean up eagerly.\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws3"
+}

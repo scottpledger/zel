@@ -1,0 +1,20 @@
+{
+eps
+beta
+x
+{
+gamma 0
+alpha 0
+  indent 0
+{
+}
+
+x
+  indent 0
+
+  indent
+beta
+alpha
+eps 2
+gamma
+y

@@ -1,0 +1,6 @@
+xlib rule //a:cl (2d89340)
+xlib rule //a:cl2 (2d89340)
+source file //a:c.cc (null)
+alias rule @bazel_tools//tools:host_platform (c07488d)
+platform rule @@platforms//host:host (c07488d)
+source file //a:c.h (null)

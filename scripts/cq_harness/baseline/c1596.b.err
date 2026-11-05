@@ -1,0 +1,10 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //a:lib (0 packages loaded, 0 targets configured)
+INFO: Analyzed target //a:lib (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+ERROR: Error doing post analysis query: No target (in) //a:lib could be found in the 'null' configuration
+INFO: Elapsed time: 0.060s, Critical Path: 0.00s
+INFO: 0 processes.
+INFO: Build completed successfully, 0 total actions

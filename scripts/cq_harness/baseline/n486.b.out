@@ -1,0 +1,9 @@
+action 'Cat @@//a:sm_cat'
+  Mnemonic: CatIt
+  Target: //a:sm_cat
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea
+  Inputs: [a/x.txt, a/y.txt]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt]
+

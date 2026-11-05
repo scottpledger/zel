@@ -1,0 +1,12 @@
+//a:c.cc
+//a:c.h
+//a:c2.cc
+//a:lib
+//a:lm
+//a:sel
+//a:sm_fg
+//a:srcs_fg
+//a:x.txt
+//a:y.txt
+//a:z.txt
+@ext//lib:data

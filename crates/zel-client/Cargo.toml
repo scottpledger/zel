@@ -12,6 +12,7 @@ path = "src/main.rs"
 zel-cmdline = { workspace = true }
 zel-options = { workspace = true }
 zel-proto = { workspace = true }
+zel-remote = { workspace = true }
 zel-server = { workspace = true }
 zel-util = { workspace = true }
 zel-vfs = { workspace = true }

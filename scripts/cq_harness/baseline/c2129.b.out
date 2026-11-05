@@ -1,0 +1,3 @@
+NoTransition -> //a:lib2 (334d30c)
+  srcs#//a:lib#NoTransition -> 
+  srcs#//a:y.txt#(null transition) -> 

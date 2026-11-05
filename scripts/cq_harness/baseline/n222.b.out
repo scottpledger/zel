@@ -1,0 +1,13 @@
+//a:x.txt (null)
+NoTransition -> //a:lib (7e2fa55)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> //a:srcs_fg (7e2fa55)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:tr (2d89340)
+  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 7e2fa55
+    compilation_mode:fastbuild -> [opt]
+  $allowlist_function_transition#@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist#(null transition) -> 

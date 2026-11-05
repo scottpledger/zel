@@ -1,0 +1,3 @@
+bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt
+bazel-out/darwin_arm64-opt/bin/a/lib.txt
+bazel-out/darwin_arm64-fastbuild/bin/b/t1

@@ -1,0 +1,101 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <source-file location="@WS@/a/c.cc:1:1" name="//a:c.cc">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/c.h:1:1" name="//a:c.h">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/c2.cc:1:1" name="//a:c2.cc">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="catrule" location="@WS@/a/BUILD:4:8" name="//a:lib">
+        <string name="name" value="lib"/>
+        <list name="tags">
+            <string value="fast"/>
+            <string value="manual"/>
+        </list>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:srcs_fg"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <string name="tag_x" value="lib"/>
+        <rule-input name="//a:srcs_fg"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="@ext//lib:data"/>
+    </rule>
+    <rule class="genrule" location="@WS@/a/BUILD:7:7" name="//a:lm">
+        <string name="name" value="lm"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="generator_name" value="lm"/>
+        <string name="generator_function" value="lmacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:7:7"/>
+        <list name="outs">
+            <output value="//a:lm.o"/>
+        </list>
+        <string name="cmd" value="echo lm &gt; $@"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-output name="//a:lm.o"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:11:10" name="//a:sel">
+        <string name="name" value="sel"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+            <label value="//a:z.txt"/>
+        </list>
+        <rule-input name="//a:def_cs"/>
+        <rule-input name="//a:opt_cs"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+        <rule-input name="//a:z.txt"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:6:7" name="//a:sm_fg">
+        <string name="name" value="sm_fg"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <string name="generator_name" value="sm"/>
+        <string name="generator_function" value="smacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:6:7"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+        </list>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:3:10" name="//a:srcs_fg">
+        <string name="name" value="srcs_fg"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+            <label value="//a:z.txt"/>
+        </list>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+        <rule-input name="//a:z.txt"/>
+    </rule>
+    <source-file location="@WS@/a/x.txt:1:1" name="//a:x.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/y.txt:1:1" name="//a:y.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/z.txt:1:1" name="//a:z.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/ext+/lib/BUILD:1:10" name="@ext//lib:data">
+        <string name="name" value="data"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="@ext//lib:d.txt"/>
+        </list>
+        <rule-input name="@ext//lib:d.txt"/>
+    </rule>
+</query>

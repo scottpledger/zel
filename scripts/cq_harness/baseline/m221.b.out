@@ -1,0 +1,33 @@
+:catrule//a:lib//a:lib2*ddarwin_arm64-optdarwin_arm64"@7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272cBaBx.txt
+B	bazel-outBdarwin_arm64-fastbuildB	binBaBlib.txt
+By.txt
+"BexternalB	z.txt
+	B
+lib2.txt
+
+:
+x_test
+//a:sm_catB
+ext+B	libBd.txt
+"�@2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8"CatIt(2	/bin/bash2-c2lcat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txtBJhr@@platforms//host:host"B
+sm_cat.txt
+�@c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69"CatIt(2	/bin/bash2-c2lcat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txtBJhr@@platforms//host:host�@ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea"CatIt(2	/bin/bash2-c2Gcat a/x.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txtBJhr@@platforms//host:host"//b:t1Bdarwin_arm64-optB	binBaBlib.txt
+�@e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329"CatIt(2	/bin/bash2-c2fcat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txtBJhr@@platforms//host:host*jdarwin_arm64-fastbuilddarwin_arm64"@1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607BbBt1
+	q@c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"	FileWrite(J	h	r@@platforms//host:host�Bt1.repo_mapping
+
+x@04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d"RepoMappingManifest(J
+h
+r@@platforms//host:hostBt1.runfiles_manifest
+z@c9003ec327c69a6d7cc84512879d19c1353a0bb372ab45c23672289203c93160"SourceSymlinkManifest(Jhr@@platforms//host:host"Bt1.runfilesBMANIFEST
+s@2d3875d14b12b47496a9004d1f82c6bcf72e8c046ffdd9e3c962823de9b5c1fe"SymlinkTree(BJhr@@platforms//host:host"	"	
+
+t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:hostBbazel_toolsBtoolsB
+testBtest-setup.sh
+Bgenerate-xml.sh
+"B"testlogsB!b"B t1!Btest.log 
+B#test.xml 
+#B$test.cache_status 
+$B%test.outputs 
+%�@205428c674ece34895c9d37069735603ac04f06cc7f559f119763b18bb7e84d8"
+TestRunner(2-external/bazel_tools/tools/test/test-setup.sh2b/t1:$
+PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:host

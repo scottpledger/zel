@@ -12,444 +12,447 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Built-in Rule Implementations and `@_builtins` Starlark bridge (`genrule`, `filegroup`,
-//! `cc_*`, `rust_*`, `java_*`, `py_*`, `sh_*`, `copy_file`, `bazel_binary`).
-//! Mirrors `src/main/java/com/google/devtools/build/lib/rules` and `src/main/starlark/builtins_bzl`.
+//! Target analysis: dispatches a loaded `Target` under a configuration to a Starlark rule
+//! implementation (via the typed engine in `zel-analysis`) or to a native rule implementation.
+//! Mirrors `src/main/java/com/google/devtools/build/lib/rules` (native rules) and
+//! `StarlarkRuleConfiguredTargetUtil` (Starlark rules).
+//!
+//! Rule classes without a toolchain-backed implementation (`cc_*`, `java_*`, `py_*`,
+//! `proto_library`, ...) are reported as analysis errors; no placeholder outputs are produced.
+
+mod config;
+pub mod failure;
+mod legacy;
+mod native;
+pub mod resolver;
+pub mod toolchain;
+
+pub use resolver::{AnalysisConfig, PatternExpander, TargetResolver};
 
 use std::collections::BTreeMap;
-use zel_analysis::{
-    ActionAnalysisMetadata, Artifact, BuildConfigurationKey, ConfiguredTarget, DefaultInfo,
-    OutputGroupInfo,
-};
-use zel_cmdline::{Label, PackageIdentifier};
+use std::sync::Arc;
+use toolchain::{resolve_toolchains, ToolchainTypeRequest};
+use zel_analysis::starlark_rule::{analyze_starlark_rule, AnalysisInputs, DepResolver};
+use zel_analysis::{BuildConfigurationKey, ConfiguredTarget, DefaultInfo, OutputGroupInfo};
+use zel_cmdline::Label;
 use zel_packages::{RuleInstance, Target};
+use zel_starlark::Value;
+
+/// A resolver that fails every dependency request (used when analysing without a package
+/// loader, e.g. leaf rules in unit tests).
+struct NoDeps;
+
+impl DepResolver for NoDeps {
+    fn configured_target(
+        &self,
+        label: &Label,
+        _cfg: &BuildConfigurationKey,
+    ) -> Result<Arc<ConfiguredTarget>, String> {
+        Err(format!(
+            "cannot resolve dependency {}: no package loader available",
+            label.canonical_form()
+        ))
+    }
+}
+
+/// `GenQuery.executeQuery`: evaluates `expression` (opts as in the rule's `opts` attribute) against the
+/// package loader and returns the formatted output. Registered by `zel-server` (the query engine
+/// lives in `zel-query`, which depends on this crate).
+pub type GenQueryFn = dyn Fn(&Arc<zel_packages::PackageLoader>, &str, &[String], bool, &[String]) -> Result<Vec<u8>, String>
+    + Send
+    + Sync;
+
+static GENQUERY_HOOK: std::sync::OnceLock<Box<GenQueryFn>> = std::sync::OnceLock::new();
+
+/// Installs the query engine used by the `genquery` rule (first registration wins).
+pub fn set_genquery_hook(f: Box<GenQueryFn>) {
+    let _ = GENQUERY_HOOK.set(f);
+}
+
+pub(crate) fn genquery_hook() -> Option<&'static GenQueryFn> {
+    GENQUERY_HOOK.get().map(|b| b.as_ref())
+}
 
 /// Analyzes a loaded `Target` under `config` into a `ConfiguredTarget` with concrete actions.
 pub fn analyze_target(
     target: &Target,
     config: &BuildConfigurationKey,
 ) -> Result<ConfiguredTarget, String> {
-    let mnemonic = config.mnemonic();
+    analyze_target_with(target, config, Arc::new(NoDeps), &AnalysisConfig::new())
+}
+
+/// Like [`analyze_target`], resolving dependencies through `resolver`.
+pub fn analyze_target_with(
+    target: &Target,
+    config: &BuildConfigurationKey,
+    resolver: Arc<dyn DepResolver>,
+    acfg: &AnalysisConfig,
+) -> Result<ConfiguredTarget, String> {
     match target {
-        Target::InputFile { label } => {
-            let rel_path = label
-                .package_identifier()
-                .package_fragment()
-                .get_relative_str(label.name());
-            let art = Artifact::source(rel_path, label.clone());
-            Ok(ConfiguredTarget {
-                label: label.clone(),
-                configuration: config.clone(),
-                rule_class: "source file".to_string(),
-                default_info: DefaultInfo {
-                    files: vec![art],
-                    ..Default::default()
-                },
-                output_groups: OutputGroupInfo::default(),
-                actions: Vec::new(),
-                is_test: false,
-            })
+        Target::InputFile { label } => Ok(resolver::source_file_target(label, config)),
+        Target::OutputFile { label, generating_rule } => {
+            let gen = resolver.configured_target(generating_rule, config)?;
+            let mut rel = label.package_identifier().package_fragment().get_relative_str(label.name());
+            // Generated files of external repositories live below `external/<repo>/`.
+            if !label.package_identifier().repository().is_main() {
+                rel = zel_vfs::PathFragment::create(&format!(
+                    "external/{}/{}",
+                    label.package_identifier().repository().name(),
+                    rel.path_string()
+                ));
+            }
+            let art = gen
+                .typed_actions
+                .iter()
+                .flat_map(|a| a.outputs.iter())
+                .find(|a| a.root_relative_path == rel)
+                .cloned()
+                .or_else(|| {
+                    gen.actions
+                        .iter()
+                        .flat_map(|a| a.outputs())
+                        .find(|a| a.root_relative_path == rel)
+                })
+                .or_else(|| gen.default_info.files.iter().find(|a| a.root_relative_path == rel).cloned())
+                .ok_or_else(|| {
+                    format!(
+                        "output file '{}' was not generated by its rule {}",
+                        label.canonical_form(),
+                        generating_rule.canonical_form()
+                    )
+                })?;
+            let mut ct = ConfiguredTarget::new(label.clone(), config.clone(), "generated file".to_string());
+            ct.default_info = DefaultInfo { files: vec![art.clone()], ..Default::default() };
+            ct.providers.insert(
+                "DefaultInfo".into(),
+                zel_analysis::starlark_rule::default_info_provider(
+                    &[art.clone()],
+                    Default::default(),
+                    Default::default(),
+                    None,
+                ),
+            );
+            let mut groups = BTreeMap::new();
+            groups.insert("default".to_string(), vec![art]);
+            ct.output_groups = OutputGroupInfo { groups };
+            ct.testonly = gen.testonly;
+            ct.visibility = gen.visibility.clone();
+            Ok(ct)
         }
-        Target::OutputFile {
-            label,
-            generating_rule,
-        } => {
-            let rel_path = label
-                .package_identifier()
-                .package_fragment()
-                .get_relative_str(label.name());
-            let art = Artifact::derived(&mnemonic, rel_path, generating_rule.clone());
-            Ok(ConfiguredTarget {
-                label: label.clone(),
-                configuration: config.clone(),
-                rule_class: "generated file".to_string(),
-                default_info: DefaultInfo {
-                    files: vec![art],
-                    ..Default::default()
-                },
-                output_groups: OutputGroupInfo::default(),
-                actions: Vec::new(),
-                is_test: false,
-            })
+        Target::PackageGroup { label, .. } => {
+            let mut ct = ConfiguredTarget::new(label.clone(), config.clone(), "package_group".to_string());
+            ct.providers.insert(
+                "DefaultInfo".into(),
+                zel_analysis::starlark_rule::default_info_provider(
+                    &[],
+                    Default::default(),
+                    Default::default(),
+                    None,
+                ),
+            );
+            ct.providers.insert(
+                "PackageSpecificationInfo".into(),
+                zel_analysis::starlark_rule::provider_instance("PackageSpecificationInfo", vec![("label", Value::Label(label.clone()))]),
+            );
+            Ok(ct)
         }
-        Target::PackageGroup { label, .. } => Ok(ConfiguredTarget {
-            label: label.clone(),
-            configuration: config.clone(),
-            rule_class: "package_group".to_string(),
-            default_info: DefaultInfo::default(),
-            output_groups: OutputGroupInfo::default(),
-            actions: Vec::new(),
-            is_test: false,
-        }),
-        Target::Rule(rule) => analyze_rule(rule, config),
+        Target::EnvironmentGroup { label, .. } => {
+            // Not configurable: environment groups are only used by the (legacy) constraint checks.
+            Ok(ConfiguredTarget::new(label.clone(), config.clone(), "environment_group".to_string()))
+        }
+        Target::Rule(rule) => analyze_rule(rule, config, resolver, acfg),
     }
+}
+
+fn label_list(v: &Value) -> Vec<Label> {
+    zel_starlark::eval::builtins::value_to_sequence(v)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|x| match x {
+            Value::Label(l) => Some(l),
+            Value::String(s) => Label::parse_canonical(&s).ok(),
+            _ => None,
+        })
+        .collect()
+}
+
+fn toolchain_requests(v: Option<&Value>) -> Vec<ToolchainTypeRequest> {
+    let Some(v) = v else { return Vec::new() };
+    zel_starlark::eval::builtins::value_to_sequence(v)
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|x| match &x {
+            Value::Struct(s) if s.fields.contains_key("_toolchain_type") => {
+                let l = match s.fields.get("name") {
+                    Some(Value::Label(l)) => l.clone(),
+                    Some(Value::String(n)) => Label::parse_canonical(n).ok()?,
+                    _ => return None,
+                };
+                let mandatory = !matches!(s.fields.get("mandatory"), Some(Value::Bool(false)));
+                Some(ToolchainTypeRequest { toolchain_type: l, mandatory })
+            }
+            Value::Label(l) => Some(ToolchainTypeRequest { toolchain_type: l.clone(), mandatory: true }),
+            Value::String(s) => Label::parse_canonical(s)
+                .ok()
+                .map(|l| ToolchainTypeRequest { toolchain_type: l, mandatory: true }),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The toolchain context of one rule / exec group: the selected execution platform, the
+/// `ToolchainInfo` of each requested type (`None` for unresolved optional toolchains) and the
+/// toolchains' Make variables.
+pub(crate) struct ToolchainCtx {
+    pub exec_platform: String,
+    pub toolchains: BTreeMap<String, Value>,
+    pub make_variables: BTreeMap<String, String>,
+    /// Configured targets of the requested toolchain types and the resolved implementations
+    /// (`PostAnalysisQueryEnvironment.targetifyValues` shows them as direct deps of the rule).
+    pub deps: Vec<Arc<ConfiguredTarget>>,
+}
+
+pub(crate) fn resolve_ctx_toolchains(
+    owner: &Label,
+    types: &[ToolchainTypeRequest],
+    exec_compatible_with: &[Label],
+    cfg: &BuildConfigurationKey,
+    acfg: &AnalysisConfig,
+    resolver: &Arc<dyn DepResolver>,
+) -> Result<ToolchainCtx, String> {
+    let registered = acfg.all_registered_toolchains()?;
+    let exec_platforms = acfg.all_execution_platforms()?;
+    let resolved = resolve_toolchains(owner, types, exec_compatible_with, cfg, &registered, &exec_platforms, resolver, acfg)?;
+    // The platform's own label (an `alias` such as `@bazel_tools//tools:host_platform` reports
+    // the aliased platform's, like `PlatformInfo.label`).
+    let exec_label = match resolved.execution_platform.providers.get("PlatformInfo") {
+        Some(Value::ProviderInstance { fields, .. }) => match fields.get("label") {
+            Some(Value::Label(l)) => l.canonical_form(),
+            _ => resolved.execution_platform.label.canonical_form(),
+        },
+        _ => resolved.execution_platform.label.canonical_form(),
+    };
+    let mut out = ToolchainCtx {
+        exec_platform: exec_label,
+        toolchains: BTreeMap::new(),
+        make_variables: BTreeMap::new(),
+        deps: Vec::new(),
+    };
+    for t in types {
+        if let Ok(tt) = resolver.configured_target(&t.toolchain_type, cfg) {
+            out.deps.push(tt);
+        }
+    }
+    for (ty, imp) in &resolved.toolchains {
+        let v = match imp {
+            None => Value::None,
+            Some(l) => {
+                // `DependencyProducer`: toolchain dependencies keep the configuration of the
+                // requesting target (no exec transition).
+                let ct = resolver.configured_target(l, cfg)?;
+                out.deps.push(ct.clone());
+                if let Some(Value::ProviderInstance { fields, .. }) = ct.providers.get("TemplateVariableInfo") {
+                    if let Some(Value::Dict(d)) = fields.get("variables") {
+                        for (k, v) in d.lock().unwrap().items() {
+                            if let (Value::String(k), Value::String(v)) = (k, v) {
+                                out.make_variables.insert(k, v);
+                            }
+                        }
+                    }
+                }
+                ct.providers.get("ToolchainInfo").cloned().ok_or_else(|| {
+                    format!(
+                        "{}: toolchain {} for type {ty} does not provide ToolchainInfo",
+                        owner.canonical_form(),
+                        l.canonical_form()
+                    )
+                })?
+            }
+        };
+        out.toolchains.insert(ty.clone(), v);
+    }
+    Ok(out)
 }
 
 fn analyze_rule(
     rule: &RuleInstance,
     config: &BuildConfigurationKey,
+    resolver: Arc<dyn DepResolver>,
+    acfg: &AnalysisConfig,
 ) -> Result<ConfiguredTarget, String> {
-    let cfg_mnemonic = config.mnemonic();
-    let pkg_id = rule.label.package_identifier();
-    let pkg_frag = pkg_id.package_fragment();
-
-    let mut src_artifacts = Vec::new();
-    for s in &rule.srcs {
-        let clean = s.strip_prefix(':').unwrap_or(s);
-        let rel = if clean.starts_with("//") {
-            if let Ok(lbl) = Label::parse_canonical(clean) {
-                lbl.package_identifier()
-                    .package_fragment()
-                    .get_relative_str(lbl.name())
-            } else {
-                pkg_frag.get_relative_str(clean)
-            }
-        } else {
-            pkg_frag.get_relative_str(clean)
-        };
-        src_artifacts.push(Artifact::source(rel, rule.label.clone()));
-    }
-
-    let mut out_artifacts = Vec::new();
-    for o in &rule.outs {
-        let clean = o.strip_prefix(':').unwrap_or(o);
-        let rel = pkg_frag.get_relative_str(clean);
-        out_artifacts.push(Artifact::derived(&cfg_mnemonic, rel, rule.label.clone()));
-    }
-
-    let mut actions = Vec::new();
-    let mut executable: Option<Artifact> = None;
-
-    match rule.rule_class.as_str() {
-        "filegroup" | "alias" | "test_suite" | "config_setting" => {
-            if out_artifacts.is_empty() {
-                out_artifacts = src_artifacts.clone();
-            }
-        }
-        "genrule" => {
-            if out_artifacts.is_empty() {
-                let default_out = pkg_frag.get_relative_str(rule.label.name());
-                out_artifacts.push(Artifact::derived(
-                    &cfg_mnemonic,
-                    default_out,
-                    rule.label.clone(),
-                ));
-            }
-            let raw_cmd = rule.cmd.as_deref().unwrap_or("true");
-            let expanded_cmd = expand_genrule_cmd(pkg_id, raw_cmd, &src_artifacts, &out_artifacts);
-            actions.push(ActionAnalysisMetadata::SpawnAction {
-                owner: rule.label.clone(),
-                mnemonic: "Genrule".to_string(),
-                progress_message: format!("Executing genrule {}", rule.label),
-                argv: vec!["/bin/bash".to_string(), "-c".to_string(), expanded_cmd],
-                env: BTreeMap::new(),
-                inputs: src_artifacts.clone(),
-                outputs: out_artifacts.clone(),
-                execution_info: BTreeMap::new(),
-            });
-        }
-        "copy_file" => {
-            if out_artifacts.is_empty() {
-                let default_out = pkg_frag.get_relative_str(rule.label.name());
-                out_artifacts.push(Artifact::derived(
-                    &cfg_mnemonic,
-                    default_out,
-                    rule.label.clone(),
-                ));
-            }
-            if let (Some(src), Some(dst)) = (src_artifacts.first(), out_artifacts.first()) {
-                actions.push(ActionAnalysisMetadata::SpawnAction {
-                    owner: rule.label.clone(),
-                    mnemonic: "CopyFile".to_string(),
-                    progress_message: format!("Copying {} to {}", src.exec_path, dst.exec_path),
-                    argv: vec![
-                        "/bin/cp".to_string(),
-                        "-f".to_string(),
-                        src.exec_path.to_string(),
-                        dst.exec_path.to_string(),
-                    ],
-                    env: BTreeMap::new(),
-                    inputs: vec![src.clone()],
-                    outputs: vec![dst.clone()],
-                    execution_info: BTreeMap::new(),
-                });
-            }
-        }
-        "sh_binary" | "sh_test" | "py_binary" | "py_test" => {
-            let bin_rel = pkg_frag.get_relative_str(rule.label.name());
-            let bin_art = Artifact::derived(&cfg_mnemonic, bin_rel, rule.label.clone());
-            if let Some(first_src) = src_artifacts.first() {
-                actions.push(ActionAnalysisMetadata::SpawnAction {
-                    owner: rule.label.clone(),
-                    mnemonic: "ExecutableSymlink".to_string(),
-                    progress_message: format!("Creating executable {}", rule.label),
-                    argv: vec![
-                        "/bin/cp".to_string(),
-                        "-f".to_string(),
-                        first_src.exec_path.to_string(),
-                        bin_art.exec_path.to_string(),
-                    ],
-                    env: BTreeMap::new(),
-                    inputs: src_artifacts.clone(),
-                    outputs: vec![bin_art.clone()],
-                    execution_info: BTreeMap::new(),
-                });
-            } else {
-                actions.push(ActionAnalysisMetadata::FileWriteAction {
-                    owner: rule.label.clone(),
-                    output: bin_art.clone(),
-                    content: b"#!/bin/sh\nexit 0\n".to_vec(),
-                    is_executable: true,
-                });
-            }
-            executable = Some(bin_art.clone());
-            out_artifacts = vec![bin_art];
-        }
-        "cc_binary" | "cc_test" => {
-            let bin_rel = pkg_frag.get_relative_str(rule.label.name());
-            let bin_art = Artifact::derived(&cfg_mnemonic, bin_rel, rule.label.clone());
-            let mut argv = vec!["cc".to_string()];
-            if config.compilation_mode == "opt" {
-                argv.push("-O2".to_string());
-            } else if config.compilation_mode == "dbg" {
-                argv.push("-g".to_string());
-            }
-            for src in &src_artifacts {
-                argv.push(src.exec_path.to_string());
-            }
-            argv.push("-o".to_string());
-            argv.push(bin_art.exec_path.to_string());
-
-            actions.push(ActionAnalysisMetadata::SpawnAction {
-                owner: rule.label.clone(),
-                mnemonic: "CppLink".to_string(),
-                progress_message: format!("Linking {}", rule.label),
-                argv,
-                env: BTreeMap::new(),
-                inputs: src_artifacts.clone(),
-                outputs: vec![bin_art.clone()],
-                execution_info: BTreeMap::new(),
-            });
-            executable = Some(bin_art.clone());
-            out_artifacts = vec![bin_art];
-        }
-        "cc_library" => {
-            let lib_rel = pkg_frag.get_relative_str(&format!("lib{}.a", rule.label.name()));
-            let lib_art = Artifact::derived(&cfg_mnemonic, lib_rel, rule.label.clone());
-            actions.push(ActionAnalysisMetadata::FileWriteAction {
-                owner: rule.label.clone(),
-                output: lib_art.clone(),
-                content: b"!<arch>\n".to_vec(),
-                is_executable: false,
-            });
-            out_artifacts = vec![lib_art];
-        }
-        "rust_binary" | "rust_test" | "rust_library" | "rust_shared_library" => {
-            let is_bin = rule.rule_class == "rust_binary" || rule.rule_class == "rust_test";
-            let crate_name = rule.label.name().replace('-', "_");
-            let out_name = if is_bin {
-                rule.label.name().to_string()
-            } else if rule.rule_class == "rust_shared_library" {
-                format!("lib{crate_name}.dylib")
-            } else {
-                format!("lib{crate_name}.rlib")
-            };
-            let out_rel = pkg_frag.get_relative_str(&out_name);
-            let out_art = Artifact::derived(&cfg_mnemonic, out_rel, rule.label.clone());
-
-            let crate_root = src_artifacts
-                .iter()
-                .find(|a| {
-                    let b = a.exec_path.base_name();
-                    b == "main.rs" || b == "lib.rs"
-                })
-                .or_else(|| src_artifacts.first());
-
-            if let Some(root_src) = crate_root {
-                let mut argv = vec![
-                    "rustc".to_string(),
-                    "--edition=2021".to_string(),
-                    format!("--crate-name={crate_name}"),
-                    root_src.exec_path.to_string(),
-                    "-o".to_string(),
-                    out_art.exec_path.to_string(),
-                ];
-                if rule.rule_class == "rust_library" {
-                    argv.push("--crate-type=rlib".to_string());
-                } else if rule.rule_class == "rust_shared_library" {
-                    argv.push("--crate-type=cdylib".to_string());
-                } else if rule.rule_class == "rust_test" {
-                    argv.push("--test".to_string());
+    let is_plat = matches!(rule.rule_class.as_str(), "platform" | "constraint_value" | "constraint_setting");
+    let plat_cfg;
+    let config = if is_plat {
+        plat_cfg = config.to_core_only();
+        &plat_cfg
+    } else {
+        config
+    };
+    let starlark = rule.extra.rule_class.as_ref().and_then(|rc| rc.starlark.clone());
+    if let Some(spec) = starlark {
+        // Incoming (rule-level) transition.
+        let mut cfg = config.clone();
+        if let Some(t @ Value::Struct(_)) = spec.kwargs.get("cfg").filter(|t| {
+            // `config.target()` / `config.none()` (structs marked `_build_setting`, without an
+            // implementation) are no-ops at the rule level.
+            !matches!(t, Value::Struct(ts) if ts.fields.contains_key("_build_setting") && !ts.fields.contains_key("implementation"))
+        }) {
+            // Plain attribute values are visible to the transition as `attr`.
+            let mut af = std::collections::BTreeMap::new();
+            let rc_attrs = rule.extra.rule_class.as_ref().map(|rc| rc.attrs.clone()).unwrap_or_default();
+            let mut names: Vec<String> = rc_attrs.keys().cloned().collect();
+            for k in rule.extra.attr_values.keys() {
+                if !names.contains(k) {
+                    names.push(k.clone());
                 }
-                let mut action_inputs = src_artifacts.clone();
-                if !rule.deps.is_empty() {
-                    let bin_pkg_dir = format!("bazel-out/{cfg_mnemonic}/bin/{pkg_frag}");
-                    argv.push("-L".to_string());
-                    argv.push(format!("dependency={bin_pkg_dir}"));
-                    for dep_str in &rule.deps {
-                        let dep_name = dep_str
-                            .rsplit(':')
-                            .next()
-                            .unwrap_or(dep_str)
-                            .trim_start_matches("//")
-                            .replace('-', "_");
-                        let dep_crate_name = dep_name
-                            .strip_prefix("zel_client_lib")
-                            .map(|_| "zel_client")
-                            .unwrap_or(&dep_name);
-                        let dep_rlib_rel =
-                            pkg_frag.get_relative_str(&format!("lib{dep_name}.rlib"));
-                        let dep_art =
-                            Artifact::derived(&cfg_mnemonic, dep_rlib_rel, rule.label.clone());
-                        argv.push("--extern".to_string());
-                        argv.push(format!("{dep_crate_name}={}", dep_art.exec_path));
-                        action_inputs.push(dep_art);
-                    }
+            }
+            for k in names {
+                use zel_packages::AttrValue as A;
+                let v = match rule.extra.attr_values.get(&k) {
+                    Some(v) => v.clone(),
+                    None => match rc_attrs.get(&k) {
+                        Some(a) => a.default_value(),
+                        None => continue,
+                    },
+                };
+                // Selects are resolved against the incoming configuration.
+                let v = match &v {
+                    A::Select(_) => match zel_analysis::select::resolve_select(&v, &k, rule, config, resolver.as_ref()) {
+                        Ok(r) => r,
+                        Err(_) => continue,
+                    },
+                    _ => v,
+                };
+                let val = match &v {
+                    A::Str(x) => Value::String(x.clone()),
+                    A::Bool(b) => Value::Bool(*b),
+                    A::Int(i) => Value::Int((*i).into()),
+                    A::StrList(l) => zel_analysis::starlark_rule::mk_list(l.iter().cloned().map(Value::String).collect()),
+                    A::StrDict(d) => zel_analysis::starlark_rule::mk_dict(
+                        d.iter().map(|(a, b)| (Value::String(a.clone()), Value::String(b.clone()))).collect(),
+                    ),
+                    A::LabelKeyedStrDict(d) => zel_analysis::starlark_rule::mk_dict(
+                        d.iter().map(|(a, b)| (Value::Label(a.clone()), Value::String(b.clone()))).collect(),
+                    ),
+                    _ => continue,
+                };
+                af.insert(k.clone(), val);
+            }
+            let attrs = Value::Struct(Arc::new(zel_starlark::StructValue::new(af)));
+            cfg = zel_analysis::transition::apply_transition(t, config, Some(&attrs)).map_err(|e| {
+                format!("in {} rule {}: {e}", rule.rule_class, rule.label.canonical_form())
+            })?;
+        }
+        let mut inputs = AnalysisInputs::new(resolver.clone());
+        inputs.allow_unresolved_symlinks = acfg.allow_unresolved_symlinks;
+        inputs.compact_repo_mapping = !acfg.no_compact_repo_mapping;
+        inputs.exec_platform = Some(acfg.default_exec_platform());
+        let types = toolchain_requests(spec.kwargs.get("toolchains"));
+        let mut rule_ecw: Vec<Label> =
+            spec.kwargs.get("exec_compatible_with").map(label_list).unwrap_or_default();
+        if let Some(zel_packages::AttrValue::LabelList(l)) = rule.extra.attr_values.get("exec_compatible_with") {
+            rule_ecw.extend(l.iter().cloned());
+        }
+        if !types.is_empty() {
+            let tc = resolve_ctx_toolchains(&rule.label, &types, &rule_ecw, &cfg, acfg, &resolver)?;
+            for d in &tc.deps {
+                let _ = resolver.check_dependency(rule, "$toolchains", d);
+            }
+            inputs.exec_platform = Some(tc.exec_platform.clone());
+            inputs.extra_make_variables.extend(tc.make_variables);
+            inputs.toolchains.extend(tc.toolchains);
+        }
+        // Exec groups: each group resolves its own toolchains / execution platform
+        // (`copy_from_rule` inherits the rule's).
+        if let Some(Value::Dict(d)) = spec.kwargs.get("exec_groups") {
+            for (name, g) in d.lock().unwrap().items() {
+                let Some(name) = name.as_str().map(str::to_string) else { continue };
+                let Value::Struct(gs) = &g else { continue };
+                let copy = matches!(gs.fields.get("copy_from_rule"), Some(Value::Bool(true)));
+                let mut gtypes = toolchain_requests(gs.fields.get("toolchains"));
+                let mut gecw: Vec<Label> =
+                    gs.fields.get("exec_compatible_with").map(label_list).unwrap_or_default();
+                if copy {
+                    gtypes.extend(types.clone());
+                    gecw.extend(rule_ecw.clone());
                 }
-                actions.push(ActionAnalysisMetadata::SpawnAction {
-                    owner: rule.label.clone(),
-                    mnemonic: "Rustc".to_string(),
-                    progress_message: format!("Compiling Rust {} {}", rule.rule_class, rule.label),
-                    argv,
-                    env: BTreeMap::new(),
-                    inputs: action_inputs,
-                    outputs: vec![out_art.clone()],
-                    execution_info: BTreeMap::new(),
-                });
-            } else {
-                actions.push(ActionAnalysisMetadata::FileWriteAction {
-                    owner: rule.label.clone(),
-                    output: out_art.clone(),
-                    content: Vec::new(),
-                    is_executable: is_bin,
-                });
-            }
-            if is_bin {
-                executable = Some(out_art.clone());
-            }
-            out_artifacts = vec![out_art];
-        }
-        _ => {
-            if out_artifacts.is_empty() {
-                let default_out = pkg_frag.get_relative_str(rule.label.name());
-                out_artifacts.push(Artifact::derived(
-                    &cfg_mnemonic,
-                    default_out,
-                    rule.label.clone(),
-                ));
-            }
-            for out_art in &out_artifacts {
-                actions.push(ActionAnalysisMetadata::FileWriteAction {
-                    owner: rule.label.clone(),
-                    output: out_art.clone(),
-                    content: Vec::new(),
-                    is_executable: rule.is_binary_rule(),
-                });
-            }
-            if rule.is_binary_rule() {
-                executable = out_artifacts.first().cloned();
+                let tc = resolve_ctx_toolchains(&rule.label, &gtypes, &gecw, &cfg, acfg, &resolver)?;
+                for d in &tc.deps {
+                    let _ = resolver.check_dependency(rule, "$toolchains", d);
+                }
+                inputs.exec_group_platforms.insert(name.clone(), tc.exec_platform);
+                inputs.exec_group_toolchains.insert(name, tc.toolchains);
             }
         }
+        let mut ct = analyze_starlark_rule(rule, &cfg, inputs)?;
+        if let Ok(Some(plat_ct)) = toolchain::target_platform(&cfg, &resolver, acfg) {
+            let _ = resolver.check_dependency(rule, "$target_platform", &plat_ct);
+            toolchain::record_exec_platform_edge(rule, &cfg, &resolver, acfg);
+        }
+        ct.visibility = rule.extra.effective_visibility.clone();
+        return Ok(ct);
     }
 
-    let mut groups = BTreeMap::new();
-    groups.insert("default".to_string(), out_artifacts.clone());
-
-    Ok(ConfiguredTarget {
-        label: rule.label.clone(),
-        configuration: config.clone(),
-        rule_class: rule.rule_class.clone(),
-        default_info: DefaultInfo {
-            files: out_artifacts,
-            data_runfiles: src_artifacts,
-            default_runfiles: Vec::new(),
-            executable,
-        },
-        output_groups: OutputGroupInfo { groups },
-        actions,
-        is_test: rule.is_test_rule(),
-    })
-}
-
-/// Expands `$(SRCS)`, `$<`, `$(OUTS)`, `$@`, and `$(location ...)` in a `genrule` command string.
-pub fn expand_genrule_cmd(
-    pkg_id: &PackageIdentifier,
-    raw_cmd: &str,
-    srcs: &[Artifact],
-    outs: &[Artifact],
-) -> String {
-    let srcs_str: Vec<String> = srcs.iter().map(|a| a.exec_path.to_string()).collect();
-    let outs_str: Vec<String> = outs.iter().map(|a| a.exec_path.to_string()).collect();
-    let joined_srcs = srcs_str.join(" ");
-    let joined_outs = outs_str.join(" ");
-
-    let mut cmd = raw_cmd
-        .replace("$(SRCS)", &joined_srcs)
-        .replace("$<", srcs_str.first().map(|s| s.as_str()).unwrap_or(""))
-        .replace("$(OUTS)", &joined_outs)
-        .replace("$@", outs_str.first().map(|s| s.as_str()).unwrap_or(""));
-
-    // Expand $(location <label>) and $(locations <label>)
-    for prefix in ["$(location ", "$(locations ", "$(execpath ", "$(execpaths "] {
-        while let Some(start) = cmd.find(prefix) {
-            if let Some(rel_end) = cmd[start..].find(')') {
-                let end = start + rel_end;
-                let inner_lbl = cmd[start + prefix.len()..end].trim();
-                let clean = inner_lbl.strip_prefix(':').unwrap_or(inner_lbl);
-                let replacement = srcs
-                    .iter()
-                    .chain(outs.iter())
-                    .find(|a| {
-                        a.exec_path.base_name() == clean
-                            || a.root_relative_path.path_string() == clean
-                    })
-                    .map(|a| a.exec_path.to_string())
-                    .unwrap_or_else(|| {
-                        pkg_id
-                            .package_fragment()
-                            .get_relative_str(clean)
-                            .to_string()
-                    });
-                cmd.replace_range(start..=end, &replacement);
-            } else {
-                break;
-            }
+    let n = native::Nctx { rule, cfg: config, resolver: &resolver, acfg };
+    let mut ct = match rule.rule_class.as_str() {
+        "filegroup" => native::filegroup(&n)?,
+        "alias" => native::alias(&n)?,
+        "genrule" => native::genrule(&n)?,
+        "test_suite" => native::test_suite(&n)?,
+        "genquery" => native::genquery(&n)?,
+        "java_plugins_flag_alias" => native::java_plugins_flag_alias(&n)?,
+        "cc_libc_top_alias" => native::cc_libc_top_alias(&n)?,
+        "extra_action" | "action_listener" | "environment" | "starlark_doc_extract" => native::extra_action_like(&n)?,
+        "label_flag" => native::label_flag(&n)?,
+        "label_setting" => native::label_setting(&n)?,
+        "config_setting" => config::config_setting(&n)?,
+        "constraint_setting" => config::constraint_setting(&n)?,
+        "constraint_value" => config::constraint_value(&n)?,
+        "platform" => config::platform(&n)?,
+        "toolchain_type" => config::toolchain_type(&n)?,
+        "toolchain" => config::toolchain(&n)?,
+        "copy_file" | "rust_binary" | "rust_test" | "rust_library" | "rust_shared_library" => {
+            let mut ct = legacy::analyze_legacy(rule, config)?;
+            ct.providers.insert(
+                "DefaultInfo".into(),
+                zel_analysis::starlark_rule::default_info_provider(
+                    &ct.default_info.files,
+                    zel_analysis::Runfiles {
+                        artifacts: ct.default_info.default_runfiles.clone(),
+                        ..Default::default()
+                    },
+                    zel_analysis::Runfiles {
+                        artifacts: ct.default_info.data_runfiles.clone(),
+                        ..Default::default()
+                    },
+                    ct.default_info.executable.clone(),
+                ),
+            );
+            ct
+        }
+        other => {
+            return Err(format!(
+                "{}in {other} rule {}: rule class '{other}' has no implementation in this build (it requires a toolchain-backed rule implementation that is not available)",
+                rule.extra.location.as_ref().map(|l| format!("{l}: ")).unwrap_or_default(),
+                rule.label.canonical_form()
+            ))
+        }
+    };
+    if rule.rule_class != "platform"
+        && rule.rule_class != "constraint_value"
+        && rule.rule_class != "constraint_setting"
+        && rule.rule_class != "package_group"
+        && rule.label.name() != "host_platform"
+    {
+        if let Ok(Some(plat_ct)) = toolchain::target_platform(config, &resolver, acfg) {
+            let _ = resolver.check_dependency(rule, "$target_platform", &plat_ct);
+            toolchain::record_exec_platform_edge(rule, &config, &resolver, acfg);
         }
     }
-    cmd
+    ct.visibility = rule.extra.effective_visibility.clone();
+    ct.testonly = rule.testonly;
+    Ok(ct)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_genrule_location_and_var_expansion() {
-        let pkg_id = PackageIdentifier::create_in_main_repo("src").unwrap();
-        let lbl = Label::create(pkg_id.clone(), "gen").unwrap();
-        let cfg = BuildConfigurationKey::target("darwin_arm64", "fastbuild");
-        let rule = RuleInstance {
-            label: lbl,
-            rule_class: "genrule".to_string(),
-            attrs: BTreeMap::new(),
-            srcs: vec!["in.txt".to_string()],
-            deps: Vec::new(),
-            outs: vec!["out.txt".to_string()],
-            tools: Vec::new(),
-            data: Vec::new(),
-            visibility: Vec::new(),
-            cmd: Some("cat $(location :in.txt) > $@".to_string()),
-            executable: false,
-            testonly: false,
-        };
-        let ct = analyze_target(&Target::Rule(rule), &cfg).unwrap();
-        assert_eq!(ct.actions.len(), 1);
-        let ActionAnalysisMetadata::SpawnAction { argv, .. } = &ct.actions[0] else {
-            panic!("Expected SpawnAction");
-        };
-        assert_eq!(
-            argv[2],
-            "cat src/in.txt > bazel-out/darwin_arm64-fastbuild/bin/src/out.txt"
-        );
-    }
-}
+mod tests;

@@ -1,0 +1,3 @@
+catrule rule //a:lib
+catrule rule //a:lib2
+source file //a:y.txt

@@ -1,0 +1,54 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //a:tr (0 packages loaded, 0 targets configured)
+INFO: Analyzed target //a:tr (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+ERROR: Starlark evaluation error for //a:tr: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for //a:lib: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for @@bazel_tools//tools:host_platform: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: 'Target' value has no field or method 'nope'
+ERROR: Starlark evaluation error for @@platforms//host:host: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for @@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for @@platforms//cpu:aarch64: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for @@platforms//os:osx: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for //a:srcs_fg: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for //a:x.txt: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for @@ext+//lib:data: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for //a:z.txt: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for @@platforms//cpu:cpu: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for @@platforms//os:os: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for //a:y.txt: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+ERROR: Starlark evaluation error for @@ext+//lib:d.txt: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+INFO: Elapsed time: 0.059s, Critical Path: 0.00s
+INFO: 0 processes.
+INFO: Build completed successfully, 0 total actions

@@ -1,0 +1,16 @@
+6 total actions.
+
+Mnemonics:
+  SymlinkTree: 1
+  SourceSymlinkManifest: 1
+  RepoMappingManifest: 1
+  FileWrite: 1
+  RunfilesTree: 1
+  Genrule: 1
+
+Configurations:
+  darwin_arm64-fastbuild: 1
+  darwin_arm64-opt-exec: 5
+
+Execution Platforms:
+  @@platforms//host:host: 6

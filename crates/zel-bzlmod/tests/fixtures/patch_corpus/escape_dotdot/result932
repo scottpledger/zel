@@ -1,0 +1,1 @@
+ERR PatchFailedException: Cannot patch file outside of external repository ($OUT), file path = "../x.txt" at line 1

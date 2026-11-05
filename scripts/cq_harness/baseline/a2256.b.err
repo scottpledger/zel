@@ -1,0 +1,16 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+ERROR: Skipping '//nonexistent:x': no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent
+Analyzing: 0 targets (0 packages loaded, 0 targets configured)
+INFO: Analyzed 0 targets (0 packages loaded, 0 targets configured).
+INFO: Found 0 targets...
+ERROR: Evaluation of query "//nonexistent:x" failed: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent
+WARNING: --keep_going specified, ignoring errors. Results may be inaccurate
+INFO: Empty query results
+ERROR: command succeeded, but there were errors parsing the target pattern
+INFO: Elapsed time: 0.057s, Critical Path: 0.00s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully

@@ -1,0 +1,24 @@
+eps
+ 1
+alpha
+  indent 1
+  indent
+} 0
+  indent
+y 1
+alpha
+	Tab 3
+
+delta 0
+eps
+ 1
+alpha
+  indent 1
+  indent
+} 0
+  indent
+y 1
+alpha
+	Tab 3
+
+delta 0

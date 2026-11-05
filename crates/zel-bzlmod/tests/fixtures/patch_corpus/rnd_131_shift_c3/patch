@@ -1,0 +1,19 @@
+--- a/f.txt
++++ b/f.txt
+@@ -9,7 +9,7 @@
+ beta 0
+ return 0; 3
+ beta
+-{ 1
++NEW { 1
+   indent 2
+ 	Tab 0
+ 	Tab 2
+@@ -23,7 +23,6 @@
+ gamma 1
+ eps 0
+ y 0
+-gamma 2
+ alpha
+ beta 2
+ x

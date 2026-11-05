@@ -1,0 +1,20 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:lib2"
+  "//a:lib2" -> "//a:lib"
+  "//a:lib2" -> "//a:y.txt"
+  "//a:lib"
+  "//a:lib" -> "//a:srcs_fg"
+  "//a:lib" -> "//a:x.txt"
+  "//a:lib" -> "@ext//lib:data"
+  "@ext//lib:data"
+  "@ext//lib:data" -> "@ext//lib:d.txt"
+  "@ext//lib:d.txt"
+  "//a:srcs_fg"
+  "//a:srcs_fg" -> "//a:x.txt"
+  "//a:srcs_fg" -> "//a:y.txt"
+  "//a:srcs_fg" -> "//a:z.txt"
+  "//a:z.txt"
+  "//a:y.txt"
+  "//a:x.txt"
+}

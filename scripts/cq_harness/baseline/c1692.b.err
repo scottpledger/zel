@@ -1,0 +1,2 @@
+Computing main repo mapping: 
+ERROR: Error while parsing 'rbuildfiles(defs.bzl)': unknown function 'rbuildfiles' at 'rbuildfiles ( defs.bzl'; expected one of ['allpaths', 'attr', 'buildfiles', 'config', 'deps', 'executables', 'filter', 'kind', 'labels', 'loadfiles', 'rdeps', 'same_pkg_direct_rdeps', 'siblings', 'some', 'somepath', 'tests', 'visible']

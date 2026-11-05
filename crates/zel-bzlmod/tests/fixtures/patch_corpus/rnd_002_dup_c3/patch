@@ -1,0 +1,17 @@
+--- a/f.txt
++++ b/f.txt
+@@ -11,12 +11,14 @@
+  2
+ delta 2
+ { 0
++alpha 2
+ 	Tab 2
+ beta 1
+ x 0
+ { 1
+ return 0; 3
+ return 0; 3
++delta
+ 
+ }
+ gamma

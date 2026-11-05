@@ -1,0 +1,4 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:lm (2d89340)"
+}

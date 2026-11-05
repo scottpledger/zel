@@ -1,0 +1,12 @@
+} 0
+x 1
+  indent 3
+gamma 2
+x
+} 2
+return 0; 2
+  indent 0
+PERTURBED8
+alpha
+delta 2
+PERTURBED11

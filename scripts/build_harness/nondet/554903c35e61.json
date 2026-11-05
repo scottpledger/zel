@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "554903c35e61",
+ "classified_as": "STRICT",
+ "cmd": "test --runs_per_test=2 --test_output=streamed //:t_out",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "91a61fbd3fcdff80",
+  "91a61fbd3fcdff80",
+  "91a61fbd3fcdff80",
+  "91a61fbd3fcdff80",
+  "91a61fbd3fcdff80",
+  "91a61fbd3fcdff80"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "WARNING: Streamed test output requested. All tests will be run without sharding, one at a time\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "line1\nline2\nline3\nline1\nline2\nline3\n//:t_out                                                                 PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Streamed test output requested. All tests will be run without sharding, one at a time\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "line1\nline2\nline3\nline1\nline2\nline3\n//:t_out                                                                 PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Streamed test output requested. All tests will be run without sharding, one at a time\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "line1\nline2\nline3\nline1\nline2\nline3\n//:t_out                                                                 PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Streamed test output requested. All tests will be run without sharding, one at a time\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "line1\nline2\nline3\nline1\nline2\nline3\n//:t_out                                                                 PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Streamed test output requested. All tests will be run without sharding, one at a time\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "line1\nline2\nline3\nline1\nline2\nline3\n//:t_out                                                                 PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Streamed test output requested. All tests will be run without sharding, one at a time\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "line1\nline2\nline3\nline1\nline2\nline3\n//:t_out                                                                 PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

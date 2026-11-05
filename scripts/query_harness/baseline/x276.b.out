@@ -1,0 +1,5 @@
+b/BUILD:6:8: genrule rule //b:mk
+b/BUILD:5:5: xlib rule //b:shlib
+b/BUILD:3:7: x_test rule //b:t1
+b/BUILD:4:7: x_test rule //b:t2
+b/BUILD:2:5: xbin rule //b:tool

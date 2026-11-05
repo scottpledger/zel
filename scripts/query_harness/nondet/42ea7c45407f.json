@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "42ea7c45407f",
+ "classified_as": "ORDERLESS",
+ "cmd": "query 'deps(//a:lib2)' --output=label_kind --order_output=no --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "12cd26d5ab61b8e5",
+  "ce8b29c9e8addc0b",
+  "01c0d5c4656d02be",
+  "7000fbd48060130c",
+  "bfbed6c908b6fb36",
+  "32e62fd65b7f5dcf"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "filegroup rule @ext//lib:data\ncatrule rule //a:lib\nsource file @ext//lib:d.txt\nfilegroup rule //a:srcs_fg\nsource file //a:x.txt\nsource file //a:z.txt\ncatrule rule //a:lib2\nsource file //a:y.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "source file //a:x.txt\nfilegroup rule //a:srcs_fg\ncatrule rule //a:lib\nsource file //a:z.txt\nsource file @ext//lib:d.txt\nsource file //a:y.txt\nfilegroup rule @ext//lib:data\ncatrule rule //a:lib2\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "source file //a:y.txt\nsource file //a:x.txt\nsource file //a:z.txt\ncatrule rule //a:lib2\ncatrule rule //a:lib\nfilegroup rule //a:srcs_fg\nsource file @ext//lib:d.txt\nfilegroup rule @ext//lib:data\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "source file //a:y.txt\nfilegroup rule //a:srcs_fg\nsource file //a:x.txt\ncatrule rule //a:lib\ncatrule rule //a:lib2\nsource file //a:z.txt\nsource file @ext//lib:d.txt\nfilegroup rule @ext//lib:data\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "catrule rule //a:lib2\nsource file @ext//lib:d.txt\ncatrule rule //a:lib\nfilegroup rule //a:srcs_fg\nfilegroup rule @ext//lib:data\nsource file //a:z.txt\nsource file //a:y.txt\nsource file //a:x.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "catrule rule //a:lib2\nsource file @ext//lib:d.txt\nfilegroup rule //a:srcs_fg\ncatrule rule //a:lib\nsource file //a:x.txt\nsource file //a:z.txt\nsource file //a:y.txt\nfilegroup rule @ext//lib:data\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

@@ -1,0 +1,4 @@
+--- /tmp/zel_patch_escape_x
++++ /tmp/zel_patch_escape_x
+@@ -0,0 +1 @@
++a

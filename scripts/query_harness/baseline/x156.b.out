@@ -1,0 +1,26 @@
+# @WS@/b/BUILD:3:7
+x_test(
+  name = "t1",
+  tags = ["fast"],
+  size = "small",
+  srcs = ["//b:t.cc"],
+  data = ["//a:lib2"],
+)
+# Rule t1 instantiated at (most recent call last):
+#   @WS@/b/BUILD:3:7 in <toplevel>
+# Rule x_test defined at (most recent call last):
+#   @WS@/defs.bzl:35:14 in <toplevel>
+
+# @WS@/b/BUILD:4:7
+x_test(
+  name = "t2",
+  tags = ["manual", "slow"],
+  timeout = "long",
+  srcs = ["//b:t.cc"],
+  deps = ["//b:shlib"],
+)
+# Rule t2 instantiated at (most recent call last):
+#   @WS@/b/BUILD:4:7 in <toplevel>
+# Rule x_test defined at (most recent call last):
+#   @WS@/defs.bzl:35:14 in <toplevel>
+

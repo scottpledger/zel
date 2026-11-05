@@ -1,0 +1,4 @@
+catrule rule //a:lib
+catrule rule //a:lib2
+filegroup rule //a:srcs_fg
+source file //a:x.txt

@@ -1,0 +1,1 @@
+echo passing; exit 0

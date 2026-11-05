@@ -1,0 +1,36 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+WARNING: Build option --features has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+Analyzing: 26 targets (0 packages loaded, 0 targets configured)
+ERROR: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent
+ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent and referenced by '//d:bad'
+ERROR: @WS@/pg/BUILD:1:10: in filegroup rule //pg:private: Visibility error:
+target '//b:mk' is not visible from
+target '//pg:private'
+Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
+ERROR: @WS@/pg/BUILD:1:10: Analysis of target '//pg:private' (config: a750db4) failed
+WARNING: errors encountered while analyzing target '//d:bad', it will not be built.
+Analysis failed
+ERROR: @WS@/c/BUILD:3:10: in filegroup rule //c:cyc2: cycle in dependency graph:
+    //c:cyc2 (366c4ef5f83bce96c2c936441b8d7e90867213c1a7367c91d00be1310a68a3c9)
+.-> //c:cyc2 (a750db43d3fc7836bf24223d243150ff6149ae85dfb9ec21c87f602aa624e851)
+|   //c:cyc1 (a750db43d3fc7836bf24223d243150ff6149ae85dfb9ec21c87f602aa624e851)
+`-- //c:cyc2 (a750db43d3fc7836bf24223d243150ff6149ae85dfb9ec21c87f602aa624e851)
+WARNING: errors encountered while analyzing target '//c:cyc2', it will not be built.
+WARNING: errors encountered while analyzing target '//pg:private', it will not be built.
+ERROR: @WS@/c/BUILD:2:10: in filegroup rule //c:cyc1: cycle in dependency graph: target depends on an already-reported cycle
+WARNING: errors encountered while analyzing target '//c:cyc1', it will not be built.
+WARNING: errors encountered while analyzing target '//d:dep_bad', it will not be built.
+Analysis failed
+INFO: Analysis succeeded for only 21 of 26 top-level targets
+INFO: Analyzed 26 targets (0 packages loaded, 418 targets configured).
+INFO: Found 21 targets...
+WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//:top_alias, config=BuildConfigurationKey[366c4ef5f83bce96c2c936441b8d7e90867213c1a7367c91d00be1310a68a3c9]}, ConfiguredTargetKey{label=//a:sm_cat, config=BuildConfigurationKey[a750db43d3fc7836bf24223d243150ff6149ae85dfb9ec21c87f602aa624e851]}, ConfiguredTargetKey{label=//a:tr, config=BuildConfigurationKey[a750db43d3fc7836bf24223d243150ff6149ae85dfb9ec21c87f602aa624e851]}]
+WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//b:t1, config=BuildConfigurationKey[366c4ef5f83bce96c2c936441b8d7e90867213c1a7367c91d00be1310a68a3c9]}]
+ERROR: command succeeded, but not all targets were analyzed
+INFO: Elapsed time: 0.076s, Critical Path: 0.00s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully

@@ -1,0 +1,2 @@
+/bin/sh: -c: line 0: syntax error near unexpected token `('
+/bin/sh: -c: line 0: `timeout 300 /tmp/bazel-9.3.2 --max_idle_secs=60 --output_base=@OB@ aquery 'outputs('(',//a:lib)' --output=jsonproto --keep_going'

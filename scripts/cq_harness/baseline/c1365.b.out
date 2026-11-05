@@ -1,0 +1,16 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:lib2 (2d89340)"
+  "//a:lib2 (2d89340)" -> "//a:lib (2d89340)"
+  "//a:lib2 (2d89340)" -> "//a:y.txt (null)"
+  "//a:lib (2d89340)"
+  "//a:lib (2d89340)" -> "//a:srcs_fg (2d89340)"
+  "//a:lib (2d89340)" -> "//a:x.txt (null)"
+  "//a:srcs_fg (2d89340)"
+  "//a:srcs_fg (2d89340)" -> "//a:x.txt (null)"
+  "//a:srcs_fg (2d89340)" -> "//a:y.txt (null)"
+  "//a:srcs_fg (2d89340)" -> "//a:z.txt (null)"
+  "//a:z.txt (null)"
+  "//a:y.txt (null)"
+  "//a:x.txt (null)"
+}

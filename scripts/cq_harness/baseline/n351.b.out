@@ -1,0 +1,270 @@
+rule_classes {
+id: 1
+name: "x_test"
+}
+targets {
+id: 1
+label: "//b:t1"
+rule_class_id: 1
+}
+configuration {
+id: 1
+mnemonic: "darwin_arm64-fastbuild"
+platform_name: "darwin_arm64"
+checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+}
+path_fragments {
+id: 5
+label: "bazel-out"
+}
+path_fragments {
+id: 4
+label: "darwin_arm64-fastbuild"
+parent_id: 5
+}
+path_fragments {
+id: 3
+label: "bin"
+parent_id: 4
+}
+path_fragments {
+id: 2
+label: "b"
+parent_id: 3
+}
+path_fragments {
+id: 1
+label: "t1"
+parent_id: 2
+}
+artifacts {
+id: 1
+path_fragment_id: 1
+}
+actions {
+target_id: 1
+action_key: "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"
+mnemonic: "FileWrite"
+configuration_id: 1
+output_ids: 1
+primary_output_id: 1
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+path_fragments {
+id: 6
+label: "t1.repo_mapping"
+parent_id: 2
+}
+artifacts {
+id: 2
+path_fragment_id: 6
+}
+actions {
+target_id: 1
+action_key: "04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d"
+mnemonic: "RepoMappingManifest"
+configuration_id: 1
+output_ids: 2
+primary_output_id: 2
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 7
+label: "t1.runfiles_manifest"
+parent_id: 2
+}
+artifacts {
+id: 3
+path_fragment_id: 7
+}
+actions {
+target_id: 1
+action_key: "c9003ec327c69a6d7cc84512879d19c1353a0bb372ab45c23672289203c93160"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 1
+output_ids: 3
+primary_output_id: 3
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 1
+direct_artifact_ids: 3
+}
+path_fragments {
+id: 9
+label: "t1.runfiles"
+parent_id: 2
+}
+path_fragments {
+id: 8
+label: "MANIFEST"
+parent_id: 9
+}
+artifacts {
+id: 4
+path_fragment_id: 8
+}
+actions {
+target_id: 1
+action_key: "2d3875d14b12b47496a9004d1f82c6bcf72e8c046ffdd9e3c962823de9b5c1fe"
+mnemonic: "SymlinkTree"
+configuration_id: 1
+input_dep_set_ids: 1
+output_ids: 4
+primary_output_id: 4
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 11
+label: "a"
+parent_id: 3
+}
+path_fragments {
+id: 10
+label: "lib2.txt"
+parent_id: 11
+}
+artifacts {
+id: 5
+path_fragment_id: 10
+}
+dep_set_of_files {
+id: 3
+direct_artifact_ids: 5
+direct_artifact_ids: 1
+}
+dep_set_of_files {
+id: 2
+transitive_dep_set_ids: 3
+direct_artifact_ids: 4
+direct_artifact_ids: 2
+}
+artifacts {
+id: 6
+path_fragment_id: 9
+}
+actions {
+target_id: 1
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 1
+input_dep_set_ids: 2
+output_ids: 6
+primary_output_id: 6
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 16
+label: "external"
+}
+path_fragments {
+id: 15
+label: "bazel_tools"
+parent_id: 16
+}
+path_fragments {
+id: 14
+label: "tools"
+parent_id: 15
+}
+path_fragments {
+id: 13
+label: "test"
+parent_id: 14
+}
+path_fragments {
+id: 12
+label: "test-setup.sh"
+parent_id: 13
+}
+artifacts {
+id: 7
+path_fragment_id: 12
+}
+path_fragments {
+id: 17
+label: "generate-xml.sh"
+parent_id: 13
+}
+artifacts {
+id: 8
+path_fragment_id: 17
+}
+dep_set_of_files {
+id: 4
+direct_artifact_ids: 6
+direct_artifact_ids: 7
+direct_artifact_ids: 8
+}
+path_fragments {
+id: 21
+label: "testlogs"
+parent_id: 4
+}
+path_fragments {
+id: 20
+label: "b"
+parent_id: 21
+}
+path_fragments {
+id: 19
+label: "t1"
+parent_id: 20
+}
+path_fragments {
+id: 18
+label: "test.log"
+parent_id: 19
+}
+artifacts {
+id: 9
+path_fragment_id: 18
+}
+path_fragments {
+id: 22
+label: "test.xml"
+parent_id: 19
+}
+artifacts {
+id: 10
+path_fragment_id: 22
+}
+path_fragments {
+id: 23
+label: "test.cache_status"
+parent_id: 19
+}
+artifacts {
+id: 11
+path_fragment_id: 23
+}
+path_fragments {
+id: 24
+label: "test.outputs"
+parent_id: 19
+}
+artifacts {
+id: 12
+path_fragment_id: 24
+is_tree_artifact: true
+}
+actions {
+target_id: 1
+action_key: "205428c674ece34895c9d37069735603ac04f06cc7f559f119763b18bb7e84d8"
+mnemonic: "TestRunner"
+configuration_id: 1
+arguments: "external/bazel_tools/tools/test/test-setup.sh"
+arguments: "b/t1"
+environment_variables {
+  key: "PATH"
+  value: "/bin:/usr/bin:/usr/local/bin"
+}
+input_dep_set_ids: 4
+output_ids: 9
+output_ids: 10
+output_ids: 11
+output_ids: 12
+primary_output_id: 9
+execution_platform: "@@platforms//host:host"
+}

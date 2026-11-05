@@ -1,0 +1,15 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:cl (2d89340)"
+  "//a:cl (2d89340)" -> "//a:c.cc (null)\n//a:c.h (null)"
+  "//a:cl (2d89340)" -> "//a:cl2 (2d89340)"
+  "//a:cl (2d89340)" -> "@bazel_tools//tools:host_platform (c07488d)"
+  "//a:cl (2d89340)" -> "@@platforms//host:host (c07488d)"
+  "//a:cl2 (2d89340)"
+  "//a:cl2 (2d89340)" -> "@bazel_tools//tools:host_platform (c07488d)"
+  "//a:cl2 (2d89340)" -> "@@platforms//host:host (c07488d)"
+  "@bazel_tools//tools:host_platform (c07488d)"
+  "@bazel_tools//tools:host_platform (c07488d)" -> "@@platforms//host:host (c07488d)"
+  "@@platforms//host:host (c07488d)"
+  "//a:c.cc (null)\n//a:c.h (null)"
+}

@@ -1,0 +1,14 @@
+delta 3
+gamma 2
+{
+return 0; 0
+eps 3
+  indent
+ 1
+	Tab 2
+delta 0
+x
+alpha
+eps 2
+return 0;
+gamma 2

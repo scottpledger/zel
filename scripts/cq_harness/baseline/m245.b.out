@@ -1,0 +1,16 @@
+:genrule//a:lm*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272cBexternalBbazel_toolsBtoolsBgenruleBgenrule-setup.sh
+"B
+	bazel-outB	darwin_arm64-fastbuild
+B	bin	BaB
+lm.o
+�@87db1df4b214fe2a744f1a7292cfa0468e49193cae194c181f0f39e81c9a76f5"Genrule(2	/bin/bash2-c2qsource external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/darwin_arm64-fastbuild/bin/a/lm.o:$
+PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:host//a:ggBaBz.txt
+B
+ext+B	libBd.txt
+"Bdarwin_arm64-opt-exec
+B	binBbB
+tool
+Btool.runfiles
+""	Bgg.out
+�@2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542"Genrule(2	/bin/bash2-c2�source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out:$
+PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:host

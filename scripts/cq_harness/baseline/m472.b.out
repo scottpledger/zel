@@ -1,0 +1,4 @@
+NoTransition -> //b:tool (2d89340)
+  srcs#//b:tool.cc#(null transition) -> 
+NoTransition -> //b:tool (77e8473)
+  srcs#//b:tool.cc#(null transition) -> 

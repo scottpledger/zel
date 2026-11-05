@@ -1,0 +1,1206 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="catrule" location="@WS@/a/BUILD:4:8" name="//a:lib">
+        <string name="name" value="lib"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="fast"/>
+            <string value="manual"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:srcs_fg"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <string name="tag_x" value="lib"/>
+        <list name="opt"/>
+        <rule-input name="//a:srcs_fg"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="@ext//lib:data"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:5:8" name="//a:lib2">
+        <string name="name" value="lib2"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="//a:lib"/>
+            <label value="//a:y.txt"/>
+        </list>
+        <string name="tag_x" value="d"/>
+        <list name="opt"/>
+        <rule-input name="//a:lib"/>
+        <rule-input name="//a:y.txt"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:3:10" name="//a:srcs_fg">
+        <string name="name" value="srcs_fg"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+            <label value="//a:z.txt"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+        <rule-input name="//a:z.txt"/>
+    </rule>
+    <source-file location="@WS@/a/x.txt:1:1" name="//a:x.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/y.txt:1:1" name="//a:y.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/z.txt:1:1" name="//a:z.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/b/t.cc:1:1" name="//b:t.cc">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <rule class="x_test" location="@WS@/b/BUILD:3:7" name="//b:t1">
+        <string name="name" value="t1"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:private"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="true"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <string name="size" value="small"/>
+        <string name="timeout" value="short"/>
+        <boolean name="flaky" value="false"/>
+        <int name="shard_count" value="-1"/>
+        <boolean name="local" value="false"/>
+        <list name="args"/>
+        <label name="$test_wrapper" value="@bazel_tools//tools/test:test_wrapper"/>
+        <label name="$xml_writer" value="@bazel_tools//tools/test:xml_writer"/>
+        <list name="$test_runtime">
+            <label value="@bazel_tools//tools/test:runtime"/>
+        </list>
+        <label name="$test_setup_script" value="@bazel_tools//tools/test:test_setup"/>
+        <label name="$xml_generator_script" value="@bazel_tools//tools/test:test_xml_generator"/>
+        <label name="$collect_coverage_script" value="@bazel_tools//tools/test:collect_coverage"/>
+        <label name=":coverage_support" value="@bazel_tools//tools/test:coverage_support"/>
+        <label name=":coverage_report_generator" value="@bazel_tools//tools/test:coverage_report_generator"/>
+        <label name=":run_under_exec_config"/>
+        <label name=":run_under_target_config"/>
+        <boolean name="$is_executable" value="true"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="deps"/>
+        <list name="data">
+            <label value="//a:lib2"/>
+        </list>
+        <rule-input name="//a:lib2"/>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="@bazel_tools//tools/test:collect_coverage"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_report_generator"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_support"/>
+        <rule-input name="@bazel_tools//tools/test:runtime"/>
+        <rule-input name="@bazel_tools//tools/test:test_setup"/>
+        <rule-input name="@bazel_tools//tools/test:test_wrapper"/>
+        <rule-input name="@bazel_tools//tools/test:test_xml_generator"/>
+        <rule-input name="@bazel_tools//tools/test:xml_writer"/>
+    </rule>
+    <rule class="config_setting" location="@OB@/external/bazel_tools/src/conditions/BUILD:115:15" name="@bazel_tools//src/conditions:windows">
+        <string name="name" value="windows"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="manual"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <dict name="values"/>
+        <dict name="define_values"/>
+        <dict name="flag_values"/>
+        <list name=":flag_alias_settings"/>
+        <list name="constraint_values">
+            <label value="@@platforms//os:windows"/>
+        </list>
+        <rule-input name="@@platforms//os:windows"/>
+    </rule>
+    <rule class="bazel_java_build_info" location="@OB@/external/bazel_tools/tools/build_defs/build_info/BUILD:24:22" name="@bazel_tools//tools/build_defs/build_info:java_build_info">
+        <string name="name" value="java_build_info"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <label name="$version_template" value="@bazel_tools//tools/build_defs/build_info/templates:volatile_file.properties.template"/>
+        <label name="$info_template" value="@bazel_tools//tools/build_defs/build_info/templates:non_volatile_file.properties.template"/>
+        <label name="$redacted_file" value="@bazel_tools//tools/build_defs/build_info/templates:redacted_file.properties.template"/>
+        <rule-input name="@bazel_tools//tools/build_defs/build_info/templates:non_volatile_file.properties.template"/>
+        <rule-input name="@bazel_tools//tools/build_defs/build_info/templates:redacted_file.properties.template"/>
+        <rule-input name="@bazel_tools//tools/build_defs/build_info/templates:volatile_file.properties.template"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/build_defs/build_info/templates/non_volatile_file.properties.template:1:1" name="@bazel_tools//tools/build_defs/build_info/templates:non_volatile_file.properties.template">
+        <visibility-label name="@bazel_tools//tools/build_defs/build_info:__pkg__"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/build_defs/build_info/templates/redacted_file.properties.template:1:1" name="@bazel_tools//tools/build_defs/build_info/templates:redacted_file.properties.template">
+        <visibility-label name="@bazel_tools//tools/build_defs/build_info:__pkg__"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/build_defs/build_info/templates/volatile_file.properties.template:1:1" name="@bazel_tools//tools/build_defs/build_info/templates:volatile_file.properties.template">
+        <visibility-label name="@bazel_tools//tools/build_defs/build_info:__pkg__"/>
+    </source-file>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/cpp/BUILD:21:15" name="@bazel_tools//tools/cpp:toolchain_type">
+        <string name="name" value="toolchain_type"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <string name="no_match_error" value=""/>
+    </rule>
+    <rule class="alias" location="@OB@/external/bazel_tools/tools/jdk/BUILD:191:10" name="@bazel_tools//tools/jdk:current_java_toolchain">
+        <string name="name" value="current_java_toolchain"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <label name="actual" value="@@rules_java+//toolchains:current_java_toolchain"/>
+        <rule-input name="@@rules_java+//toolchains:current_java_toolchain"/>
+    </rule>
+    <rule class="java_plugins_flag_alias" location="@OB@/external/bazel_tools/tools/jdk/BUILD:48:24" name="@bazel_tools//tools/jdk:java_plugins_flag_alias">
+        <string name="name" value="java_plugins_flag_alias"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name=":java_plugins"/>
+    </rule>
+    <rule class="launcher_flag_alias" location="@OB@/external/bazel_tools/tools/jdk/BUILD:201:20" name="@bazel_tools//tools/jdk:launcher_flag_alias">
+        <string name="name" value="launcher_flag_alias"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <label name=":launcher"/>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/jdk/BUILD:34:15" name="@bazel_tools//tools/jdk:runtime_toolchain_type">
+        <string name="name" value="runtime_toolchain_type"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <string name="no_match_error" value=""/>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/jdk/BUILD:23:15" name="@bazel_tools//tools/jdk:toolchain_type">
+        <string name="name" value="toolchain_type"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <string name="no_match_error" value=""/>
+    </rule>
+    <rule class="current_launcher_binary" location="@OB@/external/bazel_tools/tools/launcher/BUILD:15:24" name="@bazel_tools//tools/launcher:launcher">
+        <string name="name" value="launcher"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="args"/>
+        <list name="output_licenses"/>
+        <boolean name="$is_executable" value="true"/>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/launcher/BUILD:36:15" name="@bazel_tools//tools/launcher:launcher_maker_toolchain_type">
+        <string name="name" value="launcher_maker_toolchain_type"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <string name="no_match_error" value=""/>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/launcher/BUILD:34:15" name="@bazel_tools//tools/launcher:launcher_toolchain_type">
+        <string name="name" value="launcher_toolchain_type"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <string name="no_match_error" value=""/>
+    </rule>
+    <rule class="sh_binary" location="@OB@/external/bazel_tools/tools/test/BUILD:111:10" name="@bazel_tools//tools/test:collect_coverage">
+        <string name="name" value="collect_coverage"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="args"/>
+        <list name="output_licenses"/>
+        <boolean name="$is_executable" value="true"/>
+        <list name="srcs">
+            <label value="@bazel_tools//tools/test:collect_coverage.sh"/>
+        </list>
+        <list name="data"/>
+        <list name="deps"/>
+        <label name="$runfiles_dep" value="@@rules_shell+//shell/runfiles:runfiles"/>
+        <dict name="env"/>
+        <list name="env_inherit"/>
+        <boolean name="use_bash_launcher" value="false"/>
+        <label name="$windows_constraint" value="@@platforms//os:windows"/>
+        <rule-input name="@bazel_tools//tools/test:collect_coverage.sh"/>
+        <rule-input name="@@platforms//os:windows"/>
+        <rule-input name="@@rules_shell+//shell/runfiles:runfiles"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/test/collect_coverage.sh:1:1" name="@bazel_tools//tools/test:collect_coverage.sh">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="alias" location="@OB@/external/bazel_tools/tools/test/BUILD:126:6" name="@bazel_tools//tools/test:coverage_report_generator">
+        <string name="name" value="coverage_report_generator"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <label name="actual" value="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:coverage_report_generator"/>
+        <rule-input name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:coverage_report_generator"/>
+    </rule>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:121:10" name="@bazel_tools//tools/test:coverage_support">
+        <string name="name" value="coverage_support"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="@bazel_tools//tools/test:collect_coverage.sh"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="@bazel_tools//tools/test:collect_coverage.sh"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/test/dummy.sh:1:1" name="@bazel_tools//tools/test:dummy.sh">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/test/generate-xml.sh:1:1" name="@bazel_tools//tools/test:generate-xml.sh">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:96:10" name="@bazel_tools//tools/test:runtime">
+        <string name="name" value="runtime"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="@bazel_tools//tools/test:test-setup.sh"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="@bazel_tools//tools/test:test-setup.sh"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/test/test-setup.sh:1:1" name="@bazel_tools//tools/test:test-setup.sh">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:101:10" name="@bazel_tools//tools/test:test_setup">
+        <string name="name" value="test_setup"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="@bazel_tools//tools/test:test-setup.sh"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="@bazel_tools//tools/test:test-setup.sh"/>
+    </rule>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:136:10" name="@bazel_tools//tools/test:test_wrapper">
+        <string name="name" value="test_wrapper"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies">
+            <label value="@bazel_tools//src/conditions:windows"/>
+        </list>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="@bazel_tools//tools/test:tw.exe"/>
+            <label value="@bazel_tools//tools/test:dummy.sh"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="@bazel_tools//src/conditions:windows"/>
+        <rule-input name="@bazel_tools//tools/test:dummy.sh"/>
+        <rule-input name="@bazel_tools//tools/test:tw.exe"/>
+    </rule>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:106:10" name="@bazel_tools//tools/test:test_xml_generator">
+        <string name="name" value="test_xml_generator"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="@bazel_tools//tools/test:generate-xml.sh"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="@bazel_tools//tools/test:generate-xml.sh"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/test/tw.exe:1:1" name="@bazel_tools//tools/test:tw.exe">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/test/xml.exe:1:1" name="@bazel_tools//tools/test:xml.exe">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:148:10" name="@bazel_tools//tools/test:xml_writer">
+        <string name="name" value="xml_writer"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies">
+            <label value="@bazel_tools//src/conditions:windows"/>
+        </list>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="@bazel_tools//tools/test:xml.exe"/>
+            <label value="@bazel_tools//tools/test:dummy.sh"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="@bazel_tools//src/conditions:windows"/>
+        <rule-input name="@bazel_tools//tools/test:dummy.sh"/>
+        <rule-input name="@bazel_tools//tools/test:xml.exe"/>
+    </rule>
+    <rule class="java_binary" location="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:11:12" name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main">
+        <string name="name" value="Main"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value="Main"/>
+        <string name="generator_function" value="java_binary"/>
+        <string name="generator_location" value="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:11:12"/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="args"/>
+        <list name="output_licenses"/>
+        <boolean name="$is_executable" value="true"/>
+        <label name="$java_plugins" value="@bazel_tools//tools/jdk:java_plugins_flag_alias"/>
+        <label name="$java_toolchain" value="@bazel_tools//tools/jdk:current_java_toolchain"/>
+        <boolean name="$use_auto_exec_groups" value="true"/>
+        <list name="srcs"/>
+        <list name="deps"/>
+        <list name="resources"/>
+        <list name="runtime_deps">
+            <label value="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_lib"/>
+        </list>
+        <list name="data"/>
+        <list name="plugins"/>
+        <list name="deploy_env"/>
+        <label name="launcher" value="@bazel_tools//tools/jdk:launcher_flag_alias"/>
+        <label name="bootclasspath"/>
+        <boolean name="neverlink" value="false"/>
+        <list name="javacopts"/>
+        <list name="add_exports"/>
+        <list name="add_opens"/>
+        <string name="main_class" value="com.google.devtools.coverageoutputgenerator.Main"/>
+        <list name="jvm_flags"/>
+        <list name="deploy_manifest_lines"/>
+        <int name="stamp" value="-1"/>
+        <boolean name="use_testrunner" value="false"/>
+        <boolean name="use_launcher" value="true"/>
+        <dict name="env"/>
+        <list name="classpath_resources"/>
+        <list name="licenses"/>
+        <label name="$stub_template" value="@@rules_java+//java/bazel/rules:java_stub_template.txt"/>
+        <label name="$java_toolchain_type" value="@bazel_tools//tools/jdk:toolchain_type"/>
+        <list name="$windows_constraints">
+            <label value="@@platforms//os:windows"/>
+        </list>
+        <label name="$build_info_translator" value="@bazel_tools//tools/build_defs/build_info:java_build_info"/>
+        <boolean name="create_executable" value="true"/>
+        <string name="resource_strip_prefix" value=""/>
+        <label name="$test_support"/>
+        <label name="$launcher" value="@bazel_tools//tools/launcher:launcher"/>
+        <rule-input name="@bazel_tools//tools/build_defs/build_info:java_build_info"/>
+        <rule-input name="@bazel_tools//tools/jdk:current_java_toolchain"/>
+        <rule-input name="@bazel_tools//tools/jdk:java_plugins_flag_alias"/>
+        <rule-input name="@bazel_tools//tools/jdk:launcher_flag_alias"/>
+        <rule-input name="@bazel_tools//tools/jdk:toolchain_type"/>
+        <rule-input name="@bazel_tools//tools/launcher:launcher"/>
+        <rule-input name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_lib"/>
+        <rule-input name="@@platforms//os:windows"/>
+        <rule-input name="@@rules_java+//java/bazel/rules:java_stub_template.txt"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main.jar"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main-src.jar"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main_deploy-src.jar"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main_deploy.jar"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main_deploy.jar.unstripped"/>
+    </rule>
+    <rule class="java_import" location="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:6:12" name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_lib">
+        <string name="name" value="all_lcov_merger_lib"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value="all_lcov_merger_lib"/>
+        <string name="generator_function" value="java_import"/>
+        <string name="generator_location" value="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:6:12"/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="data"/>
+        <list name="deps"/>
+        <list name="exports"/>
+        <list name="runtime_deps"/>
+        <list name="jars">
+            <label value="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_tools_deploy.jar"/>
+        </list>
+        <label name="srcjar"/>
+        <boolean name="neverlink" value="false"/>
+        <list name="constraints"/>
+        <list name="proguard_specs"/>
+        <list name="add_exports"/>
+        <list name="add_opens"/>
+        <list name="licenses"/>
+        <label name="$java_toolchain_type" value="@bazel_tools//tools/jdk:toolchain_type"/>
+        <rule-input name="@bazel_tools//tools/jdk:toolchain_type"/>
+        <rule-input name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_tools_deploy.jar"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/all_lcov_merger_tools_deploy.jar:1:1" name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_tools_deploy.jar">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="alias" location="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:23:6" name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:coverage_report_generator">
+        <string name="name" value="coverage_report_generator"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <label name="actual" value="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main"/>
+        <rule-input name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main"/>
+    </rule>
+    <source-file location="@OB@/external/ext+/lib/d.txt:1:1" name="@ext//lib:d.txt">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/ext+/lib/BUILD:1:10" name="@ext//lib:data">
+        <string name="name" value="data"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="@ext//lib:d.txt"/>
+        </list>
+        <string name="output_group" value=""/>
+        <list name="data"/>
+        <list name="output_licenses"/>
+        <rule-input name="@ext//lib:d.txt"/>
+    </rule>
+    <rule class="constraint_setting" location="@OB@/external/platforms/os/BUILD:14:19" name="@@platforms//os:os">
+        <string name="name" value="os"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="manual"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="$config_dependencies"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NOTICE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <label name="default_constraint_value"/>
+        <label name="refines_constraint_value"/>
+    </rule>
+    <rule class="constraint_value" location="@OB@/external/platforms/os/BUILD:46:17" name="@@platforms//os:windows">
+        <string name="name" value="windows"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="manual"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="$config_dependencies"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NOTICE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <label name="constraint_setting" value="@@platforms//os:os"/>
+        <rule-input name="@@platforms//os:os"/>
+    </rule>
+    <source-file location="@OB@/external/rules_java+/LICENSE:1:1" name="@@rules_java+//:LICENSE">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="_license" location="@OB@/external/rules_java+/BUILD:26:8" name="@@rules_java+//:license">
+        <string name="name" value="license"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value="license"/>
+        <string name="generator_function" value="license"/>
+        <string name="generator_location" value="@OB@/external/rules_java+/BUILD:26:8"/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="license_kinds"/>
+        <string name="copyright_notice" value=""/>
+        <label name="license_text" value="@@rules_java+//:LICENSE"/>
+        <string name="package_name" value="rules_java"/>
+        <string name="package_url" value=""/>
+        <string name="package_version" value=""/>
+        <rule-input name="@@rules_java+//:LICENSE"/>
+    </rule>
+    <source-file location="@OB@/external/rules_java+/java/bazel/rules/java_stub_template.txt:1:1" name="@@rules_java+//java/bazel/rules:java_stub_template.txt">
+        <visibility-label name="@bazel_tools//tools/java:__pkg__"/>
+    </source-file>
+    <rule class="java_toolchain_alias" location="@OB@/external/rules_java+/toolchains/BUILD:97:21" name="@@rules_java+//toolchains:current_java_toolchain">
+        <string name="name" value="current_java_toolchain"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata">
+            <label value="@@rules_java+//:license"/>
+        </list>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <rule-input name="@@rules_java+//:license"/>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/rules_shell+/shell/BUILD:15:15" name="@@rules_shell+//shell:toolchain_type">
+        <string name="name" value="toolchain_type"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <string name="no_match_error" value=""/>
+    </rule>
+    <rule class="alias" location="@OB@/external/rules_shell+/shell/runfiles/BUILD:4:6" name="@@rules_shell+//shell/runfiles:runfiles">
+        <string name="name" value="runfiles"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="target_compatible_with"/>
+        <label name="actual" value="@@rules_shell+//shell/runfiles:runfiles_impl"/>
+        <rule-input name="@@rules_shell+//shell/runfiles:runfiles_impl"/>
+    </rule>
+    <source-file location="@OB@/external/rules_shell+/shell/runfiles/runfiles.bash:1:1" name="@@rules_shell+//shell/runfiles:runfiles.bash">
+        <visibility-label name="@@rules_shell+//tests/runfiles:__pkg__"/>
+    </source-file>
+    <rule class="root_symlinks" location="@OB@/external/rules_shell+/shell/runfiles/BUILD:16:14" name="@@rules_shell+//shell/runfiles:runfiles_at_legacy_location">
+        <string name="name" value="runfiles_at_legacy_location"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:private"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="manual"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <dict name="root_symlinks">
+            <pair>
+                <label value="@@rules_shell+//shell/runfiles:runfiles.bash"/>
+                <string value="bazel_tools/tools/bash/runfiles/runfiles.bash"/>
+            </pair>
+        </dict>
+        <rule-input name="@@rules_shell+//shell/runfiles:runfiles.bash"/>
+    </rule>
+    <rule class="sh_library" location="@OB@/external/rules_shell+/shell/runfiles/BUILD:10:11" name="@@rules_shell+//shell/runfiles:runfiles_impl">
+        <string name="name" value="runfiles_impl"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:private"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="manual"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs"/>
+        <list name="data">
+            <label value="@@rules_shell+//shell/runfiles:runfiles_at_legacy_location"/>
+        </list>
+        <list name="deps"/>
+        <rule-input name="@@rules_shell+//shell/runfiles:runfiles_at_legacy_location"/>
+    </rule>
+</query>

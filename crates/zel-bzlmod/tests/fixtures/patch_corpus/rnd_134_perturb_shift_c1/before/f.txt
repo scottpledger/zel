@@ -1,0 +1,36 @@
+
+y 2
+x 0
+  indent 1
+gamma 3
+delta
+y 0
+x
+}
+y
+x 1
+x 2
+
+}
+	Tab 3
+return 0;
+gamma
+PERTURBED17
+gamma 3
+{ 0
+delta 2
+ 2
+alpha 0
+
+
+return 0; 3
+} 0
+{
+
+x 2
+alpha
+	Tab
+ 3
+}
+eps 0
+beta

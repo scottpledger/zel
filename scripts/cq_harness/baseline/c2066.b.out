@@ -1,0 +1,17 @@
+NoTransition -> //a:tr (2d89340)
+  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 7e2fa55
+  $allowlist_function_transition#@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist#(null transition) -> 
+NoTransition -> //a:lib (7e2fa55)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> //a:srcs_fg (7e2fa55)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+//a:x.txt (null)
+NoTransition -> @ext//lib:data (7e2fa55)
+  srcs#@ext//lib:d.txt#(null transition) -> 
+//a:z.txt (null)
+//a:y.txt (null)
+@ext//lib:d.txt (null)

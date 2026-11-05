@@ -1,0 +1,11 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+WARNING: Build option --include_config_fragments_provider has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+Analyzing: 2 targets (0 packages loaded, 0 targets configured)
+INFO: Analyzed 2 targets (0 packages loaded, 800 targets configured).
+INFO: Found 2 targets...
+ERROR: Invalid output format 'summary'. Valid values are: label_kind, label, transitions, proto, streamed_proto, textproto, jsonproto, build, graph, starlark, files
+INFO: Elapsed time: 0.097s, Critical Path: 0.00s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully

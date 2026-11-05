@@ -1,0 +1,8 @@
+//a:z.txt
+@ext//lib:data
+//a:lib
+//a:srcs_fg
+//a:x.txt
+//a:lib2
+//a:y.txt
+@ext//lib:d.txt

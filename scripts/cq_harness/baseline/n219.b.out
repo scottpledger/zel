@@ -1,0 +1,4 @@
+a/x.txt
+bazel-out/darwin_arm64-opt/bin/a/lib.txt
+a/y.txt
+a/z.txt

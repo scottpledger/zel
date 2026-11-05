@@ -1,0 +1,23 @@
+test //:pass //:fail
+test //:pass //:fail
+test --test_summary=detailed //:pass //:fail
+test --check_tests_up_to_date //:pass //:fail
+test --check_tests_up_to_date //:pass
+test --cache_test_results=no //:pass
+test --test_env=X=1 //:pass
+test --test_arg=a //:pass
+test //:flaky
+test //:flaky
+test --runs_per_test=2 //:pass
+test --runs_per_test=2 //:pass
+test //:pass
+build --nobuild //:pass
+test --nobuild //:pass
+test --test_output=all //:pass //:fail
+test --test_output=errors //:fail
+build //:pass
+test --test_filter=zz //:pass
+test --test_filter=zz //:pass
+test //:man
+test //:suite
+test //:suite

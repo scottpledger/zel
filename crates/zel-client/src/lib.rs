@@ -16,14 +16,17 @@
 //! Mirrors `src/main/cpp/blaze.cc` (workspace discovery, `.bazelrc` loading, server lifecycle,
 //! gRPC `CommandServer` connection, streaming `RunResponse`, and `ExecRequest` execution).
 
-use std::collections::HashSet;
+pub mod bazelisk;
+pub mod daemon_client;
+
+pub use bazelisk::{plan_invocation, BazeliskEnv, LauncherAction, ResolvedVersionSpec, VersionSource};
+
 use std::io::{self, BufReader, BufWriter, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
-use std::thread;
 use std::time::Duration;
-use zel_options::{split_command_line, BazelrcConfig, StartupOptions};
+use zel_options::{discover_and_load_rc_files, split_command_line, StartupOptions};
 use zel_proto::command_server::{PingRequest, PingResponse, RunRequest, RunResponse, ServerInfo};
 use zel_proto::grpc_framing::{read_grpc_frame, write_grpc_frame};
 use zel_server::{
@@ -41,18 +44,24 @@ const WORKSPACE_BOUNDARY_FILES: &[&str] = &[
     "WORKSPACE",
 ];
 
-/// Walks up from `cwd` looking for a Bazel workspace boundary marker file.
-pub fn find_workspace_root(fs: &dyn FileSystem, cwd: &PathFragment) -> PathFragment {
+/// Walks up from `cwd` looking for a Bazel workspace boundary marker file
+/// (`WorkspaceLayout::GetWorkspace`); `None` when the client is outside any workspace.
+pub fn find_workspace_root_opt(fs: &dyn FileSystem, cwd: &PathFragment) -> Option<PathFragment> {
     let mut curr = Some(cwd.clone());
     while let Some(dir) = curr {
         for marker in WORKSPACE_BOUNDARY_FILES {
             if fs.exists(&dir.get_relative_str(marker), true) {
-                return dir;
+                return Some(dir);
             }
         }
         curr = dir.parent_directory();
     }
-    cwd.clone()
+    None
+}
+
+/// Like [`find_workspace_root_opt`] but falls back to `cwd` outside a workspace.
+pub fn find_workspace_root(fs: &dyn FileSystem, cwd: &PathFragment) -> PathFragment {
+    find_workspace_root_opt(fs, cwd).unwrap_or_else(|| cwd.clone())
 }
 
 /// Sends a `PingRequest` to verify if an existing server is alive and matches `request_cookie`.
@@ -146,22 +155,257 @@ pub fn read_existing_server_info(
 }
 
 /// Entrypoint for running a CLI invocation and returning the numeric exit code.
-pub fn execute_cli<O: Write, E: Write>(
+pub fn execute_cli<O: Write + Send, E: Write + Send>(
     raw_args: &[String],
     cwd: &PathFragment,
     fs: Arc<dyn FileSystem>,
     stdout_writer: &mut O,
     stderr_writer: &mut E,
 ) -> i32 {
+    let mut exec_request = None;
+    execute_cli_with_exec(raw_args, cwd, fs, stdout_writer, stderr_writer, &mut exec_request)
+}
+
+/// Directories the client substitutes for `PathToReplace` placeholders in an `ExecRequest`.
+#[derive(Debug, Clone, Default)]
+pub struct ExecPathContext {
+    pub output_base: String,
+    pub workspace_dir: String,
+    pub working_dir: String,
+}
+
+/// An `ExecRequest` together with the directories needed to apply it.
+#[derive(Debug, Clone)]
+pub struct PendingExec {
+    pub request: zel_proto::command_server::ExecRequest,
+    pub paths: ExecPathContext,
+}
+
+fn lossy(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+/// Applies a server `ExecRequest` exactly like the Bazel client: writes `--script_path` scripts
+/// (and returns 0 without running), otherwise substitutes `PathToReplace` placeholders, sets up
+/// the environment, `chdir`s and `exec`s the command (never returns on success on Unix).
+/// Returns an exit code only if the program could not be exec'd or a script was written.
+pub fn perform_exec_request(pending: &PendingExec) -> i32 {
+    use zel_proto::command_server::PathToReplaceType;
+    let req = &pending.request;
+    let replace = |s: &[u8]| -> String {
+        let mut out = lossy(s);
+        for p in &req.path_to_replace {
+            let actual = match p.r#type {
+                PathToReplaceType::OutputBase => &pending.paths.output_base,
+                PathToReplaceType::BuildWorkingDirectory => &pending.paths.working_dir,
+                PathToReplaceType::BuildWorkspaceDirectory => &pending.paths.workspace_dir,
+                _ => continue,
+            };
+            let ph = lossy(&p.value);
+            if !ph.is_empty() {
+                out = out.replace(&ph, actual);
+            }
+        }
+        out
+    };
+    if let Some(sp) = &req.script_path {
+        let path = lossy(&sp.script_path);
+        if let Err(e) = std::fs::write(&path, &sp.script_contents) {
+            eprintln!("ERROR: Could not write script '{path}': {e}");
+            return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
+        }
+        return 0;
+    }
+    if req.argv.is_empty() {
+        eprintln!("ERROR: empty exec request");
+        return ExitCode::BLAZE_INTERNAL_ERROR.numeric_exit_code();
+    }
+    let argv: Vec<String> = req.argv.iter().map(|a| replace(a)).collect();
+    let mut cmd = std::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]);
+    for name in &req.environment_variable_to_clear {
+        cmd.env_remove(lossy(name));
+    }
+    for ev in &req.environment_variable {
+        cmd.env(lossy(&ev.name), replace(&ev.value));
+    }
+    if !req.working_directory.is_empty() {
+        cmd.current_dir(replace(&req.working_directory));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let err = cmd.exec();
+        eprintln!("ERROR: Cannot execute {}: {}", argv[0], err);
+        return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+    }
+    #[cfg(not(unix))]
+    match cmd.status() {
+        Ok(st) => st.code().unwrap_or(1),
+        Err(e) => {
+            eprintln!("ERROR: Cannot execute {}: {}", argv[0], e);
+            ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code()
+        }
+    }
+}
+
+#[cfg(unix)]
+extern "C" {
+    fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
+}
+
+#[cfg(unix)]
+#[repr(C)]
+struct Tm {
+    tm_sec: i32,
+    tm_min: i32,
+    tm_hour: i32,
+    tm_mday: i32,
+    tm_mon: i32,
+    tm_year: i32,
+    tm_wday: i32,
+    tm_yday: i32,
+    tm_isdst: i32,
+    tm_gmtoff: i64,
+    tm_zone: *const u8,
+}
+
+fn client_timestamp() -> String {
+    let now = std::time::SystemTime::now();
+    let since = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = since.as_secs();
+    let millis = since.subsec_millis();
+    #[cfg(unix)]
+    unsafe {
+        let t = secs as i64;
+        let mut tm: Tm = std::mem::zeroed();
+        if !localtime_r(&t, &mut tm).is_null() {
+            return format!("{:02}:{:02}:{:02}.{:03}", tm.tm_hour, tm.tm_min, tm.tm_sec, millis);
+        }
+    }
+    let s = secs % 60;
+    let mi = (secs / 60) % 60;
+    let h = (secs / 3600) % 24;
+    format!("{h:02}:{mi:02}:{s:02}.{millis:03}")
+}
+
+fn fatal_blaze_error(msg: &str) -> String {
+    let clean = if let Some(idx) = msg.find(" :: ") {
+        &msg[idx + 4..]
+    } else {
+        msg.strip_prefix("ERROR: ").unwrap_or(msg)
+    };
+    format!("[FATAL {} src/main/cpp/blaze.cc:1275] {}", client_timestamp(), clean)
+}
+
+/// `OptionProcessor::PrintStartupOptionsProvenanceMessage` /
+/// `BlazeCommandDispatcher`'s "Reading 'startup' options from <rc>: a, b" notes: one per run of
+/// consecutive startup options with the same rc source (command-line ones, whose source is empty
+/// in blaze.cc, are skipped).
+fn startup_provenance_lines(startup: &StartupOptions, sep: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut last_rc = String::new();
+    let mut accumulated: Vec<String> = Vec::new();
+    for o in &startup.raw_tagged_options {
+        let src = String::from_utf8_lossy(&o.source).to_string();
+        if src.is_empty() || src == "command line" {
+            continue;
+        }
+        if !last_rc.is_empty() && src != last_rc {
+            lines.push(format!("INFO: Reading 'startup' options from {last_rc}: {}", accumulated.join(sep)));
+            accumulated.clear();
+        }
+        last_rc = src;
+        accumulated.push(String::from_utf8_lossy(&o.option).to_string());
+    }
+    if !last_rc.is_empty() {
+        lines.push(format!("INFO: Reading 'startup' options from {last_rc}: {}", accumulated.join(sep)));
+    }
+    lines
+}
+
+/// A fatal client error after rc discovery started (`ParseOptionsOrDie`): the startup option
+/// provenance goes to stderr first, then the buffered `BAZEL_LOG(INFO)` lines, then the FATAL line.
+fn fatal_after_rc_parsing(startup: &StartupOptions, msg: &str) -> String {
+    let mut out = String::new();
+    for l in startup_provenance_lines(startup, " ") {
+        out.push_str(&l);
+        out.push('\n');
+    }
+    for (loc, m) in zel_options::rc::take_client_log() {
+        out.push_str(&format!("[INFO {} {loc}] {m}\n", client_timestamp()));
+    }
+    out.push_str(&fatal_blaze_error(msg));
+    out
+}
+
+fn error_option_processor(msg: &str) -> String {
+    format!("[ERROR {} src/main/cpp/option_processor.cc:362] {}", client_timestamp(), msg)
+}
+
+/// Like [`execute_cli`] but surfaces a server `ExecRequest` (as used by `run`) to the caller.
+pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
+    raw_args: &[String],
+    cwd: &PathFragment,
+    fs: Arc<dyn FileSystem>,
+    stdout_writer: &mut O,
+    stderr_writer: &mut E,
+    exec_request: &mut Option<PendingExec>,
+) -> i32 {
     // Internal flag used when spawning the background server process
     if raw_args.first().map(|s| s.as_str()) == Some("--internal_server_daemon") {
         return run_background_daemon(&raw_args[1..]);
     }
 
+    // Built-in Bazelisk behavior: version resolution (`USE_BAZEL_VERSION`, `.bazelversion`),
+    // enforcement and `tools/bazel` wrapper delegation. Only against the host file system.
+    let proc_env = BazeliskEnv::from_process_env();
+    let is_host_fs = proc_env.current_exe.as_ref().is_some_and(|exe| fs.exists(exe, true));
+    let bazelisk_env = if is_host_fs { proc_env } else { BazeliskEnv::default() };
+    {
+        let ws = find_workspace_root(fs.as_ref(), cwd);
+        match bazelisk::plan_invocation(fs.as_ref(), cwd, &ws, raw_args, &bazelisk_env) {
+            Ok(LauncherAction::RunInProcess { spec }) => {
+                if let Some(ref warn) = spec.warn_message {
+                    let _ = writeln!(stderr_writer, "{warn}");
+                }
+            }
+            Ok(LauncherAction::ExecExternal { program, args, env_vars, spec }) => {
+                if let Some(ref warn) = spec.warn_message {
+                    let _ = writeln!(stderr_writer, "{warn}");
+                }
+                return match bazelisk::execute_external_action(
+                    &program,
+                    &args,
+                    &env_vars,
+                    cwd,
+                    bazelisk_env.inherit_stdio,
+                    stdout_writer,
+                    stderr_writer,
+                ) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        let _ = writeln!(stderr_writer, "ERROR: {e}");
+                        ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code()
+                    }
+                };
+            }
+            Err(e) => {
+                let _ = writeln!(stderr_writer, "ERROR: {e}");
+                return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+            }
+        }
+    }
+
     let (mut startup, command, raw_cmd_args) = match split_command_line(raw_args) {
         Ok(res) => res,
         Err(e) => {
-            let _ = writeln!(stderr_writer, "ERROR: {e}");
+            let _ = writeln!(stderr_writer, "{}", fatal_blaze_error(&e.format_bazel_error()));
             return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
         }
     };
@@ -169,62 +413,81 @@ pub fn execute_cli<O: Write, E: Write>(
     // Fast path for `zel --version` / `bazel --version` (does not start server or load rc files)
     if command == "version" && raw_cmd_args.iter().any(|a| a == "--startup_version") {
         let prefix = zel_server::version_product_prefix();
-        let _ = writeln!(stdout_writer, "{prefix} {}", zel_server::build_label());
+        let _ = writeln!(stdout_writer, "{prefix} {}", bazelisk_env.current_version);
         return ExitCode::SUCCESS.numeric_exit_code();
     }
 
-    let workspace_dir = find_workspace_root(fs.as_ref(), cwd);
+    // Outside a workspace the workspace is empty (output base = md5(""), like blaze.cc).
+    let workspace_found = find_workspace_root_opt(fs.as_ref(), cwd);
+    let workspace_dir = workspace_found.clone().unwrap_or_else(|| PathFragment::create(""));
 
-    // Load .zelrc and .bazelrc files unless --ignore_all_rc_files is set
-    let mut rc_config = BazelrcConfig::default();
-    let mut visited_rcs = HashSet::new();
-    if !startup.ignore_all_rc_files {
-        if startup.workspace_rc {
-            for rc_name in [".zelrc", ".bazelrc"] {
-                let ws_rc = workspace_dir.get_relative_str(rc_name);
-                if let Ok(bytes) = fs.read_file(&ws_rc) {
-                    visited_rcs.insert(ws_rc.clone());
-                    let content = String::from_utf8_lossy(&bytes);
-                    let _ = rc_config.parse_str(
-                        &content,
-                        ws_rc.path_string(),
-                        &workspace_dir,
-                        fs.as_ref(),
-                        &mut visited_rcs,
-                    );
-                }
-            }
-        }
-        for custom_rc in startup.bazelrc_files.clone() {
-            if custom_rc == "/dev/null" {
-                continue;
-            }
-            let rc_pf = PathFragment::create(&custom_rc);
-            let full_rc = if rc_pf.is_absolute() {
-                rc_pf
+    let home = std::env::var("HOME").ok();
+    let user = std::env::var("USER").unwrap_or_else(|_| "bazel".to_string());
+
+    // Discover and load rc files in exact Bazel precedence order
+    let rc_config = match discover_and_load_rc_files(
+        &mut startup,
+        workspace_found.as_ref(),
+        home.as_deref(),
+        cwd,
+        fs.as_ref(),
+        &zel_server::build_label(),
+    ) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            // `ParseErrorToExitCode`: unreadable rc files are INTERNAL_ERROR, everything else BAD_ARGV.
+            let code = if e.message.starts_with("Unexpected error reading config file") {
+                ExitCode::BLAZE_INTERNAL_ERROR
             } else {
-                workspace_dir.get_relative(&rc_pf)
+                ExitCode::COMMAND_LINE_ERROR
             };
-            if let Ok(bytes) = fs.read_file(&full_rc) {
-                visited_rcs.insert(full_rc.clone());
-                let content = String::from_utf8_lossy(&bytes);
-                if let Err(e) = rc_config.parse_str(
-                    &content,
-                    full_rc.path_string(),
-                    &workspace_dir,
-                    fs.as_ref(),
-                    &mut visited_rcs,
-                ) {
-                    let _ = writeln!(stderr_writer, "ERROR: {e}");
-                    return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
-                }
+            let msg = e.message.strip_prefix("FATAL: ").unwrap_or(&e.message).to_string();
+            let _ = writeln!(stderr_writer, "{}", fatal_after_rc_parsing(&startup, &msg));
+            return code.numeric_exit_code();
+        }
+    };
+    if let Some(e) = startup.deferred_error.take() {
+        let _ = writeln!(stderr_writer, "{}", fatal_after_rc_parsing(&startup, &e.message));
+        return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
+    }
+
+    if !startup.workspace_rc {
+        if let Some(ref ws) = workspace_found {
+            let rc_file = ws.get_relative_str(".bazelrc");
+            if fs.exists(&rc_file, false) {
+                let real_rc = std::fs::canonicalize(rc_file.path_string()).unwrap_or_else(|_| std::path::PathBuf::from(rc_file.path_string()));
+                let _ = writeln!(
+                    stderr_writer,
+                    "WARNING: The following rc files are no longer being read, please transfer their contents or import their path into one of the standard rc files:\n{}",
+                    real_rc.display()
+                );
             }
         }
-        if let Some(startup_rc_opts) = rc_config.sections.get("startup") {
-            for (flag, src) in startup_rc_opts {
-                let _ = startup.apply_flag(flag, src);
-            }
-        }
+    }
+
+    // Check for explicit empty command string: `zel ''`
+    if command.is_empty() && raw_args.iter().any(|a| a.is_empty()) {
+        let prefix = if startup.product_name.is_empty() { "bazel" } else { &startup.product_name };
+        let _ = writeln!(
+            stderr_writer,
+            "{}",
+            fatal_blaze_error(&format!("Command cannot be the empty string.\n  For more info, run '{prefix} help'."))
+        );
+        return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
+    }
+
+    // Bare `zel` without workspace: Bazel prints error that it must be invoked from within a workspace
+    if command.is_empty() && workspace_found.is_none() {
+        let prefix = if startup.product_name == "bazel" || startup.product_name.is_empty() {
+            "Bazel"
+        } else {
+            &startup.product_name
+        };
+        let _ = writeln!(
+            stderr_writer,
+            "ERROR: {prefix} must be invoked from within a workspace (below a directory having a MODULE.bazel file).\nSee documentation at https://bazel.build/concepts/build-ref#workspace"
+        );
+        return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
     }
 
     let effective_cmd = if command.is_empty() {
@@ -233,32 +496,161 @@ pub fn execute_cli<O: Write, E: Write>(
         command
     };
 
-    let rc_command = if effective_cmd == "canonicalize-flags" {
-        raw_cmd_args
-            .iter()
-            .find_map(|a| a.strip_prefix("--for_command="))
-            .unwrap_or("build")
-    } else {
-        effective_cmd.as_str()
-    };
+    if workspace_found.is_none() {
+        if let Some(spec) = zel_server::commands::command_spec(&effective_cmd) {
+            if spec.must_run_in_workspace {
+                let prefix = if startup.product_name == "bazel" || startup.product_name.is_empty() {
+                    "Bazel"
+                } else {
+                    &startup.product_name
+                };
+                let _ = writeln!(
+                    stderr_writer,
+                    "ERROR: {prefix} '{effective_cmd}' must be invoked from within a workspace (below a directory having a MODULE.bazel file).\nSee documentation at https://bazel.build/concepts/build-ref#workspace"
+                );
+                return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
+            }
+        }
+    }
 
-    let expanded_cmd_args = match rc_config.expand_command_args(rc_command, &raw_cmd_args) {
-        Ok(args) => args,
+    // rc options are structured for the invoked command itself (BlazeOptionHandler), also for
+    // `canonicalize-flags` (whose `--for_command` only affects how the command line is parsed).
+    let rc_command = effective_cmd.as_str();
+
+    let (expanded_cmd_args, rc_diagnostics) = match rc_config.expand_command_args_with_diagnostics(rc_command, &raw_cmd_args) {
+        Ok(res) => res,
         Err(e) => {
             let _ = writeln!(stderr_writer, "ERROR: {e}");
             return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
         }
     };
-
-    let user = std::env::var("USER").unwrap_or_else(|_| "bazel".to_string());
-    let home = std::env::var("HOME").ok();
     let output_user_root = startup.resolve_output_user_root(&user, home.as_deref());
     let output_base = startup.resolve_output_base(&workspace_dir, &user, home.as_deref());
-    let install_base =
-        startup.resolve_install_base("zel-0.0.1-install-key", &user, home.as_deref());
+    let install_md5 = binary_install_md5();
+    let install_base = startup.resolve_install_base(&install_md5, &user, home.as_deref());
 
-    let mut full_argv_bytes = Vec::with_capacity(1 + expanded_cmd_args.len());
+    // `StartupOptions::SanityCheckJavabase` (`--server_javabase`), then `PrepareDirectories`
+    // (`output_user_root`, `output_base`), as the C++ client does before it talks to a server.
+    if let Some(desc) = startup.parsed_options.get("server_javabase") {
+        let jb = desc.raw_values.last().cloned().unwrap_or_default();
+        if !jb.is_empty() {
+            let java = std::path::Path::new(&jb).join("bin/java");
+            let problem = match std::fs::metadata(&java) {
+                Err(_) => Some(format!("Couldn't find java at '{}'.", java.display())),
+                Ok(m) => {
+                    use std::os::unix::fs::PermissionsExt;
+                    if m.is_dir() || m.permissions().mode() & 0o111 == 0 {
+                        Some(format!(
+                            "Java at '{}' exists but is not executable: {}",
+                            java.display(),
+                            daemon_client::errno_string(&std::io::Error::from_raw_os_error(13))
+                        ))
+                    } else {
+                        None
+                    }
+                }
+            };
+            if let Some(p) = problem {
+                let src = if desc.source.is_empty() || desc.source == "command line" {
+                    "on the command line".to_string()
+                } else {
+                    format!("in {}", desc.source)
+                };
+                let _ = writeln!(stderr_writer, "ERROR: {p}");
+                let _ = writeln!(stderr_writer, "ERROR:   The java path was specified by a '--server_javabase' option {src}");
+                return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
+            }
+        }
+    }
+    if let Err(code) = daemon_client::prepare_directories(
+        std::path::Path::new(output_user_root.path_string()),
+        std::path::Path::new(output_base.path_string()),
+        stderr_writer,
+    ) {
+        return code;
+    }
+
+    // `RepositoryOptions`/`BazelRepositoryModule`: the default repo contents cache
+    // (`<output_user_root>/cache/repos/v1/contents`) must not live inside the main repository.
+    if !workspace_dir.path_string().is_empty()
+        && !expanded_cmd_args
+            .iter()
+            .take_while(|a| a.as_str() != "--")
+            .any(|a| a == "--repo_contents_cache" || a.starts_with("--repo_contents_cache="))
+        && !matches!(effective_cmd.as_str(), "help" | "version" | "shutdown" | "clean")
+    {
+        let real = |p: &str| std::fs::canonicalize(p).map(|c| c.display().to_string()).unwrap_or_else(|_| p.to_string());
+        let cache = format!("{}/cache/repos/v1/contents", real(output_user_root.path_string()));
+        let ws = real(workspace_dir.path_string());
+        if cache.starts_with(&format!("{}/", ws.trim_end_matches('/'))) {
+            let _ = writeln!(
+                stderr_writer,
+                "ERROR: The repo contents cache [{cache}] is inside the main repo [{ws}]. This can cause spurious failures. Disable the repo contents cache with `--repo_contents_cache=`, or specify `--repo_contents_cache=<path outside the main repo>`."
+            );
+            return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
+        }
+    }
+
+    // `shutdown` without a live server returns in the client before any option provenance is printed.
+    let shutdown_without_server = effective_cmd == "shutdown"
+        && daemon_client::find_running_server(&std::path::Path::new(output_base.path_string()).join("server")).is_none();
+    // `--announce_rc` is an option of the invoked command: arguments after a `--` terminator are residue
+    // (e.g. the flags `canonicalize-flags` is asked to canonicalize) and never set it.
+    let announce_rc = !shutdown_without_server
+        && expanded_cmd_args
+            .iter()
+            .take_while(|a| a.as_str() != "--")
+            .any(|a| a == "--announce_rc" || a == "--announce_rc=true");
+    if announce_rc {
+        for l in startup_provenance_lines(&startup, ", ") {
+            let _ = writeln!(stderr_writer, "{l}");
+        }
+        // The launcher's own `common` chunk (blaze.cc passes --isatty/--terminal_columns through
+        // `--default_override=0:common=...`, source "client").
+        let _ = writeln!(
+            stderr_writer,
+            "INFO: Options provided by the client:\n  Inherited 'common' options: --isatty={} --terminal_columns={}",
+            if zel_server::sys::is_tty(2) { 1 } else { 0 },
+            zel_server::sys::terminal_columns(2)
+        );
+        for diag in &rc_diagnostics {
+            let _ = writeln!(stderr_writer, "{diag}");
+        }
+    }
+
+    let mut full_argv_bytes = Vec::with_capacity(2 + expanded_cmd_args.len());
     full_argv_bytes.push(effective_cmd.as_bytes().to_vec());
+    // Like Bazel's C++ client, tell the server the directory the client was started in so that
+    // relative target patterns (`:foo`, `...`, `sub/pkg:all`) resolve against it. The flag goes
+    // right after the command name, i.e. before any `--` terminator.
+    if matches!(
+        effective_cmd.as_str(),
+        "build" | "test" | "run" | "coverage" | "query" | "cquery" | "aquery"
+    ) {
+        full_argv_bytes.push(format!("--client_cwd={}", cwd.path_string()).into_bytes());
+    }
+    // Like `OptionProcessor::GetBlazercAndEnvCommandArgs`, pass the client's environment to the
+    // server as `--client_env=NAME=VALUE` arguments (the server needs the *client's* variables for
+    // `--action_env=NAME`, `--test_env=NAME`, `--repo_env=NAME`, `bazel run`, ...; its own
+    // environment is whatever the daemon was started with).
+    if !matches!(effective_cmd.as_str(), "help" | "version" | "shutdown") {
+        let mut env: Vec<(String, String)> = std::env::vars_os()
+            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
+            .collect();
+        env.sort();
+        for (k, v) in env {
+            full_argv_bytes.push(format!("--client_env={k}={v}").into_bytes());
+        }
+    }
+    // Terminal facts for the server-side UI (`--isatty`, `--terminal_columns`), like blaze.cc.
+    // User-supplied values (appended below) win because they come later.
+    if matches!(effective_cmd.as_str(), "build" | "test" | "run" | "coverage") {
+        let tty = zel_server::sys::is_tty(2);
+        full_argv_bytes.push(format!("--isatty={}", if tty { 1 } else { 0 }).into_bytes());
+        full_argv_bytes.push(
+            format!("--terminal_columns={}", zel_server::sys::terminal_columns(2)).into_bytes(),
+        );
+    }
     for a in &expanded_cmd_args {
         full_argv_bytes.push(a.as_bytes().to_vec());
     }
@@ -268,78 +660,69 @@ pub fn execute_cli<O: Write, E: Write>(
         arg: full_argv_bytes,
         block_for_lock: startup.block_for_lock,
         client_description: format!("pid={}", std::process::id()),
-        invocation_policy: String::new(),
+        invocation_policy: startup.invocation_policy.clone(),
         startup_options: startup.raw_tagged_options.clone(),
-        preemptible: false,
+        preemptible: startup_flag(&startup, "preemptible", false),
         command_extensions: Vec::new(),
         quiet: startup.quiet,
-        block_for_lock_timeout_ms: None,
     };
 
-    // If not in batch mode and using LocalFileSystem, check if a server daemon is already running
-    if !startup.batch {
-        if let Some(info) = read_existing_server_info(fs.as_ref(), &output_base) {
-            if ping_server(&info.address, &info.request_cookie, &info.response_cookie) {
-                run_req.cookie = info.request_cookie.clone();
-                if let Ok(resp) = send_run_request(
-                    &info.address,
-                    &run_req,
-                    &info.response_cookie,
-                    stdout_writer,
-                    stderr_writer,
-                ) {
-                    return resp.exit_code;
-                }
-            }
+    if effective_cmd == "shutdown" {
+        let in_ws = find_workspace_root_opt(fs.as_ref(), &cwd).is_some();
+        if !in_ws {
+            let prod = if startup.product_name.is_empty() { "Bazel" } else { &startup.product_name };
+            let _ = writeln!(
+                stderr_writer,
+                "WARNING: Running command \"shutdown\" in batch mode.  Batch mode is triggered\n\
+                 when not running {prod} within a workspace. If you intend to shutdown an\n\
+                 existing {prod} server, run \"{} shutdown\" from the directory where\n\
+                 it was started.",
+                prod.to_ascii_lowercase()
+            );
         }
-
-        // Try starting an in-process or background server over localhost TCP
-        if let Ok(listener) = TcpListener::bind(("127.0.0.1", 0)) {
-            let req_cookie = "cookie-req-zel".to_string();
-            let resp_cookie = "cookie-resp-zel".to_string();
-            run_req.cookie = req_cookie.clone();
-
-            // If we can spawn a detached daemon binary from current_exe, do so; otherwise serve in a thread
-            let addr = listener.local_addr().unwrap().to_string();
-            let dirs = BlazeDirectories {
-                workspace_dir: workspace_dir.clone(),
-                output_base: output_base.clone(),
-                install_base: install_base.clone(),
-                output_user_root: output_user_root.clone(),
-            };
-            let runtime = Arc::new(BlazeRuntime::new(dirs, Arc::clone(&fs), std::process::id()));
-            let rt_clone = Arc::clone(&runtime);
-            let req_c = req_cookie.clone();
-            let resp_c = resp_cookie.clone();
-
-            let server_handle = thread::spawn(move || {
-                // Handle single request in embedded server mode if background daemon isn't detached
-                let _ = serve_command_server(listener, rt_clone, req_c, resp_c);
-            });
-
-            // Wait briefly for server status files and connect
-            for _ in 0..20 {
-                if ping_server(&addr, &req_cookie, &resp_cookie) {
-                    break;
-                }
-                thread::sleep(Duration::from_millis(5));
+        // `blaze.cc`: with no live server the client returns before the command is ever parsed (exit 0, no
+        // message about unrecognized arguments); otherwise the *server* parses the options.
+        let server_dir = std::path::Path::new(output_base.path_string()).join("server");
+        if daemon_client::find_running_server(&server_dir).is_none() {
+            return 0;
+        }
+        let parsed = match zel_options::ParsedCommandOptions::parse_for_command("shutdown", &expanded_cmd_args) {
+            Ok(p) => p,
+            Err(e) => {
+                let _ = writeln!(stderr_writer, "{}", e.format_bazel_error());
+                return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
             }
-
-            if let Ok(resp) =
-                send_run_request(&addr, &run_req, &resp_cookie, stdout_writer, stderr_writer)
-            {
-                // Signal shutdown for the embedded single-shot server thread
-                runtime
-                    .shutdown_requested
-                    .store(true, std::sync::atomic::Ordering::SeqCst);
-                let _ = TcpStream::connect(&addr);
-                let _ = server_handle.join();
-                return resp.exit_code;
-            }
+        };
+        if !parsed.targets.is_empty() {
+            let _ = writeln!(stderr_writer, "ERROR: Unrecognized arguments: {}", parsed.targets.join(" "));
+            return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
         }
     }
 
+    // Persistent server mode (default): lock, find / (re)start the daemon, stream the command.
+    if !startup.batch && std::path::Path::new(cwd.path_string()).is_dir() {
+        let paths = ExecPathContext {
+            output_base: output_base.path_string().to_string(),
+            workspace_dir: workspace_dir.path_string().to_string(),
+            working_dir: cwd.path_string().to_string(),
+        };
+        return run_with_daemon(
+            &startup,
+            run_req,
+            paths,
+            output_user_root.path_string(),
+            stdout_writer,
+            stderr_writer,
+            exec_request,
+        );
+    }
+
     // Fallback / `--batch` mode execution
+    let paths = ExecPathContext {
+        output_base: output_base.path_string().to_string(),
+        workspace_dir: workspace_dir.path_string().to_string(),
+        working_dir: cwd.path_string().to_string(),
+    };
     let dirs = BlazeDirectories {
         workspace_dir,
         output_base,
@@ -350,6 +733,176 @@ pub fn execute_cli<O: Write, E: Write>(
     let resp = runtime.dispatch_command(&run_req, "batch-cookie");
     let _ = stdout_writer.write_all(&resp.standard_output);
     let _ = stderr_writer.write_all(&resp.standard_error);
+    *exec_request = resp.exec_request.clone().map(|request| PendingExec { request, paths });
+    resp.exit_code
+}
+
+/// Digest of the running binary (`install_md5`): the install base is derived from it so that a
+/// new binary never reuses (or talks to a server of) an older installation.
+pub fn binary_install_md5() -> String {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            if let Ok(v) = std::env::var("ZEL_INSTALL_MD5_OVERRIDE") {
+                return v;
+            }
+            let Ok(exe) = std::env::current_exe() else {
+                return zel_util::md5::hex_digest(zel_server::build_label().as_bytes());
+            };
+            // Memoize the (slow-in-debug) content digest keyed by path, size and mtime.
+            let meta = std::fs::metadata(&exe).ok();
+            let key = meta.as_ref().map(|m| {
+                let mtime = m
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0);
+                zel_util::md5::hex_digest(
+                    format!("{}|{}|{}", exe.display(), m.len(), mtime).as_bytes(),
+                )
+            });
+            let cache_dir = std::env::temp_dir()
+                .join(format!("zel-install-md5-{}", std::env::var("USER").unwrap_or_default()));
+            if let Some(k) = &key {
+                if let Ok(v) = std::fs::read_to_string(cache_dir.join(k)) {
+                    if v.len() == 32 {
+                        return v;
+                    }
+                }
+            }
+            let digest = match std::fs::read(&exe) {
+                Ok(bytes) => zel_util::md5::hex_digest(&bytes),
+                Err(_) => zel_util::md5::hex_digest(zel_server::build_label().as_bytes()),
+            };
+            if let Some(k) = &key {
+                let _ = std::fs::create_dir_all(&cache_dir);
+                let _ = std::fs::write(cache_dir.join(k), &digest);
+            }
+            digest
+        })
+        .clone()
+}
+
+#[allow(clippy::too_many_arguments)]
+/// The effective boolean value of a startup option (`--flag`, `--noflag`, `--flag=false`).
+pub fn startup_flag(startup: &StartupOptions, name: &str, default: bool) -> bool {
+    startup
+        .parsed_options
+        .get(name)
+        .and_then(|d| d.raw_values.last())
+        .map(|v| !matches!(v.as_str(), "false" | "0" | "no"))
+        .unwrap_or(default)
+}
+
+/// `--failure_detail_out`: writes the serialized `FailureDetail` of a failed command.
+fn write_failure_detail(startup: &StartupOptions, detail: Option<&zel_proto::failure_details::FailureDetail>) {
+    let Some(d) = startup.parsed_options.get("failure_detail_out").and_then(|d| d.raw_values.last()) else {
+        return;
+    };
+    if d.is_empty() {
+        return;
+    }
+    if let Some(detail) = detail {
+        let _ = std::fs::write(d, detail.encode_to_vec());
+    }
+}
+
+fn run_with_daemon<O: Write, E: Write>(
+    startup: &StartupOptions,
+    run_req: RunRequest,
+    paths: ExecPathContext,
+    output_user_root: &str,
+    stdout_writer: &mut O,
+    stderr_writer: &mut E,
+    exec_request: &mut Option<PendingExec>,
+) -> i32 {
+    let install_md5 = binary_install_md5();
+    let user = std::env::var("USER").unwrap_or_else(|_| "bazel".to_string());
+    let home = std::env::var("HOME").ok();
+    let install_base = startup.resolve_install_base(&install_md5, &user, home.as_deref());
+    let exe = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = writeln!(stderr_writer, "ERROR: cannot determine own path: {e}");
+            return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+        }
+    };
+    let spec = daemon_client::ServerSpec {
+        exe,
+        startup,
+        workspace_dir: &paths.workspace_dir,
+        output_base: &paths.output_base,
+        install_base: install_base.path_string(),
+        output_user_root,
+        install_md5: &install_md5,
+    };
+    let debug = startup_flag(startup, "client_debug", false);
+    // `--lock_install_base`: a shared lock on `<install_base>.lock` while the install is in use.
+    let _install_lock = if startup_flag(startup, "lock_install_base", true) {
+        match daemon_client::acquire_install_base_lock(install_base.path_string()) {
+            Ok(l) => l,
+            Err(e) => {
+                let _ = writeln!(stderr_writer, "FATAL: open failed for install base lock: {}", daemon_client::errno_string(&e));
+                return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+            }
+        }
+    } else {
+        None
+    };
+    let lock = match daemon_client::acquire_output_base_lock(
+        std::path::Path::new(&paths.output_base),
+        startup.block_for_lock,
+        stderr_writer,
+    ) {
+        Ok(l) => l,
+        Err(code) => return code,
+    };
+    let server = match daemon_client::connect_or_start(&spec, stderr_writer) {
+        Ok(s) => s,
+        Err((code, msg)) => {
+            let _ = writeln!(stderr_writer, "FATAL: {msg}");
+            return code;
+        }
+    };
+    drop(lock);
+    if debug {
+        let _ = writeln!(
+            stderr_writer,
+            "INFO: connected to server pid={} at {}",
+            server.info.pid, server.info.address
+        );
+    }
+    daemon_client::set_product_name(&{
+        let mut n = startup.product_name.clone();
+        if let Some(c) = n.get_mut(0..1) {
+            c.make_ascii_uppercase();
+        }
+        n
+    });
+    let outcome = daemon_client::run_command(
+        &server.info,
+        &run_req,
+        stdout_writer,
+        stderr_writer,
+        spec.connect_timeout(),
+    );
+    if let Some(status) = outcome.abrupt {
+        let _ = writeln!(
+            stderr_writer,
+            "Server terminated abruptly (error code: {}, error message: '{}', log file: '{}')\n",
+            status.code,
+            status.message,
+            spec.jvm_out().display()
+        );
+        return ExitCode::BLAZE_INTERNAL_ERROR.numeric_exit_code();
+    }
+    let resp = outcome.response;
+    write_failure_detail(startup, resp.failure_detail.as_ref());
+    if resp.termination_expected {
+        daemon_client::await_server_exit(&spec.server_dir(), server.info.pid);
+    }
+    *exec_request = resp.exec_request.clone().map(|request| PendingExec { request, paths });
     resp.exit_code
 }
 
@@ -358,9 +911,15 @@ fn run_background_daemon(args: &[String]) -> i32 {
     let mut output_base = PathFragment::create("/tmp/zel-ob");
     let mut install_base = PathFragment::create("/tmp/zel-ib");
     let mut output_user_root = PathFragment::create("/tmp/zel-root");
-    let mut request_cookie = "cookie-req".to_string();
-    let mut response_cookie = "cookie-resp".to_string();
-
+    let mut cfg = zel_server::daemon::DaemonConfig {
+        request_cookie: "cookie-req".to_string(),
+        response_cookie: "cookie-resp".to_string(),
+        max_idle_secs: 3 * 3600,
+        shutdown_on_low_sys_mem: false,
+        idle_server_tasks: true,
+    };
+    let mut command_port: u16 = 0;
+    let truthy = |v: &str| !matches!(v, "false" | "0" | "no");
     for arg in args {
         if let Some(v) = arg.strip_prefix("--workspace_directory=") {
             workspace_dir = PathFragment::create(v);
@@ -371,20 +930,47 @@ fn run_background_daemon(args: &[String]) -> i32 {
         } else if let Some(v) = arg.strip_prefix("--output_user_root=") {
             output_user_root = PathFragment::create(v);
         } else if let Some(v) = arg.strip_prefix("--request_cookie=") {
-            request_cookie = v.to_string();
+            cfg.request_cookie = v.to_string();
         } else if let Some(v) = arg.strip_prefix("--response_cookie=") {
-            response_cookie = v.to_string();
+            cfg.response_cookie = v.to_string();
+        } else if let Some(v) = arg.strip_prefix("--max_idle_secs=") {
+            cfg.max_idle_secs = v.parse().unwrap_or(cfg.max_idle_secs);
+        } else if let Some(v) = arg.strip_prefix("--command_port=") {
+            command_port = v.parse().unwrap_or(0);
+        } else if let Some(v) = arg.strip_prefix("--shutdown_on_low_sys_mem=") {
+            cfg.shutdown_on_low_sys_mem = truthy(v);
+        } else if let Some(v) = arg.strip_prefix("--idle_server_tasks=") {
+            cfg.idle_server_tasks = truthy(v);
+        } else if let Some(v) = arg.strip_prefix("--unlimit_coredumps=") {
+            if truthy(v) {
+                zel_server::sys::unlimit_coredumps();
+            }
+        } else if let Some(v) = arg.strip_prefix("--macos_qos_class=") {
+            zel_server::sys::set_macos_qos_class(v);
+        } else if let Some(v) = arg.strip_prefix("--batch_cpu_scheduling=") {
+            if truthy(v) {
+                zel_server::sys::set_batch_cpu_scheduling();
+            }
+        } else if let Some(v) = arg.strip_prefix("--io_nice_level=") {
+            zel_server::sys::set_io_nice_level(v.parse().unwrap_or(-1));
+        } else if let Some(v) = arg.strip_prefix("--product_name=") {
+            zel_server::commands::set_product_name(&v.to_ascii_lowercase());
+        } else if let Some(v) = arg.strip_prefix("--install_md5=") {
+            zel_server::commands::set_install_md5(v);
         }
     }
 
-    let Ok(listener) = TcpListener::bind(("127.0.0.1", 0)) else {
+    let Ok(listener) = TcpListener::bind(("127.0.0.1", command_port)) else {
         return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
     };
     let runtime =
         create_default_runtime(workspace_dir, output_base, install_base, output_user_root);
-    match serve_command_server(listener, runtime, request_cookie, response_cookie) {
+    match zel_server::daemon::serve_grpc(listener, runtime, cfg) {
         Ok(()) => 0,
-        Err(_) => ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code(),
+        Err(e) => {
+            eprintln!("FATAL: server failed: {e}");
+            ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code()
+        }
     }
 }
 
@@ -437,7 +1023,7 @@ mod tests {
         fs.create_directory_and_parents(&pkg).unwrap();
         fs.write_file(
             &pkg.get_relative_str("BUILD.bazel"),
-            b"cc_binary(name = \"hello\", srcs = [\"hello.cc\"])\n",
+            b"filegroup(name = \"hello\", srcs = [\"hello.cc\"])\n",
         )
         .unwrap();
 
@@ -452,15 +1038,16 @@ mod tests {
             &mut err,
         );
         assert_eq!(code, 0);
-        assert!(String::from_utf8_lossy(&out).contains("Build label: 0.0.1"));
+        assert!(String::from_utf8_lossy(&out).contains("Build label: 9.3.2"));
 
-        // 2. Test `bazel canonicalize-flags --config=opt`
+        // 2. Test `bazel canonicalize-flags -- --config=opt`
         out.clear();
         err.clear();
         let code = execute_cli(
             &[
                 "--batch".to_string(),
                 "canonicalize-flags".to_string(),
+                "--".to_string(),
                 "--config=opt".to_string(),
             ],
             &ws,
@@ -471,7 +1058,7 @@ mod tests {
         assert_eq!(code, 0);
         assert_eq!(
             String::from_utf8_lossy(&out).trim(),
-            "--compilation_mode=opt"
+            "--config=opt"
         );
 
         // 3. Test `bazel query //app/...`
@@ -488,7 +1075,7 @@ mod tests {
             &mut out,
             &mut err,
         );
-        assert_eq!(code, 0);
+        assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
         assert_eq!(String::from_utf8_lossy(&out).trim(), "//app:hello");
     }
 }

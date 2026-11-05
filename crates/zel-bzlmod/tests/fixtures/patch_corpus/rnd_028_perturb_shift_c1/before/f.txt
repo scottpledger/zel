@@ -1,0 +1,23 @@
+{ 2
+x
+  indent 1
+y 2
+alpha 2
+ 3
+x 1
+PERTURBED7
+y 2
+gamma
+x
+eps 1
+y
+alpha 0
+return 0; 3
+{ 2
+x 2
+x 2
+gamma
+x 0
+x 1
+y 1
+delta

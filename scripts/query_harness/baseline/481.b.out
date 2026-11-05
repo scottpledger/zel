@@ -1,0 +1,4 @@
+catrule rule //a:lib
+filegroup rule //a:sel
+filegroup rule //a:sm_fg
+filegroup rule //a:srcs_fg

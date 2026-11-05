@@ -1,0 +1,21 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //:all_tests (0 packages loaded, 0 targets configured)
+ERROR: @WS@/BUILD:4:11: in test_suite rule //:all_tests: Visibility error:
+target '//b:t1' is not visible from
+target '//:all_tests'
+Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
+ERROR: @WS@/BUILD:4:11: in test_suite rule //:all_tests: Visibility error:
+target '//b:t2' is not visible from
+target '//:all_tests'
+Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
+ERROR: @WS@/BUILD:4:11: Analysis of target '//:all_tests' (config: 1a589d1) failed
+WARNING: errors encountered while analyzing target '//:all_tests', it will not be built.
+INFO: Analyzed target //:all_tests (0 packages loaded, 0 targets configured).
+INFO: Found 0 targets...
+INFO: Empty query results
+ERROR: command succeeded, but not all targets were analyzed
+INFO: Elapsed time: 0.059s, Critical Path: 0.00s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully

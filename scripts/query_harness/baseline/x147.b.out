@@ -1,0 +1,6 @@
+test_suite rule //:all_tests
+alias rule //:top_alias
+catrule rule //a:lib
+catrule rule //a:lib2
+trule rule //a:tr
+x_test rule //b:t1

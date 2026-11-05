@@ -1,0 +1,11 @@
+y
+y
+gamma 0
+delta 3
+  indent 3
+
+
+eps 2
+x 0
+delta
+alpha

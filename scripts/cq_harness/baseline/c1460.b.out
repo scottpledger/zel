@@ -1,0 +1,56 @@
+# @OB@/external/ext+/lib/BUILD:2:8
+genrule(
+  name = "gen",
+  visibility = ["//visibility:public"],
+  outs = ["@ext//lib:g.out"],
+  cmd = "echo ext > $@",
+)
+# Rule gen instantiated at (most recent call last):
+#   @OB@/external/ext+/lib/BUILD:2:8 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/BUILD:5:6
+alias(
+  name = "host_platform",
+  actual = "@@platforms//host:host",
+)
+# Rule host_platform instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/BUILD:5:6 in <toplevel>
+
+# @OB@/external/platforms/host/BUILD:14:9
+platform(
+  name = "host",
+  constraint_values = ["@@platforms//cpu:aarch64", "@@platforms//os:osx"],
+)
+# Rule host instantiated at (most recent call last):
+#   @OB@/external/platforms/host/BUILD:14:9 in <toplevel>
+
+# @OB@/external/platforms/cpu/BUILD:57:17
+constraint_value(
+  name = "aarch64",
+  constraint_setting = "@@platforms//cpu:cpu",
+)
+# Rule aarch64 instantiated at (most recent call last):
+#   @OB@/external/platforms/cpu/BUILD:57:17 in <toplevel>
+
+# @OB@/external/platforms/os/BUILD:71:17
+constraint_value(
+  name = "osx",
+  constraint_setting = "@@platforms//os:os",
+)
+# Rule osx instantiated at (most recent call last):
+#   @OB@/external/platforms/os/BUILD:71:17 in <toplevel>
+
+# @OB@/external/platforms/cpu/BUILD:14:19
+constraint_setting(
+  name = "cpu",
+)
+# Rule cpu instantiated at (most recent call last):
+#   @OB@/external/platforms/cpu/BUILD:14:19 in <toplevel>
+
+# @OB@/external/platforms/os/BUILD:14:19
+constraint_setting(
+  name = "os",
+)
+# Rule os instantiated at (most recent call last):
+#   @OB@/external/platforms/os/BUILD:14:19 in <toplevel>
+

@@ -1,0 +1,18 @@
+
+alpha 1
+eps
+delta 2
+ 1
+x 1
+ 2
+	Tab 3
+alpha 0
+eps
+	Tab 2
+delta
+eps
+y 1
+	Tab 1
+  indent 3
+}
+{ 2

@@ -1,0 +1,17 @@
+10 total actions.
+
+Mnemonics:
+  SymlinkTree: 1
+  TestRunner: 1
+  SourceSymlinkManifest: 1
+  RepoMappingManifest: 1
+  FileWrite: 1
+  RunfilesTree: 1
+  CatIt: 4
+
+Configurations:
+  darwin_arm64-opt: 1
+  darwin_arm64-fastbuild: 9
+
+Execution Platforms:
+  @@platforms//host:host: 10

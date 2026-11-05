@@ -1,0 +1,38 @@
+gamma
+x
+eps
+x
+gamma 0
+eps 0
+gamma 1
+}
+delta 1
+y 1
+{ 0
+gamma 2
+delta
+beta 2
+  indent 2
+{
+{
+}
+beta
+gamma
+x
+eps
+x
+gamma 0
+eps 0
+gamma 1
+}
+delta 1
+y 1
+{ 0
+gamma 2
+delta
+beta 2
+  indent 2
+{
+{
+}
+beta

@@ -1,0 +1,10 @@
+digraph mygraph {
+  node [shape=box];
+  "//d:ok (2d89340)\n//pg:viol (2d89340)"
+  "//d:ok (2d89340)\n//pg:viol (2d89340)" -> "//c:cdata (2d89340)"
+  "//b:t2 (1a589d1)"
+  "//b:t2 (1a589d1)" -> "//b:shlib (2d89340)"
+  "//b:shlib (2d89340)"
+  "//b:shlib (2d89340)" -> "//c:cdata (2d89340)"
+  "//c:cdata (2d89340)"
+}

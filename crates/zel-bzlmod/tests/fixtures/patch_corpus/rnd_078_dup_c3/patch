@@ -1,0 +1,13 @@
+--- a/f.txt
++++ b/f.txt
+@@ -1,8 +1,9 @@
+ delta 0
+ 	Tab
++y 2
+ gamma 1
+ y
+-  indent 2
++NEW   indent 2
+ delta 1
+ alpha
+ {

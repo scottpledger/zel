@@ -1,0 +1,4 @@
+
+RN
+//:all_tests
+test_suite"@WS@/BUILD:4:11*//b:t1*//b:t2

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "3789193790fb",
+ "classified_as": "STRICT",
+ "cmd": "query 'rdeps(//...,//a:x.txt)' --nokeep_going",
+ "distinct": 1,
+ "harness": "query",
+ "hashes": [
+  "ed593d08fe65651e",
+  "ed593d08fe65651e",
+  "ed593d08fe65651e",
+  "ed593d08fe65651e",
+  "ed593d08fe65651e",
+  "ed593d08fe65651e"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nERROR: Error evaluating '//...': error loading package 'e': Package 'e' contains errors\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nERROR: Error evaluating '//...': error loading package 'e': Package 'e' contains errors\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nERROR: Error evaluating '//...': error loading package 'e': Package 'e' contains errors\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nERROR: Error evaluating '//...': error loading package 'e': Package 'e' contains errors\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nERROR: Error evaluating '//...': error loading package 'e': Package 'e' contains errors\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nERROR: Error evaluating '//...': error loading package 'e': Package 'e' contains errors\n",
+   "out": "",
+   "rc": 7
+  }
+ ],
+ "workspace": "wsbroken"
+}

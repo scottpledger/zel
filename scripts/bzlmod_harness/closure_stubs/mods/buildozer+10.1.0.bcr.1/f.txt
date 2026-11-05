@@ -1,0 +1,1 @@
+buildozer10.1.0.bcr.1

@@ -1,0 +1,21 @@
+:
+x_test//b:t1*jdarwin_arm64-fastbuilddarwin_arm64"@1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607B	bazel-outBdarwin_arm64-fastbuildB	binBbBt1
+q@c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"	FileWrite(Jhr@@platforms//host:host�Bt1.repo_mapping
+x@04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d"RepoMappingManifest(Jhr@@platforms//host:hostBt1.runfiles_manifest
+z@90c8b3aa7491a9cbc9a8fdb93abdf414e57af43f502b0a2736b23aafe1610d09"SourceSymlinkManifest(Jhr@@platforms//host:host"B	t1.runfilesBMANIFEST	
+s@eb5b1f1043d720c80c979549cf31d8565b99bf09999edd7a70cc6ad70cbcb7fb"SymlinkTree(BJhr@@platforms//host:hostBaB
+lib2.txt
+
+""	
+	t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:hostBexternalBbazel_toolsBtoolsB
+testBtest-setup.sh
+Bgenerate-xml.sh
+"BtestlogsBbBt1Btest.log
+	Btest.xml
+
+Btest.cache_status
+Btest.outputs
+�@205428c674ece34895c9d37069735603ac04f06cc7f559f119763b18bb7e84d8"
+TestRunner(2-external/bazel_tools/tools/test/test-setup.sh2b/t1:$
+PATH/bin:/usr/bin:/usr/local/binBJ	
+h	r@@platforms//host:host

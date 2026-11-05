@@ -1,0 +1,32 @@
+x 3
+return 0;
+ 3
+eps 3
+x 2
+} 3
+alpha
+alpha 0
+	Tab 3
+x
+
+delta
+y 3
+{ 2
+eps 1
+delta 2
+x 3
+return 0;
+ 3
+eps 3
+x 2
+} 3
+alpha
+alpha 0
+	Tab 3
+x
+
+delta
+y 3
+{ 2
+eps 1
+delta 2

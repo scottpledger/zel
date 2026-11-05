@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "bc81ad39aba5",
+ "classified_as": "UNCLASSIFIED",
+ "cmd": "coverage --test_output=all //:t_out",
+ "distinct": 3,
+ "harness": "build",
+ "hashes": [
+  "280c88ab5e341677",
+  "5c154d761968c6f2",
+  "5c154d761968c6f2",
+  "5c154d761968c6f2",
+  "26b65dfb3e1e3f48",
+  "26b65dfb3e1e3f48"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out:\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "==================== Test output for //:t_out:\nline1\nline2\nline3\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\n================================================================================\n//:t_out                                                                 PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out:\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "==================== Test output for //:t_out:\nline1\nline2\nline3\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\n================================================================================\n//:t_out                                                                 PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out:\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "==================== Test output for //:t_out:\nline1\nline2\nline3\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\n================================================================================\n//:t_out                                                                 PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out:\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "==================== Test output for //:t_out:\nline1\nline2\nline3\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\n================================================================================\n//:t_out                                                                 PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out:\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "==================== Test output for //:t_out:\nline1\nline2\nline3\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\n================================================================================\n//:t_out                                                                 PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out:\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "==================== Test output for //:t_out:\nline1\nline2\nline3\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\n================================================================================\n//:t_out                                                                 PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

@@ -1,0 +1,1012 @@
+rule_classes {
+id: 1
+name: "genrule"
+}
+targets {
+id: 1
+label: "//a:gg"
+rule_class_id: 1
+}
+configuration {
+id: 1
+mnemonic: "darwin_arm64-fastbuild"
+platform_name: "darwin_arm64"
+checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+}
+path_fragments {
+id: 2
+label: "a"
+}
+path_fragments {
+id: 1
+label: "z.txt"
+parent_id: 2
+}
+artifacts {
+id: 1
+path_fragment_id: 1
+}
+path_fragments {
+id: 6
+label: "external"
+}
+path_fragments {
+id: 5
+label: "ext+"
+parent_id: 6
+}
+path_fragments {
+id: 4
+label: "lib"
+parent_id: 5
+}
+path_fragments {
+id: 3
+label: "d.txt"
+parent_id: 4
+}
+artifacts {
+id: 2
+path_fragment_id: 3
+}
+dep_set_of_files {
+id: 2
+direct_artifact_ids: 1
+direct_artifact_ids: 2
+}
+path_fragments {
+id: 11
+label: "bazel-out"
+}
+path_fragments {
+id: 10
+label: "darwin_arm64-opt-exec"
+parent_id: 11
+}
+path_fragments {
+id: 9
+label: "bin"
+parent_id: 10
+}
+path_fragments {
+id: 8
+label: "b"
+parent_id: 9
+}
+path_fragments {
+id: 7
+label: "tool"
+parent_id: 8
+}
+artifacts {
+id: 3
+path_fragment_id: 7
+}
+path_fragments {
+id: 12
+label: "tool.runfiles"
+parent_id: 8
+}
+targets {
+id: 4
+label: "//a:lm"
+rule_class_id: 1
+}
+path_fragments {
+id: 16
+label: "bazel_tools"
+parent_id: 6
+}
+path_fragments {
+id: 15
+label: "tools"
+parent_id: 16
+}
+path_fragments {
+id: 14
+label: "genrule"
+parent_id: 15
+}
+path_fragments {
+id: 13
+label: "genrule-setup.sh"
+parent_id: 14
+}
+artifacts {
+id: 5
+path_fragment_id: 13
+}
+dep_set_of_files {
+id: 4
+direct_artifact_ids: 5
+}
+path_fragments {
+id: 20
+label: "darwin_arm64-fastbuild"
+parent_id: 11
+}
+path_fragments {
+id: 19
+label: "bin"
+parent_id: 20
+}
+artifacts {
+id: 4
+path_fragment_id: 12
+}
+dep_set_of_files {
+id: 3
+direct_artifact_ids: 3
+direct_artifact_ids: 4
+}
+dep_set_of_files {
+id: 1
+transitive_dep_set_ids: 2
+transitive_dep_set_ids: 3
+direct_artifact_ids: 5
+}
+path_fragments {
+id: 21
+label: "gg.out"
+parent_id: 18
+}
+artifacts {
+id: 7
+path_fragment_id: 21
+}
+actions {
+target_id: 1
+action_key: "2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542"
+mnemonic: "Genrule"
+configuration_id: 1
+arguments: "/bin/bash"
+arguments: "-c"
+arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out"
+environment_variables {
+  key: "PATH"
+  value: "/bin:/usr/bin:/usr/local/bin"
+}
+input_dep_set_ids: 1
+output_ids: 7
+primary_output_id: 7
+execution_platform: "@@platforms//host:host"
+}
+targets {
+id: 5
+label: "//a:sm_cat"
+rule_class_id: 2
+}
+path_fragments {
+id: 22
+label: "x.txt"
+parent_id: 2
+}
+artifacts {
+id: 8
+path_fragment_id: 22
+}
+path_fragments {
+id: 23
+label: "y.txt"
+parent_id: 2
+}
+artifacts {
+id: 9
+path_fragment_id: 23
+}
+dep_set_of_files {
+id: 6
+direct_artifact_ids: 8
+direct_artifact_ids: 9
+}
+path_fragments {
+id: 24
+label: "sm_cat.txt"
+parent_id: 18
+}
+artifacts {
+id: 10
+path_fragment_id: 24
+}
+dep_set_of_files {
+id: 5
+direct_artifact_ids: 8
+direct_artifact_ids: 9
+direct_artifact_ids: 1
+direct_artifact_ids: 2
+}
+targets {
+id: 6
+label: "//b:mk"
+rule_class_id: 1
+}
+path_fragments {
+id: 27
+label: "b"
+parent_id: 19
+}
+path_fragments {
+id: 26
+label: "mk.txt"
+parent_id: 27
+}
+targets {
+id: 3
+label: "//a:lib"
+rule_class_id: 2
+}
+path_fragments {
+id: 18
+label: "a"
+parent_id: 19
+}
+path_fragments {
+id: 17
+label: "lm.o"
+parent_id: 18
+}
+artifacts {
+id: 6
+path_fragment_id: 17
+}
+configuration {
+id: 2
+mnemonic: "darwin_arm64-opt"
+platform_name: "darwin_arm64"
+checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+}
+artifacts {
+id: 12
+path_fragment_id: 26
+}
+dep_set_of_files {
+id: 7
+direct_artifact_ids: 8
+direct_artifact_ids: 9
+direct_artifact_ids: 1
+direct_artifact_ids: 2
+}
+actions {
+target_id: 6
+action_key: "fb33f4e7f919d9b54fa182ce1c4972e842fef8f9c073e487174dcd238a9dc278"
+mnemonic: "Genrule"
+configuration_id: 1
+arguments: "/bin/bash"
+arguments: "-c"
+arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo hi > bazel-out/darwin_arm64-fastbuild/bin/b/mk.txt"
+environment_variables {
+  key: "PATH"
+  value: "/bin:/usr/bin:/usr/local/bin"
+}
+input_dep_set_ids: 4
+output_ids: 12
+primary_output_id: 12
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 31
+label: "darwin_arm64-opt"
+parent_id: 11
+}
+path_fragments {
+id: 30
+label: "bin"
+parent_id: 31
+}
+path_fragments {
+id: 29
+label: "a"
+parent_id: 30
+}
+path_fragments {
+id: 28
+label: "lib.txt"
+parent_id: 29
+}
+artifacts {
+id: 13
+path_fragment_id: 28
+}
+actions {
+target_id: 3
+action_key: "e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329"
+mnemonic: "CatIt"
+configuration_id: 2
+arguments: "/bin/bash"
+arguments: "-c"
+arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txt"
+input_dep_set_ids: 7
+output_ids: 13
+primary_output_id: 13
+execution_platform: "@@platforms//host:host"
+}
+targets {
+id: 9
+label: "//b:t2"
+rule_class_id: 3
+}
+rule_classes {
+id: 4
+name: "xbin"
+}
+targets {
+id: 8
+label: "//b:tool"
+rule_class_id: 4
+}
+rule_classes {
+id: 2
+name: "catrule"
+}
+targets {
+id: 2
+label: "//a:lib2"
+rule_class_id: 2
+}
+path_fragments {
+id: 32
+label: "tool"
+parent_id: 27
+}
+artifacts {
+id: 14
+path_fragment_id: 32
+}
+actions {
+target_id: 8
+action_key: "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"
+mnemonic: "FileWrite"
+configuration_id: 1
+output_ids: 14
+primary_output_id: 14
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+dep_set_of_files {
+id: 8
+direct_artifact_ids: 11
+direct_artifact_ids: 9
+}
+path_fragments {
+id: 33
+label: "lib2.txt"
+parent_id: 18
+}
+artifacts {
+id: 15
+path_fragment_id: 33
+}
+actions {
+target_id: 2
+action_key: "c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69"
+mnemonic: "CatIt"
+configuration_id: 1
+arguments: "/bin/bash"
+arguments: "-c"
+arguments: "cat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt"
+input_dep_set_ids: 8
+output_ids: 15
+primary_output_id: 15
+execution_platform: "@@platforms//host:host"
+}
+configuration {
+id: 3
+mnemonic: "darwin_arm64-fastbuild"
+platform_name: "darwin_arm64"
+checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+}
+configuration {
+id: 4
+mnemonic: "darwin_arm64-opt-exec"
+platform_name: "darwin_arm64"
+checksum: "77e8473c8c1c4b4ef1825b4b7ffc50dc3ee606e358c10cba8c77f21ec5fe49d9"
+is_tool: true
+}
+actions {
+target_id: 8
+action_key: "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"
+mnemonic: "FileWrite"
+configuration_id: 4
+output_ids: 3
+primary_output_id: 3
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+path_fragments {
+id: 34
+label: "t2"
+parent_id: 27
+}
+artifacts {
+id: 16
+path_fragment_id: 34
+}
+actions {
+target_id: 9
+action_key: "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"
+mnemonic: "FileWrite"
+configuration_id: 3
+output_ids: 16
+primary_output_id: 16
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+rule_classes {
+id: 3
+name: "x_test"
+}
+path_fragments {
+id: 35
+label: "tool.repo_mapping"
+parent_id: 8
+}
+actions {
+target_id: 5
+action_key: "ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea"
+mnemonic: "CatIt"
+configuration_id: 1
+arguments: "/bin/bash"
+arguments: "-c"
+arguments: "cat a/x.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt"
+input_dep_set_ids: 6
+output_ids: 10
+primary_output_id: 10
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 37
+label: "t2.repo_mapping"
+parent_id: 27
+}
+artifacts {
+id: 19
+path_fragment_id: 37
+}
+actions {
+target_id: 9
+action_key: "957b5a405a35c995a6343ea1cd2ca35c35ec3da330b8eb847fca68b5361b76b3"
+mnemonic: "RepoMappingManifest"
+configuration_id: 3
+output_ids: 19
+primary_output_id: 19
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 25
+label: "lib.txt"
+parent_id: 18
+}
+artifacts {
+id: 11
+path_fragment_id: 25
+}
+path_fragments {
+id: 38
+label: "t2.runfiles_manifest"
+parent_id: 27
+}
+artifacts {
+id: 20
+path_fragment_id: 38
+}
+actions {
+target_id: 3
+action_key: "2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8"
+mnemonic: "CatIt"
+configuration_id: 1
+arguments: "/bin/bash"
+arguments: "-c"
+arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt"
+input_dep_set_ids: 5
+output_ids: 11
+primary_output_id: 11
+execution_platform: "@@platforms//host:host"
+}
+actions {
+target_id: 9
+action_key: "a1ad5e7b302707c0c15c7c8b5ef2ecded373a5896f695af8edd9cbb48cf3fe4d"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 3
+output_ids: 20
+primary_output_id: 20
+execution_platform: "@@platforms//host:host"
+}
+targets {
+id: 7
+label: "//b:t1"
+rule_class_id: 3
+}
+path_fragments {
+id: 39
+label: "t1"
+parent_id: 27
+}
+artifacts {
+id: 21
+path_fragment_id: 39
+}
+actions {
+target_id: 7
+action_key: "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"
+mnemonic: "FileWrite"
+configuration_id: 3
+output_ids: 21
+primary_output_id: 21
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+path_fragments {
+id: 40
+label: "t1.repo_mapping"
+parent_id: 27
+}
+artifacts {
+id: 22
+path_fragment_id: 40
+}
+actions {
+target_id: 7
+action_key: "04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d"
+mnemonic: "RepoMappingManifest"
+configuration_id: 3
+output_ids: 22
+primary_output_id: 22
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 9
+direct_artifact_ids: 20
+}
+path_fragments {
+id: 43
+label: "t2.runfiles"
+parent_id: 27
+}
+path_fragments {
+id: 42
+label: "MANIFEST"
+parent_id: 43
+}
+actions {
+target_id: 4
+action_key: "87db1df4b214fe2a744f1a7292cfa0468e49193cae194c181f0f39e81c9a76f5"
+mnemonic: "Genrule"
+configuration_id: 1
+arguments: "/bin/bash"
+arguments: "-c"
+arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/darwin_arm64-fastbuild/bin/a/lm.o"
+environment_variables {
+  key: "PATH"
+  value: "/bin:/usr/bin:/usr/local/bin"
+}
+input_dep_set_ids: 4
+output_ids: 6
+primary_output_id: 6
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 36
+label: "tool.repo_mapping"
+parent_id: 27
+}
+artifacts {
+id: 18
+path_fragment_id: 36
+}
+actions {
+target_id: 8
+action_key: "9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a"
+mnemonic: "RepoMappingManifest"
+configuration_id: 1
+output_ids: 18
+primary_output_id: 18
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 44
+label: "tool.runfiles_manifest"
+parent_id: 27
+}
+artifacts {
+id: 25
+path_fragment_id: 44
+}
+actions {
+target_id: 8
+action_key: "8cde1b5b3980b2dfcd31339996ce6c6dc7f06c18fd566a130ea55577b1b72072"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 1
+output_ids: 25
+primary_output_id: 25
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 10
+direct_artifact_ids: 25
+}
+path_fragments {
+id: 46
+label: "tool.runfiles"
+parent_id: 27
+}
+path_fragments {
+id: 45
+label: "MANIFEST"
+parent_id: 46
+}
+artifacts {
+id: 26
+path_fragment_id: 45
+}
+actions {
+target_id: 8
+action_key: "507fc32f3b8936667ae5c68bd64925404b486d4e91861ef8eb9db2ebf6f75430"
+mnemonic: "SymlinkTree"
+configuration_id: 1
+input_dep_set_ids: 10
+output_ids: 26
+primary_output_id: 26
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 11
+direct_artifact_ids: 14
+direct_artifact_ids: 26
+direct_artifact_ids: 18
+}
+artifacts {
+id: 27
+path_fragment_id: 46
+}
+actions {
+target_id: 8
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 1
+input_dep_set_ids: 11
+output_ids: 27
+primary_output_id: 27
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 41
+label: "t1.runfiles_manifest"
+parent_id: 27
+}
+artifacts {
+id: 23
+path_fragment_id: 41
+}
+actions {
+target_id: 7
+action_key: "90c8b3aa7491a9cbc9a8fdb93abdf414e57af43f502b0a2736b23aafe1610d09"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 3
+output_ids: 23
+primary_output_id: 23
+execution_platform: "@@platforms//host:host"
+}
+artifacts {
+id: 17
+path_fragment_id: 35
+}
+dep_set_of_files {
+id: 12
+direct_artifact_ids: 23
+}
+actions {
+target_id: 8
+action_key: "9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a"
+mnemonic: "RepoMappingManifest"
+configuration_id: 4
+output_ids: 17
+primary_output_id: 17
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 48
+label: "t1.runfiles"
+parent_id: 27
+}
+path_fragments {
+id: 49
+label: "tool.runfiles_manifest"
+parent_id: 8
+}
+artifacts {
+id: 29
+path_fragment_id: 49
+}
+actions {
+target_id: 8
+action_key: "04503c002e4c8376c7b1143f1d1eae6c9c0fb88658286dca774e009167bc08cb"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 4
+output_ids: 29
+primary_output_id: 29
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 47
+label: "MANIFEST"
+parent_id: 48
+}
+artifacts {
+id: 28
+path_fragment_id: 47
+}
+dep_set_of_files {
+id: 13
+direct_artifact_ids: 29
+}
+path_fragments {
+id: 50
+label: "MANIFEST"
+parent_id: 12
+}
+artifacts {
+id: 30
+path_fragment_id: 50
+}
+actions {
+target_id: 8
+action_key: "753ded1e6f15fd9aafc065b7f683c507313f0e63014a24a36eb2875e8fe17b79"
+mnemonic: "SymlinkTree"
+configuration_id: 4
+input_dep_set_ids: 13
+output_ids: 30
+primary_output_id: 30
+execution_platform: "@@platforms//host:host"
+}
+actions {
+target_id: 7
+action_key: "eb5b1f1043d720c80c979549cf31d8565b99bf09999edd7a70cc6ad70cbcb7fb"
+mnemonic: "SymlinkTree"
+configuration_id: 3
+input_dep_set_ids: 12
+output_ids: 28
+primary_output_id: 28
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 14
+direct_artifact_ids: 3
+direct_artifact_ids: 30
+direct_artifact_ids: 17
+}
+actions {
+target_id: 8
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 4
+input_dep_set_ids: 14
+output_ids: 4
+primary_output_id: 4
+execution_platform: "@@platforms//host:host"
+}
+artifacts {
+id: 24
+path_fragment_id: 42
+}
+actions {
+target_id: 9
+action_key: "b039f77de3072d90a05e7981fe405e14a0d8fa24b254c5e21418200b6f71313b"
+mnemonic: "SymlinkTree"
+configuration_id: 3
+input_dep_set_ids: 9
+output_ids: 24
+primary_output_id: 24
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 15
+direct_artifact_ids: 16
+direct_artifact_ids: 24
+direct_artifact_ids: 19
+}
+artifacts {
+id: 31
+path_fragment_id: 43
+}
+actions {
+target_id: 9
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 3
+input_dep_set_ids: 15
+output_ids: 31
+primary_output_id: 31
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 52
+label: "test"
+parent_id: 15
+}
+path_fragments {
+id: 51
+label: "test-setup.sh"
+parent_id: 52
+}
+artifacts {
+id: 32
+path_fragment_id: 51
+}
+dep_set_of_files {
+id: 17
+direct_artifact_ids: 15
+direct_artifact_ids: 21
+}
+path_fragments {
+id: 53
+label: "generate-xml.sh"
+parent_id: 52
+}
+artifacts {
+id: 33
+path_fragment_id: 53
+}
+dep_set_of_files {
+id: 18
+direct_artifact_ids: 31
+direct_artifact_ids: 32
+direct_artifact_ids: 33
+}
+path_fragments {
+id: 57
+label: "testlogs"
+parent_id: 20
+}
+dep_set_of_files {
+id: 16
+transitive_dep_set_ids: 17
+direct_artifact_ids: 28
+direct_artifact_ids: 22
+}
+path_fragments {
+id: 56
+label: "b"
+parent_id: 57
+}
+path_fragments {
+id: 55
+label: "t2"
+parent_id: 56
+}
+artifacts {
+id: 35
+path_fragment_id: 48
+}
+actions {
+target_id: 7
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 3
+input_dep_set_ids: 16
+output_ids: 35
+primary_output_id: 35
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 19
+direct_artifact_ids: 35
+direct_artifact_ids: 32
+direct_artifact_ids: 33
+}
+path_fragments {
+id: 59
+label: "t1"
+parent_id: 56
+}
+path_fragments {
+id: 58
+label: "test.log"
+parent_id: 59
+}
+artifacts {
+id: 36
+path_fragment_id: 58
+}
+path_fragments {
+id: 60
+label: "test.xml"
+parent_id: 59
+}
+artifacts {
+id: 37
+path_fragment_id: 60
+}
+path_fragments {
+id: 61
+label: "test.cache_status"
+parent_id: 59
+}
+path_fragments {
+id: 54
+label: "test.log"
+parent_id: 55
+}
+artifacts {
+id: 34
+path_fragment_id: 54
+}
+path_fragments {
+id: 62
+label: "test.xml"
+parent_id: 55
+}
+artifacts {
+id: 39
+path_fragment_id: 62
+}
+path_fragments {
+id: 63
+label: "test.cache_status"
+parent_id: 55
+}
+artifacts {
+id: 40
+path_fragment_id: 63
+}
+path_fragments {
+id: 64
+label: "test.outputs"
+parent_id: 55
+}
+artifacts {
+id: 38
+path_fragment_id: 61
+}
+path_fragments {
+id: 65
+label: "test.outputs"
+parent_id: 59
+}
+artifacts {
+id: 41
+path_fragment_id: 64
+is_tree_artifact: true
+}
+actions {
+target_id: 9
+action_key: "0e439c536470aa9a95fc3bb976b2151d28adf8d6edb356420b0010b2d0cc60e3"
+mnemonic: "TestRunner"
+configuration_id: 3
+arguments: "external/bazel_tools/tools/test/test-setup.sh"
+arguments: "b/t2"
+environment_variables {
+  key: "PATH"
+  value: "/bin:/usr/bin:/usr/local/bin"
+}
+input_dep_set_ids: 18
+output_ids: 34
+output_ids: 39
+output_ids: 40
+output_ids: 41
+primary_output_id: 34
+execution_platform: "@@platforms//host:host"
+}
+artifacts {
+id: 42
+path_fragment_id: 65
+is_tree_artifact: true
+}
+actions {
+target_id: 7
+action_key: "205428c674ece34895c9d37069735603ac04f06cc7f559f119763b18bb7e84d8"
+mnemonic: "TestRunner"
+configuration_id: 3
+arguments: "external/bazel_tools/tools/test/test-setup.sh"
+arguments: "b/t1"
+environment_variables {
+  key: "PATH"
+  value: "/bin:/usr/bin:/usr/local/bin"
+}
+input_dep_set_ids: 19
+output_ids: 36
+output_ids: 37
+output_ids: 38
+output_ids: 42
+primary_output_id: 36
+execution_platform: "@@platforms//host:host"
+}

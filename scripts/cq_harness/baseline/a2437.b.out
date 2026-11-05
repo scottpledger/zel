@@ -1,0 +1,11 @@
+3 total actions.
+
+Mnemonics:
+  CatIt: 3
+
+Configurations:
+  darwin_arm64-opt: 1
+  darwin_arm64-fastbuild: 2
+
+Execution Platforms:
+  @@platforms//host:host: 3

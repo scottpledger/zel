@@ -1,0 +1,26 @@
+alpha 2
+beta 1
+	Tab 1
+  indent
+} 0
+delta 3
+}
+{ 3
+} 1
+y 0
+{ 1
+} 0
+} 0
+y 1
+	Tab 1
+gamma 2
+gamma 0
+gamma
+alpha
+y
+  indent 1
+ 1
+gamma
+{
+{
+} 3

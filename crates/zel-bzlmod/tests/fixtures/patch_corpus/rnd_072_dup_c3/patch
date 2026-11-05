@@ -1,0 +1,7 @@
+--- a/f.txt
++++ b/f.txt
+@@ -2,3 +2,4 @@
+ delta 0
+ beta
+ {
++return 0; 3

@@ -1,0 +1,586 @@
+m1	aquery '//b:t1'  --keep_going
+m2	aquery '//b:t1' --output=text --keep_going
+m3	aquery '//b:t1' --output=jsonproto --keep_going
+m4	aquery '//b:t1' --output=textproto --keep_going
+m5	aquery '//b:t1' --output=proto --keep_going
+m6	aquery '//b:t1' --output=summary --keep_going
+m7	aquery '//b:t1' --output=commands --keep_going
+m8	aquery '//b:t1' --noinclude_commandline --keep_going
+m9	aquery '//b:t1' --noinclude_artifacts --keep_going
+m10	aquery '//b:t1' --include_param_files --keep_going
+m11	aquery '//b:t1' --include_file_write_contents --keep_going
+m12	aquery '//b:t1' -c opt --keep_going
+m13	aquery '//b:t1' --nostamp --keep_going
+m14	aquery '//b:t1' --stamp --keep_going
+m15	aquery '//b:t1' --features=foo --keep_going
+m16	aquery '//b:t1' --action_env=FOO=bar --keep_going
+m17	aquery '//b:t1' --host_action_env=X=1 --keep_going
+m18	aquery '//b:t1' --noinclude_aspects --keep_going
+m19	aquery '//b:t1' --cpu=k8 --keep_going
+m20	aquery '//b:t1' --platforms=@bazel_tools//tools:host_platform --keep_going
+m21	aquery '//b:t1' --define=A=1 --keep_going
+m22	aquery '//b:t1' --copt=-O2 --keep_going
+m23	aquery '//b:t1' --noimplicit_deps --keep_going
+m24	aquery '//b:t1' --notool_deps --keep_going
+m25	aquery '//b:t2'  --keep_going
+m26	aquery '//b:t2' --output=text --keep_going
+m27	aquery '//b:t2' --output=jsonproto --keep_going
+m28	aquery '//b:t2' --output=textproto --keep_going
+m29	aquery '//b:t2' --output=proto --keep_going
+m30	aquery '//b:t2' --output=summary --keep_going
+m31	aquery '//b:t2' --output=commands --keep_going
+m32	aquery '//b:t2' --noinclude_commandline --keep_going
+m33	aquery '//b:t2' --noinclude_artifacts --keep_going
+m34	aquery '//b:t2' --include_param_files --keep_going
+m35	aquery '//b:t2' --include_file_write_contents --keep_going
+m36	aquery '//b:t2' -c opt --keep_going
+m37	aquery '//b:t2' --nostamp --keep_going
+m38	aquery '//b:t2' --stamp --keep_going
+m39	aquery '//b:t2' --features=foo --keep_going
+m40	aquery '//b:t2' --action_env=FOO=bar --keep_going
+m41	aquery '//b:t2' --host_action_env=X=1 --keep_going
+m42	aquery '//b:t2' --noinclude_aspects --keep_going
+m43	aquery '//b:t2' --cpu=k8 --keep_going
+m44	aquery '//b:t2' --platforms=@bazel_tools//tools:host_platform --keep_going
+m45	aquery '//b:t2' --define=A=1 --keep_going
+m46	aquery '//b:t2' --copt=-O2 --keep_going
+m47	aquery '//b:t2' --noimplicit_deps --keep_going
+m48	aquery '//b:t2' --notool_deps --keep_going
+m49	aquery '//b:tool'  --keep_going
+m50	aquery '//b:tool' --output=text --keep_going
+m51	aquery '//b:tool' --output=jsonproto --keep_going
+m52	aquery '//b:tool' --output=textproto --keep_going
+m53	aquery '//b:tool' --output=proto --keep_going
+m54	aquery '//b:tool' --output=summary --keep_going
+m55	aquery '//b:tool' --output=commands --keep_going
+m56	aquery '//b:tool' --noinclude_commandline --keep_going
+m57	aquery '//b:tool' --noinclude_artifacts --keep_going
+m58	aquery '//b:tool' --include_param_files --keep_going
+m59	aquery '//b:tool' --include_file_write_contents --keep_going
+m60	aquery '//b:tool' -c opt --keep_going
+m61	aquery '//b:tool' --nostamp --keep_going
+m62	aquery '//b:tool' --stamp --keep_going
+m63	aquery '//b:tool' --features=foo --keep_going
+m64	aquery '//b:tool' --action_env=FOO=bar --keep_going
+m65	aquery '//b:tool' --host_action_env=X=1 --keep_going
+m66	aquery '//b:tool' --noinclude_aspects --keep_going
+m67	aquery '//b:tool' --cpu=k8 --keep_going
+m68	aquery '//b:tool' --platforms=@bazel_tools//tools:host_platform --keep_going
+m69	aquery '//b:tool' --define=A=1 --keep_going
+m70	aquery '//b:tool' --copt=-O2 --keep_going
+m71	aquery '//b:tool' --noimplicit_deps --keep_going
+m72	aquery '//b:tool' --notool_deps --keep_going
+m73	aquery '//a:gg'  --keep_going
+m74	aquery '//a:gg' --output=text --keep_going
+m75	aquery '//a:gg' --output=jsonproto --keep_going
+m76	aquery '//a:gg' --output=textproto --keep_going
+m77	aquery '//a:gg' --output=proto --keep_going
+m78	aquery '//a:gg' --output=summary --keep_going
+m79	aquery '//a:gg' --output=commands --keep_going
+m80	aquery '//a:gg' --noinclude_commandline --keep_going
+m81	aquery '//a:gg' --noinclude_artifacts --keep_going
+m82	aquery '//a:gg' --include_param_files --keep_going
+m83	aquery '//a:gg' --include_file_write_contents --keep_going
+m84	aquery '//a:gg' -c opt --keep_going
+m85	aquery '//a:gg' --nostamp --keep_going
+m86	aquery '//a:gg' --stamp --keep_going
+m87	aquery '//a:gg' --features=foo --keep_going
+m88	aquery '//a:gg' --action_env=FOO=bar --keep_going
+m89	aquery '//a:gg' --host_action_env=X=1 --keep_going
+m90	aquery '//a:gg' --noinclude_aspects --keep_going
+m91	aquery '//a:gg' --cpu=k8 --keep_going
+m92	aquery '//a:gg' --platforms=@bazel_tools//tools:host_platform --keep_going
+m93	aquery '//a:gg' --define=A=1 --keep_going
+m94	aquery '//a:gg' --copt=-O2 --keep_going
+m95	aquery '//a:gg' --noimplicit_deps --keep_going
+m96	aquery '//a:gg' --notool_deps --keep_going
+m97	aquery '//a:lib'  --keep_going
+m98	aquery '//a:lib' --output=text --keep_going
+m99	aquery '//a:lib' --output=jsonproto --keep_going
+m100	aquery '//a:lib' --output=textproto --keep_going
+m101	aquery '//a:lib' --output=proto --keep_going
+m102	aquery '//a:lib' --output=summary --keep_going
+m103	aquery '//a:lib' --output=commands --keep_going
+m104	aquery '//a:lib' --noinclude_commandline --keep_going
+m105	aquery '//a:lib' --noinclude_artifacts --keep_going
+m106	aquery '//a:lib' --include_param_files --keep_going
+m107	aquery '//a:lib' --include_file_write_contents --keep_going
+m108	aquery '//a:lib' -c opt --keep_going
+m109	aquery '//a:lib' --nostamp --keep_going
+m110	aquery '//a:lib' --stamp --keep_going
+m111	aquery '//a:lib' --features=foo --keep_going
+m112	aquery '//a:lib' --action_env=FOO=bar --keep_going
+m113	aquery '//a:lib' --host_action_env=X=1 --keep_going
+m114	aquery '//a:lib' --noinclude_aspects --keep_going
+m115	aquery '//a:lib' --cpu=k8 --keep_going
+m116	aquery '//a:lib' --platforms=@bazel_tools//tools:host_platform --keep_going
+m117	aquery '//a:lib' --define=A=1 --keep_going
+m118	aquery '//a:lib' --copt=-O2 --keep_going
+m119	aquery '//a:lib' --noimplicit_deps --keep_going
+m120	aquery '//a:lib' --notool_deps --keep_going
+m121	aquery '//a:lib2'  --keep_going
+m122	aquery '//a:lib2' --output=text --keep_going
+m123	aquery '//a:lib2' --output=jsonproto --keep_going
+m124	aquery '//a:lib2' --output=textproto --keep_going
+m125	aquery '//a:lib2' --output=proto --keep_going
+m126	aquery '//a:lib2' --output=summary --keep_going
+m127	aquery '//a:lib2' --output=commands --keep_going
+m128	aquery '//a:lib2' --noinclude_commandline --keep_going
+m129	aquery '//a:lib2' --noinclude_artifacts --keep_going
+m130	aquery '//a:lib2' --include_param_files --keep_going
+m131	aquery '//a:lib2' --include_file_write_contents --keep_going
+m132	aquery '//a:lib2' -c opt --keep_going
+m133	aquery '//a:lib2' --nostamp --keep_going
+m134	aquery '//a:lib2' --stamp --keep_going
+m135	aquery '//a:lib2' --features=foo --keep_going
+m136	aquery '//a:lib2' --action_env=FOO=bar --keep_going
+m137	aquery '//a:lib2' --host_action_env=X=1 --keep_going
+m138	aquery '//a:lib2' --noinclude_aspects --keep_going
+m139	aquery '//a:lib2' --cpu=k8 --keep_going
+m140	aquery '//a:lib2' --platforms=@bazel_tools//tools:host_platform --keep_going
+m141	aquery '//a:lib2' --define=A=1 --keep_going
+m142	aquery '//a:lib2' --copt=-O2 --keep_going
+m143	aquery '//a:lib2' --noimplicit_deps --keep_going
+m144	aquery '//a:lib2' --notool_deps --keep_going
+m145	aquery '//b:all'  --keep_going
+m146	aquery '//b:all' --output=text --keep_going
+m147	aquery '//b:all' --output=jsonproto --keep_going
+m148	aquery '//b:all' --output=textproto --keep_going
+m149	aquery '//b:all' --output=proto --keep_going
+m150	aquery '//b:all' --output=summary --keep_going
+m151	aquery '//b:all' --output=commands --keep_going
+m152	aquery '//b:all' --noinclude_commandline --keep_going
+m153	aquery '//b:all' --noinclude_artifacts --keep_going
+m154	aquery '//b:all' --include_param_files --keep_going
+m155	aquery '//b:all' --include_file_write_contents --keep_going
+m156	aquery '//b:all' -c opt --keep_going
+m157	aquery '//b:all' --nostamp --keep_going
+m158	aquery '//b:all' --stamp --keep_going
+m159	aquery '//b:all' --features=foo --keep_going
+m160	aquery '//b:all' --action_env=FOO=bar --keep_going
+m161	aquery '//b:all' --host_action_env=X=1 --keep_going
+m162	aquery '//b:all' --noinclude_aspects --keep_going
+m163	aquery '//b:all' --cpu=k8 --keep_going
+m164	aquery '//b:all' --platforms=@bazel_tools//tools:host_platform --keep_going
+m165	aquery '//b:all' --define=A=1 --keep_going
+m166	aquery '//b:all' --copt=-O2 --keep_going
+m167	aquery '//b:all' --noimplicit_deps --keep_going
+m168	aquery '//b:all' --notool_deps --keep_going
+m169	aquery 'deps(//b:t1)'  --keep_going
+m170	aquery 'deps(//b:t1)' --output=text --keep_going
+m171	aquery 'deps(//b:t1)' --output=jsonproto --keep_going
+m172	aquery 'deps(//b:t1)' --output=textproto --keep_going
+m173	aquery 'deps(//b:t1)' --output=proto --keep_going
+m174	aquery 'deps(//b:t1)' --output=summary --keep_going
+m175	aquery 'deps(//b:t1)' --output=commands --keep_going
+m176	aquery 'deps(//b:t1)' --noinclude_commandline --keep_going
+m177	aquery 'deps(//b:t1)' --noinclude_artifacts --keep_going
+m178	aquery 'deps(//b:t1)' --include_param_files --keep_going
+m179	aquery 'deps(//b:t1)' --include_file_write_contents --keep_going
+m180	aquery 'deps(//b:t1)' -c opt --keep_going
+m181	aquery 'deps(//b:t1)' --nostamp --keep_going
+m182	aquery 'deps(//b:t1)' --stamp --keep_going
+m183	aquery 'deps(//b:t1)' --features=foo --keep_going
+m184	aquery 'deps(//b:t1)' --action_env=FOO=bar --keep_going
+m185	aquery 'deps(//b:t1)' --host_action_env=X=1 --keep_going
+m186	aquery 'deps(//b:t1)' --noinclude_aspects --keep_going
+m187	aquery 'deps(//b:t1)' --cpu=k8 --keep_going
+m188	aquery 'deps(//b:t1)' --platforms=@bazel_tools//tools:host_platform --keep_going
+m189	aquery 'deps(//b:t1)' --define=A=1 --keep_going
+m190	aquery 'deps(//b:t1)' --copt=-O2 --keep_going
+m191	aquery 'deps(//b:t1)' --noimplicit_deps --keep_going
+m192	aquery 'deps(//b:t1)' --notool_deps --keep_going
+m193	aquery 'deps(//a:gg)'  --keep_going
+m194	aquery 'deps(//a:gg)' --output=text --keep_going
+m195	aquery 'deps(//a:gg)' --output=jsonproto --keep_going
+m196	aquery 'deps(//a:gg)' --output=textproto --keep_going
+m197	aquery 'deps(//a:gg)' --output=proto --keep_going
+m198	aquery 'deps(//a:gg)' --output=summary --keep_going
+m199	aquery 'deps(//a:gg)' --output=commands --keep_going
+m200	aquery 'deps(//a:gg)' --noinclude_commandline --keep_going
+m201	aquery 'deps(//a:gg)' --noinclude_artifacts --keep_going
+m202	aquery 'deps(//a:gg)' --include_param_files --keep_going
+m203	aquery 'deps(//a:gg)' --include_file_write_contents --keep_going
+m204	aquery 'deps(//a:gg)' -c opt --keep_going
+m205	aquery 'deps(//a:gg)' --nostamp --keep_going
+m206	aquery 'deps(//a:gg)' --stamp --keep_going
+m207	aquery 'deps(//a:gg)' --features=foo --keep_going
+m208	aquery 'deps(//a:gg)' --action_env=FOO=bar --keep_going
+m209	aquery 'deps(//a:gg)' --host_action_env=X=1 --keep_going
+m210	aquery 'deps(//a:gg)' --noinclude_aspects --keep_going
+m211	aquery 'deps(//a:gg)' --cpu=k8 --keep_going
+m212	aquery 'deps(//a:gg)' --platforms=@bazel_tools//tools:host_platform --keep_going
+m213	aquery 'deps(//a:gg)' --define=A=1 --keep_going
+m214	aquery 'deps(//a:gg)' --copt=-O2 --keep_going
+m215	aquery 'deps(//a:gg)' --noimplicit_deps --keep_going
+m216	aquery 'deps(//a:gg)' --notool_deps --keep_going
+m217	aquery 'rdeps(//...,//a:x.txt)'  --keep_going
+m218	aquery 'rdeps(//...,//a:x.txt)' --output=text --keep_going
+m219	aquery 'rdeps(//...,//a:x.txt)' --output=jsonproto --keep_going
+m220	aquery 'rdeps(//...,//a:x.txt)' --output=textproto --keep_going
+m221	aquery 'rdeps(//...,//a:x.txt)' --output=proto --keep_going
+m222	aquery 'rdeps(//...,//a:x.txt)' --output=summary --keep_going
+m223	aquery 'rdeps(//...,//a:x.txt)' --output=commands --keep_going
+m224	aquery 'rdeps(//...,//a:x.txt)' --noinclude_commandline --keep_going
+m225	aquery 'rdeps(//...,//a:x.txt)' --noinclude_artifacts --keep_going
+m226	aquery 'rdeps(//...,//a:x.txt)' --include_param_files --keep_going
+m227	aquery 'rdeps(//...,//a:x.txt)' --include_file_write_contents --keep_going
+m228	aquery 'rdeps(//...,//a:x.txt)' -c opt --keep_going
+m229	aquery 'rdeps(//...,//a:x.txt)' --nostamp --keep_going
+m230	aquery 'rdeps(//...,//a:x.txt)' --stamp --keep_going
+m231	aquery 'rdeps(//...,//a:x.txt)' --features=foo --keep_going
+m232	aquery 'rdeps(//...,//a:x.txt)' --action_env=FOO=bar --keep_going
+m233	aquery 'rdeps(//...,//a:x.txt)' --host_action_env=X=1 --keep_going
+m234	aquery 'rdeps(//...,//a:x.txt)' --noinclude_aspects --keep_going
+m235	aquery 'rdeps(//...,//a:x.txt)' --cpu=k8 --keep_going
+m236	aquery 'rdeps(//...,//a:x.txt)' --platforms=@bazel_tools//tools:host_platform --keep_going
+m237	aquery 'rdeps(//...,//a:x.txt)' --define=A=1 --keep_going
+m238	aquery 'rdeps(//...,//a:x.txt)' --copt=-O2 --keep_going
+m239	aquery 'rdeps(//...,//a:x.txt)' --noimplicit_deps --keep_going
+m240	aquery 'rdeps(//...,//a:x.txt)' --notool_deps --keep_going
+m241	aquery 'kind(genrule,//a:all)'  --keep_going
+m242	aquery 'kind(genrule,//a:all)' --output=text --keep_going
+m243	aquery 'kind(genrule,//a:all)' --output=jsonproto --keep_going
+m244	aquery 'kind(genrule,//a:all)' --output=textproto --keep_going
+m245	aquery 'kind(genrule,//a:all)' --output=proto --keep_going
+m246	aquery 'kind(genrule,//a:all)' --output=summary --keep_going
+m247	aquery 'kind(genrule,//a:all)' --output=commands --keep_going
+m248	aquery 'kind(genrule,//a:all)' --noinclude_commandline --keep_going
+m249	aquery 'kind(genrule,//a:all)' --noinclude_artifacts --keep_going
+m250	aquery 'kind(genrule,//a:all)' --include_param_files --keep_going
+m251	aquery 'kind(genrule,//a:all)' --include_file_write_contents --keep_going
+m252	aquery 'kind(genrule,//a:all)' -c opt --keep_going
+m253	aquery 'kind(genrule,//a:all)' --nostamp --keep_going
+m254	aquery 'kind(genrule,//a:all)' --stamp --keep_going
+m255	aquery 'kind(genrule,//a:all)' --features=foo --keep_going
+m256	aquery 'kind(genrule,//a:all)' --action_env=FOO=bar --keep_going
+m257	aquery 'kind(genrule,//a:all)' --host_action_env=X=1 --keep_going
+m258	aquery 'kind(genrule,//a:all)' --noinclude_aspects --keep_going
+m259	aquery 'kind(genrule,//a:all)' --cpu=k8 --keep_going
+m260	aquery 'kind(genrule,//a:all)' --platforms=@bazel_tools//tools:host_platform --keep_going
+m261	aquery 'kind(genrule,//a:all)' --define=A=1 --keep_going
+m262	aquery 'kind(genrule,//a:all)' --copt=-O2 --keep_going
+m263	aquery 'kind(genrule,//a:all)' --noimplicit_deps --keep_going
+m264	aquery 'kind(genrule,//a:all)' --notool_deps --keep_going
+m265	aquery '//a:cl'  --keep_going
+m266	aquery '//a:cl' --output=text --keep_going
+m267	aquery '//a:cl' --output=jsonproto --keep_going
+m268	aquery '//a:cl' --output=textproto --keep_going
+m269	aquery '//a:cl' --output=proto --keep_going
+m270	aquery '//a:cl' --output=summary --keep_going
+m271	aquery '//a:cl' --output=commands --keep_going
+m272	aquery '//a:cl' --noinclude_commandline --keep_going
+m273	aquery '//a:cl' --noinclude_artifacts --keep_going
+m274	aquery '//a:cl' --include_param_files --keep_going
+m275	aquery '//a:cl' --include_file_write_contents --keep_going
+m276	aquery '//a:cl' -c opt --keep_going
+m277	aquery '//a:cl' --nostamp --keep_going
+m278	aquery '//a:cl' --stamp --keep_going
+m279	aquery '//a:cl' --features=foo --keep_going
+m280	aquery '//a:cl' --action_env=FOO=bar --keep_going
+m281	aquery '//a:cl' --host_action_env=X=1 --keep_going
+m282	aquery '//a:cl' --noinclude_aspects --keep_going
+m283	aquery '//a:cl' --cpu=k8 --keep_going
+m284	aquery '//a:cl' --platforms=@bazel_tools//tools:host_platform --keep_going
+m285	aquery '//a:cl' --define=A=1 --keep_going
+m286	aquery '//a:cl' --copt=-O2 --keep_going
+m287	aquery '//a:cl' --noimplicit_deps --keep_going
+m288	aquery '//a:cl' --notool_deps --keep_going
+m289	aquery '//a:sel'  --keep_going
+m290	aquery '//a:sel' --output=text --keep_going
+m291	aquery '//a:sel' --output=jsonproto --keep_going
+m292	aquery '//a:sel' --output=textproto --keep_going
+m293	aquery '//a:sel' --output=proto --keep_going
+m294	aquery '//a:sel' --output=summary --keep_going
+m295	aquery '//a:sel' --output=commands --keep_going
+m296	aquery '//a:sel' --noinclude_commandline --keep_going
+m297	aquery '//a:sel' --noinclude_artifacts --keep_going
+m298	aquery '//a:sel' --include_param_files --keep_going
+m299	aquery '//a:sel' --include_file_write_contents --keep_going
+m300	aquery '//a:sel' -c opt --keep_going
+m301	aquery '//a:sel' --nostamp --keep_going
+m302	aquery '//a:sel' --stamp --keep_going
+m303	aquery '//a:sel' --features=foo --keep_going
+m304	aquery '//a:sel' --action_env=FOO=bar --keep_going
+m305	aquery '//a:sel' --host_action_env=X=1 --keep_going
+m306	aquery '//a:sel' --noinclude_aspects --keep_going
+m307	aquery '//a:sel' --cpu=k8 --keep_going
+m308	aquery '//a:sel' --platforms=@bazel_tools//tools:host_platform --keep_going
+m309	aquery '//a:sel' --define=A=1 --keep_going
+m310	aquery '//a:sel' --copt=-O2 --keep_going
+m311	aquery '//a:sel' --noimplicit_deps --keep_going
+m312	aquery '//a:sel' --notool_deps --keep_going
+m313	aquery '//a:tr'  --keep_going
+m314	aquery '//a:tr' --output=text --keep_going
+m315	aquery '//a:tr' --output=jsonproto --keep_going
+m316	aquery '//a:tr' --output=textproto --keep_going
+m317	aquery '//a:tr' --output=proto --keep_going
+m318	aquery '//a:tr' --output=summary --keep_going
+m319	aquery '//a:tr' --output=commands --keep_going
+m320	aquery '//a:tr' --noinclude_commandline --keep_going
+m321	aquery '//a:tr' --noinclude_artifacts --keep_going
+m322	aquery '//a:tr' --include_param_files --keep_going
+m323	aquery '//a:tr' --include_file_write_contents --keep_going
+m324	aquery '//a:tr' -c opt --keep_going
+m325	aquery '//a:tr' --nostamp --keep_going
+m326	aquery '//a:tr' --stamp --keep_going
+m327	aquery '//a:tr' --features=foo --keep_going
+m328	aquery '//a:tr' --action_env=FOO=bar --keep_going
+m329	aquery '//a:tr' --host_action_env=X=1 --keep_going
+m330	aquery '//a:tr' --noinclude_aspects --keep_going
+m331	aquery '//a:tr' --cpu=k8 --keep_going
+m332	aquery '//a:tr' --platforms=@bazel_tools//tools:host_platform --keep_going
+m333	aquery '//a:tr' --define=A=1 --keep_going
+m334	aquery '//a:tr' --copt=-O2 --keep_going
+m335	aquery '//a:tr' --noimplicit_deps --keep_going
+m336	aquery '//a:tr' --notool_deps --keep_going
+m337	aquery '@ext//lib:gen'  --keep_going
+m338	aquery '@ext//lib:gen' --output=text --keep_going
+m339	aquery '@ext//lib:gen' --output=jsonproto --keep_going
+m340	aquery '@ext//lib:gen' --output=textproto --keep_going
+m341	aquery '@ext//lib:gen' --output=proto --keep_going
+m342	aquery '@ext//lib:gen' --output=summary --keep_going
+m343	aquery '@ext//lib:gen' --output=commands --keep_going
+m344	aquery '@ext//lib:gen' --noinclude_commandline --keep_going
+m345	aquery '@ext//lib:gen' --noinclude_artifacts --keep_going
+m346	aquery '@ext//lib:gen' --include_param_files --keep_going
+m347	aquery '@ext//lib:gen' --include_file_write_contents --keep_going
+m348	aquery '@ext//lib:gen' -c opt --keep_going
+m349	aquery '@ext//lib:gen' --nostamp --keep_going
+m350	aquery '@ext//lib:gen' --stamp --keep_going
+m351	aquery '@ext//lib:gen' --features=foo --keep_going
+m352	aquery '@ext//lib:gen' --action_env=FOO=bar --keep_going
+m353	aquery '@ext//lib:gen' --host_action_env=X=1 --keep_going
+m354	aquery '@ext//lib:gen' --noinclude_aspects --keep_going
+m355	aquery '@ext//lib:gen' --cpu=k8 --keep_going
+m356	aquery '@ext//lib:gen' --platforms=@bazel_tools//tools:host_platform --keep_going
+m357	aquery '@ext//lib:gen' --define=A=1 --keep_going
+m358	aquery '@ext//lib:gen' --copt=-O2 --keep_going
+m359	aquery '@ext//lib:gen' --noimplicit_deps --keep_going
+m360	aquery '@ext//lib:gen' --notool_deps --keep_going
+m361	aquery '//:top_alias'  --keep_going
+m362	aquery '//:top_alias' --output=text --keep_going
+m363	aquery '//:top_alias' --output=jsonproto --keep_going
+m364	aquery '//:top_alias' --output=textproto --keep_going
+m365	aquery '//:top_alias' --output=proto --keep_going
+m366	aquery '//:top_alias' --output=summary --keep_going
+m367	aquery '//:top_alias' --output=commands --keep_going
+m368	aquery '//:top_alias' --noinclude_commandline --keep_going
+m369	aquery '//:top_alias' --noinclude_artifacts --keep_going
+m370	aquery '//:top_alias' --include_param_files --keep_going
+m371	aquery '//:top_alias' --include_file_write_contents --keep_going
+m372	aquery '//:top_alias' -c opt --keep_going
+m373	aquery '//:top_alias' --nostamp --keep_going
+m374	aquery '//:top_alias' --stamp --keep_going
+m375	aquery '//:top_alias' --features=foo --keep_going
+m376	aquery '//:top_alias' --action_env=FOO=bar --keep_going
+m377	aquery '//:top_alias' --host_action_env=X=1 --keep_going
+m378	aquery '//:top_alias' --noinclude_aspects --keep_going
+m379	aquery '//:top_alias' --cpu=k8 --keep_going
+m380	aquery '//:top_alias' --platforms=@bazel_tools//tools:host_platform --keep_going
+m381	aquery '//:top_alias' --define=A=1 --keep_going
+m382	aquery '//:top_alias' --copt=-O2 --keep_going
+m383	aquery '//:top_alias' --noimplicit_deps --keep_going
+m384	aquery '//:top_alias' --notool_deps --keep_going
+m385	aquery 'deps(//b:tool,1)'  --keep_going
+m386	aquery 'deps(//b:tool,1)' --output=text --keep_going
+m387	aquery 'deps(//b:tool,1)' --output=jsonproto --keep_going
+m388	aquery 'deps(//b:tool,1)' --output=textproto --keep_going
+m389	aquery 'deps(//b:tool,1)' --output=proto --keep_going
+m390	aquery 'deps(//b:tool,1)' --output=summary --keep_going
+m391	aquery 'deps(//b:tool,1)' --output=commands --keep_going
+m392	aquery 'deps(//b:tool,1)' --noinclude_commandline --keep_going
+m393	aquery 'deps(//b:tool,1)' --noinclude_artifacts --keep_going
+m394	aquery 'deps(//b:tool,1)' --include_param_files --keep_going
+m395	aquery 'deps(//b:tool,1)' --include_file_write_contents --keep_going
+m396	aquery 'deps(//b:tool,1)' -c opt --keep_going
+m397	aquery 'deps(//b:tool,1)' --nostamp --keep_going
+m398	aquery 'deps(//b:tool,1)' --stamp --keep_going
+m399	aquery 'deps(//b:tool,1)' --features=foo --keep_going
+m400	aquery 'deps(//b:tool,1)' --action_env=FOO=bar --keep_going
+m401	aquery 'deps(//b:tool,1)' --host_action_env=X=1 --keep_going
+m402	aquery 'deps(//b:tool,1)' --noinclude_aspects --keep_going
+m403	aquery 'deps(//b:tool,1)' --cpu=k8 --keep_going
+m404	aquery 'deps(//b:tool,1)' --platforms=@bazel_tools//tools:host_platform --keep_going
+m405	aquery 'deps(//b:tool,1)' --define=A=1 --keep_going
+m406	aquery 'deps(//b:tool,1)' --copt=-O2 --keep_going
+m407	aquery 'deps(//b:tool,1)' --noimplicit_deps --keep_going
+m408	aquery 'deps(//b:tool,1)' --notool_deps --keep_going
+m409	aquery '//a:all'  --keep_going
+m410	aquery '//a:all' --output=text --keep_going
+m411	aquery '//a:all' --output=jsonproto --keep_going
+m412	aquery '//a:all' --output=textproto --keep_going
+m413	aquery '//a:all' --output=proto --keep_going
+m414	aquery '//a:all' --output=summary --keep_going
+m415	aquery '//a:all' --output=commands --keep_going
+m416	aquery '//a:all' --noinclude_commandline --keep_going
+m417	aquery '//a:all' --noinclude_artifacts --keep_going
+m418	aquery '//a:all' --include_param_files --keep_going
+m419	aquery '//a:all' --include_file_write_contents --keep_going
+m420	aquery '//a:all' -c opt --keep_going
+m421	aquery '//a:all' --nostamp --keep_going
+m422	aquery '//a:all' --stamp --keep_going
+m423	aquery '//a:all' --features=foo --keep_going
+m424	aquery '//a:all' --action_env=FOO=bar --keep_going
+m425	aquery '//a:all' --host_action_env=X=1 --keep_going
+m426	aquery '//a:all' --noinclude_aspects --keep_going
+m427	aquery '//a:all' --cpu=k8 --keep_going
+m428	aquery '//a:all' --platforms=@bazel_tools//tools:host_platform --keep_going
+m429	aquery '//a:all' --define=A=1 --keep_going
+m430	aquery '//a:all' --copt=-O2 --keep_going
+m431	aquery '//a:all' --noimplicit_deps --keep_going
+m432	aquery '//a:all' --notool_deps --keep_going
+m433	cquery '//b:t1' --output=label --keep_going
+m434	cquery '//b:t1' --output=label_kind --keep_going
+m435	cquery '//b:t1' --output=files --keep_going
+m436	cquery '//b:t1' --output=proto --keep_going
+m437	cquery '//b:t1' --output=jsonproto --keep_going
+m438	cquery '//b:t1' --output=textproto --keep_going
+m439	cquery '//b:t1' --output=summary --keep_going
+m440	cquery '//b:t1' --output=starlark --starlark:expr="target.label" --keep_going
+m441	cquery '//b:t1' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m442	cquery '//b:t1' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m443	cquery '//b:t1' --output=transitions --transitions=lite --keep_going
+m444	cquery '//b:t1' --output=transitions --transitions=full --keep_going
+m445	cquery '//b:t1' --noimplicit_deps --output=label --keep_going
+m446	cquery '//b:t1' -c dbg --output=label --keep_going
+m447	cquery '//b:t2' --output=label --keep_going
+m448	cquery '//b:t2' --output=label_kind --keep_going
+m449	cquery '//b:t2' --output=files --keep_going
+m450	cquery '//b:t2' --output=proto --keep_going
+m451	cquery '//b:t2' --output=jsonproto --keep_going
+m452	cquery '//b:t2' --output=textproto --keep_going
+m453	cquery '//b:t2' --output=summary --keep_going
+m454	cquery '//b:t2' --output=starlark --starlark:expr="target.label" --keep_going
+m455	cquery '//b:t2' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m456	cquery '//b:t2' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m457	cquery '//b:t2' --output=transitions --transitions=lite --keep_going
+m458	cquery '//b:t2' --output=transitions --transitions=full --keep_going
+m459	cquery '//b:t2' --noimplicit_deps --output=label --keep_going
+m460	cquery '//b:t2' -c dbg --output=label --keep_going
+m461	cquery '//b:tool' --output=label --keep_going
+m462	cquery '//b:tool' --output=label_kind --keep_going
+m463	cquery '//b:tool' --output=files --keep_going
+m464	cquery '//b:tool' --output=proto --keep_going
+m465	cquery '//b:tool' --output=jsonproto --keep_going
+m466	cquery '//b:tool' --output=textproto --keep_going
+m467	cquery '//b:tool' --output=summary --keep_going
+m468	cquery '//b:tool' --output=starlark --starlark:expr="target.label" --keep_going
+m469	cquery '//b:tool' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m470	cquery '//b:tool' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m471	cquery '//b:tool' --output=transitions --transitions=lite --keep_going
+m472	cquery '//b:tool' --output=transitions --transitions=full --keep_going
+m473	cquery '//b:tool' --noimplicit_deps --output=label --keep_going
+m474	cquery '//b:tool' -c dbg --output=label --keep_going
+m475	cquery '//a:gg' --output=label --keep_going
+m476	cquery '//a:gg' --output=label_kind --keep_going
+m477	cquery '//a:gg' --output=files --keep_going
+m478	cquery '//a:gg' --output=proto --keep_going
+m479	cquery '//a:gg' --output=jsonproto --keep_going
+m480	cquery '//a:gg' --output=textproto --keep_going
+m481	cquery '//a:gg' --output=summary --keep_going
+m482	cquery '//a:gg' --output=starlark --starlark:expr="target.label" --keep_going
+m483	cquery '//a:gg' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m484	cquery '//a:gg' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m485	cquery '//a:gg' --output=transitions --transitions=lite --keep_going
+m486	cquery '//a:gg' --output=transitions --transitions=full --keep_going
+m487	cquery '//a:gg' --noimplicit_deps --output=label --keep_going
+m488	cquery '//a:gg' -c dbg --output=label --keep_going
+m489	cquery '//a:lib' --output=label --keep_going
+m490	cquery '//a:lib' --output=label_kind --keep_going
+m491	cquery '//a:lib' --output=files --keep_going
+m492	cquery '//a:lib' --output=proto --keep_going
+m493	cquery '//a:lib' --output=jsonproto --keep_going
+m494	cquery '//a:lib' --output=textproto --keep_going
+m495	cquery '//a:lib' --output=summary --keep_going
+m496	cquery '//a:lib' --output=starlark --starlark:expr="target.label" --keep_going
+m497	cquery '//a:lib' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m498	cquery '//a:lib' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m499	cquery '//a:lib' --output=transitions --transitions=lite --keep_going
+m500	cquery '//a:lib' --output=transitions --transitions=full --keep_going
+m501	cquery '//a:lib' --noimplicit_deps --output=label --keep_going
+m502	cquery '//a:lib' -c dbg --output=label --keep_going
+m503	cquery '//a:lib2' --output=label --keep_going
+m504	cquery '//a:lib2' --output=label_kind --keep_going
+m505	cquery '//a:lib2' --output=files --keep_going
+m506	cquery '//a:lib2' --output=proto --keep_going
+m507	cquery '//a:lib2' --output=jsonproto --keep_going
+m508	cquery '//a:lib2' --output=textproto --keep_going
+m509	cquery '//a:lib2' --output=summary --keep_going
+m510	cquery '//a:lib2' --output=starlark --starlark:expr="target.label" --keep_going
+m511	cquery '//a:lib2' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m512	cquery '//a:lib2' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m513	cquery '//a:lib2' --output=transitions --transitions=lite --keep_going
+m514	cquery '//a:lib2' --output=transitions --transitions=full --keep_going
+m515	cquery '//a:lib2' --noimplicit_deps --output=label --keep_going
+m516	cquery '//a:lib2' -c dbg --output=label --keep_going
+m517	cquery '//b:all' --output=label --keep_going
+m518	cquery '//b:all' --output=label_kind --keep_going
+m519	cquery '//b:all' --output=files --keep_going
+m520	cquery '//b:all' --output=proto --keep_going
+m521	cquery '//b:all' --output=jsonproto --keep_going
+m522	cquery '//b:all' --output=textproto --keep_going
+m523	cquery '//b:all' --output=summary --keep_going
+m524	cquery '//b:all' --output=starlark --starlark:expr="target.label" --keep_going
+m525	cquery '//b:all' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m526	cquery '//b:all' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m527	cquery '//b:all' --output=transitions --transitions=lite --keep_going
+m528	cquery '//b:all' --output=transitions --transitions=full --keep_going
+m529	cquery '//b:all' --noimplicit_deps --output=label --keep_going
+m530	cquery '//b:all' -c dbg --output=label --keep_going
+m531	cquery 'deps(//b:t1)' --output=label --keep_going
+m532	cquery 'deps(//b:t1)' --output=label_kind --keep_going
+m533	cquery 'deps(//b:t1)' --output=files --keep_going
+m534	cquery 'deps(//b:t1)' --output=proto --keep_going
+m535	cquery 'deps(//b:t1)' --output=jsonproto --keep_going
+m536	cquery 'deps(//b:t1)' --output=textproto --keep_going
+m537	cquery 'deps(//b:t1)' --output=summary --keep_going
+m538	cquery 'deps(//b:t1)' --output=starlark --starlark:expr="target.label" --keep_going
+m539	cquery 'deps(//b:t1)' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m540	cquery 'deps(//b:t1)' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m541	cquery 'deps(//b:t1)' --output=transitions --transitions=lite --keep_going
+m542	cquery 'deps(//b:t1)' --output=transitions --transitions=full --keep_going
+m543	cquery 'deps(//b:t1)' --noimplicit_deps --output=label --keep_going
+m544	cquery 'deps(//b:t1)' -c dbg --output=label --keep_going
+m545	cquery 'deps(//a:gg)' --output=label --keep_going
+m546	cquery 'deps(//a:gg)' --output=label_kind --keep_going
+m547	cquery 'deps(//a:gg)' --output=files --keep_going
+m548	cquery 'deps(//a:gg)' --output=proto --keep_going
+m549	cquery 'deps(//a:gg)' --output=jsonproto --keep_going
+m550	cquery 'deps(//a:gg)' --output=textproto --keep_going
+m551	cquery 'deps(//a:gg)' --output=summary --keep_going
+m552	cquery 'deps(//a:gg)' --output=starlark --starlark:expr="target.label" --keep_going
+m553	cquery 'deps(//a:gg)' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m554	cquery 'deps(//a:gg)' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m555	cquery 'deps(//a:gg)' --output=transitions --transitions=lite --keep_going
+m556	cquery 'deps(//a:gg)' --output=transitions --transitions=full --keep_going
+m557	cquery 'deps(//a:gg)' --noimplicit_deps --output=label --keep_going
+m558	cquery 'deps(//a:gg)' -c dbg --output=label --keep_going
+m559	cquery 'rdeps(//...,//a:x.txt)' --output=label --keep_going
+m560	cquery 'rdeps(//...,//a:x.txt)' --output=label_kind --keep_going
+m561	cquery 'rdeps(//...,//a:x.txt)' --output=files --keep_going
+m562	cquery 'rdeps(//...,//a:x.txt)' --output=proto --keep_going
+m563	cquery 'rdeps(//...,//a:x.txt)' --output=jsonproto --keep_going
+m564	cquery 'rdeps(//...,//a:x.txt)' --output=textproto --keep_going
+m565	cquery 'rdeps(//...,//a:x.txt)' --output=summary --keep_going
+m566	cquery 'rdeps(//...,//a:x.txt)' --output=starlark --starlark:expr="target.label" --keep_going
+m567	cquery 'rdeps(//...,//a:x.txt)' --output=starlark --starlark:expr="providers(target).keys()" --keep_going
+m568	cquery 'rdeps(//...,//a:x.txt)' --output=starlark --starlark:expr="[f.path for f in target[DefaultInfo].files.to_list()]" --keep_going
+m569	cquery 'rdeps(//...,//a:x.txt)' --output=transitions --transitions=lite --keep_going
+m570	cquery 'rdeps(//...,//a:x.txt)' --output=transitions --transitions=full --keep_going
+m571	cquery 'rdeps(//...,//a:x.txt)' --noimplicit_deps --output=label --keep_going
+m572	cquery 'rdeps(//...,//a:x.txt)' -c dbg --output=label --keep_going
+m573	aquery 'mnemonic("TestRunner",//b:all)' --keep_going
+m574	aquery 'mnemonic("SymlinkTree",//b:all)' --keep_going
+m575	aquery 'mnemonic("RunfilesTree",//b:all)' --keep_going
+m576	aquery 'mnemonic("RepoMappingManifest",//b:all)' --keep_going
+m577	aquery 'outputs(".*runfiles.*",//b:t1)' --keep_going
+m578	aquery 'inputs(".*test-setup.*",//b:t1)' --keep_going
+m579	aquery '//:all_tests' --keep_going
+m580	aquery '//:tagged' --keep_going
+m581	aquery 'tests(//:all_tests)' --keep_going
+m582	aquery '//...' --output=jsonproto --keep_going
+m583	aquery '//...' --output=textproto --keep_going
+m584	aquery '//...' --output=proto --keep_going
+m585	aquery '//b:t1' --output=streamed_proto --keep_going
+m586	aquery '//a:gg' --output=streamed_proto --keep_going

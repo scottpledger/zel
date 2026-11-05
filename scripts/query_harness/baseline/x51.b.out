@@ -1,0 +1,3 @@
+test_suite rule //:all_tests
+test_suite rule //:tagged
+alias rule //:top_alias

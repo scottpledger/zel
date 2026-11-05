@@ -1,0 +1,15 @@
+@@//a:tr
+@@//a:lib
+@@platforms//host:host
+@@platforms//host:host
+@@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist
+@@platforms//cpu:aarch64
+@@platforms//os:osx
+@@//a:srcs_fg
+@@//a:x.txt
+@@ext+//lib:data
+@@//a:z.txt
+@@platforms//cpu:cpu
+@@platforms//os:os
+@@//a:y.txt
+@@ext+//lib:d.txt

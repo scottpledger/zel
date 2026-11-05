@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "56736ca4cafc",
+ "classified_as": "STRICT",
+ "cmd": "test --notest_keep_going --keep_going //:t_fail //:t_pass",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "7e7be5f136cbd9be",
+  "7e7be5f136cbd9be",
+  "7e7be5f136cbd9be",
+  "7e7be5f136cbd9be",
+  "7e7be5f136cbd9be",
+  "7e7be5f136cbd9be"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nINFO: Found 2 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 13 processes: 12 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 13 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 2 out of 2 tests: 1 test passes and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nINFO: Found 2 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 13 processes: 12 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 13 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 2 out of 2 tests: 1 test passes and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nINFO: Found 2 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 13 processes: 12 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 13 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 2 out of 2 tests: 1 test passes and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nINFO: Found 2 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 13 processes: 12 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 13 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 2 out of 2 tests: 1 test passes and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nINFO: Found 2 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 13 processes: 12 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 13 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 2 out of 2 tests: 1 test passes and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nINFO: Found 2 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 13 processes: 12 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 13 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 2 out of 2 tests: 1 test passes and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  }
+ ],
+ "workspace": "ws1"
+}

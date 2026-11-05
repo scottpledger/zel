@@ -1,0 +1,20 @@
+gamma
+
+beta 3
+	Tab
+delta 1
+} 2
+alpha 3
+return 0; 3
+}
+{
+gamma
+gamma 3
+  indent
+ 2
+gamma 2
+y
+return 0; 3
+gamma
+gamma
+y 3

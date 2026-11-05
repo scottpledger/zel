@@ -1,0 +1,7 @@
+eps
+return 0; 2
+y 0
+NEW x 3
+{ 2
+alpha 1
+  indent

@@ -1,0 +1,25 @@
+action 'Cat @@//a:lib'
+  Mnemonic: CatIt
+  Target: //a:lib
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8
+  Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt]
+  Command Line: (exec /bin/bash \
+    -c \
+    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt')
+# Configuration: 2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c
+# Execution platform: @@platforms//host:host
+
+action 'Writing file a/lib.asp'
+  Mnemonic: FileWrite
+  Target: //a:lib
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  AspectDescriptors: [//:defs.bzl%asp()]
+  ActionKey: b7f54ffd4255624e359660f177f4ed2ad26ed07e2108c3536516cdbc8ddfd3b2
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lib.asp]
+  IsExecutable: false
+

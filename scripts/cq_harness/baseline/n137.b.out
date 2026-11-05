@@ -1,0 +1,15 @@
+NoTransition -> //a:lm_grp (d2c2765)
+  srcs#//a:lm#NoTransition -> 
+NoTransition -> //a:sel (d2c2765)
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:sm_fg (d2c2765)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> //a:srcs_fg (663e844)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:srcs_fg (d2c2765)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 

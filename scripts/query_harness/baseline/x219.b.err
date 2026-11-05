@@ -1,0 +1,10 @@
+WARNING: Running Bazel server needs to be killed, because the following startup options are different:
+  - Only in old server: bazel(wsbroken) --workspace_directory=@WS@broken
+  - Only in new server: --workspace_directory=@WS@ bazel(ws)
+Starting local Bazel server (9.3.2) and connecting to it...
+ no actions running
+ no actions running
+ no actions running
+ no actions running
+ no actions running
+Loading: 0 packages loaded

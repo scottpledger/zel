@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "0bbc5afa5d91",
+ "classified_as": "UNCLASSIFIED",
+ "cmd": "query '//...' --output=graph --graph:node_limit=20 --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "e6e09101478e707e",
+  "c533379d5afc0351",
+  "fd996b4d4249d48b",
+  "2e542837363cdc98",
+  "d2f418bbe5709727",
+  "92b6e3bcc05932ec"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:sm_fg\"\n  \"//:top_alias\\n...and 1 more items\"\n  \"//:top_alias\\n...and 1 more items\" -> \"//a:lib\"\n  \"//pg:private\"\n  \"//pg:private\" -> \"//b:mk\"\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//c:cyc2\"\n  \"//c:cyc2\" -> \"//c:cyc1\"\n  \"//c:cyc1\"\n  \"//c:cyc1\" -> \"//c:cyc2\"\n  \"//:all_tests\"\n  \"//:all_tests\" -> \"//b:t1\"\n  \"//:all_tests\" -> \"//b:t2\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:cl2\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:opt_cs\\n...and 1 more items\"\n  \"//pg:viol\"\n  \"//pg:viol\" -> \"//c:cdata\"\n  \"//b:mk\"\n  \"//b:t1\"\n  \"//b:t1\" -> \"//a:lib2\"\n  \"//d:dep_bad\"\n  \"//d:dep_bad\" -> \"//d:bad\"\n  \"//d:dep_bad\" -> \"//d:ok\"\n  \"//d:ok\"\n  \"//d:ok\" -> \"//c:cdata\"\n  \"//d:bad\"\n  \"//:tagged\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:lm\"\n  \"//b:shlib\"\n  \"//b:shlib\" -> \"//c:cdata\"\n  \"//c:cdata\"\n  \"//a:opt_cs\\n...and 1 more items\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//:all_tests\"\n  \"//:all_tests\" -> \"//b:t1\"\n  \"//:all_tests\" -> \"//b:t2\"\n  \"//c:cyc2\"\n  \"//c:cyc2\" -> \"//c:cyc1\"\n  \"//c:cyc1\"\n  \"//c:cyc1\" -> \"//c:cyc2\"\n  \"//pg:viol\"\n  \"//pg:viol\" -> \"//c:cdata\"\n  \"//:tagged\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//pg:private\"\n  \"//pg:private\" -> \"//b:mk\"\n  \"//b:mk\"\n  \"//b:t1\"\n  \"//b:t1\" -> \"//a:lib2\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n  \"//b:shlib\" -> \"//c:cdata\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:cl2\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:sm_fg\"\n  \"//d:dep_bad\"\n  \"//d:dep_bad\" -> \"//d:bad\"\n  \"//d:dep_bad\" -> \"//d:ok\"\n  \"//d:ok\"\n  \"//d:ok\" -> \"//c:cdata\"\n  \"//c:cdata\"\n  \"//d:bad\"\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\\n...and 1 more items\"\n  \"//a:lm\"\n  \"//a:tr\\n...and 1 more items\"\n  \"//a:tr\\n...and 1 more items\" -> \"//a:lib\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n  \"//a:def_cs\\n...and 1 more items\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//:tagged\"\n  \"//a:tr\\n...and 1 more items\"\n  \"//a:tr\\n...and 1 more items\" -> \"//a:lib\"\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//c:cyc1\"\n  \"//c:cyc1\" -> \"//c:cyc2\"\n  \"//c:cyc2\"\n  \"//c:cyc2\" -> \"//c:cyc1\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:sm_fg\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:opt_cs\\n...and 1 more items\"\n  \"//a:opt_cs\\n...and 1 more items\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:cl2\"\n  \"//pg:viol\"\n  \"//pg:viol\" -> \"//c:cdata\"\n  \"//pg:private\"\n  \"//pg:private\" -> \"//b:mk\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:lm\"\n  \"//d:dep_bad\"\n  \"//d:dep_bad\" -> \"//d:bad\"\n  \"//d:dep_bad\" -> \"//d:ok\"\n  \"//d:ok\"\n  \"//d:ok\" -> \"//c:cdata\"\n  \"//d:bad\"\n  \"//:all_tests\"\n  \"//:all_tests\" -> \"//b:t1\"\n  \"//:all_tests\" -> \"//b:t2\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n  \"//b:shlib\" -> \"//c:cdata\"\n  \"//c:cdata\"\n  \"//b:t1\"\n  \"//b:t1\" -> \"//a:lib2\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n  \"//b:mk\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//pg:private\"\n  \"//pg:private\" -> \"//b:mk\"\n  \"//b:mk\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//c:cyc2\"\n  \"//c:cyc2\" -> \"//c:cyc1\"\n  \"//c:cyc1\"\n  \"//c:cyc1\" -> \"//c:cyc2\"\n  \"//pg:viol\"\n  \"//pg:viol\" -> \"//c:cdata\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//d:dep_bad\"\n  \"//d:dep_bad\" -> \"//d:bad\"\n  \"//d:dep_bad\" -> \"//d:ok\"\n  \"//d:bad\"\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\\n...and 1 more items\"\n  \"//a:def_cs\\n...and 1 more items\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:lm\"\n  \"//:all_tests\"\n  \"//:all_tests\" -> \"//b:t1\"\n  \"//:all_tests\" -> \"//b:t2\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:t1\"\n  \"//b:t1\" -> \"//a:lib2\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//d:ok\"\n  \"//d:ok\" -> \"//c:cdata\"\n  \"//b:tool\"\n  \"//a:cl2\"\n  \"//a:tr\\n...and 1 more items\"\n  \"//a:tr\\n...and 1 more items\" -> \"//a:lib\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n  \"//a:sm_fg\"\n  \"//b:shlib\"\n  \"//b:shlib\" -> \"//c:cdata\"\n  \"//c:cdata\"\n  \"//:tagged\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//d:dep_bad\"\n  \"//d:dep_bad\" -> \"//d:bad\"\n  \"//d:dep_bad\" -> \"//d:ok\"\n  \"//:tagged\"\n  \"//d:ok\"\n  \"//d:ok\" -> \"//c:cdata\"\n  \"//pg:private\"\n  \"//pg:private\" -> \"//b:mk\"\n  \"//pg:viol\"\n  \"//pg:viol\" -> \"//c:cdata\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:tr\\n...and 1 more items\"\n  \"//a:tr\\n...and 1 more items\" -> \"//a:lib\"\n  \"//a:sm_fg\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:cl2\"\n  \"//:all_tests\"\n  \"//:all_tests\" -> \"//b:t1\"\n  \"//:all_tests\" -> \"//b:t2\"\n  \"//a:lm\"\n  \"//c:cyc2\"\n  \"//c:cyc2\" -> \"//c:cyc1\"\n  \"//c:cyc1\"\n  \"//c:cyc1\" -> \"//c:cyc2\"\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\\n...and 1 more items\"\n  \"//a:def_cs\\n...and 1 more items\"\n  \"//d:bad\"\n  \"//b:t1\"\n  \"//b:t1\" -> \"//a:lib2\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n  \"//b:mk\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n  \"//b:shlib\" -> \"//c:cdata\"\n  \"//c:cdata\"\n  \"//b:tool\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:tr\\n...and 1 more items\"\n  \"//a:tr\\n...and 1 more items\" -> \"//a:lib\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//d:dep_bad\"\n  \"//d:dep_bad\" -> \"//d:bad\"\n  \"//d:dep_bad\" -> \"//d:ok\"\n  \"//:tagged\"\n  \"//d:ok\"\n  \"//d:ok\" -> \"//c:cdata\"\n  \"//a:lm\"\n  \"//pg:private\"\n  \"//pg:private\" -> \"//b:mk\"\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:opt_cs\\n...and 1 more items\"\n  \"//a:opt_cs\\n...and 1 more items\"\n  \"//b:tool\"\n  \"//d:bad\"\n  \"//pg:viol\"\n  \"//pg:viol\" -> \"//c:cdata\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:sm_fg\"\n  \"//b:mk\"\n  \"//a:cl2\"\n  \"//:all_tests\"\n  \"//:all_tests\" -> \"//b:t1\"\n  \"//:all_tests\" -> \"//b:t2\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n  \"//b:shlib\" -> \"//c:cdata\"\n  \"//b:t1\"\n  \"//b:t1\" -> \"//a:lib2\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//c:cdata\"\n  \"//c:cyc1\"\n  \"//c:cyc1\" -> \"//c:cyc2\"\n  \"//c:cyc2\"\n  \"//c:cyc2\" -> \"//c:cyc1\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n}\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

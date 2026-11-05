@@ -1,0 +1,13 @@
+NoTransition -> //a:lib (2d89340)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> //a:lib (7e2fa55)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> //a:lib2 (2d89340)
+  srcs#//a:lib#NoTransition -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> //a:lm (2d89340)
+  $genrule_setup#@bazel_tools//tools/genrule:genrule-setup.sh#(null transition) -> 

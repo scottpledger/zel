@@ -1,0 +1,12 @@
+{
+beta 3
+	Tab 2
+eps 3
+ 0
+eps 1
+	Tab
+beta
+	Tab
+gamma
+x 3
+alpha 1

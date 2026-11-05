@@ -1,0 +1,3 @@
+@WS@/c/BUILD:1:10: filegroup rule //c:cdata
+@WS@/d/BUILD:3:10: filegroup rule //d:dep_bad
+@WS@/d/BUILD:2:10: filegroup rule //d:ok

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "5e9997be277c",
+ "classified_as": "UNCLASSIFIED",
+ "cmd": "query '//b:all' --output=graph --graph:node_limit=20 --keep_going",
+ "distinct": 4,
+ "harness": "query",
+ "hashes": [
+  "3a7a47b2c7ab1e52",
+  "be6593e23d5fdc40",
+  "49062ba35f1bb7ac",
+  "be6593e23d5fdc40",
+  "9bf18c15ff2af021",
+  "9bf18c15ff2af021"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:t1\\n...and 2 more items\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:mk\\n...and 2 more items\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:tool\\n...and 2 more items\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:mk\\n...and 2 more items\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:mk\\n...and 2 more items\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:mk\\n...and 2 more items\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

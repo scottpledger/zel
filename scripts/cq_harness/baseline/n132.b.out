@@ -1,0 +1,15 @@
+NoTransition -> //a:lm_grp (2d89340)
+  srcs#//a:lm#NoTransition -> 
+NoTransition -> //a:sel (2d89340)
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:sm_fg (2d89340)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> //a:srcs_fg (2d89340)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:srcs_fg (7e2fa55)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 

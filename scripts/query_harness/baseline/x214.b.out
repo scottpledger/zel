@@ -1,0 +1,2 @@
+@WS@/a/BUILD:5:8: catrule rule //a:lib2
+@WS@/a/BUILD:8:6: trule rule //a:tr

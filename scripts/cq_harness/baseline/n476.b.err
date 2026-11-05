@@ -1,0 +1,11 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+WARNING: Build option --compilation_mode has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+Analyzing: 2 targets (0 packages loaded, 0 targets configured)
+INFO: Analyzed 2 targets (0 packages loaded, 4 targets configured).
+INFO: Found 2 targets...
+WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//a:tr, config=BuildConfigurationKey[7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565]}]
+INFO: Elapsed time: 0.071s, Critical Path: 0.00s
+INFO: 0 processes.
+INFO: Build completed successfully, 0 total actions

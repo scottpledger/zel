@@ -1,0 +1,6 @@
+config_setting rule //a:def_cs
+config_setting rule //a:opt_cs
+filegroup rule //a:sel
+source file //a:x.txt
+source file //a:y.txt
+source file //a:z.txt

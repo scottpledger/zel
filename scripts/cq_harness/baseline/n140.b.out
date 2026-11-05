@@ -1,0 +1,5 @@
+//a:lm_grp (7913989) [BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]
+//a:sel (7913989) [--define:FOO, BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]
+//a:sm_fg (7913989) [BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]
+//a:srcs_fg (7913989) [BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]
+//a:srcs_fg (cbe2a75) [BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]

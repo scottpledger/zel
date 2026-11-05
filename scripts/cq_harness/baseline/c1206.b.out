@@ -1,0 +1,15 @@
+bazel-out/darwin_arm64-fastbuild/bin/a/gg.out
+bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt
+bazel-out/darwin_arm64-opt/bin/a/lib.txt
+bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt
+bazel-out/darwin_arm64-fastbuild/bin/a/lm.o
+a/z.txt
+bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt
+a/x.txt
+a/y.txt
+bazel-out/darwin_arm64-fastbuild/bin/b/mk.txt
+bazel-out/darwin_arm64-fastbuild/bin/b/t1
+bazel-out/darwin_arm64-fastbuild/bin/b/t2
+bazel-out/darwin_arm64-fastbuild/bin/b/tool
+bazel-out/darwin_arm64-opt-exec/bin/b/tool
+c/d.txt

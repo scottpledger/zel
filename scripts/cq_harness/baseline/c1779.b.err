@@ -1,0 +1,12 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: target //a:lib2 (0 packages loaded, 0 targets configured)
+INFO: Analyzed target //a:lib2 (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+ERROR: Starlark evaluation error for //a:lib2: Traceback (most recent call last):
+	File "--starlark:expr", line 1, column 35, in format
+Error: Accessing providers via the field syntax on structs is deprecated and removed.
+INFO: Elapsed time: 0.070s, Critical Path: 0.00s
+INFO: 0 processes.
+INFO: Build completed successfully, 0 total actions

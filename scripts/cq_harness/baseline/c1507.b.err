@@ -1,0 +1,14 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+ERROR: Skipping '//a:nope': no such target '//a:nope': target 'nope' not declared in package 'a' defined by @WS@/a/BUILD
+Analyzing: 0 targets (0 packages loaded, 0 targets configured)
+INFO: Analyzed 0 targets (0 packages loaded, 0 targets configured).
+INFO: Found 0 targets...
+ERROR: Evaluation of query "//a:nope" failed: no such target '//a:nope': target 'nope' not declared in package 'a' defined by @WS@/a/BUILD
+WARNING: --keep_going specified, ignoring errors. Results may be inaccurate
+INFO: Empty query results
+ERROR: command succeeded, but there were errors parsing the target pattern
+INFO: Elapsed time: 0.070s, Critical Path: 0.00s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully

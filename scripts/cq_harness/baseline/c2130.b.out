@@ -1,0 +1,28 @@
+NoTransition -> //a:tr (334d30c)
+  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> fe04a1f
+  $allowlist_function_transition#@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist#(null transition) -> 
+NoTransition -> @bazel_tools//tools:host_platform (c07488d)
+NoTransition -> //a:lib (fe04a1f)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> @@platforms//host:host (c07488d)
+  constraint_values#@@platforms//cpu:aarch64#NoTransition -> 
+  constraint_values#@@platforms//os:osx#NoTransition -> 
+@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist (null)
+NoConfigTransition -> @@platforms//cpu:aarch64 (c07488d)
+  constraint_setting#@@platforms//cpu:cpu#NoTransition -> 
+NoTransition -> @ext//lib:data (fe04a1f)
+  srcs#@ext//lib:d.txt#(null transition) -> 
+NoConfigTransition -> @@platforms//os:osx (c07488d)
+  constraint_setting#@@platforms//os:os#NoTransition -> 
+//a:x.txt (null)
+NoTransition -> //a:srcs_fg (fe04a1f)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+//a:z.txt (null)
+NoConfigTransition -> @@platforms//cpu:cpu (c07488d)
+NoConfigTransition -> @@platforms//os:os (c07488d)
+@ext//lib:d.txt (null)
+//a:y.txt (null)

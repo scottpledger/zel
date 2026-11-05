@@ -1,0 +1,3 @@
+INFO: Options provided by the client:
+  Inherited 'common' options: --isatty=0 --terminal_columns=80
+ERROR: - :: Invalid options syntax: -

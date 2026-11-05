@@ -1,0 +1,5 @@
+Loading: 0 packages loaded
+ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead
+ERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline
+ERROR: package contains errors: e: 'is' not supported, use '==' instead
+ERROR: Evaluation of query "(//e:all + //a:all)" failed

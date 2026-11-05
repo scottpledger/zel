@@ -1,0 +1,3 @@
+filegroup rule //c:cdata
+filegroup rule //d:dep_bad
+filegroup rule //d:ok

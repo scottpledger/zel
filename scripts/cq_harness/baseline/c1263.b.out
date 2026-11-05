@@ -1,0 +1,36 @@
+NoTransition -> //a:gg (2d89340)
+  srcs#//a:sel#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+  tools#//b:tool#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $genrule_setup#@bazel_tools//tools/genrule:genrule-setup.sh#(null transition) -> 
+NoTransition -> @bazel_tools//tools:host_platform (c07488d)
+NoTransition -> @ext//lib:data (2d89340)
+  srcs#@ext//lib:d.txt#(null transition) -> 
+NoTransition -> //b:tool (77e8473)
+  srcs#//b:tool.cc#(null transition) -> 
+NoTransition -> @@platforms//host:host (c07488d)
+  constraint_values#@@platforms//cpu:aarch64#NoTransition -> 
+  constraint_values#@@platforms//os:osx#NoTransition -> 
+NoTransition -> //a:sel (2d89340)
+  srcs#//a:z.txt#(null transition) -> 
+@bazel_tools//tools/genrule:genrule-setup.sh (null)
+NoConfigTransition -> @@platforms//cpu:aarch64 (c07488d)
+  constraint_setting#@@platforms//cpu:cpu#NoTransition -> 
+NoTransition -> //a:opt_cs (2d89340)
+//a:z.txt (null)
+//b:tool.cc (null)
+NoConfigTransition -> @@platforms//os:osx (c07488d)
+  constraint_setting#@@platforms//os:os#NoTransition -> 
+NoTransition -> //a:def_cs (2d89340)
+@ext//lib:d.txt (null)
+NoConfigTransition -> @@platforms//cpu:cpu (c07488d)
+NoConfigTransition -> @@platforms//os:os (c07488d)

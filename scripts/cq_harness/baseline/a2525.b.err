@@ -1,0 +1,2 @@
+Computing main repo mapping: 
+ERROR: Error while parsing '//a:lib2': Specifying build target(s) [//a:lib2] with --skyframe_state is currently not supported.

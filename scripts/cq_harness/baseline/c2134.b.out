@@ -1,0 +1,46 @@
+NoTransition -> //a:cl (4d1be72)
+  srcs#//a:c.cc#(null transition) -> 
+  srcs#//a:c.h#(null transition) -> 
+  deps#//a:cl2#NoTransition -> 
+NoTransition -> //a:cl2 (4d1be72)
+  srcs#//a:c2.cc#(null transition) -> 
+NoTransition -> //a:def_cs (4d1be72)
+NoTransition -> //a:gg (4d1be72)
+  srcs#//a:sel#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+  tools#//b:tool#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $genrule_setup#@bazel_tools//tools/genrule:genrule-setup.sh#(null transition) -> 
+NoTransition -> //a:lib (3339c9b)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> //a:lib (4d1be72)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> //a:lib2 (4d1be72)
+  srcs#//a:lib#NoTransition -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> //a:lm (4d1be72)
+  $genrule_setup#@bazel_tools//tools/genrule:genrule-setup.sh#(null transition) -> 
+NoTransition -> //a:lm_grp (4d1be72)
+  srcs#//a:lm#NoTransition -> 
+NoTransition -> //a:opt_cs (4d1be72)
+NoTransition -> //a:sel (4d1be72)
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:sm_cat (4d1be72)
+  srcs#//a:sm_fg#NoTransition -> 
+NoTransition -> //a:sm_fg (4d1be72)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> //a:srcs_fg (3339c9b)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:srcs_fg (4d1be72)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:tr (4d1be72)
+  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 3339c9b
+  $allowlist_function_transition#@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist#(null transition) -> 

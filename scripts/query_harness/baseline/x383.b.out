@@ -1,0 +1,26 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="x_test" location="@WS@/b/BUILD" name="//b:t1">
+        <string name="name" value="t1"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="size" value="small"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="data">
+            <label value="//a:lib2"/>
+        </list>
+        <rule-input name="//a:lib2"/>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="@bazel_tools//tools/test:collect_coverage"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_report_generator"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_support"/>
+        <rule-input name="@bazel_tools//tools/test:runtime"/>
+        <rule-input name="@bazel_tools//tools/test:test_setup"/>
+        <rule-input name="@bazel_tools//tools/test:test_wrapper"/>
+        <rule-input name="@bazel_tools//tools/test:test_xml_generator"/>
+        <rule-input name="@bazel_tools//tools/test:xml_writer"/>
+    </rule>
+</query>

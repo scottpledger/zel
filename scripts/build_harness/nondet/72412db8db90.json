@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "72412db8db90",
+ "classified_as": "STRICT",
+ "cmd": "build --build_event_json_file=/nonexistent/x //:g1",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "4de6c0c5badde369",
+  "4de6c0c5badde369",
+  "4de6c0c5badde369",
+  "4de6c0c5badde369",
+  "4de6c0c5badde369",
+  "4de6c0c5badde369"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: [unix_jni.cc:471] /nonexistent (Read-only file system)\nERROR: Unable to write to '/nonexistent/x'. Omitting --build_event_json_file. [unix_jni.cc:471] /nonexistent (Read-only file system)",
+   "out": "",
+   "rc": 36
+  },
+  {
+   "err": "ERROR: [unix_jni.cc:471] /nonexistent (Read-only file system)\nERROR: Unable to write to '/nonexistent/x'. Omitting --build_event_json_file. [unix_jni.cc:471] /nonexistent (Read-only file system)",
+   "out": "",
+   "rc": 36
+  },
+  {
+   "err": "ERROR: [unix_jni.cc:471] /nonexistent (Read-only file system)\nERROR: Unable to write to '/nonexistent/x'. Omitting --build_event_json_file. [unix_jni.cc:471] /nonexistent (Read-only file system)",
+   "out": "",
+   "rc": 36
+  },
+  {
+   "err": "ERROR: [unix_jni.cc:471] /nonexistent (Read-only file system)\nERROR: Unable to write to '/nonexistent/x'. Omitting --build_event_json_file. [unix_jni.cc:471] /nonexistent (Read-only file system)",
+   "out": "",
+   "rc": 36
+  },
+  {
+   "err": "ERROR: [unix_jni.cc:471] /nonexistent (Read-only file system)\nERROR: Unable to write to '/nonexistent/x'. Omitting --build_event_json_file. [unix_jni.cc:471] /nonexistent (Read-only file system)",
+   "out": "",
+   "rc": 36
+  },
+  {
+   "err": "ERROR: [unix_jni.cc:471] /nonexistent (Read-only file system)\nERROR: Unable to write to '/nonexistent/x'. Omitting --build_event_json_file. [unix_jni.cc:471] /nonexistent (Read-only file system)",
+   "out": "",
+   "rc": 36
+  }
+ ],
+ "workspace": "ws1"
+}

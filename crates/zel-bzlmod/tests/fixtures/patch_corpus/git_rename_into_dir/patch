@@ -1,0 +1,3 @@
+diff --git a/old.txt b/sub/dir/new.txt
+rename from old.txt
+rename to sub/dir/new.txt

@@ -1,0 +1,14 @@
+@@//a:tr 4
+@@//a:lib 4
+@@platforms//host:host 5
+@@platforms//host:host 5
+@@platforms//cpu:aarch64 5
+@@platforms//os:osx 5
+@@//a:srcs_fg 5
+@@//a:x.txt 4
+@@ext+//lib:data 5
+@@//a:z.txt 4
+@@platforms//cpu:cpu 5
+@@platforms//os:os 5
+@@//a:y.txt 4
+@@ext+//lib:d.txt 4

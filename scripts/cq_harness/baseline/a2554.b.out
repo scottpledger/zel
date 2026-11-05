@@ -1,0 +1,16 @@
+18 total actions.
+
+Mnemonics:
+  Genrule: 2
+  CatIt: 4
+  FileWrite: 12
+
+Configurations:
+  darwin_arm64-opt: 1
+  darwin_arm64-fastbuild: 17
+
+Execution Platforms:
+  @@platforms//host:host: 18
+
+Aspects:
+  //:defs.bzl%asp: 12

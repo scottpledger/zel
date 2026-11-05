@@ -1,0 +1,5 @@
+--- a/f.txt
++++ b/f.txt
+@@ -23 +23 @@
+-alpha
++NEW alpha

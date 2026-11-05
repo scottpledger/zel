@@ -1,0 +1,4 @@
+Loading: 0 packages loaded
+ERROR: Skipping '//nonexistent:x': no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent
+ERROR: Evaluation of query "//a:lib" failed: no such package 'a': BUILD file not found on package path

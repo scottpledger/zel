@@ -16,6 +16,8 @@
 //! (`src/main/java/com/google/devtools/build/lib/...`) into Rust crates (`zel-vfs`,
 //! `zel-cmdline`, `zel-skyframe`, `zel-util`).
 
+pub mod native;
+
 use std::ffi::{CStr, CString};
 use std::os::raw::c_char;
 use zel_cmdline::Label;
@@ -86,6 +88,32 @@ pub unsafe extern "C" fn zel_md5_hex(data: *const u8, len: usize) -> *mut c_char
     CString::new(hex)
         .map(CString::into_raw)
         .unwrap_or(std::ptr::null_mut())
+}
+
+/// Terminal columns of stderr/stdout (0 when not a terminal), like the client's `--terminal_columns`.
+#[no_mangle]
+pub extern "C" fn zel_terminal_columns() -> u32 {
+    zel_util::terminal::terminal_columns().unwrap_or(0) as u32
+}
+
+/// Whether stderr is a terminal.
+#[no_mangle]
+pub extern "C" fn zel_isatty_stderr() -> i32 {
+    zel_util::terminal::isatty(2) as i32
+}
+
+/// Whether the process `pid` exists.
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn zel_process_alive(pid: u32) -> i32 {
+    native::process::is_alive(pid) as i32
+}
+
+/// System memory pressure: 0 normal, 1 warning, 2 critical.
+#[cfg(unix)]
+#[no_mangle]
+pub extern "C" fn zel_memory_pressure_level() -> i32 {
+    native::system::memory_pressure() as i32
 }
 
 /// Frees a `CString` allocated by `zel_*` FFI functions.

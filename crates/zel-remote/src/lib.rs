@@ -15,147 +15,27 @@
 //! Remote Execution API v2 (REAPI) client, Disk Cache (`--disk_cache`), and Chrome Trace Profiler (`--profile`).
 //! Mirrors `src/main/java/com/google/devtools/build/lib/remote` and `profiler`.
 
+pub mod credentials;
+pub mod digest;
+pub mod disk_cache;
+pub mod fake_server;
+pub mod grpc;
+pub mod hpack;
+pub mod http2;
+pub mod merkle;
+pub mod options;
+pub mod reapi_client;
+pub mod spawn_runner;
+#[cfg(test)]
+mod spawn_runner_tests;
+pub mod transport;
+
 use std::io;
 use std::sync::Mutex;
-use zel_proto::remote_execution::{Action, ActionResult, Command, Digest, OutputFile};
-use zel_util::sha256;
 use zel_vfs::{FileSystem, PathFragment};
 
-/// Computes the REAPI v2 `Digest` (`SHA-256` hex + size in bytes) of a blob.
-pub fn compute_digest(blob: &[u8]) -> Digest {
-    Digest {
-        hash: sha256::hex_digest(blob),
-        size_bytes: blob.len() as i64,
-    }
-}
-
-/// Computes the REAPI v2 `Command` and `Action` digests for a spawn.
-pub fn build_reapi_action(
-    argv: &[String],
-    output_files: &[String],
-    input_root_digest: Digest,
-) -> (Command, Digest, Action, Digest) {
-    let cmd = Command {
-        arguments: argv.to_vec(),
-        environment_variables: Vec::new(),
-        output_files: output_files.to_vec(),
-        output_directories: Vec::new(),
-        working_directory: String::new(),
-    };
-    let cmd_bytes = cmd.encode_to_vec();
-    let cmd_digest = compute_digest(&cmd_bytes);
-
-    let action = Action {
-        command_digest: Some(cmd_digest.clone()),
-        input_root_digest: Some(input_root_digest),
-        do_not_cache: false,
-    };
-    let action_bytes = action.encode_to_vec();
-    let action_digest = compute_digest(&action_bytes);
-
-    (cmd, cmd_digest, action, action_digest)
-}
-
-/// Combined Disk Cache (`--disk_cache`) and Remote Action Cache (`ac/` + `cas/` layout).
-pub struct DiskCacheClient {
-    pub cache_root: PathFragment,
-}
-
-impl DiskCacheClient {
-    pub fn new(cache_root: PathFragment) -> Self {
-        Self { cache_root }
-    }
-
-    fn ac_path(&self, action_hash: &str) -> PathFragment {
-        let prefix = if action_hash.len() >= 2 {
-            &action_hash[..2]
-        } else {
-            "00"
-        };
-        self.cache_root
-            .get_relative_str("ac")
-            .get_relative_str(prefix)
-            .get_relative_str(action_hash)
-    }
-
-    fn cas_path(&self, blob_hash: &str) -> PathFragment {
-        let prefix = if blob_hash.len() >= 2 {
-            &blob_hash[..2]
-        } else {
-            "00"
-        };
-        self.cache_root
-            .get_relative_str("cas")
-            .get_relative_str(prefix)
-            .get_relative_str(blob_hash)
-    }
-
-    pub fn get_action_result(
-        &self,
-        fs: &dyn FileSystem,
-        action_digest: &Digest,
-    ) -> Option<ActionResult> {
-        let bytes = fs.read_file(&self.ac_path(&action_digest.hash)).ok()?;
-        ActionResult::decode(&bytes).ok()
-    }
-
-    pub fn put_action_result(
-        &self,
-        fs: &dyn FileSystem,
-        action_digest: &Digest,
-        result: &ActionResult,
-    ) -> io::Result<()> {
-        let path = self.ac_path(&action_digest.hash);
-        if let Some(parent) = path.parent_directory() {
-            fs.create_directory_and_parents(&parent)?;
-        }
-        fs.write_file(&path, &result.encode_to_vec())
-    }
-
-    pub fn upload_blob(&self, fs: &dyn FileSystem, data: &[u8]) -> io::Result<Digest> {
-        let digest = compute_digest(data);
-        let path = self.cas_path(&digest.hash);
-        if let Some(parent) = path.parent_directory() {
-            fs.create_directory_and_parents(&parent)?;
-        }
-        fs.write_file(&path, data)?;
-        Ok(digest)
-    }
-
-    pub fn download_blob(&self, fs: &dyn FileSystem, digest: &Digest) -> io::Result<Vec<u8>> {
-        fs.read_file(&self.cas_path(&digest.hash))
-    }
-
-    pub fn cache_outputs_from_execroot(
-        &self,
-        fs: &dyn FileSystem,
-        execroot: &PathFragment,
-        action_digest: &Digest,
-        output_rel_paths: &[PathFragment],
-        exit_code: i32,
-    ) -> io::Result<ActionResult> {
-        let mut output_files = Vec::new();
-        for rel in output_rel_paths {
-            let full = execroot.get_relative(rel);
-            if let Ok(bytes) = fs.read_file(&full) {
-                let blob_digest = self.upload_blob(fs, &bytes)?;
-                output_files.push(OutputFile {
-                    path: rel.path_string().to_string(),
-                    digest: Some(blob_digest),
-                    is_executable: false,
-                });
-            }
-        }
-        let ar = ActionResult {
-            output_files,
-            exit_code,
-            stdout_raw: Vec::new(),
-            stderr_raw: Vec::new(),
-        };
-        self.put_action_result(fs, action_digest, &ar)?;
-        Ok(ar)
-    }
-}
+/// `--disk_cache` client (Bazel layout `ac/` + `cas/`); see [`disk_cache::DiskCache`].
+pub type DiskCacheClient = disk_cache::DiskCache;
 
 #[derive(Debug, Clone)]
 pub struct TraceEvent {
@@ -210,39 +90,3 @@ impl Profiler {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use zel_vfs::InMemoryFileSystem;
-
-    #[test]
-    fn test_disk_cache_cas_and_ac_roundtrip() {
-        let fs = InMemoryFileSystem::default();
-        let cache = DiskCacheClient::new(PathFragment::create("/cache"));
-        let execroot = PathFragment::create("/execroot/_main");
-        fs.create_directory_and_parents(&execroot.get_relative_str("out"))
-            .unwrap();
-        let out_rel = PathFragment::create("out/hello.txt");
-        fs.write_file(&execroot.get_relative(&out_rel), b"hello world")
-            .unwrap();
-
-        let input_digest = compute_digest(b"input-tree");
-        let (_cmd, _cd, _act, act_digest) = build_reapi_action(
-            &["echo".to_string(), "hello".to_string()],
-            &["out/hello.txt".to_string()],
-            input_digest,
-        );
-
-        let stored = cache
-            .cache_outputs_from_execroot(&fs, &execroot, &act_digest, &[out_rel], 0)
-            .unwrap();
-        assert_eq!(stored.output_files.len(), 1);
-
-        let fetched = cache.get_action_result(&fs, &act_digest).unwrap();
-        assert_eq!(fetched, stored);
-        let blob = cache
-            .download_blob(&fs, fetched.output_files[0].digest.as_ref().unwrap())
-            .unwrap();
-        assert_eq!(blob, b"hello world");
-    }
-}

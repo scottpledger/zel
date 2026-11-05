@@ -1,0 +1,4 @@
+/bin/bash -c 'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt'
+/bin/bash -c 'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txt'
+/bin/bash -c 'cat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt'
+/bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/darwin_arm64-fastbuild/bin/a/lm.o'

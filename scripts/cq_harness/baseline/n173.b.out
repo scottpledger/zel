@@ -1,0 +1,10 @@
+NoTransition -> //a:lib2 (d2c2765)
+  srcs#//a:lib#NoTransition -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> //a:lib (d2c2765)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> @ext//lib:data (d2c2765)
+  srcs#@ext//lib:d.txt#(null transition) -> 
+@ext//lib:d.txt (null)

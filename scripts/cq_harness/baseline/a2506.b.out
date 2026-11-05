@@ -1,0 +1,25 @@
+:genrule:catrule//a:gg//a:lib//a:lib2//a:lm*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272cBaBx.txt
+By.txt
+Bz.txt
+BexternalB
+ext+*ddarwin_arm64-optdarwin_arm64"@7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565B	
+libBd.txt
+"
+//a:sm_catB	bazel-outBdarwin_arm64-fastbuildB	bin"B
+sm_cat.txt
+Bbazel_toolsm@ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea"CatIt(BJhr@@platforms//host:host"
+Bdarwin_arm64-opt-execB	binBbB
+tool
+	Btool.runfiles"BaBlib.txt
+
+
+"	
+Bdarwin_arm64-optB	binBa"	Blib.txtBgg.out
+
+m@e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329"CatIt(BJhr@@platforms//host:host"�@2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542"Genrule(:$
+PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:hostBlib2.txt
+m@c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69"CatIt(BJhr@@platforms//host:hostm@2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8"CatIt(BJhr@@platforms//host:hostBtoolsB	genruleBgenrule-setup.sh	
+"B
+lm.o
+�@87db1df4b214fe2a744f1a7292cfa0468e49193cae194c181f0f39e81c9a76f5"Genrule(:$
+PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:host

@@ -1,0 +1,9 @@
+//a:lib
+//a:srcs_fg
+//a:tr
+//a:x.txt
+//a:y.txt
+//a:z.txt
+@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist
+@ext//lib:d.txt
+@ext//lib:data

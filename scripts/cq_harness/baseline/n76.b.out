@@ -1,0 +1,37 @@
+# @WS@/a/BUILD:13:5
+xlib(
+  name = "cl",
+  srcs = ["//a:c.cc", "//a:c.h"],
+  deps = ["//a:cl2"],
+)
+# Rule cl instantiated at (most recent call last):
+#   @WS@/a/BUILD:13:5 in <toplevel>
+# Rule xlib defined at (most recent call last):
+#   @WS@/defs.bzl:36:12 in <toplevel>
+
+# @WS@/a/BUILD:14:5
+xlib(
+  name = "cl2",
+  srcs = ["//a:c2.cc"],
+)
+# Rule cl2 instantiated at (most recent call last):
+#   @WS@/a/BUILD:14:5 in <toplevel>
+# Rule xlib defined at (most recent call last):
+#   @WS@/defs.bzl:36:12 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/BUILD:5:6
+alias(
+  name = "host_platform",
+  actual = "@@platforms//host:host",
+)
+# Rule host_platform instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/BUILD:5:6 in <toplevel>
+
+# @OB@/external/platforms/host/BUILD:14:9
+platform(
+  name = "host",
+  constraint_values = ["@@platforms//cpu:aarch64", "@@platforms//os:osx"],
+)
+# Rule host instantiated at (most recent call last):
+#   @OB@/external/platforms/host/BUILD:14:9 in <toplevel>
+

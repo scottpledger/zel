@@ -1,0 +1,9 @@
+--- a/f.txt
++++ b/f.txt
+@@ -15,5 +15,5 @@
+ y 3
+ alpha 1
+-gamma 0
++NEW gamma 0
+ beta 1
+ beta 0

@@ -1,0 +1,22 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:gg"
+  "//a:gg" -> "//a:sel"
+  "//a:cl"
+  "//a:cl" -> "//a:cl2"
+  "//a:cl2"
+  "//a:sel"
+  "//a:sel" -> "//a:opt_cs\n...and 1 more items"
+  "//a:opt_cs\n...and 1 more items"
+  "//a:lm_grp"
+  "//a:lm_grp" -> "//a:lm"
+  "//a:tr\n...and 1 more items"
+  "//a:tr\n...and 1 more items" -> "//a:lib"
+  "//a:lib"
+  "//a:lib" -> "//a:srcs_fg"
+  "//a:srcs_fg"
+  "//a:lm"
+  "//a:sm_cat"
+  "//a:sm_cat" -> "//a:sm_fg"
+  "//a:sm_fg"
+}

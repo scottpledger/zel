@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "d3d25348d2ba",
+ "classified_as": "STRICT",
+ "cmd": "query //a:lib --color=yes",
+ "distinct": 1,
+ "harness": "query",
+ "hashes": [
+  "32392bd5d36c2aa6",
+  "32392bd5d36c2aa6",
+  "32392bd5d36c2aa6",
+  "32392bd5d36c2aa6",
+  "32392bd5d36c2aa6",
+  "32392bd5d36c2aa6"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "//a:lib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:lib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:lib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:lib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:lib\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:lib\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

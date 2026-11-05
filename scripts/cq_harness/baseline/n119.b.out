@@ -1,0 +1,6 @@
+NoTransition -> //a:lib2 (d2c2765)
+  srcs#//a:lib#NoTransition -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> //a:tr (d2c2765)
+  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 663e844
+  $allowlist_function_transition#@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist#(null transition) -> 

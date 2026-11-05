@@ -1,0 +1,5 @@
+module(name="root", version="1.0")
+ext = use_extension("//:ext.bzl", "ex")
+ext.mk(name = "a")
+ext.mk(name = "b", opt = ["with \"quote\" and \\ backslash", "@@x//:y", "'q'"])
+use_repo(ext, "a", "b")

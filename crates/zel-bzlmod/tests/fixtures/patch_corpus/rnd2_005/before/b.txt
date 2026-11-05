@@ -1,0 +1,27 @@
+	Tab 2
+y
+eps 0
+
+delta
+y 1
+delta
+beta 2
+x
+ 0
+{ 0
+alpha 1
+beta 1
+}
+	Tab 1
+y 3
+x
+delta
+delta 2
+beta
+
+eps
+alpha
+x 0
+	Tab 1
+alpha 2
+gamma

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "63f01a82de9d",
+ "classified_as": "ORDERLESS",
+ "cmd": "build -k --jobs=1 //:gfail //:gfail2 //:g1",
+ "distinct": 2,
+ "harness": "build",
+ "hashes": [
+  "83de8f24198b3e79",
+  "9d2c420c7ee953e1",
+  "9d2c420c7ee953e1",
+  "9d2c420c7ee953e1",
+  "83de8f24198b3e79",
+  "83de8f24198b3e79"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo boom >&2; exit 3'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nboom\nERROR: WS/BUILD:8:8: Executing genrule //:gfail2 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //:gfail2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nINFO: Build succeeded for only 1 of 3 top-level targets\nINFO: Found 3 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 3 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nERROR: WS/BUILD:8:8: Executing genrule //:gfail2 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //:gfail2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo boom >&2; exit 3'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nboom\nINFO: Build succeeded for only 1 of 3 top-level targets\nINFO: Found 3 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 3 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nERROR: WS/BUILD:8:8: Executing genrule //:gfail2 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //:gfail2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo boom >&2; exit 3'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nboom\nINFO: Build succeeded for only 1 of 3 top-level targets\nINFO: Found 3 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 3 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nERROR: WS/BUILD:8:8: Executing genrule //:gfail2 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //:gfail2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo boom >&2; exit 3'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nboom\nINFO: Build succeeded for only 1 of 3 top-level targets\nINFO: Found 3 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 3 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo boom >&2; exit 3'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nboom\nERROR: WS/BUILD:8:8: Executing genrule //:gfail2 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //:gfail2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nINFO: Build succeeded for only 1 of 3 top-level targets\nINFO: Found 3 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 3 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 3): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo boom >&2; exit 3'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nboom\nERROR: WS/BUILD:8:8: Executing genrule //:gfail2 failed: (Exit 4): bash failed: error executing Genrule command (from genrule rule target //:gfail2) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; exit 4'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\nINFO: Build succeeded for only 1 of 3 top-level targets\nINFO: Found 3 targets...\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 3 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

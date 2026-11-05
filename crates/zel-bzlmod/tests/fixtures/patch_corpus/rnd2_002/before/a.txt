@@ -1,0 +1,7 @@
+}
+ 0
+gamma 1
+y 1
+delta
+y
+{

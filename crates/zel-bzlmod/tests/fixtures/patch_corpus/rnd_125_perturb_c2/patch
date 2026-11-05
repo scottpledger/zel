@@ -1,0 +1,8 @@
+--- a/f.txt
++++ b/f.txt
+@@ -6,3 +6,5 @@
+   indent 2
+   indent 3
++beta
++  indent 3
+ alpha 1

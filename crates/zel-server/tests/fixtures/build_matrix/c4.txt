@@ -1,0 +1,58 @@
+run //:bin
+run //:bin -- a b
+run //:bin a b
+run //:bin --test_output=all
+run //:bin -- --foo
+run --script_path=/tmp/vb4/sp.sh //:bin
+run --script_path=/tmp/vb4/sp.sh //:bin -- x y
+run --script_path=/tmp/vb4/sp.sh //:pass
+run --norun //:bin
+run --norun //:bad
+run --run_in_cwd //:bin
+run --norun_in_cwd //:bin
+run --run_under=echo //:bin
+run --run_under='echo X' //:bin -- hi
+run --run_under=//:bin2 //:bin
+run --run_under=/bin/nonexist //:bin
+run --run_under=//:nonexist //:bin
+run //:gen
+run //:bad
+run //:nonexist
+run //:bin //:bin2
+run //:all
+run //...
+run //:pass
+run //:fail
+run //:envt
+run //:shard
+run --test_sharding_strategy=forced=2 //:shard
+run --runs_per_test=2 //:pass
+run --test_env=FOO=bar //:envt
+run --test_arg=zz //:envt
+run --test_filter=zz //:envt
+run --nobuild //:bin
+run --keep_going //:bin
+run --verbose_failures //:bin
+run -s //:bin
+run --script_path=/tmp/vb4/sp.sh --run_under=echo //:bin
+run
+run --
+run -- //:bin
+run -- //:bin a
+run --symlink_prefix=foo- //:bin
+run --noexperimental_convenience_symlinks //:bin
+run --show_result=0 //:bin
+run --color=yes //:bin
+run --test_output=streamed //:pass
+run --compilation_mode=opt //:bin
+run --action_env=A=B //:bin
+run --run_under= //:bin
+run --script_path= //:bin
+run bazel-bin/bin
+run //:lib
+run //:suite
+run //:man
+run --nobuild_runfile_links //:bin
+run --noenable_runfiles //:bin
+run --enable_runfiles //:bin
+run --legacy_external_runfiles //:bin

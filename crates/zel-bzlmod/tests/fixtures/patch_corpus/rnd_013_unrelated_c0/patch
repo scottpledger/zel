@@ -1,0 +1,8 @@
+--- a/f.txt
++++ b/f.txt
+@@ -9,2 +8,0 @@
+-eps
+-  indent
+@@ -22 +20 @@
+-beta 3
++NEW beta 3

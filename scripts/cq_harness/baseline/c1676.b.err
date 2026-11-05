@@ -1,0 +1,2 @@
+Computing main repo mapping: 
+ERROR: Error while parsing 'config(//a:lib)': too few arguments to function 'config' at ')'

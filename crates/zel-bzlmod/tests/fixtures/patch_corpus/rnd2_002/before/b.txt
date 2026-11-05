@@ -1,0 +1,7 @@
+{
+alpha
+return 0; 0
+NEW   indent 3
+ 0
+delta
+return 0;

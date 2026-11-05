@@ -1,0 +1,25 @@
+x 3
+beta 1
+x 0
+  indent
+x
+alpha
+y 1
+eps 1
+	Tab
+eps
+} 0
+ 1
+y
+  indent
+PERTURBED
+x 2
+  indent
+  indent 1
+} 1
+  indent
+}
+}
+delta
+delta 0
+} 1

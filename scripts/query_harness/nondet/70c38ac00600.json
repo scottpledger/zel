@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "70c38ac00600",
+ "classified_as": "UNCLASSIFIED",
+ "cmd": "query 'deps(//a:gg)' --output=graph --graph:node_limit=20 --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "ce3c8353ee673097",
+  "2e06b6a45dd347a2",
+  "3336d17aad1c5d42",
+  "a17b3bf12259f442",
+  "2861250144f426e9",
+  "b488dfb68f48d171"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:opt_cs\\n...and 4 more items\"\n  [label=\"//a:def_cs//a:opt_cs//conditions:default\"];\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//b:tool.cc\"\n  \"//a:opt_cs\\n...and 4 more items\"\n  \"@ext//lib:d.txt\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\\n...and 4 more items\"\n  [label=\"//a:opt_cs//a:def_cs//conditions:default\"];\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"//b:tool.cc\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:def_cs\\n...and 4 more items\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"//b:tool.cc\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:opt_cs\\n...and 4 more items\"\n  [label=\"//a:def_cs//a:opt_cs//conditions:default\"];\n  \"//a:opt_cs\\n...and 4 more items\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"//b:tool.cc\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:x.txt\\n...and 4 more items\"\n  [label=\"//a:opt_cs//conditions:default//a:def_cs\"];\n  \"//a:x.txt\\n...and 4 more items\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\\n...and 4 more items\"\n  [label=\"//a:def_cs//a:opt_cs//conditions:default\"];\n  \"//a:def_cs\\n...and 4 more items\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"//b:tool.cc\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\\n...and 4 more items\"\n  [label=\"//a:opt_cs//conditions:default//a:def_cs\"];\n  \"//b:tool.cc\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:def_cs\\n...and 4 more items\"\n}\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

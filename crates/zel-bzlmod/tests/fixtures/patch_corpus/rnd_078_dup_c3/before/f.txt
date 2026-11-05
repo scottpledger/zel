@@ -1,0 +1,24 @@
+delta 0
+	Tab
+gamma 1
+y
+  indent 2
+delta 1
+alpha
+{
+alpha 2
+} 1
+delta
+beta 2
+delta 0
+	Tab
+gamma 1
+y
+  indent 2
+delta 1
+alpha
+{
+alpha 2
+} 1
+delta
+beta 2

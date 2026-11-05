@@ -1,0 +1,52 @@
+action 'Writing script b/tool'
+  Mnemonic: FileWrite
+  Target: //b:tool
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool]
+  IsExecutable: true
+  FileWriteContents: [IyEvYmluL3NoCnRydWUK]
+
+action 'Writing repo mapping manifest for //b:tool'
+  Mnemonic: RepoMappingManifest
+  Target: //b:tool
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.repo_mapping]
+  IsExecutable: false
+  FileWriteContents: [LHZxLF9tYWluCg==]
+
+action 'Creating source manifest for //b:tool'
+  Mnemonic: SourceSymlinkManifest
+  Target: //b:tool
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 827f0fe2457d4ac47eabfc4f2b14ab9e6c9df2718ccaebed65b7884201f1812d
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles_manifest]
+  IsExecutable: false
+  FileWriteContents: [X21haW4vYi90b29sIC9wcml2YXRlL3RtcC9jcWgvb2JiMC9leGVjcm9vdC9fbWFpbi9iYXplbC1vdXQvZGFyd2luX2FybTY0LWZhc3RidWlsZC9iaW4vYi90b29sCl9yZXBvX21hcHBpbmcgL3ByaXZhdGUvdG1wL2NxaC9vYmIwL2V4ZWNyb290L19tYWluL2JhemVsLW91dC9kYXJ3aW5fYXJtNjQtZmFzdGJ1aWxkL2Jpbi9iL3Rvb2wucmVwb19tYXBwaW5nCg==]
+
+action 'Creating runfiles tree bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //b:tool
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 7dc5a94dd5304ba87abeb760f1f8f4a43319e6ba0b28414858e2bf1ad1e22529
+  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+runfiles for //b:tool
+  Mnemonic: RunfilesTree
+  Target: //b:tool
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
+  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool, bazel-out/darwin_arm64-fastbuild/bin/b/tool.repo_mapping, bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles/MANIFEST]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles]
+

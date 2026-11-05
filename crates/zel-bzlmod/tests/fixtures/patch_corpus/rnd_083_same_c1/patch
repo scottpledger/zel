@@ -1,0 +1,10 @@
+--- a/f.txt
++++ b/f.txt
+@@ -7,6 +7,5 @@
+ alpha 3
+-beta
+ return 0;
+ delta 3
+-} 1
++NEW } 1
+ y 1

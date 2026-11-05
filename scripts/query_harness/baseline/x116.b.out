@@ -1,0 +1,65 @@
+# @WS@/a/BUILD:4:8
+catrule(
+  name = "lib",
+  tags = ["fast", "manual"],
+  srcs = ["//a:x.txt", "//a:srcs_fg", "@ext//lib:data"],
+  tag_x = "lib",
+)
+# Rule lib instantiated at (most recent call last):
+#   @WS@/a/BUILD:4:8 in <toplevel>
+# Rule catrule defined at (most recent call last):
+#   @WS@/defs.bzl:6:15 in <toplevel>
+
+# @WS@/a/BUILD:7:7
+genrule(
+  name = "lm",
+  tags = ["fast"],
+  generator_name = "lm",
+  generator_function = "lmacro",
+  generator_location = "ate@WS@/a/BUILD:7:7",
+  outs = ["//a:lm.o"],
+  cmd = "echo lm > $@",
+)
+# Rule lm instantiated at (most recent call last):
+#   @WS@/a/BUILD:7:7    in <toplevel>
+#   @WS@/defs.bzl:20:19 in lmacro
+
+# @WS@/a/BUILD:11:10
+filegroup(
+  name = "sel",
+  srcs = select({"//a:opt_cs": ["//a:x.txt"], "//a:def_cs": ["//a:y.txt"], "//conditions:default": ["//a:z.txt"]}),
+)
+# Rule sel instantiated at (most recent call last):
+#   @WS@/a/BUILD:11:10 in <toplevel>
+
+# @WS@/a/BUILD:6:7
+filegroup(
+  name = "sm_fg",
+  visibility = ["//visibility:public"],
+  generator_name = "sm",
+  generator_function = "smacro",
+  generator_location = "ate@WS@/a/BUILD:6:7",
+  srcs = ["//a:x.txt", "//a:y.txt"],
+)
+# Rule sm_fg instantiated at (most recent call last):
+#   @WS@/a/BUILD:6:7    in <toplevel>
+#   @WS@/defs.bzl:17:1  in smacro
+#   @WS@/defs.bzl:15:21 in _smacro
+
+# @WS@/a/BUILD:3:10
+filegroup(
+  name = "srcs_fg",
+  srcs = ["//a:x.txt", "//a:y.txt", "//a:z.txt"],
+)
+# Rule srcs_fg instantiated at (most recent call last):
+#   @WS@/a/BUILD:3:10 in <toplevel>
+
+# @OB@/external/ext+/lib/BUILD:1:10
+filegroup(
+  name = "data",
+  visibility = ["//visibility:public"],
+  srcs = ["@ext//lib:d.txt"],
+)
+# Rule data instantiated at (most recent call last):
+#   @OB@/external/ext+/lib/BUILD:1:10 in <toplevel>
+

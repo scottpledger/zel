@@ -1,0 +1,76 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="test_suite" location="@WS@/BUILD:5:11" name="//:tagged">
+        <string name="name" value="tagged"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <list name="$implicit_tests"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:4:8" name="//a:lib">
+        <string name="name" value="lib"/>
+        <list name="tags">
+            <string value="fast"/>
+            <string value="manual"/>
+        </list>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:srcs_fg"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <string name="tag_x" value="lib"/>
+        <rule-input name="//a:srcs_fg"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="@ext//lib:data"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:5:8" name="//a:lib2">
+        <string name="name" value="lib2"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <list name="srcs">
+            <label value="//a:lib"/>
+            <label value="//a:y.txt"/>
+        </list>
+        <rule-input name="//a:lib"/>
+        <rule-input name="//a:y.txt"/>
+    </rule>
+    <rule class="genrule" location="@WS@/a/BUILD:7:7" name="//a:lm">
+        <string name="name" value="lm"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="generator_name" value="lm"/>
+        <string name="generator_function" value="lmacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:7:7"/>
+        <list name="outs">
+            <output value="//a:lm.o"/>
+        </list>
+        <string name="cmd" value="echo lm &gt; $@"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-output name="//a:lm.o"/>
+    </rule>
+    <rule class="x_test" location="@WS@/b/BUILD:3:7" name="//b:t1">
+        <string name="name" value="t1"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="size" value="small"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="data">
+            <label value="//a:lib2"/>
+        </list>
+        <rule-input name="//a:lib2"/>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="@bazel_tools//tools/test:collect_coverage"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_report_generator"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_support"/>
+        <rule-input name="@bazel_tools//tools/test:runtime"/>
+        <rule-input name="@bazel_tools//tools/test:test_setup"/>
+        <rule-input name="@bazel_tools//tools/test:test_wrapper"/>
+        <rule-input name="@bazel_tools//tools/test:test_xml_generator"/>
+        <rule-input name="@bazel_tools//tools/test:xml_writer"/>
+    </rule>
+</query>

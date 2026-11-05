@@ -1,0 +1,4 @@
+Loading: 0 packages loaded
+ERROR: Evaluation of query "attr('opt', '[]', //a:all)" failed: illegal 'attr' pattern regexp '[]': Unclosed character class near index 1
+[]
+ ^

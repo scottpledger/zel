@@ -1,0 +1,29 @@
+{
+  "actions": [{
+    "targetId": 1,
+    "actionKey": "2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542",
+    "mnemonic": "Genrule",
+    "configurationId": 1,
+    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt \u003e\u003e bazel-out/darwin_arm64-fastbuild/bin/a/gg.out"],
+    "environmentVariables": [{
+      "key": "PATH",
+      "value": "/bin:/usr/bin:/usr/local/bin"
+    }],
+    "executionPlatform": "@@platforms//host:host"
+  }],
+  "targets": [{
+    "id": 1,
+    "label": "//a:gg",
+    "ruleClassId": 1
+  }],
+  "configuration": [{
+    "id": 1,
+    "mnemonic": "darwin_arm64-fastbuild",
+    "platformName": "darwin_arm64",
+    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+  }],
+  "ruleClasses": [{
+    "id": 1,
+    "name": "genrule"
+  }]
+}

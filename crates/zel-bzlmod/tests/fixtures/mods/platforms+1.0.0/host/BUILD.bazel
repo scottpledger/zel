@@ -1,0 +1,1 @@
+alias(name="host", actual="//:host", visibility=["//visibility:public"])

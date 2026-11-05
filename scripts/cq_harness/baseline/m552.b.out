@@ -1,0 +1,16 @@
+@@//a:gg
+@@platforms//host:host
+@@ext+//lib:data
+@@//b:tool
+@@platforms//host:host
+@@//a:sel
+@@bazel_tools//tools/genrule:genrule-setup.sh
+@@platforms//cpu:aarch64
+@@//a:opt_cs
+@@//a:z.txt
+@@//b:tool.cc
+@@platforms//os:osx
+@@//a:def_cs
+@@ext+//lib:d.txt
+@@platforms//cpu:cpu
+@@platforms//os:os

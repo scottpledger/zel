@@ -1,0 +1,16 @@
+alpha
+  indent
+y 2
+  indent
+{ 0
+eps 3
+{
+
+delta 2
+return 0;
+{
+gamma 1
+delta
+beta 3
+{
+} 3

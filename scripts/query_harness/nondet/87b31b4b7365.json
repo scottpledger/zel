@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "87b31b4b7365",
+ "classified_as": "STRICT",
+ "cmd": "query //a:lib --universe_scope=//nonexistent:x",
+ "distinct": 1,
+ "harness": "query",
+ "hashes": [
+  "11ca42793a3e7e12",
+  "11ca42793a3e7e12",
+  "11ca42793a3e7e12",
+  "11ca42793a3e7e12",
+  "11ca42793a3e7e12",
+  "11ca42793a3e7e12"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: Skipping '//nonexistent:x': no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping '//nonexistent:x': no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping '//nonexistent:x': no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping '//nonexistent:x': no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping '//nonexistent:x': no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping '//nonexistent:x': no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  }
+ ],
+ "workspace": "ws"
+}

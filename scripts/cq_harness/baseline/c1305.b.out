@@ -1,0 +1,4 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:sm_cat (2d89340)"
+}

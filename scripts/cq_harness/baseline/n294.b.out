@@ -1,0 +1,5 @@
+NoTransition -> //a:lib (2d89340)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+//a:y.txt (null)

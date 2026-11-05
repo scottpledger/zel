@@ -1,0 +1,40 @@
+//a:x.txt (null)
+NoTransition -> //a:lib (7e2fa55)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> //a:lib (2d89340)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> //a:srcs_fg (7e2fa55)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:sm_fg (2d89340)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> //a:srcs_fg (2d89340)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:tr (2d89340)
+  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 7e2fa55
+  $allowlist_function_transition#@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist#(null transition) -> 
+NoTransition -> //:top_alias (1a589d1)
+NoTransition -> //a:lib2 (2d89340)
+  srcs#//a:lib#NoTransition -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> //a:sm_cat (2d89340)
+  srcs#//a:sm_fg#NoTransition -> 
+NoTransition -> //b:t1 (1a589d1)
+  $test_wrapper#@bazel_tools//tools/test:test_wrapper#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $xml_writer#@bazel_tools//tools/test:xml_writer#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $test_runtime#@bazel_tools//tools/test:runtime#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $test_setup_script#@bazel_tools//tools/test:test_setup#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $xml_generator_script#@bazel_tools//tools/test:test_xml_generator#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $collect_coverage_script#@bazel_tools//tools/test:collect_coverage#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  :coverage_support#@bazel_tools//tools/test:coverage_support#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  srcs#//b:t.cc#(null transition) -> 
+  data#//a:lib2#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> 2d89340
+  [toolchain dependency: test]#@bazel_tools//tools/test:empty_toolchain#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> 2d89340

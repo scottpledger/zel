@@ -1,0 +1,17 @@
+alpha
+{ 3
+alpha 0
+  indent
+x
+{ 3
+beta
+{
+delta
+{ 3
+  indent
+gamma
+alpha 0
+gamma 3
+ 0
+return 0;
+alpha 2

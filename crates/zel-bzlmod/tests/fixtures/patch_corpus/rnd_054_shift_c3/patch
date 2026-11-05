@@ -1,0 +1,22 @@
+--- a/f.txt
++++ b/f.txt
+@@ -4,8 +4,6 @@
+ { 3
+ delta 3
+ { 2
+-return 0;
+-beta
+ x 3
+ { 1
+ 
+@@ -15,8 +13,8 @@
+ gamma 3
+ y 1
+ { 1
+-gamma 3
+-gamma 0
++NEW gamma 3
++NEW gamma 0
+ }
+ } 0
+ } 2

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "d582d11457a0",
+ "classified_as": "STRICT",
+ "cmd": "build --verbose_failures //:gfail",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "73ee85a2bf203a22",
+  "73ee85a2bf203a22",
+  "73ee85a2bf203a22",
+  "73ee85a2bf203a22",
+  "73ee85a2bf203a22",
+  "73ee85a2bf203a22"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) \n  (cd OB/sandbox/darwin-sandbox/1/execroot/_main && \\\n  exec env - \\\n    PATH=/bin:/usr/bin:/usr/local/bin \\\n  /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9')\n# Configuration: HASH\n# Execution platform: @@platforms//host:host\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nTarget //:gfail failed to build\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) \n  (cd OB/sandbox/darwin-sandbox/1/execroot/_main && \\\n  exec env - \\\n    PATH=/bin:/usr/bin:/usr/local/bin \\\n  /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9')\n# Configuration: HASH\n# Execution platform: @@platforms//host:host\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nTarget //:gfail failed to build\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) \n  (cd OB/sandbox/darwin-sandbox/1/execroot/_main && \\\n  exec env - \\\n    PATH=/bin:/usr/bin:/usr/local/bin \\\n  /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9')\n# Configuration: HASH\n# Execution platform: @@platforms//host:host\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nTarget //:gfail failed to build\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) \n  (cd OB/sandbox/darwin-sandbox/1/execroot/_main && \\\n  exec env - \\\n    PATH=/bin:/usr/bin:/usr/local/bin \\\n  /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9')\n# Configuration: HASH\n# Execution platform: @@platforms//host:host\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nTarget //:gfail failed to build\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) \n  (cd OB/sandbox/darwin-sandbox/1/execroot/_main && \\\n  exec env - \\\n    PATH=/bin:/usr/bin:/usr/local/bin \\\n  /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9')\n# Configuration: HASH\n# Execution platform: @@platforms//host:host\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nTarget //:gfail failed to build\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) \n  (cd OB/sandbox/darwin-sandbox/1/execroot/_main && \\\n  exec env - \\\n    PATH=/bin:/usr/bin:/usr/local/bin \\\n  /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9')\n# Configuration: HASH\n# Execution platform: @@platforms//host:host\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nTarget //:gfail failed to build\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws3"
+}

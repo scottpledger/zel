@@ -1,0 +1,9 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+WARNING: Build option --platforms has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+ERROR: com.google.devtools.build.lib.packages.BuildFileNotFoundException: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent
+INFO: Elapsed time: 0.062s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully

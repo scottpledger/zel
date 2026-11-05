@@ -1,0 +1,8 @@
+gamma
+beta
+eps 3
+eps
+	Tab 0
+	Tab
+  indent
+y 0

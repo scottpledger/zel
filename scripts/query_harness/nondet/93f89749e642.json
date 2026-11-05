@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "93f89749e642",
+ "classified_as": "ORDERLESS",
+ "cmd": "query 'deps(//a:gg)' --output=label --order_output=no --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "cd06fd475972b501",
+  "0d570fcf6494fc25",
+  "397126883ef62993",
+  "d58b07b0196401cc",
+  "fe49774b48e6876b",
+  "d7f4a8527a72013b"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "//a:opt_cs\n@bazel_tools//tools/genrule:genrule-setup.sh\n//b:tool\n//a:sel\n@ext//lib:d.txt\n//a:def_cs\n//a:x.txt\n//a:z.txt\n//b:tool.cc\n@ext//lib:data\n//a:gg\n//a:y.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "@ext//lib:d.txt\n//b:tool.cc\n//a:opt_cs\n//a:z.txt\n//a:y.txt\n@bazel_tools//tools/genrule:genrule-setup.sh\n@ext//lib:data\n//a:gg\n//a:sel\n//a:def_cs\n//b:tool\n//a:x.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:y.txt\n@ext//lib:d.txt\n//b:tool\n//a:opt_cs\n@bazel_tools//tools/genrule:genrule-setup.sh\n@ext//lib:data\n//b:tool.cc\n//a:z.txt\n//a:def_cs\n//a:x.txt\n//a:sel\n//a:gg\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:def_cs\n//a:gg\n//a:opt_cs\n@bazel_tools//tools/genrule:genrule-setup.sh\n//b:tool\n//a:sel\n//a:x.txt\n@ext//lib:d.txt\n@ext//lib:data\n//a:y.txt\n//b:tool.cc\n//a:z.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "@ext//lib:d.txt\n//a:y.txt\n//a:z.txt\n//a:opt_cs\n//b:tool.cc\n@bazel_tools//tools/genrule:genrule-setup.sh\n//a:def_cs\n//a:gg\n//b:tool\n@ext//lib:data\n//a:sel\n//a:x.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:sel\n@ext//lib:data\n//a:def_cs\n@bazel_tools//tools/genrule:genrule-setup.sh\n@ext//lib:d.txt\n//a:y.txt\n//b:tool.cc\n//a:gg\n//a:opt_cs\n//a:x.txt\n//a:z.txt\n//b:tool\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

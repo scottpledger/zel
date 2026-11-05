@@ -1,0 +1,22 @@
+--- a/a.txt
++++ b/a.txt
+@@ -10,3 +10,3 @@
+ x 2
+-	Tab 2
++NEW 	Tab 2
+ x 0
+--- a/b.txt
++++ b/b.txt
+@@ -1,10 +1,10 @@
+ { 0
+ y 3
+ 	Tab 3
+-}
++NEW }
+  2
+ 	Tab 1
+-} 1
++NEW NEW } 1
+ gamma 0
+ { 0
+   indent 1

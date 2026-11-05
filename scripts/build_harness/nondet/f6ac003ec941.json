@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "f6ac003ec941",
+ "classified_as": "STRICT",
+ "cmd": "build --nokeep_going //:gmissing //:g1",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "668f3e7f936dc44e",
+  "668f3e7f936dc44e",
+  "668f3e7f936dc44e",
+  "668f3e7f936dc44e",
+  "668f3e7f936dc44e",
+  "668f3e7f936dc44e"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: missing input file '//:nonexistent.txt'\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: 1 input file(s) do not exist\nUse --verbose_failures to see the command lines of failed build steps.\nERROR: WS/BUILD:28:8 Executing genrule //:gmissing failed: 1 input file(s) do not exist\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: missing input file '//:nonexistent.txt'\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: 1 input file(s) do not exist\nUse --verbose_failures to see the command lines of failed build steps.\nERROR: WS/BUILD:28:8 Executing genrule //:gmissing failed: 1 input file(s) do not exist\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: missing input file '//:nonexistent.txt'\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: 1 input file(s) do not exist\nUse --verbose_failures to see the command lines of failed build steps.\nERROR: WS/BUILD:28:8 Executing genrule //:gmissing failed: 1 input file(s) do not exist\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: missing input file '//:nonexistent.txt'\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: 1 input file(s) do not exist\nUse --verbose_failures to see the command lines of failed build steps.\nERROR: WS/BUILD:28:8 Executing genrule //:gmissing failed: 1 input file(s) do not exist\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: missing input file '//:nonexistent.txt'\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: 1 input file(s) do not exist\nUse --verbose_failures to see the command lines of failed build steps.\nERROR: WS/BUILD:28:8 Executing genrule //:gmissing failed: 1 input file(s) do not exist\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed 2 targets (N packages loaded).\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: missing input file '//:nonexistent.txt'\nERROR: WS/BUILD:28:8: Executing genrule //:gmissing failed: 1 input file(s) do not exist\nUse --verbose_failures to see the command lines of failed build steps.\nERROR: WS/BUILD:28:8 Executing genrule //:gmissing failed: 1 input file(s) do not exist\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

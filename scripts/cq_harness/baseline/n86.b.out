@@ -1,0 +1,6 @@
+//a:cl (7913989) [BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]
+//a:c.cc (null) []
+@bazel_tools//tools:host_platform (c07488d) []
+@@platforms//host:host (c07488d) []
+//a:c.h (null) []
+//a:cl2 (7913989) [BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]

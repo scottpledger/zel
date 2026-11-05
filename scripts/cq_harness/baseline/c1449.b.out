@@ -1,0 +1,4 @@
+digraph mygraph {
+  node [shape=box];
+  "@ext//lib:data (2d89340)\n@ext//lib:data (7e2fa55)\n@ext//lib:gen (2d89340)"
+}

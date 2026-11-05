@@ -1,0 +1,8 @@
+source file //a:y.txt
+source file //a:x.txt
+catrule rule //a:lib2
+filegroup rule @ext//lib:data
+catrule rule //a:lib
+source file @ext//lib:d.txt
+filegroup rule //a:srcs_fg
+source file //a:z.txt

@@ -1,0 +1,140 @@
+{
+  "artifacts": [{
+    "id": 1,
+    "pathFragmentId": 1
+  }, {
+    "id": 2,
+    "pathFragmentId": 3
+  }, {
+    "id": 3,
+    "pathFragmentId": 7
+  }, {
+    "id": 4,
+    "pathFragmentId": 12
+  }, {
+    "id": 5,
+    "pathFragmentId": 13
+  }, {
+    "id": 6,
+    "pathFragmentId": 17
+  }],
+  "actions": [{
+    "targetId": 1,
+    "actionKey": "c858377b082563ada91337c61fd7ef737c9e6514f12f5b2393fce67fd84922ec",
+    "mnemonic": "Genrule",
+    "configurationId": 1,
+    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-dbg/bin/a/gg.out ; echo a/z.txt \u003e\u003e bazel-out/darwin_arm64-dbg/bin/a/gg.out"],
+    "environmentVariables": [{
+      "key": "PATH",
+      "value": "/bin:/usr/bin:/usr/local/bin"
+    }],
+    "inputDepSetIds": [1],
+    "outputIds": [6],
+    "primaryOutputId": 6,
+    "executionPlatform": "@@platforms//host:host"
+  }],
+  "targets": [{
+    "id": 1,
+    "label": "//a:gg",
+    "ruleClassId": 1
+  }],
+  "depSetOfFiles": [{
+    "id": 2,
+    "directArtifactIds": [1, 2]
+  }, {
+    "id": 3,
+    "directArtifactIds": [3, 4]
+  }, {
+    "id": 1,
+    "transitiveDepSetIds": [2, 3],
+    "directArtifactIds": [5]
+  }],
+  "configuration": [{
+    "id": 1,
+    "mnemonic": "darwin_arm64-dbg",
+    "platformName": "darwin_arm64",
+    "checksum": "e1e6329670252a01146c735509bb7a24f7cecec29110adf8c48c6d650bb777e0"
+  }],
+  "ruleClasses": [{
+    "id": 1,
+    "name": "genrule"
+  }],
+  "pathFragments": [{
+    "id": 2,
+    "label": "a"
+  }, {
+    "id": 1,
+    "label": "z.txt",
+    "parentId": 2
+  }, {
+    "id": 6,
+    "label": "external"
+  }, {
+    "id": 5,
+    "label": "ext+",
+    "parentId": 6
+  }, {
+    "id": 4,
+    "label": "lib",
+    "parentId": 5
+  }, {
+    "id": 3,
+    "label": "d.txt",
+    "parentId": 4
+  }, {
+    "id": 11,
+    "label": "bazel-out"
+  }, {
+    "id": 10,
+    "label": "darwin_arm64-opt-exec",
+    "parentId": 11
+  }, {
+    "id": 9,
+    "label": "bin",
+    "parentId": 10
+  }, {
+    "id": 8,
+    "label": "b",
+    "parentId": 9
+  }, {
+    "id": 7,
+    "label": "tool",
+    "parentId": 8
+  }, {
+    "id": 12,
+    "label": "tool.runfiles",
+    "parentId": 8
+  }, {
+    "id": 16,
+    "label": "bazel_tools",
+    "parentId": 6
+  }, {
+    "id": 15,
+    "label": "tools",
+    "parentId": 16
+  }, {
+    "id": 14,
+    "label": "genrule",
+    "parentId": 15
+  }, {
+    "id": 13,
+    "label": "genrule-setup.sh",
+    "parentId": 14
+  }, {
+    "id": 20,
+    "label": "darwin_arm64-dbg",
+    "parentId": 11
+  }, {
+    "id": 19,
+    "label": "bin",
+    "parentId": 20
+  }, {
+    "id": 18,
+    "label": "a",
+    "parentId": 19
+  }, {
+    "id": 17,
+    "label": "gg.out",
+    "parentId": 18
+  }]
+}

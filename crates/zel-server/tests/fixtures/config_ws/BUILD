@@ -1,0 +1,11 @@
+load(":defs.bzl", "my_test", "string_flag", "bool_flag", "int_flag", "list_flag", "tool", "user")
+
+string_flag(name = "f", build_setting_default = "x")
+bool_flag(name = "b", build_setting_default = False)
+int_flag(name = "i", build_setting_default = 3)
+list_flag(name = "l", build_setting_default = [])
+tool(name = "tool")
+user(name = "u", tool = ":tool")
+my_test(name = "t")
+platform(name = "p")
+platform(name = "p2", constraint_values = [])

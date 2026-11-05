@@ -1,0 +1,5 @@
+NoTransition -> //a:gg (2d89340)
+  srcs#//a:sel#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+  tools#//b:tool#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $genrule_setup#@bazel_tools//tools/genrule:genrule-setup.sh#(null transition) -> 

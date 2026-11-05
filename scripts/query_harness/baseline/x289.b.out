@@ -1,0 +1,321 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="test_suite" location="@WS@/BUILD:4:11" name="//:all_tests">
+        <string name="name" value="all_tests"/>
+        <list name="tests">
+            <label value="//b:t1"/>
+            <label value="//b:t2"/>
+        </list>
+        <rule-input name="//b:t1"/>
+        <rule-input name="//b:t2"/>
+    </rule>
+    <rule class="test_suite" location="@WS@/BUILD:5:11" name="//:tagged">
+        <string name="name" value="tagged"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <list name="$implicit_tests"/>
+    </rule>
+    <rule class="alias" location="@WS@/BUILD:3:6" name="//:top_alias">
+        <string name="name" value="top_alias"/>
+        <label name="actual" value="//a:lib"/>
+        <rule-input name="//a:lib"/>
+    </rule>
+    <rule class="xlib" location="@WS@/a/BUILD:13:5" name="//a:cl">
+        <string name="name" value="cl"/>
+        <list name="srcs">
+            <label value="//a:c.cc"/>
+            <label value="//a:c.h"/>
+        </list>
+        <list name="deps">
+            <label value="//a:cl2"/>
+        </list>
+        <rule-input name="//a:c.cc"/>
+        <rule-input name="//a:c.h"/>
+        <rule-input name="//a:cl2"/>
+    </rule>
+    <rule class="xlib" location="@WS@/a/BUILD:14:5" name="//a:cl2">
+        <string name="name" value="cl2"/>
+        <list name="srcs">
+            <label value="//a:c2.cc"/>
+        </list>
+        <rule-input name="//a:c2.cc"/>
+    </rule>
+    <rule class="config_setting" location="@WS@/a/BUILD:10:15" name="//a:def_cs">
+        <string name="name" value="def_cs"/>
+        <dict name="define_values">
+            <pair>
+                <string value="FOO"/>
+                <string value="bar"/>
+            </pair>
+        </dict>
+    </rule>
+    <rule class="genrule" location="@WS@/a/BUILD:12:8" name="//a:gg">
+        <string name="name" value="gg"/>
+        <list name="srcs">
+            <label value="//a:sel"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <list name="tools">
+            <label value="//b:tool"/>
+        </list>
+        <list name="outs">
+            <output value="//a:gg.out"/>
+        </list>
+        <string name="cmd" value="cat $(SRCS) &gt; $@ ; echo $(location :sel) &gt;&gt; $@"/>
+        <rule-input name="//a:sel"/>
+        <rule-input name="//b:tool"/>
+        <rule-input name="@ext//lib:data"/>
+        <rule-output name="//a:gg.out"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:4:8" name="//a:lib">
+        <string name="name" value="lib"/>
+        <list name="tags">
+            <string value="fast"/>
+            <string value="manual"/>
+        </list>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:srcs_fg"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <string name="tag_x" value="lib"/>
+        <rule-input name="//a:srcs_fg"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="@ext//lib:data"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:5:8" name="//a:lib2">
+        <string name="name" value="lib2"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <list name="srcs">
+            <label value="//a:lib"/>
+            <label value="//a:y.txt"/>
+        </list>
+        <rule-input name="//a:lib"/>
+        <rule-input name="//a:y.txt"/>
+    </rule>
+    <rule class="genrule" location="@WS@/a/BUILD:7:7" name="//a:lm">
+        <string name="name" value="lm"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="generator_name" value="lm"/>
+        <string name="generator_function" value="lmacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:7:7"/>
+        <list name="outs">
+            <output value="//a:lm.o"/>
+        </list>
+        <string name="cmd" value="echo lm &gt; $@"/>
+        <rule-output name="//a:lm.o"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:7:7" name="//a:lm_grp">
+        <string name="name" value="lm_grp"/>
+        <string name="generator_name" value="lm"/>
+        <string name="generator_function" value="lmacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:7:7"/>
+        <list name="srcs">
+            <label value="//a:lm"/>
+        </list>
+        <rule-input name="//a:lm"/>
+    </rule>
+    <rule class="config_setting" location="@WS@/a/BUILD:9:15" name="//a:opt_cs">
+        <string name="name" value="opt_cs"/>
+        <dict name="values">
+            <pair>
+                <string value="compilation_mode"/>
+                <string value="opt"/>
+            </pair>
+        </dict>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:11:10" name="//a:sel">
+        <string name="name" value="sel"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+            <label value="//a:z.txt"/>
+        </list>
+        <rule-input name="//a:def_cs"/>
+        <rule-input name="//a:opt_cs"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+        <rule-input name="//a:z.txt"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:6:7" name="//a:sm_cat">
+        <string name="name" value="sm_cat"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <string name="generator_name" value="sm"/>
+        <string name="generator_function" value="smacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:6:7"/>
+        <list name="srcs">
+            <label value="//a:sm_fg"/>
+        </list>
+        <rule-input name="//a:sm_fg"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:6:7" name="//a:sm_fg">
+        <string name="name" value="sm_fg"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <string name="generator_name" value="sm"/>
+        <string name="generator_function" value="smacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:6:7"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+        </list>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:3:10" name="//a:srcs_fg">
+        <string name="name" value="srcs_fg"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+            <label value="//a:z.txt"/>
+        </list>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+        <rule-input name="//a:z.txt"/>
+    </rule>
+    <rule class="trule" location="@WS@/a/BUILD:8:6" name="//a:tr">
+        <string name="name" value="tr"/>
+        <label name="dep" value="//a:lib"/>
+        <rule-input name="//a:lib"/>
+    </rule>
+    <rule class="genrule" location="@WS@/b/BUILD:6:8" name="//b:mk">
+        <string name="name" value="mk"/>
+        <list name="visibility">
+            <label value="//visibility:private"/>
+        </list>
+        <list name="outs">
+            <output value="//b:mk.txt"/>
+        </list>
+        <string name="cmd" value="echo hi &gt; $@"/>
+        <rule-output name="//b:mk.txt"/>
+    </rule>
+    <rule class="xlib" location="@WS@/b/BUILD:5:5" name="//b:shlib">
+        <string name="name" value="shlib"/>
+        <list name="visibility">
+            <label value="//c:__pkg__"/>
+        </list>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="data">
+            <label value="//c:cdata"/>
+        </list>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="//c:cdata"/>
+    </rule>
+    <rule class="x_test" location="@WS@/b/BUILD:3:7" name="//b:t1">
+        <string name="name" value="t1"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="size" value="small"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="data">
+            <label value="//a:lib2"/>
+        </list>
+        <rule-input name="//a:lib2"/>
+        <rule-input name="//b:t.cc"/>
+    </rule>
+    <rule class="x_test" location="@WS@/b/BUILD:4:7" name="//b:t2">
+        <string name="name" value="t2"/>
+        <list name="tags">
+            <string value="manual"/>
+            <string value="slow"/>
+        </list>
+        <string name="timeout" value="long"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="deps">
+            <label value="//b:shlib"/>
+        </list>
+        <rule-input name="//b:shlib"/>
+        <rule-input name="//b:t.cc"/>
+    </rule>
+    <rule class="xbin" location="@WS@/b/BUILD:2:5" name="//b:tool">
+        <string name="name" value="tool"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="//b:tool.cc"/>
+        </list>
+        <rule-input name="//b:tool.cc"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/c/BUILD:1:10" name="//c:cdata">
+        <string name="name" value="cdata"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="//c:d.txt"/>
+        </list>
+        <rule-input name="//c:d.txt"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/c/BUILD:2:10" name="//c:cyc1">
+        <string name="name" value="cyc1"/>
+        <list name="srcs">
+            <label value="//c:cyc2"/>
+        </list>
+        <rule-input name="//c:cyc2"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/c/BUILD:3:10" name="//c:cyc2">
+        <string name="name" value="cyc2"/>
+        <list name="srcs">
+            <label value="//c:cyc1"/>
+        </list>
+        <rule-input name="//c:cyc1"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/d/BUILD:1:10" name="//d:bad">
+        <string name="name" value="bad"/>
+        <list name="srcs">
+            <label value="//nonexistent:foo"/>
+            <label value="//d:missing.txt"/>
+        </list>
+        <rule-input name="//d:missing.txt"/>
+        <rule-input name="//nonexistent:foo"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/d/BUILD:3:10" name="//d:dep_bad">
+        <string name="name" value="dep_bad"/>
+        <list name="srcs">
+            <label value="//d:bad"/>
+            <label value="//d:ok"/>
+        </list>
+        <rule-input name="//d:bad"/>
+        <rule-input name="//d:ok"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/d/BUILD:2:10" name="//d:ok">
+        <string name="name" value="ok"/>
+        <list name="srcs">
+            <label value="//c:cdata"/>
+        </list>
+        <rule-input name="//c:cdata"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/pg/BUILD:1:10" name="//pg:private">
+        <string name="name" value="private"/>
+        <list name="srcs">
+            <label value="//b:mk"/>
+        </list>
+        <rule-input name="//b:mk"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/pg/BUILD:2:10" name="//pg:viol">
+        <string name="name" value="viol"/>
+        <list name="visibility">
+            <label value="//a:__pkg__"/>
+        </list>
+        <list name="srcs">
+            <label value="//c:cdata"/>
+        </list>
+        <rule-input name="//c:cdata"/>
+    </rule>
+</query>

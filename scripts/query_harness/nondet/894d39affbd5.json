@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "894d39affbd5",
+ "classified_as": "UNCLASSIFIED",
+ "cmd": "query 'deps(//a:gg)' --output=graph --order_output=auto --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "7b9289238a8884d7",
+  "e65830bde69c50e1",
+  "01db66943d81581d",
+  "b114714afc1f286f",
+  "fc8e7387ffa35d37",
+  "2278c6908568f636"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"//b:tool.cc\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:opt_cs\\n//a:x.txt\\n//a:y.txt\\n//a:def_cs\\n//a:z.txt\"\n  [label=\"//a:opt_cs//a:def_cs//conditions:default\"];\n  \"//a:opt_cs\\n//a:x.txt\\n//a:y.txt\\n//a:def_cs\\n//a:z.txt\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"@ext//lib:d.txt\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"//b:tool.cc\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\\n//a:x.txt\\n//a:z.txt\\n//a:opt_cs\\n//a:y.txt\"\n  [label=\"//a:opt_cs//conditions:default//a:def_cs\"];\n  \"//a:def_cs\\n//a:x.txt\\n//a:z.txt\\n//a:opt_cs\\n//a:y.txt\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"//b:tool.cc\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:z.txt\\n//a:def_cs\\n//a:opt_cs\\n//a:x.txt\\n//a:y.txt\"\n  [label=\"//conditions:default//a:opt_cs//a:def_cs\"];\n  \"//a:z.txt\\n//a:def_cs\\n//a:opt_cs\\n//a:x.txt\\n//a:y.txt\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"@ext//lib:d.txt\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"//b:tool.cc\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:x.txt\\n//a:y.txt\\n//a:def_cs\\n//a:z.txt\\n//a:opt_cs\"\n  [label=\"//a:opt_cs//a:def_cs//conditions:default\"];\n  \"//a:x.txt\\n//a:y.txt\\n//a:def_cs\\n//a:z.txt\\n//a:opt_cs\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:x.txt\\n//a:opt_cs\\n//a:def_cs\\n//a:y.txt\\n//a:z.txt\"\n  [label=\"//a:opt_cs//a:def_cs//conditions:default\"];\n  \"//a:x.txt\\n//a:opt_cs\\n//a:def_cs\\n//a:y.txt\\n//a:z.txt\"\n  \"//b:tool.cc\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:gg\" -> \"@ext//lib:data\"\n  \"//a:gg\" -> \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"//a:gg\" -> \"//b:tool\"\n  \"//b:tool\"\n  \"//b:tool\" -> \"//b:tool.cc\"\n  \"//b:tool.cc\"\n  \"@bazel_tools//tools/genrule:genrule-setup.sh\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:x.txt\\n//a:y.txt\\n//a:opt_cs\\n//a:def_cs\\n//a:z.txt\"\n  [label=\"//a:opt_cs//a:def_cs//conditions:default\"];\n  \"//a:x.txt\\n//a:y.txt\\n//a:opt_cs\\n//a:def_cs\\n//a:z.txt\"\n}\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

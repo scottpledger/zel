@@ -1,0 +1,25 @@
+NoTransition -> //:top_alias (1a589d1)
+NoTransition -> //a:lib (2d89340)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoTransition -> @bazel_tools//tools:host_platform (c07488d)
+NoTransition -> @ext//lib:data (2d89340)
+  srcs#@ext//lib:d.txt#(null transition) -> 
+//a:x.txt (null)
+NoTransition -> @@platforms//host:host (c07488d)
+  constraint_values#@@platforms//cpu:aarch64#NoTransition -> 
+  constraint_values#@@platforms//os:osx#NoTransition -> 
+NoTransition -> //a:srcs_fg (2d89340)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+NoConfigTransition -> @@platforms//cpu:aarch64 (c07488d)
+  constraint_setting#@@platforms//cpu:cpu#NoTransition -> 
+//a:z.txt (null)
+NoConfigTransition -> @@platforms//os:osx (c07488d)
+  constraint_setting#@@platforms//os:os#NoTransition -> 
+@ext//lib:d.txt (null)
+//a:y.txt (null)
+NoConfigTransition -> @@platforms//cpu:cpu (c07488d)
+NoConfigTransition -> @@platforms//os:os (c07488d)

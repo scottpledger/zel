@@ -1,0 +1,14 @@
+	Tab 0
+  indent 2
+y
+y
+x
+ 1
+eps 3
+} 1
+x 0
+eps 3
+} 2
+{ 2
+x
+return 0;

@@ -1,0 +1,14 @@
+NoTransition -> //a:gg (2d89340)
+  srcs#//a:sel#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+  tools#//b:tool#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $genrule_setup#@bazel_tools//tools/genrule:genrule-setup.sh#(null transition) -> 

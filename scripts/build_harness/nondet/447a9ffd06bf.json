@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "447a9ffd06bf",
+ "classified_as": "ORDERLESS",
+ "cmd": "test --test_output=all //:t_shard",
+ "distinct": 3,
+ "harness": "build",
+ "hashes": [
+  "2b41b1b8d0204e4a",
+  "2b41b1b8d0204e4a",
+  "2b41b1b8d0204e4a",
+  "74a4fccaa3e52857",
+  "1a93f511ac0a8224",
+  "74a4fccaa3e52857"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "rm -f /tmp/vb5-flaky-*",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:t_shard (N packages loaded).\nINFO: From Testing //:t_shard (shard 1 of 3):\nINFO: From Testing //:t_shard (shard 2 of 3):\nINFO: From Testing //:t_shard (shard 3 of 3):\nINFO: Found 1 test target...\nTarget //:t_shard up-to-date:\n  bazel-bin/t_shard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_shard (shard 1 of 3):\nshard 0 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 2 of 3):\nshard 1 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 3 of 3):\nshard 2 of 3\n================================================================================\n//:t_shard                                                               PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_shard (N packages loaded).\nINFO: From Testing //:t_shard (shard 1 of 3):\nINFO: From Testing //:t_shard (shard 2 of 3):\nINFO: From Testing //:t_shard (shard 3 of 3):\nINFO: Found 1 test target...\nTarget //:t_shard up-to-date:\n  bazel-bin/t_shard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_shard (shard 1 of 3):\nshard 0 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 2 of 3):\nshard 1 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 3 of 3):\nshard 2 of 3\n================================================================================\n//:t_shard                                                               PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_shard (N packages loaded).\nINFO: From Testing //:t_shard (shard 1 of 3):\nINFO: From Testing //:t_shard (shard 2 of 3):\nINFO: From Testing //:t_shard (shard 3 of 3):\nINFO: Found 1 test target...\nTarget //:t_shard up-to-date:\n  bazel-bin/t_shard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_shard (shard 1 of 3):\nshard 0 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 2 of 3):\nshard 1 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 3 of 3):\nshard 2 of 3\n================================================================================\n//:t_shard                                                               PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_shard (N packages loaded).\nINFO: From Testing //:t_shard (shard 3 of 3):\nINFO: From Testing //:t_shard (shard 2 of 3):\nINFO: From Testing //:t_shard (shard 1 of 3):\nINFO: Found 1 test target...\nTarget //:t_shard up-to-date:\n  bazel-bin/t_shard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_shard (shard 3 of 3):\nshard 2 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 2 of 3):\nshard 1 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 1 of 3):\nshard 0 of 3\n================================================================================\n//:t_shard                                                               PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_shard (N packages loaded).\nINFO: From Testing //:t_shard (shard 1 of 3):\nINFO: From Testing //:t_shard (shard 3 of 3):\nINFO: From Testing //:t_shard (shard 2 of 3):\nINFO: Found 1 test target...\nTarget //:t_shard up-to-date:\n  bazel-bin/t_shard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_shard (shard 1 of 3):\nshard 0 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 3 of 3):\nshard 2 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 2 of 3):\nshard 1 of 3\n================================================================================\n//:t_shard                                                               PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_shard (N packages loaded).\nINFO: From Testing //:t_shard (shard 3 of 3):\nINFO: From Testing //:t_shard (shard 2 of 3):\nINFO: From Testing //:t_shard (shard 1 of 3):\nINFO: Found 1 test target...\nTarget //:t_shard up-to-date:\n  bazel-bin/t_shard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_shard (shard 3 of 3):\nshard 2 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 2 of 3):\nshard 1 of 3\n================================================================================\n==================== Test output for //:t_shard (shard 1 of 3):\nshard 0 of 3\n================================================================================\n//:t_shard                                                               PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

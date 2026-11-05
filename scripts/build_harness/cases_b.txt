@@ -1,0 +1,62 @@
+build --announce //:ga
+build --experimental_strict_action_env //:ga
+build --experimental_sandbox_base=/tmp //:ga
+build --experimental_run_validations //:ga
+build --build_python_zip //:ga
+build --notrack_incremental_state //:ga
+build --override_repository=foo=/tmp //:ga
+build -k=no //:ga
+build -j2 //:ga
+build -jx //:ga
+build --cache_test_results=bogus //:ga
+test --run_under=//:exit5 //:tstd
+test --run_under=//:hello //:tp
+test --run_under='echo UNDER' //:tp
+test --run_under=/bin/true //:tp
+run --run_under=//:hello //:hello
+run --run_under='echo UNDER' //:hello
+run --run_under=cat //:data.txt
+run --run_under=/bin/nonexist //:hello
+build --ui_event_filters=-error //:gfail
+build --ui_event_filters=-stderr //:gwarn
+build --experimental_ui_max_stdouterr_bytes=3 //:gfail_big
+build --experimental_ui_max_stdouterr_bytes=3 //:gwarn
+run --ui_event_filters=-info //:hello
+build --extra_execution_platforms=//:nonexistent //:ga
+build --host_platform=//:nonexistent //:ga
+build --platforms=//:nonexistent //:ga
+build --disk_cache=/nonexistent/x/y //:ga
+build --remote_cache=grpc://localhost:1 //:ga
+build --remote_cache=http://localhost:1 //:ga
+build --remote_executor=grpc://localhost:1 //:ga
+build --bes_backend=grpc://localhost:1 //:ga
+build --build_event_json_file=/nonexistent/x //:ga
+build --profile=/nonexistent/x //:ga
+test --check_tests_up_to_date //:tp
+run --check_up_to_date //:hello
+build -k //:gcycx
+build -k //:gbadsrc
+build --keep_going //:gfail
+build //:gcycx //:ga
+test --subcommands //:tp
+run --subcommands //:hello -- a b
+test --test_output=all //:tshard
+test --test_sharding_strategy=forced=4 //:tp
+test --build_tag_filters=tagA //:tp //:tsmall
+test --flaky_test_attempts=//:tf@2 //:tf
+test --noverbose_test_summary --test_summary=detailed //:tf
+test --test_output=streamed //:tstd
+test --test_output=streamed --runs_per_test=2 //:tp
+test --test_lang_filters=nonexistent //:tp
+test //:tp //:tp
+build --compile_one_dependency //:ga
+build @@nonexist//:x
+build //nosuchpkg:x
+build --aspects=//:x //:ga
+build --toolchain_resolution_debug=foo(bar //:ga
+build --show_timestamps //:ga
+run --show_timestamps //:hello
+build --workspace_status_command=/nonexistent //:ga
+build --spawn_strategy=bogus //:ga
+build --verbose_failures //:gfail
+build --sandbox_debug //:gfail

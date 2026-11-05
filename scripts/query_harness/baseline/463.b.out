@@ -1,0 +1,3 @@
+source file //:BUILD
+source file //:defs.bzl
+source file //a:BUILD

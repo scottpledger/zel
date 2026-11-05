@@ -1,0 +1,91 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="config_setting" location="@WS@/a/BUILD" name="//a:def_cs">
+        <string name="name" value="def_cs"/>
+        <dict name="define_values">
+            <pair>
+                <string value="FOO"/>
+                <string value="bar"/>
+            </pair>
+        </dict>
+    </rule>
+    <rule class="genrule" location="@WS@/a/BUILD" name="//a:gg">
+        <string name="name" value="gg"/>
+        <list name="srcs">
+            <label value="//a:sel"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <list name="tools">
+            <label value="//b:tool"/>
+        </list>
+        <list name="outs">
+            <output value="//a:gg.out"/>
+        </list>
+        <string name="cmd" value="cat $(SRCS) &gt; $@ ; echo $(location :sel) &gt;&gt; $@"/>
+        <rule-input name="//a:sel"/>
+        <rule-input name="//b:tool"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-input name="@ext//lib:data"/>
+        <rule-output name="//a:gg.out"/>
+    </rule>
+    <rule class="config_setting" location="@WS@/a/BUILD" name="//a:opt_cs">
+        <string name="name" value="opt_cs"/>
+        <dict name="values">
+            <pair>
+                <string value="compilation_mode"/>
+                <string value="opt"/>
+            </pair>
+        </dict>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD" name="//a:sel">
+        <string name="name" value="sel"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+            <label value="//a:z.txt"/>
+        </list>
+        <rule-input name="//a:def_cs"/>
+        <rule-input name="//a:opt_cs"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+        <rule-input name="//a:z.txt"/>
+    </rule>
+    <source-file location="@WS@/a/x.txt" name="//a:x.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/y.txt" name="//a:y.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/z.txt" name="//a:z.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <rule class="xbin" location="@WS@/b/BUILD" name="//b:tool">
+        <string name="name" value="tool"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="//b:tool.cc"/>
+        </list>
+        <rule-input name="//b:tool.cc"/>
+    </rule>
+    <source-file location="@WS@/b/tool.cc" name="//b:tool.cc">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/genrule/genrule-setup.sh" name="@bazel_tools//tools/genrule:genrule-setup.sh">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@OB@/external/ext+/lib/d.txt" name="@ext//lib:d.txt">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/ext+/lib/BUILD" name="@ext//lib:data">
+        <string name="name" value="data"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="@ext//lib:d.txt"/>
+        </list>
+        <rule-input name="@ext//lib:d.txt"/>
+    </rule>
+</query>

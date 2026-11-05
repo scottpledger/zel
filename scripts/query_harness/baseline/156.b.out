@@ -1,0 +1,14 @@
+catrule rule //a:lib2
+xlib rule //a:cl
+genrule rule //a:gg
+filegroup rule //a:sel
+xlib rule //a:cl2
+config_setting rule //a:opt_cs
+filegroup rule //a:lm_grp
+catrule rule //a:sm_cat
+filegroup rule //a:sm_fg
+config_setting rule //a:def_cs
+trule rule //a:tr
+catrule rule //a:lib
+filegroup rule //a:srcs_fg
+genrule rule //a:lm

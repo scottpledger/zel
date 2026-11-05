@@ -1,0 +1,11 @@
+beta 1
+eps
+{ 2
+	Tab
+	Tab 3
+	Tab 1
+PERTURBED6
+PERTURBED7
+delta
+alpha 2
+alpha

@@ -1,0 +1,8 @@
+--- a/f.txt
++++ b/f.txt
+@@ -17,4 +17,4 @@
+ line 17
+ line 18
+ line 19
+-line 20
++LAST

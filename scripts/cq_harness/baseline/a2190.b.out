@@ -1,0 +1,262 @@
+rule_classes {
+id: 1
+name: "xbin"
+}
+targets {
+id: 1
+label: "//b:tool"
+rule_class_id: 1
+}
+configuration {
+id: 1
+mnemonic: "darwin_arm64-opt-exec"
+platform_name: "darwin_arm64"
+checksum: "77e8473c8c1c4b4ef1825b4b7ffc50dc3ee606e358c10cba8c77f21ec5fe49d9"
+is_tool: true
+}
+configuration {
+id: 2
+mnemonic: "darwin_arm64-fastbuild"
+platform_name: "darwin_arm64"
+checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+}
+path_fragments {
+id: 8
+label: "darwin_arm64-opt-exec"
+parent_id: 9
+}
+path_fragments {
+id: 9
+label: "bazel-out"
+}
+path_fragments {
+id: 6
+label: "bin"
+parent_id: 8
+}
+path_fragments {
+id: 7
+label: "darwin_arm64-fastbuild"
+parent_id: 9
+}
+path_fragments {
+id: 4
+label: "b"
+parent_id: 6
+}
+path_fragments {
+id: 5
+label: "bin"
+parent_id: 7
+}
+path_fragments {
+id: 3
+label: "b"
+parent_id: 5
+}
+path_fragments {
+id: 1
+label: "tool"
+parent_id: 3
+}
+artifacts {
+id: 2
+path_fragment_id: 1
+}
+path_fragments {
+id: 2
+label: "tool"
+parent_id: 4
+}
+artifacts {
+id: 1
+path_fragment_id: 2
+}
+actions {
+target_id: 1
+action_key: "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"
+mnemonic: "FileWrite"
+configuration_id: 2
+output_ids: 2
+primary_output_id: 2
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+actions {
+target_id: 1
+action_key: "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"
+mnemonic: "FileWrite"
+configuration_id: 1
+output_ids: 1
+primary_output_id: 1
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+path_fragments {
+id: 10
+label: "tool.repo_mapping"
+parent_id: 3
+}
+path_fragments {
+id: 11
+label: "tool.repo_mapping"
+parent_id: 4
+}
+artifacts {
+id: 3
+path_fragment_id: 10
+}
+actions {
+target_id: 1
+action_key: "9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a"
+mnemonic: "RepoMappingManifest"
+configuration_id: 2
+output_ids: 3
+primary_output_id: 3
+execution_platform: "@@platforms//host:host"
+}
+artifacts {
+id: 4
+path_fragment_id: 11
+}
+actions {
+target_id: 1
+action_key: "9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a"
+mnemonic: "RepoMappingManifest"
+configuration_id: 1
+output_ids: 4
+primary_output_id: 4
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 12
+label: "tool.runfiles_manifest"
+parent_id: 3
+}
+artifacts {
+id: 5
+path_fragment_id: 12
+}
+actions {
+target_id: 1
+action_key: "827f0fe2457d4ac47eabfc4f2b14ab9e6c9df2718ccaebed65b7884201f1812d"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 2
+output_ids: 5
+primary_output_id: 5
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 1
+direct_artifact_ids: 5
+}
+path_fragments {
+id: 14
+label: "tool.runfiles"
+parent_id: 3
+}
+path_fragments {
+id: 13
+label: "MANIFEST"
+parent_id: 14
+}
+artifacts {
+id: 6
+path_fragment_id: 13
+}
+actions {
+target_id: 1
+action_key: "7dc5a94dd5304ba87abeb760f1f8f4a43319e6ba0b28414858e2bf1ad1e22529"
+mnemonic: "SymlinkTree"
+configuration_id: 2
+input_dep_set_ids: 1
+output_ids: 6
+primary_output_id: 6
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 2
+direct_artifact_ids: 2
+direct_artifact_ids: 6
+direct_artifact_ids: 3
+}
+artifacts {
+id: 7
+path_fragment_id: 14
+}
+actions {
+target_id: 1
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 2
+input_dep_set_ids: 2
+output_ids: 7
+primary_output_id: 7
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 15
+label: "tool.runfiles_manifest"
+parent_id: 4
+}
+artifacts {
+id: 8
+path_fragment_id: 15
+}
+actions {
+target_id: 1
+action_key: "e346326417c6d035de7958c9d53a1d985c71b8977bd881813c6084ab02bda792"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 1
+output_ids: 8
+primary_output_id: 8
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 3
+direct_artifact_ids: 8
+}
+path_fragments {
+id: 17
+label: "tool.runfiles"
+parent_id: 4
+}
+path_fragments {
+id: 16
+label: "MANIFEST"
+parent_id: 17
+}
+artifacts {
+id: 9
+path_fragment_id: 16
+}
+actions {
+target_id: 1
+action_key: "9d08d249af1fb388108eb2399cb831dc2a7d2046b2f108ae6cad2a57b326aabf"
+mnemonic: "SymlinkTree"
+configuration_id: 1
+input_dep_set_ids: 3
+output_ids: 9
+primary_output_id: 9
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 4
+direct_artifact_ids: 1
+direct_artifact_ids: 9
+direct_artifact_ids: 4
+}
+artifacts {
+id: 10
+path_fragment_id: 17
+}
+actions {
+target_id: 1
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 1
+input_dep_set_ids: 4
+output_ids: 10
+primary_output_id: 10
+execution_platform: "@@platforms//host:host"
+}

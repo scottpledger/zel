@@ -1,0 +1,42 @@
+# @WS@/a/BUILD:7:7
+filegroup(
+  name = "lm_grp",
+  generator_name = "lm",
+  generator_function = "lmacro",
+  generator_location = "ate@WS@/a/BUILD:7:7",
+  srcs = ["//a:lm"],
+)
+# Rule lm_grp instantiated at (most recent call last):
+#   @WS@/a/BUILD:7:7    in <toplevel>
+#   @WS@/defs.bzl:21:21 in lmacro
+
+# @WS@/a/BUILD:11:10
+filegroup(
+  name = "sel",
+  srcs = ["//a:z.txt"],
+)
+# Rule sel instantiated at (most recent call last):
+#   @WS@/a/BUILD:11:10 in <toplevel>
+
+# @WS@/a/BUILD:6:7
+filegroup(
+  name = "sm_fg",
+  visibility = ["//visibility:public"],
+  generator_name = "sm",
+  generator_function = "smacro",
+  generator_location = "ate@WS@/a/BUILD:6:7",
+  srcs = ["//a:x.txt", "//a:y.txt"],
+)
+# Rule sm_fg instantiated at (most recent call last):
+#   @WS@/a/BUILD:6:7    in <toplevel>
+#   @WS@/defs.bzl:17:1  in smacro
+#   @WS@/defs.bzl:15:21 in _smacro
+
+# @WS@/a/BUILD:3:10
+filegroup(
+  name = "srcs_fg",
+  srcs = ["//a:x.txt", "//a:y.txt", "//a:z.txt"],
+)
+# Rule srcs_fg instantiated at (most recent call last):
+#   @WS@/a/BUILD:3:10 in <toplevel>
+

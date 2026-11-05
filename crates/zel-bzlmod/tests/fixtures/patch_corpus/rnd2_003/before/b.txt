@@ -1,0 +1,10 @@
+eps
+beta
+gamma
+eps
+beta 2
+ 1
+} 1
+{ 2
+eps 1
+gamma

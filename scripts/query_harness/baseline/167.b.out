@@ -1,0 +1,171 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="trule" location="@WS@/a/BUILD:8:6" name="//a:tr">
+        <string name="name" value="tr"/>
+        <label name="dep" value="//a:lib"/>
+        <rule-input name="//a:lib"/>
+        <rule-input name="@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:6:7" name="//a:sm_cat">
+        <string name="name" value="sm_cat"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <string name="generator_name" value="sm"/>
+        <string name="generator_function" value="smacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:6:7"/>
+        <list name="srcs">
+            <label value="//a:sm_fg"/>
+        </list>
+        <rule-input name="//a:sm_fg"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:6:7" name="//a:sm_fg">
+        <string name="name" value="sm_fg"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <string name="generator_name" value="sm"/>
+        <string name="generator_function" value="smacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:6:7"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+        </list>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:7:7" name="//a:lm_grp">
+        <string name="name" value="lm_grp"/>
+        <string name="generator_name" value="lm"/>
+        <string name="generator_function" value="lmacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:7:7"/>
+        <list name="srcs">
+            <label value="//a:lm"/>
+        </list>
+        <rule-input name="//a:lm"/>
+    </rule>
+    <rule class="genrule" location="@WS@/a/BUILD:7:7" name="//a:lm">
+        <string name="name" value="lm"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="generator_name" value="lm"/>
+        <string name="generator_function" value="lmacro"/>
+        <string name="generator_location" value="ate@WS@/a/BUILD:7:7"/>
+        <list name="outs">
+            <output value="//a:lm.o"/>
+        </list>
+        <string name="cmd" value="echo lm &gt; $@"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-output name="//a:lm.o"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:5:8" name="//a:lib2">
+        <string name="name" value="lib2"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <list name="srcs">
+            <label value="//a:lib"/>
+            <label value="//a:y.txt"/>
+        </list>
+        <rule-input name="//a:lib"/>
+        <rule-input name="//a:y.txt"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:4:8" name="//a:lib">
+        <string name="name" value="lib"/>
+        <list name="tags">
+            <string value="fast"/>
+            <string value="manual"/>
+        </list>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:srcs_fg"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <string name="tag_x" value="lib"/>
+        <rule-input name="//a:srcs_fg"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="@ext//lib:data"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:3:10" name="//a:srcs_fg">
+        <string name="name" value="srcs_fg"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+            <label value="//a:z.txt"/>
+        </list>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+        <rule-input name="//a:z.txt"/>
+    </rule>
+    <rule class="genrule" location="@WS@/a/BUILD:12:8" name="//a:gg">
+        <string name="name" value="gg"/>
+        <list name="srcs">
+            <label value="//a:sel"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <list name="tools">
+            <label value="//b:tool"/>
+        </list>
+        <list name="outs">
+            <output value="//a:gg.out"/>
+        </list>
+        <string name="cmd" value="cat $(SRCS) &gt; $@ ; echo $(location :sel) &gt;&gt; $@"/>
+        <rule-input name="//a:sel"/>
+        <rule-input name="//b:tool"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-input name="@ext//lib:data"/>
+        <rule-output name="//a:gg.out"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:11:10" name="//a:sel">
+        <string name="name" value="sel"/>
+        <list name="srcs">
+            <label value="//a:x.txt"/>
+            <label value="//a:y.txt"/>
+            <label value="//a:z.txt"/>
+        </list>
+        <rule-input name="//a:def_cs"/>
+        <rule-input name="//a:opt_cs"/>
+        <rule-input name="//a:x.txt"/>
+        <rule-input name="//a:y.txt"/>
+        <rule-input name="//a:z.txt"/>
+    </rule>
+    <rule class="config_setting" location="@WS@/a/BUILD:9:15" name="//a:opt_cs">
+        <string name="name" value="opt_cs"/>
+        <dict name="values">
+            <pair>
+                <string value="compilation_mode"/>
+                <string value="opt"/>
+            </pair>
+        </dict>
+    </rule>
+    <rule class="config_setting" location="@WS@/a/BUILD:10:15" name="//a:def_cs">
+        <string name="name" value="def_cs"/>
+        <dict name="define_values">
+            <pair>
+                <string value="FOO"/>
+                <string value="bar"/>
+            </pair>
+        </dict>
+    </rule>
+    <rule class="xlib" location="@WS@/a/BUILD:13:5" name="//a:cl">
+        <string name="name" value="cl"/>
+        <list name="srcs">
+            <label value="//a:c.cc"/>
+            <label value="//a:c.h"/>
+        </list>
+        <list name="deps">
+            <label value="//a:cl2"/>
+        </list>
+        <rule-input name="//a:c.cc"/>
+        <rule-input name="//a:c.h"/>
+        <rule-input name="//a:cl2"/>
+    </rule>
+    <rule class="xlib" location="@WS@/a/BUILD:14:5" name="//a:cl2">
+        <string name="name" value="cl2"/>
+        <list name="srcs">
+            <label value="//a:c2.cc"/>
+        </list>
+        <rule-input name="//a:c2.cc"/>
+    </rule>
+</query>

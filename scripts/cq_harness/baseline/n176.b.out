@@ -1,0 +1,4 @@
+//a:lib2 (7913989) [BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]
+//a:lib (7913989) [BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]
+@ext//lib:data (7913989) [BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]
+@ext//lib:d.txt (null) []

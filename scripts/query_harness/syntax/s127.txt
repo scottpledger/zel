@@ -1,0 +1,2 @@
+cc_library(name = 'a'
+cc_library(name = 'b')

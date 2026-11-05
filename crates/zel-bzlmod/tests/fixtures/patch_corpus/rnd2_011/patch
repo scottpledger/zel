@@ -1,0 +1,17 @@
+--- a/a.txt
++++ b/a.txt
+@@ -2,6 +2,8 @@
+ 	Tab 3
+ return 0; 2
+ gamma 0
++}
++	Tab 3
+ return 0;
+ 	Tab
+ gamma 1
+--- a/b.txt
++++ b/b.txt
+@@ -3,3 +3,2 @@
+  1
+- 2
+ 	Tab 0

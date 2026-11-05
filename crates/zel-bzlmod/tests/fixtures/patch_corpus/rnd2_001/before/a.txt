@@ -1,0 +1,8 @@
+x
+alpha
+} 1
+beta 1
+eps 3
+x 0
+	Tab 3
+alpha

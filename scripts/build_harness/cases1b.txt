@@ -1,0 +1,891 @@
+rm -f /tmp/vb5-flaky-* ;; test //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test //:t_out
+rm -f /tmp/vb5-flaky-* ;; test //:t_env
+rm -f /tmp/vb5-flaky-* ;; test //:t_args
+rm -f /tmp/vb5-flaky-* ;; test //:t_data
+rm -f /tmp/vb5-flaky-* ;; test //:t_slow
+rm -f /tmp/vb5-flaky-* ;; test //:t_med
+rm -f /tmp/vb5-flaky-* ;; test //:t_enorm
+rm -f /tmp/vb5-flaky-* ;; test //:t_small
+rm -f /tmp/vb5-flaky-* ;; test //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test //:t_shard
+rm -f /tmp/vb5-flaky-* ;; test //:t_manual
+rm -f /tmp/vb5-flaky-* ;; test //:t_local
+rm -f /tmp/vb5-flaky-* ;; test //:t_notcached
+rm -f /tmp/vb5-flaky-* ;; test //:t_noexit
+rm -f /tmp/vb5-flaky-* ;; test //:t_stderr
+rm -f /tmp/vb5-flaky-* ;; test //:t_big
+rm -f /tmp/vb5-flaky-* ;; test //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test //:t_undecl
+rm -f /tmp/vb5-flaky-* ;; test //:t_sleep_ok
+rm -f /tmp/vb5-flaky-* ;; test --test_output=summary //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_output=summary //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_output=summary //:t_out
+rm -f /tmp/vb5-flaky-* ;; test --test_output=summary //:t_stderr
+rm -f /tmp/vb5-flaky-* ;; test --test_output=summary //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_output=summary //:t_big
+rm -f /tmp/vb5-flaky-* ;; test --test_output=summary //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_output=summary //:t_shard
+rm -f /tmp/vb5-flaky-* ;; test --test_output=errors //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_output=errors //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_output=errors //:t_out
+rm -f /tmp/vb5-flaky-* ;; test --test_output=errors //:t_stderr
+rm -f /tmp/vb5-flaky-* ;; test --test_output=errors //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_output=errors //:t_big
+rm -f /tmp/vb5-flaky-* ;; test --test_output=errors //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_output=errors //:t_shard
+rm -f /tmp/vb5-flaky-* ;; test --test_output=all //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_output=all //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_output=all //:t_out
+rm -f /tmp/vb5-flaky-* ;; test --test_output=all //:t_stderr
+rm -f /tmp/vb5-flaky-* ;; test --test_output=all //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_output=all //:t_big
+rm -f /tmp/vb5-flaky-* ;; test --test_output=all //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_output=all //:t_shard
+rm -f /tmp/vb5-flaky-* ;; test --test_output=streamed //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_output=streamed //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_output=streamed //:t_out
+rm -f /tmp/vb5-flaky-* ;; test --test_output=streamed //:t_stderr
+rm -f /tmp/vb5-flaky-* ;; test --test_output=streamed //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_output=streamed //:t_big
+rm -f /tmp/vb5-flaky-* ;; test --test_output=streamed //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_output=streamed //:t_shard
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=short //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=short //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=short //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=short //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=terse //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=terse //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=terse //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=terse //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=detailed //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=detailed //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=detailed //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=detailed //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=none //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=none //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=none //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=none //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=testcase //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=testcase //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=testcase //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=testcase //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=full //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=full //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=full //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=full //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=bogus //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=bogus //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=bogus //:t_xml
+rm -f /tmp/vb5-flaky-* ;; test --test_summary=bogus //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=1 --test_output=all //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=1 --test_output=all //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=1 --test_output=all //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=1 --test_output=all //:t_out
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=2 --test_output=all //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=2 --test_output=all //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=2 --test_output=all //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=2 --test_output=all //:t_out
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=3 --test_output=all //:t_pass
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=3 --test_output=all //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=3 --test_output=all //:t_flaky_pass
+rm -f /tmp/vb5-flaky-* ;; test --runs_per_test=3 --test_output=all //:t_out
+test --runs_per_test=2 --runs_per_test_detects_flakes //:t_flaky_pass
+test --runs_per_test=3 --runs_per_test_detects_flakes //:t_pass
+test --runs_per_test=//:t_pass@2 //:t_pass //:t_out
+test --runs_per_test=0 //:t_pass
+test --runs_per_test=abc //:t_pass
+test --runs_per_test=-1 //:t_pass
+test --runs_per_test=2 --test_summary=detailed //:t_xml
+test --runs_per_test=2 --notest_keep_going //:t_fail
+test --runs_per_test=2 //:t_shard
+test --runs_per_test=2 --test_output=streamed //:t_out
+rm -f /tmp/vb5-flaky-* ;; test --flaky_test_attempts=0 //:t_flaky_pass //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --flaky_test_attempts=1 //:t_flaky_pass //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --flaky_test_attempts=2 //:t_flaky_pass //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --flaky_test_attempts=3 //:t_flaky_pass //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --flaky_test_attempts=5 //:t_flaky_pass //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --flaky_test_attempts=abc //:t_flaky_pass //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --flaky_test_attempts=-1 //:t_flaky_pass //:t_fail
+rm -f /tmp/vb5-flaky-* ;; test --flaky_test_attempts=10 //:t_flaky_pass //:t_fail
+test --flaky_test_attempts=default //:t_fail
+test --flaky_test_attempts=//:t_fail@2 //:t_fail
+test --flaky_test_attempts=short@2 //:t_fail
+test --flaky_test_attempts=2 //:t_fail //:t_pass //:t_slow --test_timeout=1
+test --test_timeout=1 //:t_slow
+test --test_timeout=1,2,3,4 //:t_slow
+test --test_timeout=abc //:t_slow
+test --test_timeout=-5 //:t_slow
+test --test_timeout=0 //:t_slow
+test --test_timeout=5,10 //:t_slow
+test --test_timeout=10  //:t_slow
+test --test_timeout=1 --test_verbose_timeout_warnings //:t_slow //:t_med //:t_enorm //:t_pass
+test --test_timeout=500 --test_verbose_timeout_warnings //:t_pass //:t_small //:t_med
+test --test_verbose_timeout_warnings //:t_pass //:t_enorm //:t_med //:t_small
+test --test_timeout=2 --test_output=all //:t_slow
+test --test_timeout=2 --test_summary=detailed //:t_slow
+test --test_timeout=2 --flaky_test_attempts=2 //:t_slow
+test --test_tag_filters=tagA //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_tag_filters=tagA //:all
+build --test_tag_filters=tagA //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_tag_filters=-tagA //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_tag_filters=-tagA //:all
+build --test_tag_filters=-tagA //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_tag_filters=tagA,tagB //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_tag_filters=tagA,tagB //:all
+build --test_tag_filters=tagA,tagB //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_tag_filters=manual //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_tag_filters=manual //:all
+build --test_tag_filters=manual //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_tag_filters=-manual //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_tag_filters=-manual //:all
+build --test_tag_filters=-manual //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_tag_filters=exclusive //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_tag_filters=exclusive //:all
+build --test_tag_filters=exclusive //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_tag_filters=bogus //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_tag_filters=bogus //:all
+build --test_tag_filters=bogus //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_tag_filters=-exclusive,-tagA //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_tag_filters=-exclusive,-tagA //:all
+build --test_tag_filters=-exclusive,-tagA //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_size_filters=small //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_size_filters=small //:all
+build --test_size_filters=small //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_size_filters=-small //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_size_filters=-small //:all
+build --test_size_filters=-small //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_size_filters=small,medium //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_size_filters=small,medium //:all
+build --test_size_filters=small,medium //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_size_filters=enormous //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_size_filters=enormous //:all
+build --test_size_filters=enormous //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_size_filters=bogus //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_size_filters=bogus //:all
+build --test_size_filters=bogus //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_size_filters=-large,-enormous //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_size_filters=-large,-enormous //:all
+build --test_size_filters=-large,-enormous //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_size_filters=large //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_size_filters=large //:all
+build --test_size_filters=large //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_lang_filters=sh //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_lang_filters=sh //:all
+build --test_lang_filters=sh //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_lang_filters=-sh //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_lang_filters=-sh //:all
+build --test_lang_filters=-sh //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_lang_filters=py //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_lang_filters=py //:all
+build --test_lang_filters=py //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_lang_filters=cc,java //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_lang_filters=cc,java //:all
+build --test_lang_filters=cc,java //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --build_tag_filters=-manual //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --build_tag_filters=-manual //:all
+build --build_tag_filters=-manual //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --build_tag_filters=tagA //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --build_tag_filters=tagA //:all
+build --build_tag_filters=tagA //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --build_tag_filters=-tagA,-tagB //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --build_tag_filters=-tagA,-tagB //:all
+build --build_tag_filters=-tagA,-tagB //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_timeout_filters=short //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_timeout_filters=short //:all
+build --test_timeout_filters=short //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_timeout_filters=-short //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_timeout_filters=-short //:all
+build --test_timeout_filters=-short //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_timeout_filters=eternal //:t_pass //:t_small //:t_med //:t_slow //:t_enorm //:t_manual
+test --test_timeout_filters=eternal //:all
+build --test_timeout_filters=eternal //:t_pass //:t_small //:t_med //:t_enorm //:t_manual //:g1
+test --test_tag_filters=tagA //:s_all //:s_tag
+test --test_tag_filters=tagA //:s_nested
+test --test_size_filters=small //:s_all //:s_tag
+test --test_size_filters=small //:s_nested
+test --test_lang_filters=sh //:s_all //:s_tag
+test --test_lang_filters=sh //:s_nested
+test --test_lang_filters=py //:s_all //:s_tag
+test --test_lang_filters=py //:s_nested
+test --test_filter=foo --test_output=all //:t_env
+test --test_filter= --test_output=all //:t_env
+test --test_filter=a.b#c --test_output=all //:t_env
+test --test_arg=x --test_output=all //:t_args
+test --test_arg=x --test_arg=y z --test_output=all //:t_args
+test --test_arg=--flag=1 --test_output=all //:t_args
+test --test_arg=a\ b --test_output=all //:t_args
+test --test_env=TEST_ENV_X=1 --test_output=all //:t_env
+test --test_env=TEST_ENV_X --test_output=all //:t_env
+test --test_env=NOPE --test_output=all //:t_env
+test --test_env=TEST_ENV_X=a=b --test_output=all //:t_env
+test --test_env=HOME=zz --test_output=all //:t_env
+test --test_env=A=1 --test_env=A=2 --test_output=all //:t_env
+test --test_env==x --test_output=all //:t_env
+test --action_env=TEST_ENV_X=ae --test_output=all //:t_env
+test --test_env=TEST_ENV_X=1 --action_env=TEST_ENV_X=ae --test_output=all //:t_env
+test --test_tmpdir=/tmp/vb5-tt --test_output=all //:t_env
+test --test_sharding_strategy=disabled --test_output=all //:t_shard
+test --test_sharding_strategy=explicit --test_output=all //:t_shard
+test --test_sharding_strategy=forced=2 --test_output=all //:t_shard
+test --test_sharding_strategy=forced=0 --test_output=all //:t_shard
+test --test_sharding_strategy=forced=x //:t_shard
+test --test_sharding_strategy=bogus //:t_shard
+test --test_sharding_strategy=forced=4 --test_output=all //:t_pass
+test --test_sharding_strategy=explicit --test_output=all //:t_pass
+test --test_sharding_strategy=forced=3 //:t_noexit
+test --noincompatible_check_sharding_support //:t_shard
+build --spawn_strategy=standalone //:g2
+build --spawn_strategy=local //:g2
+build --spawn_strategy=sandboxed //:g2
+build --spawn_strategy=worker //:g2
+build --spawn_strategy=remote //:g2
+build --spawn_strategy=bogus //:g2
+build --spawn_strategy=processwrapper-sandbox //:g2
+build --spawn_strategy=darwin-sandbox //:g2
+build --spawn_strategy=linux-sandbox //:g2
+build --spawn_strategy=dynamic //:g2
+build --spawn_strategy= //:g2
+test --test_strategy=local //:t_pass
+test --test_strategy=bogus //:t_pass
+test --test_strategy=standalone //:t_pass
+test --test_strategy=exclusive //:t_pass
+test --test_strategy=sandboxed //:t_pass
+build --strategy=Genrule=local //:g2
+build --strategy=Genrule=bogus //:g2
+build --strategy=Genrule=standalone //:g2
+build --strategy=bogus=local //:g2
+build --strategy=Genrule=sandboxed,local //:g2
+build --strategy=local //:g2
+build --strategy_regexp=Genrule=local //:g2
+build --strategy_regexp=g2=local //:g2
+build --genrule_strategy=local //:g2
+build --genrule_strategy=bogus //:g2
+build --sandbox_debug //:gfail
+build --sandbox_debug //:g2
+build --spawn_strategy=local --verbose_failures //:gfail
+build --spawn_strategy=standalone --verbose_failures //:gfail
+build --spawn_strategy=sandboxed --verbose_failures //:gfail
+build --nosandbox_default_allow_network //:g2
+build --sandbox_add_mount_pair=/tmp //:g2
+build --sandbox_writable_path=/tmp //:g2
+build --sandbox_tmpfs_path=/tmp/x //:g2
+build --experimental_sandbox_base=/tmp/vb5-sb //:g2
+build --incompatible_sandbox_hermetic_tmp //:g2
+build --sandbox_fake_hostname //:g2
+build --sandbox_fake_username //:g2
+build --reuse_sandbox_directories //:g2
+build --worker_sandboxing //:g2
+build --experimental_use_hermetic_linux_sandbox //:g2
+build --noexperimental_remotable_source_manifests //:g2
+build //:gfail
+build //:gfail2
+build //:gpartial
+build //:gnoout
+build //:gbadvar
+build //:gbadloc
+build //:gcyc_a
+build //:gmissing
+build //:gdepvis
+build //:gdepdeprecated
+build //:nonexist
+build //:gdir
+build //:gexec
+build //:gstamp
+build //:gmake
+build //:gtool
+build //:gstderr
+build //:gstdout
+build //:gslow
+build //:glocal
+build //:gtag
+build //:gtimeout
+build //:g3
+build //:g1
+build --keep_going //:gfail //:g1
+build --nokeep_going //:gfail //:g1
+build --verbose_failures //:gfail
+build -s //:gfail
+build --subcommands=pretty_print //:gfail
+build --explain=/tmp/vb5-explain.txt --verbose_explanations //:gfail
+build --keep_going //:gnoout //:g1
+build --nokeep_going //:gnoout //:g1
+build --verbose_failures //:gnoout
+build -s //:gnoout
+build --subcommands=pretty_print //:gnoout
+build --explain=/tmp/vb5-explain.txt --verbose_explanations //:gnoout
+build --keep_going //:gpartial //:g1
+build --nokeep_going //:gpartial //:g1
+build --verbose_failures //:gpartial
+build -s //:gpartial
+build --subcommands=pretty_print //:gpartial
+build --explain=/tmp/vb5-explain.txt --verbose_explanations //:gpartial
+build --keep_going //:gcyc_a //:g1
+build --nokeep_going //:gcyc_a //:g1
+build --verbose_failures //:gcyc_a
+build -s //:gcyc_a
+build --subcommands=pretty_print //:gcyc_a
+build --explain=/tmp/vb5-explain.txt --verbose_explanations //:gcyc_a
+build --keep_going //:gmissing //:g1
+build --nokeep_going //:gmissing //:g1
+build --verbose_failures //:gmissing
+build -s //:gmissing
+build --subcommands=pretty_print //:gmissing
+build --explain=/tmp/vb5-explain.txt --verbose_explanations //:gmissing
+build --keep_going //:gbadloc //:g1
+build --nokeep_going //:gbadloc //:g1
+build --verbose_failures //:gbadloc
+build -s //:gbadloc
+build --subcommands=pretty_print //:gbadloc
+build --explain=/tmp/vb5-explain.txt --verbose_explanations //:gbadloc
+build --keep_going //:gdepvis //:g1
+build --nokeep_going //:gdepvis //:g1
+build --verbose_failures //:gdepvis
+build -s //:gdepvis
+build --subcommands=pretty_print //:gdepvis
+build --explain=/tmp/vb5-explain.txt --verbose_explanations //:gdepvis
+build //:gfail //:gfail2 //:gnoout
+build -k //:gfail //:gfail2 //:gnoout //:g2
+build --jobs=1 //:gfail //:gfail2
+build -k --jobs=1 //:gfail //:gfail2 //:g1
+build //:all
+build -k //:all
+build //...
+build -k //...
+build //sub:all //sub/deep:all
+build //sub/...
+build //sub:s1 //sub:s2
+build //pkg:x
+build -k //pkg:x //:g1
+build //conf2:a
+build //conf2:all
+build //conf2:a //conf2:b
+build -k //conf2:all //:g1
+build //vis:dep
+build //vis:private_file
+build //nonexistent/pkg:x
+build //:nonexist //:g1
+build -k //:nonexist //:g1
+build //:g1 //:nonexist
+build :g1
+build g1
+build //:g1 //:g1
+build //:g1 -//:g1
+build -- //:all -//:gfail
+build -- //:all -//:gfail -//:gnoout -//:gpartial -//:gcyc_a -//:gcyc_b -//:gcyc_c -//:gbadvar -//:gbadloc -//:gmissing -//:gdepvis -//:gfail2 -//:gdepdeprecated
+build //:g*
+build //
+build //:
+build ...
+build @nonexist//:x
+build @@nonexist//:x
+build @rules_shell//shell:sh_test.bzl
+build //:g1.out
+build //:BUILD
+build //:tool.sh
+build //:data.txt
+build bazel-bin/g1.out
+build ./BUILD
+build /tmp/nonexist
+build //:g1 --keep_going --nokeep_going
+build
+build --nobuild //:g1
+build --nobuild //:gfail
+build --nobuild //:nonexist
+build --nobuild //:gcyc_a
+build --check_up_to_date //:g1
+build --check_up_to_date //:g1 //:g2
+build --compile_one_dependency tool.sh
+build --compile_one_dependency data.txt
+build --compile_one_dependency t_pass.sh t_fail.sh
+build --compile_one_dependency nonexistent.sh
+build --compile_one_dependency //:g1
+build --compile_one_dependency
+build --show_result=0 //:g1 //:g2 //:g3
+build --show_result=1 //:g1 //:g2 //:g3
+build --show_result=10 //:g1 //:g2 //:g3
+build --noshow_result //:g1 //:g2 //:g3
+build --show_result=-1 //:g1 //:g2 //:g3
+build --show_result=x //:g1 //:g2 //:g3
+build --output_groups=default //:g3
+build --output_groups=default //:args
+build --output_groups=+default //:g3
+build --output_groups=+default //:args
+build --output_groups=-default //:g3
+build --output_groups=-default //:args
+build --output_groups=bogus //:g3
+build --output_groups=bogus //:args
+build --output_groups=compilation_outputs //:g3
+build --output_groups=compilation_outputs //:args
+build --output_groups=_hidden_top_level_INTERNAL_ //:g3
+build --output_groups=_hidden_top_level_INTERNAL_ //:args
+build --output_groups= //:g3
+build --output_groups= //:args
+build --output_groups=default,bogus //:g3
+build --output_groups=default,bogus //:args
+build --output_groups=+bogus //:g3
+build --output_groups=+bogus //:args
+build --symlink_prefix=foo- //:g1
+build --symlink_prefix=/ //:g1
+build --symlink_prefix=out/ //:g1
+build --symlink_prefix=/tmp/vb5-sp- //:g1
+build --experimental_convenience_symlinks=ignore //:g1
+build --experimental_convenience_symlinks=clean //:g1
+build --experimental_convenience_symlinks=bogus //:g1
+build --noexperimental_convenience_symlinks //:g1
+build --experimental_no_product_name_out_symlink //:g1
+build --use_action_cache=false //:g1
+build --nouse_action_cache //:g2
+build --keep_state_after_build //:g2
+build --nokeep_state_after_build //:g2
+build --discard_analysis_cache //:g2
+build --track_incremental_state //:g2
+build --notrack_incremental_state //:g2
+build --experimental_check_output_files //:g2
+build --noexperimental_check_output_files //:g2
+build --compilation_mode=dbg //:gmake
+build -c opt //:gmake
+build -c fastbuild //:gmake
+build -c bogus //:gmake
+build -c dbg //:g2 --show_result=5
+build --stamp //:gstamp
+build --nostamp //:gstamp
+build --stamp --embed_label=foo //:gstamp
+build --embed_label=foo //:gstamp
+build --workspace_status_command=/bin/true //:gstamp
+build --workspace_status_command=/bin/false //:gstamp
+build --workspace_status_command=/nonexistent/cmd //:gstamp
+build --workspace_status_command=/bin/echo //:gstamp
+build --show_timestamps //:g1
+build --show_timestamps //:gfail
+build --noshow_progress //:g1
+build --noshow_progress //:gfail
+build --progress_in_terminal_title //:g1
+build --color=yes //:g1
+build --color=yes //:gfail
+build --color=auto //:g1
+build --color=no //:g1
+build --color=bogus //:g1
+build --curses=yes //:g1
+build --curses=yes //:gfail
+build --curses=no //:g1
+build --terminal_columns=40 //:g1
+build --toolchain_resolution_debug=.* //:g1
+build --toolchain_resolution_debug=//:x //:g1
+build --toolchain_resolution_debug=foo(bar //:g1
+build --platforms=//:nonexistent //:g1
+build --platforms=//nonexistent:x //:g1
+build --host_platform=//:nonexistent //:g1
+build --extra_toolchains=//:nonexistent //:g1
+build --extra_execution_platforms=//:nonexistent //:g1
+build --cpu=bogus //:g1
+build --host_cpu=bogus //:g1
+build --jobs=1 //:g3
+build --jobs=0 //:g3
+build --jobs=-1 //:g3
+build --jobs=abc //:g3
+build --jobs=auto //:g3
+build --jobs=HOST_CPUS*2 //:g3
+build --jobs=HOST_CPUS-1 //:g3
+build --jobs=HOST_RAM*.5 //:g3
+build --jobs=99999 //:g3
+build --loading_phase_threads=1 //:g3
+build --loading_phase_threads=abc //:g3
+build --local_cpu_resources=2 //:g3
+build --local_cpu_resources=HOST_CPUS*.5 //:g3
+build --local_cpu_resources=bogus //:g3
+build --local_ram_resources=1024 //:g3
+build --local_resources=cpu=1 //:g3
+build --local_test_jobs=1 //:g3
+build --local_test_jobs=abc //:g3
+build --announce //:g1
+build --announce_rc //:g1
+build --verbose_failures //:g1
+build --keep_going --verbose_failures //:gfail2
+build --test_summary=detailed //:g1
+build --build_manual_tests //:t_manual
+build --build_tests_only //:t_pass //:g1
+build --build_tests_only //:s_all //:g1
+build --build_tests_only //:t_pass //:t_manual
+test --build_tests_only //:t_pass //:g1
+test //:g1
+test //:g1 //:t_pass
+test //:args
+test //:nonexist
+test //:t_pass //:nonexist
+test -k //:t_pass //:nonexist
+test --keep_going //:t_fail //:nonexist
+test //:gfail //:t_pass
+test -k //:gfail //:t_pass
+test --nokeep_going //:gfail //:t_pass
+test //:all
+test -k //:all
+test //...
+test //:s_all
+test //:s_all //:t_fail
+test //:s_nested
+test //:s_tag
+test //:s_empty
+test //:s_manual
+test //:s_all //:s_nested //:t_pass
+test //:s_all --test_output=errors
+test //:t_manual //:s_manual
+test --noexperimental_convenience_symlinks //:t_pass
+test --nobuild //:t_pass
+test --nobuild //:t_fail
+test --nobuild //:nonexist
+test --nobuild //:g1
+test --nobuild //:s_all
+test --check_tests_up_to_date //:t_pass
+test --check_tests_up_to_date //:t_pass //:t_fail
+test --check_tests_up_to_date //:s_all
+test --nocache_test_results //:t_pass
+test --cache_test_results=no //:t_pass
+test --cache_test_results=auto //:t_pass
+test --cache_test_results=yes //:t_pass
+test --cache_test_results=bogus //:t_pass
+test --max_test_output_bytes=100 --test_output=all //:t_big
+test --max_test_output_bytes=0 --test_output=all //:t_big
+test --max_test_output_bytes=-1 --test_output=all //:t_big
+test --max_test_output_bytes=abc //:t_big
+test --max_test_output_bytes=100000 --test_output=all //:t_big
+test --test_output=all --experimental_ui_max_stdouterr_bytes=100 //:t_big
+test --test_output=all --experimental_ui_max_stdouterr_bytes=-1 //:t_big
+test --test_output=errors --experimental_ui_max_stdouterr_bytes=100 //:t_big //:t_fail
+test --notest_keep_going //:t_fail //:t_pass //:t_out
+test --test_keep_going=false //:t_fail //:t_pass
+test --keep_going //:t_fail //:t_pass
+test --nokeep_going //:t_fail //:t_pass
+test --notest_keep_going --keep_going //:t_fail //:t_pass
+test --notest_keep_going //:t_fail
+test --notest_keep_going //:t_pass
+test --print_relative_test_log_paths //:t_fail
+test --test_output=all --print_relative_test_log_paths //:t_fail
+test --test_output=errors --verbose_test_summary //:t_fail
+test --noverbose_test_summary --test_summary=detailed //:t_fail
+test --test_summary=terse //:t_pass //:t_fail //:t_out
+test --test_summary=short //:t_pass //:t_fail //:t_out
+test --test_summary=testcase //:t_xml
+test --test_summary=detailed //:t_xml
+test --test_summary=detailed //:t_xml //:t_pass
+test --test_summary=none //:t_fail
+test --test_summary=none --test_output=all //:t_fail
+test --test_summary=terse --test_output=errors //:t_fail //:t_pass
+test --test_summary=short --test_output=streamed //:t_fail //:t_pass
+test --test_verbose_timeout_warnings //:t_pass
+test --test_result_expiration=1 //:t_pass
+test --incompatible_check_sharding_support //:t_shard
+test --test_runner_fail_fast //:t_fail //:t_pass
+test --test_runner_fail_fast --notest_keep_going //:t_fail //:t_pass
+test --test_filter=x --test_filter=y --test_output=all //:t_env
+test --cache_test_results=no --test_output=all //:t_pass //:t_fail
+test --experimental_cancel_concurrent_tests //:t_fail //:t_pass
+test --test_lang_filters=sh,bogus //:t_pass
+test --test_tag_filters=a,b,-c //:t_pass
+test --heap_dump_on_oom //:t_pass
+test --run_under=echo --test_output=all //:t_pass
+test --run_under=/bin/true --test_output=all //:t_pass
+test --run_under=/bin/false --test_output=all //:t_pass
+test --run_under='echo RU' --test_output=all //:t_pass
+test --run_under=//:tool --test_output=all //:t_pass
+test --run_under=//:nonexist --test_output=all //:t_pass
+test --run_under=/bin/nonexist --test_output=all //:t_pass
+test --run_under='' --test_output=all //:t_pass
+test --run_under=env --test_output=all //:t_pass
+test --run_under='/bin/sh -c' --test_output=all //:t_pass
+test --run_under=//:exit7 --test_output=all //:t_pass
+test --run_under='bash -c "exit 3" --' --test_output=all //:t_pass
+test --run_under=echo --test_output=all //:t_pass //:t_fail
+test --run_under='echo' --test_output=all //:t_args
+test --run_under=//:tool --test_output=all //:t_pass
+test --run_under=//:tool --test_output=all //:t_pass //:s_all
+test --run_under='//:args foo' --test_output=all //:t_pass
+test --run_under=//:g1 //:t_pass
+test --run_under=//:tool --nobuild //:t_pass
+build --run_under=//:tool //:g1
+build --run_under=/bin/nonexist //:g1
+build --run_under=//:nonexist //:g1
+build --run_under= //:g1
+run //:tool
+run //:args
+run //:args -- a b c
+run //:args a b c
+run //:args -- --foo -x
+run //:args --test_env=x=y
+run //:exit7
+run //:pwd
+run --run_in_cwd //:pwd
+run --norun_in_cwd //:pwd
+run -- //:tool
+run -- //:args a b
+run //:tool //:args
+run //:tool -- //:args
+run //:g1
+run //:gexec
+run //:gfail
+run //:nonexist
+run //nonexist:x
+run //:all
+run //:s_all
+run //:t_pass
+run //:t_fail
+run //:t_env
+run //:t_args
+run //:t_args -- x y
+run --test_arg=zz //:t_args
+run --test_env=TEST_ENV_X=1 //:t_env
+run --test_filter=ff //:t_env
+run //:t_shard
+run --test_sharding_strategy=forced=2 //:t_shard
+run //:slib
+run //:data.txt
+run //:t_manual
+run
+run --
+run -- 
+run //:tool --
+run --nobuild //:tool
+run --nobuild //:t_pass
+run --nobuild //:nonexist
+run --script_path=/tmp/vb5-sp.sh //:tool
+run --script_path=/tmp/vb5-sp.sh //:args a b
+run --script_path=/tmp/vb5-sp.sh //:t_pass
+run --script_path=/tmp/vb5-sp.sh //:g1
+run --script_path=/tmp/vb5-sp.sh //:gfail
+run --script_path= //:tool
+run --script_path=/nonexistent/dir/x.sh //:tool
+run --script_path=/tmp/vb5-sp.sh --run_under=echo //:tool
+run --run_under=echo //:tool
+run --run_under='echo X' //:args a
+run --run_under=//:tool //:args
+run --run_under=/bin/nonexist //:tool
+run --run_under=//:nonexist //:tool
+run --run_under= //:tool
+run --run_under=/bin/true //:exit7
+run --run_under=env //:args
+run --run_under=cat //:data.txt
+run --symlink_prefix=foo- //:tool
+run --noexperimental_convenience_symlinks //:tool
+run --experimental_convenience_symlinks=ignore //:tool
+run -s //:tool
+run --subcommands //:g1
+run --noshow_progress //:tool
+run --color=yes //:tool
+run --verbose_failures //:gfail
+run --keep_going //:tool
+run -c opt //:tool
+run --jobs=1 //:tool
+run --stamp //:tool
+run --compile_one_dependency tool.sh
+run --run_under="'" //:tool
+run --show_result=0 //:tool
+run --build_runfile_links //:args
+run --nobuild_runfile_links //:args
+run --experimental_run_validations //:tool
+run --incompatible_run_shell_command_string //:tool
+run --test_timeout=1 //:t_slow
+run --test_output=all //:t_pass
+run --check_up_to_date //:tool
+run --nocheck_visibility //:tool
+run --incompatible_strict_action_env //:args
+run --action_env=FOO=bar //:args
+run --host_action_env=FOO=bar //:args
+run --run_env=FOO=bar //:args
+run --client_env=FOO=bar //:args
+run //:tool --noexperimental_convenience_symlinks
+build --nocheck_visibility //:gdepvis
+build --check_visibility=false //:gdepvis
+build --check_visibility //:gdepvis
+build --incompatible_enforce_config_setting_visibility //:g1
+build --experimental_enforce_config_setting_visibility //:g1
+build --nocheck_licenses //:g1
+build --check_licenses //:g1
+build --auto_cpu_environment_group=//:x //:g1
+build --target_environment=//:x //:g1
+build --bes_backend=grpc://localhost:1 //:g1
+build --remote_cache=grpc://localhost:1 //:g1
+build --remote_cache=http://localhost:1 //:g1
+build --remote_cache=grpc://localhost:1 --remote_local_fallback //:g1
+build --remote_executor=grpc://localhost:1 //:g1
+build --remote_executor=grpc://localhost:1 --remote_local_fallback //:g1
+build --remote_cache=bogus //:g1
+build --disk_cache=/tmp/vb5-dc //:g1
+build --disk_cache=/tmp/vb5-dc //:g2
+build --disk_cache=/tmp/vb5-dc --remote_upload_local_results=false //:g2
+build --remote_timeout=abc //:g1
+build --remote_accept_cached=false //:g1
+build --remote_instance_name=x //:g1
+build --remote_cache_compression //:g1
+build --remote_max_connections=3 //:g1
+build --remote_download_minimal //:g2
+build --remote_download_toplevel //:g2
+build --remote_download_outputs=bogus //:g2
+build --remote_download_all //:g2
+build --remote_default_exec_properties=a=b //:g2
+build --remote_header=a=b //:g2
+build --google_default_credentials //:g1
+build --profile=/tmp/vb5-prof.json //:g1
+build --profile=/nonexistent/x //:g1
+build --build_event_text_file=/tmp/vb5-bep.txt //:g1
+build --build_event_json_file=/tmp/vb5-bep.json //:g1
+build --build_event_binary_file=/tmp/vb5-bep.bin //:g1
+build --build_event_json_file=/nonexistent/x //:g1
+build --execution_log_json_file=/tmp/vb5-el.json //:g2
+build --execution_log_binary_file=/tmp/vb5-el.bin //:g2
+build --execution_log_compact_file=/tmp/vb5-elc.bin //:g2
+build --subcommands --execution_log_json_file=/tmp/vb5-el.json //:g2
+build --explain=/tmp/vb5-ex.txt //:g2
+build --explain=/tmp/vb5-ex.txt --verbose_explanations //:g2
+build --verbose_explanations //:g2
+build --output_filter=nomatch //:gstderr
+build --output_filter=gstderr //:gstderr
+build --output_filter=nomatch //:gfail
+build //:gstderr
+build //:gstdout
+build --noallow_analysis_failures //:g1
+build --keep_going --jobs=1 //:g1 //:gfail
+build --experimental_execution_log_spawn_metrics //:g1
+build --test_output=all //:g1
+build --lockfile_mode=off //:g1
+build --lockfile_mode=error //:g1
+build --lockfile_mode=update //:g1
+build --check_direct_dependencies=error //:g1
+build --registry=file:///nonexistent //:g1
+build --enable_bzlmod=false //:g1
+build --noenable_workspace //:g1
+build --enable_workspace //:g1
+build --incompatible_disallow_empty_glob //:g1
+build --repo_env=FOO=bar //:g1
+build --override_repository=foo=/tmp //:g1
+build --override_repository=foo //:g1
+build --package_path=%workspace% //:g1
+build --deleted_packages=sub //sub:s1
+build --deleted_packages=sub //sub:s1 //:g1
+build --deleted_packages=nonexist //:g1
+build --ignore_dev_dependency //:g1
+build --define=a=b //:g1
+build --define=a //:g1
+build --define a=b //:gmake
+build --copt=-O2 //:g1
+build --features=foo //:g1
+build --host_features=foo //:g1
+build --collect_code_coverage //:g1
+build --instrumentation_filter=//... //:g1
+build --build_python_zip //:g1
+build --legacy_external_runfiles //:args
+build --nolegacy_external_runfiles //:args
+build --legacy_important_outputs //:g1
+build --experimental_remote_cache_eviction_retries=1 //:g1
+build --max_config_changes_to_show=0 //:g1
+build --experimental_extra_action_filter=x //:g1
+build --aspects=//:x //:g1
+build --aspects=//:x%y //:g1
+build --aspects_parameters=a=b //:g1
+build --output_groups=default --aspects=//:x%y //:g1
+build --experimental_action_listener=//:x //:g1
+build --experimental_worker_for_repo_fetching=off //:g1
+build --nobuild_test_dependencies //:g1
+build --target_pattern_file=/nonexistent //:g1
+build --target_pattern_file=/tmp/vb5-tpf.txt
+build --target_pattern_file=/tmp/vb5-tpf.txt //:g1
+build --keep_going --target_pattern_file=/tmp/vb5-tpf.txt
+build --flagfile=/nonexistent //:g1
+build --config=nonexistent //:g1
+build --config=foo //:g1
+build --bazelrc=/nonexistent //:g1
+build --nobazelrc //:g1
+build --noinvalid_flag //:g1
+build --invalid_flag //:g1
+build --jobs //:g1
+build --jobs= //:g1
+build --keep_going=maybe //:g1
+build --keep_going=0 //:g1
+build --keep_going=true //:g1
+build --keep_going=yes //:gfail
+build -k=no //:g1
+build -j2 //:g1
+build -j 2 //:g1
+build -jx //:g1
+build -c //:g1
+build -k -s //:g1
+build --test_tag_filters=a //:g1
+build --test_output=bogus //:g1
+build --test_summary=bogus //:g1
+build --test_size_filters=bogus //:g1
+build --test_timeout=bogus //:g1
+build --test_arg //:g1
+build --ui_event_filters=-info //:g1
+build --ui_event_filters=+debug //:g1
+build --ui_event_filters=bogus //:g1
+build --ui_event_filters=-info,-stdout //:g1
+build --ui_event_filters=-error //:gfail
+build --ui_event_filters=-stderr //:gstderr
+build --noui_event_filters //:g1
+build --show_progress_rate_limit=1 //:g1
+build --show_progress_rate_limit=abc //:g1
+build --progress_report_interval=10 //:g1
+build --progress_report_interval=1 //:g1
+build --progress_report_interval=-1 //:g1
+build --experimental_ui_debug_all_events //:g1
+build --experimental_ui_mode=bogus //:g1
+build --experimental_ui_limit_console_output=1 //:g1
+build --experimental_ui_limit_console_output=-1 //:g1
+build --experimental_ui_max_stdouterr_bytes=0 //:gstderr
+build --experimental_show_artifacts //:g3
+build --experimental_show_artifacts //:g1
+build --show_task_finish //:g1
+build --show_task_finish //:gfail
+build --subcommands=true //:g1
+build --subcommands=false //:g1
+build --subcommands=bogus //:g1
+build --subcommands=pretty_print //:g3
+build -s //:g3
+build -s //:gtool
+build -s //:gexec
+build -s //:args
+build -s //:t_pass
+build -s //:s_all
+build -s //:g2 //:g1
+build --subcommands --jobs=1 //:gtool
+build --action_env=A=1 -s //:g1
+build --action_env=A -s //:g1
+build --host_action_env=A=1 -s //:g1
+build --incompatible_strict_action_env -s //:g1
+build --noincompatible_strict_action_env -s //:g1
+build --shell_executable=/bin/sh -s //:g1
+build --shell_executable=/nonexistent //:g1
+build --experimental_strict_action_env //:g1
+build --verbose_failures --sandbox_debug //:gfail
+build --verbose_failures --spawn_strategy=local //:gfail2
+build --verbose_failures //:gcyc_a
+build --verbose_failures //:gmissing
+build --verbose_failures //:gnoout
+build --verbose_failures //:gpartial
+build --verbose_failures -k //:gfail //:gfail2
+build --verbose_failures //:t_fail
+coverage //:t_pass
+coverage //:t_fail
+coverage //:t_env --test_output=all
+coverage //:g1
+coverage //:all
+coverage --combined_report=lcov //:t_pass
+coverage --combined_report=bogus //:t_pass
+coverage --instrumentation_filter=//:foo //:t_pass
+coverage --test_output=all //:t_out
+coverage --nocache_test_results //:t_pass
+coverage //:s_all
+coverage //:t_shard
+coverage //:t_slow --test_timeout=1
+coverage --nobuild //:t_pass
+coverage --test_output=all //:t_env
+coverage --collect_code_coverage //:t_pass
+coverage --experimental_fetch_all_coverage_outputs //:t_pass
+coverage --experimental_split_coverage_postprocessing //:t_pass
+coverage --experimental_generate_llvm_lcov //:t_pass
+coverage --coverage_report_generator=//:x //:t_pass
+coverage --coverage_support=//:x //:t_pass
+coverage --experimental_cc_coverage //:t_pass
+coverage --test_summary=detailed //:t_xml
+coverage --runs_per_test=2 //:t_pass
+coverage --flaky_test_attempts=2 //:t_flaky_pass

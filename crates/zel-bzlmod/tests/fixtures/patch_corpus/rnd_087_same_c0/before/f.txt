@@ -1,0 +1,6 @@
+gamma 1
+return 0; 0
+	Tab 3
+beta 0
+{ 1
+gamma 2

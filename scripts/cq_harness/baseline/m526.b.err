@@ -1,0 +1,10 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: 5 targets (0 packages loaded, 0 targets configured)
+INFO: Analyzed 5 targets (0 packages loaded, 0 targets configured).
+INFO: Found 5 targets...
+ERROR: Error doing post analysis query: invalid --starlark:expr: name 'DefaultInfo' is not defined
+INFO: Elapsed time: 0.053s, Critical Path: 0.00s
+INFO: 0 processes.
+INFO: Build completed successfully, 0 total actions

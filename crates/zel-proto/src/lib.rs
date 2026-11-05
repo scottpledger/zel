@@ -30,6 +30,11 @@ impl fmt::Display for DecodeError {
 impl std::error::Error for DecodeError {}
 
 /// Low-level Protobuf binary wire-format primitives (proto3).
+pub mod dynamic;
+pub mod embedded;
+pub mod reapi;
+pub mod schema;
+
 pub mod wire {
     use super::DecodeError;
 
@@ -206,8 +211,10 @@ pub mod failure_details {
     pub enum InterruptedCode {
         #[default]
         InterruptedUnknown = 0,
-        Interrupted = 4,
-        Build = 5,
+        /// `INTERRUPTED = 28`.
+        Interrupted = 28,
+        /// `DEPRECATED_BUILD = 4`.
+        Build = 4,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -219,6 +226,13 @@ pub mod failure_details {
         AnotherCommandRunning = 2,
         PreviouslyShutdown = 3,
         StarlarkCpuProfileFileInitializationFailure = 4,
+        InvocationPolicyParseFailure = 7,
+        InvocationPolicyInvalid = 8,
+        OptionsParseFailure = 9,
+        StarlarkOptionsParseFailure = 10,
+        ArgumentsNotRecognized = 11,
+        NotInWorkspace = 12,
+        InOutputDirectory = 14,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -241,6 +255,62 @@ pub mod failure_details {
     }
 
     impl Category {
+        /// Builds a category from the `FailureDetail` oneof field name (e.g. `"spawn"`) and the
+        /// enum value name of its `code` (e.g. `"NON_ZERO_EXIT"`), using the real schema.
+        pub fn named(category: &str, code_name: &str) -> Option<Self> {
+            let reg = crate::schema::registry();
+            let fd = reg.message("failure_details.FailureDetail")?;
+            let f = fd.field_by_name(category)?;
+            if !(101..=10_000).contains(&f.number) {
+                return None;
+            }
+            let crate::schema::FieldType::Message(sub) = &f.ty else {
+                return None;
+            };
+            let code_field = reg.message(sub)?.field_by_number(1)?;
+            let crate::schema::FieldType::Enum(en) = &code_field.ty else {
+                return None;
+            };
+            let code = reg.enum_desc(en)?.number_of(code_name)?;
+            Some(Category::Submessage {
+                field_number: f.number,
+                code,
+            })
+        }
+
+        fn enum_desc(&self) -> Option<&'static crate::schema::EnumDesc> {
+            let reg = crate::schema::registry();
+            let fd = reg.message("failure_details.FailureDetail")?;
+            let f = fd.field_by_number(self.field_number())?;
+            let crate::schema::FieldType::Message(sub) = &f.ty else {
+                return None;
+            };
+            let code_field = reg.message(sub)?.field_by_number(1)?;
+            let crate::schema::FieldType::Enum(en) = &code_field.ty else {
+                return None;
+            };
+            reg.enum_desc(en)
+        }
+
+        /// The oneof field name (e.g. `"spawn"`).
+        pub fn category_name(&self) -> Option<&'static str> {
+            crate::schema::registry()
+                .message("failure_details.FailureDetail")?
+                .field_by_number(self.field_number())
+                .map(|f| f.name.as_str())
+        }
+
+        /// The enum value name of the subcategory code.
+        pub fn code_name(&self) -> Option<&'static str> {
+            self.enum_desc()?.name_of(self.subcategory_code())
+        }
+
+        /// The numeric exit code from the value's `FailureDetailMetadata` (mirrors
+        /// `DetailedExitCode.getNumericExitCode(FailureDetail)`).
+        pub fn exit_code(&self) -> Option<i32> {
+            self.enum_desc()?.exit_code_of(self.subcategory_code())
+        }
+
         pub fn field_number(&self) -> u32 {
             match self {
                 Category::Interrupted(_) => 101,
@@ -260,6 +330,20 @@ pub mod failure_details {
         }
     }
 
+    /// All `FailureDetail` oneof categories: `(field number, field name)`.
+    pub fn all_categories() -> Vec<(u32, String)> {
+        crate::schema::registry()
+            .message("failure_details.FailureDetail")
+            .map(|m| {
+                m.fields
+                    .iter()
+                    .filter(|f| (101..=10_000).contains(&f.number))
+                    .map(|f| (f.number, f.name.clone()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     #[derive(Debug, Clone, Default, PartialEq, Eq)]
     pub struct FailureDetail {
         pub message: String,
@@ -272,6 +356,17 @@ pub mod failure_details {
                 message: message.into(),
                 category: Some(category),
             }
+        }
+
+        /// Numeric exit code implied by this detail's category/code metadata.
+        pub fn exit_code(&self) -> Option<i32> {
+            self.category.as_ref().and_then(Category::exit_code)
+        }
+
+        /// Converts to a schema-driven message (for JSON/text output).
+        pub fn to_msg(&self) -> crate::dynamic::Msg {
+            crate::dynamic::Msg::decode("failure_details.FailureDetail", &self.encode_to_vec())
+                .expect("self-encoded FailureDetail must decode")
         }
 
         pub fn encode_to_vec(&self) -> Vec<u8> {
@@ -308,8 +403,8 @@ pub mod failure_details {
                         }
                         detail.category = Some(match f {
                             101 => Category::Interrupted(match code {
-                                4 => InterruptedCode::Interrupted,
-                                5 => InterruptedCode::Build,
+                                28 => InterruptedCode::Interrupted,
+                                4 => InterruptedCode::Build,
                                 _ => InterruptedCode::InterruptedUnknown,
                             }),
                             122 => Category::Command(match code {
@@ -317,6 +412,13 @@ pub mod failure_details {
                                 2 => CommandCode::AnotherCommandRunning,
                                 3 => CommandCode::PreviouslyShutdown,
                                 4 => CommandCode::StarlarkCpuProfileFileInitializationFailure,
+                                7 => CommandCode::InvocationPolicyParseFailure,
+                                8 => CommandCode::InvocationPolicyInvalid,
+                                9 => CommandCode::OptionsParseFailure,
+                                10 => CommandCode::StarlarkOptionsParseFailure,
+                                11 => CommandCode::ArgumentsNotRecognized,
+                                12 => CommandCode::NotInWorkspace,
+                                14 => CommandCode::InOutputDirectory,
                                 _ => CommandCode::CommandFailureUnknown,
                             }),
                             124 => Category::GrpcServer(match code {
@@ -589,7 +691,6 @@ pub mod command_server {
         pub preemptible: bool,
         pub command_extensions: Vec<Any>,
         pub quiet: bool,
-        pub block_for_lock_timeout_ms: Option<i64>,
     }
 
     impl RunRequest {
@@ -610,10 +711,6 @@ pub mod command_server {
                 wire::encode_bytes_always(8, &ext.encode_to_vec(), &mut buf);
             }
             wire::encode_bool(9, self.quiet, &mut buf);
-            if let Some(timeout) = self.block_for_lock_timeout_ms {
-                wire::encode_tag(10, wire::WIRE_TYPE_VARINT, &mut buf);
-                wire::encode_varint(timeout as u64, &mut buf);
-            }
             buf
         }
 
@@ -651,10 +748,6 @@ pub mod command_server {
                     }
                     (9, wire::WIRE_TYPE_VARINT) => {
                         msg.quiet = wire::decode_varint(buf, &mut pos)? != 0;
-                    }
-                    (10, wire::WIRE_TYPE_VARINT) => {
-                        msg.block_for_lock_timeout_ms =
-                            Some(wire::decode_varint(buf, &mut pos)? as i64);
                     }
                     _ => wire::skip_field(wire_type, buf, &mut pos)?,
                 }
@@ -1515,7 +1608,6 @@ mod tests {
             preemptible: false,
             command_extensions: vec![],
             quiet: false,
-            block_for_lock_timeout_ms: Some(5000),
         };
         let encoded_req = req.encode_to_vec();
         let decoded_req = RunRequest::decode(&encoded_req).unwrap();

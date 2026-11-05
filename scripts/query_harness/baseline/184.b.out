@@ -1,0 +1,12 @@
+genrule rule //a:gg
+xbin rule //b:tool
+source file //b:tool.cc
+source file @bazel_tools//tools/genrule:genrule-setup.sh
+filegroup rule @ext//lib:data
+source file @ext//lib:d.txt
+filegroup rule //a:sel
+source file //a:z.txt
+source file //a:y.txt
+source file //a:x.txt
+config_setting rule //a:def_cs
+config_setting rule //a:opt_cs

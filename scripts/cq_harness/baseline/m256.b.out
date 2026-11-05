@@ -1,0 +1,30 @@
+action 'Executing genrule //a:gg'
+  Mnemonic: Genrule
+  Target: //a:gg
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: c1140ecb19bd53b3b5cf96af440853cd4e4429d68e4b77eeb6a71b188b828f88
+  Inputs: [a/z.txt, bazel-out/darwin_arm64-opt-exec/bin/b/tool, bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/gg.out]
+  Environment: [FOO=bar, PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec /bin/bash \
+    -c \
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out')
+# Configuration: d86f1257c4c9bc0216c30066a31ab38715d53f3db97646661417322b91a577ee
+# Execution platform: @@platforms//host:host
+
+action 'Executing genrule //a:lm'
+  Mnemonic: Genrule
+  Target: //a:lm
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 400fa6ddb992faa3fcf89d504445af92e0329c5a712dc1b2f6c5ac61c69ac420
+  Inputs: [external/bazel_tools/tools/genrule/genrule-setup.sh]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lm.o]
+  Environment: [FOO=bar, PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec /bin/bash \
+    -c \
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/darwin_arm64-fastbuild/bin/a/lm.o')
+# Configuration: d86f1257c4c9bc0216c30066a31ab38715d53f3db97646661417322b91a577ee
+# Execution platform: @@platforms//host:host
+

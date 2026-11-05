@@ -1,0 +1,9 @@
+# @OB@/external/ext+/lib/BUILD:1:10
+filegroup(
+  name = "data",
+  visibility = ["//visibility:public"],
+  srcs = ["@ext//lib:d.txt"],
+)
+# Rule data instantiated at (most recent call last):
+#   @OB@/external/ext+/lib/BUILD:1:10 in <toplevel>
+

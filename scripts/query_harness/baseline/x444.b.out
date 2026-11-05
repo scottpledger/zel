@@ -1,0 +1,4 @@
+digraph mygraph {
+  node [shape=box];
+  "@ext//lib:data\n...and 1 more items"
+}

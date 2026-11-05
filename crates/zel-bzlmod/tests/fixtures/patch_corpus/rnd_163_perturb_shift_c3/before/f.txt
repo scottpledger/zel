@@ -1,0 +1,43 @@
+  indent 3
+gamma
+alpha 0
+x 3
+x 0
+delta
+return 0; 2
+
+alpha 2
+gamma 1
+delta
+gamma
+delta 1
+gamma 3
+eps 2
+gamma 0
+  indent 2
+	Tab 0
+beta 2
+  indent
+gamma 2
+alpha
+x
+
+eps 1
+eps
+beta
+PERTURBED
+
+x
+y
+gamma
+alpha
+gamma
+x 1
+{
+return 0; 2
+return 0; 1
+  indent
+x 2
+} 0
+	Tab 2
+ 0

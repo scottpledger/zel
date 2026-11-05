@@ -1,0 +1,2 @@
+@WS@/b/BUILD:3:7: x_test rule //b:t1
+@WS@/b/BUILD:4:7: x_test rule //b:t2

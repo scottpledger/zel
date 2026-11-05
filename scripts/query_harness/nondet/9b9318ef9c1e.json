@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "9b9318ef9c1e",
+ "classified_as": "STRICT",
+ "cmd": "query 'buildfiles(//...)' --keep_going --order_output=full",
+ "distinct": 1,
+ "harness": "query",
+ "hashes": [
+  "91b78ca29ad75dae",
+  "91b78ca29ad75dae",
+  "91b78ca29ad75dae",
+  "91b78ca29ad75dae",
+  "91b78ca29ad75dae",
+  "91b78ca29ad75dae"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "//:defs.bzl\n//:BUILD\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "//:defs.bzl\n//:BUILD\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "//:defs.bzl\n//:BUILD\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "//:defs.bzl\n//:BUILD\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "//:defs.bzl\n//:BUILD\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "//:defs.bzl\n//:BUILD\n",
+   "rc": 3
+  }
+ ],
+ "workspace": "wsbroken"
+}

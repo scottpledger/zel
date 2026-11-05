@@ -1,0 +1,4 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:lm_grp (2d89340)\n//a:sel (2d89340)\n//a:sm_fg (2d89340)\n//a:srcs_fg (2d89340)\n//a:srcs_fg (7e2fa55)"
+}

@@ -1,0 +1,17 @@
+--- a/f.txt
++++ b/f.txt
+@@ -1,5 +1,3 @@
+-eps 0
+-return 0; 1
+ x
+ x 1
+ alpha 2
+@@ -13,8 +11,6 @@
+ beta 3
+ beta
+ x 2
+-return 0; 1
+-y
+  2
+ eps 0
+ gamma 1

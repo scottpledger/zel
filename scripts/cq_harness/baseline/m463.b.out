@@ -1,0 +1,2 @@
+bazel-out/darwin_arm64-fastbuild/bin/b/tool
+bazel-out/darwin_arm64-opt-exec/bin/b/tool

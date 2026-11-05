@@ -1,0 +1,12 @@
+0 //a:gg
+1 //a:sel
+1 @ext//lib:data
+1 @bazel_tools//tools/genrule:genrule-setup.sh
+1 //b:tool
+2 //a:opt_cs
+2 //a:def_cs
+2 //a:x.txt
+2 //a:y.txt
+2 //a:z.txt
+2 @ext//lib:d.txt
+2 //b:tool.cc

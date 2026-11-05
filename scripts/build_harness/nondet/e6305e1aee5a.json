@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "e6305e1aee5a",
+ "classified_as": "ORDERLESS",
+ "cmd": "test --test_output=all //:tshard",
+ "distinct": 2,
+ "harness": "build",
+ "hashes": [
+  "0f2dbbd7a80f9b29",
+  "0f2dbbd7a80f9b29",
+  "e8513caa2b53817d",
+  "0f2dbbd7a80f9b29",
+  "e8513caa2b53817d",
+  "0f2dbbd7a80f9b29"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:tshard (N packages loaded).\nINFO: From Testing //:tshard (shard 2 of 2):\nINFO: From Testing //:tshard (shard 1 of 2):\nINFO: Found 1 test target...\nTarget //:tshard up-to-date:\n  bazel-bin/tshard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "==================== Test output for //:tshard (shard 2 of 2):\nshard 1/2\n================================================================================\n==================== Test output for //:tshard (shard 1 of 2):\nshard 0/2\n================================================================================\n//:tshard                                                                PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:tshard (N packages loaded).\nINFO: From Testing //:tshard (shard 2 of 2):\nINFO: From Testing //:tshard (shard 1 of 2):\nINFO: Found 1 test target...\nTarget //:tshard up-to-date:\n  bazel-bin/tshard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "==================== Test output for //:tshard (shard 2 of 2):\nshard 1/2\n================================================================================\n==================== Test output for //:tshard (shard 1 of 2):\nshard 0/2\n================================================================================\n//:tshard                                                                PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:tshard (N packages loaded).\nINFO: From Testing //:tshard (shard 1 of 2):\nINFO: From Testing //:tshard (shard 2 of 2):\nINFO: Found 1 test target...\nTarget //:tshard up-to-date:\n  bazel-bin/tshard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "==================== Test output for //:tshard (shard 1 of 2):\nshard 0/2\n================================================================================\n==================== Test output for //:tshard (shard 2 of 2):\nshard 1/2\n================================================================================\n//:tshard                                                                PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:tshard (N packages loaded).\nINFO: From Testing //:tshard (shard 2 of 2):\nINFO: From Testing //:tshard (shard 1 of 2):\nINFO: Found 1 test target...\nTarget //:tshard up-to-date:\n  bazel-bin/tshard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "==================== Test output for //:tshard (shard 2 of 2):\nshard 1/2\n================================================================================\n==================== Test output for //:tshard (shard 1 of 2):\nshard 0/2\n================================================================================\n//:tshard                                                                PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:tshard (N packages loaded).\nINFO: From Testing //:tshard (shard 1 of 2):\nINFO: From Testing //:tshard (shard 2 of 2):\nINFO: Found 1 test target...\nTarget //:tshard up-to-date:\n  bazel-bin/tshard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "==================== Test output for //:tshard (shard 1 of 2):\nshard 0/2\n================================================================================\n==================== Test output for //:tshard (shard 2 of 2):\nshard 1/2\n================================================================================\n//:tshard                                                                PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:tshard (N packages loaded).\nINFO: From Testing //:tshard (shard 2 of 2):\nINFO: From Testing //:tshard (shard 1 of 2):\nINFO: Found 1 test target...\nTarget //:tshard up-to-date:\n  bazel-bin/tshard\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 4 darwin-sandbox.\nINFO: Build completed successfully, 8 total actions",
+   "out": "==================== Test output for //:tshard (shard 2 of 2):\nshard 1/2\n================================================================================\n==================== Test output for //:tshard (shard 1 of 2):\nshard 0/2\n================================================================================\n//:tshard                                                                PASSED in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws3"
+}

@@ -1,0 +1,73 @@
+{
+  "artifacts": [{
+    "id": 1,
+    "pathFragmentId": 1
+  }, {
+    "id": 2,
+    "pathFragmentId": 3
+  }, {
+    "id": 3,
+    "pathFragmentId": 4
+  }],
+  "actions": [{
+    "targetId": 1,
+    "actionKey": "ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea",
+    "mnemonic": "CatIt",
+    "configurationId": 1,
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/y.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt"],
+    "inputDepSetIds": [1],
+    "outputIds": [3],
+    "primaryOutputId": 3,
+    "executionPlatform": "@@platforms//host:host"
+  }],
+  "targets": [{
+    "id": 1,
+    "label": "//a:sm_cat",
+    "ruleClassId": 1
+  }],
+  "depSetOfFiles": [{
+    "id": 1,
+    "directArtifactIds": [1, 2]
+  }],
+  "configuration": [{
+    "id": 1,
+    "mnemonic": "darwin_arm64-fastbuild",
+    "platformName": "darwin_arm64",
+    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+  }],
+  "ruleClasses": [{
+    "id": 1,
+    "name": "catrule"
+  }],
+  "pathFragments": [{
+    "id": 2,
+    "label": "a"
+  }, {
+    "id": 1,
+    "label": "x.txt",
+    "parentId": 2
+  }, {
+    "id": 3,
+    "label": "y.txt",
+    "parentId": 2
+  }, {
+    "id": 8,
+    "label": "bazel-out"
+  }, {
+    "id": 7,
+    "label": "darwin_arm64-fastbuild",
+    "parentId": 8
+  }, {
+    "id": 6,
+    "label": "bin",
+    "parentId": 7
+  }, {
+    "id": 5,
+    "label": "a",
+    "parentId": 6
+  }, {
+    "id": 4,
+    "label": "sm_cat.txt",
+    "parentId": 5
+  }]
+}

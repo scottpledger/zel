@@ -1,0 +1,21 @@
+--- a/f.txt
++++ b/f.txt
+@@ -3,9 +3,12 @@
+   indent
+ 	Tab 1
+ beta
++  indent 3
+ }
+ {
+ }
++  indent
++} 3
+ 
+ 
+ { 3
+@@ -13,5 +16,3 @@
+ {
+ {
+ return 0; 2
+-	Tab 3
+-delta

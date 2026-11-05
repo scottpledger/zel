@@ -1,0 +1,78 @@
+eps
+
+eps
+  indent 0
+eps 1
+y 1
+x 2
+  indent
+return 0; 1
+gamma 1
+beta 1
+x
+}
+x 2
+y 2
+  indent
+return 0; 2
+y
+alpha
+eps
+  indent 2
+}
+  indent 0
+delta 3
+eps
+x
+beta 0
+gamma 1
+	Tab 1
+  indent
+alpha
+x
+return 0;
+delta
+beta 0
+  indent 1
+y
+	Tab 3
+y
+eps
+
+eps
+  indent 0
+eps 1
+y 1
+x 2
+  indent
+return 0; 1
+gamma 1
+beta 1
+x
+}
+x 2
+y 2
+  indent
+return 0; 2
+y
+alpha
+eps
+  indent 2
+}
+  indent 0
+delta 3
+eps
+x
+beta 0
+gamma 1
+	Tab 1
+  indent
+alpha
+x
+return 0;
+delta
+beta 0
+  indent 1
+y
+	Tab 3
+y

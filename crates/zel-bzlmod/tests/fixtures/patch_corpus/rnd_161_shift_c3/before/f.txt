@@ -1,0 +1,13 @@
+gamma
+beta 1
+}
+  indent
+delta
+delta
+	Tab 3
+	Tab 3
+delta 3
+beta
+delta 3
+{
+beta 3

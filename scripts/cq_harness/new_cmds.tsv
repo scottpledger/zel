@@ -1,0 +1,509 @@
+n1	cquery '//a:lib'  --keep_going
+n2	cquery '//a:lib' --output=label_kind --keep_going
+n3	cquery '//a:lib' --output=files --keep_going
+n4	cquery '//a:lib' --output=build --keep_going
+n5	cquery '//a:lib' --output=location --keep_going
+n6	cquery '//a:lib' --output=transitions --transitions=full --keep_going
+n7	cquery '//a:lib' --noimplicit_deps --keep_going
+n8	cquery '//a:lib' --notool_deps --keep_going
+n9	cquery '//a:lib' -c opt --output=label --keep_going
+n10	cquery '//a:lib' --cpu=k8 --output=label --keep_going
+n11	cquery '//a:lib' --define=A=1 --output=transitions --transitions=lite --keep_going
+n12	cquery '//a:lib' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n13	cquery '//a:lib' --output=starlark --starlark:expr="target.label.name" --keep_going
+n14	cquery '//a:lib' --show_config_fragments=transitive --keep_going
+n15	cquery '//a:lib' --output=jsonproto --keep_going
+n16	cquery '//a:lib' --output=summary --keep_going
+n17	cquery '//a:lib' --output=graph --keep_going
+n18	cquery '//a:lib' --output=textproto --keep_going
+n19	cquery '//a:gg'  --keep_going
+n20	cquery '//a:gg' --output=label_kind --keep_going
+n21	cquery '//a:gg' --output=files --keep_going
+n22	cquery '//a:gg' --output=build --keep_going
+n23	cquery '//a:gg' --output=location --keep_going
+n24	cquery '//a:gg' --output=transitions --transitions=full --keep_going
+n25	cquery '//a:gg' --noimplicit_deps --keep_going
+n26	cquery '//a:gg' --notool_deps --keep_going
+n27	cquery '//a:gg' -c opt --output=label --keep_going
+n28	cquery '//a:gg' --cpu=k8 --output=label --keep_going
+n29	cquery '//a:gg' --define=A=1 --output=transitions --transitions=lite --keep_going
+n30	cquery '//a:gg' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n31	cquery '//a:gg' --output=starlark --starlark:expr="target.label.name" --keep_going
+n32	cquery '//a:gg' --show_config_fragments=transitive --keep_going
+n33	cquery '//a:gg' --output=jsonproto --keep_going
+n34	cquery '//a:gg' --output=summary --keep_going
+n35	cquery '//a:gg' --output=graph --keep_going
+n36	cquery '//a:gg' --output=textproto --keep_going
+n37	cquery '//b:t1'  --keep_going
+n38	cquery '//b:t1' --output=label_kind --keep_going
+n39	cquery '//b:t1' --output=files --keep_going
+n40	cquery '//b:t1' --output=build --keep_going
+n41	cquery '//b:t1' --output=location --keep_going
+n42	cquery '//b:t1' --output=transitions --transitions=full --keep_going
+n43	cquery '//b:t1' --noimplicit_deps --keep_going
+n44	cquery '//b:t1' --notool_deps --keep_going
+n45	cquery '//b:t1' -c opt --output=label --keep_going
+n46	cquery '//b:t1' --cpu=k8 --output=label --keep_going
+n47	cquery '//b:t1' --define=A=1 --output=transitions --transitions=lite --keep_going
+n48	cquery '//b:t1' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n49	cquery '//b:t1' --output=starlark --starlark:expr="target.label.name" --keep_going
+n50	cquery '//b:t1' --show_config_fragments=transitive --keep_going
+n51	cquery '//b:t1' --output=jsonproto --keep_going
+n52	cquery '//b:t1' --output=summary --keep_going
+n53	cquery '//b:t1' --output=graph --keep_going
+n54	cquery '//b:t1' --output=textproto --keep_going
+n55	cquery '//a:sel'  --keep_going
+n56	cquery '//a:sel' --output=label_kind --keep_going
+n57	cquery '//a:sel' --output=files --keep_going
+n58	cquery '//a:sel' --output=build --keep_going
+n59	cquery '//a:sel' --output=location --keep_going
+n60	cquery '//a:sel' --output=transitions --transitions=full --keep_going
+n61	cquery '//a:sel' --noimplicit_deps --keep_going
+n62	cquery '//a:sel' --notool_deps --keep_going
+n63	cquery '//a:sel' -c opt --output=label --keep_going
+n64	cquery '//a:sel' --cpu=k8 --output=label --keep_going
+n65	cquery '//a:sel' --define=A=1 --output=transitions --transitions=lite --keep_going
+n66	cquery '//a:sel' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n67	cquery '//a:sel' --output=starlark --starlark:expr="target.label.name" --keep_going
+n68	cquery '//a:sel' --show_config_fragments=transitive --keep_going
+n69	cquery '//a:sel' --output=jsonproto --keep_going
+n70	cquery '//a:sel' --output=summary --keep_going
+n71	cquery '//a:sel' --output=graph --keep_going
+n72	cquery '//a:sel' --output=textproto --keep_going
+n73	cquery 'deps(//a:cl,1)'  --keep_going
+n74	cquery 'deps(//a:cl,1)' --output=label_kind --keep_going
+n75	cquery 'deps(//a:cl,1)' --output=files --keep_going
+n76	cquery 'deps(//a:cl,1)' --output=build --keep_going
+n77	cquery 'deps(//a:cl,1)' --output=location --keep_going
+n78	cquery 'deps(//a:cl,1)' --output=transitions --transitions=full --keep_going
+n79	cquery 'deps(//a:cl,1)' --noimplicit_deps --keep_going
+n80	cquery 'deps(//a:cl,1)' --notool_deps --keep_going
+n81	cquery 'deps(//a:cl,1)' -c opt --output=label --keep_going
+n82	cquery 'deps(//a:cl,1)' --cpu=k8 --output=label --keep_going
+n83	cquery 'deps(//a:cl,1)' --define=A=1 --output=transitions --transitions=lite --keep_going
+n84	cquery 'deps(//a:cl,1)' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n85	cquery 'deps(//a:cl,1)' --output=starlark --starlark:expr="target.label.name" --keep_going
+n86	cquery 'deps(//a:cl,1)' --show_config_fragments=transitive --keep_going
+n87	cquery 'deps(//a:cl,1)' --output=jsonproto --keep_going
+n88	cquery 'deps(//a:cl,1)' --output=summary --keep_going
+n89	cquery 'deps(//a:cl,1)' --output=graph --keep_going
+n90	cquery 'deps(//a:cl,1)' --output=textproto --keep_going
+n91	cquery 'rdeps(//...,//a:c.h)'  --keep_going
+n92	cquery 'rdeps(//...,//a:c.h)' --output=label_kind --keep_going
+n93	cquery 'rdeps(//...,//a:c.h)' --output=files --keep_going
+n94	cquery 'rdeps(//...,//a:c.h)' --output=build --keep_going
+n95	cquery 'rdeps(//...,//a:c.h)' --output=location --keep_going
+n96	cquery 'rdeps(//...,//a:c.h)' --output=transitions --transitions=full --keep_going
+n97	cquery 'rdeps(//...,//a:c.h)' --noimplicit_deps --keep_going
+n98	cquery 'rdeps(//...,//a:c.h)' --notool_deps --keep_going
+n99	cquery 'rdeps(//...,//a:c.h)' -c opt --output=label --keep_going
+n100	cquery 'rdeps(//...,//a:c.h)' --cpu=k8 --output=label --keep_going
+n101	cquery 'rdeps(//...,//a:c.h)' --define=A=1 --output=transitions --transitions=lite --keep_going
+n102	cquery 'rdeps(//...,//a:c.h)' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n103	cquery 'rdeps(//...,//a:c.h)' --output=starlark --starlark:expr="target.label.name" --keep_going
+n104	cquery 'rdeps(//...,//a:c.h)' --show_config_fragments=transitive --keep_going
+n105	cquery 'rdeps(//...,//a:c.h)' --output=jsonproto --keep_going
+n106	cquery 'rdeps(//...,//a:c.h)' --output=summary --keep_going
+n107	cquery 'rdeps(//...,//a:c.h)' --output=graph --keep_going
+n108	cquery 'rdeps(//...,//a:c.h)' --output=textproto --keep_going
+n109	cquery '//a:lib2 + //a:tr'  --keep_going
+n110	cquery '//a:lib2 + //a:tr' --output=label_kind --keep_going
+n111	cquery '//a:lib2 + //a:tr' --output=files --keep_going
+n112	cquery '//a:lib2 + //a:tr' --output=build --keep_going
+n113	cquery '//a:lib2 + //a:tr' --output=location --keep_going
+n114	cquery '//a:lib2 + //a:tr' --output=transitions --transitions=full --keep_going
+n115	cquery '//a:lib2 + //a:tr' --noimplicit_deps --keep_going
+n116	cquery '//a:lib2 + //a:tr' --notool_deps --keep_going
+n117	cquery '//a:lib2 + //a:tr' -c opt --output=label --keep_going
+n118	cquery '//a:lib2 + //a:tr' --cpu=k8 --output=label --keep_going
+n119	cquery '//a:lib2 + //a:tr' --define=A=1 --output=transitions --transitions=lite --keep_going
+n120	cquery '//a:lib2 + //a:tr' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n121	cquery '//a:lib2 + //a:tr' --output=starlark --starlark:expr="target.label.name" --keep_going
+n122	cquery '//a:lib2 + //a:tr' --show_config_fragments=transitive --keep_going
+n123	cquery '//a:lib2 + //a:tr' --output=jsonproto --keep_going
+n124	cquery '//a:lib2 + //a:tr' --output=summary --keep_going
+n125	cquery '//a:lib2 + //a:tr' --output=graph --keep_going
+n126	cquery '//a:lib2 + //a:tr' --output=textproto --keep_going
+n127	cquery 'kind(filegroup,//a:all)'  --keep_going
+n128	cquery 'kind(filegroup,//a:all)' --output=label_kind --keep_going
+n129	cquery 'kind(filegroup,//a:all)' --output=files --keep_going
+n130	cquery 'kind(filegroup,//a:all)' --output=build --keep_going
+n131	cquery 'kind(filegroup,//a:all)' --output=location --keep_going
+n132	cquery 'kind(filegroup,//a:all)' --output=transitions --transitions=full --keep_going
+n133	cquery 'kind(filegroup,//a:all)' --noimplicit_deps --keep_going
+n134	cquery 'kind(filegroup,//a:all)' --notool_deps --keep_going
+n135	cquery 'kind(filegroup,//a:all)' -c opt --output=label --keep_going
+n136	cquery 'kind(filegroup,//a:all)' --cpu=k8 --output=label --keep_going
+n137	cquery 'kind(filegroup,//a:all)' --define=A=1 --output=transitions --transitions=lite --keep_going
+n138	cquery 'kind(filegroup,//a:all)' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n139	cquery 'kind(filegroup,//a:all)' --output=starlark --starlark:expr="target.label.name" --keep_going
+n140	cquery 'kind(filegroup,//a:all)' --show_config_fragments=transitive --keep_going
+n141	cquery 'kind(filegroup,//a:all)' --output=jsonproto --keep_going
+n142	cquery 'kind(filegroup,//a:all)' --output=summary --keep_going
+n143	cquery 'kind(filegroup,//a:all)' --output=graph --keep_going
+n144	cquery 'kind(filegroup,//a:all)' --output=textproto --keep_going
+n145	cquery 'attr(tags,fast,//a:all)'  --keep_going
+n146	cquery 'attr(tags,fast,//a:all)' --output=label_kind --keep_going
+n147	cquery 'attr(tags,fast,//a:all)' --output=files --keep_going
+n148	cquery 'attr(tags,fast,//a:all)' --output=build --keep_going
+n149	cquery 'attr(tags,fast,//a:all)' --output=location --keep_going
+n150	cquery 'attr(tags,fast,//a:all)' --output=transitions --transitions=full --keep_going
+n151	cquery 'attr(tags,fast,//a:all)' --noimplicit_deps --keep_going
+n152	cquery 'attr(tags,fast,//a:all)' --notool_deps --keep_going
+n153	cquery 'attr(tags,fast,//a:all)' -c opt --output=label --keep_going
+n154	cquery 'attr(tags,fast,//a:all)' --cpu=k8 --output=label --keep_going
+n155	cquery 'attr(tags,fast,//a:all)' --define=A=1 --output=transitions --transitions=lite --keep_going
+n156	cquery 'attr(tags,fast,//a:all)' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n157	cquery 'attr(tags,fast,//a:all)' --output=starlark --starlark:expr="target.label.name" --keep_going
+n158	cquery 'attr(tags,fast,//a:all)' --show_config_fragments=transitive --keep_going
+n159	cquery 'attr(tags,fast,//a:all)' --output=jsonproto --keep_going
+n160	cquery 'attr(tags,fast,//a:all)' --output=summary --keep_going
+n161	cquery 'attr(tags,fast,//a:all)' --output=graph --keep_going
+n162	cquery 'attr(tags,fast,//a:all)' --output=textproto --keep_going
+n163	cquery 'filter('lib',deps(//a:lib2))'  --keep_going
+n164	cquery 'filter('lib',deps(//a:lib2))' --output=label_kind --keep_going
+n165	cquery 'filter('lib',deps(//a:lib2))' --output=files --keep_going
+n166	cquery 'filter('lib',deps(//a:lib2))' --output=build --keep_going
+n167	cquery 'filter('lib',deps(//a:lib2))' --output=location --keep_going
+n168	cquery 'filter('lib',deps(//a:lib2))' --output=transitions --transitions=full --keep_going
+n169	cquery 'filter('lib',deps(//a:lib2))' --noimplicit_deps --keep_going
+n170	cquery 'filter('lib',deps(//a:lib2))' --notool_deps --keep_going
+n171	cquery 'filter('lib',deps(//a:lib2))' -c opt --output=label --keep_going
+n172	cquery 'filter('lib',deps(//a:lib2))' --cpu=k8 --output=label --keep_going
+n173	cquery 'filter('lib',deps(//a:lib2))' --define=A=1 --output=transitions --transitions=lite --keep_going
+n174	cquery 'filter('lib',deps(//a:lib2))' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n175	cquery 'filter('lib',deps(//a:lib2))' --output=starlark --starlark:expr="target.label.name" --keep_going
+n176	cquery 'filter('lib',deps(//a:lib2))' --show_config_fragments=transitive --keep_going
+n177	cquery 'filter('lib',deps(//a:lib2))' --output=jsonproto --keep_going
+n178	cquery 'filter('lib',deps(//a:lib2))' --output=summary --keep_going
+n179	cquery 'filter('lib',deps(//a:lib2))' --output=graph --keep_going
+n180	cquery 'filter('lib',deps(//a:lib2))' --output=textproto --keep_going
+n181	cquery 'somepath(//b:t1,//c:cdata)'  --keep_going
+n182	cquery 'somepath(//b:t1,//c:cdata)' --output=label_kind --keep_going
+n183	cquery 'somepath(//b:t1,//c:cdata)' --output=files --keep_going
+n184	cquery 'somepath(//b:t1,//c:cdata)' --output=build --keep_going
+n185	cquery 'somepath(//b:t1,//c:cdata)' --output=location --keep_going
+n186	cquery 'somepath(//b:t1,//c:cdata)' --output=transitions --transitions=full --keep_going
+n187	cquery 'somepath(//b:t1,//c:cdata)' --noimplicit_deps --keep_going
+n188	cquery 'somepath(//b:t1,//c:cdata)' --notool_deps --keep_going
+n189	cquery 'somepath(//b:t1,//c:cdata)' -c opt --output=label --keep_going
+n190	cquery 'somepath(//b:t1,//c:cdata)' --cpu=k8 --output=label --keep_going
+n191	cquery 'somepath(//b:t1,//c:cdata)' --define=A=1 --output=transitions --transitions=lite --keep_going
+n192	cquery 'somepath(//b:t1,//c:cdata)' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n193	cquery 'somepath(//b:t1,//c:cdata)' --output=starlark --starlark:expr="target.label.name" --keep_going
+n194	cquery 'somepath(//b:t1,//c:cdata)' --show_config_fragments=transitive --keep_going
+n195	cquery 'somepath(//b:t1,//c:cdata)' --output=jsonproto --keep_going
+n196	cquery 'somepath(//b:t1,//c:cdata)' --output=summary --keep_going
+n197	cquery 'somepath(//b:t1,//c:cdata)' --output=graph --keep_going
+n198	cquery 'somepath(//b:t1,//c:cdata)' --output=textproto --keep_going
+n199	cquery '@ext//lib:gen'  --keep_going
+n200	cquery '@ext//lib:gen' --output=label_kind --keep_going
+n201	cquery '@ext//lib:gen' --output=files --keep_going
+n202	cquery '@ext//lib:gen' --output=build --keep_going
+n203	cquery '@ext//lib:gen' --output=location --keep_going
+n204	cquery '@ext//lib:gen' --output=transitions --transitions=full --keep_going
+n205	cquery '@ext//lib:gen' --noimplicit_deps --keep_going
+n206	cquery '@ext//lib:gen' --notool_deps --keep_going
+n207	cquery '@ext//lib:gen' -c opt --output=label --keep_going
+n208	cquery '@ext//lib:gen' --cpu=k8 --output=label --keep_going
+n209	cquery '@ext//lib:gen' --define=A=1 --output=transitions --transitions=lite --keep_going
+n210	cquery '@ext//lib:gen' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n211	cquery '@ext//lib:gen' --output=starlark --starlark:expr="target.label.name" --keep_going
+n212	cquery '@ext//lib:gen' --show_config_fragments=transitive --keep_going
+n213	cquery '@ext//lib:gen' --output=jsonproto --keep_going
+n214	cquery '@ext//lib:gen' --output=summary --keep_going
+n215	cquery '@ext//lib:gen' --output=graph --keep_going
+n216	cquery '@ext//lib:gen' --output=textproto --keep_going
+n217	cquery 'allpaths(//a:tr,//a:x.txt)'  --keep_going
+n218	cquery 'allpaths(//a:tr,//a:x.txt)' --output=label_kind --keep_going
+n219	cquery 'allpaths(//a:tr,//a:x.txt)' --output=files --keep_going
+n220	cquery 'allpaths(//a:tr,//a:x.txt)' --output=build --keep_going
+n221	cquery 'allpaths(//a:tr,//a:x.txt)' --output=location --keep_going
+n222	cquery 'allpaths(//a:tr,//a:x.txt)' --output=transitions --transitions=full --keep_going
+n223	cquery 'allpaths(//a:tr,//a:x.txt)' --noimplicit_deps --keep_going
+n224	cquery 'allpaths(//a:tr,//a:x.txt)' --notool_deps --keep_going
+n225	cquery 'allpaths(//a:tr,//a:x.txt)' -c opt --output=label --keep_going
+n226	cquery 'allpaths(//a:tr,//a:x.txt)' --cpu=k8 --output=label --keep_going
+n227	cquery 'allpaths(//a:tr,//a:x.txt)' --define=A=1 --output=transitions --transitions=lite --keep_going
+n228	cquery 'allpaths(//a:tr,//a:x.txt)' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n229	cquery 'allpaths(//a:tr,//a:x.txt)' --output=starlark --starlark:expr="target.label.name" --keep_going
+n230	cquery 'allpaths(//a:tr,//a:x.txt)' --show_config_fragments=transitive --keep_going
+n231	cquery 'allpaths(//a:tr,//a:x.txt)' --output=jsonproto --keep_going
+n232	cquery 'allpaths(//a:tr,//a:x.txt)' --output=summary --keep_going
+n233	cquery 'allpaths(//a:tr,//a:x.txt)' --output=graph --keep_going
+n234	cquery 'allpaths(//a:tr,//a:x.txt)' --output=textproto --keep_going
+n235	cquery '//a:sm_cat'  --keep_going
+n236	cquery '//a:sm_cat' --output=label_kind --keep_going
+n237	cquery '//a:sm_cat' --output=files --keep_going
+n238	cquery '//a:sm_cat' --output=build --keep_going
+n239	cquery '//a:sm_cat' --output=location --keep_going
+n240	cquery '//a:sm_cat' --output=transitions --transitions=full --keep_going
+n241	cquery '//a:sm_cat' --noimplicit_deps --keep_going
+n242	cquery '//a:sm_cat' --notool_deps --keep_going
+n243	cquery '//a:sm_cat' -c opt --output=label --keep_going
+n244	cquery '//a:sm_cat' --cpu=k8 --output=label --keep_going
+n245	cquery '//a:sm_cat' --define=A=1 --output=transitions --transitions=lite --keep_going
+n246	cquery '//a:sm_cat' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n247	cquery '//a:sm_cat' --output=starlark --starlark:expr="target.label.name" --keep_going
+n248	cquery '//a:sm_cat' --show_config_fragments=transitive --keep_going
+n249	cquery '//a:sm_cat' --output=jsonproto --keep_going
+n250	cquery '//a:sm_cat' --output=summary --keep_going
+n251	cquery '//a:sm_cat' --output=graph --keep_going
+n252	cquery '//a:sm_cat' --output=textproto --keep_going
+n253	cquery '//:top_alias'  --keep_going
+n254	cquery '//:top_alias' --output=label_kind --keep_going
+n255	cquery '//:top_alias' --output=files --keep_going
+n256	cquery '//:top_alias' --output=build --keep_going
+n257	cquery '//:top_alias' --output=location --keep_going
+n258	cquery '//:top_alias' --output=transitions --transitions=full --keep_going
+n259	cquery '//:top_alias' --noimplicit_deps --keep_going
+n260	cquery '//:top_alias' --notool_deps --keep_going
+n261	cquery '//:top_alias' -c opt --output=label --keep_going
+n262	cquery '//:top_alias' --cpu=k8 --output=label --keep_going
+n263	cquery '//:top_alias' --define=A=1 --output=transitions --transitions=lite --keep_going
+n264	cquery '//:top_alias' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n265	cquery '//:top_alias' --output=starlark --starlark:expr="target.label.name" --keep_going
+n266	cquery '//:top_alias' --show_config_fragments=transitive --keep_going
+n267	cquery '//:top_alias' --output=jsonproto --keep_going
+n268	cquery '//:top_alias' --output=summary --keep_going
+n269	cquery '//:top_alias' --output=graph --keep_going
+n270	cquery '//:top_alias' --output=textproto --keep_going
+n271	cquery '//a:lm'  --keep_going
+n272	cquery '//a:lm' --output=label_kind --keep_going
+n273	cquery '//a:lm' --output=files --keep_going
+n274	cquery '//a:lm' --output=build --keep_going
+n275	cquery '//a:lm' --output=location --keep_going
+n276	cquery '//a:lm' --output=transitions --transitions=full --keep_going
+n277	cquery '//a:lm' --noimplicit_deps --keep_going
+n278	cquery '//a:lm' --notool_deps --keep_going
+n279	cquery '//a:lm' -c opt --output=label --keep_going
+n280	cquery '//a:lm' --cpu=k8 --output=label --keep_going
+n281	cquery '//a:lm' --define=A=1 --output=transitions --transitions=lite --keep_going
+n282	cquery '//a:lm' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n283	cquery '//a:lm' --output=starlark --starlark:expr="target.label.name" --keep_going
+n284	cquery '//a:lm' --show_config_fragments=transitive --keep_going
+n285	cquery '//a:lm' --output=jsonproto --keep_going
+n286	cquery '//a:lm' --output=summary --keep_going
+n287	cquery '//a:lm' --output=graph --keep_going
+n288	cquery '//a:lm' --output=textproto --keep_going
+n289	cquery 'labels(srcs,//a:lib2)'  --keep_going
+n290	cquery 'labels(srcs,//a:lib2)' --output=label_kind --keep_going
+n291	cquery 'labels(srcs,//a:lib2)' --output=files --keep_going
+n292	cquery 'labels(srcs,//a:lib2)' --output=build --keep_going
+n293	cquery 'labels(srcs,//a:lib2)' --output=location --keep_going
+n294	cquery 'labels(srcs,//a:lib2)' --output=transitions --transitions=full --keep_going
+n295	cquery 'labels(srcs,//a:lib2)' --noimplicit_deps --keep_going
+n296	cquery 'labels(srcs,//a:lib2)' --notool_deps --keep_going
+n297	cquery 'labels(srcs,//a:lib2)' -c opt --output=label --keep_going
+n298	cquery 'labels(srcs,//a:lib2)' --cpu=k8 --output=label --keep_going
+n299	cquery 'labels(srcs,//a:lib2)' --define=A=1 --output=transitions --transitions=lite --keep_going
+n300	cquery 'labels(srcs,//a:lib2)' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n301	cquery 'labels(srcs,//a:lib2)' --output=starlark --starlark:expr="target.label.name" --keep_going
+n302	cquery 'labels(srcs,//a:lib2)' --show_config_fragments=transitive --keep_going
+n303	cquery 'labels(srcs,//a:lib2)' --output=jsonproto --keep_going
+n304	cquery 'labels(srcs,//a:lib2)' --output=summary --keep_going
+n305	cquery 'labels(srcs,//a:lib2)' --output=graph --keep_going
+n306	cquery 'labels(srcs,//a:lib2)' --output=textproto --keep_going
+n307	cquery '//b:all'  --keep_going
+n308	cquery '//b:all' --output=label_kind --keep_going
+n309	cquery '//b:all' --output=files --keep_going
+n310	cquery '//b:all' --output=build --keep_going
+n311	cquery '//b:all' --output=location --keep_going
+n312	cquery '//b:all' --output=transitions --transitions=full --keep_going
+n313	cquery '//b:all' --noimplicit_deps --keep_going
+n314	cquery '//b:all' --notool_deps --keep_going
+n315	cquery '//b:all' -c opt --output=label --keep_going
+n316	cquery '//b:all' --cpu=k8 --output=label --keep_going
+n317	cquery '//b:all' --define=A=1 --output=transitions --transitions=lite --keep_going
+n318	cquery '//b:all' --platforms=@bazel_tools//tools:host_platform --output=label --keep_going
+n319	cquery '//b:all' --output=starlark --starlark:expr="target.label.name" --keep_going
+n320	cquery '//b:all' --show_config_fragments=transitive --keep_going
+n321	cquery '//b:all' --output=jsonproto --keep_going
+n322	cquery '//b:all' --output=summary --keep_going
+n323	cquery '//b:all' --output=graph --keep_going
+n324	cquery '//b:all' --output=textproto --keep_going
+n325	aquery '//a:lib'  --keep_going
+n326	aquery '//a:lib' --output=jsonproto --keep_going
+n327	aquery '//a:lib' --output=textproto --keep_going
+n328	aquery '//a:lib' --output=commands --keep_going
+n329	aquery '//a:lib' --output=summary --keep_going
+n330	aquery '//a:lib' --noinclude_commandline --keep_going
+n331	aquery '//a:lib' --noinclude_artifacts --keep_going
+n332	aquery '//a:lib' -c opt --keep_going
+n333	aquery '//a:lib' --noimplicit_deps --keep_going
+n334	aquery '//a:lib' --include_param_files --keep_going
+n335	aquery '//a:lib' --include_file_write_contents --keep_going
+n336	aquery '//a:lib' --features=foo --keep_going
+n337	aquery '//a:gg'  --keep_going
+n338	aquery '//a:gg' --output=jsonproto --keep_going
+n339	aquery '//a:gg' --output=textproto --keep_going
+n340	aquery '//a:gg' --output=commands --keep_going
+n341	aquery '//a:gg' --output=summary --keep_going
+n342	aquery '//a:gg' --noinclude_commandline --keep_going
+n343	aquery '//a:gg' --noinclude_artifacts --keep_going
+n344	aquery '//a:gg' -c opt --keep_going
+n345	aquery '//a:gg' --noimplicit_deps --keep_going
+n346	aquery '//a:gg' --include_param_files --keep_going
+n347	aquery '//a:gg' --include_file_write_contents --keep_going
+n348	aquery '//a:gg' --features=foo --keep_going
+n349	aquery '//b:t1'  --keep_going
+n350	aquery '//b:t1' --output=jsonproto --keep_going
+n351	aquery '//b:t1' --output=textproto --keep_going
+n352	aquery '//b:t1' --output=commands --keep_going
+n353	aquery '//b:t1' --output=summary --keep_going
+n354	aquery '//b:t1' --noinclude_commandline --keep_going
+n355	aquery '//b:t1' --noinclude_artifacts --keep_going
+n356	aquery '//b:t1' -c opt --keep_going
+n357	aquery '//b:t1' --noimplicit_deps --keep_going
+n358	aquery '//b:t1' --include_param_files --keep_going
+n359	aquery '//b:t1' --include_file_write_contents --keep_going
+n360	aquery '//b:t1' --features=foo --keep_going
+n361	aquery '//a:sel'  --keep_going
+n362	aquery '//a:sel' --output=jsonproto --keep_going
+n363	aquery '//a:sel' --output=textproto --keep_going
+n364	aquery '//a:sel' --output=commands --keep_going
+n365	aquery '//a:sel' --output=summary --keep_going
+n366	aquery '//a:sel' --noinclude_commandline --keep_going
+n367	aquery '//a:sel' --noinclude_artifacts --keep_going
+n368	aquery '//a:sel' -c opt --keep_going
+n369	aquery '//a:sel' --noimplicit_deps --keep_going
+n370	aquery '//a:sel' --include_param_files --keep_going
+n371	aquery '//a:sel' --include_file_write_contents --keep_going
+n372	aquery '//a:sel' --features=foo --keep_going
+n373	aquery 'deps(//a:cl,1)'  --keep_going
+n374	aquery 'deps(//a:cl,1)' --output=jsonproto --keep_going
+n375	aquery 'deps(//a:cl,1)' --output=textproto --keep_going
+n376	aquery 'deps(//a:cl,1)' --output=commands --keep_going
+n377	aquery 'deps(//a:cl,1)' --output=summary --keep_going
+n378	aquery 'deps(//a:cl,1)' --noinclude_commandline --keep_going
+n379	aquery 'deps(//a:cl,1)' --noinclude_artifacts --keep_going
+n380	aquery 'deps(//a:cl,1)' -c opt --keep_going
+n381	aquery 'deps(//a:cl,1)' --noimplicit_deps --keep_going
+n382	aquery 'deps(//a:cl,1)' --include_param_files --keep_going
+n383	aquery 'deps(//a:cl,1)' --include_file_write_contents --keep_going
+n384	aquery 'deps(//a:cl,1)' --features=foo --keep_going
+n385	aquery 'rdeps(//...,//a:c.h)'  --keep_going
+n386	aquery 'rdeps(//...,//a:c.h)' --output=jsonproto --keep_going
+n387	aquery 'rdeps(//...,//a:c.h)' --output=textproto --keep_going
+n388	aquery 'rdeps(//...,//a:c.h)' --output=commands --keep_going
+n389	aquery 'rdeps(//...,//a:c.h)' --output=summary --keep_going
+n390	aquery 'rdeps(//...,//a:c.h)' --noinclude_commandline --keep_going
+n391	aquery 'rdeps(//...,//a:c.h)' --noinclude_artifacts --keep_going
+n392	aquery 'rdeps(//...,//a:c.h)' -c opt --keep_going
+n393	aquery 'rdeps(//...,//a:c.h)' --noimplicit_deps --keep_going
+n394	aquery 'rdeps(//...,//a:c.h)' --include_param_files --keep_going
+n395	aquery 'rdeps(//...,//a:c.h)' --include_file_write_contents --keep_going
+n396	aquery 'rdeps(//...,//a:c.h)' --features=foo --keep_going
+n397	aquery '//a:lib2 + //a:tr'  --keep_going
+n398	aquery '//a:lib2 + //a:tr' --output=jsonproto --keep_going
+n399	aquery '//a:lib2 + //a:tr' --output=textproto --keep_going
+n400	aquery '//a:lib2 + //a:tr' --output=commands --keep_going
+n401	aquery '//a:lib2 + //a:tr' --output=summary --keep_going
+n402	aquery '//a:lib2 + //a:tr' --noinclude_commandline --keep_going
+n403	aquery '//a:lib2 + //a:tr' --noinclude_artifacts --keep_going
+n404	aquery '//a:lib2 + //a:tr' -c opt --keep_going
+n405	aquery '//a:lib2 + //a:tr' --noimplicit_deps --keep_going
+n406	aquery '//a:lib2 + //a:tr' --include_param_files --keep_going
+n407	aquery '//a:lib2 + //a:tr' --include_file_write_contents --keep_going
+n408	aquery '//a:lib2 + //a:tr' --features=foo --keep_going
+n409	aquery 'kind(filegroup,//a:all)'  --keep_going
+n410	aquery 'kind(filegroup,//a:all)' --output=jsonproto --keep_going
+n411	aquery 'kind(filegroup,//a:all)' --output=textproto --keep_going
+n412	aquery 'kind(filegroup,//a:all)' --output=commands --keep_going
+n413	aquery 'kind(filegroup,//a:all)' --output=summary --keep_going
+n414	aquery 'kind(filegroup,//a:all)' --noinclude_commandline --keep_going
+n415	aquery 'kind(filegroup,//a:all)' --noinclude_artifacts --keep_going
+n416	aquery 'kind(filegroup,//a:all)' -c opt --keep_going
+n417	aquery 'kind(filegroup,//a:all)' --noimplicit_deps --keep_going
+n418	aquery 'kind(filegroup,//a:all)' --include_param_files --keep_going
+n419	aquery 'kind(filegroup,//a:all)' --include_file_write_contents --keep_going
+n420	aquery 'kind(filegroup,//a:all)' --features=foo --keep_going
+n421	aquery 'attr(tags,fast,//a:all)'  --keep_going
+n422	aquery 'attr(tags,fast,//a:all)' --output=jsonproto --keep_going
+n423	aquery 'attr(tags,fast,//a:all)' --output=textproto --keep_going
+n424	aquery 'attr(tags,fast,//a:all)' --output=commands --keep_going
+n425	aquery 'attr(tags,fast,//a:all)' --output=summary --keep_going
+n426	aquery 'attr(tags,fast,//a:all)' --noinclude_commandline --keep_going
+n427	aquery 'attr(tags,fast,//a:all)' --noinclude_artifacts --keep_going
+n428	aquery 'attr(tags,fast,//a:all)' -c opt --keep_going
+n429	aquery 'attr(tags,fast,//a:all)' --noimplicit_deps --keep_going
+n430	aquery 'attr(tags,fast,//a:all)' --include_param_files --keep_going
+n431	aquery 'attr(tags,fast,//a:all)' --include_file_write_contents --keep_going
+n432	aquery 'attr(tags,fast,//a:all)' --features=foo --keep_going
+n433	aquery 'filter('lib',deps(//a:lib2))'  --keep_going
+n434	aquery 'filter('lib',deps(//a:lib2))' --output=jsonproto --keep_going
+n435	aquery 'filter('lib',deps(//a:lib2))' --output=textproto --keep_going
+n436	aquery 'filter('lib',deps(//a:lib2))' --output=commands --keep_going
+n437	aquery 'filter('lib',deps(//a:lib2))' --output=summary --keep_going
+n438	aquery 'filter('lib',deps(//a:lib2))' --noinclude_commandline --keep_going
+n439	aquery 'filter('lib',deps(//a:lib2))' --noinclude_artifacts --keep_going
+n440	aquery 'filter('lib',deps(//a:lib2))' -c opt --keep_going
+n441	aquery 'filter('lib',deps(//a:lib2))' --noimplicit_deps --keep_going
+n442	aquery 'filter('lib',deps(//a:lib2))' --include_param_files --keep_going
+n443	aquery 'filter('lib',deps(//a:lib2))' --include_file_write_contents --keep_going
+n444	aquery 'filter('lib',deps(//a:lib2))' --features=foo --keep_going
+n445	aquery 'somepath(//b:t1,//c:cdata)'  --keep_going
+n446	aquery 'somepath(//b:t1,//c:cdata)' --output=jsonproto --keep_going
+n447	aquery 'somepath(//b:t1,//c:cdata)' --output=textproto --keep_going
+n448	aquery 'somepath(//b:t1,//c:cdata)' --output=commands --keep_going
+n449	aquery 'somepath(//b:t1,//c:cdata)' --output=summary --keep_going
+n450	aquery 'somepath(//b:t1,//c:cdata)' --noinclude_commandline --keep_going
+n451	aquery 'somepath(//b:t1,//c:cdata)' --noinclude_artifacts --keep_going
+n452	aquery 'somepath(//b:t1,//c:cdata)' -c opt --keep_going
+n453	aquery 'somepath(//b:t1,//c:cdata)' --noimplicit_deps --keep_going
+n454	aquery 'somepath(//b:t1,//c:cdata)' --include_param_files --keep_going
+n455	aquery 'somepath(//b:t1,//c:cdata)' --include_file_write_contents --keep_going
+n456	aquery 'somepath(//b:t1,//c:cdata)' --features=foo --keep_going
+n457	aquery '@ext//lib:gen'  --keep_going
+n458	aquery '@ext//lib:gen' --output=jsonproto --keep_going
+n459	aquery '@ext//lib:gen' --output=textproto --keep_going
+n460	aquery '@ext//lib:gen' --output=commands --keep_going
+n461	aquery '@ext//lib:gen' --output=summary --keep_going
+n462	aquery '@ext//lib:gen' --noinclude_commandline --keep_going
+n463	aquery '@ext//lib:gen' --noinclude_artifacts --keep_going
+n464	aquery '@ext//lib:gen' -c opt --keep_going
+n465	aquery '@ext//lib:gen' --noimplicit_deps --keep_going
+n466	aquery '@ext//lib:gen' --include_param_files --keep_going
+n467	aquery '@ext//lib:gen' --include_file_write_contents --keep_going
+n468	aquery '@ext//lib:gen' --features=foo --keep_going
+n469	aquery 'allpaths(//a:tr,//a:x.txt)'  --keep_going
+n470	aquery 'allpaths(//a:tr,//a:x.txt)' --output=jsonproto --keep_going
+n471	aquery 'allpaths(//a:tr,//a:x.txt)' --output=textproto --keep_going
+n472	aquery 'allpaths(//a:tr,//a:x.txt)' --output=commands --keep_going
+n473	aquery 'allpaths(//a:tr,//a:x.txt)' --output=summary --keep_going
+n474	aquery 'allpaths(//a:tr,//a:x.txt)' --noinclude_commandline --keep_going
+n475	aquery 'allpaths(//a:tr,//a:x.txt)' --noinclude_artifacts --keep_going
+n476	aquery 'allpaths(//a:tr,//a:x.txt)' -c opt --keep_going
+n477	aquery 'allpaths(//a:tr,//a:x.txt)' --noimplicit_deps --keep_going
+n478	aquery 'allpaths(//a:tr,//a:x.txt)' --include_param_files --keep_going
+n479	aquery 'allpaths(//a:tr,//a:x.txt)' --include_file_write_contents --keep_going
+n480	aquery 'allpaths(//a:tr,//a:x.txt)' --features=foo --keep_going
+n481	aquery '//a:sm_cat'  --keep_going
+n482	aquery '//a:sm_cat' --output=jsonproto --keep_going
+n483	aquery '//a:sm_cat' --output=textproto --keep_going
+n484	aquery '//a:sm_cat' --output=commands --keep_going
+n485	aquery '//a:sm_cat' --output=summary --keep_going
+n486	aquery '//a:sm_cat' --noinclude_commandline --keep_going
+n487	aquery '//a:sm_cat' --noinclude_artifacts --keep_going
+n488	aquery '//a:sm_cat' -c opt --keep_going
+n489	aquery '//a:sm_cat' --noimplicit_deps --keep_going
+n490	aquery '//a:sm_cat' --include_param_files --keep_going
+n491	aquery '//a:sm_cat' --include_file_write_contents --keep_going
+n492	aquery '//a:sm_cat' --features=foo --keep_going
+n493	cquery 'config(//a:lib,target)' --output=label --keep_going
+n494	cquery 'config(//a:lib,null)' --keep_going
+n495	cquery '//a:lib' --output=starlark --starlark:file=/tmp/cqh/fmt.star --keep_going
+n496	cquery '//a:lib' --output=starlark --starlark:expr='str(providers(target).keys())' --keep_going
+n497	cquery '//a:all' --universe_scope=//a:lib --keep_going
+n498	cquery '//a:all' --infer_universe_scope --keep_going
+n499	cquery '//a:lib' --aspects=//:defs.bzl%asp --output=label --keep_going
+n500	cquery '//a:lib' --aspects=//:defs.bzl%asp --include_aspects --output=label --keep_going
+n501	cquery '//a:lib' --noinclude_aspects --output=label --keep_going
+n502	cquery '//a:lib' --output=transitions --transitions=none --keep_going
+n503	cquery '//a:lib' --output=label --order_output=full --keep_going
+n504	cquery 'deps(//a:lib2)' --output=label --order_output=full --keep_going
+n505	aquery 'inputs(".*x.txt",//a:lib)' --keep_going
+n506	aquery 'outputs(".*lib.txt",//a:lib)' --keep_going
+n507	aquery 'mnemonic("CatIt",//a:all)' --keep_going
+n508	aquery '//a:lib' --aspects=//:defs.bzl%asp --keep_going
+n509	aquery '//a:lib' --universe_scope=//a:lib --keep_going

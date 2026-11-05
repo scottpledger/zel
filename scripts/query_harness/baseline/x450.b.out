@@ -1,0 +1,12 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="test_suite" location="@WS@/BUILD:4:11" name="//:all_tests">
+        <string name="name" value="all_tests"/>
+        <list name="tests">
+            <label value="//b:t1"/>
+            <label value="//b:t2"/>
+        </list>
+        <rule-input name="//b:t1"/>
+        <rule-input name="//b:t2"/>
+    </rule>
+</query>

@@ -1,0 +1,14 @@
+action 'Cat @@//a:sm_cat'
+  Mnemonic: CatIt
+  Target: //a:sm_cat
+  Configuration: darwin_arm64-opt
+  Execution platform: @@platforms//host:host
+  ActionKey: 3a4d9a142edd30892e4595daeb1a2c70e32c97b555c25980317efac8ff69b7d0
+  Inputs: [a/x.txt, a/y.txt]
+  Outputs: [bazel-out/darwin_arm64-opt/bin/a/sm_cat.txt]
+  Command Line: (exec /bin/bash \
+    -c \
+    'cat a/x.txt a/y.txt > bazel-out/darwin_arm64-opt/bin/a/sm_cat.txt')
+# Configuration: 7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565
+# Execution platform: @@platforms//host:host
+

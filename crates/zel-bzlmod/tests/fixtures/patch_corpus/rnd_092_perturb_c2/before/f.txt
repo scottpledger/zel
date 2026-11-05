@@ -1,0 +1,13 @@
+x 0
+} 3
+	Tab
+alpha 3
+beta
+beta 3
+beta
+y
+PERTURBED8
+  indent 0
+	Tab
+return 0; 3
+delta 0

@@ -1,0 +1,12 @@
+source file //a:c.cc
+source file //a:c.h
+source file //a:c2.cc
+catrule rule //a:lib
+genrule rule //a:lm
+filegroup rule //a:sel
+filegroup rule //a:sm_fg
+filegroup rule //a:srcs_fg
+source file //a:x.txt
+source file //a:y.txt
+source file //a:z.txt
+filegroup rule @ext//lib:data

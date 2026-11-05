@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "704cb5f4a423",
+ "classified_as": "UNCLASSIFIED",
+ "cmd": "query '//b:all' --output=graph --keep_going",
+ "distinct": 5,
+ "harness": "query",
+ "hashes": [
+  "0178816d5fb6ed49",
+  "621f8d4ed8f04b24",
+  "b71c3323fadd39e9",
+  "0178816d5fb6ed49",
+  "5bd31153c6003f0d",
+  "e0136aae98c682d8"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:mk\\n//b:t1\\n//b:tool\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:t1\\n//b:mk\\n//b:tool\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:tool\\n//b:t1\\n//b:mk\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:mk\\n//b:t1\\n//b:tool\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:tool\\n//b:mk\\n//b:t1\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//b:t1\\n//b:mk\\n//b:tool\"\n  \"//b:t2\"\n  \"//b:t2\" -> \"//b:shlib\"\n  \"//b:shlib\"\n}\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

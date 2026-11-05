@@ -1,0 +1,8 @@
+test //:t_crash
+test --test_output=all //:t_crash
+test //:t_nonexec
+build //:t_nonexec
+test //:t_plain
+test //:t_exit_ok_big_args --test_output=all
+test --test_output=all //:t_args --test_arg=zz
+test //:t_pass --test_summary=short --test_output=all

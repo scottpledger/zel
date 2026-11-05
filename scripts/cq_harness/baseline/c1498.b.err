@@ -1,0 +1,12 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+ERROR: Skipping '//nonexistent:x': no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent
+Analyzing: 0 targets (0 packages loaded, 0 targets configured)
+INFO: Analyzed 0 targets (0 packages loaded, 0 targets configured).
+INFO: Found 0 targets...
+ERROR: Invalid output format 'xml'. Valid values are: label_kind, label, transitions, proto, streamed_proto, textproto, jsonproto, build, graph, starlark, files
+INFO: Elapsed time: 0.070s, Critical Path: 0.00s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully

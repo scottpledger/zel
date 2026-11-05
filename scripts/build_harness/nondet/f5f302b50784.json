@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "f5f302b50784",
+ "classified_as": "ANYERR",
+ "cmd": "test --test_tag_filters=-exclusive,-tagA //:all",
+ "distinct": 3,
+ "harness": "build",
+ "hashes": [
+  "0eedb3bf972cd366",
+  "0eedb3bf972cd366",
+  "ae137f20f33ad8ba",
+  "ae137f20f33ad8ba",
+  "e79d15902f719d43",
+  "0eedb3bf972cd366"
+ ],
+ "history": [],
+ "mode": "ANYERR",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:14:8: in cmd attribute of genrule rule //:gbadvar: $(NOSUCHVAR) not defined\nERROR: WS/BUILD:14:8: Analysis of target '//:gbadvar' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadvar' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:14:8: in cmd attribute of genrule rule //:gbadvar: $(NOSUCHVAR) not defined\nERROR: WS/BUILD:14:8: Analysis of target '//:gbadvar' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadvar' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "WARNING: WS/BUILD:27:8: in genrule rule //:gdepdeprecated: target '//:gdepdeprecated' depends on deprecated target '//vis:dep': this is deprecated\nERROR: WS/BUILD:14:8: in cmd attribute of genrule rule //:gbadvar: $(NOSUCHVAR) not defined\nERROR: WS/BUILD:14:8: Analysis of target '//:gbadvar' (config: 2d89340) failed\nUse --verbose_failures to see the command lines of failed build steps.\nERROR: Analysis of target '//:gbadvar' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

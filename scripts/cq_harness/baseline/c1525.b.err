@@ -1,0 +1,19 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: 3 targets (0 packages loaded, 0 targets configured)
+ERROR: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent
+ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent and referenced by '//d:bad'
+WARNING: errors encountered while analyzing target '//d:dep_bad', it will not be built.
+Analysis failed
+WARNING: errors encountered while analyzing target '//d:bad', it will not be built.
+Analysis failed
+INFO: Analysis succeeded for only 1 of 3 top-level targets
+INFO: Analyzed 3 targets (0 packages loaded, 0 targets configured).
+INFO: Found 1 target...
+ERROR: command succeeded, but not all targets were analyzed
+INFO: Elapsed time: 0.066s, Critical Path: 0.00s
+INFO: 0 processes.
+ERROR: Build did NOT complete successfully

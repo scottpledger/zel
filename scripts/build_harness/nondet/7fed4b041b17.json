@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "7fed4b041b17",
+ "classified_as": "STRICT",
+ "cmd": "build --ui_event_filters=-stderr //:gwarn",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "e783b1f97f7e0fb4",
+  "e783b1f97f7e0fb4",
+  "e783b1f97f7e0fb4",
+  "e783b1f97f7e0fb4",
+  "e783b1f97f7e0fb4",
+  "e783b1f97f7e0fb4"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:gwarn (N packages loaded).\nINFO: From Executing genrule //:gwarn:\ncareful\nINFO: Found 1 target...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:gwarn (N packages loaded).\nINFO: From Executing genrule //:gwarn:\ncareful\nINFO: Found 1 target...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:gwarn (N packages loaded).\nINFO: From Executing genrule //:gwarn:\ncareful\nINFO: Found 1 target...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:gwarn (N packages loaded).\nINFO: From Executing genrule //:gwarn:\ncareful\nINFO: Found 1 target...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:gwarn (N packages loaded).\nINFO: From Executing genrule //:gwarn:\ncareful\nINFO: Found 1 target...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:gwarn (N packages loaded).\nINFO: From Executing genrule //:gwarn:\ncareful\nINFO: Found 1 target...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws3"
+}

@@ -1,0 +1,110 @@
+// Reconstructed from the public googleapis definitions
+// (google/devtools/build/v1/{publish_build_event,build_events,build_status}.proto);
+// the Bazel checkout does not vendor googleapis, so field numbers are transcribed from the
+// published API.
+syntax = "proto3";
+package google.devtools.build.v1;
+
+message StreamId {
+  enum BuildComponent {
+    UNKNOWN_COMPONENT = 0;
+    CONTROLLER = 1;
+    WORKER = 2;
+    TOOL = 3;
+  }
+  string build_id = 1;
+  string invocation_id = 6;
+  BuildComponent component = 3;
+}
+
+message BuildStatus {
+  enum Result {
+    UNKNOWN_STATUS = 0;
+    COMMAND_SUCCEEDED = 1;
+    COMMAND_FAILED = 2;
+    USER_ERROR = 3;
+    SYSTEM_ERROR = 4;
+    RESOURCE_EXHAUSTED = 5;
+    INVOCATION_DEADLINE_EXCEEDED = 6;
+    REQUEST_DEADLINE_EXCEEDED = 8;
+    CANCELLED = 7;
+  }
+  Result result = 1;
+  google.protobuf.Any details = 2;
+}
+
+message BuildEvent {
+  message InvocationAttemptStarted {
+    int64 attempt_number = 1;
+    google.protobuf.Any details = 2;
+  }
+  message InvocationAttemptFinished {
+    google.protobuf.Any details = 3;
+    BuildStatus invocation_status = 4;
+  }
+  message BuildEnqueued {
+    google.protobuf.Any details = 1;
+  }
+  message BuildFinished {
+    google.protobuf.Any details = 2;
+    BuildStatus status = 1;
+  }
+  message ConsoleOutput {
+    int32 type = 1;
+    oneof output {
+      string text_output = 2;
+      bytes binary_output = 3;
+    }
+  }
+  message ComponentStreamFinished {
+    enum FinishType {
+      FINISH_TYPE_UNSPECIFIED = 0;
+      FINISHED = 1;
+      EXPIRED = 2;
+    }
+    FinishType type = 1;
+  }
+  google.protobuf.Timestamp event_time = 1;
+  oneof event {
+    InvocationAttemptStarted invocation_attempt_started = 51;
+    InvocationAttemptFinished invocation_attempt_finished = 52;
+    BuildEnqueued build_enqueued = 53;
+    BuildFinished build_finished = 55;
+    ConsoleOutput console_output = 56;
+    ComponentStreamFinished component_stream_finished = 59;
+    google.protobuf.Any bazel_event = 60;
+    google.protobuf.Any build_execution_event = 61;
+    google.protobuf.Any source_fetch_event = 62;
+  }
+}
+
+message OrderedBuildEvent {
+  StreamId stream_id = 1;
+  int64 sequence_number = 2;
+  BuildEvent event = 3;
+}
+
+message PublishLifecycleEventRequest {
+  enum ServiceLevel {
+    NONINTERACTIVE = 0;
+    INTERACTIVE = 1;
+  }
+  ServiceLevel service_level = 1;
+  OrderedBuildEvent build_event = 2;
+  google.protobuf.Duration stream_timeout = 3;
+  repeated string notification_keywords = 4;
+  string project_id = 6;
+  bool check_preceding_lifecycle_events_present = 7;
+}
+
+message PublishBuildToolEventStreamRequest {
+  bool check_preceding_lifecycle_events_present = 3;
+  OrderedBuildEvent ordered_build_event = 4;
+  repeated string notification_keywords = 5;
+  string project_id = 6;
+}
+
+message PublishBuildToolEventStreamResponse {
+  StreamId stream_id = 1;
+  int64 sequence_number = 2;
+}

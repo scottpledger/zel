@@ -1,0 +1,1 @@
+ERROR: Invalid output format ''. Valid values are: label, label_kind, build, minrank, maxrank, package, location, graph, xml, proto, streamed_jsonproto, streamed_proto

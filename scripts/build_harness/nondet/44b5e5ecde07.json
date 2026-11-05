@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "44b5e5ecde07",
+ "classified_as": "STRICT",
+ "cmd": "build --output_groups=bogus //:args",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "3c173af4752d6414",
+  "3c173af4752d6414",
+  "3c173af4752d6414",
+  "3c173af4752d6414",
+  "3c173af4752d6414",
+  "3c173af4752d6414"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:args (N packages loaded).\nINFO: Found 1 target...\nTarget //:args up-to-date (nothing to build)\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:args (N packages loaded).\nINFO: Found 1 target...\nTarget //:args up-to-date (nothing to build)\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:args (N packages loaded).\nINFO: Found 1 target...\nTarget //:args up-to-date (nothing to build)\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:args (N packages loaded).\nINFO: Found 1 target...\nTarget //:args up-to-date (nothing to build)\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:args (N packages loaded).\nINFO: Found 1 target...\nTarget //:args up-to-date (nothing to build)\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:args (N packages loaded).\nINFO: Found 1 target...\nTarget //:args up-to-date (nothing to build)\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action",
+   "out": "",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

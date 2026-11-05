@@ -6,8 +6,10 @@ license.workspace = true
 
 [dependencies]
 zel-analysis = { workspace = true }
+zel-bzlmod = { workspace = true }
 zel-cmdline = { workspace = true }
 zel-events = { workspace = true }
+zel-proto = { workspace = true }
 zel-remote = { workspace = true }
 zel-sandbox = { workspace = true }
 zel-util = { workspace = true }

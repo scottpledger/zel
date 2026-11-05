@@ -1,0 +1,12 @@
+NoTransition -> //a:cl (d2c2765)
+  srcs#//a:c.cc#(null transition) -> 
+  srcs#//a:c.h#(null transition) -> 
+  deps#//a:cl2#NoTransition -> 
+NoTransition -> //a:cl2 (d2c2765)
+  srcs#//a:c2.cc#(null transition) -> 
+//a:c.cc (null)
+NoTransition -> @bazel_tools//tools:host_platform (c07488d)
+NoTransition -> @@platforms//host:host (c07488d)
+  constraint_values#@@platforms//cpu:aarch64#NoTransition -> 
+  constraint_values#@@platforms//os:osx#NoTransition -> 
+//a:c.h (null)

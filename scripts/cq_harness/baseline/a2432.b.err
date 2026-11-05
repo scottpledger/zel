@@ -1,0 +1,10 @@
+Computing main repo mapping: 
+Loading: 
+Loading: 0 packages loaded
+Analyzing: 12 targets (0 packages loaded, 0 targets configured)
+INFO: Analyzed 12 targets (0 packages loaded, 0 targets configured).
+INFO: Found 12 targets...
+WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//a:tr, config=BuildConfigurationKey[2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c]}]
+INFO: Elapsed time: 0.067s, Critical Path: 0.00s
+INFO: 0 processes.
+INFO: Build completed successfully, 0 total actions

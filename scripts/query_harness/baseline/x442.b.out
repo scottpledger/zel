@@ -1,0 +1,2 @@
+genrule rule @ext//lib:gen
+filegroup rule @ext//lib:data

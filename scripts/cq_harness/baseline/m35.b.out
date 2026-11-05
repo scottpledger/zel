@@ -1,0 +1,66 @@
+action 'Writing script b/t2'
+  Mnemonic: FileWrite
+  Target: //b:t2
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2]
+  IsExecutable: true
+  FileWriteContents: [IyEvYmluL3NoCnRydWUK]
+
+action 'Writing repo mapping manifest for //b:t2'
+  Mnemonic: RepoMappingManifest
+  Target: //b:t2
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 957b5a405a35c995a6343ea1cd2ca35c35ec3da330b8eb847fca68b5361b76b3
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.repo_mapping]
+  IsExecutable: false
+  FileWriteContents: [LHZxLF9tYWluCg==]
+
+action 'Creating source manifest for //b:t2'
+  Mnemonic: SourceSymlinkManifest
+  Target: //b:t2
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: d0f178271ee2ddaedf774b7c7765a9bba3ce47eadda70cd3e419358e697b461a
+  Inputs: []
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles_manifest]
+  IsExecutable: false
+  FileWriteContents: [X21haW4vYi90MiAvcHJpdmF0ZS90bXAvY3FoL29iYjAvZXhlY3Jvb3QvX21haW4vYmF6ZWwtb3V0L2Rhcndpbl9hcm02NC1mYXN0YnVpbGQvYmluL2IvdDIKX3JlcG9fbWFwcGluZyAvcHJpdmF0ZS90bXAvY3FoL29iYjAvZXhlY3Jvb3QvX21haW4vYmF6ZWwtb3V0L2Rhcndpbl9hcm02NC1mYXN0YnVpbGQvYmluL2IvdDIucmVwb19tYXBwaW5nCg==]
+
+action 'Creating runfiles tree bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //b:t2
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 30a0f1d28876513357ac5520ee17b3b0a52de7b9c0db45b08d32e6b95e9144a3
+  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles_manifest]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+runfiles for //b:t2
+  Mnemonic: RunfilesTree
+  Target: //b:t2
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
+  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2, bazel-out/darwin_arm64-fastbuild/bin/b/t2.repo_mapping, bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles/MANIFEST]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles]
+
+action 'Testing //b:t2'
+  Mnemonic: TestRunner
+  Target: //b:t2
+  Configuration: darwin_arm64-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 0e439c536470aa9a95fc3bb976b2151d28adf8d6edb356420b0010b2d0cc60e3
+  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles, external/bazel_tools/tools/test/generate-xml.sh, external/bazel_tools/tools/test/test-setup.sh]
+  Outputs: [bazel-out/darwin_arm64-fastbuild/testlogs/b/t2/test.cache_status, bazel-out/darwin_arm64-fastbuild/testlogs/b/t2/test.log, bazel-out/darwin_arm64-fastbuild/testlogs/b/t2/test.outputs (TreeArtifact), bazel-out/darwin_arm64-fastbuild/testlogs/b/t2/test.xml]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec external/bazel_tools/tools/test/test-setup.sh \
+    b/t2)
+# Configuration: 1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607
+# Execution platform: @@platforms//host:host
+
