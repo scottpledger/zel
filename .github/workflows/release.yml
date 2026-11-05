@@ -89,6 +89,9 @@ jobs:
     needs: package
     runs-on: ubuntu-latest
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download all packaged platform artifacts
         uses: actions/download-artifact@v4
         with:
@@ -106,10 +109,11 @@ jobs:
           if [ -n "${{ github.event.inputs.version }}" ]; then
             TAG="${{ github.event.inputs.version }}"
           fi
-          if gh release view "${TAG}" >/dev/null 2>&1; then
-            gh release upload "${TAG}" release-assets/* --clobber
+          if gh release view "${TAG}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" release-assets/* --clobber --repo "${{ github.repository }}"
           else
             gh release create "${TAG}" release-assets/* \
+              --repo "${{ github.repository }}" \
               --title "Zel ${TAG}" \
               --generate-notes
           fi
