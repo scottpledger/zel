@@ -1,4 +1,1 @@
 Loading: 0 packages loaded
-ERROR: Evaluation of query "//c:cdata" failed: no such package 'c': BUILD file not found on package path
-WARNING: --keep_going specified, ignoring errors. Results may be inaccurate
-INFO: Empty results

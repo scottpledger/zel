@@ -1,4 +1,1 @@
 Loading: 0 packages loaded
-ERROR: Evaluation of query "//a:lib" failed: no such package 'a': BUILD file not found on package path
-WARNING: --keep_going specified, ignoring errors. Results may be inaccurate
-INFO: Empty results

@@ -1,6 +1,6 @@
 cl
-cl2
+host
 c.cc
-host
-host
 c.h
+host
+cl2
