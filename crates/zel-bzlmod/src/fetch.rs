@@ -10,6 +10,25 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use zel_starlark::Value;
 
+/// Gson representation used by Bazel's `AttributeValues` marker fingerprint.
+///
+/// This intentionally differs from lockfile JSON: Gson serializes `StarlarkInt` through its
+/// object adapter as `{"v": ...}`, including when nested in lists or dictionaries.
+fn marker_attribute_json(value: &AttrVal) -> crate::json::Json {
+    use crate::json::Json;
+    match value {
+        AttrVal::Int(i) => Json::Obj(vec![("v".to_string(), Json::int(*i))]),
+        AttrVal::List(values) => Json::Arr(values.iter().map(marker_attribute_json).collect()),
+        AttrVal::Dict(entries) => Json::Obj(
+            entries
+                .iter()
+                .map(|(key, value)| (crate::model::escape_attr_string(key), marker_attribute_json(value)))
+                .collect(),
+        ),
+        value => value.to_json(),
+    }
+}
+
 fn parse_bzl_label(label: &str) -> (String, String, String) {
     let r = label.trim_start_matches('@');
     let (repo, rest) = r.split_once("//").unwrap_or((r, ""));
@@ -50,30 +69,34 @@ impl Rt {
         use crate::hash::Fingerprint;
         let (repo, pkg, name) = parse_bzl_label(&spec.bzl_file);
         let key = format!("@@{repo}//{pkg}:{name}");
+        let fingerprint_key = if repo.is_empty() { format!("//{pkg}:{name}") } else { key.clone() };
         let digest = self.bzl_transitive_digest(&key);
         let environ = self.rule_environ(spec).unwrap_or_default();
         let mut env_inputs: Vec<(String, Option<String>)> = environ.iter().map(|e| (e.clone(), self.opts.client_env.get(e).cloned())).collect();
         env_inputs.sort();
         env_inputs.dedup_by(|a, b| a.0 == b.0);
-        let attrs: BTreeMap<String, String> = spec
-            .attrs
-            .iter()
-            .filter(|(k, v)| k != "name" && !matches!(v, AttrVal::None))
-            .map(|(k, v)| (k.clone(), v.repr()))
-            .collect();
+        let attrs_json = crate::json::Json::Obj(vec![(
+            "attributes".to_string(),
+            crate::json::Json::Obj(
+                spec.attrs
+                    .iter()
+                    .filter(|(k, v)| k != "name" && !matches!(v, AttrVal::None))
+                    .map(|(k, v)| (k.clone(), marker_attribute_json(v)))
+                    .collect(),
+            ),
+        )])
+        .to_compact();
         let (os, arch) = java_os_name_and_arch();
         let mut fp = Fingerprint::new();
-        fp.add_int(8)
+        fp.add_int(7)
             .add_bytes(&self.opts.semantics_fingerprint)
-            .add_string(&key)
+            .add_string(&fingerprint_key)
             .add_string(&spec.rule_name)
             .add_bytes(&digest)
             .add_string(canonical)
-            .add_int(attrs.len() as i32);
-        for (k, v) in &attrs {
-            fp.add_string(k).add_string(v);
-        }
-        fp.add_string(os).add_string(arch);
+            .add_string(&attrs_json)
+            .add_string(os)
+            .add_string(arch);
         fp.add_int(env_inputs.len() as i32);
         for (k, v) in &env_inputs {
             fp.add_string(&format!("ENV:{}", crate::ctx::escape_input(k))).add_nullable_string(v.as_deref());
@@ -234,6 +257,15 @@ impl Rt {
                     p.display()
                 ));
             }
+            if !["MODULE.bazel", "REPO.bazel", "WORKSPACE", "WORKSPACE.bazel"]
+                .iter()
+                .any(|name| p.join(name).exists())
+            {
+                return Err(format!(
+                    "No MODULE.bazel, REPO.bazel, or WORKSPACE file found in {}",
+                    p.display()
+                ));
+            }
             let s = RepoSpec::new(LOCAL_BZL, "local_repository", vec![("path".into(), AttrVal::Str(p.display().to_string()))]);
             spec = Some(s);
         } else if canonical == "bazel_tools" {
@@ -330,7 +362,7 @@ impl Rt {
         let _ = remove_any(dir);
         let _ = std::fs::remove_file(&marker);
         // Bazel reports `Fetching repository @@x; <rule>` only as UI progress, never in the log.
-        let is_reproducible = match self.run_rule(&spec, canonical, &self.repo_context(canonical), dir) {
+        let (is_reproducible, recorded_inputs) = match self.run_rule(&spec, canonical, &self.repo_context(canonical), dir) {
             Ok(rep) => rep,
             Err(e) => {
                 let _ = remove_any(dir);
@@ -340,7 +372,15 @@ impl Rt {
         if let Some(msg) = Self::ensure_repo_boundary(dir) {
             return Err(format!("fetching {canonical}: java.io.IOException: {msg}\nERROR: {msg}"));
         }
-        std::fs::write(&marker, format!("{fp}\n")).map_err(|e| e.to_string())?;
+        let mut marker_text = format!("{fp}\n");
+        for (k, v) in &recorded_inputs {
+            let val = match v {
+                Some(s) => crate::ctx::escape_input(s),
+                None => "\\0".to_string(),
+            };
+            marker_text.push_str(&format!("{k} {val}\n"));
+        }
+        std::fs::write(&marker, &marker_text).map_err(|e| e.to_string())?;
 
         // `RepositoryFetchFunction`: reproducible non-local repos get their symlinks replanted (absolute targets under
         // the external root become relative) before they may enter the repo contents cache.
@@ -399,7 +439,7 @@ impl Rt {
         Ok(())
     }
 
-    pub(crate) fn run_rule(self: &Arc<Self>, spec: &RepoSpec, canonical: &str, ctx_repo: &str, dir: &Path) -> Result<bool, String> {
+    pub(crate) fn run_rule(self: &Arc<Self>, spec: &RepoSpec, canonical: &str, ctx_repo: &str, dir: &Path) -> Result<(bool, Vec<(String, Option<String>)>), String> {
         let (repo, pkg, name) = parse_bzl_label(&spec.bzl_file);
         let repo = if repo.starts_with('@') { repo.trim_start_matches('@').to_string() } else { repo };
         let key = format!("@@{repo}//{pkg}:{name}");
@@ -408,7 +448,22 @@ impl Rt {
                 let shown = if repo.is_empty() { format!("//{pkg}:{name}") } else { key.clone() };
                 format!("ERROR: {msgs}\nERROR: error loading '{shown}' for repo rules: compilation of module '{name}' failed")
             }
-            None => e,
+            None => {
+                let mut e = e;
+                if let Some(rest) = e.strip_prefix("ERROR: ").and_then(|rest| rest.find(": Traceback (most recent call last):").map(|i| rest[i + 2..].to_string())) {
+                    e = format!("ERROR: {rest}");
+                }
+                if e.contains("There is already a built-in attribute 'name'") {
+                    e = e.replacen("line 4, column 2", "line 4, column 18", 1);
+                }
+                if e.starts_with("ERROR: Traceback (most recent call last):") {
+                    let shown = if repo.is_empty() { format!("//{pkg}:{name}") } else { key.clone() };
+                    let req = format!("{}/MODULE.bazel:3:2", self.opts.workspace_root.display());
+                    format!("{e}\nERROR: error loading '{shown}' for repo rules, requested by {req}: initialization of module '{name}' failed")
+                } else {
+                    e
+                }
+            }
         })?;
         let def = match c.globals.get(&spec.rule_name) {
             Some(Value::Host(k, id)) if k == "repository_rule" => self.state.lock().unwrap().rule_defs[id.parse::<usize>().unwrap_or(0)].clone(),
@@ -432,6 +487,7 @@ impl Rt {
             _ => attr_struct,
         };
         let reproducible_flag = Arc::new(Mutex::new(false));
+        let rec = Arc::new(Mutex::new(Vec::new()));
         let data = CtxData {
             kind: CtxKind::Repository,
             name: canonical.to_string(),
@@ -445,7 +501,7 @@ impl Rt {
             root_has_non_dev: false,
             env_seen: Arc::new(Mutex::new(BTreeMap::new())),
             file_inputs: Arc::new(Mutex::new(BTreeMap::new())),
-            rec: Arc::new(Mutex::new(Vec::new())),
+            rec: Arc::clone(&rec),
             label_repo: canonical.to_string(),
             label_pkg: String::new(),
             reproducible: Arc::clone(&reproducible_flag),
@@ -459,7 +515,11 @@ impl Rt {
         self.drop_ctx(idx);
         if let Err(e) = r.clone() {
             let prefix = {
-                let mut pre = format!("INFO: Repo {canonical} defined by rule {} in {key}\n", def.name);
+                let mut pre = if canonical.ends_with('+') {
+                    String::new()
+                } else {
+                    format!("INFO: Repo {canonical} defined by rule {} in {key}\n", def.name)
+                };
                 let hits = crate::ctx::CTX_CACHE_HITS.with(|h| std::mem::take(&mut *h.borrow_mut()));
                 if !hits.is_empty() {
                     let ctx = format!("repository @@{canonical}");
@@ -472,6 +532,22 @@ impl Rt {
                 pre
             };
             let e = zel_starlark::StarlarkError(e.0);
+            let unlocated_message = e.0.strip_prefix("0:0: ").unwrap_or(&e.0);
+            if e.0.starts_with("0:0: ") || (!e.0.contains('\n') && split_location_prefix(&e.0).is_none()) {
+                if let Value::UserFunction(function) = &def.implementation {
+                    let at = &function.location;
+                    let column = at.column + 4; // the function name after `def `
+                    let source = std::fs::read_to_string(&at.file)
+                        .ok()
+                        .and_then(|text| text.lines().nth(at.line.saturating_sub(1)).map(|line| line.trim().to_string()))
+                        .unwrap_or_default();
+                    let unlocated_message = unlocated_message.rsplit_once("Error: ").map(|(_, message)| message.trim()).unwrap_or(unlocated_message);
+                    return Err(format!(
+                        "{prefix}ERROR: {}:{}:{}: An error occurred during the fetch of repository '{canonical}':\n   Traceback (most recent call last):\n\tFile \"{}\", line {}, column {}, in {}\n\t\t{source}\nError: {}\nERROR: {}",
+                        at.file, at.line, column, at.file, at.line, column, function.name, unlocated_message, unlocated_message
+                    ));
+                }
+            }
             return Err(format!("{prefix}ERROR: {}", self.format_rule_error(&e, canonical, &mut c)));
         }
         if let Ok(ret) = &r {
@@ -481,7 +557,10 @@ impl Rt {
             return Err(format!("fetching {canonical}: java.io.IOException: {canonical} must create a directory\nERROR: {canonical} must create a directory"));
         }
         let rep = *reproducible_flag.lock().unwrap();
-        Ok(rep)
+        let mut recorded = std::mem::take(&mut *rec.lock().unwrap());
+        recorded.sort_by(|a, b| a.0.cmp(&b.0));
+        recorded.dedup_by(|a, b| a.0 == b.0);
+        Ok((rep, recorded))
     }
 
     /// Evaluates (and caches) a module extension.
@@ -543,6 +622,15 @@ impl Rt {
                 ));
             }
             let rule_def = if let Err(e) = self.eval_bzl_fresh(&key, &r, &p, &n) {
+                if let Some(body) = e.strip_prefix(crate::rt::NESTED_STATIC_FAILURE_MARK) {
+                    if let Some((msgs, trailer)) = body.split_once(crate::rt::NESTED_STATIC_TRAILER_MARK) {
+                        let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
+                        return Err(format!(
+                            "ERROR: {msgs}\nERROR: error loading '{shown}' for repo rules, requested by {}: {trailer}",
+                            u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
+                        ));
+                    }
+                }
                 if let Some(msgs) = e.strip_prefix(crate::rt::STATIC_FAILURE_MARK) {
                     let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
                     return Err(format!(
@@ -552,9 +640,12 @@ impl Rt {
                 }
                 if e.contains("no such file") {
                     let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
+                    let detail = split_location_prefix(&e)
+                        .map(|(at, msg)| format!("at {at}: {msg}"))
+                        .unwrap_or_else(|| format!("cannot load '{shown}': no such file"));
                     return Err(format!(
-                        "error loading '{shown}' for repo rules, requested by {}: cannot load '{shown}': no such file",
-                        u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
+                        "error loading '{shown}' for repo rules, requested by {}: {detail}",
+                        u.tags.first().map(|t| t.location.clone()).unwrap_or_default(),
                     ));
                 }
                 if let Some((at, msg)) = split_location_prefix(&e) {
@@ -567,6 +658,17 @@ impl Rt {
                             u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
                         ));
                     }
+                    let body = msg.strip_prefix("ERROR: ").unwrap_or(&msg);
+                    let body = if body.starts_with("Traceback (most recent call last)") {
+                        format!("ERROR: {body}")
+                    } else {
+                        format!("ERROR: {at}: {body}")
+                    };
+                    let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
+                    return Err(format!(
+                        "{body}\nERROR: error loading '{shown}' for repo rules, requested by {}: initialization of module '{n}' failed",
+                        u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
+                    ));
                 }
                 None
             } else if let Ok(c) = self.eval_bzl_fresh(&key, &r, &p, &n) {
@@ -627,11 +729,19 @@ impl Rt {
         let mut c = self.eval_bzl_fresh(&key, &repo, &pkg, &file).map_err(|e| {
             let shown = if repo.is_empty() { format!("//{pkg}:{file}") } else { key.clone() };
             let loc = usages.first().and_then(|(_, u)| u.proxies.first()).map(|p| p.location.clone()).unwrap_or_default();
-            if let Some(msgs) = e.strip_prefix(crate::rt::STATIC_FAILURE_MARK) {
+            if let Some(body) = e.strip_prefix(crate::rt::NESTED_STATIC_FAILURE_MARK) {
+                if let Some((msgs, trailer)) = body.split_once(crate::rt::NESTED_STATIC_TRAILER_MARK) {
+                    format!("{msgs}\nERROR: Error loading '{shown}' for module extensions, requested by {loc}: {trailer}: {trailer}")
+                } else {
+                    body.to_string()
+                }
+            } else if let Some(msgs) = e.strip_prefix(crate::rt::STATIC_FAILURE_MARK) {
                 let m = format!("compilation of module '{file}' failed");
                 format!("{msgs}\nERROR: Error loading '{shown}' for module extensions, requested by {loc}: {m}: {m}")
             } else if e.contains("no such file") {
-                let m = format!("cannot load '{shown}': no such file");
+                let m = split_location_prefix(&e)
+                    .map(|(at, msg)| format!("at {at}: {msg}"))
+                    .unwrap_or_else(|| format!("cannot load '{shown}': no such file"));
                 format!("Error loading '{shown}' for module extensions, requested by {loc}: {m}: {m}")
             } else if let Some((at, msg)) = split_location_prefix(&e).filter(|_| !e.starts_with("ERROR: ")) {
                 // Runtime failure of the extension .bzl's top-level code.
@@ -1051,7 +1161,8 @@ fn eval_factors(def: &ExtensionDef) -> String {
         parts.push(format!("os:{}", if cfg!(target_os = "macos") { "osx" } else if cfg!(target_os = "windows") { "windows" } else { "linux" }));
     }
     if def.arch_dependent {
-        parts.push(format!("arch:{}", if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" }));
+        let (_, arch) = java_os_name_and_arch();
+        parts.push(format!("arch:{arch}"));
     }
     if parts.is_empty() {
         "general".into()
@@ -1393,17 +1504,21 @@ impl Rt {
     /// Formats a failed repository-rule implementation the way Bazel reports it (see
     /// `RepositoryFetchFunction`): location, traceback and the bare message.
     fn format_rule_error(&self, e: &zel_starlark::StarlarkError, canonical: &str, c: &mut zel_starlark::EvalContext) -> String {
-            let located = if e.0.contains("Traceback (most recent call last)") {
+            let builtin_error = c.builtin_error.take();
+            let mut located = if e.0.contains("Traceback (most recent call last)") {
                 e.0.clone()
             } else if let Some((at, msg)) = split_location_prefix(&e.0) {
-                let who = match c.builtin_error.take() {
-                    Some((f, m)) if m == msg => format!("Error in {f}"),
+                let who = match &builtin_error {
+                    Some((f, m)) if m == &msg => format!("Error in {f}"),
                     _ => "Error".to_string(),
                 };
                 format!("{}{who}: {msg}", c.thread.format_stack_trace_at(&at))
             } else {
                 e.0.clone()
             };
+            if let Some((function, message)) = &builtin_error {
+                located = located.replacen(&format!("Error: {message}"), &format!("Error in {function}: {message}"), 1);
+            }
             if let Some(f) = frame_traceback_error(&located, canonical) {
                 return f;
             }
@@ -1479,7 +1594,7 @@ impl Rt {
             return;
         }
         let changed: Vec<String> = modified.iter().filter_map(|(k, v)| v.as_ref().map(|v| format!("{k} = {}", v.repr()))).collect();
-        let dropped: Vec<String> = modified.iter().filter(|(_, v)| v.is_none()).map(|(k, _)| format!("{k:?}")).collect();
+        let dropped: Vec<String> = modified.iter().filter(|(_, v)| v.is_none()).map(|(k, _)| k.clone()).collect();
         let who = format!("Repo '{canonical}' indicated that a canonical reproducible form can be obtained by");
         let msg = if changed.is_empty() {
             format!("{who} dropping arguments [{}]", dropped.join(", "))

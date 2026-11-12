@@ -77,6 +77,9 @@ pub fn run_query(resolver: &PatternResolver, expr_str: &str, opts: &QueryOpts, f
     let graphless = streamed && !opts.sky && opts.graphless_query != Some(false);
     let opts = &opts;
     let mut env = TargetEnv::new(resolver, opts.clone());
+    env.graphless = graphless;
+    env.output_format = fmt.output.clone();
+    env.order_output = Some(fmt.order);
     let functions = env.functions();
     let expr = match parse::parse(expr_str, &functions) {
         Ok(e) => e,
@@ -130,7 +133,16 @@ pub fn run_query(resolver: &PatternResolver, expr_str: &str, opts: &QueryOpts, f
         engine.diag.graphless = graphless;
         let preload = engine.env.preload_patterns(&patterns_for_preload, &mut engine.diag);
         eval_result = match preload {
-            Ok(()) => engine.eval(&expr),
+            Ok(()) => {
+                if opts.sky && !opts.universe_scope.is_empty() {
+                    match engine.universe(&expr) {
+                        Ok(_) => engine.eval(&expr),
+                        Err(e) => Err(e),
+                    }
+                } else {
+                    engine.eval(&expr)
+                }
+            }
             Err(e) => Err(e),
         };
         diag_errors.extend(engine.diag.errors.drain(..));

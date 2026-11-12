@@ -28,7 +28,7 @@
     "pathFragmentId": 23
   }, {
     "id": 10,
-    "pathFragmentId": 27
+    "pathFragmentId": 24
   }, {
     "id": 11,
     "pathFragmentId": 28
@@ -41,10 +41,10 @@
   }],
   "actions": [{
     "targetId": 1,
-    "actionKey": "c858377b082563ada91337c61fd7ef737c9e6514f12f5b2393fce67fd84922ec",
+    "actionKey": "071207860e10c63dfef34bf9ab5a56531758a96c751388640b776609e05136b0",
     "mnemonic": "Genrule",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-dbg/bin/a/gg.out ; echo a/z.txt \u003e\u003e bazel-out/darwin_arm64-dbg/bin/a/gg.out"],
+    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-dbg/bin/a/gg.out ; echo a/z.txt \u003e\u003e bazel-out/k8-dbg/bin/a/gg.out"],
     "environmentVariables": [{
       "key": "PATH",
       "value": "/bin:/usr/bin:/usr/local/bin"
@@ -55,40 +55,40 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 2,
-    "actionKey": "e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329",
+    "actionKey": "0fc12981d491b6dcda8ba34d4ee9f34be613ada544bf17214ea3b2c62aafe633",
     "mnemonic": "CatIt",
-    "configurationId": 2,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-opt/bin/a/lib.txt"],
+    "configurationId": 1,
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-dbg/bin/a/lib.txt"],
     "inputDepSetIds": [4],
     "outputIds": [9],
     "primaryOutputId": 9,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 2,
-    "actionKey": "e627a49abbfe0dffd05aff820684efbd754c9fa23ff09b31918abaf812069fcc",
+    "actionKey": "c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012",
     "mnemonic": "CatIt",
-    "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-dbg/bin/a/lib.txt"],
+    "configurationId": 2,
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-opt/bin/a/lib.txt"],
     "inputDepSetIds": [5],
     "outputIds": [10],
     "primaryOutputId": 10,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 3,
-    "actionKey": "29785e492ddf6e441eadaef6c8bf94225726b74705cf441966940845a8885ed6",
+    "actionKey": "e7d6a94890779fa4c58596dcaad36967fcca4ca9c483b53513ceb0f8b03848ce",
     "mnemonic": "CatIt",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "cat bazel-out/darwin_arm64-dbg/bin/a/lib.txt a/y.txt \u003e bazel-out/darwin_arm64-dbg/bin/a/lib2.txt"],
+    "arguments": ["/bin/bash", "-c", "cat bazel-out/k8-dbg/bin/a/lib.txt a/y.txt \u003e bazel-out/k8-dbg/bin/a/lib2.txt"],
     "inputDepSetIds": [6],
     "outputIds": [11],
     "primaryOutputId": 11,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 4,
-    "actionKey": "2a5db8e2ce7c4991a0ced82ff6f12366c04123ce8e82a77f57d2fd88ce49b94e",
+    "actionKey": "a1b8598bc5badab36e3282785677351d2ed215a81c776aeb6a2d594c61c4dead",
     "mnemonic": "Genrule",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm \u003e bazel-out/darwin_arm64-dbg/bin/a/lm.o"],
+    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm \u003e bazel-out/k8-dbg/bin/a/lm.o"],
     "environmentVariables": [{
       "key": "PATH",
       "value": "/bin:/usr/bin:/usr/local/bin"
@@ -99,10 +99,10 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 5,
-    "actionKey": "4e731e92000df4ccb5a756f6b9b31b5798592d5b54345b4e8fced793d1a77d0b",
+    "actionKey": "ea6a211be8f794f05177fd6f4b1750e50bb1e685698387713422d23d99466e4c",
     "mnemonic": "CatIt",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/y.txt \u003e bazel-out/darwin_arm64-dbg/bin/a/sm_cat.txt"],
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/y.txt \u003e bazel-out/k8-dbg/bin/a/sm_cat.txt"],
     "inputDepSetIds": [8],
     "outputIds": [13],
     "primaryOutputId": 13,
@@ -147,7 +147,7 @@
     "directArtifactIds": [7, 8, 1, 2]
   }, {
     "id": 6,
-    "directArtifactIds": [10, 8]
+    "directArtifactIds": [9, 8]
   }, {
     "id": 7,
     "directArtifactIds": [5]
@@ -157,14 +157,14 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-dbg",
-    "platformName": "darwin_arm64",
-    "checksum": "e1e6329670252a01146c735509bb7a24f7cecec29110adf8c48c6d650bb777e0"
+    "mnemonic": "k8-dbg",
+    "platformName": "k8",
+    "checksum": "70ad46f0e930d4921a16f2065d932ae9a89595182dca24bf7c85f4d2aef3b5a9"
   }, {
     "id": 2,
-    "mnemonic": "darwin_arm64-opt",
-    "platformName": "darwin_arm64",
-    "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+    "mnemonic": "k8-opt",
+    "platformName": "k8",
+    "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   }],
   "ruleClasses": [{
     "id": 1,
@@ -200,7 +200,7 @@
     "label": "bazel-out"
   }, {
     "id": 10,
-    "label": "darwin_arm64-opt-exec",
+    "label": "k8-opt-exec",
     "parentId": 11
   }, {
     "id": 9,
@@ -236,7 +236,7 @@
     "parentId": 14
   }, {
     "id": 20,
-    "label": "darwin_arm64-dbg",
+    "label": "k8-dbg",
     "parentId": 11
   }, {
     "id": 19,
@@ -259,25 +259,25 @@
     "label": "y.txt",
     "parentId": 2
   }, {
-    "id": 26,
-    "label": "darwin_arm64-opt",
+    "id": 23,
+    "label": "lib.txt",
+    "parentId": 18
+  }, {
+    "id": 27,
+    "label": "k8-opt",
     "parentId": 11
   }, {
-    "id": 25,
+    "id": 26,
     "label": "bin",
+    "parentId": 27
+  }, {
+    "id": 25,
+    "label": "a",
     "parentId": 26
   }, {
     "id": 24,
-    "label": "a",
+    "label": "lib.txt",
     "parentId": 25
-  }, {
-    "id": 23,
-    "label": "lib.txt",
-    "parentId": 24
-  }, {
-    "id": 27,
-    "label": "lib.txt",
-    "parentId": 18
   }, {
     "id": 28,
     "label": "lib2.txt",

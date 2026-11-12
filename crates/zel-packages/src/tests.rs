@@ -146,10 +146,10 @@ sh_test(name = "t", srcs = ["t.sh"])
     // Outputs are targets.
     assert!(matches!(p.targets["out.txt"], Target::OutputFile { .. }));
     assert_eq!(rule(&p, "g").outs, vec!["out.txt"]);
-    // Implicit input files exist only for files that exist ("other" and x:y don't).
+    // Labels in source attributes create implicit input-file targets, including assumed files.
     assert!(matches!(p.targets["a.txt"], Target::InputFile { .. }));
     assert!(matches!(p.targets["d.txt"], Target::InputFile { .. }));
-    assert!(!p.targets.contains_key("other"));
+    assert!(matches!(p.targets["other"], Target::InputFile { .. }));
 }
 
 #[test]
@@ -805,7 +805,7 @@ fn input_file_and_subpackage_checks() {
     let e = errors(&p).join("\n");
     assert!(e.contains("Label '//:sub/x.txt' is invalid because 'sub' is a subpackage; perhaps you meant to put the colon here: '//sub:x.txt'?"), "{e}");
     assert!(p.targets.contains_key("real.txt"));
-    assert!(!p.targets.contains_key("missing.txt"), "nonexistent files do not become targets");
+    assert!(matches!(p.targets["missing.txt"], Target::InputFile { .. }), "referenced files become assumed input targets");
 }
 
 #[test]
@@ -1078,10 +1078,10 @@ fn resolve_error_messages() {
     let o = resolver(&ws4, "").resolve_patterns(&["//:sever".into()]);
     assert!(o.errors[0].message.ends_with(" (did you mean server?)"), "{}", o.errors[0].message);
     // Rule consuming a source of that name.
-    // (An implicit input-file target only exists for a source file that is present on disk.)
+    // Referenced source labels participate in typo suggestions.
     let ws5 = Ws::new(&[("BUILD", "filegroup(name='core_lib', srcs=['foo_bar.cc'])"), ("foo_bar.cc", "")]);
     let o = resolver(&ws5, "").resolve_patterns(&["//:foo_bar".into()]);
-    assert!(o.errors[0].message.ends_with(" (did you mean core_lib?)"), "{}", o.errors[0].message);
+    assert!(o.errors[0].message.ends_with(" (did you mean foo_bar.cc?)"), "{}", o.errors[0].message);
     // Syntax errors.
     let o = r.resolve_patterns(&["//a//b".into()]);
     assert!(o.errors[0].message.starts_with("invalid package name 'a//b'"), "{:?}", o.errors);

@@ -2,7 +2,7 @@
 1 //a:lib
 2 @ext//lib:data
 2 //a:srcs_fg
+3 //a:z.txt
 3 //a:x.txt
 3 //a:y.txt
-3 //a:z.txt
 3 @ext//lib:d.txt

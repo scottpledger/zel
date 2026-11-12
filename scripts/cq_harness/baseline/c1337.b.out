@@ -158,7 +158,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -322,170 +322,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
-  }
-  configuration_id: 1
-}
-results {
-  target {
-    type: RULE
-    rule {
-      name: "//d:ok"
-      rule_class: "filegroup"
-      location: "@WS@/d/BUILD:2:10"
-      attribute {
-        name: "$config_dependencies"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: ":action_listener"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "aspect_hints"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "data"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "deprecation"
-        type: STRING
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "distribs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "features"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_function"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_location"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_name"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "licenses"
-        type: LICENSE
-        license {
-          license_type: "NONE"
-        }
-        explicitly_specified: false
-      }
-      attribute {
-        name: "name"
-        type: STRING
-        string_value: "ok"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "output_group"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "output_licenses"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "package_metadata"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "restricted_to"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "srcs"
-        type: LABEL_LIST
-        string_list_value: "//c:cdata"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "tags"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "target_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "testonly"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "transitive_configs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "visibility"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      rule_input: "//c:cdata"
-    }
-  }
-  configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -664,7 +501,170 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+  }
+  configuration_id: 1
+}
+results {
+  target {
+    type: RULE
+    rule {
+      name: "//d:ok"
+      rule_class: "filegroup"
+      location: "@WS@/d/BUILD:2:10"
+      attribute {
+        name: "$config_dependencies"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: ":action_listener"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "aspect_hints"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "data"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "deprecation"
+        type: STRING
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "distribs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "features"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_function"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_location"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_name"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "licenses"
+        type: LICENSE
+        license {
+          license_type: "NONE"
+        }
+        explicitly_specified: false
+      }
+      attribute {
+        name: "name"
+        type: STRING
+        string_value: "ok"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "output_group"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "output_licenses"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "package_metadata"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "restricted_to"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "srcs"
+        type: LABEL_LIST
+        string_list_value: "//c:cdata"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "tags"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "target_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "testonly"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "transitive_configs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "visibility"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      rule_input: "//c:cdata"
+    }
+  }
+  configuration {
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -970,15 +970,15 @@ results {
     }
   }
   configuration {
-    checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+    checksum: "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
   }
   configuration_id: 2
 }
 configurations {
   id: 1
-  mnemonic: "darwin_arm64-fastbuild"
-  platform_name: "darwin_arm64"
-  checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+  mnemonic: "k8-fastbuild"
+  platform_name: "k8"
+  checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -1127,7 +1127,7 @@ configurations {
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -1239,7 +1239,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"
@@ -2363,9 +2363,9 @@ configurations {
 }
 configurations {
   id: 2
-  mnemonic: "darwin_arm64-fastbuild"
-  platform_name: "darwin_arm64"
-  checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+  mnemonic: "k8-fastbuild"
+  platform_name: "k8"
+  checksum: "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -2518,7 +2518,7 @@ configurations {
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -2630,7 +2630,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"

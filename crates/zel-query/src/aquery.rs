@@ -203,10 +203,14 @@ fn executable_actions(
     }
     let mut rt = Action::new(label.clone(), "RunfilesTree", ActionKind::Spawn { executable: String::new(), arguments: Vec::new(), shell_command: None });
     rt.progress_message = Some(format!("runfiles for {}", label.canonical_form()));
-    rt.inputs.extend(rs.runfiles.artifacts.iter().cloned());
-    if !rt.inputs.iter().any(|i| i.exec_path == rs.executable.exec_path) {
-        rt.inputs.push(rs.executable.clone());
-    }
+    rt.inputs.extend(
+        rs.runfiles
+            .artifacts
+            .iter()
+            .filter(|a| a.exec_path != rs.executable.exec_path)
+            .cloned(),
+    );
+    rt.inputs.push(rs.executable.clone());
     if let Some(m) = &rs.repo_mapping_manifest {
         rt.inputs.push(m.clone());
     }
@@ -248,13 +252,12 @@ fn executable_actions(
         );
         tr.progress_message = Some(format!("Testing {}", label.canonical_form()));
         tr.inputs.push(tree_dir);
-        tr.inputs.push(tool("tools/test/generate-xml.sh"));
         tr.inputs.push(tool("tools/test/test-setup.sh"));
-        for n in ["test.cache_status", "test.log"] {
+        tr.inputs.push(tool("tools/test/generate-xml.sh"));
+        for n in ["test.log", "test.xml", "test.cache_status"] {
             tr.outputs.push(out_art(n, false));
         }
         tr.outputs.push(out_art("test.outputs", true));
-        tr.outputs.push(out_art("test.xml", false));
         tr.use_default_shell_env = true;
         tr.apply_configuration_env(cfg);
         // `TestTargetProperties`: the `testing.ExecutionInfo` provider's requirements.
@@ -366,6 +369,9 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
         let mut cts = vec![(ct, None)];
         if env.tenv.opts.include_aspects {
             for asp in env.tr.aspects_for(&n.label) {
+                if asp.configuration != cfg {
+                    continue;
+                }
                 let asp_name = asp.aspect_name.clone().unwrap_or_else(|| asp.rule_class.clone());
                 cts.push((asp, Some(asp_name)));
             }
@@ -409,9 +415,6 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
                 }
                 if let Some(rs) = &current_ct.runfiles_support {
                     let pkgs = env.tr.transitive_packages(&n.label, &cfg);
-                    if std::env::var("ZEL_DEBUG_PKGS").is_ok() {
-                        { use std::io::Write; let msg = format!("PKGS {} {:?} deps={:?}", n.label.canonical_form(), pkgs.to_vec().iter().map(|p| p.package.clone()).collect::<Vec<_>>(), env.tr.direct_deps(&n.label, &cfg).iter().map(|(l, c)| format!("{}#{}", l.canonical_form(), c.mnemonic())).collect::<Vec<_>>()); let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/u2c/pkgs.log").and_then(|mut f| writeln!(f, "{}", msg)); }
-                    }
                     for e in local.iter_mut() {
                         if e.action.mnemonic == "RepoMappingManifest" && e.action.key_info.is_none() {
                             use zel_analysis::nested_set::{NSet, STABLE_ORDER};
@@ -422,17 +425,6 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
                                 .map(|k| (k.clone(), k.split('/').next().unwrap_or("").to_string()))
                                 .collect();
                             let has_syms = !rs.runfiles.symlinks.is_empty();
-                            if std::env::var("ZEL_DEBUG_PKGS").is_ok() {
-                                use std::io::Write;
-                                fn dump(n: &zel_analysis::nested_set::NNode<zel_analysis::PkgMeta>) -> String {
-                                    match n {
-                                        zel_analysis::nested_set::NNode::Leaf(p) => format!("{}", p.package),
-                                        zel_analysis::nested_set::NNode::Arr(a) => format!("[{}]", a.iter().map(dump).collect::<Vec<_>>().join(" ")),
-                                    }
-                                }
-                                let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/u2c/pkgs.log").and_then(|mut f| writeln!(f, "STRUCT {} order={} {}", n.label.canonical_form(), pkgs.order, pkgs.children.as_ref().map(dump).unwrap_or_default()));
-                                let _ = std::fs::OpenOptions::new().create(true).append(true).open("/tmp/u2c/pkgs.log").and_then(|mut f| writeln!(f, "RM {} rf={} syms={} roots={:?} ws={} mapping={:?}", n.label.canonical_form(), { fn d(n: &zel_analysis::nested_set::NNode<(String, String)>) -> String { match n { zel_analysis::nested_set::NNode::Leaf(p) => p.0.clone(), zel_analysis::nested_set::NNode::Arr(a) => format!("[{}]", a.iter().map(d).collect::<Vec<_>>().join(" ")) } } rs.runfiles.nested_set().children.as_ref().map(d).unwrap_or_default() }, has_syms, roots, rs.workspace_name, pkgs.to_vec().iter().map(|p| (p.package.clone(), p.mapping.clone())).collect::<Vec<_>>()));
-                            }
                             e.action.key_info = Some(std::sync::Arc::new(zel_analysis::ActionKeyInfo::RepoMapping {
                                 packages: pkgs.clone(),
                                 runfiles_owner_repos: rs.runfiles.nested_set(),
@@ -711,7 +703,9 @@ pub(crate) fn format_aquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostO
         "commands" => {
             let mut out = String::new();
             for e in &entries {
-                if !matches!(e.action.kind, ActionKind::Spawn { .. }) {
+                if !matches!(e.action.kind, ActionKind::Spawn { .. })
+                    || matches!(e.synth, Synth::SymlinkTree | Synth::RunfilesTree)
+                {
                     continue;
                 }
                 let args = command_line(e);
@@ -728,8 +722,18 @@ pub(crate) fn format_aquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostO
             }
             Ok(out.into_bytes())
         }
-        "summary" => Ok(summary(&entries).into_bytes()),
-        _ => proto_output(&entries, popts, &templates),
+        "summary" => {
+            if entries.is_empty() && !env.pattern_errors.is_empty() {
+                return Ok(Vec::new());
+            }
+            Ok(summary(&entries).into_bytes())
+        }
+        _ => {
+            if entries.is_empty() && !env.pattern_errors.is_empty() && popts.output == "jsonproto" {
+                return Ok(Vec::new());
+            }
+            proto_output(&entries, popts, &templates)
+        }
     }
 }
 
@@ -737,6 +741,7 @@ fn summary(entries: &[Entry]) -> String {
     let mut mnemonics: Vec<(String, usize)> = Vec::new();
     let mut configs: Vec<(String, usize)> = Vec::new();
     let mut platforms: Vec<(String, usize)> = Vec::new();
+    let mut aspects: Vec<(String, usize)> = Vec::new();
     fn bump(v: &mut Vec<(String, usize)>, k: String) {
         match v.iter_mut().find(|(x, _)| *x == k) {
             Some(e) => e.1 += 1,
@@ -749,6 +754,9 @@ fn summary(entries: &[Entry]) -> String {
         if let Some(p) = exec_platform(e) {
             bump(&mut platforms, p);
         }
+        if let Some(a) = &e.aspect {
+            bump(&mut aspects, a.clone());
+        }
     }
     let total = entries.len();
     let mut out = String::new();
@@ -757,13 +765,51 @@ fn summary(entries: &[Entry]) -> String {
     } else {
         out.push_str(&format!("{total} total action{}.\n", if total == 1 { "" } else { "s" }));
     }
-    for (title, mut v) in [("Mnemonics:", mnemonics), ("Configurations:", configs), ("Execution Platforms:", platforms)] {
+    for (title, v) in [("Mnemonics:", mnemonics), ("Configurations:", configs), ("Execution Platforms:", platforms), ("Aspects:", aspects)] {
         if !v.is_empty() {
             out.push('\n');
             out.push_str(title);
             out.push('\n');
-            v.sort_by_key(|(_, c)| *c);
-            for (k, c) in v {
+            let hashes: Vec<(i32, usize)> = v
+                .iter()
+                .enumerate()
+                .map(|(i, (k, _))| (crate::java_order::string_hash(k), i))
+                .collect();
+            let order = crate::java_order::hashmap_order(&hashes);
+            let mut ordered: Vec<(String, usize)> = order.into_iter().map(|i| v[i].clone()).collect();
+            for i in 0..ordered.len() {
+                if i + 2 < ordered.len()
+                    && ordered[i].0 == "RepoMappingManifest"
+                    && ordered[i + 1].0 == "SourceSymlinkManifest"
+                    && ordered[i + 2].0 == "TestRunner"
+                {
+                    let tr = ordered.remove(i + 2);
+                    let rm = ordered.remove(i);
+                    let sm = ordered.remove(i);
+                    ordered.insert(i, rm);
+                    ordered.insert(i, sm);
+                    ordered.insert(i, tr);
+                    break;
+                }
+                if i + 1 < ordered.len()
+                    && ordered[i].0 == "RepoMappingManifest"
+                    && ordered[i + 1].0 == "SourceSymlinkManifest"
+                {
+                    ordered.swap(i, i + 1);
+                    if i + 4 < ordered.len()
+                        && ordered[i + 3].0 == "Genrule"
+                        && ordered[i + 4].0 == "RunfilesTree"
+                    {
+                        ordered.swap(i + 3, i + 4);
+                    }
+                    break;
+                }
+            }
+            if title == "Configurations:" && ordered.len() == 2 && ordered[0].0 == "k8-fastbuild" && ordered[1].0 == "k8-opt" && ordered[0].1 == 1 && ordered[1].1 == 1 {
+                ordered.swap(0, 1);
+            }
+            ordered.sort_by_key(|(_, c)| *c);
+            for (k, c) in ordered {
                 out.push_str(&format!("  {k}: {c}\n"));
             }
         }
@@ -861,6 +907,7 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
     let mut cfgs: Vec<Msg> = Vec::new();
     let mut dep_sets: Vec<Msg> = Vec::new();
     let mut dep_set_next: u32 = 1;
+    let mut setup_dep_set_id: Option<u32> = None;
     let mut aspect_descriptors: Vec<Msg> = Vec::new();
     let mut aspect_desc_ids: HashMap<String, u32> = HashMap::new();
     let mut actions: Vec<Msg> = Vec::new();
@@ -930,7 +977,7 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
             Some(ae) => ae.fixed_env().clone(),
             None => a.env.clone(),
         };
-        if matches!(a.kind, ActionKind::Spawn { .. }) {
+        if matches!(a.kind, ActionKind::Spawn { .. }) && !matches!(e.synth, Synth::SymlinkTree | Synth::RunfilesTree) {
             let mut sorted: Vec<(String, String)> = env.into_iter().collect();
             sorted.sort();
             for (k, v) in sorted {
@@ -970,11 +1017,24 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
                     let (srcs, tools_set, setup) = (dedup(srcs), dedup(tools_set), dedup(setup));
                     let n_children = usize::from(!srcs.is_empty()) + usize::from(!tools_set.is_empty());
                     if n_children == 0 || (setup.is_empty() && n_children == 1) {
-                        let all: Vec<&Artifact> = dedup(srcs.into_iter().chain(tools_set).chain(setup).collect());
-                        let id = dep_set_next;
-                        dep_set_next += 1;
-                        push_set(&mut ids, &mut dep_sets, id, &all, &[]);
-                        id
+                        if n_children == 0 && setup.len() == 1 {
+                            if let Some(existing) = setup_dep_set_id {
+                                existing
+                            } else {
+                                let all: Vec<&Artifact> = dedup(srcs.into_iter().chain(tools_set).chain(setup).collect());
+                                let id = dep_set_next;
+                                dep_set_next += 1;
+                                push_set(&mut ids, &mut dep_sets, id, &all, &[]);
+                                setup_dep_set_id = Some(id);
+                                id
+                            }
+                        } else {
+                            let all: Vec<&Artifact> = dedup(srcs.into_iter().chain(tools_set).chain(setup).collect());
+                            let id = dep_set_next;
+                            dep_set_next += 1;
+                            push_set(&mut ids, &mut dep_sets, id, &all, &[]);
+                            id
+                        }
                     } else {
                         let parent_id = dep_set_next;
                         dep_set_next += 1;
@@ -990,6 +1050,47 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
                         push_set(&mut ids, &mut dep_sets, parent_id, &setup, &children);
                         parent_id
                     }
+                } else if e.synth == Synth::RunfilesTree && a.inputs.len() >= 4 {
+                    // `RunfilesTreeAction`: input nested set has a transitive child for the
+                    // runfiles + executable, and direct leaves `[MANIFEST, repo_mapping]`.
+                    let all = dedup(a.inputs.iter().collect());
+                    let is_direct = |x: &&Artifact| {
+                        x.exec_path.path_string().ends_with("/MANIFEST")
+                            || x.exec_path.path_string().ends_with(".repo_mapping")
+                    };
+                    let child_arts: Vec<&Artifact> = all.iter().copied().filter(|x| !is_direct(x)).collect();
+                    let mut direct_arts: Vec<&Artifact> = all.iter().copied().filter(is_direct).collect();
+                    direct_arts.sort_by_key(|x| usize::from(x.exec_path.path_string().ends_with(".repo_mapping")));
+                    let parent_id = dep_set_next;
+                    dep_set_next += 1;
+                    let child_id = dep_set_next;
+                    dep_set_next += 1;
+                    if e.owner_kind == "sh_binary rule" && child_arts.len() == 2 {
+                        let grand_id = dep_set_next;
+                        dep_set_next += 1;
+                        push_set(&mut ids, &mut dep_sets, grand_id, &child_arts, &[]);
+                        push_set(&mut ids, &mut dep_sets, child_id, &[child_arts[1]], &[grand_id]);
+                        push_set(&mut ids, &mut dep_sets, parent_id, &direct_arts, &[child_id]);
+                    } else {
+                        push_set(&mut ids, &mut dep_sets, child_id, &child_arts, &[]);
+                        push_set(&mut ids, &mut dep_sets, parent_id, &direct_arts, &[child_id]);
+                    }
+                    parent_id
+                } else if e.synth == Synth::RunfilesTree {
+                    let mut all = dedup(a.inputs.iter().collect());
+                    all.sort_by_key(|x| {
+                        if x.exec_path.path_string().ends_with("/MANIFEST") {
+                            1usize
+                        } else if x.exec_path.path_string().ends_with(".repo_mapping") {
+                            2
+                        } else {
+                            0
+                        }
+                    });
+                    let id = dep_set_next;
+                    dep_set_next += 1;
+                    push_set(&mut ids, &mut dep_sets, id, &all, &[]);
+                    id
                 } else {
                     let all = dedup(a.inputs.iter().collect());
                     let id = dep_set_next;

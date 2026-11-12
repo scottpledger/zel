@@ -39,7 +39,7 @@
   }],
   "actions": [{
     "targetId": 1,
-    "actionKey": "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a",
+    "actionKey": "8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8",
     "mnemonic": "FileWrite",
     "configurationId": 1,
     "outputIds": [1],
@@ -48,7 +48,7 @@
     "isExecutable": true
   }, {
     "targetId": 1,
-    "actionKey": "04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d",
+    "actionKey": "6d4676cfc8cc9f2031a6a30402bfbe451f4d33cd46a92272cddb17441af265da",
     "mnemonic": "RepoMappingManifest",
     "configurationId": 1,
     "outputIds": [2],
@@ -56,7 +56,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "c9003ec327c69a6d7cc84512879d19c1353a0bb372ab45c23672289203c93160",
+    "actionKey": "23941fd4e6093d3ee7bc18e2ae73db2a79f007db9c7fa6c90977fc47de7ecccd",
     "mnemonic": "SourceSymlinkManifest",
     "configurationId": 1,
     "outputIds": [3],
@@ -64,7 +64,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "2d3875d14b12b47496a9004d1f82c6bcf72e8c046ffdd9e3c962823de9b5c1fe",
+    "actionKey": "5e2d081693a0cdca35fe93c28f1f347a104fc427e6073326245ce128e6f0541f",
     "mnemonic": "SymlinkTree",
     "configurationId": 1,
     "inputDepSetIds": [1],
@@ -82,7 +82,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "205428c674ece34895c9d37069735603ac04f06cc7f559f119763b18bb7e84d8",
+    "actionKey": "6ff7a6d9e8ae0f0d2e54c37977421c903806c134117396c1e00b1968a500b478",
     "mnemonic": "TestRunner",
     "configurationId": 1,
     "arguments": ["external/bazel_tools/tools/test/test-setup.sh", "b/t1"],
@@ -116,9 +116,9 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
   }],
   "ruleClasses": [{
     "id": 1,
@@ -129,7 +129,7 @@
     "label": "bazel-out"
   }, {
     "id": 4,
-    "label": "darwin_arm64-fastbuild",
+    "label": "k8-fastbuild",
     "parentId": 5
   }, {
     "id": 3,

@@ -1,12 +1,10 @@
 Starting local Bazel server (9.3.2) and connecting to it...
 Computing main repo mapping: 
-Computing main repo mapping: 
-Computing main repo mapping: 
 Loading: 
 Loading: 0 packages loaded
 Analyzing: 14 targets (5 packages loaded, 6 targets configured)
 INFO: Analyzed 14 targets (9 packages loaded, 35 targets configured).
 INFO: Found 14 targets...
-INFO: Elapsed time: 4.501s, Critical Path: 0.00s
+INFO: Elapsed time: 3.146s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

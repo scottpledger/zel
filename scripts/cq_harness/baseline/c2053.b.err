@@ -4,6 +4,6 @@ Loading: 0 packages loaded
 Analyzing: target //a:lib2 (0 packages loaded, 0 targets configured)
 INFO: Analyzed target //a:lib2 (0 packages loaded, 0 targets configured).
 INFO: Found 1 target...
-INFO: Elapsed time: 0.057s, Critical Path: 0.00s
+INFO: Elapsed time: 0.034s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

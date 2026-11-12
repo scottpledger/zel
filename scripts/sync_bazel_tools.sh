@@ -60,6 +60,19 @@ for f in BUILD common.h mapped_file.h mapped_file_unix.cc mapped_file_windows.cc
   mkdir -p "$ROOT/third_party/ijar"; cp "$BZL/third_party/ijar/$f" "$ROOT/third_party/ijar/$f"
 done
 echo "synced total $(find "$ROOT" -type f | wc -l) files (resources)"
+rm -rf \
+  "$DST/build_defs/cc/tests" \
+  "$DST/build_defs/inspect" \
+  "$DST/compliance" \
+  "$DST/bash/BUILD" \
+  "$DST/mini_tar" \
+  "$DST/ctexplain" \
+  "$DST/aquery_differ" \
+  "$DST/defaults" \
+  "$DST/allowlists/subrules_allowlist" \
+  "$DST/allowlists/initializer_allowlist" \
+  "$DST/allowlists/skip_validations_allowlist" \
+  "$DST/allowlists/extend_rule_allowlist"
 
 # zel has no prebuilt tools/zip/zipper binary (Bazel's distribution embeds one built from
 # //third_party/ijar:zipper): always build the zipper from the embedded ijar sources.

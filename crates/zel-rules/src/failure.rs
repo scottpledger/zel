@@ -52,6 +52,9 @@ pub fn analysis_failure(
     config: &str,
     rule_loc: &dyn Fn(&str) -> Option<String>,
 ) -> AnalysisFailure {
+    if error == "target depends on an already-reported cycle" {
+        return AnalysisFailure { events: Vec::new(), abort_suffix: "" };
+    }
     let mut events = Vec::new();
     for (i, line) in error.lines().enumerate() {
         if i == 0 && !line.starts_with("ERROR:") {

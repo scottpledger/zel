@@ -81,7 +81,6 @@ fn spec_of(kind: &str, member: &str) -> Option<&'static str> {
         (_, "getenv") => "^name:s! ^default:sn",
         (_, "report_progress") => "^status:s",
         (_, "execute") => "^arguments:q! timeout:i environment:d quiet:b working_directory:s",
-        (_, "copy") => "^src:p3! ^dst:p3! *executable:b *watch_src:s",
         (_, "extract") => "archive:p3! output:p3 strip_prefix:s *rename_files:d *watch_archive:s *stripPrefix:s *strip_components:i *type:s",
         (_, "download") => "url:u! output:p3 sha256:s executable:b allow_fail:b canonical_id:s auth:d headers:d *integrity:s *block:b",
         (_, "download_and_extract") => {
@@ -93,7 +92,7 @@ fn spec_of(kind: &str, member: &str) -> Option<&'static str> {
         ("repository_ctx", "delete") => "^path:p2!",
         ("repository_ctx", "rename") => "^src:p3! ^dst:p3!",
         ("repository_ctx", "patch") => "^patch_file:p3! strip:i *directory:p3 *watch_patch:s",
-        ("repository_ctx", "watch_tree") => "^path:p3! *exclude:l",
+        ("repository_ctx", "watch_tree") => "^path:p3!",
         ("repository_ctx", "repo_metadata") => "*reproducible:b *attrs_for_reproducibility:d",
         _ => return None,
     })

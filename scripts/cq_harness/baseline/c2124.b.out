@@ -15,9 +15,48 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
+  }, {
+    "target": {
+      "type": "RULE",
+      "rule": {
+        "name": "@@platforms//host:host",
+        "ruleClass": "platform",
+        "location": "@OB@/external/platforms/host/BUILD:14:9",
+        "ruleInput": ["@@platforms//cpu:x86_64", "@@platforms//os:linux"]
+      }
+    },
+    "configuration": {
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
+    },
+    "configurationId": 2
+  }, {
+    "target": {
+      "type": "PACKAGE_GROUP",
+      "packageGroup": {
+        "name": "@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist",
+        "containedPackage": ["public"]
+      }
+    },
+    "configuration": {
+      "checksum": "null"
+    }
+  }, {
+    "target": {
+      "type": "RULE",
+      "rule": {
+        "name": "@bazel_tools//tools:host_platform",
+        "ruleClass": "alias",
+        "location": "@OB@/external/bazel_tools/tools/BUILD:5:6",
+        "ruleInput": ["@@platforms//host:host"]
+      }
+    },
+    "configuration": {
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
+    },
+    "configurationId": 2
   }, {
     "target": {
       "type": "RULE",
@@ -40,95 +79,21 @@
       }
     },
     "configuration": {
-      "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
-    },
-    "configurationId": 2
-  }, {
-    "target": {
-      "type": "RULE",
-      "rule": {
-        "name": "@bazel_tools//tools:host_platform",
-        "ruleClass": "alias",
-        "location": "@OB@/external/bazel_tools/tools/BUILD:5:6",
-        "ruleInput": ["@@platforms//host:host"]
-      }
-    },
-    "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+      "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
     },
     "configurationId": 3
   }, {
     "target": {
       "type": "RULE",
       "rule": {
-        "name": "@@platforms//host:host",
-        "ruleClass": "platform",
-        "location": "@OB@/external/platforms/host/BUILD:14:9",
-        "ruleInput": ["@@platforms//cpu:aarch64", "@@platforms//os:osx"]
-      }
-    },
-    "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
-    },
-    "configurationId": 3
-  }, {
-    "target": {
-      "type": "PACKAGE_GROUP",
-      "packageGroup": {
-        "name": "@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist",
-        "containedPackage": ["public"]
-      }
-    },
-    "configuration": {
-      "checksum": "null"
-    }
-  }, {
-    "target": {
-      "type": "RULE",
-      "rule": {
-        "name": "@@platforms//cpu:aarch64",
+        "name": "@@platforms//os:linux",
         "ruleClass": "constraint_value",
-        "location": "@OB@/external/platforms/cpu/BUILD:57:17",
-        "ruleInput": ["@@platforms//cpu:cpu"]
-      }
-    },
-    "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
-    },
-    "configurationId": 3
-  }, {
-    "target": {
-      "type": "RULE",
-      "rule": {
-        "name": "@@platforms//os:osx",
-        "ruleClass": "constraint_value",
-        "location": "@OB@/external/platforms/os/BUILD:71:17",
+        "location": "@OB@/external/platforms/os/BUILD:41:17",
         "ruleInput": ["@@platforms//os:os"]
       }
     },
     "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
-    },
-    "configurationId": 3
-  }, {
-    "target": {
-      "type": "RULE",
-      "rule": {
-        "name": "//a:srcs_fg",
-        "ruleClass": "filegroup",
-        "location": "@WS@/a/BUILD:3:10",
-        "attribute": [{
-          "name": "srcs",
-          "type": "LABEL_LIST",
-          "stringListValue": ["//a:x.txt", "//a:y.txt", "//a:z.txt"],
-          "explicitlySpecified": true,
-          "nodep": false
-        }],
-        "ruleInput": ["//a:x.txt", "//a:y.txt", "//a:z.txt"]
-      }
-    },
-    "configuration": {
-      "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
     },
     "configurationId": 2
   }, {
@@ -147,6 +112,41 @@
     "target": {
       "type": "RULE",
       "rule": {
+        "name": "//a:srcs_fg",
+        "ruleClass": "filegroup",
+        "location": "@WS@/a/BUILD:3:10",
+        "attribute": [{
+          "name": "srcs",
+          "type": "LABEL_LIST",
+          "stringListValue": ["//a:x.txt", "//a:y.txt", "//a:z.txt"],
+          "explicitlySpecified": true,
+          "nodep": false
+        }],
+        "ruleInput": ["//a:x.txt", "//a:y.txt", "//a:z.txt"]
+      }
+    },
+    "configuration": {
+      "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
+    },
+    "configurationId": 3
+  }, {
+    "target": {
+      "type": "RULE",
+      "rule": {
+        "name": "@@platforms//cpu:x86_64",
+        "ruleClass": "constraint_value",
+        "location": "@OB@/external/platforms/cpu/BUILD:162:17",
+        "ruleInput": ["@@platforms//cpu:cpu"]
+      }
+    },
+    "configuration": {
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
+    },
+    "configurationId": 2
+  }, {
+    "target": {
+      "type": "RULE",
+      "rule": {
         "name": "@ext//lib:data",
         "ruleClass": "filegroup",
         "location": "@OB@/external/ext+/lib/BUILD:1:10",
@@ -161,9 +161,9 @@
       }
     },
     "configuration": {
-      "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+      "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
     },
-    "configurationId": 2
+    "configurationId": 3
   }, {
     "target": {
       "type": "SOURCE_FILE",
@@ -186,9 +186,9 @@
       }
     },
     "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
     },
-    "configurationId": 3
+    "configurationId": 2
   }, {
     "target": {
       "type": "RULE",
@@ -199,9 +199,9 @@
       }
     },
     "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
     },
-    "configurationId": 3
+    "configurationId": 2
   }, {
     "target": {
       "type": "SOURCE_FILE",
@@ -229,9 +229,9 @@
   }],
   "configurations": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c",
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -345,7 +345,7 @@
         "value": "fastbuild"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -429,7 +429,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"
@@ -1282,9 +1282,230 @@
     }]
   }, {
     "id": 2,
-    "mnemonic": "darwin_arm64-opt",
-    "platformName": "darwin_arm64",
-    "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565",
+    "mnemonic": "fastbuild-noconfig",
+    "platformName": "k8",
+    "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569",
+    "fragmentOptions": [{
+      "name": "com.google.devtools.build.lib.analysis.config.CoreOptions",
+      "options": [{
+        "name": "action_env",
+        "value": "[]"
+      }, {
+        "name": "affected by starlark transition",
+        "value": "[]"
+      }, {
+        "name": "allow_analysis_failures",
+        "value": "false"
+      }, {
+        "name": "allow_unresolved_symlinks",
+        "value": "true"
+      }, {
+        "name": "allowed_cpu_values",
+        "value": "[]"
+      }, {
+        "name": "analysis_testing_deps_limit",
+        "value": "2000"
+      }, {
+        "name": "archived_tree_artifact_mnemonics_filter",
+        "value": "-(?:(?\u003e.*))"
+      }, {
+        "name": "build_runfile_links",
+        "value": "true"
+      }, {
+        "name": "build_runfile_manifests",
+        "value": "true"
+      }, {
+        "name": "check_licenses",
+        "value": "false"
+      }, {
+        "name": "check_visibility",
+        "value": "true"
+      }, {
+        "name": "collect_code_coverage",
+        "value": "false"
+      }, {
+        "name": "compilation_mode",
+        "value": "fastbuild"
+      }, {
+        "name": "cpu",
+        "value": "k8"
+      }, {
+        "name": "enable_runfiles",
+        "value": "AUTO"
+      }, {
+        "name": "enforce_constraints",
+        "value": "true"
+      }, {
+        "name": "evaluating for analysis test",
+        "value": "false"
+      }, {
+        "name": "exec_aspects",
+        "value": "[]"
+      }, {
+        "name": "experimental_action_listener",
+        "value": "[]"
+      }, {
+        "name": "experimental_allow_map_directory",
+        "value": "true"
+      }, {
+        "name": "experimental_collect_code_coverage_for_generated_files",
+        "value": "false"
+      }, {
+        "name": "experimental_debug_selects_always_succeed",
+        "value": "false"
+      }, {
+        "name": "experimental_enforce_transitive_visibility",
+        "value": "false"
+      }, {
+        "name": "experimental_exclude_defines_from_exec_config",
+        "value": "false"
+      }, {
+        "name": "experimental_exec_config",
+        "value": "@_builtins//:common/builtin_exec_platforms.bzl%bazel_exec_transition"
+      }, {
+        "name": "experimental_exec_configuration_distinguisher",
+        "value": "OFF"
+      }, {
+        "name": "experimental_extended_sanity_checks",
+        "value": "false"
+      }, {
+        "name": "experimental_output_directory_naming_scheme",
+        "value": "DIFF_AGAINST_DYNAMIC_BASELINE"
+      }, {
+        "name": "experimental_output_paths",
+        "value": "OFF"
+      }, {
+        "name": "experimental_override_platform_cpu_name",
+        "value": "[]"
+      }, {
+        "name": "experimental_platform_in_output_dir",
+        "value": "AUTO"
+      }, {
+        "name": "experimental_propagate_custom_flag",
+        "value": "[]"
+      }, {
+        "name": "experimental_remotable_source_manifests",
+        "value": "false"
+      }, {
+        "name": "experimental_strict_fileset_output",
+        "value": "false"
+      }, {
+        "name": "experimental_throttle_action_cache_check",
+        "value": "true"
+      }, {
+        "name": "experimental_use_platforms_in_output_dir_legacy_heuristic",
+        "value": "true"
+      }, {
+        "name": "experimental_writable_outputs",
+        "value": "false"
+      }, {
+        "name": "features",
+        "value": "[]"
+      }, {
+        "name": "flag_alias",
+        "value": "[]"
+      }, {
+        "name": "host_action_env",
+        "value": "[]"
+      }, {
+        "name": "host_compilation_mode",
+        "value": "opt"
+      }, {
+        "name": "host_cpu",
+        "value": "k8"
+      }, {
+        "name": "host_features",
+        "value": "[]"
+      }, {
+        "name": "include_config_fragments_provider",
+        "value": "OFF"
+      }, {
+        "name": "incompatible_always_include_files_in_data",
+        "value": "true"
+      }, {
+        "name": "incompatible_auto_exec_groups",
+        "value": "false"
+      }, {
+        "name": "incompatible_bazel_test_exec_run_under",
+        "value": "true"
+      }, {
+        "name": "incompatible_bep_cpu_from_platform",
+        "value": "false"
+      }, {
+        "name": "incompatible_check_testonly_for_output_files",
+        "value": "false"
+      }, {
+        "name": "incompatible_compact_repo_mapping_manifest",
+        "value": "true"
+      }, {
+        "name": "incompatible_disable_select_on",
+        "value": "[]"
+      }, {
+        "name": "incompatible_exclude_starlark_flags_from_exec_config",
+        "value": "false"
+      }, {
+        "name": "incompatible_filegroup_runfiles_for_data",
+        "value": "true"
+      }, {
+        "name": "incompatible_limit_platforms_in_output_dir_to",
+        "value": "[]"
+      }, {
+        "name": "incompatible_merge_genfiles_directory",
+        "value": "true"
+      }, {
+        "name": "incompatible_modify_execution_info_additive",
+        "value": "true"
+      }, {
+        "name": "incompatible_target_cpu_from_platform",
+        "value": "true"
+      }, {
+        "name": "instrument_test_targets",
+        "value": "false"
+      }, {
+        "name": "instrumentation_filter",
+        "value": "-(?:(?\u003e/javatests[/:])|(?\u003e/test/java[/:]))"
+      }, {
+        "name": "is exec configuration",
+        "value": "false"
+      }, {
+        "name": "min_param_file_size",
+        "value": "32768"
+      }, {
+        "name": "modify_execution_info",
+        "value": "[]"
+      }, {
+        "name": "platform_suffix",
+        "value": "null"
+      }, {
+        "name": "run_under",
+        "value": "null"
+      }, {
+        "name": "scl_config",
+        "value": "null"
+      }, {
+        "name": "stamp",
+        "value": "false"
+      }, {
+        "name": "strict_filesets",
+        "value": "false"
+      }, {
+        "name": "target_environment",
+        "value": "[]"
+      }, {
+        "name": "use_target_platform_for_tests",
+        "value": "false"
+      }, {
+        "name": "verbose_visibility_errors",
+        "value": "false"
+      }]
+    }, {
+      "name": "user-defined"
+    }]
+  }, {
+    "id": 3,
+    "mnemonic": "k8-opt",
+    "platformName": "k8",
+    "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -1398,7 +1619,7 @@
         "value": "opt"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -1482,7 +1703,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"
@@ -2329,227 +2550,6 @@
       }, {
         "name": "python_native_rules_allowlist",
         "value": "null"
-      }]
-    }, {
-      "name": "user-defined"
-    }]
-  }, {
-    "id": 3,
-    "mnemonic": "fastbuild-noconfig",
-    "platformName": "darwin_arm64",
-    "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314",
-    "fragmentOptions": [{
-      "name": "com.google.devtools.build.lib.analysis.config.CoreOptions",
-      "options": [{
-        "name": "action_env",
-        "value": "[]"
-      }, {
-        "name": "affected by starlark transition",
-        "value": "[]"
-      }, {
-        "name": "allow_analysis_failures",
-        "value": "false"
-      }, {
-        "name": "allow_unresolved_symlinks",
-        "value": "true"
-      }, {
-        "name": "allowed_cpu_values",
-        "value": "[]"
-      }, {
-        "name": "analysis_testing_deps_limit",
-        "value": "2000"
-      }, {
-        "name": "archived_tree_artifact_mnemonics_filter",
-        "value": "-(?:(?\u003e.*))"
-      }, {
-        "name": "build_runfile_links",
-        "value": "true"
-      }, {
-        "name": "build_runfile_manifests",
-        "value": "true"
-      }, {
-        "name": "check_licenses",
-        "value": "false"
-      }, {
-        "name": "check_visibility",
-        "value": "true"
-      }, {
-        "name": "collect_code_coverage",
-        "value": "false"
-      }, {
-        "name": "compilation_mode",
-        "value": "fastbuild"
-      }, {
-        "name": "cpu",
-        "value": "darwin_arm64"
-      }, {
-        "name": "enable_runfiles",
-        "value": "AUTO"
-      }, {
-        "name": "enforce_constraints",
-        "value": "true"
-      }, {
-        "name": "evaluating for analysis test",
-        "value": "false"
-      }, {
-        "name": "exec_aspects",
-        "value": "[]"
-      }, {
-        "name": "experimental_action_listener",
-        "value": "[]"
-      }, {
-        "name": "experimental_allow_map_directory",
-        "value": "true"
-      }, {
-        "name": "experimental_collect_code_coverage_for_generated_files",
-        "value": "false"
-      }, {
-        "name": "experimental_debug_selects_always_succeed",
-        "value": "false"
-      }, {
-        "name": "experimental_enforce_transitive_visibility",
-        "value": "false"
-      }, {
-        "name": "experimental_exclude_defines_from_exec_config",
-        "value": "false"
-      }, {
-        "name": "experimental_exec_config",
-        "value": "@_builtins//:common/builtin_exec_platforms.bzl%bazel_exec_transition"
-      }, {
-        "name": "experimental_exec_configuration_distinguisher",
-        "value": "OFF"
-      }, {
-        "name": "experimental_extended_sanity_checks",
-        "value": "false"
-      }, {
-        "name": "experimental_output_directory_naming_scheme",
-        "value": "DIFF_AGAINST_DYNAMIC_BASELINE"
-      }, {
-        "name": "experimental_output_paths",
-        "value": "OFF"
-      }, {
-        "name": "experimental_override_platform_cpu_name",
-        "value": "[]"
-      }, {
-        "name": "experimental_platform_in_output_dir",
-        "value": "AUTO"
-      }, {
-        "name": "experimental_propagate_custom_flag",
-        "value": "[]"
-      }, {
-        "name": "experimental_remotable_source_manifests",
-        "value": "false"
-      }, {
-        "name": "experimental_strict_fileset_output",
-        "value": "false"
-      }, {
-        "name": "experimental_throttle_action_cache_check",
-        "value": "true"
-      }, {
-        "name": "experimental_use_platforms_in_output_dir_legacy_heuristic",
-        "value": "true"
-      }, {
-        "name": "experimental_writable_outputs",
-        "value": "false"
-      }, {
-        "name": "features",
-        "value": "[]"
-      }, {
-        "name": "flag_alias",
-        "value": "[]"
-      }, {
-        "name": "host_action_env",
-        "value": "[]"
-      }, {
-        "name": "host_compilation_mode",
-        "value": "opt"
-      }, {
-        "name": "host_cpu",
-        "value": "darwin_arm64"
-      }, {
-        "name": "host_features",
-        "value": "[]"
-      }, {
-        "name": "include_config_fragments_provider",
-        "value": "OFF"
-      }, {
-        "name": "incompatible_always_include_files_in_data",
-        "value": "true"
-      }, {
-        "name": "incompatible_auto_exec_groups",
-        "value": "false"
-      }, {
-        "name": "incompatible_bazel_test_exec_run_under",
-        "value": "true"
-      }, {
-        "name": "incompatible_bep_cpu_from_platform",
-        "value": "false"
-      }, {
-        "name": "incompatible_check_testonly_for_output_files",
-        "value": "false"
-      }, {
-        "name": "incompatible_compact_repo_mapping_manifest",
-        "value": "true"
-      }, {
-        "name": "incompatible_disable_select_on",
-        "value": "[]"
-      }, {
-        "name": "incompatible_exclude_starlark_flags_from_exec_config",
-        "value": "false"
-      }, {
-        "name": "incompatible_filegroup_runfiles_for_data",
-        "value": "true"
-      }, {
-        "name": "incompatible_limit_platforms_in_output_dir_to",
-        "value": "[]"
-      }, {
-        "name": "incompatible_merge_genfiles_directory",
-        "value": "true"
-      }, {
-        "name": "incompatible_modify_execution_info_additive",
-        "value": "true"
-      }, {
-        "name": "incompatible_target_cpu_from_platform",
-        "value": "true"
-      }, {
-        "name": "instrument_test_targets",
-        "value": "false"
-      }, {
-        "name": "instrumentation_filter",
-        "value": "-(?:(?\u003e/javatests[/:])|(?\u003e/test/java[/:]))"
-      }, {
-        "name": "is exec configuration",
-        "value": "false"
-      }, {
-        "name": "min_param_file_size",
-        "value": "32768"
-      }, {
-        "name": "modify_execution_info",
-        "value": "[]"
-      }, {
-        "name": "platform_suffix",
-        "value": "null"
-      }, {
-        "name": "run_under",
-        "value": "null"
-      }, {
-        "name": "scl_config",
-        "value": "null"
-      }, {
-        "name": "stamp",
-        "value": "false"
-      }, {
-        "name": "strict_filesets",
-        "value": "false"
-      }, {
-        "name": "target_environment",
-        "value": "[]"
-      }, {
-        "name": "use_target_platform_for_tests",
-        "value": "false"
-      }, {
-        "name": "verbose_visibility_errors",
-        "value": "false"
       }]
     }, {
       "name": "user-defined"

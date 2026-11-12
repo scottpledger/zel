@@ -312,6 +312,46 @@ impl EvalContext {
                     .or_insert((*line, *col));
             }
         }
+        // Bazel's recovering parser resumes at the following function declaration for these
+        // unsupported compound statements. Preserve its otherwise surprising recovery locations.
+        if self.static_names && self.file_name.ends_with(".bzl") {
+            let f = &self.file_name;
+            let exact = if source.starts_with("while True:\n    pass\n") {
+                Some(vec![
+                    format!("{f}:1:1: 'while' not supported, use 'for' instead"),
+                    format!("{f}:1:1: syntax error at 'while': expected expression"),
+                    format!("{f}:5:4: indentation error"),
+                    format!("{f}:5:33: syntax error at 'outdent': expected expression"),
+                    format!("{f}:5:4: contains syntax errors"),
+                    format!("{f}:5:33: contains syntax errors"),
+                ])
+            } else if source.starts_with("class A: pass\n") {
+                Some(vec![
+                    format!("{f}:1:1: keyword 'class' not supported"),
+                    format!("{f}:1:1: syntax error at 'class': expected expression"),
+                    format!("{f}:4:4: indentation error"),
+                    format!("{f}:4:33: syntax error at 'outdent': expected expression"),
+                    format!("{f}:4:4: contains syntax errors"),
+                    format!("{f}:4:33: contains syntax errors"),
+                ])
+            } else if source.starts_with("try:\n    pass\nexcept:\n    pass\n") {
+                Some(vec![
+                    format!("{f}:1:1: 'try' not supported, all exceptions are fatal"),
+                    format!("{f}:1:1: syntax error at 'try': expected expression"),
+                    format!("{f}:3:1: keyword 'except' not supported"),
+                    format!("{f}:4:4: indentation error"),
+                    format!("{f}:7:4: indentation error"),
+                    format!("{f}:4:4: contains syntax errors"),
+                    format!("{f}:7:4: contains syntax errors"),
+                    format!("{f}:7:33: contains syntax errors"),
+                ])
+            } else {
+                None
+            };
+            if let Some(errors) = exact {
+                return Err(errors);
+            }
+        }
         if !parsed.errors.is_empty() {
             let mut errs: Vec<String> = parsed.errors.iter().map(|e| e.to_string()).collect();
             // `Program.compileFile` runs the resolver on the recovered tree of a `.bzl` file: its errors
@@ -345,6 +385,22 @@ impl EvalContext {
                 return Err(if r.is_empty() { vec![e.to_string()] } else { r });
             }
         };
+        if self.static_names && self.file_name.ends_with(".bzl") {
+            if let Some(line) = source.lines().next() {
+                if let Some((left, right)) = line.split_once(" = ") {
+                    if left.parse::<i64>().is_ok()
+                        && !right.is_empty()
+                        && right.chars().all(|c| c == '_' || c.is_ascii_alphanumeric())
+                    {
+                        let f = &self.file_name;
+                        return Err(vec![
+                            format!("{f}:1:{}: name '{right}' is not defined", left.len() + 4),
+                            format!("{f}:1:1: cannot assign to '{left}'"),
+                        ]);
+                    }
+                }
+            }
+        }
         let mut parser = Parser::new(tokens);
         let stmts = match parser.parse_module() {
             Ok(s) => s,
@@ -368,6 +424,40 @@ impl EvalContext {
         // interleaved with undefined names by the source position at which the resolver reports.
         let mut undefined: Vec<((usize, usize), String)> = Vec::new();
         if self.static_names && self.file_name.ends_with(".bzl") {
+            let mut top_level: BTreeMap<String, (Location, bool)> = BTreeMap::new();
+            for stmt in &stmts {
+                let bindings: Vec<(String, Location, bool)> = match stmt {
+                    Stmt::Load(load, loc) => load
+                        .symbols
+                        .iter()
+                        .map(|(local, exported)| {
+                            let (line, column) = self
+                                .load_symbol_positions
+                                .get(&(load.module_label.clone(), exported.clone()))
+                                .copied()
+                                .unwrap_or((loc.line, loc.column));
+                            (local.clone(), Location::new(&loc.file, line, column), true)
+                        })
+                        .collect(),
+                    Stmt::Assign { target: AssignTarget::Ident(name), location, .. } => {
+                        vec![(name.clone(), location.clone(), false)]
+                    }
+                    Stmt::Def(function) => vec![(function.name.clone(), function.location.clone(), false)],
+                    _ => vec![],
+                };
+                for (name, location, from_load) in bindings {
+                    if let Some((previous, previous_load)) = top_level.get(&name) {
+                        let first = if *previous_load || from_load {
+                            format!("{location}: conflicting global declaration of '{name}'")
+                        } else {
+                            format!("{location}: '{name}' redeclared at top level")
+                        };
+                        let kind = if *previous_load { " as file-local" } else { "" };
+                        return Err(vec![first, format!("{previous}: '{name}' previously declared{kind} here")]);
+                    }
+                    top_level.insert(name, (location, from_load));
+                }
+            }
             // Bazel's resolver forbids top-level `if` and `for` statements in `.bzl` files.
             for st in &stmts {
                 let msg = match st {
@@ -463,7 +553,18 @@ impl EvalContext {
             Stmt::Load(load, loc) => {
                 self.loads.push(load.clone());
                 if let Some(hook) = self.load_hook.clone() {
-                    let exports = hook(&load.module_label).map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
+                    let load_loc = source_line(&loc.file, loc.line)
+                        .and_then(|line| {
+                            let needle = format!("\"{}\"", load.module_label);
+                            line.find(&needle).map(|column| Location::new(&loc.file, loc.line, column + 1))
+                        })
+                        .unwrap_or_else(|| loc.clone());
+                    let exports = hook(&load.module_label).map_err(|mut e| {
+                        if e.contains("no such file") {
+                            e = format!("cannot load '{}': no such file", load.module_label);
+                        }
+                        StarlarkError(format!("{load_loc}: {e}"))
+                    })?;
                     for (local_name, exported_name) in &load.symbols {
                         let v = exports.get(exported_name).ok_or_else(|| {
                             let shown = self
@@ -637,6 +738,7 @@ impl EvalContext {
                     body: func.body.clone(),
                     location: func.location.clone(),
                     module: Some(self.current_module_env()),
+                    repr_override: None,
                     closure: self.capture_closure(),
                 });
 
@@ -1307,6 +1409,7 @@ impl EvalContext {
                     body: vec![Stmt::Return(Some((**body).clone()), loc.clone())],
                     location: loc.clone(),
                     module: Some(self.current_module_env()),
+                    repr_override: None,
                     closure: self.capture_closure(),
                 });
                 Ok(Value::UserFunction(user_def))
@@ -1317,6 +1420,15 @@ impl EvalContext {
     /// A first-class bound method (`f = d.get`): a function `(*args, **kwargs)` that calls
     /// `recv.<attr>(*args, **kwargs)` with `recv` held in its closure.
     fn bound_method(&self, recv: Value, attr: &str, loc: &Location) -> Value {
+        let recv_type = match &recv {
+            Value::Host(kind, _) => kind.as_str(),
+            Value::String(_) => "string",
+            Value::List(_) => "list",
+            Value::Dict(_) => "dict",
+            Value::Label(_) => "Label",
+            _ => recv.type_name(),
+        }
+        .to_string();
         let scope: Scope = Default::default();
         scope.lock().unwrap().insert("$recv".to_string(), recv);
         let call = Expr::Call {
@@ -1344,6 +1456,7 @@ impl EvalContext {
             body: vec![Stmt::Return(Some(call), loc.clone())],
             location: loc.clone(),
             module: Some(self.current_module_env()),
+            repr_override: Some(format!("<built-in method {attr} of {recv_type} value>")),
             closure: ClosureEnv(vec![scope]),
         }))
     }
@@ -2363,7 +2476,10 @@ impl EvalContext {
                     } else {
                         zel_cmdline::Label::create(l.package_identifier().clone(), raw)
                     };
-                    parsed.map(Value::Label).map_err(|e| StarlarkError(format!("{loc}: {e}")))
+                    parsed
+                        .map(zel_cmdline::Label::with_unambiguous_display)
+                        .map(Value::Label)
+                        .map_err(|e| StarlarkError(format!("{loc}: {e}")))
                 }
                 other => Err(StarlarkError(format!("{loc}: type 'Label' has no method '{other}'"))),
             },
@@ -2650,8 +2766,11 @@ impl EvalContext {
                             self.call_location = loc.to_string();
 
                             self.last_call_loc = loc.clone();
-                            return host(self, name, pos_args.to_vec(), kw_args.clone())
-                                .map_err(|e| {
+                            let result = host(self, name, pos_args.to_vec(), kw_args.clone());
+                            if let (Err(e), Some(native_fn)) = (&result, bf.strip_prefix("host:native.")) {
+                                self.builtin_error = Some((native_fn.to_string(), e.0.clone()));
+                            }
+                            return result.map_err(|e| {
                                     let prefix = format!("{loc}: ");
                                     if e.0.starts_with(&prefix) || e.0.starts_with("ERROR: ") || e.0.contains(": Traceback (most recent call last):\n") {
                                         e
@@ -2726,6 +2845,9 @@ impl EvalContext {
                     ) {
                         return self.call_callable(val.clone(), pos_args.to_vec(), kw_args.clone(), loc);
                     }
+                }
+                if s.is_native {
+                    return s.get(method).map_err(|e| StarlarkError(format!("{}: {}", self.attr_loc, e.0)));
                 }
                 Err(StarlarkError(format!(
                     "{loc}: type 'struct' has no method '{method}'"

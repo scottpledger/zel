@@ -148,7 +148,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -300,7 +300,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -441,7 +441,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -459,9 +459,9 @@
   }],
   "configurations": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c",
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -575,7 +575,7 @@
         "value": "fastbuild"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -659,7 +659,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"

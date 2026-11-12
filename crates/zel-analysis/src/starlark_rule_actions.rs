@@ -112,10 +112,11 @@ fn depset_nested(
 
 fn collect_attr_runfiles(st: &Arc<CtxState>, data: bool) -> Runfiles {
     let mut out = Runfiles::default();
-    for attr in ["srcs", "deps", "data"] {
+    for attr in ["data", "srcs", "deps"] {
+        let is_data_attr = attr == "data";
         if let Some(ts) = st.deps.get(attr) {
             for t in ts {
-                out = out.merge(&target_runfiles(t, data));
+                out = out.merge(&target_runfiles(t, is_data_attr || data));
             }
         }
     }
@@ -125,6 +126,15 @@ fn collect_attr_runfiles(st: &Arc<CtxState>, data: bool) -> Runfiles {
 /// Runfiles contributed by a dependency (`Runfiles.Builder.addTarget`): its `data_runfiles` /
 /// `default_runfiles`, or, for targets without runfiles (plain files), the files themselves.
 pub fn target_runfiles(t: &ConfiguredTarget, data: bool) -> Runfiles {
+    // `Runfiles.Builder.addTargetIncludingFileTargets`: file targets (source/generated files)
+    // have no `RunfilesProvider` in Bazel and only contribute their `files` to *data* runfiles.
+    if t.rule_class == "source file" || t.rule_class == "generated file" {
+        return if data {
+            Runfiles { artifacts: t.default_info.files.clone(), ..Default::default() }
+        } else {
+            Runfiles::default()
+        };
+    }
     if let Some(Value::ProviderInstance { fields, .. }) = t.providers.get("DefaultInfo") {
         let key = if data { "data_runfiles" } else { "default_runfiles" };
         if let Some(r) = fields.get(key).and_then(runfiles_of) {
@@ -132,11 +142,6 @@ pub fn target_runfiles(t: &ConfiguredTarget, data: bool) -> Runfiles {
             // are not implicitly runfiles): only targets without one fall back to their files.
             return (*r).clone();
         }
-    }
-    // `Runfiles.Builder.addTargetIncludingFileTargets`: file targets (source/generated files)
-    // only contribute to the *data* runfiles; the default mapping yields nothing for them.
-    if !data && (t.rule_class == "source file" || t.rule_class == "generated file") {
-        return Runfiles::default();
     }
     Runfiles { artifacts: t.default_info.files.clone(), ..Default::default() }
 }
@@ -231,9 +236,10 @@ fn ctx_method(
                 if arg(pos, kw, idx, if data { "collect_data" } else { "collect_default" }).map(|v| v.is_truthy()).unwrap_or(false) {
                     out = out.merge(&collect_attr_runfiles(st, data));
                     for attr in ["data", "srcs", "deps"] {
+                        let is_data_attr = attr == "data";
                         if let Some(ts) = st.deps.get(attr) {
                             for t in ts {
-                                collected.push(target_runfiles(t, data));
+                                collected.push(target_runfiles(t, is_data_attr || data));
                             }
                         }
                     }

@@ -9,9 +9,9 @@ rule_class_id: 1
 }
 configuration {
 id: 1
-mnemonic: "darwin_arm64-fastbuild"
-platform_name: "darwin_arm64"
-checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+mnemonic: "k8-fastbuild"
+platform_name: "k8"
+checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
 }
 path_fragments {
 id: 5
@@ -19,7 +19,7 @@ label: "bazel-out"
 }
 path_fragments {
 id: 4
-label: "darwin_arm64-fastbuild"
+label: "k8-fastbuild"
 parent_id: 5
 }
 path_fragments {
@@ -70,12 +70,12 @@ path_fragment_id: 8
 }
 actions {
 target_id: 1
-action_key: "c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69"
+action_key: "a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87"
 mnemonic: "CatIt"
 configuration_id: 1
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "cat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt"
+arguments: "cat bazel-out/k8-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/k8-fastbuild/bin/a/lib2.txt"
 input_dep_set_ids: 1
 output_ids: 3
 primary_output_id: 3

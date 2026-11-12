@@ -138,6 +138,13 @@ pub fn record_exec_platform_edge(
             let _ = resolver.check_dependency(rule, "$exec_platform", &ct);
         }
     }
+    if acfg.host_platform.is_none() {
+        if let Ok(l) = Label::parse_canonical("@bazel_tools//tools:host_platform") {
+            if let Ok(ct) = resolver.configured_target(&l, &core_cfg) {
+                let _ = resolver.check_dependency(rule, "$exec_platform", &ct);
+            }
+        }
+    }
 }
 
 fn platform_constraints(p: &ConfiguredTarget) -> BTreeMap<String, Label> {

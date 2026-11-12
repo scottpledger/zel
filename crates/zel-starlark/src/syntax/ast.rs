@@ -184,6 +184,8 @@ pub struct UserFunctionDef {
     pub location: Location,
     /// Module in which this function was defined (`None` for synthetic functions).
     pub module: Option<Arc<ModuleEnv>>,
+    /// Custom representation for a synthetic callable such as a first-class bound method.
+    pub repr_override: Option<String>,
     /// Enclosing function scopes (empty for module-level functions).
     pub closure: ClosureEnv,
 }

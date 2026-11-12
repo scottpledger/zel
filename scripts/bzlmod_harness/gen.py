@@ -1,9 +1,10 @@
 from hconf import VBZ
 import os,subprocess,shutil,random,sys,io,tarfile,zipfile,struct,zlib,json
 A=VBZ+'/arch'; S=VBZ+'/src'
+os.makedirs(A, exist_ok=True); os.makedirs(S, exist_ok=True)
 random.seed(5)
 def sh(c,cwd=None):
-    r=subprocess.run(c,shell=True,cwd=cwd,capture_output=True)
+    r=subprocess.run(c,shell=True,executable='/bin/bash',cwd=cwd,capture_output=True)
     if r.returncode: print('GENFAIL',c,r.stderr[:200])
 def tree(name,kind):
     d=f'{S}/{name}'; shutil.rmtree(d,ignore_errors=True); os.makedirs(d)

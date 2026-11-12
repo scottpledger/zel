@@ -4,6 +4,6 @@ Loading: 0 packages loaded
 Analyzing: target //a:lib2 (0 packages loaded, 0 targets configured)
 ERROR: cannot load '//:nonexist.bzl': no such file
 ERROR: Analysis of aspects '[//:nonexist.bzl%asp] with parameters {} on //a:lib2' failed; build aborted: cannot load '//:nonexist.bzl': no such file
-INFO: Elapsed time: 0.059s
+INFO: Elapsed time: 0.034s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

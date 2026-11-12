@@ -374,7 +374,7 @@ pub fn eval_module_file(src: &str, opts: ModuleFileOptions) -> Result<EvalResult
         }
         if let Some(prev) = s.repo_name_usages.get(b).cloned() {
             return Err(format!(
-                "The repo name '{b}' cannot be defined as a built-in dependency at <builtin> as it is already defined {} at {}, '{b}' is a built-in dependency and cannot be used by any 'bazel_dep' or 'use_repo' directive",
+                "The repo name '{b}' cannot be defined as a built-in dependency at <builtin> as it is already defined {} at {}, '{b}' is a built-in dependency and cannot be used by any 'bazel_dep' or 'use_repo' directive\nERROR: error executing MODULE.bazel file for the root module",
                 prev.0, prev.1
             ));
         }
@@ -986,9 +986,6 @@ fn dispatch_inner(
             let dev = a.opt_bool("dev_dependency");
             a.finish()?;
             validate_module_name(&dname).map_err(|e| tb(&loc, fname, e.0))?;
-            if dname == s.name {
-                return tb_err(&loc, fname, format!("module '{dname}' cannot depend on itself"));
-            }
             let parsed = Version::parse(&version).map_err(|_| tb(&loc, fname, "Invalid version in bazel_dep()"))?;
             if max_compat != -1 && s.opts_key.is_root() {
                 s.warnings.push(format!("{loc}: The attribute 'max_compatibility_level' in bazel_dep() is a no-op and will be removed in a future Bazel release. Please remove it from your MODULE.bazel file."));
@@ -1003,6 +1000,12 @@ fn dispatch_inner(
                 None => Some(dname.clone()),
                 Some(_) => return tb_err(&loc, fname, "internal error: unexpected repoName type"),
             };
+            if let Some(ref r) = repo_name {
+                add_repo_name_usage(&mut s, r, "by a bazel_dep", &loc).map_err(|e| tb(&loc, fname, e.0))?;
+            }
+            if dname == s.name {
+                return tb_err(&loc, fname, format!("module '{dname}' cannot depend on itself"));
+            }
             if !(s.ignore_dev_deps && dev) {
                 match &repo_name {
                     Some(r) => {
@@ -1015,9 +1018,6 @@ fn dispatch_inner(
                     }
                     None => s.nodeps.push(ModuleKey::new(dname.clone(), parsed)),
                 }
-            }
-            if let Some(r) = repo_name {
-                add_repo_name_usage(&mut s, &r, "by a bazel_dep", &loc).map_err(|e| tb(&loc, fname, e.0))?;
             }
             Ok(Value::None)
         }
@@ -1481,7 +1481,7 @@ local_path_override(module_name = "devonly", path = "../x")
         let e = eval_module_file("bazel_dep(name='x')\nmodule(name='y')", opts(true)).unwrap_err();
         assert!(e.contains("if module() is called, it must be called before any other functions"), "{e}");
         let e = eval_module_file("module(name='a')\nbazel_dep(name='a')", opts(true)).unwrap_err();
-        assert!(e.contains("cannot depend on itself"), "{e}");
+        assert!(e.contains("The repo name 'a' cannot be defined by a bazel_dep"), "{e}");
         let e = eval_module_file("bazel_dep(name='x', repo_name='y')\nbazel_dep(name='z', repo_name='y')", opts(true)).unwrap_err();
         assert!(e.contains("The repo name 'y' cannot be defined"), "{e}");
         let e = eval_module_file("bazel_dep(name='Bad')", opts(true)).unwrap_err();

@@ -32,7 +32,7 @@
   }],
   "actions": [{
     "targetId": 1,
-    "actionKey": "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a",
+    "actionKey": "8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8",
     "mnemonic": "FileWrite",
     "configurationId": 1,
     "outputIds": [1],
@@ -41,7 +41,7 @@
     "isExecutable": true
   }, {
     "targetId": 1,
-    "actionKey": "9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a",
+    "actionKey": "61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3",
     "mnemonic": "RepoMappingManifest",
     "configurationId": 1,
     "outputIds": [2],
@@ -49,7 +49,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "827f0fe2457d4ac47eabfc4f2b14ab9e6c9df2718ccaebed65b7884201f1812d",
+    "actionKey": "278c5f46d0d07301d3cf8edaf39aecdca38dc722cc58edda142aa04e824d5e20",
     "mnemonic": "SourceSymlinkManifest",
     "configurationId": 1,
     "outputIds": [3],
@@ -57,7 +57,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "7dc5a94dd5304ba87abeb760f1f8f4a43319e6ba0b28414858e2bf1ad1e22529",
+    "actionKey": "9f18d61fe318c622b23edd15c2b9b185a8dc0e972d9c1498add946aeb8c125c7",
     "mnemonic": "SymlinkTree",
     "configurationId": 1,
     "inputDepSetIds": [1],
@@ -75,7 +75,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a",
+    "actionKey": "8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8",
     "mnemonic": "FileWrite",
     "configurationId": 2,
     "outputIds": [6],
@@ -84,7 +84,7 @@
     "isExecutable": true
   }, {
     "targetId": 1,
-    "actionKey": "9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a",
+    "actionKey": "61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3",
     "mnemonic": "RepoMappingManifest",
     "configurationId": 2,
     "outputIds": [7],
@@ -92,7 +92,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "e346326417c6d035de7958c9d53a1d985c71b8977bd881813c6084ab02bda792",
+    "actionKey": "fa612f3420bc9a9f396725824b7025c5bce959ee5459337d257e28af7303d3e9",
     "mnemonic": "SourceSymlinkManifest",
     "configurationId": 2,
     "outputIds": [8],
@@ -100,7 +100,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "9d08d249af1fb388108eb2399cb831dc2a7d2046b2f108ae6cad2a57b326aabf",
+    "actionKey": "b4383eb49e620ed4369432971c7220f133f5f750c1ffc573d2c133419df8ad0e",
     "mnemonic": "SymlinkTree",
     "configurationId": 2,
     "inputDepSetIds": [3],
@@ -137,15 +137,15 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    "mnemonic": "k8-opt-exec",
+    "platformName": "k8",
+    "checksum": "04bf134dfa57115b01daa56bd3a30421a6e74b1819e002496a26c94ed0087067",
+    "isTool": true
   }, {
     "id": 2,
-    "mnemonic": "darwin_arm64-opt-exec",
-    "platformName": "darwin_arm64",
-    "checksum": "77e8473c8c1c4b4ef1825b4b7ffc50dc3ee606e358c10cba8c77f21ec5fe49d9",
-    "isTool": true
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }],
   "ruleClasses": [{
     "id": 1,
@@ -156,7 +156,7 @@
     "label": "bazel-out"
   }, {
     "id": 4,
-    "label": "darwin_arm64-fastbuild",
+    "label": "k8-opt-exec",
     "parentId": 5
   }, {
     "id": 3,
@@ -188,7 +188,7 @@
     "parentId": 9
   }, {
     "id": 13,
-    "label": "darwin_arm64-opt-exec",
+    "label": "k8-fastbuild",
     "parentId": 5
   }, {
     "id": 12,

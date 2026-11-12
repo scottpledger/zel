@@ -1,4 +1,4 @@
-catrule rule //a:lib2 (2d89340)
-catrule rule //a:lib (2d89340)
-filegroup rule @ext//lib:data (2d89340)
+catrule rule //a:lib2 (a7a71fd)
+catrule rule //a:lib (a7a71fd)
+filegroup rule @ext//lib:data (a7a71fd)
 source file @ext//lib:d.txt (null)

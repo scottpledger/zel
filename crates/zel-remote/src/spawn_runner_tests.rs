@@ -121,11 +121,11 @@ fn remote_execution_then_remote_cache_hit() {
     assert_eq!(std::fs::read_to_string(ws.join("out/a.txt")).unwrap(), "HELLO");
     assert_eq!(server.executions(), 1);
 
-    // Changing the input changes the action digest → a new execution.
-    std::fs::write(ws.join("src/a.txt"), "other").unwrap();
+    // Changing the input changes the action digest → a new execution (different size avoids mtime-based digest cache hit in the same millisecond).
+    std::fs::write(ws.join("src/a.txt"), "different").unwrap();
     let res = run(&r, &s, &ws);
     assert_eq!(res.runner_name, "remote");
-    assert_eq!(std::fs::read_to_string(ws.join("out/a.txt")).unwrap(), "OTHER");
+    assert_eq!(std::fs::read_to_string(ws.join("out/a.txt")).unwrap(), "DIFFERENT");
     assert_eq!(server.executions(), 2);
     assert_eq!(r.stats.summary(), "3 processes: 1 remote cache hit, 2 remote");
 }

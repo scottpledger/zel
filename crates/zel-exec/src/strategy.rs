@@ -101,7 +101,7 @@ impl StrategyAvailability {
         Self {
             process_wrapper_sandbox: sandbox::process_wrapper_supported(),
             darwin_sandbox: sandbox::darwin_sandbox_supported(),
-            linux_sandbox: zel_sandbox::linux::get_unsupported_reason(None).is_none(),
+            linux_sandbox: sandbox::linux_sandbox_supported(),
             // `RemoteModule` always registers `remote` (a placeholder that cannot execute
             // anything unless an executor is configured).
             remote: true,
@@ -172,10 +172,7 @@ impl StrategyOptions {
             o.genrule_strategy.extend(split_commas(v));
         }
         for v in strategy {
-            let (k, val) = v.split_once('=').ok_or_else(|| {
-                format!("Invalid value for --strategy: '{v}': Variable definition must be in the form of a 'name=value' assignment")
-            })?;
-            o.strategy.push((k.to_string(), split_commas(val)));
+            o.strategy.push(parse_name_to_list("strategy", v)?);
         }
         for v in strategy_regexp {
             let (k, val) = v.split_once('=').ok_or_else(|| {
@@ -385,7 +382,7 @@ impl SpawnStrategyRegistry {
     pub fn build(opts: &StrategyOptions, av: &StrategyAvailability) -> Result<Self, String> {
         let map = Self::registrations(av);
         // Default strategies.
-        let mut spawn_strategies = opts.spawn_strategy.clone();
+        let mut spawn_strategies: Vec<String> = opts.spawn_strategy.iter().filter(|s| !s.is_empty()).cloned().collect();
         if spawn_strategies.is_empty() {
             if av.remote_exec {
                 spawn_strategies.push("remote".into());
@@ -393,10 +390,8 @@ impl SpawnStrategyRegistry {
             spawn_strategies.push("worker".into());
             spawn_strategies.push("sandboxed".into());
             spawn_strategies.push("local".into());
-        } else if spawn_strategies.iter().all(|s| s.is_empty()) {
-            return Err("--spawn_strategy must contain at least one non-empty strategy".to_string());
         }
-        let default_strategies = Self::to_strategies(&map, &spawn_strategies, "explicit default strategies")?;
+        let mut default_strategies = Self::to_strategies(&map, &spawn_strategies, "explicit default strategies")?;
 
         // Mnemonic filters: Genrule first so `--strategy=Genrule=` overrides it; last wins.
         let mut mnemonic_ids: Vec<(String, Vec<String>)> = vec![("Genrule".to_string(), opts.genrule_strategy.clone())];
@@ -408,7 +403,7 @@ impl SpawnStrategyRegistry {
         }
         for (m, ids) in last {
             let ks = Self::to_strategies(&map, &ids, &format!("mnemonic {m}"))?;
-            if !ks.is_empty() {
+            if !ks.is_empty() && !m.is_empty() {
                 mnemonic_to_strategies.insert(m, ks);
             }
         }
@@ -700,7 +695,8 @@ mod tests {
         assert!(e.contains("was requested for filter x but"));
         let e = SpawnStrategyRegistry::build(&StrategyOptions::from_raw(&["remote".into()], &[], &[], &[]).unwrap(), &av()).unwrap_err();
         assert!(e.contains("'remote' was requested"));
-        assert!(StrategyOptions::from_raw(&[], &[], &["noequals".into()], &[]).is_err());
+        let parsed = StrategyOptions::from_raw(&[], &[], &["noequals".into()], &[]).unwrap();
+        assert_eq!(parsed.strategy, vec![("".into(), vec!["noequals".into()])]);
     }
 
     #[test]

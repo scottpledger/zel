@@ -43,7 +43,7 @@ pub fn print_starlark(key: &str, def: &RepoDefinition, _external_directory: &str
                 out.push_str(&format!("  _original_name = \"{o}\",\n"));
             }
             for (k, v) in &spec.attrs {
-                if k == "name" {
+                if k == "name" || matches!(v, crate::model::AttrVal::None) {
                     continue;
                 }
                 out.push_str(&format!("  {} = {},\n", k, v.repr()));

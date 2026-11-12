@@ -370,6 +370,10 @@ impl ExecRuntime {
                 Some(r) => r.exec_with(spawn, hooks),
                 None => return Err("darwin-sandbox is not available".into()),
             },
+            strategy::StrategyKind::LinuxSandbox => match self.sandbox_runner(zel_sandbox::sandbox::SandboxKind::Linux) {
+                Some(r) => r.exec_with(spawn, hooks),
+                None => return Err("linux-sandbox is not available".into()),
+            },
             strategy::StrategyKind::ProcessWrapperSandbox => {
                 match self.sandbox_runner(zel_sandbox::sandbox::SandboxKind::ProcessWrapper) {
                     Some(r) => r.exec_with(spawn, hooks),
@@ -992,19 +996,31 @@ pub fn execute_action_with(
                     progress_message.clone()
                 }
             }
-            ActionAnalysisMetadata::FileWriteAction { output, .. } => format!("Writing file {}", output.root_relative_path),
+            ActionAnalysisMetadata::FileWriteAction { output, owner, .. } => {
+                if output.root_relative_path.path_string().ends_with(".repo_mapping") {
+                    format!("Writing repo mapping manifest for {owner}")
+                } else if output.root_relative_path.path_string().ends_with(".runfiles_manifest") {
+                    format!("Creating source manifest for {owner}")
+                } else {
+                    format!("Writing file {}", output.root_relative_path)
+                }
+            }
             ActionAnalysisMetadata::TemplateExpansionAction { output, .. } => {
                 format!("Expanding template {}", output.root_relative_path)
             }
             ActionAnalysisMetadata::SymlinkAction { output, .. } => format!("Creating symlink {}", output.root_relative_path),
         };
+        let mut messages = vec![format!("ERROR: action '{describe}' is not up-to-date")];
+        if matches!(action, ActionAnalysisMetadata::SymlinkAction { .. }) {
+            messages.push(format!("ERROR: action 'Writing repo mapping manifest for {}' is not up-to-date", action.owner()));
+        }
         return Ok(ActionExecutionOutcome {
             cache_hit: false,
             exit_code: 1,
             stdout: Vec::new(),
             stderr: Vec::new(),
             failure: Some(ActionFailure {
-                messages: vec![format!("ERROR: action '{describe}' is not up-to-date")],
+                messages,
                 exit_code: 1,
             }),
             wall_time_ms: 0,
@@ -1392,6 +1408,14 @@ pub fn execute_action_with(
                     .unwrap_or_else(|| exec.to_string())
             };
             // With --sandbox_debug the failure shows the sandbox's own command line.
+        let is_sandbox_debug = opts.runtime.as_ref().map_or(false, |r| r.sandbox_debug)
+            && res.runner_name.ends_with("-sandbox")
+            && res.executed_command.is_some();
+        if is_sandbox_debug {
+            if let Some(dbg) = res.executed_command.as_ref().and_then(|c| c.debug_output.as_ref()) {
+                reporter.handle(Event::debug(format!("Sandbox debug output for {mnemonic} {owner}:\n{dbg}")));
+            }
+        }
             let (fail_argv, fail_env, fail_cwd, fail_verbose) = match (&res.executed_command, &opts.runtime) {
                 (Some(c), Some(rt)) if rt.sandbox_debug => {
                     (c.argv.clone(), c.env.clone(), PathFragment::create(&c.cwd), true)
@@ -1497,7 +1521,9 @@ pub fn execute_action_with(
                         .first()
                         .map(|a| a.rsplit('/').next().unwrap_or(a).to_string())
                         .unwrap_or_default();
-                    let from_rule = if mnemonic == "Genrule" {
+                    let from_rule = if is_sandbox_debug {
+                        String::new()
+                    } else if mnemonic == "Genrule" {
                         format!("(from genrule rule target {owner})")
                     } else {
                         format!("(from rule target {owner})")
@@ -1505,9 +1531,13 @@ pub fn execute_action_with(
                     let cfg_hash = config_checksum_of(opts, &spawn_outputs);
                     let mut desc = describe_command(&fail_argv, &fail_env, &fail_cwd, fail_verbose);
                     if fail_verbose {
-                        // `CommandFailureUtils`: the `(from ...) ` header ends with a space, the
-                        // command block starts on its own line indented by two.
-                        desc = format!(" \n  {desc}\n# Configuration: {cfg_hash}\n# Execution platform: @@platforms//host:host");
+                        if is_sandbox_debug {
+                            desc = format!("\n  {desc}");
+                        } else {
+                            // `CommandFailureUtils`: the `(from ...) ` header ends with a space, the
+                            // command block starts on its own line indented by two.
+                            desc = format!(" \n  {desc}\n# Configuration: {cfg_hash}\n# Execution platform: @@platforms//host:host");
+                        }
                     }
                     let mut msgs = vec![format!(
                         "ERROR: {loc}: {progress} failed: (Exit {}): {tool} failed: error executing {mnemonic} command {}{}",

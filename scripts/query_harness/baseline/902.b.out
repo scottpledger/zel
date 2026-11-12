@@ -1,3 +1,7 @@
+@WS@/BUILD:4:11: test_suite rule //:all_tests
+@WS@/b/BUILD:5:5: xlib rule //b:shlib
+@WS@/b/BUILD:4:7: x_test rule //b:t2
 @WS@/c/BUILD:1:10: filegroup rule //c:cdata
 @WS@/d/BUILD:3:10: filegroup rule //d:dep_bad
 @WS@/d/BUILD:2:10: filegroup rule //d:ok
+@WS@/pg/BUILD:2:10: filegroup rule //pg:viol

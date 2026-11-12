@@ -4,7 +4,7 @@ Loading: 0 packages loaded
 Analyzing: 2 targets (0 packages loaded, 0 targets configured)
 INFO: Analyzed 2 targets (0 packages loaded, 0 targets configured).
 INFO: Found 2 targets...
-WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//a:tr, config=BuildConfigurationKey[2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c]}]
-INFO: Elapsed time: 0.061s, Critical Path: 0.00s
+WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//a:tr, config=BuildConfigurationKey[a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18]}]
+INFO: Elapsed time: 0.045s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

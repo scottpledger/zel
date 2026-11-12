@@ -29,6 +29,11 @@ pub fn repo_mapping_entries(
     }
     let mut sources: BTreeSet<String> = in_paths.clone();
     sources.insert(own_repo.to_string());
+    if own_repo == "bazel_tools" {
+        sources.insert("platforms".to_string());
+        sources.insert("rules_shell+".to_string());
+        sources.insert("rules_shell++sh_configure+local_config_shell".to_string());
+    }
     let relevant = |repo: &str| -> Vec<(String, String)> {
         let mut v: Vec<(String, String)> = mapping_of(repo)
             .into_iter()

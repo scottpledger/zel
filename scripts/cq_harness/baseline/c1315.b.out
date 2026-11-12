@@ -103,15 +103,15 @@
       }
     },
     "configuration": {
-      "checksum": "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+      "checksum": "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
     },
     "configurationId": 1
   }],
   "configurations": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607",
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -228,7 +228,7 @@
         "value": "fastbuild"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -312,7 +312,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"

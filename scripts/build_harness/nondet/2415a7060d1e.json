@@ -1,50 +1,50 @@
 {
  "bazel": "/tmp/bazel-9.3.2",
  "case_id": "2415a7060d1e",
- "classified_as": "STRICT",
+ "classified_as": "ANYERR",
  "cmd": "build --workspace_status_command=/nonexistent //:ga",
- "distinct": 1,
+ "distinct": 3,
  "harness": "build",
  "hashes": [
-  "b493f76bbe2ad91c",
-  "b493f76bbe2ad91c",
-  "b493f76bbe2ad91c",
-  "b493f76bbe2ad91c",
-  "b493f76bbe2ad91c",
-  "b493f76bbe2ad91c"
+  "f16a9d47e5abe0b0",
+  "4dec7268ab92c8c1",
+  "cd2c1e72ee738abd",
+  "f16a9d47e5abe0b0",
+  "4dec7268ab92c8c1",
+  "cd2c1e72ee738abd"
  ],
  "history": [],
- "mode": "STRICT",
+ "mode": "ANYERR",
  "n_runs": 6,
  "pre": "",
  "runs": [
   {
-   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: /nonexistent: No such file or directory\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: 1: /nonexistent: not found\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
    "out": "",
    "rc": 1
   },
   {
-   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: /nonexistent: No such file or directory\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: 1: /nonexistent: not found\nTarget //:ga failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
    "out": "",
    "rc": 1
   },
   {
-   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: /nonexistent: No such file or directory\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "err": "INFO: Analyzed target //:ga (N packages loaded).\nERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: 1: /nonexistent: not found\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
    "out": "",
    "rc": 1
   },
   {
-   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: /nonexistent: No such file or directory\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: 1: /nonexistent: not found\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
    "out": "",
    "rc": 1
   },
   {
-   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: /nonexistent: No such file or directory\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: 1: /nonexistent: not found\nTarget //:ga failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
    "out": "",
    "rc": 1
   },
   {
-   "err": "ERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: /nonexistent: No such file or directory\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "err": "INFO: Analyzed target //:ga (N packages loaded).\nERROR: <builtin>: BazelWorkspaceStatusAction stable-status.txt failed: Failed to determine workspace status: Process exited with status 127\n/bin/sh: 1: /nonexistent: not found\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
    "out": "",
    "rc": 1
   }

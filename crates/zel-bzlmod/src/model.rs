@@ -73,7 +73,7 @@ impl fmt::Display for ModuleKey {
 const STRING_ESCAPE_SEQUENCE: &str = "'";
 
 /// `AttributeValuesAdapter.serializeObjToString` for a `String`.
-fn escape_attr_string(s: &str) -> String {
+pub(crate) fn escape_attr_string(s: &str) -> String {
     if s.starts_with("@@") || (s.starts_with(STRING_ESCAPE_SEQUENCE) && s.ends_with(STRING_ESCAPE_SEQUENCE)) {
         format!("{STRING_ESCAPE_SEQUENCE}{s}{STRING_ESCAPE_SEQUENCE}")
     } else {

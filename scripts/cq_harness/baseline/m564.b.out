@@ -15,539 +15,6 @@ results {
   target {
     type: RULE
     rule {
-      name: "//a:lib"
-      rule_class: "catrule"
-      location: "@WS@/a/BUILD:4:8"
-      attribute {
-        name: "$config_dependencies"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: ":action_listener"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "aspect_hints"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "deprecation"
-        type: STRING
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "exec_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "exec_group_compatible_with"
-        type: LABEL_LIST_DICT
-        explicitly_specified: false
-      }
-      attribute {
-        name: "exec_properties"
-        type: STRING_DICT
-        explicitly_specified: false
-      }
-      attribute {
-        name: "expect_failure"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "features"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_function"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_location"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_name"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "name"
-        type: STRING
-        string_value: "lib"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "opt"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "package_metadata"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "restricted_to"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "srcs"
-        type: LABEL_LIST
-        string_list_value: "//a:x.txt"
-        string_list_value: "//a:srcs_fg"
-        string_list_value: "@ext//lib:data"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "tag_x"
-        type: STRING
-        string_value: "lib"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "tags"
-        type: STRING_LIST
-        string_list_value: "fast"
-        string_list_value: "manual"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "target_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "testonly"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "toolchains"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "transitive_configs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "visibility"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "$rule_implementation_hash"
-        type: STRING
-        string_value: "ec0fc7082c582eab2da03ca774cb67aa7d726557df8e61d270fae2b4d966aa34"
-      }
-      rule_input: "//a:srcs_fg"
-      rule_input: "//a:x.txt"
-      rule_input: "@ext//lib:data"
-    }
-  }
-  configuration {
-    checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
-  }
-  configuration_id: 1
-}
-results {
-  target {
-    type: RULE
-    rule {
-      name: "//a:lib"
-      rule_class: "catrule"
-      location: "@WS@/a/BUILD:4:8"
-      attribute {
-        name: "$config_dependencies"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: ":action_listener"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "aspect_hints"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "deprecation"
-        type: STRING
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "exec_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "exec_group_compatible_with"
-        type: LABEL_LIST_DICT
-        explicitly_specified: false
-      }
-      attribute {
-        name: "exec_properties"
-        type: STRING_DICT
-        explicitly_specified: false
-      }
-      attribute {
-        name: "expect_failure"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "features"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_function"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_location"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_name"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "name"
-        type: STRING
-        string_value: "lib"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "opt"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "package_metadata"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "restricted_to"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "srcs"
-        type: LABEL_LIST
-        string_list_value: "//a:x.txt"
-        string_list_value: "//a:srcs_fg"
-        string_list_value: "@ext//lib:data"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "tag_x"
-        type: STRING
-        string_value: "lib"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "tags"
-        type: STRING_LIST
-        string_list_value: "fast"
-        string_list_value: "manual"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "target_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "testonly"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "toolchains"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "transitive_configs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "visibility"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "$rule_implementation_hash"
-        type: STRING
-        string_value: "ec0fc7082c582eab2da03ca774cb67aa7d726557df8e61d270fae2b4d966aa34"
-      }
-      rule_input: "//a:srcs_fg"
-      rule_input: "//a:x.txt"
-      rule_input: "@ext//lib:data"
-    }
-  }
-  configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
-  }
-  configuration_id: 2
-}
-results {
-  target {
-    type: RULE
-    rule {
-      name: "//a:srcs_fg"
-      rule_class: "filegroup"
-      location: "@WS@/a/BUILD:3:10"
-      attribute {
-        name: "$config_dependencies"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: ":action_listener"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "aspect_hints"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "data"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "deprecation"
-        type: STRING
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "distribs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "features"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_function"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_location"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_name"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "licenses"
-        type: LICENSE
-        license {
-          license_type: "NONE"
-        }
-        explicitly_specified: false
-      }
-      attribute {
-        name: "name"
-        type: STRING
-        string_value: "srcs_fg"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "output_group"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "output_licenses"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "package_metadata"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "restricted_to"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "srcs"
-        type: LABEL_LIST
-        string_list_value: "//a:x.txt"
-        string_list_value: "//a:y.txt"
-        string_list_value: "//a:z.txt"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "tags"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "target_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "testonly"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "transitive_configs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "visibility"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      rule_input: "//a:x.txt"
-      rule_input: "//a:y.txt"
-      rule_input: "//a:z.txt"
-    }
-  }
-  configuration {
-    checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
-  }
-  configuration_id: 1
-}
-results {
-  target {
-    type: RULE
-    rule {
       name: "//a:sm_fg"
       rule_class: "filegroup"
       location: "@WS@/a/BUILD:6:7"
@@ -609,7 +76,7 @@ results {
       attribute {
         name: "generator_location"
         type: STRING
-        string_value: "ate@WS@/a/BUILD:6:7"
+        string_value: "a/BUILD:6:7"
         explicitly_specified: true
         nodep: false
       }
@@ -706,9 +173,9 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
-  configuration_id: 2
+  configuration_id: 1
 }
 results {
   target {
@@ -873,9 +340,892 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+  }
+  configuration_id: 1
+}
+results {
+  target {
+    type: RULE
+    rule {
+      name: "//a:srcs_fg"
+      rule_class: "filegroup"
+      location: "@WS@/a/BUILD:3:10"
+      attribute {
+        name: "$config_dependencies"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: ":action_listener"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "aspect_hints"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "data"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "deprecation"
+        type: STRING
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "distribs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "features"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_function"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_location"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_name"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "licenses"
+        type: LICENSE
+        license {
+          license_type: "NONE"
+        }
+        explicitly_specified: false
+      }
+      attribute {
+        name: "name"
+        type: STRING
+        string_value: "srcs_fg"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "output_group"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "output_licenses"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "package_metadata"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "restricted_to"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "srcs"
+        type: LABEL_LIST
+        string_list_value: "//a:x.txt"
+        string_list_value: "//a:y.txt"
+        string_list_value: "//a:z.txt"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "tags"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "target_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "testonly"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "transitive_configs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "visibility"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      rule_input: "//a:x.txt"
+      rule_input: "//a:y.txt"
+      rule_input: "//a:z.txt"
+    }
+  }
+  configuration {
+    checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   }
   configuration_id: 2
+}
+results {
+  target {
+    type: RULE
+    rule {
+      name: "//a:lib"
+      rule_class: "catrule"
+      location: "@WS@/a/BUILD:4:8"
+      attribute {
+        name: "$config_dependencies"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: ":action_listener"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "aspect_hints"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "deprecation"
+        type: STRING
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "exec_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "exec_group_compatible_with"
+        type: LABEL_LIST_DICT
+        explicitly_specified: false
+      }
+      attribute {
+        name: "exec_properties"
+        type: STRING_DICT
+        explicitly_specified: false
+      }
+      attribute {
+        name: "expect_failure"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "features"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_function"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_location"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_name"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "name"
+        type: STRING
+        string_value: "lib"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "opt"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "package_metadata"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "restricted_to"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "srcs"
+        type: LABEL_LIST
+        string_list_value: "//a:x.txt"
+        string_list_value: "//a:srcs_fg"
+        string_list_value: "@ext//lib:data"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "tag_x"
+        type: STRING
+        string_value: "lib"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "tags"
+        type: STRING_LIST
+        string_list_value: "fast"
+        string_list_value: "manual"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "target_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "testonly"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "toolchains"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "transitive_configs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "visibility"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "$rule_implementation_hash"
+        type: STRING
+        string_value: "ec0fc7082c582eab2da03ca774cb67aa7d726557df8e61d270fae2b4d966aa34"
+      }
+      rule_input: "//a:srcs_fg"
+      rule_input: "//a:x.txt"
+      rule_input: "@ext//lib:data"
+    }
+  }
+  configuration {
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+  }
+  configuration_id: 1
+}
+results {
+  target {
+    type: RULE
+    rule {
+      name: "//a:lib"
+      rule_class: "catrule"
+      location: "@WS@/a/BUILD:4:8"
+      attribute {
+        name: "$config_dependencies"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: ":action_listener"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "aspect_hints"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "deprecation"
+        type: STRING
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "exec_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "exec_group_compatible_with"
+        type: LABEL_LIST_DICT
+        explicitly_specified: false
+      }
+      attribute {
+        name: "exec_properties"
+        type: STRING_DICT
+        explicitly_specified: false
+      }
+      attribute {
+        name: "expect_failure"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "features"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_function"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_location"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_name"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "name"
+        type: STRING
+        string_value: "lib"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "opt"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "package_metadata"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "restricted_to"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "srcs"
+        type: LABEL_LIST
+        string_list_value: "//a:x.txt"
+        string_list_value: "//a:srcs_fg"
+        string_list_value: "@ext//lib:data"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "tag_x"
+        type: STRING
+        string_value: "lib"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "tags"
+        type: STRING_LIST
+        string_list_value: "fast"
+        string_list_value: "manual"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "target_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "testonly"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "toolchains"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "transitive_configs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "visibility"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "$rule_implementation_hash"
+        type: STRING
+        string_value: "ec0fc7082c582eab2da03ca774cb67aa7d726557df8e61d270fae2b4d966aa34"
+      }
+      rule_input: "//a:srcs_fg"
+      rule_input: "//a:x.txt"
+      rule_input: "@ext//lib:data"
+    }
+  }
+  configuration {
+    checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
+  }
+  configuration_id: 2
+}
+results {
+  target {
+    type: RULE
+    rule {
+      name: "//a:tr"
+      rule_class: "trule"
+      location: "@WS@/a/BUILD:8:6"
+      attribute {
+        name: "$allowlist_function_transition"
+        type: LABEL
+        string_value: "@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist"
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "$config_dependencies"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: ":action_listener"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "aspect_hints"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "dep"
+        type: LABEL
+        string_value: "//a:lib"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "deprecation"
+        type: STRING
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "exec_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "exec_group_compatible_with"
+        type: LABEL_LIST_DICT
+        explicitly_specified: false
+      }
+      attribute {
+        name: "exec_properties"
+        type: STRING_DICT
+        explicitly_specified: false
+      }
+      attribute {
+        name: "expect_failure"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "features"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_function"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_location"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_name"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "name"
+        type: STRING
+        string_value: "tr"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "package_metadata"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "restricted_to"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "tags"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "target_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "testonly"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "toolchains"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "transitive_configs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "visibility"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "$rule_implementation_hash"
+        type: STRING
+        string_value: "ec0fc7082c582eab2da03ca774cb67aa7d726557df8e61d270fae2b4d966aa34"
+      }
+      rule_input: "//a:lib"
+      rule_input: "@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist"
+    }
+  }
+  configuration {
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+  }
+  configuration_id: 1
+}
+results {
+  target {
+    type: RULE
+    rule {
+      name: "//a:sm_cat"
+      rule_class: "catrule"
+      location: "@WS@/a/BUILD:6:7"
+      attribute {
+        name: "$config_dependencies"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: ":action_listener"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "aspect_hints"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "deprecation"
+        type: STRING
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "exec_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "exec_group_compatible_with"
+        type: LABEL_LIST_DICT
+        explicitly_specified: false
+      }
+      attribute {
+        name: "exec_properties"
+        type: STRING_DICT
+        explicitly_specified: false
+      }
+      attribute {
+        name: "expect_failure"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "features"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_function"
+        type: STRING
+        string_value: "smacro"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "generator_location"
+        type: STRING
+        string_value: "a/BUILD:6:7"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "generator_name"
+        type: STRING
+        string_value: "sm"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "name"
+        type: STRING
+        string_value: "sm_cat"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "opt"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "package_metadata"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "restricted_to"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "srcs"
+        type: LABEL_LIST
+        string_list_value: "//a:sm_fg"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "tag_x"
+        type: STRING
+        string_value: "d"
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "tags"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "target_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "testonly"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "toolchains"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "transitive_configs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "visibility"
+        type: STRING_LIST
+        string_list_value: "//visibility:public"
+        explicitly_specified: true
+        nodep: true
+      }
+      attribute {
+        name: "$rule_implementation_hash"
+        type: STRING
+        string_value: "ec0fc7082c582eab2da03ca774cb67aa7d726557df8e61d270fae2b4d966aa34"
+      }
+      rule_input: "//a:sm_fg"
+    }
+  }
+  configuration {
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+  }
+  configuration_id: 1
 }
 results {
   target {
@@ -1053,9 +1403,9 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
-  configuration_id: 2
+  configuration_id: 1
 }
 results {
   target {
@@ -1177,359 +1527,9 @@ results {
     }
   }
   configuration {
-    checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+    checksum: "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
   }
   configuration_id: 3
-}
-results {
-  target {
-    type: RULE
-    rule {
-      name: "//a:tr"
-      rule_class: "trule"
-      location: "@WS@/a/BUILD:8:6"
-      attribute {
-        name: "$allowlist_function_transition"
-        type: LABEL
-        string_value: "@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist"
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "$config_dependencies"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: ":action_listener"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "aspect_hints"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "dep"
-        type: LABEL
-        string_value: "//a:lib"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "deprecation"
-        type: STRING
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "exec_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "exec_group_compatible_with"
-        type: LABEL_LIST_DICT
-        explicitly_specified: false
-      }
-      attribute {
-        name: "exec_properties"
-        type: STRING_DICT
-        explicitly_specified: false
-      }
-      attribute {
-        name: "expect_failure"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "features"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_function"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_location"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_name"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "name"
-        type: STRING
-        string_value: "tr"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "package_metadata"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "restricted_to"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "tags"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "target_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "testonly"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "toolchains"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "transitive_configs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "visibility"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "$rule_implementation_hash"
-        type: STRING
-        string_value: "ec0fc7082c582eab2da03ca774cb67aa7d726557df8e61d270fae2b4d966aa34"
-      }
-      rule_input: "//a:lib"
-      rule_input: "@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist"
-    }
-  }
-  configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
-  }
-  configuration_id: 2
-}
-results {
-  target {
-    type: RULE
-    rule {
-      name: "//a:sm_cat"
-      rule_class: "catrule"
-      location: "@WS@/a/BUILD:6:7"
-      attribute {
-        name: "$config_dependencies"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: ":action_listener"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "aspect_hints"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "deprecation"
-        type: STRING
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "exec_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "exec_group_compatible_with"
-        type: LABEL_LIST_DICT
-        explicitly_specified: false
-      }
-      attribute {
-        name: "exec_properties"
-        type: STRING_DICT
-        explicitly_specified: false
-      }
-      attribute {
-        name: "expect_failure"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "features"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_function"
-        type: STRING
-        string_value: "smacro"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "generator_location"
-        type: STRING
-        string_value: "ate@WS@/a/BUILD:6:7"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "generator_name"
-        type: STRING
-        string_value: "sm"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "name"
-        type: STRING
-        string_value: "sm_cat"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "opt"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "package_metadata"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "restricted_to"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "srcs"
-        type: LABEL_LIST
-        string_list_value: "//a:sm_fg"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "tag_x"
-        type: STRING
-        string_value: "d"
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "tags"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "target_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "testonly"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "toolchains"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "transitive_configs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "visibility"
-        type: STRING_LIST
-        string_list_value: "//visibility:public"
-        explicitly_specified: true
-        nodep: true
-      }
-      attribute {
-        name: "$rule_implementation_hash"
-        type: STRING
-        string_value: "ec0fc7082c582eab2da03ca774cb67aa7d726557df8e61d270fae2b4d966aa34"
-      }
-      rule_input: "//a:sm_fg"
-    }
-  }
-  configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
-  }
-  configuration_id: 2
 }
 results {
   target {
@@ -1832,15 +1832,15 @@ results {
     }
   }
   configuration {
-    checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+    checksum: "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
   }
   configuration_id: 3
 }
 configurations {
   id: 1
-  mnemonic: "darwin_arm64-opt"
-  platform_name: "darwin_arm64"
-  checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+  mnemonic: "k8-fastbuild"
+  platform_name: "k8"
+  checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -1985,11 +1985,11 @@ configurations {
     }
     options {
       name: "compilation_mode"
-      value: "opt"
+      value: "fastbuild"
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -2101,7 +2101,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"
@@ -3225,9 +3225,9 @@ configurations {
 }
 configurations {
   id: 2
-  mnemonic: "darwin_arm64-fastbuild"
-  platform_name: "darwin_arm64"
-  checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+  mnemonic: "k8-opt"
+  platform_name: "k8"
+  checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -3372,11 +3372,11 @@ configurations {
     }
     options {
       name: "compilation_mode"
-      value: "fastbuild"
+      value: "opt"
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -3488,7 +3488,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"
@@ -4612,9 +4612,9 @@ configurations {
 }
 configurations {
   id: 3
-  mnemonic: "darwin_arm64-fastbuild"
-  platform_name: "darwin_arm64"
-  checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+  mnemonic: "k8-fastbuild"
+  platform_name: "k8"
+  checksum: "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -4767,7 +4767,7 @@ configurations {
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -4879,7 +4879,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"

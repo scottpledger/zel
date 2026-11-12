@@ -1,15 +1,14 @@
-10 total actions.
+5 total actions.
 
 Mnemonics:
-  SymlinkTree: 2
-  SourceSymlinkManifest: 2
-  RepoMappingManifest: 2
-  FileWrite: 2
-  RunfilesTree: 2
+  SymlinkTree: 1
+  SourceSymlinkManifest: 1
+  RepoMappingManifest: 1
+  FileWrite: 1
+  RunfilesTree: 1
 
 Configurations:
-  darwin_arm64-opt-exec: 5
-  darwin_arm64-fastbuild: 5
+  k8-fastbuild: 5
 
 Execution Platforms:
-  @@platforms//host:host: 10
+  @@platforms//host:host: 5

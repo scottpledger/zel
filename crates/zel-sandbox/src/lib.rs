@@ -84,6 +84,7 @@ pub struct ExecutedCommand {
     pub argv: Vec<String>,
     pub env: BTreeMap<String, String>,
     pub cwd: String,
+    pub debug_output: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

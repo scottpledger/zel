@@ -188,7 +188,9 @@ fn host_globals() -> Vec<&'static str> {
 
 /// Prefix of an [`Rt::eval_bzl_fresh`] error that is a static (compilation) failure; the rest is the
 /// list of messages, one per `ERROR: ` line.
-pub(crate) const STATIC_FAILURE_MARK: &str = "\u{0}static:";
+pub(crate) const STATIC_FAILURE_MARK: &str = "<<zel-static-failure>>";
+pub(crate) const NESTED_STATIC_FAILURE_MARK: &str = "<<zel-nested-static-failure>>";
+pub(crate) const NESTED_STATIC_TRAILER_MARK: &str = "\n<<zel-nested-static-trailer>>";
 
 /// `.bzl` builtins besides the Starlark core, which the resolver accepts as predeclared names.
 const BZL_BUILTIN_NAMES: &[&str] = &[
@@ -382,7 +384,20 @@ impl Rt {
         native_fields.insert("existing_rules".to_string(), Value::BuiltinFunction("host:native.existing_rules".into()));
         native_fields.insert("package_name".to_string(), Value::BuiltinFunction("host:native.package_name".into()));
         native_fields.insert("glob".to_string(), Value::BuiltinFunction("host:native.glob".into()));
-        ctx.globals.insert("native".into(), Value::Struct(Arc::new(StructValue::new(native_fields))));
+        for name in [
+            "action_listener", "alias", "cc_binary", "cc_import", "cc_libc_top_alias", "cc_library", "cc_shared_library",
+            "cc_static_library", "cc_test", "cc_toolchain", "cc_toolchain_alias", "cc_toolchain_suite", "config_feature_flag",
+            "config_setting", "constraint_setting", "constraint_value", "environment", "exports_files", "extra_action",
+            "fdo_prefetch_hints", "fdo_profile", "filegroup", "genquery", "genrule", "java_binary", "java_import",
+            "java_library", "java_package_configuration", "java_plugin", "java_plugins_flag_alias", "java_runtime",
+            "java_test", "java_toolchain", "label_flag", "label_setting", "memprof_profile", "module_name", "module_version",
+            "objc_import", "objc_library", "package_default_visibility", "package_group", "package_relative_label",
+            "platform", "propeller_optimize", "repo_name", "repository_name", "starlark_doc_extract", "subpackages",
+            "test_suite", "toolchain", "toolchain_type",
+        ] {
+            native_fields.insert(name.to_string(), Value::BuiltinFunction(format!("host:native.{name}")));
+        }
+        ctx.globals.insert("native".into(), Value::Struct(Arc::new(StructValue::new_native(native_fields))));
         let rt2 = self.clone();
         let (cr, cp) = (ctx_repo.to_string(), ctx_pkg.to_string());
         ctx.load_hook = Some(Arc::new(move |label: &str| rt2.load_bzl(label, &cr, &cp)));
@@ -429,7 +444,36 @@ impl Rt {
             if ctx.static_failure {
                 return Err(format!("{STATIC_FAILURE_MARK}{}", errs.join("\nERROR: ")));
             }
-            return Err(errs.join("\n"));
+            let joined = errs.join("\n");
+            // A compilation failure in a transitively loaded file is still a compilation failure
+            // of this file. Preserve the child's diagnostics and add Bazel's load-site context.
+            if let Some(i) = joined.find(STATIC_FAILURE_MARK) {
+                let child_messages = &joined[i + STATIC_FAILURE_MARK.len()..];
+                let load = ctx.loads.last();
+                let child_name = load
+                    .map(|l| {
+                        l.module_label
+                            .rsplit_once(':')
+                            .map(|(_, name)| name)
+                            .or_else(|| l.module_label.rsplit_once('/').map(|(_, name)| name))
+                            .unwrap_or(&l.module_label)
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "loaded file".to_string());
+                let (line, column) = load
+                    .and_then(|l| {
+                        let needle = format!("\"{}\"", l.module_label);
+                        src.lines()
+                            .enumerate()
+                            .find_map(|(line, text)| text.find(&needle).map(|column| (line + 1, column + 1)))
+                    })
+                    .unwrap_or((1, 1));
+                return Err(format!(
+                    "{NESTED_STATIC_FAILURE_MARK}{child_messages}{NESTED_STATIC_TRAILER_MARK}at {}:{line}:{column}: compilation of module '{child_name}' failed",
+                    path.display()
+                ));
+            }
+            return Err(joined);
         }
         let mut st = self.state.lock().unwrap();
         {
@@ -514,10 +558,13 @@ impl Rt {
             if let Ok(src) = std::fs::read_to_string(&path) {
                 if !Self::defines_external_machinery(&src) {
                     let label = zel_cmdline::Label::parse_canonical(key).map_err(|e| e.to_string())?;
-                    let exports = self.package_loader().load_bzl_exports(&label)?;
-                    // Record the dependency edge for lockfile digests like `eval_bzl_fresh` does.
-                    self.state.lock().unwrap().bzl_deps.insert(key.to_string(), (crate::hash::sha256_hex(src.as_bytes()), vec![]));
-                    return Ok(exports);
+                    if let Ok(exports) = self.package_loader().load_bzl_exports(&label) {
+                        // Record the dependency edge for lockfile digests like `eval_bzl_fresh` does.
+                        self.state.lock().unwrap().bzl_deps.insert(key.to_string(), (crate::hash::sha256_hex(src.as_bytes()), vec![]));
+                        return Ok(exports);
+                    }
+                    // Re-evaluate failures through the Bzlmod Starlark context below so static
+                    // failures retain their compilation marker and load-site context.
                 }
             }
         }
@@ -565,9 +612,27 @@ impl Rt {
                 "package_name() can only be used while evaluating a BUILD file or a legacy or symbolic macro".into(),
             )),
             "native.glob" => Err(StarlarkError("glob() can only be used while evaluating a BUILD file or a legacy macro".into())),
-            "native.existing_rule" => Ok(Value::None),
-            "native.existing_rules" => Ok(dict_value(vec![])),
-            "repository_rule" => self.make_repository_rule(pos, kw),
+            "native.existing_rule" if !self.state.lock().unwrap().collectors.is_empty() => Ok(Value::None),
+            "native.existing_rules" if !self.state.lock().unwrap().collectors.is_empty() => {
+                Ok(dict_value(Vec::new()))
+            }
+            "native.existing_rule" => Err(StarlarkError(
+                "existing_rule() can only be used while evaluating a BUILD file, a legacy macro, or a rule finalizer".into(),
+            )),
+            "native.existing_rules" => Err(StarlarkError(
+                "existing_rules() can only be used while evaluating a BUILD file, a legacy macro, or a rule finalizer".into(),
+            )),
+            "repository_rule" => {
+                match self.make_repository_rule(pos, kw) {
+                    Ok(v) => Ok(v),
+                    Err(e) if !ctx.last_call_loc.file.is_empty() && !e.0.contains("Traceback (most recent call last)") => {
+                        let at = ctx.assign_stmt_location.clone().unwrap_or_else(|| ctx.last_call_loc.clone());
+                        let trace = ctx.thread.format_stack_trace_at(&at);
+                        Err(StarlarkError(format!("ERROR: {trace}Error in repository_rule: {}", e.0)))
+                    }
+                    other => other,
+                }
+            }
             "module_extension" => self.make_module_extension(pos, kw, ctx.call_location.clone()),
             "tag_class" => {
                 let attrs = self.attrs_from_kw(kw.get("attrs"))?;
@@ -757,7 +822,7 @@ impl Rt {
         };
         // `@Param(name = "remotable", enableOnlyWithFlag = EXPERIMENTAL_REPO_REMOTE_EXEC)`; the flag is off.
         if kw.contains_key("remotable") {
-            return err("parameter 'remotable' is experimental and thus unavailable with the current flags. It may be enabled by setting --experimental_repo_remote_exec");
+            return err("in call to repository_rule(), parameter 'remotable' is experimental and thus unavailable with the current flags. It may be enabled by setting --experimental_repo_remote_exec");
         }
         let mut attrs = self.attrs_from_kw(kw.get("attrs"))?;
         if attrs.iter().any(|(n, _)| n == "name") {

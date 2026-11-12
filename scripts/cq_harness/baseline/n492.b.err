@@ -5,6 +5,6 @@ WARNING: Build option --features has changed, discarding analysis cache (this ca
 Analyzing: target //a:sm_cat (0 packages loaded, 0 targets configured)
 INFO: Analyzed target //a:sm_cat (0 packages loaded, 2 targets configured).
 INFO: Found 1 target...
-INFO: Elapsed time: 0.110s, Critical Path: 0.00s
+INFO: Elapsed time: 0.042s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

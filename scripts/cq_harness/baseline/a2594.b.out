@@ -3,12 +3,12 @@ action 'Cat @@//a:lib2'
   Target: //a:lib2
   Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: f0230a83e69047867d2f3de6a238b66ace8fe11b9fcfeb075362063266095ab4
+  ActionKey: a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87
   Inputs: [a/y.txt, bazel-out/k8-fastbuild/bin/a/lib.txt]
   Outputs: [bazel-out/k8-fastbuild/bin/a/lib2.txt]
   Command Line: (exec /bin/bash \
     -c \
     'cat bazel-out/k8-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/k8-fastbuild/bin/a/lib2.txt')
-# Configuration: 4d1be72401ba892d08e723bc2b89b364d2c892b184c81b0e3b71ceeeac145767
+# Configuration: a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18
 # Execution platform: @@platforms//host:host
 

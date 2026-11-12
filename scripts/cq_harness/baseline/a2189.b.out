@@ -1,18 +1,18 @@
-:xbin//b:tool*kdarwin_arm64-opt-execdarwin_arm64"@77e8473c8c1c4b4ef1825b4b7ffc50dc3ee606e358c10cba8c77f21ec5fe49d9(B	bazel-outBdarwin_arm64-opt-execB	binBbB
-tool
-*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272cq@c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"	FileWrite(Jhr@@platforms//host:host�B	darwin_arm64-fastbuildB	bin	BbB
-tool
-q@c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"	FileWrite(Jhr@@platforms//host:host�B
-tool.repo_mapping
+:xbin//b:tool*Wk8-opt-execk8"@04bf134dfa57115b01daa56bd3a30421a6e74b1819e002496a26c94ed0087067(*Vk8-fastbuildk8"@a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18B	bazel-outB	k8-fastbuildBk8-opt-execB	bin	B	binBbBbB
+tool
+q@8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8"	FileWrite(Jhr@@platforms//host:host�B
+tool
+q@8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8"	FileWrite(Jhr@@platforms//host:host�B
+tool.repo_mapping
 
-x@9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a"RepoMappingManifest(Jhr@@platforms//host:hostBtool.repo_mapping
-x@9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a"RepoMappingManifest(Jhr@@platforms//host:hostBtool.runfiles_manifestBtool.runfiles_manifest
-
-z@8cde1b5b3980b2dfcd31339996ce6c6dc7f06c18fd566a130ea55577b1b72072"SourceSymlinkManifest(Jhr@@platforms//host:hostz@04503c002e4c8376c7b1143f1d1eae6c9c0fb88658286dca774e009167bc08cb"SourceSymlinkManifest(Jhr@@platforms//host:host"Btool.runfilesBMANIFEST
-s@753ded1e6f15fd9aafc065b7f683c507313f0e63014a24a36eb2875e8fe17b79"SymlinkTree(BJhr@@platforms//host:host"
-t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:host"Btool.runfilesBMANIFEST
-	s@507fc32f3b8936667ae5c68bd64925404b486d4e91861ef8eb9db2ebf6f75430"SymlinkTree(BJ	h	r@@platforms//host:host"	
+Btool.repo_mappingx@61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3"RepoMappingManifest(Jhr@@platforms//host:host
+x@61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3"RepoMappingManifest(Jhr@@platforms//host:hostBtool.runfiles_manifestBtool.runfiles_manifest
+
+z@fa612f3420bc9a9f396725824b7025c5bce959ee5459337d257e28af7303d3e9"SourceSymlinkManifest(Jhr@@platforms//host:hostz@278c5f46d0d07301d3cf8edaf39aecdca38dc722cc58edda142aa04e824d5e20"SourceSymlinkManifest(Jhr@@platforms//host:host""Btool.runfilesBtool.runfilesBMANIFEST
+BMANIFESTs@9f18d61fe318c622b23edd15c2b9b185a8dc0e972d9c1498add946aeb8c125c7"SymlinkTree(BJhr@@platforms//host:host
+s@b4383eb49e620ed4369432971c7220f133f5f750c1ffc573d2c133419df8ad0e"SymlinkTree(BJhr@@platforms//host:host""
+	
 
-t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJ
+t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJ	h	r@@platforms//host:hostt@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJ
 h
 r@@platforms//host:host

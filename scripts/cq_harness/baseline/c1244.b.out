@@ -11,23 +11,6 @@ x_test(
 # Rule x_test defined at (most recent call last):
 #   @WS@/defs.bzl:35:14 in <toplevel>
 
-# @OB@/external/bazel_tools/tools/test/BUILD:24:16
-empty_toolchain(
-  name = "empty_toolchain",
-)
-# Rule empty_toolchain instantiated at (most recent call last):
-#   @OB@/external/bazel_tools/tools/test/BUILD:24:16 in <toplevel>
-# Rule empty_toolchain defined at (most recent call last):
-#   @OB@/external/bazel_tools/tools/test/default_test_toolchain.bzl:25:23 in <toplevel>
-
-# @OB@/external/bazel_tools/tools/BUILD:5:6
-alias(
-  name = "host_platform",
-  actual = "@@platforms//host:host",
-)
-# Rule host_platform instantiated at (most recent call last):
-#   @OB@/external/bazel_tools/tools/BUILD:5:6 in <toplevel>
-
 # @OB@/external/bazel_tools/tools/test/BUILD:148:10
 filegroup(
   name = "xml_writer",
@@ -35,14 +18,6 @@ filegroup(
 )
 # Rule xml_writer instantiated at (most recent call last):
 #   @OB@/external/bazel_tools/tools/test/BUILD:148:10 in <toplevel>
-
-# @OB@/external/bazel_tools/tools/test/BUILD:12:15
-toolchain_type(
-  name = "default_test_toolchain_type",
-  no_match_error = "By default, tests are executed on the first execution platform that matches all constraints specified by the target platform. Either register the target platform (or a platform with at least the same constraints) as an execution platform, or override the default behavior by registering a custom toolchain for @bazel_tools//tools/test:default_test_toolchain_type.",
-)
-# Rule default_test_toolchain_type instantiated at (most recent call last):
-#   @OB@/external/bazel_tools/tools/test/BUILD:12:15 in <toplevel>
 
 # @OB@/external/bazel_tools/tools/test/BUILD:106:10
 filegroup(
@@ -52,14 +27,6 @@ filegroup(
 # Rule test_xml_generator instantiated at (most recent call last):
 #   @OB@/external/bazel_tools/tools/test/BUILD:106:10 in <toplevel>
 
-# @OB@/external/bazel_tools/tools/test/BUILD:136:10
-filegroup(
-  name = "test_wrapper",
-  srcs = ["@bazel_tools//tools/test:dummy.sh"],
-)
-# Rule test_wrapper instantiated at (most recent call last):
-#   @OB@/external/bazel_tools/tools/test/BUILD:136:10 in <toplevel>
-
 # @OB@/external/bazel_tools/tools/test/BUILD:101:10
 filegroup(
   name = "test_setup",
@@ -68,13 +35,21 @@ filegroup(
 # Rule test_setup instantiated at (most recent call last):
 #   @OB@/external/bazel_tools/tools/test/BUILD:101:10 in <toplevel>
 
-# @OB@/external/platforms/host/BUILD:14:9
-platform(
-  name = "host",
-  constraint_values = ["@@platforms//cpu:aarch64", "@@platforms//os:osx"],
+# @OB@/external/bazel_tools/tools/test/BUILD:96:10
+filegroup(
+  name = "runtime",
+  srcs = ["@bazel_tools//tools/test:test-setup.sh"],
 )
-# Rule host instantiated at (most recent call last):
-#   @OB@/external/platforms/host/BUILD:14:9 in <toplevel>
+# Rule runtime instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:96:10 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/test/BUILD:12:15
+toolchain_type(
+  name = "default_test_toolchain_type",
+  no_match_error = "By default, tests are executed on the first execution platform that matches all constraints specified by the target platform. Either register the target platform (or a platform with at least the same constraints) as an execution platform, or override the default behavior by registering a custom toolchain for @bazel_tools//tools/test:default_test_toolchain_type.",
+)
+# Rule default_test_toolchain_type instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:12:15 in <toplevel>
 
 # @OB@/external/bazel_tools/tools/test/BUILD:121:10
 filegroup(
@@ -84,24 +59,22 @@ filegroup(
 # Rule coverage_support instantiated at (most recent call last):
 #   @OB@/external/bazel_tools/tools/test/BUILD:121:10 in <toplevel>
 
-# @OB@/external/bazel_tools/tools/test/BUILD:111:10
-sh_binary(
-  name = "collect_coverage",
-  srcs = ["@bazel_tools//tools/test:collect_coverage.sh"],
+# @OB@/external/bazel_tools/tools/BUILD:5:6
+alias(
+  name = "host_platform",
+  actual = "@@platforms//host:host",
 )
-# Rule collect_coverage instantiated at (most recent call last):
-#   @OB@/external/bazel_tools/tools/test/BUILD:111:10 in <toplevel>
-# Rule sh_binary defined at (most recent call last):
-#   @OB@/external/rules_shell+/shell/private/sh_binary.bzl:22:36      in <toplevel>
-#   @OB@/external/rules_shell+/shell/private/sh_executable.bzl:173:16 in make_sh_executable_rule
+# Rule host_platform instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/BUILD:5:6 in <toplevel>
 
-# @OB@/external/bazel_tools/tools/test/BUILD:96:10
-filegroup(
-  name = "runtime",
-  srcs = ["@bazel_tools//tools/test:test-setup.sh"],
+# @OB@/external/bazel_tools/tools/test/BUILD:24:16
+empty_toolchain(
+  name = "empty_toolchain",
 )
-# Rule runtime instantiated at (most recent call last):
-#   @OB@/external/bazel_tools/tools/test/BUILD:96:10 in <toplevel>
+# Rule empty_toolchain instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:24:16 in <toplevel>
+# Rule empty_toolchain defined at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/default_test_toolchain.bzl:25:23 in <toplevel>
 
 # @WS@/a/BUILD:5:8
 catrule(
@@ -114,13 +87,40 @@ catrule(
 # Rule catrule defined at (most recent call last):
 #   @WS@/defs.bzl:6:15 in <toplevel>
 
-# @OB@/external/platforms/cpu/BUILD:57:17
-constraint_value(
-  name = "aarch64",
-  constraint_setting = "@@platforms//cpu:cpu",
+# @OB@/external/bazel_tools/tools/test/BUILD:111:10
+sh_binary(
+  name = "collect_coverage",
+  srcs = ["@bazel_tools//tools/test:collect_coverage.sh"],
 )
-# Rule aarch64 instantiated at (most recent call last):
-#   @OB@/external/platforms/cpu/BUILD:57:17 in <toplevel>
+# Rule collect_coverage instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:111:10 in <toplevel>
+# Rule sh_binary defined at (most recent call last):
+#   @OB@/external/rules_shell+/shell/private/sh_binary.bzl:22:36      in <toplevel>
+#   @OB@/external/rules_shell+/shell/private/sh_executable.bzl:173:16 in make_sh_executable_rule
+
+# @OB@/external/platforms/host/BUILD:14:9
+platform(
+  name = "host",
+  constraint_values = ["@@platforms//cpu:x86_64", "@@platforms//os:linux"],
+)
+# Rule host instantiated at (most recent call last):
+#   @OB@/external/platforms/host/BUILD:14:9 in <toplevel>
+
+# @OB@/external/bazel_tools/tools/test/BUILD:136:10
+filegroup(
+  name = "test_wrapper",
+  srcs = ["@bazel_tools//tools/test:dummy.sh"],
+)
+# Rule test_wrapper instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/tools/test/BUILD:136:10 in <toplevel>
+
+# @OB@/external/platforms/os/BUILD:41:17
+constraint_value(
+  name = "linux",
+  constraint_setting = "@@platforms//os:os",
+)
+# Rule linux instantiated at (most recent call last):
+#   @OB@/external/platforms/os/BUILD:41:17 in <toplevel>
 
 # @WS@/a/BUILD:4:8
 catrule(
@@ -134,48 +134,13 @@ catrule(
 # Rule catrule defined at (most recent call last):
 #   @WS@/defs.bzl:6:15 in <toplevel>
 
-# @OB@/external/bazel_tools/src/conditions/BUILD:115:15
-config_setting(
-  name = "windows",
-  visibility = ["//visibility:public"],
-  constraint_values = ["@@platforms//os:windows"],
-)
-# Rule windows instantiated at (most recent call last):
-#   @OB@/external/bazel_tools/src/conditions/BUILD:115:15 in <toplevel>
-
-# @OB@/external/platforms/os/BUILD:46:17
+# @OB@/external/platforms/cpu/BUILD:162:17
 constraint_value(
-  name = "windows",
-  constraint_setting = "@@platforms//os:os",
+  name = "x86_64",
+  constraint_setting = "@@platforms//cpu:cpu",
 )
-# Rule windows instantiated at (most recent call last):
-#   @OB@/external/platforms/os/BUILD:46:17 in <toplevel>
-
-# @OB@/external/rules_shell+/shell/BUILD:15:15
-toolchain_type(
-  name = "toolchain_type",
-  visibility = ["//visibility:public"],
-)
-# Rule toolchain_type instantiated at (most recent call last):
-#   @OB@/external/rules_shell+/shell/BUILD:15:15 in <toplevel>
-
-# @OB@/external/platforms/os/BUILD:71:17
-constraint_value(
-  name = "osx",
-  constraint_setting = "@@platforms//os:os",
-)
-# Rule osx instantiated at (most recent call last):
-#   @OB@/external/platforms/os/BUILD:71:17 in <toplevel>
-
-# @OB@/external/rules_shell++sh_configure+local_config_shell/BUILD:38:13
-sh_toolchain(
-  name = "osx_sh",
-  path = "/bin/bash",
-)
-# Rule osx_sh instantiated at (most recent call last):
-#   @OB@/external/rules_shell++sh_configure+local_config_shell/BUILD:38:13 in <toplevel>
-# Rule sh_toolchain defined at (most recent call last):
-#   @OB@/external/rules_shell+/shell/toolchains/sh_toolchain.bzl:28:20 in <toplevel>
+# Rule x86_64 instantiated at (most recent call last):
+#   @OB@/external/platforms/cpu/BUILD:162:17 in <toplevel>
 
 # @OB@/external/rules_shell+/shell/runfiles/BUILD:4:6
 alias(
@@ -186,14 +151,48 @@ alias(
 # Rule runfiles instantiated at (most recent call last):
 #   @OB@/external/rules_shell+/shell/runfiles/BUILD:4:6 in <toplevel>
 
-# @OB@/external/ext+/lib/BUILD:1:10
-filegroup(
-  name = "data",
+# @OB@/external/rules_shell+/shell/BUILD:15:15
+toolchain_type(
+  name = "toolchain_type",
   visibility = ["//visibility:public"],
-  srcs = ["@ext//lib:d.txt"],
 )
-# Rule data instantiated at (most recent call last):
-#   @OB@/external/ext+/lib/BUILD:1:10 in <toplevel>
+# Rule toolchain_type instantiated at (most recent call last):
+#   @OB@/external/rules_shell+/shell/BUILD:15:15 in <toplevel>
+
+# @OB@/external/bazel_tools/src/conditions/BUILD:115:15
+config_setting(
+  name = "windows",
+  visibility = ["//visibility:public"],
+  constraint_values = ["@@platforms//os:windows"],
+)
+# Rule windows instantiated at (most recent call last):
+#   @OB@/external/bazel_tools/src/conditions/BUILD:115:15 in <toplevel>
+
+# @OB@/external/rules_shell++sh_configure+local_config_shell/BUILD:22:13
+sh_toolchain(
+  name = "linux_sh",
+  path = "/usr/bin/bash",
+)
+# Rule linux_sh instantiated at (most recent call last):
+#   @OB@/external/rules_shell++sh_configure+local_config_shell/BUILD:22:13 in <toplevel>
+# Rule sh_toolchain defined at (most recent call last):
+#   @OB@/external/rules_shell+/shell/toolchains/sh_toolchain.bzl:28:20 in <toplevel>
+
+# @OB@/external/platforms/os/BUILD:46:17
+constraint_value(
+  name = "windows",
+  constraint_setting = "@@platforms//os:os",
+)
+# Rule windows instantiated at (most recent call last):
+#   @OB@/external/platforms/os/BUILD:46:17 in <toplevel>
+
+# @WS@/a/BUILD:3:10
+filegroup(
+  name = "srcs_fg",
+  srcs = ["//a:x.txt", "//a:y.txt", "//a:z.txt"],
+)
+# Rule srcs_fg instantiated at (most recent call last):
+#   @WS@/a/BUILD:3:10 in <toplevel>
 
 # @OB@/external/platforms/cpu/BUILD:14:19
 constraint_setting(
@@ -201,13 +200,6 @@ constraint_setting(
 )
 # Rule cpu instantiated at (most recent call last):
 #   @OB@/external/platforms/cpu/BUILD:14:19 in <toplevel>
-
-# @OB@/external/platforms/os/BUILD:14:19
-constraint_setting(
-  name = "os",
-)
-# Rule os instantiated at (most recent call last):
-#   @OB@/external/platforms/os/BUILD:14:19 in <toplevel>
 
 # @OB@/external/rules_shell+/shell/runfiles/BUILD:10:11
 sh_library(
@@ -220,13 +212,21 @@ sh_library(
 # Rule sh_library defined at (most recent call last):
 #   @OB@/external/rules_shell+/shell/private/sh_library.bzl:46:18 in <toplevel>
 
-# @WS@/a/BUILD:3:10
-filegroup(
-  name = "srcs_fg",
-  srcs = ["//a:x.txt", "//a:y.txt", "//a:z.txt"],
+# @OB@/external/platforms/os/BUILD:14:19
+constraint_setting(
+  name = "os",
 )
-# Rule srcs_fg instantiated at (most recent call last):
-#   @WS@/a/BUILD:3:10 in <toplevel>
+# Rule os instantiated at (most recent call last):
+#   @OB@/external/platforms/os/BUILD:14:19 in <toplevel>
+
+# @OB@/external/ext+/lib/BUILD:1:10
+filegroup(
+  name = "data",
+  visibility = ["//visibility:public"],
+  srcs = ["@ext//lib:d.txt"],
+)
+# Rule data instantiated at (most recent call last):
+#   @OB@/external/ext+/lib/BUILD:1:10 in <toplevel>
 
 # @OB@/external/rules_shell+/shell/runfiles/BUILD:16:14
 root_symlinks(

@@ -5,6 +5,6 @@ Analyzing: target //b:tool (0 packages loaded, 0 targets configured)
 INFO: Analyzed target //b:tool (0 packages loaded, 0 targets configured).
 INFO: Found 1 target...
 ERROR: Error doing post analysis query: invalid --starlark:expr: name 'DefaultInfo' is not defined
-INFO: Elapsed time: 0.054s, Critical Path: 0.00s
+INFO: Elapsed time: 0.030s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

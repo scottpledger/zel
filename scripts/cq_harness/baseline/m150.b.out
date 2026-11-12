@@ -1,17 +1,16 @@
-17 total actions.
+12 total actions.
 
 Mnemonics:
   TestRunner: 1
   Genrule: 1
-  SymlinkTree: 3
-  SourceSymlinkManifest: 3
-  RepoMappingManifest: 3
-  FileWrite: 3
-  RunfilesTree: 3
+  SymlinkTree: 2
+  SourceSymlinkManifest: 2
+  RepoMappingManifest: 2
+  FileWrite: 2
+  RunfilesTree: 2
 
 Configurations:
-  darwin_arm64-opt-exec: 5
-  darwin_arm64-fastbuild: 12
+  k8-fastbuild: 12
 
 Execution Platforms:
-  @@platforms//host:host: 17
+  @@platforms//host:host: 12

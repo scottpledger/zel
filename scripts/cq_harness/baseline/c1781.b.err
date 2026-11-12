@@ -52,6 +52,6 @@ Error: Accessing providers via the field syntax on structs is deprecated and rem
 ERROR: Starlark evaluation error for //a:tr: Traceback (most recent call last):
 	File "--starlark:expr", line 1, column 35, in format
 Error: Accessing providers via the field syntax on structs is deprecated and removed.
-INFO: Elapsed time: 0.060s, Critical Path: 0.00s
+INFO: Elapsed time: 0.032s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

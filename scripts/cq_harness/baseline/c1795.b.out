@@ -1,11 +1,11 @@
 @@//a:tr 4
+@@platforms//host:host 5
+@@platforms//host:host 5
 @@//a:lib 4
-@@platforms//host:host 5
-@@platforms//host:host 5
-@@platforms//cpu:aarch64 5
-@@platforms//os:osx 5
-@@//a:srcs_fg 5
+@@platforms//os:linux 5
 @@//a:x.txt 4
+@@//a:srcs_fg 5
+@@platforms//cpu:x86_64 5
 @@ext+//lib:data 5
 @@//a:z.txt 4
 @@platforms//cpu:cpu 5

@@ -8,10 +8,10 @@
   }],
   "actions": [{
     "targetId": 1,
-    "actionKey": "0aa5a55ed753de0b28e97d3cd34e9e150625cec2c4eb0d6ea68abdccaa618f98",
+    "actionKey": "437af1919ec9321eeb32f63be830af377946257f87823bd5ae149fe94b74e213",
     "mnemonic": "Genrule",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo ext \u003e bazel-out/darwin_arm64-fastbuild/bin/external/ext+/lib/g.out"],
+    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo ext \u003e bazel-out/k8-fastbuild/bin/external/ext+/lib/g.out"],
     "environmentVariables": [{
       "key": "PATH",
       "value": "/bin:/usr/bin:/usr/local/bin"
@@ -32,9 +32,9 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }],
   "ruleClasses": [{
     "id": 1,
@@ -64,7 +64,7 @@
     "label": "bazel-out"
   }, {
     "id": 11,
-    "label": "darwin_arm64-fastbuild",
+    "label": "k8-fastbuild",
     "parentId": 12
   }, {
     "id": 10,

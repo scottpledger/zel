@@ -1,29 +1,29 @@
-NoTransition -> //a:tr (599753c)
-  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> b4d1ba2
+NoTransition -> //a:tr (fb36655)
+  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 9a51187
     compilation_mode:fastbuild -> [opt]
   $allowlist_function_transition#@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist#(null transition) -> 
-NoTransition -> //a:lib (b4d1ba2)
+NoTransition -> @@platforms//host:host (3030ed4)
+  constraint_values#@@platforms//cpu:x86_64#NoTransition -> 
+  constraint_values#@@platforms//os:linux#NoTransition -> 
+NoTransition -> //a:lib (9a51187)
   srcs#//a:x.txt#(null transition) -> 
   srcs#//a:srcs_fg#NoTransition -> 
   srcs#@ext//lib:data#NoTransition -> 
-NoTransition -> @bazel_tools//tools:host_platform (c07488d)
-NoTransition -> @@platforms//host:host (c07488d)
-  constraint_values#@@platforms//cpu:aarch64#NoTransition -> 
-  constraint_values#@@platforms//os:osx#NoTransition -> 
 @bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist (null)
-NoTransition -> @ext//lib:data (b4d1ba2)
-  srcs#@ext//lib:d.txt#(null transition) -> 
-NoConfigTransition -> @@platforms//cpu:aarch64 (c07488d)
-  constraint_setting#@@platforms//cpu:cpu#NoTransition -> 
-NoTransition -> //a:srcs_fg (b4d1ba2)
+NoTransition -> @bazel_tools//tools:host_platform (3030ed4)
+NoTransition -> //a:srcs_fg (9a51187)
   srcs#//a:x.txt#(null transition) -> 
   srcs#//a:y.txt#(null transition) -> 
   srcs#//a:z.txt#(null transition) -> 
-NoConfigTransition -> @@platforms//os:osx (c07488d)
+NoConfigTransition -> @@platforms//os:linux (3030ed4)
   constraint_setting#@@platforms//os:os#NoTransition -> 
 //a:x.txt (null)
+NoConfigTransition -> @@platforms//cpu:x86_64 (3030ed4)
+  constraint_setting#@@platforms//cpu:cpu#NoTransition -> 
+NoTransition -> @ext//lib:data (9a51187)
+  srcs#@ext//lib:d.txt#(null transition) -> 
 //a:z.txt (null)
-NoConfigTransition -> @@platforms//cpu:cpu (c07488d)
-NoConfigTransition -> @@platforms//os:os (c07488d)
-@ext//lib:d.txt (null)
+NoConfigTransition -> @@platforms//cpu:cpu (3030ed4)
+NoConfigTransition -> @@platforms//os:os (3030ed4)
 //a:y.txt (null)
+@ext//lib:d.txt (null)

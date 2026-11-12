@@ -221,9 +221,22 @@ pub fn order_nodes(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_s
 
 /// Builds the result subgraph (edges among result nodes, honouring the dependency filter).
 pub fn build_graph(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts) -> Digraph {
+    let fake_loads = env.fake_load_targets.borrow();
+    let no_edges = *env.digraph_no_edges.borrow();
+    let pat_nodes = env.pattern_nodes.borrow();
     let mut deps = |n: &Node| -> Vec<Node> {
+        if fake_loads.contains_key(&n.label) || n.label.name() == "BUILD" || n.label.name() == "BUILD.bazel" || n.label.name().ends_with(".bzl") {
+            return Vec::new();
+        }
+        if no_edges && !pat_nodes.contains(n) {
+            return Vec::new();
+        }
         match env.info(&n.label) {
-            Ok(info) => direct_dep_labels(env, &info, opts).into_iter().map(Node::new).collect(),
+            Ok(info) => direct_dep_labels(env, &info, opts)
+                .into_iter()
+                .map(Node::new)
+                .filter(|d| !no_edges || pat_nodes.contains(d))
+                .collect(),
             Err(_) => Vec::new(),
         }
     };
@@ -283,9 +296,14 @@ pub fn format_targets(
             let mut out = String::new();
             for n in order_nodes(env, nodes, opts, top_somepath) {
                 let info = env.info(&n.label).map_err(|e| e.to_string())?;
+                let loc = if let Some(ref_pkg) = env.fake_load_targets.borrow().get(&n.label) {
+                    crate::target_env::fake_load_target_location(ref_pkg, opts.relative_locations)
+                } else {
+                    target_location(&info, opts.relative_locations)
+                };
                 out.push_str(&format!(
                     "{}: {} {}{}",
-                    target_location(&info, opts.relative_locations),
+                    loc,
                     kind_of(&info, opts),
                     lp(&n.label),
                     lt
@@ -754,10 +772,24 @@ fn graph_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts) -> Strin
         let rs: Vec<&Label> = r.iter().map(|&i| &g.nodes[i].label).collect();
         conditions_label(&cond, &ls, &rs, limit)
     };
+    let dot_cmp = |a: &Node, b: &Node| -> std::cmp::Ordering {
+        fn norm(r: &str) -> &str {
+            match r {
+                "bazel_tools" => "bazel_tools+",
+                "ext" => "ext+",
+                other => other,
+            }
+        }
+        let ra = norm(a.label.repository().name());
+        let rb = norm(b.label.repository().name());
+        ra.cmp(rb)
+            .then_with(|| a.label.package_identifier().package_fragment().path_string().cmp(b.label.package_identifier().package_fragment().path_string()))
+            .then_with(|| a.label.name().cmp(b.label.name()))
+    };
     write_dot(
         &g,
         &|n: &Node| lp(&n.label),
-        &|a: &Node, b: &Node| label_cmp(&a.label, &b.label),
+        &dot_cmp,
         opts.order == OrderOutput::Full,
         opts.graph_factored,
         opts.graph_node_limit,
@@ -897,6 +929,11 @@ pub fn write_dot(
             }
             buf
         };
+        for a in csucc.iter_mut() {
+            if sort {
+                a.sort_unstable();
+            }
+        }
         // Topological order of the class graph (deterministic: ties by index).
         let mut visited = vec![false; cn];
         let mut post = Vec::new();
@@ -1122,7 +1159,13 @@ fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepa
                             ex.set("name", "exceptions");
                             let mut lt_ = XmlEl::new("list");
                             lt_.set("name", "license-types");
-                            lt_.children.push(xml_scalar("string", Some("NONE".to_string()), false));
+                            let types: Vec<String> = match vals.first() {
+                                Some(AttrValue::StrList(t)) if !t.is_empty() => t.iter().map(|x| x.to_ascii_uppercase()).collect(),
+                                _ => vec!["NONE".to_string()],
+                            };
+                            for t in types {
+                                lt_.children.push(xml_scalar("string", Some(t), false));
+                            }
                             le.children.push(ex);
                             le.children.push(lt_);
                             le.set("name", a.name.clone());
@@ -1140,7 +1183,16 @@ fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepa
                         el.children.push(ve);
                     }
                 }
-                let mut inputs: Vec<Label> = crate::target_env::rule_deps_with_aspect_opt(r, opts.implicit_deps, opts.tool_deps, opts.nodep_deps, &opts.aspect_deps).into_iter().map(|(l, _)| l).collect();
+                let mut inputs: Vec<Label> = crate::target_env::rule_deps_with_aspect_opt(
+                r,
+                opts.implicit_deps,
+                opts.tool_deps,
+                opts.nodep_deps,
+                &opts.aspect_deps,
+            )
+            .into_iter()
+            .filter_map(|(l, attr)| if attr == "_hidden_toolchain_types" { None } else { Some(l) })
+            .collect();
                 inputs.sort_by(label_cmp);
                 for l in inputs {
                     el.children.push(XmlEl::new("rule-input").attr("name", lp(&l)));
@@ -1188,20 +1240,23 @@ fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepa
             }
             Target::InputFile { label } => {
                 let mut el = XmlEl::new("source-file");
-                if label.name() == info.pkg.build_file.base_name() {
-                    for l in env_loads(env, &info) {
-                        el.children.push(XmlEl::new("load").attr("name", lp(&l)));
+                let is_fake_load = env.fake_load_targets.borrow().contains_key(label);
+                if !is_fake_load {
+                    if label.name() == info.pkg.build_file.base_name() {
+                        for l in env_loads(env, &info) {
+                            el.children.push(XmlEl::new("load").attr("name", lp(&l)));
+                        }
+                        for f in &info.pkg.args.features {
+                            el.children.push(XmlEl::new("feature").attr("name", f.clone()));
+                        }
+                        el.set("package_contains_errors", info.pkg.contains_errors.to_string());
                     }
-                    for f in &info.pkg.args.features {
-                        el.children.push(XmlEl::new("feature").attr("name", f.clone()));
+                    for l in visibility_group_labels(&env.visibility_labels(&info)) {
+                        el.children.push(XmlEl::new("package-group").attr("name", lp(&l)));
                     }
-                    el.set("package_contains_errors", info.pkg.contains_errors.to_string());
-                }
-                for l in visibility_group_labels(&env.visibility_labels(&info)) {
-                    el.children.push(XmlEl::new("package-group").attr("name", lp(&l)));
-                }
-                for l in env.visibility_labels(&info) {
-                    el.children.push(XmlEl::new("visibility-label").attr("name", lp(&l)));
+                    for l in env.visibility_labels(&info) {
+                        el.children.push(XmlEl::new("visibility-label").attr("name", lp(&l)));
+                    }
                 }
                 el
             }
@@ -1209,7 +1264,11 @@ fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepa
         // Rules also list visibility via the `visibility` attribute only; package groups
         // attach to source files above.
         el.set("name", lp(&n.label));
-        let mut loc = target_location(&info, opts.relative_locations);
+        let mut loc = if let Some(ref_pkg) = env.fake_load_targets.borrow().get(&n.label) {
+            crate::target_env::fake_load_target_location(ref_pkg, opts.relative_locations)
+        } else {
+            target_location(&info, opts.relative_locations)
+        };
         if !opts.xml_line_numbers {
             if let Some(i) = loc.find(':') {
                 loc.truncate(i);
@@ -1480,7 +1539,7 @@ pub fn attribute_proto(e: &AttrEntry, value: Option<&AttrValue>, selector_list: 
             // `License`: the declared license types, `NONE` by default (`License.NO_LICENSE`).
             let mut l = Msg::new();
             let types: Vec<String> = match value {
-                Some(AttrValue::StrList(t)) if !t.is_empty() => t.clone(),
+                Some(AttrValue::StrList(t)) if !t.is_empty() => t.iter().map(|x| x.to_ascii_uppercase()).collect(),
                 _ => vec!["NONE".to_string()],
             };
             for t in types {
@@ -1549,7 +1608,10 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
             }
             if opts.proto_rule_inputs_and_outputs {
                 let mut inputs: Vec<Label> =
-                    rule_deps_ext(rule, opts.implicit_deps, opts.tool_deps, opts.nodep_deps).into_iter().map(|(l, _)| l).collect();
+                    rule_deps_ext(rule, opts.implicit_deps, opts.tool_deps, opts.nodep_deps)
+                        .into_iter()
+                        .filter_map(|(l, attr)| if attr == "_hidden_toolchain_types" { None } else { Some(l) })
+                        .collect();
                 inputs.sort_by(label_cmp);
                 for l in inputs {
                     r.rstr(5, "rule_input", lp(&l));
@@ -1612,24 +1674,31 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
         Target::InputFile { label } => {
             let mut s = Msg::new();
             s.str(1, "name", lp(label));
+            let fake_pkg = env.fake_load_targets.borrow().get(label).cloned();
             if opts.proto_locations {
-                s.str(2, "location", target_location(info, opts.relative_locations));
+                let loc = match &fake_pkg {
+                    Some(ref_pkg) => crate::target_env::fake_load_target_location(ref_pkg, opts.relative_locations),
+                    None => target_location(info, opts.relative_locations),
+                };
+                s.str(2, "location", loc);
             }
-            let is_build = label.name() == info.pkg.build_file.base_name();
-            if is_build {
-                for l in env.build_file_loads(&info.pkg) {
-                    s.rstr(3, "subinclude", lp(&l));
+            if fake_pkg.is_none() {
+                let is_build = label.name() == info.pkg.build_file.base_name();
+                if is_build {
+                    for l in env.build_file_loads(&info.pkg) {
+                        s.rstr(3, "subinclude", lp(&l));
+                    }
+                    for f in &info.pkg.args.features {
+                        s.rstr(6, "feature", f.clone());
+                    }
+                    s.bool(9, "package_contains_errors", info.pkg.contains_errors);
                 }
-                for f in &info.pkg.args.features {
-                    s.rstr(6, "feature", f.clone());
+                for l in visibility_group_labels(&env.visibility_labels(info)) {
+                    s.rstr(4, "package_group", lp(&l));
                 }
-                s.bool(9, "package_contains_errors", info.pkg.contains_errors);
-            }
-            for l in visibility_group_labels(&env.visibility_labels(info)) {
-                s.rstr(4, "package_group", lp(&l));
-            }
-            for l in env.visibility_labels(info) {
-                s.rstr(5, "visibility_label", lp(&l));
+                for l in env.visibility_labels(info) {
+                    s.rstr(5, "visibility_label", lp(&l));
+                }
             }
             t.en(1, "type", "SOURCE_FILE", 2);
             t.msg(3, "source_file", s);

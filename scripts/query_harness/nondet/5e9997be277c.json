@@ -1,7 +1,7 @@
 {
  "bazel": "/tmp/bazel-9.3.2",
  "case_id": "5e9997be277c",
- "classified_as": "UNCLASSIFIED",
+ "classified_as": "ORDERLESS",
  "cmd": "query '//b:all' --output=graph --graph:node_limit=20 --keep_going",
  "distinct": 4,
  "harness": "query",
@@ -14,7 +14,7 @@
   "9bf18c15ff2af021"
  ],
  "history": [],
- "mode": "STRICT",
+ "mode": "ORDERLESS",
  "n_runs": 6,
  "pre": "",
  "runs": [

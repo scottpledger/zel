@@ -1,11 +1,11 @@
 digraph mygraph {
   node [shape=box];
-  "//a:tr (2d89340)"
-  "//a:tr (2d89340)" -> "//a:lib (7e2fa55)"
-  "//a:lib (7e2fa55)"
-  "//a:lib (7e2fa55)" -> "//a:srcs_fg (7e2fa55)"
-  "//a:lib (7e2fa55)" -> "//a:x.txt (null)"
-  "//a:srcs_fg (7e2fa55)"
-  "//a:srcs_fg (7e2fa55)" -> "//a:x.txt (null)"
+  "//a:tr (a7a71fd)"
+  "//a:tr (a7a71fd)" -> "//a:lib (bf3a44e)"
+  "//a:lib (bf3a44e)"
+  "//a:lib (bf3a44e)" -> "//a:srcs_fg (bf3a44e)"
+  "//a:lib (bf3a44e)" -> "//a:x.txt (null)"
+  "//a:srcs_fg (bf3a44e)"
+  "//a:srcs_fg (bf3a44e)" -> "//a:x.txt (null)"
   "//a:x.txt (null)"
 }

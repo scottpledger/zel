@@ -141,7 +141,7 @@ pub fn execute_actions(
         }
     }
     let pending: Vec<usize> = deps.iter().map(|d| d.len()).collect();
-    let ready: VecDeque<usize> = (0..n).filter(|&i| pending[i] == 0).collect();
+        let ready: VecDeque<usize> = (0..n).filter(|&i| pending[i] == 0).collect();
     let state = Mutex::new(State {
         ready,
         pending_deps: pending,

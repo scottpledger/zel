@@ -147,7 +147,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -297,7 +297,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -427,7 +427,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -665,7 +665,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -817,7 +817,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -969,7 +969,7 @@
       }
     },
     "configuration": {
-      "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+      "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
     },
     "configurationId": 2
   }, {
@@ -1121,7 +1121,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -1232,7 +1232,7 @@
         }, {
           "name": "generator_location",
           "type": "STRING",
-          "stringValue": "ate@WS@/a/BUILD:7:7",
+          "stringValue": "a/BUILD:7:7",
           "explicitlySpecified": true,
           "nodep": false
         }, {
@@ -1358,7 +1358,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -1417,7 +1417,7 @@
         }, {
           "name": "generator_location",
           "type": "STRING",
-          "stringValue": "ate@WS@/a/BUILD:7:7",
+          "stringValue": "a/BUILD:7:7",
           "explicitlySpecified": true,
           "nodep": false
         }, {
@@ -1498,7 +1498,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -1628,7 +1628,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -1769,7 +1769,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -1837,7 +1837,7 @@
         }, {
           "name": "generator_location",
           "type": "STRING",
-          "stringValue": "ate@WS@/a/BUILD:6:7",
+          "stringValue": "a/BUILD:6:7",
           "explicitlySpecified": true,
           "nodep": false
         }, {
@@ -1921,7 +1921,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -1980,7 +1980,7 @@
         }, {
           "name": "generator_location",
           "type": "STRING",
-          "stringValue": "ate@WS@/a/BUILD:6:7",
+          "stringValue": "a/BUILD:6:7",
           "explicitlySpecified": true,
           "nodep": false
         }, {
@@ -2062,7 +2062,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -2202,7 +2202,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -2342,7 +2342,7 @@
       }
     },
     "configuration": {
-      "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+      "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
     },
     "configurationId": 2
   }, {
@@ -2488,15 +2488,15 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }],
   "configurations": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c",
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -2610,7 +2610,7 @@
         "value": "fastbuild"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -2694,7 +2694,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"
@@ -3547,9 +3547,9 @@
     }]
   }, {
     "id": 2,
-    "mnemonic": "darwin_arm64-opt",
-    "platformName": "darwin_arm64",
-    "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565",
+    "mnemonic": "k8-opt",
+    "platformName": "k8",
+    "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -3663,7 +3663,7 @@
         "value": "opt"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -3747,7 +3747,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"

@@ -1,8 +1,8 @@
-NoTransition -> //a:lib (2d89340)
+NoTransition -> //a:lib (a7a71fd)
   srcs#//a:x.txt#(null transition) -> 
   srcs#//a:srcs_fg#NoTransition -> 
   srcs#@ext//lib:data#NoTransition -> 
-NoTransition -> //a:lib (7e2fa55)
+NoTransition -> //a:lib (bf3a44e)
   srcs#//a:x.txt#(null transition) -> 
   srcs#//a:srcs_fg#NoTransition -> 
   srcs#@ext//lib:data#NoTransition -> 

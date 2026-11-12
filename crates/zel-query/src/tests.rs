@@ -478,7 +478,7 @@ fn proto_family_is_consistent() {
     let line = String::from_utf8_lossy(&js.stdout).to_string();
     assert!(line.starts_with("{\"type\":\"RULE\",\"rule\":{\"name\":\"//pkg:s\",\"ruleClass\":\"my_rule\""), "{line}");
     assert!(line.contains("\"ruleInput\":[\"//tools:t\"]"), "{line}");
-    assert!(line.contains("{\"name\":\"_tool\",\"type\":\"LABEL\",\"stringValue\":\"//tools:t\",\"explicitlySpecified\":false,\"nodep\":false}"), "{line}");
+    assert!(line.contains("{\"name\":\"$tool\",\"type\":\"LABEL\",\"stringValue\":\"//tools:t\",\"explicitlySpecified\":false,\"nodep\":false}"), "{line}");
     let no_defaults = q(&ws, "//pkg:s", |_, f| {
         f.output = "streamed_jsonproto".into();
         f.proto_default_values = false;
@@ -486,7 +486,7 @@ fn proto_family_is_consistent() {
         f.proto_locations = false;
     });
     let l = String::from_utf8_lossy(&no_defaults.stdout).to_string();
-    assert!(!l.contains("location") && !l.contains("ruleInput") && !l.contains("_tool"), "{l}");
+    assert!(!l.contains("location") && !l.contains("ruleInput") && !l.contains("$tool"), "{l}");
 }
 
 #[test]

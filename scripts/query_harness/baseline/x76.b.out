@@ -62,7 +62,7 @@ catrule(
   visibility = ["//visibility:public"],
   generator_name = "sm",
   generator_function = "smacro",
-  generator_location = "ate@WS@/a/BUILD:6:7",
+  generator_location = "a/BUILD:6:7",
   srcs = ["//a:sm_fg"],
 )
 # Rule sm_cat instantiated at (most recent call last):
@@ -78,7 +78,7 @@ filegroup(
   visibility = ["//visibility:public"],
   generator_name = "sm",
   generator_function = "smacro",
-  generator_location = "ate@WS@/a/BUILD:6:7",
+  generator_location = "a/BUILD:6:7",
   srcs = ["//a:x.txt", "//a:y.txt"],
 )
 # Rule sm_fg instantiated at (most recent call last):

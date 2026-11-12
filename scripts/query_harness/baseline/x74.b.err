@@ -3,4 +3,4 @@ ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead
 ERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline
 ERROR: package contains errors: e
 ERROR: package contains errors: e: 'is' not supported, use '==' instead
-ERROR: Error evaluating '//...': error loading package 'e': Package 'e' contains errors
+ERROR: Target parsing failed due to unexpected exception: error loading package 'e': Package 'e' contains errors

@@ -15,6 +15,6 @@ Valid values:
 A short ID is any prefix of a full ID. cquery shows short IDs. 'bazel config' shows full IDs.
 
 For more help, see https://bazel.build/docs/cquery.
-INFO: Elapsed time: 0.060s, Critical Path: 0.00s
+INFO: Elapsed time: 0.030s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

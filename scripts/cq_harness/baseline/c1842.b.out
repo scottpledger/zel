@@ -1,3 +1,3 @@
-NoTransition -> //a:lib2 (7e2fa55)
+NoTransition -> //a:lib2 (bf3a44e)
   srcs#//a:lib#NoTransition -> 
   srcs#//a:y.txt#(null transition) -> 

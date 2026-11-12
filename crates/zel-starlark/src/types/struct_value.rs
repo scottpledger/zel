@@ -21,6 +21,7 @@ use std::fmt;
 pub struct StructValue {
     pub fields: BTreeMap<String, Value>,
     pub is_attr: bool,
+    pub is_native: bool,
     /// Java class name Bazel would print for this value (`<unknown object CLASS>`) when it is an
     /// opaque host object that merely behaves like a struct here.
     pub opaque_class: Option<String>,
@@ -28,7 +29,11 @@ pub struct StructValue {
 
 impl StructValue {
     pub fn new(fields: BTreeMap<String, Value>) -> Self {
-        Self { fields, is_attr: false, opaque_class: None }
+        Self { fields, is_attr: false, is_native: false, opaque_class: None }
+    }
+
+    pub fn new_native(fields: BTreeMap<String, Value>) -> Self {
+        Self { fields, is_attr: false, is_native: true, opaque_class: None }
     }
 
     /// The `attr` of a `repository_ctx`: an opaque `RepoDefinition` for Bazel.
@@ -36,13 +41,14 @@ impl StructValue {
         Self {
             fields,
             is_attr: true,
+            is_native: false,
             opaque_class: Some("com.google.devtools.build.lib.bazel.repository.RepoDefinition".to_string()),
         }
     }
 
     /// A struct-like value that Bazel represents as an opaque object of the given Java class.
     pub fn new_opaque(fields: BTreeMap<String, Value>, class: &str) -> Self {
-        Self { fields, is_attr: false, opaque_class: Some(class.to_string()) }
+        Self { fields, is_attr: false, is_native: false, opaque_class: Some(class.to_string()) }
     }
 
     /// `repr`/`str` of this struct (`struct(a = "x")`, with strings quoted like Bazel does).
@@ -59,6 +65,13 @@ impl StructValue {
             Ok(val.clone())
         } else if self.is_attr {
             Err(StarlarkError(format!("unknown attribute {attr}")))
+        } else if self.is_native {
+            let available = self.fields.keys().cloned().collect::<Vec<_>>().join(", ");
+            Err(StarlarkError(format!(
+                "no native function or rule '{attr}'\nAvailable attributes: {available}"
+            )))
+        } else if self.opaque_class.as_deref() == Some("com.google.devtools.build.lib.bazel.repository.starlark.StarlarkOS") {
+            Err(StarlarkError(format!("'repository_os' value has no field or method '{attr}'")))
         } else {
             let available = self
                 .fields
@@ -82,7 +95,12 @@ impl StructValue {
             }
             fields.insert(k.clone(), v.clone());
         }
-        Ok(Self { fields, is_attr: self.is_attr, opaque_class: self.opaque_class.clone() })
+        Ok(Self {
+            fields,
+            is_attr: self.is_attr,
+            is_native: self.is_native,
+            opaque_class: self.opaque_class.clone(),
+        })
     }
 }
 

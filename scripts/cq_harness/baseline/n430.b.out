@@ -1,57 +1,57 @@
 action 'Cat @@//a:lib'
   Mnemonic: CatIt
   Target: //a:lib
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8
+  ActionKey: d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6
   Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/lib.txt]
   Command Line: (exec /bin/bash \
     -c \
-    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt')
-# Configuration: 2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c
+    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/lib.txt')
+# Configuration: a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18
 # Execution platform: @@platforms//host:host
 
 action 'Cat @@//a:lib'
   Mnemonic: CatIt
   Target: //a:lib
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329
+  ActionKey: c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012
   Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/lib.txt]
   Command Line: (exec /bin/bash \
     -c \
-    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txt')
-# Configuration: 7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565
+    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txt')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
 # Execution platform: @@platforms//host:host
 
 action 'Cat @@//a:lib2'
   Mnemonic: CatIt
   Target: //a:lib2
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69
-  Inputs: [a/y.txt, bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt]
+  ActionKey: a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87
+  Inputs: [a/y.txt, bazel-out/k8-fastbuild/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/lib2.txt]
   Command Line: (exec /bin/bash \
     -c \
-    'cat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt')
-# Configuration: 2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c
+    'cat bazel-out/k8-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/k8-fastbuild/bin/a/lib2.txt')
+# Configuration: a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18
 # Execution platform: @@platforms//host:host
 
 action 'Executing genrule //a:lm'
   Mnemonic: Genrule
   Target: //a:lm
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 87db1df4b214fe2a744f1a7292cfa0468e49193cae194c181f0f39e81c9a76f5
+  ActionKey: f592d9be7cd07e33df9119a083dca794b732141767337da8ffb3107f9f112eaa
   Inputs: [external/bazel_tools/tools/genrule/genrule-setup.sh]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lm.o]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/lm.o]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec /bin/bash \
     -c \
-    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/darwin_arm64-fastbuild/bin/a/lm.o')
-# Configuration: 2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/k8-fastbuild/bin/a/lm.o')
+# Configuration: a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18
 # Execution platform: @@platforms//host:host
 

@@ -4,7 +4,7 @@ Mnemonics:
   Genrule: 2
 
 Configurations:
-  darwin_arm64-fastbuild: 2
+  k8-fastbuild: 2
 
 Execution Platforms:
   @@platforms//host:host: 2

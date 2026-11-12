@@ -2033,6 +2033,14 @@ impl UiEventHandler {
         st.tracker.set_now(now);
         st.tracker.write_progress_bar(short, None, now).plain()
     }
+
+    pub fn is_filtered(&self, kind: EventKind) -> bool {
+        self.s.opts.filtered_event_kinds.contains(&kind)
+    }
+
+    pub fn write_raw_stderr(&self, bytes: &[u8]) {
+        self.s.out.err(bytes);
+    }
 }
 
 impl EventHandler for UiEventHandler {

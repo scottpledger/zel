@@ -1,15 +1,15 @@
 action 'Executing genrule @@ext+//lib:gen'
   Mnemonic: Genrule
   Target: @ext//lib:gen
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: f31bd5d4e57e787be3b358092278b53722e3f736f487616d3f69a98583252e5f
+  ActionKey: f30f320ee4c49452e3123705ceca73823bc455540c8a24d286a861897adaa1c8
   Inputs: [external/bazel_tools/tools/genrule/genrule-setup.sh]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/external/ext+/lib/g.out]
+  Outputs: [bazel-out/k8-fastbuild/bin/external/ext+/lib/g.out]
   Environment: [FOO=bar, PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec /bin/bash \
     -c \
-    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo ext > bazel-out/darwin_arm64-fastbuild/bin/external/ext+/lib/g.out')
-# Configuration: d86f1257c4c9bc0216c30066a31ab38715d53f3db97646661417322b91a577ee
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo ext > bazel-out/k8-fastbuild/bin/external/ext+/lib/g.out')
+# Configuration: e10f1f0a2c02ef7a693ee00416ce2b57c676352c8a8f9065078c12e355930f29
 # Execution platform: @@platforms//host:host
 

@@ -11,10 +11,10 @@
   }],
   "actions": [{
     "targetId": 1,
-    "actionKey": "29785e492ddf6e441eadaef6c8bf94225726b74705cf441966940845a8885ed6",
+    "actionKey": "e7d6a94890779fa4c58596dcaad36967fcca4ca9c483b53513ceb0f8b03848ce",
     "mnemonic": "CatIt",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "cat bazel-out/darwin_arm64-dbg/bin/a/lib.txt a/y.txt \u003e bazel-out/darwin_arm64-dbg/bin/a/lib2.txt"],
+    "arguments": ["/bin/bash", "-c", "cat bazel-out/k8-dbg/bin/a/lib.txt a/y.txt \u003e bazel-out/k8-dbg/bin/a/lib2.txt"],
     "inputDepSetIds": [1],
     "outputIds": [3],
     "primaryOutputId": 3,
@@ -31,9 +31,9 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-dbg",
-    "platformName": "darwin_arm64",
-    "checksum": "e1e6329670252a01146c735509bb7a24f7cecec29110adf8c48c6d650bb777e0"
+    "mnemonic": "k8-dbg",
+    "platformName": "k8",
+    "checksum": "70ad46f0e930d4921a16f2065d932ae9a89595182dca24bf7c85f4d2aef3b5a9"
   }],
   "ruleClasses": [{
     "id": 1,
@@ -44,7 +44,7 @@
     "label": "bazel-out"
   }, {
     "id": 4,
-    "label": "darwin_arm64-dbg",
+    "label": "k8-dbg",
     "parentId": 5
   }, {
     "id": 3,

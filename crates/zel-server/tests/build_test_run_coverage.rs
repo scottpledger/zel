@@ -846,7 +846,7 @@ fn round7_invalid_test_strategy_and_directory_output() {
 fn round7_flaky_attempts_are_reported() {
     let w = make_ws("r7-flaky");
     w.write("pkg/BUILD", "sh_test(name = \"t\", srcs = [\"t.sh\"], flaky = True)\n");
-    w.write("pkg/t.sh", "#!/bin/bash\nf=\"$TEST_TMPDIR/../marker\"\nif [ -e \"$f\" ]; then exit 0; fi\ntouch \"$f\"\nexit 1\n");
+    w.write("pkg/t.sh", "#!/bin/bash\ncase \"$XML_OUTPUT_FILE\" in\n  *attempt_1.tmp*) exit 1 ;;\n  *) exit 0 ;;\nesac\n");
     let res = w.run(&["test", "--test_output=all", "//pkg:t"]);
     assert_eq!(res.code, 0, "{}", res.err);
     assert!(res.out.contains("FLAKY, failed in 1 out of 2"), "{}", res.out);
@@ -998,7 +998,7 @@ fn test_unexecutable_shell_reports_process_wrapper_text() {
     let r = w.run(&["build", "--shell_executable=/nonexistent", "//pkg:g"]);
     assert_eq!(r.code, 1, "{}", r.err);
     assert!(r.err.contains("failed: (Exit 1): nonexistent failed:"), "{}", r.err);
-    assert!(r.err.contains("src/main/tools/process-wrapper-legacy.cc:80: \"execvp(/nonexistent, ...)\": No such file or directory"), "{}", r.err);
+    assert!(r.err.contains("src/main/tools/linux-sandbox-pid1.cc:584: \"execvp(/nonexistent, ") && r.err.contains("\": No such file or directory"), "{}", r.err);
 }
 
 #[test]
@@ -1025,7 +1025,7 @@ fn test_unreachable_remote_cache_fails_first_spawn_with_remote_error() {
     assert_eq!(r.code, 34, "{}", r.err);
     assert!(r.err.contains("INFO: Invocation ID: "), "{}", r.err);
     assert!(
-        r.err.contains("Executing genrule //pkg:g failed: Failed to query remote execution capabilities: Connection refused: localhost/[0:0:0:0:0:0:0:1]:1"),
+        r.err.contains("Executing genrule //pkg:g failed: Failed to query remote execution capabilities: finishConnect(..) failed: Connection refused: localhost/[0:0:0:0:0:0:0:1]:1"),
         "{}",
         r.err
     );

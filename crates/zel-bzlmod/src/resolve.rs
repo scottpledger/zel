@@ -269,7 +269,7 @@ impl<'a> Ctx<'a> {
                     );
                     let f = "{OUTPUT_BASE}/external/bazel_tools/tools/build_defs/repo/local.bzl";
                     return Err(format!(
-                        "INFO: Repo {0} defined by rule local_repository in @@bazel_tools//tools/build_defs/repo:local.bzl\nERROR: {f}:55:13: An error occurred during the fetch of repository '{}':\n   Traceback (most recent call last):\n\tFile \"{f}\", line 62, column 25, in _local_repository_impl\n\t\tpath = _get_dir_path(rctx)\n\tFile \"{f}\", line 55, column 13, in _get_dir_path\n\t\tfail(\nError in fail: {msg}\nERROR: {msg}",
+                        "ERROR: {f}:55:13: An error occurred during the fetch of repository '{}':\n   Traceback (most recent call last):\n\tFile \"{f}\", line 62, column 25, in _local_repository_impl\n\t\tpath = _get_dir_path(rctx)\n\tFile \"{f}\", line 55, column 13, in _get_dir_path\n\t\tfail(\nError in fail: {msg}\nERROR: Error computing the main repository mapping: error during computation of main repo mapping: {msg}",
                         format!("{name}+")
                     ));
                 }
@@ -475,6 +475,9 @@ fn chain_message(chain: &str, e: &str) -> String {
         if last > 0 || lines.len() > 1 {
             let events = lines[..last].join("\n");
             let trailer = lines[last..].join("\n");
+            if events.contains("An error occurred during the fetch of repository") {
+                return e.to_string();
+            }
             let trailer = trailer.strip_prefix("ERROR: ").unwrap_or(&trailer).to_string();
             let tail = format!("in module dependency chain {chain}: {trailer}");
             return if events.is_empty() { tail } else { format!("{events}\nERROR: {tail}") };

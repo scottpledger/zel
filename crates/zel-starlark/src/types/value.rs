@@ -45,6 +45,9 @@ fn unknown_object_class(kind: &str) -> Option<&'static str> {
 
 /// `<function NAME from LABEL>` (Bazel prints the label of the `.bzl` file the function was defined in).
 fn user_function_repr(func: &crate::syntax::ast::UserFunctionDef) -> String {
+    if let Some(repr) = &func.repr_override {
+        return repr.clone();
+    }
     let label = func.module.as_ref().and_then(|m| m.label_string.lock().unwrap().clone());
     match label {
         Some(l) => format!("<function {} from {l}>", func.name),
@@ -179,10 +182,7 @@ impl Value {
             Self::None | Self::Bool(_) | Self::Int(_) | Self::String(_) | Self::Label(_) | Self::Range(_) | Self::Host(..) => true,
             Self::Float(f) => !f.is_nan(),
             Self::Tuple(items) => items.iter().all(|x| x.is_hashable()),
-            // Structs and provider instances hash by content. Lists/dicts inside are frozen once
-            // their defining module finished loading, so they are accepted (valid programs
-            // never hash a still-mutable value).
-            Self::Struct(s) => s.fields.values().all(|x| x.is_hashable_deep()),
+            Self::Struct(_) => false,
             Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_hashable_deep()),
             Self::UserFunction(_) | Self::BuiltinFunction(_) | Self::Provider { .. } => true,
             _ => false,
@@ -419,7 +419,10 @@ impl Value {
                     "Facts(<opaque, inspect with print()>)".to_string()
                 } else if k == "path" {
                     format!("{id:?}")
-                } else if k == "dotted_version" {
+                } else if k == "pending_download" {
+                    let path = id.split_once('|').map(|(_, p)| p).unwrap_or(id);
+                    format!("<pending download to '{path}'>")
+                } else if k == "dotted_version" || k == "obj" {
                     id.clone()
                 } else if let Some(r) = unknown_object_class(k) {
                     format!("<unknown object {r}>")
@@ -796,8 +799,11 @@ impl fmt::Display for Value {
             Self::Host(k, id) => {
                 if k == "Facts" {
                     write!(f, "Facts(<opaque, inspect with print()>)")
-                } else if k == "path" || k == "dotted_version" {
+                } else if k == "path" || k == "dotted_version" || k == "obj" {
                     write!(f, "{id}")
+                } else if k == "pending_download" {
+                    let path = id.split_once('|').map(|(_, p)| p).unwrap_or(id);
+                    write!(f, "<pending download to '{path}'>")
                 } else if let Some(r) = unknown_object_class(k) {
                     write!(f, "<unknown object {r}>")
                 } else if let Some(r) = host_repr(k, id) {

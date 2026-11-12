@@ -5,6 +5,6 @@ Analyzing: 11 targets (0 packages loaded, 0 targets configured)
 INFO: Analyzed 11 targets (0 packages loaded, 0 targets configured).
 INFO: Found 11 targets...
 ERROR: Could not open query output file /nonexistent/x
-INFO: Elapsed time: 0.054s, Critical Path: 0.00s
+INFO: Elapsed time: 0.052s, Critical Path: 0.00s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

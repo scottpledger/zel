@@ -7,6 +7,9 @@ use std::path::{Path, PathBuf};
 
 fn copy_tree(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
+    if !from.exists() {
+        return;
+    }
     for e in std::fs::read_dir(from).unwrap() {
         let e = e.unwrap();
         let (src, dst) = (e.path(), to.join(e.file_name()));
@@ -62,6 +65,20 @@ fn native_patch_matches_bazel_patchutil() {
         let name = dir.file_name().unwrap().to_string_lossy().to_string();
         let out = work.join(&name);
         copy_tree(&dir.join("before"), &out);
+        // Git does not preserve non-0644/0755 modes in working trees after clone; restore the
+        // exact modes `patch_corpus.py` sets before running the patch.
+        match name.as_str() {
+            "perm_preserve_ro" | "perm_ro_file_modify_mode_change" => {
+                let _ = std::fs::set_permissions(out.join("f.txt"), std::fs::Permissions::from_mode(0o444));
+            }
+            "perm_preserve_600" => {
+                let _ = std::fs::set_permissions(out.join("f.txt"), std::fs::Permissions::from_mode(0o600));
+            }
+            "perm_preserve_group_exec" => {
+                let _ = std::fs::set_permissions(out.join("f.txt"), std::fs::Permissions::from_mode(0o654));
+            }
+            _ => {}
+        }
         let out = std::fs::canonicalize(&out).unwrap();
         let strip: i64 = std::fs::read_to_string(dir.join("strip")).unwrap().trim().parse().unwrap();
         let result = zel_bzlmod::patch::apply(&dir.join("patch"), strip, &out);
@@ -82,7 +99,10 @@ fn native_patch_matches_bazel_patchutil() {
             }
             _ => want.to_string(),
         };
+        let want = want.replace("/private/tmp", "/tmp").replace("/private/etc", "/etc");
         let want = want.as_str();
+        let got = got.replace("/private/tmp", "/tmp").replace("/private/etc", "/etc");
+        let got = got.as_str();
         let mut problems = vec![];
         // Uncaught Java runtime exceptions (a crash of the Bazel server): any failure is acceptable.
         let java_crash = want.strip_prefix("ERR ").is_some_and(|r| {
@@ -93,8 +113,9 @@ fn native_patch_matches_bazel_patchutil() {
         }
         if !java_crash {
             let want_tree = std::fs::read_to_string(dir.join("expected")).unwrap();
-            if snapshot(&out) != want_tree {
-                problems.push(format!("tree differs:\n--- bazel\n{want_tree}--- zel\n{}", snapshot(&out)));
+            let got_tree = snapshot(&out);
+            if got_tree != want_tree {
+                problems.push(format!("tree differs:\n--- bazel\n{want_tree}--- zel\n{got_tree}"));
             }
         }
         if !problems.is_empty() {

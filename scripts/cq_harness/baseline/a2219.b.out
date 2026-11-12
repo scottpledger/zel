@@ -1,38 +1,38 @@
 :
-x_test//b:t1*jdarwin_arm64-fastbuilddarwin_arm64"@1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607B	bazel-outBdarwin_arm64-fastbuildB	binBbBt1
-q@c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"	FileWrite(Jhr@@platforms//host:host�:	sh_binary0*@@bazel_tools//tools/test:collect_coverage:catrule//a:lib2//a:lib*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c*kdarwin_arm64-opt-execdarwin_arm64"@77e8473c8c1c4b4ef1825b4b7ffc50dc3ee606e358c10cba8c77f21ec5fe49d9(BaBlib.txt
+x_test//b:t1:catrule//a:lib2*Vk8-fastbuildk8"@e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409aB	bazel-outBk8-fastbuildB	binBbBt1
+q@8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8"	FileWrite(Jhr@@platforms//host:host�*Vk8-fastbuildk8"@a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18BaBlib.txt
 B	aBy.txt	
 "B
 lib2.txt
 
-�@c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69"CatIt(2	/bin/bash2-c2lcat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txtBJhr@@platforms//host:hostBexternalBbazel_toolsBx.txt	
-BtoolsBz.txt	
-B
-testBcollect_coverage.shB
-ext+B	libBd.txt
-"
-�@2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8"CatIt(2	/bin/bash2-c2lcat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txtBJhr@@platforms//host:host"Bt1.repo_mapping
+�@a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87"CatIt(2	/bin/bash2-c2Xcat bazel-out/k8-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/k8-fastbuild/bin/a/lib2.txtBJhr@@platforms//host:host//a:libBx.txt	
+Bz.txt	
+BexternalB
+ext+B	libBd.txt
+"�@d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6"CatIt(2	/bin/bash2-c2bcat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/lib.txtBJhr@@platforms//host:hostBt1.repo_mapping
+x@6d4676cfc8cc9f2031a6a30402bfbe451f4d33cd46a92272cddb17441af265da"RepoMappingManifest(Jhr@@platforms//host:hostBt1.runfiles_manifest
+	z@23941fd4e6093d3ee7bc18e2ae73db2a79f007db9c7fa6c90977fc47de7ecccd"SourceSymlinkManifest(J	h	r@@platforms//host:host"	Bt1.runfilesBMANIFEST
 
-Bdarwin_arm64-opt-execB	binBexternalBbazel_toolsBtoolsB
-testBcollect_coveragex@04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d"RepoMappingManifest(J
+s@5e2d081693a0cdca35fe93c28f1f347a104fc427e6073326245ce128e6f0541f"SymlinkTree(BJ
 h
-r@@platforms//host:host
-	y@c90914cc1e7ea06f84518cf4f179e63dbd20dad9358a550644494828e4a4ed28"ExecutableSymlink(BJ	h	r@@platforms//host:hostB#collect_coverage.repo_mapping
-Bt1.runfiles_manifestx@4b21d44b9fea9b91d1b51c310b27165a673872e2010b8ebb6696edcdb8a988da"RepoMappingManifest(Jhr@@platforms//host:host
-z@90c8b3aa7491a9cbc9a8fdb93abdf414e57af43f502b0a2736b23aafe1610d09"SourceSymlinkManifest(Jhr@@platforms//host:host"B t1.runfilesBMANIFEST 
-s@eb5b1f1043d720c80c979549cf31d8565b99bf09999edd7a70cc6ad70cbcb7fb"SymlinkTree(BJhr@@platforms//host:hostB(!"collect_coverage.runfiles_manifest
-!z@5fb4de8574921ef018cc19534daa894b939b08085e280e130ee2d67188ac55d2"SourceSymlinkManifest(Jhr@@platforms//host:host""B#collect_coverage.runfiles"	
-B"MANIFEST#
-"s@55010e04ccb777eb180d1379e3a73130033c3aab15e569bd7a3d8a1d8f63bfb8"SymlinkTree(BJhr@@platforms//host:host
- t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:host"
-	"	
-	"		
-#t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:hostB$test-setup.sh
-$B%generate-xml.sh
-%"B)testlogsB(b)B't1(B&test.log'
-&B*test.xml'
-*B+test.cache_status'
-+B,test.outputs'
-,�@205428c674ece34895c9d37069735603ac04f06cc7f559f119763b18bb7e84d8"
+r@@platforms//host:host""	
+
+t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:hostBbazel_toolsBtoolsB
+testBtest-setup.sh
+Bgenerate-xml.sh
+"BtestlogsBbBt1Btest.log
+Btest.xml
+Btest.cache_status
+B test.outputs
+ �@6ff7a6d9e8ae0f0d2e54c37977421c903806c134117396c1e00b1968a500b478"
 TestRunner(2-external/bazel_tools/tools/test/test-setup.sh2b/t1:$
-PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:host
+PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:host:	sh_binary0*@@bazel_tools//tools/test:collect_coverage*Wk8-opt-execk8"@04bf134dfa57115b01daa56bd3a30421a6e74b1819e002496a26c94ed0087067(B!collect_coverage.sh
+!"B(k8-opt-execB	'bin(B&external'B%bazel_tools&B$tools%B
+#test$B"collect_coverage#
+"y@c90914cc1e7ea06f84518cf4f179e63dbd20dad9358a550644494828e4a4ed28"ExecutableSymlink(BJhr@@platforms//host:hostB#)collect_coverage.repo_mapping#
+)x@96e386d23d200dd8f90f1f1cb57c734baf5cc263a1b9daec3f31184dd9b4be06"RepoMappingManifest(Jhr@@platforms//host:hostB(*"collect_coverage.runfiles_manifest#
+*z@6a4d5d1c4c0ce605a5f6e7d0c62e6002571fb421e546cbe3015842589fc4e101"SourceSymlinkManifest(Jhr@@platforms//host:host"B,collect_coverage.runfiles#B+MANIFEST,
++s@47107eebd74fa3772e2893b396f84942fffbd5aae83806f530b42269205852e7"SymlinkTree(BJhr@@platforms//host:host""
+"		
+
+,t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(B	Jhr@@platforms//host:host

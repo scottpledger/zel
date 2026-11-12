@@ -135,6 +135,7 @@ fn coverage_spec(d: &Path, script_body: &str, shards: u32) -> TestSpec {
     std::fs::write(&manifest, "pkg/lib.c\n").unwrap();
     TestSpec {
         label: "//pkg:t".into(),
+        exe_runfiles_path: exe.to_string_lossy().into_owned(),
         exe_path: exe,
         runfiles_dir: rf,
         exec_root: er,

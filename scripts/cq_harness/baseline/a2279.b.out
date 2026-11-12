@@ -1,9 +1,9 @@
-:catrule//a:lib*ddarwin_arm64-optdarwin_arm64"@7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565BaBx.txt
+:catrule//a:lib*Pk8-optk8"@bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dcBaBx.txt
 By.txt
 Bz.txt
 BexternalB
 ext+B	libBd.txt
-"B	bazel-outBdarwin_arm64-optB	binB
+"B	bazel-outBk8-optB	binB
 aB	lib.txt
 
-	�@e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329"CatIt(2	/bin/bash2-c2fcat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txtBJhr@@platforms//host:host
+	�@c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012"CatIt(2	/bin/bash2-c2\cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txtBJhr@@platforms//host:host

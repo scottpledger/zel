@@ -14,6 +14,7 @@ SCRATCH="${SCRATCH:-/tmp/zel-vendor-interchange}"
 rm -rf "$SCRATCH"; mkdir -p "$SCRATCH"
 mkws() {
   mkdir -p "$1"
+  echo "common --registry=file:///tmp/vendored-registry" >"$1/.bazelrc"
   cat >"$1/MODULE.bazel" <<'E'
 module(name = "root")
 u = use_repo_rule("//:r.bzl", "u")
@@ -30,8 +31,7 @@ E
 fail=0
 check() { if [ "$2" = "$3" ]; then echo "  [OK] $1"; else echo "  [FAIL] $1: expected '$3' got '$2'"; fail=1; fi; }
 
-# (a) Bazel writes, Zel consumes: the marker belongs to another version (hash differs), so Zel must treat the
-# vendored repo as out of date and refetch without any error.
+# (a) Bazel writes, Zel consumes: matching 9.3.2 marker serialization means the vendored repo is current.
 A="$SCRATCH/a"; mkws "$A/w"
 (cd "$A/w" && "$BAZEL_BIN" --output_base="$A/ob_bazel" vendor --enable_workspace=false --vendor_dir=vd --repo=@v >"$A/out1" 2>&1)
 "$BAZEL_BIN" --output_base="$A/ob_bazel" shutdown >/dev/null 2>&1
@@ -40,7 +40,7 @@ echo tampered >"$A/w/vd/+u+v/v.txt"
 azel=$(tr -d '\n' <"$A/ob_zel/external/+u+v/v.txt" 2>/dev/null)
 "$ZEL_BIN" --output_base="$A/ob_zel" shutdown >/dev/null 2>&1
 check "zel tolerates a bazel vendor dir (exit 0)" "$rc" "0"
-check "zel refetched (original content, no tampered)" "$azel" "original"
+check "zel consumed bazel's vendor dir" "$azel" "tampered"
 check "no ERROR from zel" "$(grep -c '^ERROR' "$A/out2")" "0"
 
 # (b) Zel writes, Bazel consumes (Bazel warns that the vendored repo is out of date and refetches).

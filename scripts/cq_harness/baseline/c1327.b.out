@@ -103,7 +103,7 @@
       }
     },
     "configuration": {
-      "checksum": "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+      "checksum": "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
     },
     "configurationId": 1
   }, {
@@ -255,36 +255,55 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 2
   }, {
     "target": {
+      "type": "SOURCE_FILE",
+      "sourceFile": {
+        "name": "//a:x.txt",
+        "location": "@WS@/a/x.txt:1:1",
+        "visibilityLabel": ["//visibility:public"]
+      }
+    },
+    "configuration": {
+      "checksum": "null"
+    }
+  }, {
+    "target": {
       "type": "RULE",
       "rule": {
-        "name": "@bazel_tools//tools:host_platform",
-        "ruleClass": "alias",
-        "location": "@OB@/external/bazel_tools/tools/BUILD:5:6",
+        "name": "@@platforms//host:host",
+        "ruleClass": "platform",
+        "location": "@OB@/external/platforms/host/BUILD:14:9",
         "attribute": [{
           "name": "$config_dependencies",
           "type": "LABEL_LIST",
           "explicitlySpecified": false,
           "nodep": false
         }, {
-          "name": "actual",
-          "type": "LABEL",
-          "stringValue": "@@platforms//host:host",
-          "explicitlySpecified": true,
-          "nodep": false
+          "name": "allowed_toolchain_types",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": true
         }, {
           "name": "aspect_hints",
           "type": "LABEL_LIST",
           "explicitlySpecified": false,
           "nodep": false
         }, {
-          "name": "compatible_with",
-          "type": "LABEL_LIST",
+          "name": "check_toolchain_types",
+          "type": "BOOLEAN",
+          "intValue": 0,
+          "stringValue": "false",
           "explicitlySpecified": false,
+          "booleanValue": false
+        }, {
+          "name": "constraint_values",
+          "type": "LABEL_LIST",
+          "stringListValue": ["@@platforms//cpu:x86_64", "@@platforms//os:linux"],
+          "explicitlySpecified": true,
           "nodep": false
         }, {
           "name": "deprecation",
@@ -292,7 +311,21 @@
           "explicitlySpecified": false,
           "nodep": false
         }, {
+          "name": "distribs",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "exec_properties",
+          "type": "STRING_DICT",
+          "explicitlySpecified": false
+        }, {
           "name": "features",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "flags",
           "type": "STRING_LIST",
           "explicitlySpecified": false,
           "nodep": false
@@ -315,29 +348,44 @@
           "explicitlySpecified": false,
           "nodep": false
         }, {
+          "name": "licenses",
+          "type": "LICENSE",
+          "license": {
+            "licenseType": ["NONE"]
+          },
+          "explicitlySpecified": false
+        }, {
+          "name": "missing_toolchain_error",
+          "type": "STRING",
+          "stringValue": "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
           "name": "name",
           "type": "STRING",
-          "stringValue": "host_platform",
+          "stringValue": "host",
           "explicitlySpecified": true,
           "nodep": false
         }, {
-          "name": "package_metadata",
+          "name": "parents",
           "type": "LABEL_LIST",
           "explicitlySpecified": false,
           "nodep": false
         }, {
-          "name": "restricted_to",
+          "name": "remote_execution_properties",
+          "type": "STRING",
+          "stringValue": "",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "required_settings",
           "type": "LABEL_LIST",
           "explicitlySpecified": false,
           "nodep": false
         }, {
           "name": "tags",
           "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "target_compatible_with",
-          "type": "LABEL_LIST",
+          "stringListValue": ["manual"],
           "explicitlySpecified": false,
           "nodep": false
         }, {
@@ -358,11 +406,11 @@
           "explicitlySpecified": false,
           "nodep": true
         }],
-        "ruleInput": ["@@platforms//host:host"]
+        "ruleInput": ["@@platforms//cpu:x86_64", "@@platforms//os:linux"]
       }
     },
     "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
     },
     "configurationId": 3
   }, {
@@ -503,55 +551,36 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 2
   }, {
     "target": {
-      "type": "SOURCE_FILE",
-      "sourceFile": {
-        "name": "//a:x.txt",
-        "location": "@WS@/a/x.txt:1:1",
-        "visibilityLabel": ["//visibility:public"]
-      }
-    },
-    "configuration": {
-      "checksum": "null"
-    }
-  }, {
-    "target": {
       "type": "RULE",
       "rule": {
-        "name": "@@platforms//host:host",
-        "ruleClass": "platform",
-        "location": "@OB@/external/platforms/host/BUILD:14:9",
+        "name": "@bazel_tools//tools:host_platform",
+        "ruleClass": "alias",
+        "location": "@OB@/external/bazel_tools/tools/BUILD:5:6",
         "attribute": [{
           "name": "$config_dependencies",
           "type": "LABEL_LIST",
           "explicitlySpecified": false,
           "nodep": false
         }, {
-          "name": "allowed_toolchain_types",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": true
+          "name": "actual",
+          "type": "LABEL",
+          "stringValue": "@@platforms//host:host",
+          "explicitlySpecified": true,
+          "nodep": false
         }, {
           "name": "aspect_hints",
           "type": "LABEL_LIST",
           "explicitlySpecified": false,
           "nodep": false
         }, {
-          "name": "check_toolchain_types",
-          "type": "BOOLEAN",
-          "intValue": 0,
-          "stringValue": "false",
-          "explicitlySpecified": false,
-          "booleanValue": false
-        }, {
-          "name": "constraint_values",
+          "name": "compatible_with",
           "type": "LABEL_LIST",
-          "stringListValue": ["@@platforms//cpu:aarch64", "@@platforms//os:osx"],
-          "explicitlySpecified": true,
+          "explicitlySpecified": false,
           "nodep": false
         }, {
           "name": "deprecation",
@@ -559,21 +588,7 @@
           "explicitlySpecified": false,
           "nodep": false
         }, {
-          "name": "distribs",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "exec_properties",
-          "type": "STRING_DICT",
-          "explicitlySpecified": false
-        }, {
           "name": "features",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "flags",
           "type": "STRING_LIST",
           "explicitlySpecified": false,
           "nodep": false
@@ -596,44 +611,29 @@
           "explicitlySpecified": false,
           "nodep": false
         }, {
-          "name": "licenses",
-          "type": "LICENSE",
-          "license": {
-            "licenseType": ["NONE"]
-          },
-          "explicitlySpecified": false
-        }, {
-          "name": "missing_toolchain_error",
-          "type": "STRING",
-          "stringValue": "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro.",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
           "name": "name",
           "type": "STRING",
-          "stringValue": "host",
+          "stringValue": "host_platform",
           "explicitlySpecified": true,
           "nodep": false
         }, {
-          "name": "parents",
+          "name": "package_metadata",
           "type": "LABEL_LIST",
           "explicitlySpecified": false,
           "nodep": false
         }, {
-          "name": "remote_execution_properties",
-          "type": "STRING",
-          "stringValue": "",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "required_settings",
+          "name": "restricted_to",
           "type": "LABEL_LIST",
           "explicitlySpecified": false,
           "nodep": false
         }, {
           "name": "tags",
           "type": "STRING_LIST",
-          "stringListValue": ["manual"],
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "target_compatible_with",
+          "type": "LABEL_LIST",
           "explicitlySpecified": false,
           "nodep": false
         }, {
@@ -654,11 +654,11 @@
           "explicitlySpecified": false,
           "nodep": true
         }],
-        "ruleInput": ["@@platforms//cpu:aarch64", "@@platforms//os:osx"]
+        "ruleInput": ["@@platforms//host:host"]
       }
     },
     "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
     },
     "configurationId": 3
   }, {
@@ -798,128 +798,16 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 2
   }, {
     "target": {
       "type": "RULE",
       "rule": {
-        "name": "@@platforms//cpu:aarch64",
+        "name": "@@platforms//os:linux",
         "ruleClass": "constraint_value",
-        "location": "@OB@/external/platforms/cpu/BUILD:57:17",
-        "attribute": [{
-          "name": "$config_dependencies",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "aspect_hints",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "constraint_setting",
-          "type": "LABEL",
-          "stringValue": "@@platforms//cpu:cpu",
-          "explicitlySpecified": true,
-          "nodep": false
-        }, {
-          "name": "deprecation",
-          "type": "STRING",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "distribs",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "features",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "generator_function",
-          "type": "STRING",
-          "stringValue": "",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "generator_location",
-          "type": "STRING",
-          "stringValue": "",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "generator_name",
-          "type": "STRING",
-          "stringValue": "",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "licenses",
-          "type": "LICENSE",
-          "license": {
-            "licenseType": ["NOTICE"]
-          },
-          "explicitlySpecified": false
-        }, {
-          "name": "name",
-          "type": "STRING",
-          "stringValue": "aarch64",
-          "explicitlySpecified": true,
-          "nodep": false
-        }, {
-          "name": "tags",
-          "type": "STRING_LIST",
-          "stringListValue": ["manual"],
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "testonly",
-          "type": "BOOLEAN",
-          "intValue": 0,
-          "stringValue": "false",
-          "explicitlySpecified": false,
-          "booleanValue": false
-        }, {
-          "name": "transitive_configs",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": true
-        }, {
-          "name": "visibility",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": true
-        }],
-        "ruleInput": ["@@platforms//cpu:cpu"]
-      }
-    },
-    "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
-    },
-    "configurationId": 3
-  }, {
-    "target": {
-      "type": "SOURCE_FILE",
-      "sourceFile": {
-        "name": "//a:z.txt",
-        "location": "@WS@/a/z.txt:1:1",
-        "visibilityLabel": ["//visibility:public"]
-      }
-    },
-    "configuration": {
-      "checksum": "null"
-    }
-  }, {
-    "target": {
-      "type": "RULE",
-      "rule": {
-        "name": "@@platforms//os:osx",
-        "ruleClass": "constraint_value",
-        "location": "@OB@/external/platforms/os/BUILD:71:17",
+        "location": "@OB@/external/platforms/os/BUILD:41:17",
         "attribute": [{
           "name": "$config_dependencies",
           "type": "LABEL_LIST",
@@ -979,7 +867,7 @@
         }, {
           "name": "name",
           "type": "STRING",
-          "stringValue": "osx",
+          "stringValue": "linux",
           "explicitlySpecified": true,
           "nodep": false
         }, {
@@ -1010,16 +898,16 @@
       }
     },
     "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
     },
     "configurationId": 3
   }, {
     "target": {
       "type": "SOURCE_FILE",
       "sourceFile": {
-        "name": "@ext//lib:d.txt",
-        "location": "@OB@/external/ext+/lib/d.txt:1:1",
-        "visibilityLabel": ["//visibility:private"]
+        "name": "//a:z.txt",
+        "location": "@WS@/a/z.txt:1:1",
+        "visibilityLabel": ["//visibility:public"]
       }
     },
     "configuration": {
@@ -1032,6 +920,118 @@
         "name": "//a:y.txt",
         "location": "@WS@/a/y.txt:1:1",
         "visibilityLabel": ["//visibility:public"]
+      }
+    },
+    "configuration": {
+      "checksum": "null"
+    }
+  }, {
+    "target": {
+      "type": "RULE",
+      "rule": {
+        "name": "@@platforms//cpu:x86_64",
+        "ruleClass": "constraint_value",
+        "location": "@OB@/external/platforms/cpu/BUILD:162:17",
+        "attribute": [{
+          "name": "$config_dependencies",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "aspect_hints",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "constraint_setting",
+          "type": "LABEL",
+          "stringValue": "@@platforms//cpu:cpu",
+          "explicitlySpecified": true,
+          "nodep": false
+        }, {
+          "name": "deprecation",
+          "type": "STRING",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "distribs",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "features",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "generator_function",
+          "type": "STRING",
+          "stringValue": "",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "generator_location",
+          "type": "STRING",
+          "stringValue": "",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "generator_name",
+          "type": "STRING",
+          "stringValue": "",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "licenses",
+          "type": "LICENSE",
+          "license": {
+            "licenseType": ["NOTICE"]
+          },
+          "explicitlySpecified": false
+        }, {
+          "name": "name",
+          "type": "STRING",
+          "stringValue": "x86_64",
+          "explicitlySpecified": true,
+          "nodep": false
+        }, {
+          "name": "tags",
+          "type": "STRING_LIST",
+          "stringListValue": ["manual"],
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "testonly",
+          "type": "BOOLEAN",
+          "intValue": 0,
+          "stringValue": "false",
+          "explicitlySpecified": false,
+          "booleanValue": false
+        }, {
+          "name": "transitive_configs",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": true
+        }, {
+          "name": "visibility",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": true
+        }],
+        "ruleInput": ["@@platforms//cpu:cpu"]
+      }
+    },
+    "configuration": {
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
+    },
+    "configurationId": 3
+  }, {
+    "target": {
+      "type": "SOURCE_FILE",
+      "sourceFile": {
+        "name": "@ext//lib:d.txt",
+        "location": "@OB@/external/ext+/lib/d.txt:1:1",
+        "visibilityLabel": ["//visibility:private"]
       }
     },
     "configuration": {
@@ -1137,7 +1137,7 @@
       }
     },
     "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
     },
     "configurationId": 3
   }, {
@@ -1240,15 +1240,15 @@
       }
     },
     "configuration": {
-      "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+      "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
     },
     "configurationId": 3
   }],
   "configurations": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607",
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -1365,7 +1365,7 @@
         "value": "fastbuild"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -1449,7 +1449,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"
@@ -2368,9 +2368,9 @@
     }]
   }, {
     "id": 2,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c",
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -2484,7 +2484,7 @@
         "value": "fastbuild"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -2568,7 +2568,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"
@@ -3422,8 +3422,8 @@
   }, {
     "id": 3,
     "mnemonic": "fastbuild-noconfig",
-    "platformName": "darwin_arm64",
-    "checksum": "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314",
+    "platformName": "k8",
+    "checksum": "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569",
     "fragmentOptions": [{
       "name": "com.google.devtools.build.lib.analysis.config.CoreOptions",
       "options": [{
@@ -3467,7 +3467,7 @@
         "value": "fastbuild"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -3551,7 +3551,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"

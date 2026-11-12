@@ -20,10 +20,10 @@
   }],
   "actions": [{
     "targetId": 1,
-    "actionKey": "c858377b082563ada91337c61fd7ef737c9e6514f12f5b2393fce67fd84922ec",
+    "actionKey": "071207860e10c63dfef34bf9ab5a56531758a96c751388640b776609e05136b0",
     "mnemonic": "Genrule",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-dbg/bin/a/gg.out ; echo a/z.txt \u003e\u003e bazel-out/darwin_arm64-dbg/bin/a/gg.out"],
+    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-dbg/bin/a/gg.out ; echo a/z.txt \u003e\u003e bazel-out/k8-dbg/bin/a/gg.out"],
     "environmentVariables": [{
       "key": "PATH",
       "value": "/bin:/usr/bin:/usr/local/bin"
@@ -51,9 +51,9 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-dbg",
-    "platformName": "darwin_arm64",
-    "checksum": "e1e6329670252a01146c735509bb7a24f7cecec29110adf8c48c6d650bb777e0"
+    "mnemonic": "k8-dbg",
+    "platformName": "k8",
+    "checksum": "70ad46f0e930d4921a16f2065d932ae9a89595182dca24bf7c85f4d2aef3b5a9"
   }],
   "ruleClasses": [{
     "id": 1,
@@ -86,7 +86,7 @@
     "label": "bazel-out"
   }, {
     "id": 10,
-    "label": "darwin_arm64-opt-exec",
+    "label": "k8-opt-exec",
     "parentId": 11
   }, {
     "id": 9,
@@ -122,7 +122,7 @@
     "parentId": 14
   }, {
     "id": 20,
-    "label": "darwin_arm64-dbg",
+    "label": "k8-dbg",
     "parentId": 11
   }, {
     "id": 19,

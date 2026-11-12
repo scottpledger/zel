@@ -2,16 +2,16 @@ rule_classes {
 id: 1
 name: "catrule"
 }
-configuration {
-id: 1
-mnemonic: "darwin_arm64-fastbuild"
-platform_name: "darwin_arm64"
-checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
-}
 targets {
 id: 1
 label: "//a:lib"
 rule_class_id: 1
+}
+configuration {
+id: 1
+mnemonic: "k8-opt"
+platform_name: "k8"
+checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
 }
 path_fragments {
 id: 2
@@ -39,12 +39,6 @@ path_fragments {
 id: 4
 label: "z.txt"
 parent_id: 2
-}
-configuration {
-id: 2
-mnemonic: "darwin_arm64-opt"
-platform_name: "darwin_arm64"
-checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
 }
 artifacts {
 id: 3
@@ -80,31 +74,20 @@ direct_artifact_ids: 2
 direct_artifact_ids: 3
 direct_artifact_ids: 4
 }
-dep_set_of_files {
+configuration {
 id: 2
-direct_artifact_ids: 1
-direct_artifact_ids: 2
-direct_artifact_ids: 3
-direct_artifact_ids: 4
+mnemonic: "k8-fastbuild"
+platform_name: "k8"
+checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
 }
 path_fragments {
 id: 13
 label: "bazel-out"
 }
 path_fragments {
-id: 17
-label: "darwin_arm64-opt"
-parent_id: 13
-}
-path_fragments {
 id: 12
-label: "darwin_arm64-fastbuild"
+label: "k8-opt"
 parent_id: 13
-}
-path_fragments {
-id: 16
-label: "bin"
-parent_id: 17
 }
 path_fragments {
 id: 11
@@ -121,22 +104,39 @@ id: 9
 label: "lib.txt"
 parent_id: 10
 }
+dep_set_of_files {
+id: 2
+direct_artifact_ids: 1
+direct_artifact_ids: 2
+direct_artifact_ids: 3
+direct_artifact_ids: 4
+}
 artifacts {
 id: 5
 path_fragment_id: 9
 }
+path_fragments {
+id: 17
+label: "k8-fastbuild"
+parent_id: 13
+}
 actions {
 target_id: 1
-action_key: "2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8"
+action_key: "c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012"
 mnemonic: "CatIt"
 configuration_id: 1
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt"
+arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txt"
 input_dep_set_ids: 1
 output_ids: 5
 primary_output_id: 5
 execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 16
+label: "bin"
+parent_id: 17
 }
 path_fragments {
 id: 15
@@ -154,12 +154,12 @@ path_fragment_id: 14
 }
 actions {
 target_id: 1
-action_key: "e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329"
+action_key: "d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6"
 mnemonic: "CatIt"
 configuration_id: 2
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txt"
+arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/lib.txt"
 input_dep_set_ids: 2
 output_ids: 6
 primary_output_id: 6

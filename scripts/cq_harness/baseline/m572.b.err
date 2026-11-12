@@ -11,7 +11,7 @@ ERROR: @WS@/pg/BUILD:1:10: in filegroup rule //pg:private: Visibility error:
 target '//b:mk' is not visible from
 target '//pg:private'
 Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
-ERROR: @WS@/pg/BUILD:1:10: Analysis of target '//pg:private' (config: e1e6329) failed
+ERROR: @WS@/pg/BUILD:1:10: Analysis of target '//pg:private' (config: 70ad46f) failed
 ERROR: @WS@/BUILD:4:11: in test_suite rule //:all_tests: Visibility error:
 target '//b:t1' is not visible from
 target '//:all_tests'
@@ -20,27 +20,27 @@ ERROR: @WS@/BUILD:4:11: in test_suite rule //:all_tests: Visibility error:
 target '//b:t2' is not visible from
 target '//:all_tests'
 Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
-ERROR: @WS@/BUILD:4:11: Analysis of target '//:all_tests' (config: 4da29b9) failed
-ERROR: @WS@/c/BUILD:2:10: in filegroup rule //c:cyc1: cycle in dependency graph:
-    //c:cyc1 (4da29b9e184e0498a418021b87ea8ff3e41858b734c6f315322bf14bfafd1847)
-.-> //c:cyc1 (e1e6329670252a01146c735509bb7a24f7cecec29110adf8c48c6d650bb777e0)
-|   //c:cyc2 (e1e6329670252a01146c735509bb7a24f7cecec29110adf8c48c6d650bb777e0)
-`-- //c:cyc1 (e1e6329670252a01146c735509bb7a24f7cecec29110adf8c48c6d650bb777e0)
-WARNING: errors encountered while analyzing target '//c:cyc1', it will not be built.
-WARNING: errors encountered while analyzing target '//:all_tests', it will not be built.
+ERROR: @WS@/BUILD:4:11: Analysis of target '//:all_tests' (config: 9772edc) failed
+WARNING: errors encountered while analyzing target '//pg:private', it will not be built.
 WARNING: errors encountered while analyzing target '//d:bad', it will not be built.
 Analysis failed
+WARNING: errors encountered while analyzing target '//:all_tests', it will not be built.
+ERROR: @WS@/c/BUILD:3:10: in filegroup rule //c:cyc2: cycle in dependency graph:
+    //c:cyc2 (9772edc02cbb371bc812ba6c14e9511fe1bee978b934a47726f4faa8fb193c18)
+.-> //c:cyc2 (70ad46f0e930d4921a16f2065d932ae9a89595182dca24bf7c85f4d2aef3b5a9)
+|   //c:cyc1 (70ad46f0e930d4921a16f2065d932ae9a89595182dca24bf7c85f4d2aef3b5a9)
+`-- //c:cyc2 (70ad46f0e930d4921a16f2065d932ae9a89595182dca24bf7c85f4d2aef3b5a9)
+WARNING: errors encountered while analyzing target '//c:cyc2', it will not be built.
+ERROR: @WS@/c/BUILD:2:10: in filegroup rule //c:cyc1: cycle in dependency graph: target depends on an already-reported cycle
+WARNING: errors encountered while analyzing target '//c:cyc1', it will not be built.
 WARNING: errors encountered while analyzing target '//d:dep_bad', it will not be built.
 Analysis failed
-ERROR: @WS@/c/BUILD:3:10: in filegroup rule //c:cyc2: cycle in dependency graph: target depends on an already-reported cycle
-WARNING: errors encountered while analyzing target '//c:cyc2', it will not be built.
-WARNING: errors encountered while analyzing target '//pg:private', it will not be built.
 INFO: Analysis succeeded for only 25 of 31 top-level targets
-INFO: Analyzed 31 targets (0 packages loaded, 419 targets configured).
+INFO: Analyzed 31 targets (0 packages loaded, 418 targets configured).
 INFO: Found 25 targets...
-WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//a:tr, config=BuildConfigurationKey[e1e6329670252a01146c735509bb7a24f7cecec29110adf8c48c6d650bb777e0]}, ConfiguredTargetKey{label=//a:sm_cat, config=BuildConfigurationKey[e1e6329670252a01146c735509bb7a24f7cecec29110adf8c48c6d650bb777e0]}, ConfiguredTargetKey{label=//:top_alias, config=BuildConfigurationKey[4da29b9e184e0498a418021b87ea8ff3e41858b734c6f315322bf14bfafd1847]}]
-WARNING: Dependency ConfiguredTargetKey{label=//:all_tests, config=BuildConfigurationKey[4da29b9e184e0498a418021b87ea8ff3e41858b734c6f315322bf14bfafd1847]} is unavaillable for querying. This may be because this query sets --keep_going, which continues analysis even some of the build graph  fails to analyze. For more accurate results ensure this request can build.
+WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//a:sm_cat, config=BuildConfigurationKey[70ad46f0e930d4921a16f2065d932ae9a89595182dca24bf7c85f4d2aef3b5a9]}, ConfiguredTargetKey{label=//a:tr, config=BuildConfigurationKey[70ad46f0e930d4921a16f2065d932ae9a89595182dca24bf7c85f4d2aef3b5a9]}, ConfiguredTargetKey{label=//:top_alias, config=BuildConfigurationKey[9772edc02cbb371bc812ba6c14e9511fe1bee978b934a47726f4faa8fb193c18]}]
+WARNING: Dependency ConfiguredTargetKey{label=//:all_tests, config=BuildConfigurationKey[9772edc02cbb371bc812ba6c14e9511fe1bee978b934a47726f4faa8fb193c18]} is unavaillable for querying. This may be because this query sets --keep_going, which continues analysis even some of the build graph  fails to analyze. For more accurate results ensure this request can build.
 ERROR: command succeeded, but not all targets were analyzed
-INFO: Elapsed time: 0.079s, Critical Path: 0.00s
+INFO: Elapsed time: 0.051s, Critical Path: 0.00s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

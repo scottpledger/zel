@@ -26,40 +26,40 @@
   }],
   "actions": [{
     "targetId": 1,
-    "actionKey": "2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8",
+    "actionKey": "d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6",
     "mnemonic": "CatIt",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt"],
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-fastbuild/bin/a/lib.txt"],
     "inputDepSetIds": [1],
     "outputIds": [5],
     "primaryOutputId": 5,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329",
+    "actionKey": "c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012",
     "mnemonic": "CatIt",
     "configurationId": 2,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-opt/bin/a/lib.txt"],
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-opt/bin/a/lib.txt"],
     "inputDepSetIds": [2],
     "outputIds": [6],
     "primaryOutputId": 6,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 2,
-    "actionKey": "c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69",
+    "actionKey": "a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87",
     "mnemonic": "CatIt",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "cat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt"],
+    "arguments": ["/bin/bash", "-c", "cat bazel-out/k8-fastbuild/bin/a/lib.txt a/y.txt \u003e bazel-out/k8-fastbuild/bin/a/lib2.txt"],
     "inputDepSetIds": [3],
     "outputIds": [7],
     "primaryOutputId": 7,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 3,
-    "actionKey": "ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea",
+    "actionKey": "528a9290a4550ab3dbb0f137142ffa734f640c7270bfd127baeb7b29a44f1f2a",
     "mnemonic": "CatIt",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/y.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt"],
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/y.txt \u003e bazel-out/k8-fastbuild/bin/a/sm_cat.txt"],
     "inputDepSetIds": [4],
     "outputIds": [8],
     "primaryOutputId": 8,
@@ -93,14 +93,14 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }, {
     "id": 2,
-    "mnemonic": "darwin_arm64-opt",
-    "platformName": "darwin_arm64",
-    "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+    "mnemonic": "k8-opt",
+    "platformName": "k8",
+    "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   }],
   "ruleClasses": [{
     "id": 1,
@@ -141,7 +141,7 @@
     "label": "bazel-out"
   }, {
     "id": 12,
-    "label": "darwin_arm64-fastbuild",
+    "label": "k8-fastbuild",
     "parentId": 13
   }, {
     "id": 11,
@@ -157,7 +157,7 @@
     "parentId": 10
   }, {
     "id": 17,
-    "label": "darwin_arm64-opt",
+    "label": "k8-opt",
     "parentId": 13
   }, {
     "id": 16,

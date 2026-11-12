@@ -1,12 +1,12 @@
-:genrule//a:ggl*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272cBaBz.txt
+:genrule//a:ggX*Vk8-fastbuildk8"@a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18BaBz.txt
 BexternalB
 ext+B	libBd.txt
-"B	bazel-outB
-darwin_arm64-opt-execB		bin
+"B	bazel-outB
+k8-opt-execB		bin
 	Bb	B
 tool
 Btool.runfiles
 "Bbazel_toolsBtoolsBgenruleBgenrule-setup.sh
-"	Bdarwin_arm64-fastbuildB	bin	BaBgg.out
-��@2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542"Genrule(2	/bin/bash2-c2�source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out:$
+"	Bk8-fastbuildB	bin	BaBgg.out
+��@efb257e0353d4c7aac216fe391aa37dd298024cb3045911ff7162b8d43f0682d"Genrule(2	/bin/bash2-c2�source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/k8-fastbuild/bin/a/gg.out:$
 PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:host

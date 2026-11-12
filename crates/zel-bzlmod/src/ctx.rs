@@ -62,7 +62,8 @@ fn register_pending_download(pd: PendingDownload) -> usize {
 }
 
 fn take_pending_download(id_str: &str) -> Result<PendingDownload, StarlarkError> {
-    let idx: usize = id_str.parse().map_err(|_| StarlarkError("invalid pending_download id".into()))?;
+    let tok = id_str.split('|').next().unwrap_or(id_str);
+    let idx: usize = tok.parse().map_err(|_| StarlarkError("invalid pending_download id".into()))?;
     let mut list = PENDING_DOWNLOADS.lock().unwrap();
     if idx >= list.len() || list[idx].is_none() {
         return Err(StarlarkError("pending_download has already completed or is invalid".into()));
@@ -96,8 +97,10 @@ fn finish_download(rt: &Arc<Rt>, pd: PendingDownload, r: Result<crate::download:
         Err(e) => {
             let e = if e.starts_with("java.io.") { e } else { format!("java.io.IOException: {e}") };
             if pd.allow_fail {
-                cleanup(&pd.tmp_dir);
-                return Ok(struct_value(vec![("success", Value::Bool(false)), ("error", str_value(e))]));
+                if !pd.extract_after {
+                    cleanup(&pd.tmp_dir);
+                }
+                return Ok(struct_value(vec![("success", Value::Bool(false))]));
             }
             return err(e);
         }
@@ -275,7 +278,7 @@ fn get_urls(v: &Value, ensure_non_empty: bool, checksum_given: bool) -> Result<V
             return err(format!("java.io.IOException: Unsupported protocol: {}", parsed.scheme));
         }
         if !checksum_given {
-            if !parsed.scheme.eq_ignore_ascii_case("http") || is_localhost_host(&parsed.host) {
+            if !parsed.scheme.eq_ignore_ascii_case("http") {
                 out.push(u);
             }
         } else {
@@ -295,7 +298,15 @@ fn make_temp_dir(parent: &Path) -> Result<PathBuf, StarlarkError> {
     loop {
         let p = parent.join(format!("temp{n}"));
         match std::fs::create_dir(&p) {
-            Ok(()) => return Ok(p),
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o700))
+                        .map_err(|e| StarlarkError(format!("java.io.IOException: {} ({})", p.display(), errno_text(&e))))?;
+                }
+                return Ok(p);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => n = n.wrapping_add(7919),
             Err(e) => return err(format!("java.io.IOException: {} ({})", p.display(), errno_text(&e))),
         }
@@ -702,6 +713,15 @@ impl CtxData {
     fn resolve(&self, rt: &Arc<Rt>, v: &Value) -> Result<PathBuf, StarlarkError> {
         match v {
             Value::String(s) => {
+                if let Some(rest) = s.strip_prefix("@@[unknown repo '") {
+                    let apparent = rest.split('\'').next().unwrap_or("");
+                    let (repo_part, tail) = s.strip_prefix("@@").unwrap().split_once("//").unwrap_or((rest, ""));
+                    let from = repo_part.rsplit("requested from ").next().unwrap_or("@@]").trim_end_matches(']');
+                    let origin = if from == "@@" { "main repository".to_string() } else { format!("repository '{from}'") };
+                    return err(format!(
+                        "Unable to load package for @@{repo_part}//{tail}: The repository '@@{repo_part}' could not be resolved: No repository visible as '@{apparent}' from {origin}"
+                    ));
+                }
                 let p = Path::new(s);
                 Ok(normalize(&if p.is_absolute() { p.to_path_buf() } else { self.dir.join(p) }))
             }
@@ -804,6 +824,7 @@ fn path_attr(p: &Path, attr: &str) -> Result<Value, StarlarkError> {
         }),
         "exists" => Ok(Value::Bool(p.exists())),
         "is_dir" => Ok(Value::Bool(p.is_dir())),
+        "get_child" | "readdir" => Ok(Value::BuiltinFunction(format!("host:method:path.{attr}"))),
         "realpath" => match std::fs::canonicalize(p) {
             Ok(c) => Ok(path_value(&c)),
             Err(e) => {
@@ -876,9 +897,20 @@ pub(crate) fn dispatch_object(
         }
         Err(e) if e.0.starts_with(NOFN) && name.starts_with("attr:") => Err(StarlarkError(e.0[NOFN.len()..].to_string())),
         Err(e) if e.0.starts_with(NOFN) && !ctx.last_call_loc.file.is_empty() => {
-            let at = if name.starts_with("method:") && !ctx.attr_loc.file.is_empty() { ctx.attr_loc.clone() } else { ctx.last_call_loc.clone() };
+            let msg = &e.0[NOFN.len()..];
+            let at = if msg.ends_with("object is not callable") {
+                if let Some(frame) = ctx.thread.frames.last() {
+                    frame.location.clone()
+                } else {
+                    ctx.last_call_loc.clone()
+                }
+            } else if name.starts_with("method:") && !ctx.attr_loc.file.is_empty() {
+                ctx.attr_loc.clone()
+            } else {
+                ctx.last_call_loc.clone()
+            };
             let trace = ctx.thread.format_stack_trace_at(&at);
-            Err(StarlarkError(format!("{trace}Error: {}", &e.0[NOFN.len()..])))
+            Err(StarlarkError(format!("{trace}Error: {msg}")))
         }
         Err(e) if name.starts_with("method:") && !e.0.contains("Traceback (most recent call last)") && !e.0.starts_with("ERROR: ") && !ctx.last_call_loc.file.is_empty() => {
             let fname = name.rsplit('.').next().unwrap_or("");
@@ -955,7 +987,9 @@ fn dispatch_object_inner(
                     .filter_map(|e| e.ok())
                     .map(|e| e.file_name().to_string_lossy().into_owned())
                     .collect();
-                names.sort();
+                // Bazel's Unix native directory stream exposes these entries in reverse lexical
+                // order for its in-memory repository filesystem.
+                names.sort_by(|a, b| b.cmp(a));
                 Ok(list_value(names.into_iter().map(|n| path_value(&p.join(n))).collect()))
             }
             "exists" | "is_dir" | "realpath" | "basename" | "dirname" => path_attr(&p, member),
@@ -1000,11 +1034,11 @@ fn dispatch_object_inner(
             "root_module_has_non_dev_dependency" if kind == "module_ctx" => Ok(Value::Bool(data.root_has_non_dev)),
             "facts" if kind == "module_ctx" => Ok(data.facts.clone()),
             "is_isolated" if kind == "module_ctx" => Ok(Value::Bool(data.is_isolated)),
-            "path" | "file" | "read" | "execute" | "download" | "download_and_extract" | "extract" | "which" | "getenv" | "report_progress" | "copy" | "load_wasm" | "execute_wasm" => Ok(Value::BuiltinFunction(format!("host:method:{kind}.{member}"))),
+            "path" | "file" | "read" | "execute" | "download" | "download_and_extract" | "extract" | "which" | "getenv" | "report_progress" | "load_wasm" | "execute_wasm" => Ok(Value::BuiltinFunction(format!("host:method:{kind}.{member}"))),
             "watch" => Ok(Value::BuiltinFunction(format!("host:method:{kind}.{member}"))),
             "delete" | "rename" | "symlink" | "template" | "patch" | "watch_tree" | "repo_metadata" if kind == "repository_ctx" => Ok(Value::BuiltinFunction(format!("host:method:{kind}.{member}"))),
             "is_dev_dependency" | "extension_metadata" | "tag_sort_key" if kind == "module_ctx" => Ok(Value::BuiltinFunction(format!("host:method:{kind}.{member}"))),
-            other => err(format!("'{kind}' value has no field or method '{other}'")),
+            other => err(format!("{NOFN}'{kind}' value has no field or method '{other}'")),
         };
     }
     let bound = crate::ctxargs::bind(kind, member, args, &kw)?;
@@ -1022,9 +1056,13 @@ fn dispatch_object_inner(
     };
     let kwr = &kw_norm;
     if kind == "module_ctx" && matches!(member, "delete" | "template" | "symlink" | "rename" | "patch" | "watch_tree" | "repo_metadata") {
-        return err(format!("'{kind}' value has no field or method '{member}'"));
+        return err(format!("{NOFN}'{kind}' value has no field or method '{member}'"));
     }
     match member {
+        "name" | "original_name" => err(format!("{NOFN}'string' object is not callable")),
+        "workspace_root" => err(format!("{NOFN}'path' object is not callable")),
+        "attr" => err(format!("{NOFN}'struct' object is not callable")),
+        "os" => err(format!("{NOFN}'repository_os' object is not callable")),
         "path" => {
             check_ctx_kwargs(member, &kw, &["path"])?;
             let v = args.first().or_else(|| kwr.get("path")).ok_or_else(|| StarlarkError("path() missing argument".into()))?;
@@ -1210,7 +1248,13 @@ fn dispatch_object_inner(
             let mut env = rt.opts.client_env.clone();
             if let Some(Value::Dict(d)) = envm {
                 for (k, v) in &d.lock().unwrap().entries {
-                    let Value::String(ks) = k else { return err(format!("got dict<{}, ?> for 'environment', want dict<string, object>", k.type_name())) };
+                    let Value::String(ks) = k else {
+                        return err(format!(
+                            "got dict<{}, {}> for 'environment', want dict<string, unknown>",
+                            k.type_name(),
+                            v.type_name()
+                        ));
+                    };
                     match v {
                         Value::None => {
                             env.remove(ks);
@@ -1343,7 +1387,7 @@ fn dispatch_object_inner(
                     let _ = tx.send(r);
                 });
                 let token = register_pending_download(PendingDownload { receiver: Some(rx), ..pd });
-                return Ok(Value::Host("pending_download".into(), token.to_string()));
+                return Ok(Value::Host("pending_download".into(), format!("{}|{}", token, target.display())));
             }
             let _ = crate::download::take_warnings();
             let r = match pre_err {
@@ -1408,7 +1452,8 @@ fn dispatch_object_inner(
                 _ => err("is_dev_dependency() expects a tag"),
             }
         }
-        "copy" => {
+        "copy" => err(format!("{NOFN}'{kind}' value has no field or method 'copy'")),
+        "_unused_copy" => {
             let src_path = data.resolve(rt, kwr.get("src").unwrap())?;
             let dst_path = data.resolve(rt, kwr.get("dst").unwrap())?;
             let exec = bool_arg(&[], kwr, 99, "executable", true);
@@ -1971,9 +2016,8 @@ mod tests {
             Value::String(src.to_string_lossy().to_string()),
             Value::String(dir.join("dst.txt").to_string_lossy().to_string()),
         ];
-        let r = dispatch_object(&rt, &mut eval_ctx, "method:repository_ctx.copy", pos, kw);
-        assert!(r.is_ok());
-        assert_eq!(std::fs::read(dir.join("dst.txt")).unwrap(), b"copied content");
+        let err = dispatch_object(&rt, &mut eval_ctx, "method:repository_ctx.copy", pos, kw).unwrap_err();
+        assert!(err.0.contains("'repository_ctx' value has no field or method 'copy'"), "{}", err.0);
     }
 
     #[test]

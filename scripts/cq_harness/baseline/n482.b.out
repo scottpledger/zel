@@ -11,10 +11,10 @@
   }],
   "actions": [{
     "targetId": 1,
-    "actionKey": "ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea",
+    "actionKey": "528a9290a4550ab3dbb0f137142ffa734f640c7270bfd127baeb7b29a44f1f2a",
     "mnemonic": "CatIt",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/y.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt"],
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/y.txt \u003e bazel-out/k8-fastbuild/bin/a/sm_cat.txt"],
     "inputDepSetIds": [1],
     "outputIds": [3],
     "primaryOutputId": 3,
@@ -31,9 +31,9 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }],
   "ruleClasses": [{
     "id": 1,
@@ -55,7 +55,7 @@
     "label": "bazel-out"
   }, {
     "id": 7,
-    "label": "darwin_arm64-fastbuild",
+    "label": "k8-fastbuild",
     "parentId": 8
   }, {
     "id": 6,

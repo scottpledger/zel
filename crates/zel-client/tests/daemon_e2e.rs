@@ -176,12 +176,18 @@ fn idle_server_shuts_down() {
     assert!(wait_dead(pid, 10), "idle server did not exit");
 }
 
+#[cfg(unix)]
+extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
+
 #[test]
 fn output_base_lock_noblock_for_lock_exits_9() {
+    use std::os::unix::io::AsRawFd;
     let e = Env::new("lock");
     e.run(&[], &["version"]);
     let lock = fs::OpenOptions::new().read(true).write(true).open(e.ob.join("lock")).unwrap();
-    lock.lock().unwrap();
+    assert_eq!(unsafe { flock(lock.as_raw_fd(), 2) }, 0);
     let o = e.run(&["--noblock_for_lock"], &["version"]);
     assert_eq!(o.status.code(), Some(9), "{}", s(&o.stderr));
     let err = s(&o.stderr);
@@ -202,7 +208,7 @@ fn output_base_lock_noblock_for_lock_exits_9() {
             .unwrap()
     });
     std::thread::sleep(Duration::from_millis(1200));
-    lock.unlock().unwrap();
+    assert_eq!(unsafe { flock(lock.as_raw_fd(), 8) }, 0);
     let o = child.join().unwrap();
     assert_eq!(o.status.code(), Some(0));
     assert!(s(&o.stderr).contains("Waiting for it to complete..."), "{}", s(&o.stderr));

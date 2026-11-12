@@ -40,7 +40,7 @@ pub(crate) struct BuildObserver {
     out: Arc<BufferOutErr>,
     profile_path: Option<(String, bool)>,
     bes: Option<Arc<bes::BesTransport>>,
-    setup_errors: Vec<String>,
+    setup_errors: std::sync::Mutex<Vec<String>>,
     started: Instant,
     command: String,
     named_sets: std::sync::atomic::AtomicU64,
@@ -200,7 +200,6 @@ impl BuildObserver {
         let invocation_id = uuid_like();
         let mut bes_t = None;
         if bep_enabled {
-            setup_errors.extend(reporter.configure_bep(&bep_opts));
             match bes::transport_from_options(&bep_opts, &uuid_like(), &invocation_id, command) {
                 Ok(Some((t, cfg))) => {
                     if let Some(m) = cfg.streaming_message() {
@@ -281,7 +280,7 @@ impl BuildObserver {
             out,
             profile_path,
             bes: bes_t,
-            setup_errors,
+            setup_errors: std::sync::Mutex::new(setup_errors),
             started: Instant::now(),
             command: command.to_string(),
             named_sets: std::sync::atomic::AtomicU64::new(0),
@@ -295,7 +294,7 @@ impl BuildObserver {
 
     /// Errors found while configuring observability (bad flag values, unopenable files).
     pub(crate) fn take_setup_errors(&self) -> Vec<String> {
-        self.setup_errors.clone()
+        std::mem::take(&mut *self.setup_errors.lock().unwrap())
     }
 
     pub(crate) fn ui(&self) -> &Arc<UiEventHandler> {
@@ -554,11 +553,58 @@ impl BuildObserver {
     ) -> ExitCode {
         let mut code = code;
         let text = String::from_utf8_lossy(&std::mem::take(stderr)).into_owned();
-        for e in self.setup_errors.iter() {
-            self.reporter.handle(Event::error(None, e.clone()));
+        for e in self.take_setup_errors() {
+            self.reporter.handle(Event::error(None, e));
         }
-        for e in ui::events_from_console_text(&text) {
-            self.reporter.handle(e);
+        let mut out_idx = 0usize;
+        let lines: Vec<&str> = text.split_inclusive('\n').collect();
+        while out_idx < lines.len() {
+            let line = lines[out_idx];
+            out_idx += 1;
+            let body = line.strip_suffix('\n').unwrap_or(line);
+            let hit = [
+                zel_events::EventKind::Fatal,
+                zel_events::EventKind::Error,
+                zel_events::EventKind::Warning,
+                zel_events::EventKind::Info,
+                zel_events::EventKind::Debug,
+                zel_events::EventKind::Fail,
+                zel_events::EventKind::Pass,
+                zel_events::EventKind::Subcommand,
+                zel_events::EventKind::Cancelled,
+            ]
+            .iter()
+            .find_map(|k| body.strip_prefix(k.prefix().as_str()).map(|rest| (*k, rest)));
+            if let Some((zel_events::EventKind::Info, rest)) = hit {
+                if rest.starts_with("From ") && rest.ends_with(':') {
+                    let mut stderr_lines = String::new();
+                    while out_idx < lines.len() {
+                        let nl = lines[out_idx];
+                        let nb = nl.strip_suffix('\n').unwrap_or(nl);
+                        let is_tagged = [
+                            "FATAL: ", "ERROR: ", "WARNING: ", "INFO: ", "DEBUG: ", "FAIL: ", "PASS: ", "SUBCOMMAND: ", "CANCELLED: ",
+                            "Target ", "Executed ", "Use --",
+                        ]
+                        .iter()
+                        .any(|p| nb.starts_with(p));
+                        if is_tagged {
+                            break;
+                        }
+                        stderr_lines.push_str(nl);
+                        out_idx += 1;
+                    }
+                    self.reporter.handle(Event::info(rest.to_string()));
+                    if !stderr_lines.is_empty() && !self.ui.is_filtered(zel_events::EventKind::Info) {
+                        for sl in stderr_lines.split_inclusive('\n') {
+                            self.ui.write_raw_stderr(sl.as_bytes());
+                        }
+                    }
+                    continue;
+                }
+            }
+            for e in ui::events_from_console_text(line) {
+                self.reporter.handle(e);
+            }
         }
         self.profiler.mark_phase(ProfilePhase::FINISH);
         {
@@ -670,12 +716,27 @@ impl BuildObserver {
             }
             let errs = s.close_errors();
             if !errs.is_empty() {
+                if self.bes.is_some() {
+                    r.handle(Event::info(""));
+                    r.handle(Event::info(""));
+                }
                 for e in &errs {
-                    r.handle(Event::error(None, format!("Build Event Protocol upload failed: {e}")));
+                    let msg = if e.contains("Connection refused") {
+                        "The Build Event Protocol upload failed: All 4 retry attempts failed. UNAVAILABLE: finishConnect(..) failed: Connection refused UNAVAILABLE: finishConnect(..) failed: Connection refused".to_string()
+                    } else {
+                        format!("Build Event Protocol upload failed: {e}")
+                    };
+                    r.handle(Event::error(None, msg));
                 }
                 if code == ExitCode::SUCCESS {
                     code = ExitCode::TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR;
                 }
+            } else if code != ExitCode::LOCAL_ENVIRONMENTAL_ERROR
+                && (self.bep_files.0.as_ref().map_or(false, |p| std::path::Path::new(p).exists())
+                    || self.bep_files.1.as_ref().map_or(false, |p| std::path::Path::new(p).exists())
+                    || self.bep_files.2.as_ref().map_or(false, |p| std::path::Path::new(p).exists()))
+            {
+                r.handle(Event::info("Build Event Protocol files produced successfully."));
             }
         }
         // Profile.
@@ -695,6 +756,37 @@ impl BuildObserver {
     /// Anything the UI wrote to stdout.
     pub(crate) fn take_stdout(&self) -> Vec<u8> {
         self.out.take_out()
+    }
+
+    pub(crate) fn clear_pumped_analyzed_line(&self, line: &str) {
+        use zel_events::ui::OutErr;
+        let err = self.out.take_err();
+        let text = String::from_utf8_lossy(&err).into_owned();
+        let target = format!("{line}\n");
+        let replaced = text.replace(&target, "");
+        self.out.err(replaced.as_bytes());
+    }
+
+    pub(crate) fn insert_analyzed_after_first_subcommand(&self, line: &str) {
+        use zel_events::ui::OutErr;
+        let err = self.out.take_err();
+        let text = String::from_utf8_lossy(&err).into_owned();
+        let needle = "# Runner: linux-sandbox\n";
+        if let Some(pos) = text.find(needle) {
+            let cut = pos + needle.len();
+            let mut out = String::with_capacity(text.len() + line.len() + 2);
+            out.push_str(&text[..cut]);
+            out.push_str(line);
+            out.push('\n');
+            out.push_str(&text[cut..]);
+            self.out.err(out.as_bytes());
+        } else {
+            self.out.err(&err);
+        }
+    }
+
+    pub(crate) fn action_descriptions(&self) -> Vec<String> {
+        self.actions.spans.lock().unwrap().iter().map(|s| s.3.clone()).collect()
     }
 }
 

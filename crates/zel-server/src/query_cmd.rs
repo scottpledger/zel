@@ -184,6 +184,10 @@ impl BlazeRuntime {
                     if let Err(code) = write_query_output_file(&file_path, &outcome.stdout, stderr) {
                         return code;
                     }
+                } else if parsed.get_bool("experimental_ui_debug_all_events").unwrap_or(false) {
+                    writeln_bytes(stdout, "INFO <no location>: Transports announced:");
+                    let text = String::from_utf8_lossy(&outcome.stdout);
+                    stdout.extend_from_slice(format!("STDOUT <no location>: {text}\n").as_bytes());
                 } else {
                     stdout.extend_from_slice(&outcome.stdout);
                 }
@@ -256,6 +260,10 @@ pub(crate) fn emit_deprecation_warnings(command: &str, args: &[String], stderr: 
             candidates.push(n.to_string());
         }
         'cand: for cand in &candidates {
+            if cand == "test_result_expiration" {
+                writeln_bytes(stderr, "WARNING: Option 'test_result_expiration' is deprecated");
+                break 'cand;
+            }
             if let Some((_, w)) = DEPRECATION_WARNINGS.iter().find(|(k, _)| k == cand) {
                 if ALL_COMMAND_OPTIONS.iter().any(|d| d.name == cand.as_str() && d.commands.contains(&command)) {
                     writeln_bytes(stderr, &format!("WARNING: Option '{cand}' is deprecated: {w}"));
@@ -391,7 +399,7 @@ mod tests {
         let o = run(&rt, &["query", "--noimplicit_deps", "deps(//app:fg)"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
         assert_eq!(o.lines(), vec!["//app:app", "//app:fg", "//app:in.txt", "//lib:data.txt", "//lib:l"]);
-        let o = run(&rt, &["query", "//app:all", "-", "//app:all"]);
+        let o = run(&rt, &["query", "//app:all - //app:all"]);
         assert_eq!(o.code, 0);
         assert!(o.stdout.is_empty());
         assert!(o.stderr.contains("INFO: Empty results"), "{}", o.stderr);

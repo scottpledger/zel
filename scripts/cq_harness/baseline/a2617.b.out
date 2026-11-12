@@ -1,86 +1,86 @@
 action 'Executing genrule //a:gg'
   Mnemonic: Genrule
   Target: //a:gg
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542
-  Inputs: [a/z.txt, bazel-out/darwin_arm64-opt-exec/bin/b/tool, bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/gg.out]
+  ActionKey: efb257e0353d4c7aac216fe391aa37dd298024cb3045911ff7162b8d43f0682d
+  Inputs: [a/z.txt, bazel-out/k8-opt-exec/bin/b/tool, bazel-out/k8-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/gg.out]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec /bin/bash \
     -c \
-    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out')
-# Configuration: 3277263b9d4b1b08bf28a5f6d27d5ae81285f2a2bf0a1de7d3c32ad3a1e48c01
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/k8-fastbuild/bin/a/gg.out')
+# Configuration: 96207f06d47ffc21662377a41573a1bf78c7e8dea043a07af89602b8f13c8f36
 # Execution platform: @@platforms//host:host
 
 action 'Cat @@//a:lib'
   Mnemonic: CatIt
   Target: //a:lib
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: 2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8
+  ActionKey: c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012
   Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/lib.txt]
   Command Line: (exec /bin/bash \
     -c \
-    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt')
-# Configuration: 3277263b9d4b1b08bf28a5f6d27d5ae81285f2a2bf0a1de7d3c32ad3a1e48c01
+    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txt')
+# Configuration: 0b03ae8d281c10791c67e40108b811ffbb58c7123ae66af237aa6cc28962244c
 # Execution platform: @@platforms//host:host
 
 action 'Cat @@//a:lib'
   Mnemonic: CatIt
   Target: //a:lib
-  Configuration: darwin_arm64-opt
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329
+  ActionKey: d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6
   Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/lib.txt]
   Command Line: (exec /bin/bash \
     -c \
-    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txt')
-# Configuration: 3474045c087a275b900b0c4b70159aafc97ce2f28153a0fea451dcae8b61ffdf
+    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/lib.txt')
+# Configuration: 96207f06d47ffc21662377a41573a1bf78c7e8dea043a07af89602b8f13c8f36
 # Execution platform: @@platforms//host:host
 
 action 'Cat @@//a:lib2'
   Mnemonic: CatIt
   Target: //a:lib2
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69
-  Inputs: [a/y.txt, bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt]
+  ActionKey: a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87
+  Inputs: [a/y.txt, bazel-out/k8-fastbuild/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/lib2.txt]
   Command Line: (exec /bin/bash \
     -c \
-    'cat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt')
-# Configuration: 3277263b9d4b1b08bf28a5f6d27d5ae81285f2a2bf0a1de7d3c32ad3a1e48c01
+    'cat bazel-out/k8-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/k8-fastbuild/bin/a/lib2.txt')
+# Configuration: 96207f06d47ffc21662377a41573a1bf78c7e8dea043a07af89602b8f13c8f36
 # Execution platform: @@platforms//host:host
 
 action 'Executing genrule //a:lm'
   Mnemonic: Genrule
   Target: //a:lm
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 87db1df4b214fe2a744f1a7292cfa0468e49193cae194c181f0f39e81c9a76f5
+  ActionKey: f592d9be7cd07e33df9119a083dca794b732141767337da8ffb3107f9f112eaa
   Inputs: [external/bazel_tools/tools/genrule/genrule-setup.sh]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/lm.o]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/lm.o]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec /bin/bash \
     -c \
-    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/darwin_arm64-fastbuild/bin/a/lm.o')
-# Configuration: 3277263b9d4b1b08bf28a5f6d27d5ae81285f2a2bf0a1de7d3c32ad3a1e48c01
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/k8-fastbuild/bin/a/lm.o')
+# Configuration: 96207f06d47ffc21662377a41573a1bf78c7e8dea043a07af89602b8f13c8f36
 # Execution platform: @@platforms//host:host
 
 action 'Cat @@//a:sm_cat'
   Mnemonic: CatIt
   Target: //a:sm_cat
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea
+  ActionKey: 528a9290a4550ab3dbb0f137142ffa734f640c7270bfd127baeb7b29a44f1f2a
   Inputs: [a/x.txt, a/y.txt]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/sm_cat.txt]
   Command Line: (exec /bin/bash \
     -c \
-    'cat a/x.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt')
-# Configuration: 3277263b9d4b1b08bf28a5f6d27d5ae81285f2a2bf0a1de7d3c32ad3a1e48c01
+    'cat a/x.txt a/y.txt > bazel-out/k8-fastbuild/bin/a/sm_cat.txt')
+# Configuration: 96207f06d47ffc21662377a41573a1bf78c7e8dea043a07af89602b8f13c8f36
 # Execution platform: @@platforms//host:host
 

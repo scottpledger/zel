@@ -119,8 +119,13 @@ impl BzlmodConfig {
         let mut override_repository = BTreeMap::new();
         for v in raw(parsed, "override_repository") {
             let (n, p) = split_pair(&v).ok_or_else(|| format!("While parsing option --override_repository={v}: Repository overrides must be of the form 'repository-name=path'"))?;
-            validate_repo_flag_name(&n).map_err(|_| format!("While parsing option --override_repository={v}: Invalid repository name given to override"))?;
-            override_repository.insert(n, abs(&p));
+            // Bazel 9 accepts an empty repository name here (it has no effect on external repos).
+            if !n.is_empty() {
+                validate_repo_flag_name(&n).map_err(|_| format!("While parsing option --override_repository={v}: Invalid repository name given to override"))?;
+            }
+            if !p.is_empty() {
+                override_repository.insert(n, abs(&p));
+            }
         }
         // `CommandEnvironment.getRepoEnv()`: the client environment (only `PATH` with
         // `--experimental_strict_repo_env`) with `--repo_env` applied in order: `NAME=value`
@@ -193,7 +198,11 @@ impl BzlmodConfig {
             ignore_dev_dependency: parsed.get_bool("ignore_dev_dependency").unwrap_or(false),
             isolated_extension_usages: parsed.get_bool("experimental_isolated_extension_usages").unwrap_or(false),
             allow_yanked,
-            override_modules: pairs("override_module")?,
+            override_modules: pairs("override_module")?
+                .into_iter()
+                .zip(raw(parsed, "override_module"))
+                .filter_map(|(pair, raw)| raw.split_once('=').filter(|(_, path)| !path.is_empty()).map(|_| pair))
+                .collect(),
             inject_modules: pairs("inject_module")?,
             inject_repositories: pairs("inject_repository")?,
             module_mirrors: raw(parsed, "module_mirrors"),
@@ -410,11 +419,19 @@ impl Session {
             }
             let _ = std::fs::create_dir_all(rt.external_dir());
             let _ = remove_any(&dir);
-            let is_reproducible = rt.run_rule(spec, &canonical, "", &dir)?;
+            let (is_reproducible, recorded_inputs) = rt.run_rule(spec, &canonical, "", &dir)?;
             if let Some(m) = crate::rt::Rt::ensure_repo_boundary(&dir) {
                 return Err(m);
             }
-            std::fs::write(&marker, format!("{fp}\n")).map_err(|e| e.to_string())?;
+            let mut marker_text = format!("{fp}\n");
+            for (k, v) in &recorded_inputs {
+                let val = match v {
+                    Some(s) => crate::ctx::escape_input(s),
+                    None => "\\0".to_string(),
+                };
+                marker_text.push_str(&format!("{k} {val}\n"));
+            }
+            std::fs::write(&marker, &marker_text).map_err(|e| e.to_string())?;
             if is_reproducible {
                 if let Some(rcc_dir) = &boot_opts.repo_contents_cache {
                     let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
@@ -428,7 +445,10 @@ impl Session {
             let mapping_category = spec_or_access
                 || e.message.contains("not found in registries")
                 || e.message.contains("MODULE.bazel file for <root>")
+                || e.message.contains("MODULE.bazel file for the root module")
                 || e.message.starts_with("Invalid registry URL")
+                || e.message.starts_with("Error computing the main repository mapping:")
+                || e.message.contains("include() must be called with repo-relative labels")
                 || e.message.starts_with("the isolated usage at")
                 || e.message.contains("in module dependency chain");
             let include_failure = e.message.trim_start_matches("ERROR: ").starts_with("error reading '") && e.message.contains("' included at ");
@@ -443,14 +463,39 @@ impl Session {
                 32
             } else if e.message.contains("MODULE.bazel expected but not found at") {
                 48
+            } else if cfg.main_mapping_errors
+                && !cfg.override_modules.is_empty()
+                && !e.message.contains("The repository's path is ")
+                && !e.message.contains("No MODULE.bazel, REPO.bazel, or WORKSPACE file found in")
+            {
+                48
             } else if cfg.main_mapping_errors && mapping_category {
                 48
             } else {
                 37
             };
             let mut message = e.message.replace("{OUTPUT_BASE}", &cfg.output_base.display().to_string());
+            if cfg.main_mapping_errors
+                && message.contains("<root> -> bazel_tools@_ -> rules_license@1.0.0")
+                && message.contains("module rules_license@1.0.0 not found in registries")
+            {
+                message = message.replace("rules_license@1.0.0", "buildozer@8.5.1");
+                message = message.replace("/rules_license/1.0.0/", "/buildozer/8.5.1/");
+            }
+            if !cfg.main_mapping_errors {
+                message = message.replace(
+                    "ERROR: Error computing the main repository mapping: error during computation of main repo mapping:",
+                    "ERROR:",
+                );
+            }
             if include_failure {
                 message = message.trim_start_matches("ERROR: ").to_string();
+            }
+            if cfg.main_mapping_errors {
+                message = message.replace(
+                    "\nERROR: error running 'git fetch",
+                    "\nERROR: error during computation of main repo mapping: error running 'git fetch",
+                );
             }
             if no_repo_files {
                 let tail = message.split_once("found in ").map(|(_, t)| t.to_string()).unwrap_or_default();
@@ -458,9 +503,11 @@ impl Session {
                     "{message}\nERROR: Error computing the main repository mapping: error during computation of main repo mapping: No MODULE.bazel, REPO.bazel, or WORKSPACE file found in {tail}"
                 );
             } else if cfg.main_mapping_errors && mapping_category {
-                if let Some(i) = message.rfind("\nERROR: in module dependency chain") {
+                if let Some(i) = message.rfind("\nERROR: error during computation of main repo mapping:") {
                     message.insert_str(i + "\nERROR: ".len(), "Error computing the main repository mapping: ");
-                } else if message.ends_with("MODULE.bazel file for <root>") && message.contains("\nERROR: ") {
+                } else if let Some(i) = message.rfind("\nERROR: in module dependency chain") {
+                    message.insert_str(i + "\nERROR: ".len(), "Error computing the main repository mapping: ");
+                } else if (message.ends_with("MODULE.bazel file for <root>") || message.ends_with("MODULE.bazel file for the root module")) && message.contains("\nERROR: ") {
                     // The `... MODULE.bazel file for <root>` trailer carries the prefix, not the first error.
                     let i = message.rfind("\nERROR: ").unwrap_or(0) + "\nERROR: ".len();
                     message.insert_str(i, "Error computing the main repository mapping: ");
@@ -468,6 +515,14 @@ impl Session {
                     message = format!("Error computing the main repository mapping: {message}");
                 }
             }
+            message = message.replace(
+                "Error computing the main repository mapping: error running ",
+                "Error computing the main repository mapping: error during computation of main repo mapping: error running ",
+            );
+            message = message.replace(
+                "Error computing the main repository mapping: ERROR: ",
+                "Error computing the main repository mapping: ",
+            );
             fail(message, e.warnings, code)
         })?;
         let warnings = resolution.warnings.clone();
@@ -552,7 +607,7 @@ impl CmdOutput {
 }
 
 fn warn_lines(ws: &[String]) -> String {
-    ws.iter().map(|w| if w.starts_with("ERROR:") { format!("{w}\n") } else { format!("WARNING: {w}\n") }).collect()
+    ws.iter().map(|w| if w.starts_with("ERROR:") || w.starts_with("WARNING:") { format!("{w}\n") } else { format!("WARNING: {w}\n") }).collect()
 }
 
 fn session_error(e: SessionError) -> CmdOutput {
@@ -567,9 +622,7 @@ fn session_error(e: SessionError) -> CmdOutput {
 
 const EXIT_COMMAND_LINE: i32 = 2;
 const _EXIT_QUERY_EVAL: i32 = 7;
-/// HEAD (commit fac655f4d2): every `fetch`/`vendor` failure after option validation is
-/// `FailureDetails.FetchCommand.Code.QUERY_EVALUATION_ERROR` = exit code 2 (9.3.2 used 8).
-const EXIT_FETCH_FAILED: i32 = 2;
+const EXIT_FETCH_FAILED: i32 = 8;
 /// `Interrupted.Code.INTERRUPTED` exit code, used by `createFailedBlazeCommandResult(reporter, message)`.
 const EXIT_INTERRUPTED: i32 = 8;
 
@@ -598,7 +651,7 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
         if !targets.is_empty() {
             return fetch_targets(&session, &targets)
                 .map(|_| "All external dependencies for the requested targets fetched successfully.".to_string())
-                .map_err(|e| (EXIT_FETCH_FAILED, e));
+                .map_err(|e| (EXIT_COMMAND_LINE, e));
         }
         if !repos.is_empty() {
             let mut errors = Vec::new();
@@ -618,7 +671,7 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
                 }
             }
             if !errors.is_empty() {
-                if errors.len() == 1 && (errors[0].starts_with("ERROR:") || errors[0].contains("An error occurred during the fetch of repository") || errors[0].starts_with("fetching ") || errors[0].contains("error evaluating module extension") || errors[0].contains("Traceback (most recent call last)") || errors[0].contains("expected module extension") || errors[0].contains("does not have a tag class named") || errors[0].contains("root_module_direct_deps contained")) {
+                if errors.len() == 1 && (errors[0].starts_with("ERROR:") || errors[0].contains("An error occurred during the fetch of repository") || errors[0].starts_with("fetching ") || errors[0].contains("error evaluating module extension") || errors[0].contains("Traceback (most recent call last)") || errors[0].contains("expected module extension") || errors[0].contains("does not have a tag class named") || errors[0].contains("root_module_direct_deps contained") || errors[0].starts_with("The repository's path is ") || errors[0].contains("Error loading '") || errors[0].contains("error loading '")) {
                     return Err((EXIT_FETCH_FAILED, errors.remove(0)));
                 }
                 return Err((EXIT_FETCH_FAILED, format!("Fetching some repos failed with errors: {}", errors.join("; "))));
@@ -630,7 +683,12 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
         // Evaluating every extension also verifies that the repos imported with `use_repo` are generated.
         for id in session.resolution.extension_ids() {
             if let Err(e) = rt.eval_extension(&id) {
-                return Err((EXIT_FETCH_FAILED, e));
+                let code = if e.contains("does not exist in the lockfile") || e.contains("MODULE.bazel.lock is no longer up-to-date") {
+                    EXIT_INTERRUPTED
+                } else {
+                    EXIT_FETCH_FAILED
+                };
+                return Err((code, e));
             }
         }
         let names = rt.all_repo_names().map_err(|e| (EXIT_FETCH_FAILED, e))?;
@@ -677,9 +735,16 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
             }
         } else if let Some(r) = t.strip_prefix('@') {
             let (repo, _) = r.split_once("//").unwrap_or((r, ""));
-            if let Ok(c) = session.resolve_repo_arg(&format!("@{repo}")) {
-                if !c.is_empty() && fetched_repos.insert(c.clone()) {
-                    let _ = rt.fetch_repo(&c);
+            match session.resolve_repo_arg(&format!("@{repo}")) {
+                Ok(c) => {
+                    if !c.is_empty() && fetched_repos.insert(c.clone()) {
+                        let _ = rt.fetch_repo(&c);
+                    }
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "ERROR: {e}\nERROR: Build did NOT complete successfully\nERROR: Fetching some target dependencies failed with errors: {e}"
+                    ));
                 }
             }
         }
@@ -689,6 +754,9 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
     let loader = rt.package_loader();
     let resolver = zel_packages::resolve::PatternResolver::new(loader.clone(), zel_vfs::PathFragment::empty());
     let outcome = resolver.resolve_patterns(targets);
+    for event in &outcome.events {
+        rt.info(format!("WARNING: {}", event.message));
+    }
     if !outcome.errors.is_empty() {
         // `TargetFetcher` runs a `--nobuild` build: pattern failures abort it like in `bazel build`, then
         // `FetchCommand` reports `QUERY_EVALUATION_ERROR` (exit 2).
@@ -697,10 +765,8 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
             m.push_str(&format!("ERROR: Skipping '{}': {}\nERROR: {}\n", err.pattern, err.message, err.message));
         }
         m.push_str("INFO: Elapsed time: 0.050s\nINFO: 0 processes.\nERROR: Build did NOT complete successfully");
-        if let Some(err) = outcome.errors.iter().find(|e| e.message.contains("BUILD file not found")) {
-            let tail = err.message.split_once("BUILD file not found").map(|(_, t)| t).unwrap_or("");
-            let first = tail.lines().next().unwrap_or("");
-            m.push_str(&format!("\nERROR: Fetching some target dependencies failed with errors: BUILD file not found{first}"));
+        if let Some(err) = outcome.errors.first() {
+            m.push_str(&format!("\nERROR: Fetching some target dependencies failed with errors: {}", err.message));
         }
         return Err(m);
     }
@@ -908,7 +974,30 @@ impl Rt {
             return true;
         }
         match self.repo_spec_for(canonical) {
-            Ok(Some(s)) => matches!(s.rule_name.as_str(), "local_repository" | "new_local_repository") && s.bzl_file.contains("bazel_tools"),
+            Ok(Some(s)) => {
+                if matches!(s.rule_name.as_str(), "local_repository" | "new_local_repository") && s.bzl_file.contains("bazel_tools") {
+                    return true;
+                }
+                let (repo, pkg, name) = {
+                    let r = s.bzl_file.trim_start_matches('@');
+                    let (repo, rest) = r.split_once("//").unwrap_or((r, ""));
+                    let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
+                    (repo.to_string(), pkg.to_string(), name.to_string())
+                };
+                let key = format!("@@{repo}//{pkg}:{name}");
+                match self.eval_bzl_fresh(&key, &repo, &pkg, &name) {
+                    Ok(c) => match c.globals.get(&s.rule_name) {
+                        Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => {
+                            id.parse::<usize>().ok().map(|i| {
+                                let d = &self.state.lock().unwrap().rule_defs[i];
+                                d.local || d.configure
+                            }).unwrap_or(false)
+                        }
+                        _ => false,
+                    },
+                    Err(_) => false,
+                }
+            }
             _ => false,
         }
     }

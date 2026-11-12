@@ -1,14 +1,14 @@
 action 'Cat @@//a:lib2'
   Mnemonic: CatIt
   Target: //a:lib2
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: c57881fd0f74bd92a28c31cdcc77b880fd39a7aade31e5bcf1c2691b8cc64bc8
-  Inputs: [a/y.txt, bazel-out/darwin_arm64-opt/bin/a/lib.txt]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/a/lib2.txt]
+  ActionKey: 04e6b0326b4f531bd3a2cf9cb2dbaef980564408bcfd35d93806c28a37c73205
+  Inputs: [a/y.txt, bazel-out/k8-opt/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/lib2.txt]
   Command Line: (exec /bin/bash \
     -c \
-    'cat bazel-out/darwin_arm64-opt/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-opt/bin/a/lib2.txt')
-# Configuration: 7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565
+    'cat bazel-out/k8-opt/bin/a/lib.txt a/y.txt > bazel-out/k8-opt/bin/a/lib2.txt')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
 # Execution platform: @@platforms//host:host
 

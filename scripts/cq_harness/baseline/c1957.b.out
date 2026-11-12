@@ -166,9 +166,313 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
+}
+results {
+  target {
+    type: RULE
+    rule {
+      name: "@@platforms//host:host"
+      rule_class: "platform"
+      location: "@OB@/external/platforms/host/BUILD:14:9"
+      attribute {
+        name: "$config_dependencies"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "allowed_toolchain_types"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "aspect_hints"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "check_toolchain_types"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "constraint_values"
+        type: LABEL_LIST
+        string_list_value: "@@platforms//cpu:x86_64"
+        string_list_value: "@@platforms//os:linux"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "deprecation"
+        type: STRING
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "distribs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "exec_properties"
+        type: STRING_DICT
+        explicitly_specified: false
+      }
+      attribute {
+        name: "features"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "flags"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_function"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_location"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_name"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "licenses"
+        type: LICENSE
+        license {
+          license_type: "NONE"
+        }
+        explicitly_specified: false
+      }
+      attribute {
+        name: "missing_toolchain_error"
+        type: STRING
+        string_value: "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro."
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "name"
+        type: STRING
+        string_value: "host"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "parents"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "remote_execution_properties"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "required_settings"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "tags"
+        type: STRING_LIST
+        string_list_value: "manual"
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "testonly"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "transitive_configs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "visibility"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      rule_input: "@@platforms//cpu:x86_64"
+      rule_input: "@@platforms//os:linux"
+    }
+  }
+  configuration {
+    checksum: "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
+  }
+  configuration_id: 2
+}
+results {
+  target {
+    type: PACKAGE_GROUP
+    package_group {
+      name: "@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist"
+      contained_package: "public"
+    }
+  }
+  configuration {
+    checksum: "null"
+  }
+}
+results {
+  target {
+    type: RULE
+    rule {
+      name: "@bazel_tools//tools:host_platform"
+      rule_class: "alias"
+      location: "@OB@/external/bazel_tools/tools/BUILD:5:6"
+      attribute {
+        name: "$config_dependencies"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "actual"
+        type: LABEL
+        string_value: "@@platforms//host:host"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "aspect_hints"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "deprecation"
+        type: STRING
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "features"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_function"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_location"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_name"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "name"
+        type: STRING
+        string_value: "host_platform"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "package_metadata"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "restricted_to"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "tags"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "target_compatible_with"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "testonly"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "transitive_configs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "visibility"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      rule_input: "@@platforms//host:host"
+    }
+  }
+  configuration {
+    checksum: "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
+  }
+  configuration_id: 2
 }
 results {
   target {
@@ -349,131 +653,7 @@ results {
     }
   }
   configuration {
-    checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
-  }
-  configuration_id: 2
-}
-results {
-  target {
-    type: RULE
-    rule {
-      name: "@bazel_tools//tools:host_platform"
-      rule_class: "alias"
-      location: "@OB@/external/bazel_tools/tools/BUILD:5:6"
-      attribute {
-        name: "$config_dependencies"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "actual"
-        type: LABEL
-        string_value: "@@platforms//host:host"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "aspect_hints"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "deprecation"
-        type: STRING
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "features"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_function"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_location"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_name"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "name"
-        type: STRING
-        string_value: "host_platform"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "package_metadata"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "restricted_to"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "tags"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "target_compatible_with"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "testonly"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "transitive_configs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "visibility"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      rule_input: "@@platforms//host:host"
-    }
-  }
-  configuration {
-    checksum: "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+    checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   }
   configuration_id: 3
 }
@@ -481,304 +661,9 @@ results {
   target {
     type: RULE
     rule {
-      name: "@@platforms//host:host"
-      rule_class: "platform"
-      location: "@OB@/external/platforms/host/BUILD:14:9"
-      attribute {
-        name: "$config_dependencies"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "allowed_toolchain_types"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "aspect_hints"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "check_toolchain_types"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "constraint_values"
-        type: LABEL_LIST
-        string_list_value: "@@platforms//cpu:aarch64"
-        string_list_value: "@@platforms//os:osx"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "deprecation"
-        type: STRING
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "distribs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "exec_properties"
-        type: STRING_DICT
-        explicitly_specified: false
-      }
-      attribute {
-        name: "features"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "flags"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_function"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_location"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_name"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "licenses"
-        type: LICENSE
-        license {
-          license_type: "NONE"
-        }
-        explicitly_specified: false
-      }
-      attribute {
-        name: "missing_toolchain_error"
-        type: STRING
-        string_value: "For more information on platforms or toolchains see https://bazel.build/concepts/platforms-intro."
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "name"
-        type: STRING
-        string_value: "host"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "parents"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "remote_execution_properties"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "required_settings"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "tags"
-        type: STRING_LIST
-        string_list_value: "manual"
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "testonly"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "transitive_configs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "visibility"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      rule_input: "@@platforms//cpu:aarch64"
-      rule_input: "@@platforms//os:osx"
-    }
-  }
-  configuration {
-    checksum: "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
-  }
-  configuration_id: 3
-}
-results {
-  target {
-    type: PACKAGE_GROUP
-    package_group {
-      name: "@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist"
-      contained_package: "public"
-    }
-  }
-  configuration {
-    checksum: "null"
-  }
-}
-results {
-  target {
-    type: RULE
-    rule {
-      name: "@@platforms//cpu:aarch64"
+      name: "@@platforms//os:linux"
       rule_class: "constraint_value"
-      location: "@OB@/external/platforms/cpu/BUILD:57:17"
-      attribute {
-        name: "$config_dependencies"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "aspect_hints"
-        type: LABEL_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "constraint_setting"
-        type: LABEL
-        string_value: "@@platforms//cpu:cpu"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "deprecation"
-        type: STRING
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "distribs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "features"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_function"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_location"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "generator_name"
-        type: STRING
-        string_value: ""
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "licenses"
-        type: LICENSE
-        license {
-          license_type: "NOTICE"
-        }
-        explicitly_specified: false
-      }
-      attribute {
-        name: "name"
-        type: STRING
-        string_value: "aarch64"
-        explicitly_specified: true
-        nodep: false
-      }
-      attribute {
-        name: "tags"
-        type: STRING_LIST
-        string_list_value: "manual"
-        explicitly_specified: false
-        nodep: false
-      }
-      attribute {
-        name: "testonly"
-        type: BOOLEAN
-        int_value: 0
-        string_value: "false"
-        explicitly_specified: false
-        boolean_value: false
-      }
-      attribute {
-        name: "transitive_configs"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      attribute {
-        name: "visibility"
-        type: STRING_LIST
-        explicitly_specified: false
-        nodep: true
-      }
-      rule_input: "@@platforms//cpu:cpu"
-    }
-  }
-  configuration {
-    checksum: "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
-  }
-  configuration_id: 3
-}
-results {
-  target {
-    type: RULE
-    rule {
-      name: "@@platforms//os:osx"
-      rule_class: "constraint_value"
-      location: "@OB@/external/platforms/os/BUILD:71:17"
+      location: "@OB@/external/platforms/os/BUILD:41:17"
       attribute {
         name: "$config_dependencies"
         type: LABEL_LIST
@@ -848,7 +733,7 @@ results {
       attribute {
         name: "name"
         type: STRING
-        string_value: "osx"
+        string_value: "linux"
         explicitly_specified: true
         nodep: false
       }
@@ -883,9 +768,22 @@ results {
     }
   }
   configuration {
-    checksum: "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+    checksum: "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
   }
-  configuration_id: 3
+  configuration_id: 2
+}
+results {
+  target {
+    type: SOURCE_FILE
+    source_file {
+      name: "//a:x.txt"
+      location: "@WS@/a/x.txt:1:1"
+      visibility_label: "//visibility:public"
+    }
+  }
+  configuration {
+    checksum: "null"
+  }
 }
 results {
   target {
@@ -1050,22 +948,124 @@ results {
     }
   }
   configuration {
-    checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+    checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   }
-  configuration_id: 2
+  configuration_id: 3
 }
 results {
   target {
-    type: SOURCE_FILE
-    source_file {
-      name: "//a:x.txt"
-      location: "@WS@/a/x.txt:1:1"
-      visibility_label: "//visibility:public"
+    type: RULE
+    rule {
+      name: "@@platforms//cpu:x86_64"
+      rule_class: "constraint_value"
+      location: "@OB@/external/platforms/cpu/BUILD:162:17"
+      attribute {
+        name: "$config_dependencies"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "aspect_hints"
+        type: LABEL_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "constraint_setting"
+        type: LABEL
+        string_value: "@@platforms//cpu:cpu"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "deprecation"
+        type: STRING
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "distribs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "features"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_function"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_location"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "generator_name"
+        type: STRING
+        string_value: ""
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "licenses"
+        type: LICENSE
+        license {
+          license_type: "NOTICE"
+        }
+        explicitly_specified: false
+      }
+      attribute {
+        name: "name"
+        type: STRING
+        string_value: "x86_64"
+        explicitly_specified: true
+        nodep: false
+      }
+      attribute {
+        name: "tags"
+        type: STRING_LIST
+        string_list_value: "manual"
+        explicitly_specified: false
+        nodep: false
+      }
+      attribute {
+        name: "testonly"
+        type: BOOLEAN
+        int_value: 0
+        string_value: "false"
+        explicitly_specified: false
+        boolean_value: false
+      }
+      attribute {
+        name: "transitive_configs"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      attribute {
+        name: "visibility"
+        type: STRING_LIST
+        explicitly_specified: false
+        nodep: true
+      }
+      rule_input: "@@platforms//cpu:cpu"
     }
   }
   configuration {
-    checksum: "null"
+    checksum: "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
   }
+  configuration_id: 2
 }
 results {
   target {
@@ -1227,9 +1227,9 @@ results {
     }
   }
   configuration {
-    checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+    checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   }
-  configuration_id: 2
+  configuration_id: 3
 }
 results {
   target {
@@ -1359,9 +1359,9 @@ results {
     }
   }
   configuration {
-    checksum: "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+    checksum: "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
   }
-  configuration_id: 3
+  configuration_id: 2
 }
 results {
   target {
@@ -1478,9 +1478,9 @@ results {
     }
   }
   configuration {
-    checksum: "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
+    checksum: "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
   }
-  configuration_id: 3
+  configuration_id: 2
 }
 results {
   target {
@@ -1510,9 +1510,9 @@ results {
 }
 configurations {
   id: 1
-  mnemonic: "darwin_arm64-fastbuild"
-  platform_name: "darwin_arm64"
-  checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+  mnemonic: "k8-fastbuild"
+  platform_name: "k8"
+  checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -1661,7 +1661,7 @@ configurations {
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -1773,7 +1773,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"
@@ -2897,9 +2897,301 @@ configurations {
 }
 configurations {
   id: 2
-  mnemonic: "darwin_arm64-opt"
-  platform_name: "darwin_arm64"
-  checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+  mnemonic: "fastbuild-noconfig"
+  platform_name: "k8"
+  checksum: "3030ed4c810cf3435d066294fa495e650fe75173e4b4ef410ea56cb683458569"
+  fragment_options {
+    name: "com.google.devtools.build.lib.analysis.config.CoreOptions"
+    options {
+      name: "action_env"
+      value: "[]"
+    }
+    options {
+      name: "affected by starlark transition"
+      value: "[]"
+    }
+    options {
+      name: "allow_analysis_failures"
+      value: "false"
+    }
+    options {
+      name: "allow_unresolved_symlinks"
+      value: "true"
+    }
+    options {
+      name: "allowed_cpu_values"
+      value: "[]"
+    }
+    options {
+      name: "analysis_testing_deps_limit"
+      value: "2000"
+    }
+    options {
+      name: "archived_tree_artifact_mnemonics_filter"
+      value: "-(?:(?>.*))"
+    }
+    options {
+      name: "build_runfile_links"
+      value: "true"
+    }
+    options {
+      name: "build_runfile_manifests"
+      value: "true"
+    }
+    options {
+      name: "check_licenses"
+      value: "false"
+    }
+    options {
+      name: "check_visibility"
+      value: "true"
+    }
+    options {
+      name: "collect_code_coverage"
+      value: "false"
+    }
+    options {
+      name: "compilation_mode"
+      value: "fastbuild"
+    }
+    options {
+      name: "cpu"
+      value: "k8"
+    }
+    options {
+      name: "enable_runfiles"
+      value: "AUTO"
+    }
+    options {
+      name: "enforce_constraints"
+      value: "true"
+    }
+    options {
+      name: "evaluating for analysis test"
+      value: "false"
+    }
+    options {
+      name: "exec_aspects"
+      value: "[]"
+    }
+    options {
+      name: "experimental_action_listener"
+      value: "[]"
+    }
+    options {
+      name: "experimental_allow_map_directory"
+      value: "true"
+    }
+    options {
+      name: "experimental_collect_code_coverage_for_generated_files"
+      value: "false"
+    }
+    options {
+      name: "experimental_debug_selects_always_succeed"
+      value: "false"
+    }
+    options {
+      name: "experimental_enforce_transitive_visibility"
+      value: "false"
+    }
+    options {
+      name: "experimental_exclude_defines_from_exec_config"
+      value: "false"
+    }
+    options {
+      name: "experimental_exec_config"
+      value: "@_builtins//:common/builtin_exec_platforms.bzl%bazel_exec_transition"
+    }
+    options {
+      name: "experimental_exec_configuration_distinguisher"
+      value: "OFF"
+    }
+    options {
+      name: "experimental_extended_sanity_checks"
+      value: "false"
+    }
+    options {
+      name: "experimental_output_directory_naming_scheme"
+      value: "DIFF_AGAINST_DYNAMIC_BASELINE"
+    }
+    options {
+      name: "experimental_output_paths"
+      value: "OFF"
+    }
+    options {
+      name: "experimental_override_platform_cpu_name"
+      value: "[]"
+    }
+    options {
+      name: "experimental_platform_in_output_dir"
+      value: "AUTO"
+    }
+    options {
+      name: "experimental_propagate_custom_flag"
+      value: "[]"
+    }
+    options {
+      name: "experimental_remotable_source_manifests"
+      value: "false"
+    }
+    options {
+      name: "experimental_strict_fileset_output"
+      value: "false"
+    }
+    options {
+      name: "experimental_throttle_action_cache_check"
+      value: "true"
+    }
+    options {
+      name: "experimental_use_platforms_in_output_dir_legacy_heuristic"
+      value: "true"
+    }
+    options {
+      name: "experimental_writable_outputs"
+      value: "false"
+    }
+    options {
+      name: "features"
+      value: "[]"
+    }
+    options {
+      name: "flag_alias"
+      value: "[]"
+    }
+    options {
+      name: "host_action_env"
+      value: "[]"
+    }
+    options {
+      name: "host_compilation_mode"
+      value: "opt"
+    }
+    options {
+      name: "host_cpu"
+      value: "k8"
+    }
+    options {
+      name: "host_features"
+      value: "[]"
+    }
+    options {
+      name: "include_config_fragments_provider"
+      value: "OFF"
+    }
+    options {
+      name: "incompatible_always_include_files_in_data"
+      value: "true"
+    }
+    options {
+      name: "incompatible_auto_exec_groups"
+      value: "false"
+    }
+    options {
+      name: "incompatible_bazel_test_exec_run_under"
+      value: "true"
+    }
+    options {
+      name: "incompatible_bep_cpu_from_platform"
+      value: "false"
+    }
+    options {
+      name: "incompatible_check_testonly_for_output_files"
+      value: "false"
+    }
+    options {
+      name: "incompatible_compact_repo_mapping_manifest"
+      value: "true"
+    }
+    options {
+      name: "incompatible_disable_select_on"
+      value: "[]"
+    }
+    options {
+      name: "incompatible_exclude_starlark_flags_from_exec_config"
+      value: "false"
+    }
+    options {
+      name: "incompatible_filegroup_runfiles_for_data"
+      value: "true"
+    }
+    options {
+      name: "incompatible_limit_platforms_in_output_dir_to"
+      value: "[]"
+    }
+    options {
+      name: "incompatible_merge_genfiles_directory"
+      value: "true"
+    }
+    options {
+      name: "incompatible_modify_execution_info_additive"
+      value: "true"
+    }
+    options {
+      name: "incompatible_target_cpu_from_platform"
+      value: "true"
+    }
+    options {
+      name: "instrument_test_targets"
+      value: "false"
+    }
+    options {
+      name: "instrumentation_filter"
+      value: "-(?:(?>/javatests[/:])|(?>/test/java[/:]))"
+    }
+    options {
+      name: "is exec configuration"
+      value: "false"
+    }
+    options {
+      name: "min_param_file_size"
+      value: "32768"
+    }
+    options {
+      name: "modify_execution_info"
+      value: "[]"
+    }
+    options {
+      name: "platform_suffix"
+      value: "null"
+    }
+    options {
+      name: "run_under"
+      value: "null"
+    }
+    options {
+      name: "scl_config"
+      value: "null"
+    }
+    options {
+      name: "stamp"
+      value: "false"
+    }
+    options {
+      name: "strict_filesets"
+      value: "false"
+    }
+    options {
+      name: "target_environment"
+      value: "[]"
+    }
+    options {
+      name: "use_target_platform_for_tests"
+      value: "false"
+    }
+    options {
+      name: "verbose_visibility_errors"
+      value: "false"
+    }
+  }
+  fragment_options {
+    name: "user-defined"
+  }
+}
+configurations {
+  id: 3
+  mnemonic: "k8-opt"
+  platform_name: "k8"
+  checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -3048,7 +3340,7 @@ configurations {
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -3160,7 +3452,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"
@@ -4276,298 +4568,6 @@ configurations {
     options {
       name: "python_native_rules_allowlist"
       value: "null"
-    }
-  }
-  fragment_options {
-    name: "user-defined"
-  }
-}
-configurations {
-  id: 3
-  mnemonic: "fastbuild-noconfig"
-  platform_name: "darwin_arm64"
-  checksum: "c07488d3cf81516db87b4f8d054ee06cf3041d6d67e9d321eff2fb7c216ff314"
-  fragment_options {
-    name: "com.google.devtools.build.lib.analysis.config.CoreOptions"
-    options {
-      name: "action_env"
-      value: "[]"
-    }
-    options {
-      name: "affected by starlark transition"
-      value: "[]"
-    }
-    options {
-      name: "allow_analysis_failures"
-      value: "false"
-    }
-    options {
-      name: "allow_unresolved_symlinks"
-      value: "true"
-    }
-    options {
-      name: "allowed_cpu_values"
-      value: "[]"
-    }
-    options {
-      name: "analysis_testing_deps_limit"
-      value: "2000"
-    }
-    options {
-      name: "archived_tree_artifact_mnemonics_filter"
-      value: "-(?:(?>.*))"
-    }
-    options {
-      name: "build_runfile_links"
-      value: "true"
-    }
-    options {
-      name: "build_runfile_manifests"
-      value: "true"
-    }
-    options {
-      name: "check_licenses"
-      value: "false"
-    }
-    options {
-      name: "check_visibility"
-      value: "true"
-    }
-    options {
-      name: "collect_code_coverage"
-      value: "false"
-    }
-    options {
-      name: "compilation_mode"
-      value: "fastbuild"
-    }
-    options {
-      name: "cpu"
-      value: "darwin_arm64"
-    }
-    options {
-      name: "enable_runfiles"
-      value: "AUTO"
-    }
-    options {
-      name: "enforce_constraints"
-      value: "true"
-    }
-    options {
-      name: "evaluating for analysis test"
-      value: "false"
-    }
-    options {
-      name: "exec_aspects"
-      value: "[]"
-    }
-    options {
-      name: "experimental_action_listener"
-      value: "[]"
-    }
-    options {
-      name: "experimental_allow_map_directory"
-      value: "true"
-    }
-    options {
-      name: "experimental_collect_code_coverage_for_generated_files"
-      value: "false"
-    }
-    options {
-      name: "experimental_debug_selects_always_succeed"
-      value: "false"
-    }
-    options {
-      name: "experimental_enforce_transitive_visibility"
-      value: "false"
-    }
-    options {
-      name: "experimental_exclude_defines_from_exec_config"
-      value: "false"
-    }
-    options {
-      name: "experimental_exec_config"
-      value: "@_builtins//:common/builtin_exec_platforms.bzl%bazel_exec_transition"
-    }
-    options {
-      name: "experimental_exec_configuration_distinguisher"
-      value: "OFF"
-    }
-    options {
-      name: "experimental_extended_sanity_checks"
-      value: "false"
-    }
-    options {
-      name: "experimental_output_directory_naming_scheme"
-      value: "DIFF_AGAINST_DYNAMIC_BASELINE"
-    }
-    options {
-      name: "experimental_output_paths"
-      value: "OFF"
-    }
-    options {
-      name: "experimental_override_platform_cpu_name"
-      value: "[]"
-    }
-    options {
-      name: "experimental_platform_in_output_dir"
-      value: "AUTO"
-    }
-    options {
-      name: "experimental_propagate_custom_flag"
-      value: "[]"
-    }
-    options {
-      name: "experimental_remotable_source_manifests"
-      value: "false"
-    }
-    options {
-      name: "experimental_strict_fileset_output"
-      value: "false"
-    }
-    options {
-      name: "experimental_throttle_action_cache_check"
-      value: "true"
-    }
-    options {
-      name: "experimental_use_platforms_in_output_dir_legacy_heuristic"
-      value: "true"
-    }
-    options {
-      name: "experimental_writable_outputs"
-      value: "false"
-    }
-    options {
-      name: "features"
-      value: "[]"
-    }
-    options {
-      name: "flag_alias"
-      value: "[]"
-    }
-    options {
-      name: "host_action_env"
-      value: "[]"
-    }
-    options {
-      name: "host_compilation_mode"
-      value: "opt"
-    }
-    options {
-      name: "host_cpu"
-      value: "darwin_arm64"
-    }
-    options {
-      name: "host_features"
-      value: "[]"
-    }
-    options {
-      name: "include_config_fragments_provider"
-      value: "OFF"
-    }
-    options {
-      name: "incompatible_always_include_files_in_data"
-      value: "true"
-    }
-    options {
-      name: "incompatible_auto_exec_groups"
-      value: "false"
-    }
-    options {
-      name: "incompatible_bazel_test_exec_run_under"
-      value: "true"
-    }
-    options {
-      name: "incompatible_bep_cpu_from_platform"
-      value: "false"
-    }
-    options {
-      name: "incompatible_check_testonly_for_output_files"
-      value: "false"
-    }
-    options {
-      name: "incompatible_compact_repo_mapping_manifest"
-      value: "true"
-    }
-    options {
-      name: "incompatible_disable_select_on"
-      value: "[]"
-    }
-    options {
-      name: "incompatible_exclude_starlark_flags_from_exec_config"
-      value: "false"
-    }
-    options {
-      name: "incompatible_filegroup_runfiles_for_data"
-      value: "true"
-    }
-    options {
-      name: "incompatible_limit_platforms_in_output_dir_to"
-      value: "[]"
-    }
-    options {
-      name: "incompatible_merge_genfiles_directory"
-      value: "true"
-    }
-    options {
-      name: "incompatible_modify_execution_info_additive"
-      value: "true"
-    }
-    options {
-      name: "incompatible_target_cpu_from_platform"
-      value: "true"
-    }
-    options {
-      name: "instrument_test_targets"
-      value: "false"
-    }
-    options {
-      name: "instrumentation_filter"
-      value: "-(?:(?>/javatests[/:])|(?>/test/java[/:]))"
-    }
-    options {
-      name: "is exec configuration"
-      value: "false"
-    }
-    options {
-      name: "min_param_file_size"
-      value: "32768"
-    }
-    options {
-      name: "modify_execution_info"
-      value: "[]"
-    }
-    options {
-      name: "platform_suffix"
-      value: "null"
-    }
-    options {
-      name: "run_under"
-      value: "null"
-    }
-    options {
-      name: "scl_config"
-      value: "null"
-    }
-    options {
-      name: "stamp"
-      value: "false"
-    }
-    options {
-      name: "strict_filesets"
-      value: "false"
-    }
-    options {
-      name: "target_environment"
-      value: "[]"
-    }
-    options {
-      name: "use_target_platform_for_tests"
-      value: "false"
-    }
-    options {
-      name: "verbose_visibility_errors"
-      value: "false"
     }
   }
   fragment_options {

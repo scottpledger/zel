@@ -1,40 +1,30 @@
 action 'Writing repo mapping manifest for //b:t1'
   Mnemonic: RepoMappingManifest
   Target: //b:t1
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d
+  ActionKey: 6d4676cfc8cc9f2031a6a30402bfbe451f4d33cd46a92272cddb17441af265da
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t1.repo_mapping]
-  IsExecutable: false
-
-action 'Writing repo mapping manifest for //b:t2'
-  Mnemonic: RepoMappingManifest
-  Target: //b:t2
-  Configuration: darwin_arm64-fastbuild
-  Execution platform: @@platforms//host:host
-  ActionKey: 957b5a405a35c995a6343ea1cd2ca35c35ec3da330b8eb847fca68b5361b76b3
-  Inputs: []
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.repo_mapping]
-  IsExecutable: false
-
-action 'Writing repo mapping manifest for //b:tool'
-  Mnemonic: RepoMappingManifest
-  Target: //b:tool
-  Configuration: darwin_arm64-fastbuild
-  Execution platform: @@platforms//host:host
-  ActionKey: 9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a
-  Inputs: []
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.repo_mapping]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t1.repo_mapping]
   IsExecutable: false
 
 action 'Writing repo mapping manifest for //b:tool [for tool]'
   Mnemonic: RepoMappingManifest
   Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
-  ActionKey: 9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a
+  ActionKey: 61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.repo_mapping]
+  Outputs: [bazel-out/k8-opt-exec/bin/b/tool.repo_mapping]
+  IsExecutable: false
+
+action 'Writing repo mapping manifest for //b:tool'
+  Mnemonic: RepoMappingManifest
+  Target: //b:tool
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3
+  Inputs: []
+  Outputs: [bazel-out/k8-fastbuild/bin/b/tool.repo_mapping]
   IsExecutable: false
 

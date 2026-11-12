@@ -49,7 +49,7 @@ pub struct LinuxSandboxCommandLineBuilder {
     pub writable_files_and_directories: Vec<String>,
     pub tmpfs_directories: Vec<String>,
     /// target -> source
-    pub bind_mounts: BTreeMap<String, String>,
+    pub bind_mounts: Vec<(String, String)>,
     pub statistics_path: Option<String>,
     pub use_fake_hostname: bool,
     pub create_network_namespace: NetworkNamespace,
@@ -181,8 +181,8 @@ mod tests {
         b.stderr_path = Some("/e".into());
         b.writable_files_and_directories = vec!["/w1".into(), "/w2".into()];
         b.tmpfs_directories = vec!["/tmp".into()];
-        b.bind_mounts.insert("/dst".into(), "/src".into());
-        b.bind_mounts.insert("/same".into(), "/same".into());
+        b.bind_mounts.push(("/dst".into(), "/src".into()));
+        b.bind_mounts.push(("/same".into(), "/same".into()));
         b.statistics_path = Some("/stats".into());
         b.hermetic_sandbox_path = Some("/sbx".into());
         b.use_fake_hostname = true;

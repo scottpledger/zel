@@ -976,6 +976,13 @@ impl PackageLoader {
                 pkg_default_attrs.push("deprecation".into());
             }
         }
+        if rc.attr("licenses").is_some() && !values.contains_key("licenses") && !s.args.licenses.is_empty() {
+            values.insert(
+                "licenses".into(),
+                AttrValue::StrList(s.args.licenses.iter().map(|x| x.to_ascii_uppercase()).collect()),
+            );
+            pkg_default_attrs.push("licenses".into());
+        }
         if !values.contains_key("compatible_with") && !s.args.default_compatible_with.is_empty() {
             values.insert(
                 "compatible_with".into(),
@@ -1267,8 +1274,12 @@ impl PackageLoader {
                             Some(pos) => raw[pos..].to_string(),
                             None => raw,
                         }
-                    } else if let Some(pos) = raw.find("BUILD") {
-                        raw[pos..].to_string()
+                    } else if id.repository().is_main() {
+                        if let Some(pos) = raw.find("BUILD") {
+                            raw[pos..].to_string()
+                        } else {
+                            raw
+                        }
                     } else {
                         raw
                     }
@@ -1552,6 +1563,8 @@ impl PackageLoader {
                         .map_err(|e| format!("for attribute '{name}': {e}"))?,
                 );
             }
+        } else if !a.mandatory && ty == AttrType::String {
+            a.default = Some(AttrValue::Str(String::new()));
         }
         Ok(a)
     }
@@ -2237,23 +2250,22 @@ impl PackageLoader {
             if s.targets.contains_key(l.name()) {
                 continue;
             }
-            if let Some(msg) = self.cfg.lookup.label_crossing_subpackage_error(&l) {
-                if reported.insert(msg.clone()) {
-                    s.error(Some(rloc), msg);
+            if self.cfg.lookup.label_crossing_subpackage_error(&l).is_some() {
+                if let Some(msg) = self.cfg.lookup.label_crossing_subpackage_error(&l) {
+                    if reported.insert(msg.clone()) {
+                        s.error(Some(rloc), msg);
+                    }
                 }
                 continue;
             }
-            let abs = s.pkg_dir.get_relative_str(l.name());
-            if self.fs().stat(&abs, true).is_ok() {
-                s.targets.insert(
-                    l.name().to_string(),
-                    Target::InputFile { label: l.clone() },
-                );
-                if let Some(dv) = &default_vis {
-                    s.exported_files
-                        .entry(l.name().to_string())
-                        .or_insert_with(|| dv.clone());
-                }
+            s.targets.insert(
+                l.name().to_string(),
+                Target::InputFile { label: l.clone() },
+            );
+            if let Some(dv) = &default_vis {
+                s.exported_files
+                    .entry(l.name().to_string())
+                    .or_insert_with(|| dv.clone());
             }
         }
     }

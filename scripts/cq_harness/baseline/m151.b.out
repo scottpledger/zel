@@ -1,2 +1,2 @@
-/bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo hi > bazel-out/darwin_arm64-fastbuild/bin/b/mk.txt'
+/bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo hi > bazel-out/k8-fastbuild/bin/b/mk.txt'
 external/bazel_tools/tools/test/test-setup.sh b/t1

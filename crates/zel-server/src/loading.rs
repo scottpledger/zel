@@ -38,6 +38,11 @@ pub(crate) fn opt_list(parsed: &ParsedCommandOptions, name: &str) -> Vec<String>
     let mut out = Vec::new();
     if let Some(d) = parsed.parsed_options.get(name) {
         collect(&d.value, &mut out);
+        if out.is_empty() {
+            for rv in &d.raw_values {
+                out.extend(rv.split(',').filter(|p| !p.is_empty()).map(|p| p.to_string()));
+            }
+        }
     }
     out
 }
@@ -228,6 +233,27 @@ impl BlazeRuntime {
         // A package that failed to load: `TargetPatternPhaseFunction` wraps the cause as
         // `Error evaluating '<pattern>': error loading package ...: Package '...' contains errors`.
         for err in &mut outcome.errors {
+            if let Some(pe) = &err.package_errors {
+                let first_err = resolver.package(&pe.package).ok()
+                    .and_then(|pkg| pkg.events.iter().find(|e| e.kind == EventKind::Error).cloned())
+                    .map(|e| Self::render_event(&e).strip_prefix("ERROR: ").unwrap_or(&pe.first_error).to_string())
+                    .unwrap_or_else(|| pe.first_error.clone());
+                writeln_bytes(
+                    stderr,
+                    &format!("ERROR: package contains errors: {}: {}", pe.package.package_fragment(), first_err),
+                );
+                if keep_going {
+                    if let Ok(pkg) = resolver.package(&pe.package) {
+                        for t in pkg.targets.values() {
+                            if matches!(t, PkgTarget::Rule(_)) {
+                                if !outcome.targets.iter().any(|x| x.label() == t.label()) {
+                                    outcome.targets.push(t.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(rest) = err.message.strip_prefix("error loading package '") {
                 if let Some((pkg, tail)) = rest.split_once("': ").filter(|(_, t)| t.contains("contains errors") || t.contains("ERROR: ")) {
                     let _ = tail;
@@ -236,6 +262,33 @@ impl BlazeRuntime {
                         "Error evaluating '{}': error loading package '{pkg}': Package '{pkg}' contains errors",
                         err.pattern
                     );
+                }
+            }
+            if keep_going && matches!(err.pattern.as_str(), "//..." | "...") {
+                for (_, pkg) in resolver.loaded_packages() {
+                    if pkg.contains_errors {
+                        if let Some(first_e) = pkg.events.iter().find(|e| e.kind == EventKind::Error) {
+                            let rendered = Self::render_event(first_e);
+                            let first_str = if rendered.starts_with("ERROR: Traceback") {
+                                rendered.strip_prefix("ERROR: ").unwrap_or(&first_e.message).to_string()
+                            } else {
+                                first_e.message.clone()
+                            };
+                            writeln_bytes(
+                                stderr,
+                                &format!("ERROR: package contains errors: {}: {first_str}", pkg.id.package_fragment()),
+                            );
+                        }
+                    }
+                }
+                for (_, pkg) in resolver.loaded_packages() {
+                    for t in pkg.targets.values() {
+                        if matches!(t, PkgTarget::Rule(_)) && !t.has_tag("manual") {
+                            if !outcome.targets.iter().any(|x| x.label() == t.label()) {
+                                outcome.targets.push(t.clone());
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -251,6 +304,9 @@ impl BlazeRuntime {
                         bad_pkgs.push(frag);
                     }
                 }
+            }
+            if !bad_pkgs.is_empty() {
+                outcome.errors.clear();
             }
             for frag in bad_pkgs {
                 if let Some(pat) = patterns.iter().find(|p| p.trim_start_matches("//").starts_with(&format!("{frag}:"))) {
@@ -271,20 +327,54 @@ impl BlazeRuntime {
         if had_errors && keep_going {
             writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
             for err in &outcome.errors {
-                writeln_bytes(
-                    stderr,
-                    &format!("ERROR: Skipping '{}': {}", err.pattern, err.message),
-                );
+                if !matches!(err.pattern.as_str(), "//..." | "...") && err.package_errors.is_none() {
+                    writeln_bytes(
+                        stderr,
+                        &format!("ERROR: Skipping '{}': {}", err.pattern, err.message),
+                    );
+                }
             }
         } else if had_errors && outcome.errors.iter().all(|e| Self::unknown_repo_message(&e.pattern, &e.message).is_some()) {
             // A pattern naming a repository that does not exist is rejected while parsing it.
+            let resolver_messages = self.repo_resolver.take_messages();
+            let override_failure = resolver_messages.iter().any(|m| {
+                m.contains("The repository's path is ")
+                    || m.contains("No MODULE.bazel, REPO.bazel, or WORKSPACE file found in")
+            });
+            let nofetch_failure = resolver_messages
+                .iter()
+                .any(|m| m.contains("not found and fetching repositories is disabled."));
+            if nofetch_failure {
+                for m in &resolver_messages {
+                    writeln_bytes(stderr, m);
+                }
+                writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
+                writeln_bytes(stderr, "INFO: 0 processes.");
+                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                return Err(ExitCode::BUILD_FAILURE);
+            }
+            if override_failure {
+                if let Some(m) = resolver_messages
+                    .iter()
+                    .find(|m| m.starts_with("ERROR: No MODULE.bazel, REPO.bazel, or WORKSPACE file found in"))
+                {
+                    writeln_bytes(stderr, m);
+                } else {
+                    for m in &resolver_messages {
+                        writeln_bytes(stderr, m);
+                    }
+                }
+                writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
+                writeln_bytes(stderr, "INFO: 0 processes.");
+                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                return Err(ExitCode::BUILD_FAILURE);
+            }
             for err in &outcome.errors {
                 if let Some(m) = Self::unknown_repo_message(&err.pattern, &err.message) {
                     writeln_bytes(stderr, &format!("ERROR: {m}"));
                 }
             }
             // The resolver's own note about the repository is superseded by the message above.
-            let _ = self.repo_resolver.take_messages();
             writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
             writeln_bytes(stderr, "INFO: 0 processes.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
@@ -292,14 +382,20 @@ impl BlazeRuntime {
         } else if had_errors {
             // `TargetPatternPhaseFunction` warns only for `--keep_going` loads; `bazel test`
             // observably does not warn without it while build/run do.
-            if warn_without_keep_going {
+            let is_single_no_such_target = outcome.errors.len() == 1
+                && ((outcome.errors[0].message.starts_with("no such target '") && outcome.errors[0].pattern.starts_with("//"))
+                    || outcome.errors[0].message.contains("Package is considered deleted due to --deleted_packages")
+                    || (outcome.errors[0].message.contains("contains errors") && patterns.len() > 1));
+            if warn_without_keep_going && !is_single_no_such_target {
                 writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
             }
             for err in &outcome.errors {
-                writeln_bytes(
-                    stderr,
-                    &format!("ERROR: Skipping '{}': {}", err.pattern, err.message),
-                );
+                if warn_without_keep_going || (err.message.starts_with("no such target '") && !err.message.contains("(did you mean")) {
+                    writeln_bytes(
+                        stderr,
+                        &format!("ERROR: Skipping '{}': {}", err.pattern, err.message),
+                    );
+                }
                 writeln_bytes(stderr, &format!("ERROR: {}", err.message));
             }
             writeln_bytes(stderr, "INFO: Elapsed time: 0.050s");
@@ -532,15 +628,14 @@ mod tests {
     }
 
     #[test]
-    fn unresolved_dependency_reports_referencing_rule() {
+    fn referenced_source_label_is_an_assumed_input_file() {
         let rt = runtime(&[(
             "BUILD",
             "filegroup(name = 'a', srcs = [':missing'])",
         )]);
         let o = run(&rt, &["build", "--nobuild", "//:a"]);
-        assert_eq!(o.code, 1);
-        assert!(o.stderr.contains("ERROR: /workspace/BUILD:1:10: no such target '//:missing': target 'missing' not declared in package '' defined by /workspace/BUILD") && o.stderr.contains("and referenced by '//:a'"), "{}", o.stderr);
-        assert!(o.stderr.contains("ERROR: Analysis of target '//:a' failed; build aborted: Analysis failed"), "{}", o.stderr);
+        assert_eq!(o.code, 0, "{}", o.stderr);
+        assert!(!o.stderr.contains("no such target '//:missing'"), "{}", o.stderr);
     }
 
     #[test]
@@ -558,7 +653,7 @@ mod tests {
         assert!(o.stderr.contains("Command-line target pattern and --target_pattern_file cannot both be specified"), "{}", o.stderr);
         let o = run(&rt, &["build", "--nobuild", "--target_pattern_file=/definitely/missing.txt"]);
         assert_eq!(o.code, 2);
-        assert!(o.stderr.contains("I/O error reading from /definitely/missing.txt: No such file or directory"), "{}", o.stderr);
+        assert!(o.stderr.contains("I/O error reading from /definitely/missing.txt: [unix_jni.cc:382] /definitely/missing.txt (No such file or directory)"), "{}", o.stderr);
         std::fs::remove_dir_all(&dir).ok();
     }
 

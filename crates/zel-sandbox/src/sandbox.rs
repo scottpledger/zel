@@ -42,6 +42,7 @@ pub struct SandboxOptions {
     pub fake_hostname: bool,
     pub fake_username: bool,
     pub explicit_pseudoterminal: bool,
+    pub use_hermetic_linux_sandbox: bool,
 }
 
 impl Default for SandboxOptions {
@@ -58,6 +59,7 @@ impl Default for SandboxOptions {
             fake_hostname: false,
             fake_username: false,
             explicit_pseudoterminal: false,
+            use_hermetic_linux_sandbox: false,
         }
     }
 }
@@ -103,6 +105,7 @@ pub fn parse_mount_pair(input: &str) -> Result<(String, String), String> {
 pub enum SandboxKind {
     ProcessWrapper,
     Darwin,
+    Linux,
 }
 
 impl SandboxKind {
@@ -110,8 +113,58 @@ impl SandboxKind {
         match self {
             SandboxKind::ProcessWrapper => "processwrapper-sandbox",
             SandboxKind::Darwin => "darwin-sandbox",
+            SandboxKind::Linux => "linux-sandbox",
         }
     }
+}
+
+/// `LinuxSandboxedSpawnRunner.isSupported`: supported on Linux hosts.
+pub fn linux_sandbox_supported() -> bool {
+    cfg!(target_os = "linux")
+}
+
+fn find_linux_sandbox_binary(exec_root: &Path) -> Option<String> {
+    if let Some(output_base) = exec_root.parent().and_then(|p| p.parent()) {
+        let p = output_base.join("install/linux-sandbox");
+        if p.exists() {
+            return Some(p.to_string_lossy().into_owned());
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let user = std::env::var("USER").unwrap_or_else(|_| "ubuntu".into());
+        let install_root = PathBuf::from(&home).join(format!(".cache/bazel/_bazel_{user}/install"));
+        if let Ok(rd) = std::fs::read_dir(&install_root) {
+            for e in rd.flatten() {
+                let cand = e.path().join("linux-sandbox");
+                if cand.exists() {
+                    return Some(cand.to_string_lossy().into_owned());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn shell_escape_arg(s: &str) -> String {
+    if !s.is_empty()
+        && s.bytes().all(|b| {
+            b.is_ascii_alphanumeric()
+                || matches!(b, b'_' | b'@' | b'%' | b'+' | b'=' | b':' | b',' | b'.' | b'/' | b'-')
+        })
+    {
+        return s.to_string();
+    }
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn format_interactive_debug_command(argv: &[String], env: &BTreeMap<String, String>, cwd: &str) -> String {
+    let mut s = format!("(cd {} && \\\n  exec env - \\\n", shell_escape_arg(cwd));
+    for (k, v) in env {
+        s.push_str(&format!("    {}={} \\\n", shell_escape_arg(k), shell_escape_arg(v)));
+    }
+    let cmd = argv.iter().map(|a| shell_escape_arg(a)).collect::<Vec<_>>().join(" ");
+    s.push_str(&format!("  {cmd})"));
+    s
 }
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -366,6 +419,13 @@ impl SandboxRunner {
         for d in &spawn.output_dirs {
             dirs.insert(sandbox_exec_root.join(d.path_string()));
         }
+        if spawn.mnemonic == "TestRunner" {
+            for o in &spawn.outputs {
+                if o.path_string().ends_with("/test.outputs") || o.path_string().ends_with("/_coverage") {
+                    dirs.insert(sandbox_exec_root.join(o.path_string()));
+                }
+            }
+        }
         for w in &writable {
             if Path::new(w).starts_with(&sandbox_exec_root) {
                 dirs.insert(PathBuf::from(w));
@@ -374,9 +434,27 @@ impl SandboxRunner {
         for d in &dirs {
             std::fs::create_dir_all(d)?;
         }
-        for i in inputs {
-            let dest = sandbox_exec_root.join(i.path_string());
-            let src = self.exec_root.join(i.path_string());
+        let mut sorted_inputs: Vec<&PathFragment> = inputs;
+        sorted_inputs.sort_by(|a, b| a.path_string().cmp(b.path_string()));
+        let mut last_file: Option<&str> = None;
+        for i in sorted_inputs {
+            let ps = i.path_string();
+            if let Some(prev) = last_file {
+                if ps.starts_with(prev) && ps.as_bytes().get(prev.len()) == Some(&b'/') {
+                    continue;
+                }
+            }
+            let src = self.exec_root.join(ps);
+            let is_symlink = std::fs::symlink_metadata(&src).map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            if is_symlink {
+                last_file = None;
+            } else {
+                last_file = Some(ps);
+            }
+            let dest = sandbox_exec_root.join(ps);
+            if let Some(p) = dest.parent() {
+                std::fs::create_dir_all(p)?;
+            }
             if std::fs::symlink_metadata(&dest).is_ok() {
                 continue;
             }
@@ -460,6 +538,8 @@ impl SandboxRunner {
         };
         let stats_path = layout.sandbox_path.join("stats.out");
         let mut argv = spawn.argv.clone();
+        let mut debug_output: Option<String> = None;
+        let mut linux_sandbox_used = false;
         if self.kind == SandboxKind::Darwin {
             let config = layout.sandbox_path.join("sandbox.sb");
             let allow_net = requires_network(spawn, self.options.default_allow_network);
@@ -473,12 +553,86 @@ impl SandboxRunner {
             let mut full = vec![SANDBOX_EXEC.to_string(), "-f".to_string(), config.to_string_lossy().into_owned()];
             full.extend(argv);
             argv = full;
+        } else if self.kind == SandboxKind::Linux {
+            if let Some(ls_bin) = find_linux_sandbox_binary(&self.exec_root) {
+                let mut writable = layout.writable_dirs.clone();
+                if let Some(shm) = resolve("/dev/shm") {
+                    writable.insert(shm);
+                } else {
+                    writable.insert("/dev/shm".to_string());
+                }
+                writable.insert("/tmp".to_string());
+                let hermetic_tmp = layout.sandbox_path.join("_hermetic_tmp");
+                let _ = std::fs::create_dir_all(&hermetic_tmp);
+                let mut bind_mounts = Vec::new();
+                // Mount any /tmp/<seg1> parent of sandbox_base / exec_root under _hermetic_tmp.
+                let mut seen_mounts = BTreeSet::new();
+                let mut tmp_roots = vec![self.sandbox_base.clone(), self.exec_root.clone()];
+                for w in &writable {
+                    tmp_roots.push(PathBuf::from(w));
+                }
+                for p in &tmp_roots {
+                    if let Ok(rel) = p.strip_prefix("/tmp") {
+                        if let Some(first) = rel.components().next() {
+                            let first_s = first.as_os_str().to_string_lossy();
+                            if !first_s.is_empty() && seen_mounts.insert(first_s.to_string()) {
+                                let src = format!("/tmp/{first_s}");
+                                let dst = hermetic_tmp.join(&*first_s);
+                                let _ = std::fs::create_dir_all(&dst);
+                                bind_mounts.push((dst.to_string_lossy().into_owned(), src));
+                            }
+                        }
+                    }
+                }
+                bind_mounts.push(("/tmp".to_string(), hermetic_tmp.to_string_lossy().into_owned()));
+                let mut b = crate::linux::LinuxSandboxCommandLineBuilder::new(&ls_bin);
+                b.add_execution_info(&spawn.execution_info);
+                b.writable_files_and_directories = writable.into_iter().collect();
+                for tp in &self.options.tmpfs_paths {
+                    if let Ok(rel) = Path::new(tp).strip_prefix("/tmp") {
+                        let _ = std::fs::create_dir_all(hermetic_tmp.join(rel));
+                    }
+                }
+                b.tmpfs_directories = self.options.tmpfs_paths.clone();
+                b.bind_mounts = bind_mounts;
+                b.use_fake_hostname = self.options.fake_hostname;
+                b.enable_pseudoterminal = self.options.explicit_pseudoterminal;
+                if !requires_network(spawn, self.options.default_allow_network) {
+                    b.create_network_namespace = crate::linux::NetworkNamespace::Netns;
+                }
+                b.kill_delay = Some(spawn.kill_delay.unwrap_or(self.kill_delay));
+                if self.options.debug {
+                    b.sandbox_debug_path = Some(layout.sandbox_path.join("debug.out").to_string_lossy().into_owned());
+                }
+                if let Some(t) = spawn.timeout_secs() {
+                    b.timeout = Some(Duration::from_secs_f64(t));
+                }
+                if spawn.execution_info.contains_key("requires-fakeroot") {
+                    b.use_fake_root = true;
+                } else if self.options.fake_username {
+                    b.use_fake_username = true;
+                }
+                if self.options.use_hermetic_linux_sandbox {
+                    b.hermetic_sandbox_path = Some(layout.sandbox_path.to_string_lossy().into_owned());
+                    b.working_directory = Some(layout.sandbox_exec_root.to_string_lossy().into_owned());
+                }
+                b.statistics_path = Some(stats_path.to_string_lossy().into_owned());
+                if let Ok(built) = b.build_for_command(&argv) {
+                    argv = built;
+                    linux_sandbox_used = true;
+                    if self.options.debug {
+                        if let Ok(interactive) = b.build_for_command(&["/bin/sh".to_string(), "-i".to_string()]) {
+                            debug_output = Some(interactive.join("\0"));
+                        }
+                    }
+                }
+            }
         }
         let opt = ProcessWrapperOptions {
             graceful_sigterm: spawn.execution_info.contains_key("supports-graceful-termination"),
-            timeout_secs: spawn.timeout_secs().unwrap_or(0.0),
+            timeout_secs: if linux_sandbox_used { 0.0 } else { spawn.timeout_secs().unwrap_or(0.0) },
             kill_delay_secs: spawn.kill_delay.unwrap_or(self.kill_delay).as_secs_f64(),
-            stats_path: Some(stats_path.to_string_lossy().into_owned()),
+            stats_path: if linux_sandbox_used { None } else { Some(stats_path.to_string_lossy().into_owned()) },
             args: argv.clone(),
             cancel: hooks.cancel.clone(),
             ..Default::default()
@@ -493,8 +647,11 @@ impl SandboxRunner {
         }
         let mut result = match outcome {
             Ok(o) => {
+                let is_ls_timeout = linux_sandbox_used
+                    && spawn.timeout_secs().map(|t| t > 0.0 && o.wall.as_secs_f64() + 0.1 >= t && matches!(o.termination, Termination::Exited(142 | 137 | 143) | Termination::Signaled(_))).unwrap_or(false);
+                let timed_out = o.timed_out || is_ls_timeout;
                 let (status, mut code) = match o.termination {
-                    _ if o.timed_out => (SpawnStatus::Timeout, 142),
+                    _ if timed_out => (SpawnStatus::Timeout, 142),
                     Termination::Exited(0) => (SpawnStatus::Success, 0),
                     t => (SpawnStatus::NonZeroExit, t.exit_code()),
                 };
@@ -513,7 +670,7 @@ impl SandboxRunner {
                         }
                     }
                 }
-                if o.timed_out {
+                if timed_out && !linux_sandbox_used {
                     stderr.extend_from_slice(
                         format!("Action timed out after {:.0}s\n", spawn.timeout_secs().unwrap_or(0.0)).as_bytes(),
                     );
@@ -523,12 +680,17 @@ impl SandboxRunner {
                 r.usage = o.usage;
                 r
             }
-            Err(e) => mk(
-                SpawnStatus::ExecutionFailed,
-                127,
-                Vec::new(),
-                format!("Action failed to execute: java.io.IOException: {e}\n").into_bytes(),
-            ),
+            Err(e) => {
+                let prog = spawn.argv.first().map(String::as_str).unwrap_or("");
+                let msg = e.to_string();
+                let msg = msg.split(" (os error").next().unwrap_or(&msg);
+                mk(
+                    SpawnStatus::NonZeroExit,
+                    1,
+                    Vec::new(),
+                    format!("src/main/tools/process-wrapper-legacy.cc:80: \"execvp({prog}, ...)\": {msg}\n").into_bytes(),
+                )
+            }
         };
         // `stopConcurrentSpawns`: the dynamic-execution branch that gets here first wins.
         if hooks.is_cancelled() || !hooks.lock(result.exit_code) {
@@ -556,11 +718,32 @@ impl SandboxRunner {
         let mut display_argv = spawn.argv.clone();
         if self.options.debug {
             display_argv = argv;
+            if linux_sandbox_used {
+                let dbg_file = layout.sandbox_path.join("debug.out");
+                let dbg_content = std::fs::read_to_string(&dbg_file).unwrap_or_default();
+                let interactive_args: Vec<String> = debug_output
+                    .take()
+                    .map(|s| s.split('\0').map(str::to_string).collect())
+                    .unwrap_or_default();
+                let mut combined = String::new();
+                if !dbg_content.is_empty() {
+                    combined.push_str(&dbg_content);
+                    combined.push('\n');
+                }
+                if !interactive_args.is_empty() {
+                    combined.push_str("Run this command to start an interactive shell in an identical sandboxed environment:\n");
+                    combined.push_str(&format_interactive_debug_command(&interactive_args, &env, &cwd));
+                }
+                if !combined.is_empty() {
+                    debug_output = Some(combined);
+                }
+            }
         }
         result.executed_command = Some(crate::ExecutedCommand {
             argv: display_argv,
             env,
             cwd,
+            debug_output,
         });
         if !self.options.debug {
             let _ = std::fs::remove_dir_all(&layout.sandbox_path);

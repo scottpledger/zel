@@ -2,18 +2,18 @@ Computing main repo mapping:
 Loading: 
 Loading: 0 packages loaded
 Analyzing: 3 targets (0 packages loaded, 0 targets configured)
-ERROR: @WS@/c/BUILD:2:10: in filegroup rule //c:cyc1: cycle in dependency graph:
-    //c:cyc1 (1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607)
-.-> //c:cyc1 (2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c)
-|   //c:cyc2 (2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c)
-`-- //c:cyc1 (2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c)
-WARNING: errors encountered while analyzing target '//c:cyc1', it will not be built.
-ERROR: @WS@/c/BUILD:3:10: in filegroup rule //c:cyc2: cycle in dependency graph: target depends on an already-reported cycle
+ERROR: @WS@/c/BUILD:3:10: in filegroup rule //c:cyc2: cycle in dependency graph:
+    //c:cyc2 (e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a)
+.-> //c:cyc2 (a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18)
+|   //c:cyc1 (a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18)
+`-- //c:cyc2 (a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18)
 WARNING: errors encountered while analyzing target '//c:cyc2', it will not be built.
+ERROR: @WS@/c/BUILD:2:10: in filegroup rule //c:cyc1: cycle in dependency graph: target depends on an already-reported cycle
+WARNING: errors encountered while analyzing target '//c:cyc1', it will not be built.
 INFO: Analysis succeeded for only 1 of 3 top-level targets
 INFO: Analyzed 3 targets (0 packages loaded, 0 targets configured).
 INFO: Found 1 target...
 ERROR: command succeeded, but not all targets were analyzed
-INFO: Elapsed time: 0.061s, Critical Path: 0.00s
+INFO: Elapsed time: 0.032s, Critical Path: 0.00s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

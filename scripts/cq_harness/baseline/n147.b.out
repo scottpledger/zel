@@ -1,4 +1,4 @@
-bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt
-bazel-out/darwin_arm64-opt/bin/a/lib.txt
-bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt
-bazel-out/darwin_arm64-fastbuild/bin/a/lm.o
+bazel-out/k8-fastbuild/bin/a/lib.txt
+bazel-out/k8-opt/bin/a/lib.txt
+bazel-out/k8-fastbuild/bin/a/lib2.txt
+bazel-out/k8-fastbuild/bin/a/lm.o

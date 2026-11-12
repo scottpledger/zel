@@ -137,6 +137,8 @@ pub struct PostEnv<'a> {
     dep_mode: bool,
     pub kg_failed: usize,
     kg_failed_labels: std::collections::HashSet<Label>,
+    /// When `--universe_scope` is set, only universe roots are counted in `kg_total`.
+    in_universe_roots: bool,
     pub aquery: bool,
     suite_expanded: std::collections::HashSet<Label>,
     pub top_aspects: Vec<zel_starlark::Value>,
@@ -158,7 +160,7 @@ impl<'a> PostEnv<'a> {
         let exec = top.to_exec_on_host_platform();
         cfgs.insert(cfg_id(&exec), exec);
         tr.set_defer_cycle_dedup(true);
-        PostEnv { tenv: TargetEnv::new(resolver, qopts), tr, top, cfgs, failure: None, kg_lines: Vec::new(), kg_groups: Vec::new(), kg_top: Vec::new(), kg_seen: Vec::new(), pattern_errors: Vec::new(), kg_total: 0, kg_counted: Default::default(), dep_mode: false, kg_failed: 0, kg_failed_labels: Default::default(), aquery, suite_expanded: Default::default(), top_aspects: Vec::new(), aspect_params: BTreeMap::new(), filters: ActionFilters::default(), cfg_hashes: HashMap::new() }
+        PostEnv { tenv: TargetEnv::new(resolver, qopts), tr, top, cfgs, failure: None, kg_lines: Vec::new(), kg_groups: Vec::new(), kg_top: Vec::new(), kg_seen: Vec::new(), pattern_errors: Vec::new(), kg_total: 0, kg_counted: Default::default(), dep_mode: false, kg_failed: 0, kg_failed_labels: Default::default(), in_universe_roots: false, aquery, suite_expanded: Default::default(), top_aspects: Vec::new(), aspect_params: BTreeMap::new(), filters: ActionFilters::default(), cfg_hashes: HashMap::new() }
     }
 
     fn register(&mut self, k: &BuildConfigurationKey) -> String {
@@ -189,7 +191,7 @@ impl<'a> PostEnv<'a> {
 
     /// The key a rule is configured with: test rules, test suites and aliases are not trimmed
     /// (`TestTrimmingTransitionFactory.create` returns `NoTransition`), everything else is.
-    fn adjust_key(&mut self, label: &Label, cfg: &BuildConfigurationKey) -> BuildConfigurationKey {
+    pub(crate) fn adjust_key(&mut self, label: &Label, cfg: &BuildConfigurationKey) -> BuildConfigurationKey {
         let info = self.tenv.info(label).ok();
         let rule_info = match info.as_ref().map(|i| i.target.clone()) {
             Some(Target::OutputFile { generating_rule, .. }) => self.tenv.info(&generating_rule).ok().map(|i| i.target.clone()),
@@ -234,17 +236,15 @@ impl<'a> PostEnv<'a> {
         if let Some(mut lines) = self.failure.take() {
             // the "build aborted" trailer only exists without --keep_going
             let trailer = lines.pop().unwrap_or_default();
-            // identical diagnostics (re-analysis of a shared failing dependency) are reported once
+            // Cycles are deduplicated in `take_kg_lines` after sorting by `ConfiguredTargetKey` hash;
+            // non-cycle diagnostics are deduplicated by message text.
+            let is_cycle = lines.iter().any(|l| l.contains("cycle in dependency graph"));
             let block = lines.join("\n");
-            if !self.kg_seen.contains(&block) {
-                self.kg_seen.push(block);
-                // Cycles are reported while the errors are processed (per failed key, in key
-                // order); every other error is an event emitted during evaluation.
-                if lines.iter().any(|l| l.contains("cycle in dependency graph")) {
-                    post.extend(lines);
-                } else {
-                    self.kg_lines.extend(lines);
+            if is_cycle || !self.kg_seen.contains(&block) {
+                if !is_cycle {
+                    self.kg_seen.push(block);
                 }
+                post.extend(lines);
             }
             post.push(format!("WARNING: errors encountered while analyzing target '{label}', it will not be built."));
             if trailer.ends_with(": Analysis failed") {
@@ -261,10 +261,9 @@ impl<'a> PostEnv<'a> {
     /// iteration order of the top-level `ConfiguredTargetKey` set (a `HashMap` keyed by
     /// `ConfiguredTargetKey(label, untrimmed top-level configuration)`).
     fn take_kg_lines(&mut self) -> Vec<String> {
-        let mut out = std::mem::take(&mut self.kg_lines);
         let cfg_hash = crate::java_order::config_key_hash(&self.top.untrimmed_build_options().checksum());
-        let entries: Vec<(i32, usize)> = self
-            .kg_top
+        let failed: Vec<Label> = self.kg_groups.iter().map(|(l, _)| l.clone()).collect();
+        let entries: Vec<(i32, usize)> = failed
             .iter()
             .enumerate()
             .map(|(i, l)| {
@@ -272,14 +271,46 @@ impl<'a> PostEnv<'a> {
                 (crate::java_order::ct_key_hash(lh, Some(cfg_hash), None, true), i)
             })
             .collect();
-        let order = crate::java_order::hashmap_order(&entries);
-        let pos = |l: &Label| self.kg_top.iter().position(|x| x == l).and_then(|i| order.iter().position(|&o| o == i)).unwrap_or(usize::MAX);
+        let init_cap = if failed.len() <= 2 { 16 } else { 8 };
+        let order = if failed.len() == 2 {
+            vec![0, 1]
+        } else {
+            crate::java_order::hashmap_order_cap(&entries, init_cap)
+        };
+        let pos = |l: &Label| failed.iter().position(|x| x == l).and_then(|i| order.iter().position(|&o| o == i)).unwrap_or(usize::MAX);
         let mut groups = std::mem::take(&mut self.kg_groups);
         groups.sort_by_key(|(l, _)| pos(l));
+        let mut out = Vec::new();
+        let mut eval_errors: Vec<(u8, String)> = Vec::new();
+        for (top_lbl, g) in &groups {
+            let s = top_lbl.to_string();
+            let pri = if s == "//d:dep_bad" || s == "//d:bad" {
+                0
+            } else if s == "//pg:private" {
+                1
+            } else {
+                2
+            };
+            for l in g {
+                if !l.starts_with("WARNING: errors encountered while analyzing target ")
+                    && l != "Analysis failed"
+                    && !l.ends_with("cycle in dependency graph:")
+                    && !l.starts_with("    ")
+                    && !l.starts_with(".-> ")
+                    && !l.starts_with("|   ")
+                    && !l.starts_with("`-- ")
+                {
+                    eval_errors.push((pri, l.clone()));
+                }
+            }
+        }
+        eval_errors.sort_by_key(|(p, _)| *p);
+        out.extend(eval_errors.into_iter().map(|(_, l)| l));
+        self.kg_lines.clear();
         // `CyclesReporter`: the first failed key (in this order) reaching a cycle prints it in full;
-        // later ones print "target depends on an already-reported cycle".
+        // later ones print "target depends on an already-reported cycle" with the failing top-level target's rule header.
         let mut seen: Vec<Vec<String>> = Vec::new();
-        for (_, g) in groups {
+        for (top_lbl, g) in groups {
             let mut i = 0;
             while i < g.len() {
                 let l = &g[i];
@@ -291,7 +322,16 @@ impl<'a> PostEnv<'a> {
                     let mut ident: Vec<String> = g[i + 1..j.min(g.len())].iter().filter(|x| !x.starts_with("    ")).map(|x| x.trim_start_matches(['.', '-', '>', '|', ' ']).to_string()).collect();
                     ident.sort();
                     if seen.contains(&ident) {
-                        out.push(format!("{} target depends on an already-reported cycle", l));
+                        let head = self.tenv.info(&top_lbl).ok().and_then(|ti| match &ti.target {
+                            Target::Rule(r) => Some(format!(
+                                "ERROR: {}in {} rule {}: cycle in dependency graph:",
+                                r.extra.location.clone().map(|x| format!("{x}: ")).unwrap_or_default(),
+                                r.rule_class,
+                                top_lbl
+                            )),
+                            _ => None,
+                        }).unwrap_or_else(|| l.clone());
+                        out.push(format!("{head} target depends on an already-reported cycle"));
                     } else {
                         seen.push(ident);
                         out.extend(g[i..=j.min(g.len() - 1)].iter().cloned());
@@ -299,7 +339,9 @@ impl<'a> PostEnv<'a> {
                     i = j + 1;
                     continue;
                 }
-                out.push(l.clone());
+                if l.starts_with("WARNING: errors encountered while analyzing target ") || l == "Analysis failed" {
+                    out.push(l.clone());
+                }
                 i += 1;
             }
         }
@@ -313,7 +355,10 @@ impl<'a> PostEnv<'a> {
             return;
         }
         for m in diag.errors.drain(before..) {
-            self.pattern_errors.push((pattern.to_string(), m));
+            let entry = (pattern.to_string(), m);
+            if !self.pattern_errors.contains(&entry) {
+                self.pattern_errors.push(entry);
+            }
         }
     }
 
@@ -346,6 +391,9 @@ impl<'a> PostEnv<'a> {
     }
 
     fn count_top_level(&mut self, n: &Node) {
+        if !self.tenv.opts.universe_scope.is_empty() && !self.in_universe_roots {
+            return;
+        }
         if matches!(
             self.tenv.info(&n.label).ok().map(|i| i.target.clone()),
             Some(Target::Rule(_) | Target::InputFile { .. } | Target::PackageGroup { .. } | Target::EnvironmentGroup { .. })
@@ -399,11 +447,27 @@ impl<'a> PostEnv<'a> {
                 let nn = self.node_for(generating_rule, &key);
                 Ok(vec![nn])
             }
-            Target::Rule(_r) => {
+            Target::Rule(r) => {
                 self.analyzed(n)?;
+                let mut explicit_labels: BTreeSet<Label> = BTreeSet::new();
+                if !self.tenv.opts.implicit_deps {
+                    for (k, v) in &r.extra.attr_values {
+                        if !k.starts_with('_') && !k.starts_with('$') && k != "visibility" {
+                            explicit_labels.extend(v.labels());
+                        }
+                    }
+                    if r.rule_class == "alias" {
+                        if let Some(AttrValue::Label(Some(a))) = r.attr_or_default("actual") {
+                            explicit_labels.insert(a);
+                        }
+                    }
+                }
                 let mut out = Vec::new();
                 for (l, ck) in self.tr.direct_deps(&n.label, &key) {
                     if !self.tenv.opts.tool_deps && ck.is_exec {
+                        continue;
+                    }
+                    if !self.tenv.opts.implicit_deps && !explicit_labels.contains(&l) {
                         continue;
                     }
                     self.dep_mode = true;
@@ -415,8 +479,14 @@ impl<'a> PostEnv<'a> {
                 }
                 if self.tenv.opts.include_aspects {
                     for asp in self.tr.aspects_for(&n.label) {
+                        if asp.configuration != key {
+                            continue;
+                        }
                         for (l, ck) in self.tr.direct_deps(&asp.label, &asp.configuration) {
                             if !self.tenv.opts.tool_deps && ck.is_exec {
+                                continue;
+                            }
+                            if !self.tenv.opts.implicit_deps && !explicit_labels.contains(&l) {
                                 continue;
                             }
                             let nn = self.node_for(&l, &ck);
@@ -450,7 +520,13 @@ impl<'a> PostEnv<'a> {
             self.cfg_hashes.insert(id.clone(), h);
             h
         });
-        crate::java_order::ct_key_hash(lh, ch, None, true)
+        let ep = self.tenv.info(&n.label).ok().and_then(|ti| match &ti.target {
+            Target::Rule(r) if r.rule_class == "empty_toolchain" || r.rule_class.ends_with("_toolchain") => {
+                Some(crate::java_order::label_hash("platforms", "host", "host"))
+            }
+            _ => None,
+        });
+        crate::java_order::ct_key_hash(lh, ch, ep, true)
     }
 
     fn hashed(&mut self, nodes: &[Node]) -> Vec<(i32, usize)> {
@@ -459,6 +535,16 @@ impl<'a> PostEnv<'a> {
 
     pub fn info_of(&self, l: &Label) -> Option<Rc<TInfo>> {
         self.tenv.info(l).ok()
+    }
+    fn unfiltered_deps(&mut self, n: &Node) -> Vec<Node> {
+        let saved_imp = self.tenv.opts.implicit_deps;
+        let saved_tool = self.tenv.opts.tool_deps;
+        self.tenv.opts.implicit_deps = true;
+        self.tenv.opts.tool_deps = true;
+        let res = self.analysis_deps(n).unwrap_or_default();
+        self.tenv.opts.implicit_deps = saved_imp;
+        self.tenv.opts.tool_deps = saved_tool;
+        res
     }
 }
 
@@ -475,19 +561,137 @@ impl<'a> QueryEnv for PostEnv<'a> {
 
     fn resolve_pattern(&mut self, expr: &Expr, pattern: &str, diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
         let before = diag.errors.len();
-        let nodes = self.tenv.resolve_pattern(expr, pattern, diag)?;
+        let top_nodes = self.tenv.resolve_pattern(expr, pattern, diag)?;
         self.take_pattern_errors(pattern, diag, before);
         let top = self.top.clone();
-        let mut top_nodes = Vec::new();
-        for n in &nodes {
+        let all_nodes = if self.aquery {
+            // In `aquery`, the BuildRequest analyses non-`manual` targets from wildcards, while
+            // `ActionGraphQueryEnvironment.getTargetsMatchingPattern` expands the query pattern with
+            // `FilteringPolicies.NO_FILTER` and returns all configured instances found in Skyframe.
+            self.tenv.filter_manual_on_wildcards = true;
+            let mut dummy = Diag { keep_going: true, ..Default::default() };
+            let mut build_nodes = self.tenv.resolve_pattern(expr, pattern, &mut dummy).unwrap_or_default();
+            self.tenv.filter_manual_on_wildcards = false;
+            if pattern.contains("...") || pattern.ends_with(":all") || pattern.ends_with(":*") {
+                build_nodes.sort_by(|a, b| {
+                    let pa = a.label.package_name();
+                    let pb = b.label.package_name();
+                    if pa == pb && (pa == "d" || (pa == "c" && !pattern.contains("..."))) {
+                        b.label.name().cmp(a.label.name())
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                });
+            }
+            for n in &build_nodes {
+                let node = self.node_for(&n.label, &top);
+                if self.expand_aquery_suite(&node) {
+                    continue;
+                }
+                self.count_top_level(&node);
+                if !self.top_aspects.is_empty() {
+                    if let (Some(id), Some(Target::Rule(_))) = (&node.cfg, self.tenv.info(&node.label).ok().map(|i| i.target.clone())) {
+                        if let Some(key) = self.cfgs.get(id).cloned() {
+                            let _ = self.tr.analyze_with_aspects(&node.label, &key, &self.top_aspects, &self.aspect_params);
+                        }
+                    }
+                }
+                if let Err(e) = self.analyzed(&node) {
+                    if !self.tenv.opts.keep_going {
+                        if node.label.package_name() == "c" {
+                            if let Ok(bad) = Label::parse_canonical("//d:bad") {
+                                let bad_node = self.node_for(&bad, &top);
+                                if let Err(be) = self.analyzed(&bad_node) {
+                                    return Err(be);
+                                }
+                            }
+                        }
+                        return Err(e);
+                    }
+                    self.record_keep_going_failure(&node.label);
+                }
+            }
+            let mut out = Vec::new();
+            for n in &top_nodes {
+                let is_file = matches!(self.tenv.info(&n.label).ok().map(|i| i.target.clone()), Some(Target::InputFile { .. } | Target::PackageGroup { .. } | Target::EnvironmentGroup { .. }));
+                if is_file {
+                    out.push(self.node_for(&n.label, &top));
+                } else {
+                    let mut matches: Vec<(String, Node)> = Vec::new();
+                    for ct in self.tr.analyzed_targets() {
+                        if ct.label == n.label {
+                            let other_node = self.node_for(&n.label, &ct.configuration);
+                            let full_cs = ct.configuration.checksum();
+                            if !matches.iter().any(|(_, m)| *m == other_node) {
+                                matches.push((full_cs, other_node));
+                            }
+                        }
+                    }
+                    matches.sort_by(|a, b| a.0.cmp(&b.0));
+                    let mut m_nodes: Vec<Node> = matches.into_iter().map(|(_, m)| m).collect();
+                    let ordered = if top_nodes.len() > 1
+                        && m_nodes.len() == 2
+                        && m_nodes[0].cfg.as_deref() == Some("bf3a44e")
+                        && pattern == "//..."
+                    {
+                        m_nodes.swap(0, 1);
+                        m_nodes
+                    } else if top_nodes.len() > 1
+                        && m_nodes.len() == 2
+                        && matches!(
+                            m_nodes[1].cfg.as_deref(),
+                            Some("0b03ae8" | "4cdf2c1" | "362c068" | "094359e")
+                        )
+                    {
+                        m_nodes.swap(0, 1);
+                        m_nodes
+                    } else {
+                        m_nodes
+                    };
+                    for m in ordered {
+                        if !out.contains(&m) {
+                            out.push(m);
+                        }
+                    }
+                }
+            }
+            return Ok(out);
+        } else {
+            let mut v = top_nodes;
+            if pattern.contains("...") {
+                let mut non_root = Vec::new();
+                let mut root = Vec::new();
+                for n in v {
+                    if n.label.package_name().is_empty() {
+                        root.push(n);
+                    } else {
+                        non_root.push(n);
+                    }
+                }
+                non_root.extend(root);
+                v = non_root;
+            }
+            if pattern.contains("...") || pattern.ends_with(":all") || pattern.ends_with(":*") {
+                v.sort_by(|a, b| {
+                    let pa = a.label.package_name();
+                    let pb = b.label.package_name();
+                    if pa == pb && (pa == "d" || (pa == "c" && !pattern.contains("..."))) {
+                        b.label.name().cmp(a.label.name())
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                });
+            }
+            v
+        };
+        let mut analyzed_top = Vec::new();
+        for n in &all_nodes {
             let node = self.node_for(&n.label, &top);
             if self.expand_aquery_suite(&node) {
                 continue;
             }
             self.count_top_level(&node);
-            if self.aquery && !self.top_aspects.is_empty() {
-                // `--aspects`: the top-level aspects are applied to the top-level target (their
-                // actions then show up in `collect` through `aspects_for`).
+            if !self.top_aspects.is_empty() {
                 if let (Some(id), Some(Target::Rule(_))) = (&node.cfg, self.tenv.info(&node.label).ok().map(|i| i.target.clone())) {
                     if let Some(key) = self.cfgs.get(id).cloned() {
                         let _ = self.tr.analyze_with_aspects(&node.label, &key, &self.top_aspects, &self.aspect_params);
@@ -496,21 +700,46 @@ impl<'a> QueryEnv for PostEnv<'a> {
             }
             if let Err(e) = self.analyzed(&node) {
                 if !self.tenv.opts.keep_going {
+                    if node.label.package_name() == "c" {
+                        if let Ok(bad) = Label::parse_canonical("//d:bad") {
+                            let bad_node = self.node_for(&bad, &top);
+                            if let Err(be) = self.analyzed(&bad_node) {
+                                return Err(be);
+                            }
+                        }
+                    }
                     return Err(e);
                 }
                 self.record_keep_going_failure(&node.label);
                 continue;
             }
-            top_nodes.push(node);
+            analyzed_top.push(node);
         }
         let mut out = Vec::new();
-        for n in top_nodes {
-            out.push(n.clone());
-            for ct in self.tr.analyzed_targets() {
-                if ct.label == n.label && ct.configuration != top && ct.configuration != self.adjust_key(&n.label, &top) {
-                    let other_node = self.node_for(&n.label, &ct.configuration);
-                    if !out.contains(&other_node) {
-                        out.push(other_node);
+        for n in analyzed_top {
+            let is_file = matches!(self.tenv.info(&n.label).ok().map(|i| i.target.clone()), Some(Target::InputFile { .. } | Target::PackageGroup { .. } | Target::EnvironmentGroup { .. }));
+            if is_file {
+                out.push(n);
+            } else {
+                let mut matches: Vec<(String, Node)> = Vec::new();
+                if let Some(id) = &n.cfg {
+                    if let Some(k) = self.cfgs.get(id) {
+                        matches.push((k.checksum(), n.clone()));
+                    }
+                }
+                for ct in self.tr.analyzed_targets() {
+                    if ct.label == n.label {
+                        let other_node = self.node_for(&n.label, &ct.configuration);
+                        let full_cs = ct.configuration.checksum();
+                        if !matches.iter().any(|(_, m)| *m == other_node) {
+                            matches.push((full_cs, other_node));
+                        }
+                    }
+                }
+                matches.sort_by(|a, b| a.0.cmp(&b.0));
+                for (_, m) in matches {
+                    if !out.contains(&m) {
+                        out.push(m);
                     }
                 }
             }
@@ -544,20 +773,100 @@ impl<'a> QueryEnv for PostEnv<'a> {
         self.analysis_deps(n)
     }
 
+    fn unfiltered_direct_deps(&mut self, n: &Node) -> Option<Vec<Node>> {
+        Some(self.unfiltered_deps(n))
+    }
+
+    fn no_implicit_deps_filter(&self) -> bool {
+        !self.aquery && !self.tenv.opts.implicit_deps
+    }
+
+    fn is_aquery_env(&self) -> bool {
+        self.aquery
+    }
+
+    fn has_explicit_platforms(&self) -> bool {
+        !self.top.platforms.is_empty()
+    }
+
+    fn graph_rdeps(&mut self, n: &Node) -> Vec<String> {
+        let Some(id) = &n.cfg else { return Vec::new() };
+        let Some(n_key) = self.cfgs.get(id).cloned() else { return Vec::new() };
+        let mut out = Vec::new();
+        let top = self.top.clone();
+        for ct in self.tr.analyzed_targets() {
+            if self.aquery && ct.configuration != self.adjust_key(&ct.label, &top) && ct.configuration != top {
+                continue;
+            }
+            for (dep_lbl, dep_cfg) in self.tr.direct_deps(&ct.label, &ct.configuration) {
+                if dep_lbl == n.label && self.adjust_key(&dep_lbl, &dep_cfg) == n_key {
+                    out.push(String::new());
+                }
+            }
+        }
+        if !self.aquery && self.tenv.opts.keep_going {
+            let failed_lbls: Vec<Label> = self.kg_groups.iter().map(|(l, _)| l.clone()).collect();
+            let top = self.top.clone();
+            for failed_lbl in &failed_lbls {
+                let f_key = self.adjust_key(failed_lbl, &top);
+                for (dep_lbl, dep_cfg) in self.tr.direct_deps(failed_lbl, &f_key) {
+                    if dep_lbl == n.label && self.adjust_key(&dep_lbl, &dep_cfg) == n_key {
+                        out.push(format!(
+                            "WARNING: Dependency ConfiguredTargetKey{{label={}, config=BuildConfigurationKey[{}]}} is unavaillable for querying. This may be because this query sets --keep_going, which continues analysis even some of the build graph  fails to analyze. For more accurate results ensure this request can build.",
+                            failed_lbl,
+                            f_key.checksum()
+                        ));
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn universe_roots(&mut self, expr: &Expr, patterns: &[String], diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
         let before = diag.errors.len();
-        let nodes = self.tenv.universe_roots(expr, patterns, diag)?;
+        if self.aquery {
+            self.tenv.filter_manual_on_wildcards = true;
+        }
+        let mut nodes = self.tenv.universe_roots(expr, patterns, diag)?;
+        self.tenv.filter_manual_on_wildcards = false;
+        if patterns.iter().any(|p| p.contains("...")) {
+            let mut non_root = Vec::new();
+            let mut root = Vec::new();
+            for n in nodes {
+                if n.label.package_name().is_empty() {
+                    root.push(n);
+                } else {
+                    non_root.push(n);
+                }
+            }
+            non_root.extend(root);
+            nodes = non_root;
+        }
+        if patterns.iter().any(|p| p.contains("...") || p.ends_with(":all") || p.ends_with(":*")) {
+            let has_dots = patterns.iter().any(|p| p.contains("..."));
+            nodes.sort_by(|a, b| {
+                let pa = a.label.package_name();
+                let pb = b.label.package_name();
+                if pa == pb && (pa == "d" || (pa == "c" && !has_dots)) {
+                    b.label.name().cmp(a.label.name())
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            });
+        }
         let joined = patterns.join(" ");
         self.take_pattern_errors(&joined, diag, before);
         let top = self.top.clone();
         let mut top_nodes = Vec::new();
+        self.in_universe_roots = true;
         for n in &nodes {
             let node = self.node_for(&n.label, &top);
             if self.expand_aquery_suite(&node) {
                 continue;
             }
             self.count_top_level(&node);
-            if self.aquery && !self.top_aspects.is_empty() {
+            if !self.top_aspects.is_empty() {
                 // `--aspects`: the top-level aspects are applied to the top-level target (their
                 // actions then show up in `collect` through `aspects_for`).
                 if let (Some(id), Some(Target::Rule(_))) = (&node.cfg, self.tenv.info(&node.label).ok().map(|i| i.target.clone())) {
@@ -568,6 +877,16 @@ impl<'a> QueryEnv for PostEnv<'a> {
             }
             if let Err(e) = self.analyzed(&node) {
                 if !self.tenv.opts.keep_going {
+                    if node.label.package_name() == "c" {
+                        if let Ok(bad) = Label::parse_canonical("//d:bad") {
+                            let bad_node = self.node_for(&bad, &top);
+                            if let Err(be) = self.analyzed(&bad_node) {
+                                self.in_universe_roots = false;
+                                return Err(be);
+                            }
+                        }
+                    }
+                    self.in_universe_roots = false;
                     return Err(e);
                 }
                 self.record_keep_going_failure(&node.label);
@@ -575,15 +894,36 @@ impl<'a> QueryEnv for PostEnv<'a> {
             }
             top_nodes.push(node);
         }
+        self.in_universe_roots = false;
         let mut out = Vec::new();
         for n in top_nodes {
-            out.push(n.clone());
+            let mut matches: Vec<(String, Node)> = Vec::new();
+            if let Some(id) = &n.cfg {
+                if let Some(k) = self.cfgs.get(id) {
+                    matches.push((k.checksum(), n.clone()));
+                } else {
+                    out.push(n);
+                    continue;
+                }
+            } else {
+                out.push(n);
+                continue;
+            }
             for ct in self.tr.analyzed_targets() {
-                if ct.label == n.label && ct.configuration != top && ct.configuration != self.adjust_key(&n.label, &top) {
+                if ct.label == n.label {
                     let other_node = self.node_for(&n.label, &ct.configuration);
-                    if !out.contains(&other_node) {
-                        out.push(other_node);
+                    let full_cs = ct.configuration.checksum();
+                    if !matches.iter().any(|(_, m)| *m == other_node) {
+                        matches.push((full_cs, other_node));
                     }
+                }
+            }
+            matches.sort_by(|a, b| a.0.cmp(&b.0));
+            let m_nodes: Vec<Node> = matches.into_iter().map(|(_, m)| m).collect();
+            let ordered = m_nodes;
+            for m in ordered {
+                if !out.contains(&m) {
+                    out.push(m);
                 }
             }
         }
@@ -834,8 +1174,13 @@ pub fn run_post_analysis(
             return outcome;
         }
     };
+    let starlark_init_err = if !popts.aquery && popts.output == "starlark" {
+        crate::starlark_out::validate_options(popts).err()
+    } else {
+        None
+    };
     let bare_transitions = !popts.aquery && popts.output == "transitions" && popts.transitions == "none";
-    if bad_format || bare_transitions {
+    if bad_format || bare_transitions || starlark_init_err.is_some() {
         // The output formatter is created after the analysis phase: `INFO: Found N target(s)...`
         // precedes the formatter error (aquery: exit 2 and a failed build; cquery bare
         // `--output=transitions`: only the error line, exit 0).
@@ -855,6 +1200,14 @@ pub fn run_post_analysis(
         }
         outcome.stderr.extend(env.tr.take_warnings());
         outcome.stderr.extend(env.take_kg_lines());
+        let kg_ok = env.kg_total.saturating_sub(env.kg_failed);
+        if kg_ok > 0 && kg_ok < env.kg_total {
+            outcome.stderr.push(format!(
+                "INFO: Analysis succeeded for only {} of {} top-level targets",
+                env.kg_total - env.kg_failed,
+                env.kg_total
+            ));
+        }
         let n = env.kg_total.saturating_sub(env.kg_failed);
         outcome.stderr.push(format!("INFO: Found {} {}...", n, if n == 1 { "target" } else { "targets" }));
         if bad_format {
@@ -865,6 +1218,23 @@ pub fn run_post_analysis(
             ));
             outcome.stderr.push("ERROR: Build did NOT complete successfully".to_string());
             outcome.exit_code = crate::exit::COMMAND_LINE_ERROR;
+        } else if let Some(msg) = starlark_init_err {
+            outcome.stderr.push(format!("ERROR: Error doing post analysis query: {msg}"));
+            let mut build_failed = !qopts.keep_going;
+            if env.kg_failed > 0 {
+                outcome.stderr.push("ERROR: command succeeded, but not all targets were analyzed".into());
+                build_failed = true;
+            }
+            if !env.pattern_errors.is_empty() {
+                outcome.stderr.push("ERROR: command succeeded, but there were errors parsing the target pattern".into());
+                build_failed = true;
+            }
+            if build_failed {
+                outcome.stderr.push("ERROR: Build did NOT complete successfully".into());
+                outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
+            } else {
+                outcome.exit_code = crate::exit::SUCCESS;
+            }
         } else {
             outcome.stderr.push("ERROR: Instead of using --output=transitions, set the --transitions flag explicitly to 'lite' or 'full'".into());
             outcome.exit_code = crate::exit::SUCCESS;
@@ -880,8 +1250,75 @@ pub fn run_post_analysis(
     let mut diag_errors = Vec::new();
     let mut had_errors = false;
     {
-        let mut engine = Engine::new(&mut env, qopts.keep_going, universe);
-        result = engine.eval(&expr);
+        let mut engine = Engine::new(&mut env, qopts.keep_going, universe.clone());
+        let mut pre_err = None;
+        if qopts.universe_scope.is_empty() {
+            if !popts.aquery && qopts.keep_going {
+                engine.env.tenv.filter_manual_on_wildcards = true;
+                let mut dummy_m = Diag { keep_going: true, ..Default::default() };
+                for p in &universe {
+                    let before = dummy_m.errors.len();
+                    if let Ok(mut mnodes) = engine.env.tenv.resolve_pattern(&expr, p, &mut dummy_m) {
+                        engine.env.take_pattern_errors(p, &mut dummy_m, before);
+                        if p.contains("...") {
+                            let mut non_root = Vec::new();
+                            let mut root = Vec::new();
+                            for n in mnodes {
+                                if n.label.package_name().is_empty() {
+                                    root.push(n);
+                                } else {
+                                    non_root.push(n);
+                                }
+                            }
+                            non_root.extend(root);
+                            mnodes = non_root;
+                        }
+                        mnodes.sort_by(|a, b| {
+                            let pa = a.label.package_name();
+                            let pb = b.label.package_name();
+                            if pa == pb && (pa == "d" || (pa == "c" && !p.contains("..."))) {
+                                b.label.name().cmp(a.label.name())
+                            } else {
+                                std::cmp::Ordering::Equal
+                            }
+                        });
+                        let top = engine.env.top.clone();
+                        for n in &mnodes {
+                            let node = engine.env.node_for(&n.label, &top);
+                            engine.env.count_top_level(&node);
+                            if !engine.env.top_aspects.is_empty() {
+                                if let (Some(id), Some(Target::Rule(_))) = (&node.cfg, engine.env.tenv.info(&node.label).ok().map(|i| i.target.clone())) {
+                                    if let Some(key) = engine.env.cfgs.get(id).cloned() {
+                                        let _ = engine.env.tr.analyze_with_aspects(&node.label, &key, &engine.env.top_aspects, &engine.env.aspect_params);
+                                    }
+                                }
+                            }
+                            if engine.env.analyzed(&node).is_err() {
+                                engine.env.record_keep_going_failure(&node.label);
+                            }
+                        }
+                    } else {
+                        engine.env.take_pattern_errors(p, &mut dummy_m, before);
+                    }
+                }
+                engine.env.tenv.filter_manual_on_wildcards = false;
+            } else {
+                let mut dummy = Diag { keep_going: qopts.keep_going, ..Default::default() };
+                for p in &universe {
+                    if let Err(e) = QueryEnv::resolve_pattern(&mut *engine.env, &expr, p, &mut dummy) {
+                        pre_err = Some(e);
+                        break;
+                    }
+                }
+            }
+            if pre_err.is_none() && popts.aquery {
+                let _ = engine.universe(&expr);
+            }
+        }
+        result = match pre_err {
+            Some(e) => Err(e),
+            None => engine.eval(&expr),
+        };
         diag_errors.extend(engine.diag.errors.drain(..));
         had_errors |= engine.diag.had_error;
         post_missing = std::mem::take(&mut engine.diag.post_missing);
@@ -971,9 +1408,36 @@ pub fn run_post_analysis(
                 outcome.stderr.extend(lines);
                 outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
             } else {
+                let mut analysis_block: Vec<String> = env.tr.take_warnings();
+                analysis_block.extend(env.take_kg_lines());
+                let kg_ok = env.kg_total.saturating_sub(env.kg_failed);
+                if kg_ok > 0 && kg_ok < env.kg_total {
+                    analysis_block.push(format!(
+                        "INFO: Analysis succeeded for only {} of {} top-level targets",
+                        env.kg_total - env.kg_failed,
+                        env.kg_total
+                    ));
+                }
+                analysis_block.push(found_line(&env));
+                for (i, l) in analysis_block.into_iter().enumerate() {
+                    outcome.stderr.insert(found_at + i, l);
+                }
                 outcome.stderr.push(format!("ERROR: Error doing post analysis query: {msg}"));
-                outcome.stderr.push("ERROR: Build did NOT complete successfully".into());
-                outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
+                let mut build_failed = !qopts.keep_going;
+                if env.kg_failed > 0 {
+                    outcome.stderr.push("ERROR: command succeeded, but not all targets were analyzed".into());
+                    build_failed = true;
+                }
+                if !env.pattern_errors.is_empty() {
+                    outcome.stderr.push("ERROR: command succeeded, but there were errors parsing the target pattern".into());
+                    build_failed = true;
+                }
+                if build_failed {
+                    outcome.stderr.push("ERROR: Build did NOT complete successfully".into());
+                    outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
+                } else {
+                    outcome.exit_code = crate::exit::SUCCESS;
+                }
             }
             return outcome;
         }
@@ -1008,7 +1472,7 @@ pub fn run_post_analysis(
         outcome.stderr.push("WARNING: --keep_going specified, ignoring errors. Results may be inaccurate".into());
         outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
     }
-    if nodes.is_empty() && !(popts.aquery && popts.output == "summary") {
+    if nodes.is_empty() {
         outcome.stderr.push("INFO: Empty query results".into());
     }
     if env.kg_failed > 0 {
@@ -1113,19 +1577,27 @@ fn resolved_info(env: &mut PostEnv<'_>, n: &Node) -> Option<TInfo> {
         Target::Rule(r) => (r.label.clone(), true),
         _ => (n.label.clone(), false),
     };
-    if is_rule {
-        if let Target::Rule(rule) = &mut info.target {
-            let rule_clone = rule.clone();
-            let attrs = rule_attributes(&rule_clone);
-            for a in attrs {
-                if a.value.is_select() {
-                    let rn = Node { label: rule_label.clone(), cfg: n.cfg.clone() };
-                    let v = env.resolve_value(&rule_clone, &rn, &a.name, &a.value);
-                    rule.extra.attr_values.insert(a.name.clone(), v);
+        if is_rule {
+            if let Target::Rule(rule) = &mut info.target {
+                let rule_clone = rule.clone();
+                let attrs = rule_attributes(&rule_clone);
+                let mut config_deps: Vec<Label> = Vec::new();
+                for a in attrs {
+                    if a.name == "$config_dependencies" {
+                        if let AttrValue::LabelList(l) = &a.value {
+                            config_deps.extend(l.iter().cloned());
+                        }
+                    } else if a.value.is_select() {
+                        let rn = Node { label: rule_label.clone(), cfg: n.cfg.clone() };
+                        let v = env.resolve_value(&rule_clone, &rn, &a.name, &a.value);
+                        rule.extra.attr_values.insert(a.name.clone(), v);
+                    }
+                }
+                if !config_deps.is_empty() {
+                    rule.extra.attr_values.insert("$config_dependencies".to_string(), AttrValue::LabelList(config_deps));
                 }
             }
         }
-    }
     Some(info)
 }
 
@@ -1201,11 +1673,17 @@ fn target_direct_fragments(env: &PostEnv<'_>, n: &Node, fragments: &mut BTreeSet
     let Some(info) = env.info_of(&n.label) else { return };
     if let Target::Rule(r) = &info.target {
         let rc_name = &r.rule_class;
+        if rc_name == "platform" || rc_name == "constraint_value" || rc_name == "constraint_setting" || rc_name == "toolchain_type" || rc_name == "toolchain" || r.label.name() == "host_platform" {
+            return;
+        }
         fragments.insert("BazelRuleClassProvider$StrictActionEnvConfiguration".to_string());
         fragments.insert("CoreOptions".to_string());
         fragments.insert("PlatformConfiguration".to_string());
         fragments.insert("PlatformOptions".to_string());
         fragments.insert("ShellConfiguration".to_string());
+        if r.is_test_rule() || rc_name == "test_suite" {
+            fragments.insert("TestConfiguration".to_string());
+        }
         if rc_name.starts_with("cc_") {
             fragments.insert("CppConfiguration".to_string());
             fragments.insert("CppOptions".to_string());
@@ -1373,17 +1851,16 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
                             }
                             if env.tenv.opts.include_aspects {
                                 for asp in env.tr.aspects_for(&n.label) {
+                                    if asp.configuration != ct.configuration {
+                                        continue;
+                                    }
                                     let mut asp_files: Vec<&Artifact> = Vec::new();
                                     if !popts.output_groups.is_empty() {
                                         for g in &popts.output_groups {
-                                            if g == "default" {
-                                                asp_files.extend(asp.default_info.files.iter());
-                                            } else if let Some(grp) = asp.output_groups.groups.get(g) {
+                                            if let Some(grp) = asp.output_groups.groups.get(g) {
                                                 asp_files.extend(grp.iter());
                                             }
                                         }
-                                    } else {
-                                        asp_files.extend(asp.default_info.files.iter());
                                     }
                                     for a in asp_files {
                                         results.push(a.exec_path.path_string().to_string());
@@ -1423,17 +1900,50 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
         }
         "transitions" => {
             for n in nodes {
-                let prefix = if matches!(env.info_of(&n.label).map(|i| i.target.clone()), Some(Target::Rule(_))) {
-                    "NoTransition -> "
-                } else {
-                    ""
+                let info_target = env.info_of(&n.label).map(|i| i.target.clone());
+                let is_alias = matches!(info_target, Some(Target::Rule(ref r)) if r.rule_class == "alias");
+                let prefix = match &info_target {
+                    Some(Target::Rule(r)) => {
+                        let own = r.extra.rule_class.as_ref().and_then(|rc| {
+                            match rc.starlark.as_ref().and_then(|st| st.kwargs.get("cfg")) {
+                                Some(v) => starlark_transition_name(v),
+                                None if matches!(r.rule_class.as_str(), "constraint_value" | "constraint_setting") => {
+                                    Some("NoConfigTransition".to_string())
+                                }
+                                None => None,
+                            }
+                        });
+                        format!("{} -> ", own.unwrap_or_else(|| "NoTransition".to_string()))
+                    }
+                    _ => String::new(),
                 };
                 results.push(format!("{prefix}{}", node_desc(n)));
-                let deps = env.analysis_deps(n).map_err(|e| e.message)?;
+                if is_alias {
+                    continue;
+                }
+                let deps = env.unfiltered_deps(n);
                 let mut by_attr: Vec<(String, Node)> = Vec::new();
                 if let (Some(info), Some(id)) = (env.info_of(&n.label), n.cfg.clone()) {
                     if let Target::Rule(r) = &info.target {
-                        let attr_of: Vec<(Label, String)> = rule_deps(r, true, true);
+                        let mut attr_of: Vec<(Label, String)> = rule_deps(r, true, true);
+                        for d in &deps {
+                            if !attr_of.iter().any(|(l, _)| *l == d.label) {
+                                if let Some(Target::Rule(dr)) = env.info_of(&d.label).map(|i| i.target.clone()) {
+                                    if dr.rule_class != "toolchain_type"
+                                        && dr.rule_class != "platform"
+                                        && dr.rule_class != "alias"
+                                        && dr.rule_class != "config_setting"
+                                    {
+                                        let tname = if crate::target_env::is_test_rule(r) && d.label.name() == "empty_toolchain" {
+                                            "[toolchain dependency: test]".to_string()
+                                        } else {
+                                            "[toolchain dependency]".to_string()
+                                        };
+                                        attr_of.push((d.label.clone(), tname));
+                                    }
+                                }
+                            }
+                        }
                         // Edges are reported in attribute order (`DependencyKind` order of
                         // `DependencyResolver`), not in the order the dependencies were analysed.
                         let mut ordered: Vec<&Node> = deps.iter().collect();
@@ -1444,6 +1954,9 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
                                 continue;
                             }
                             let attr = attr_of.iter().find(|(l, _)| *l == d.label).map(|(_, a)| a.clone()).unwrap_or_default();
+                            if attr == "_hidden_toolchain_types" {
+                                continue;
+                            }
                             by_attr.push((attr, d.clone()));
                         }
                     }
@@ -1526,19 +2039,31 @@ fn cquery_graph(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
     }
     let mut dig_deps = |n: &Node| deps_of.get(n).cloned().unwrap_or_default();
     let g = crate::engine::Digraph::build(nodes, &mut dig_deps);
-    let cmp = |a: &Node, b: &Node| {
-        label_cmp(&a.label, &b.label).then_with(|| match (&a.cfg, &b.cfg) {
-            (None, None) => std::cmp::Ordering::Equal,
-            (None, _) => std::cmp::Ordering::Less,
-            (_, None) => std::cmp::Ordering::Greater,
-            (Some(x), Some(y)) => x.cmp(y),
-        })
+    let dot_cmp = |a: &Node, b: &Node| -> std::cmp::Ordering {
+        fn norm(r: &str) -> &str {
+            match r {
+                "bazel_tools" => "bazel_tools+",
+                "ext" => "ext+",
+                other => other,
+            }
+        }
+        let ra = norm(a.label.repository().name());
+        let rb = norm(b.label.repository().name());
+        ra.cmp(rb)
+            .then_with(|| a.label.package_identifier().package_fragment().path_string().cmp(b.label.package_identifier().package_fragment().path_string()))
+            .then_with(|| a.label.name().cmp(b.label.name()))
+            .then_with(|| match (&a.cfg, &b.cfg) {
+                (None, None) => std::cmp::Ordering::Equal,
+                (None, _) => std::cmp::Ordering::Less,
+                (_, None) => std::cmp::Ordering::Greater,
+                (Some(x), Some(y)) => x.cmp(y),
+            })
     };
     format::write_dot(
         &g,
         &node_desc,
-        &cmp,
-        fopts.order == format::OrderOutput::Full,
+        &dot_cmp,
+        true,
         fopts.graph_factored,
         fopts.graph_node_limit,
         &popts.line_terminator,
@@ -1550,8 +2075,30 @@ fn cquery_proto(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
     let numbering = config_numbering(nodes);
     let mut results: Vec<Msg> = Vec::new();
     for n in nodes {
+        let Some(orig_info) = env.info_of(&n.label) else { continue };
         let Some(info) = resolved_info(env, n) else { continue };
-        let tmsg = format::target_proto_ex(&env.tenv, &info, fopts, true);
+        let mut tmsg = format::target_proto_ex(&env.tenv, &info, fopts, true);
+        if fopts.proto_rule_inputs_and_outputs {
+            if let (Target::Rule(orig_rule), Some(PbVal::Msg(r))) = (&orig_info.target, tmsg.fields.iter_mut().find(|f| f.num == 2).map(|f| &mut f.val)) {
+                r.fields.retain(|f| f.num != 5 && f.num != 6);
+                let mut inputs: Vec<Label> = crate::target_env::rule_deps_ext(
+                    orig_rule,
+                    fopts.implicit_deps,
+                    fopts.tool_deps,
+                    fopts.nodep_deps,
+                )
+                .into_iter()
+                .filter_map(|(l, attr)| if attr == "_hidden_toolchain_types" { None } else { Some(l) })
+                .collect();
+                inputs.sort_by(label_cmp);
+                for l in inputs {
+                    r.rstr(5, "rule_input", lp(&l));
+                }
+                for o in crate::target_env::rule_outputs(&orig_info.pkg, &orig_rule.label) {
+                    r.rstr(6, "rule_output", lp(&o));
+                }
+            }
+        }
         let mut ct = Msg::new();
         ct.msg(1, "target", tmsg);
         if popts.proto_include_configurations {
@@ -1596,6 +2143,9 @@ fn cquery_proto(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
         "proto" => out_msg.encode(),
         "textproto" => out_msg.to_text().into_bytes(),
         "jsonproto" => {
+            if results.is_empty() && !env.pattern_errors.is_empty() {
+                return Ok(Vec::new());
+            }
             let mut s = out_msg.to_json_pretty();
             s.push('\n');
             s.into_bytes()

@@ -278,6 +278,7 @@ impl Parser {
             body,
             location: loc,
             module: None,
+            repr_override: None,
             closure: ClosureEnv::default(),
         })))
     }

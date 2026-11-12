@@ -240,7 +240,7 @@ impl RemoteSpawnRunner {
         std::mem::take(&mut *self.warnings.lock().unwrap())
     }
 
-    fn warn(&self, w: String) {
+    pub fn warn(&self, w: String) {
         self.warnings.lock().unwrap().push(w);
     }
 

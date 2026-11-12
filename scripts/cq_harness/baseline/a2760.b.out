@@ -9,9 +9,9 @@ rule_class_id: 1
 }
 configuration {
 id: 1
-mnemonic: "darwin_arm64-fastbuild"
-platform_name: "darwin_arm64"
-checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+mnemonic: "k8-fastbuild"
+platform_name: "k8"
+checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
 }
 path_fragments {
 id: 2
@@ -60,7 +60,7 @@ label: "bazel-out"
 }
 path_fragments {
 id: 10
-label: "darwin_arm64-opt-exec"
+label: "k8-opt-exec"
 parent_id: 11
 }
 path_fragments {
@@ -128,7 +128,7 @@ direct_artifact_ids: 5
 }
 path_fragments {
 id: 20
-label: "darwin_arm64-fastbuild"
+label: "k8-fastbuild"
 parent_id: 11
 }
 path_fragments {
@@ -152,12 +152,12 @@ path_fragment_id: 17
 }
 actions {
 target_id: 1
-action_key: "2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542"
+action_key: "efb257e0353d4c7aac216fe391aa37dd298024cb3045911ff7162b8d43f0682d"
 mnemonic: "Genrule"
 configuration_id: 1
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out"
+arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/k8-fastbuild/bin/a/gg.out"
 environment_variables {
   key: "PATH"
   value: "/bin:/usr/bin:/usr/local/bin"

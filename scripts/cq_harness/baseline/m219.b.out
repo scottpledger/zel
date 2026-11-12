@@ -60,47 +60,47 @@
   }],
   "actions": [{
     "targetId": 1,
-    "actionKey": "e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329",
+    "actionKey": "d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6",
     "mnemonic": "CatIt",
     "configurationId": 1,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-opt/bin/a/lib.txt"],
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-fastbuild/bin/a/lib.txt"],
     "inputDepSetIds": [1],
     "outputIds": [5],
     "primaryOutputId": 5,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 1,
-    "actionKey": "2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8",
+    "actionKey": "c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012",
     "mnemonic": "CatIt",
     "configurationId": 2,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt"],
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-opt/bin/a/lib.txt"],
     "inputDepSetIds": [2],
     "outputIds": [6],
     "primaryOutputId": 6,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 2,
-    "actionKey": "c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69",
+    "actionKey": "a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87",
     "mnemonic": "CatIt",
-    "configurationId": 2,
-    "arguments": ["/bin/bash", "-c", "cat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt"],
+    "configurationId": 1,
+    "arguments": ["/bin/bash", "-c", "cat bazel-out/k8-fastbuild/bin/a/lib.txt a/y.txt \u003e bazel-out/k8-fastbuild/bin/a/lib2.txt"],
     "inputDepSetIds": [3],
     "outputIds": [7],
     "primaryOutputId": 7,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 3,
-    "actionKey": "ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea",
+    "actionKey": "528a9290a4550ab3dbb0f137142ffa734f640c7270bfd127baeb7b29a44f1f2a",
     "mnemonic": "CatIt",
-    "configurationId": 2,
-    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/y.txt \u003e bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt"],
+    "configurationId": 1,
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/y.txt \u003e bazel-out/k8-fastbuild/bin/a/sm_cat.txt"],
     "inputDepSetIds": [4],
     "outputIds": [8],
     "primaryOutputId": 8,
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 4,
-    "actionKey": "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a",
+    "actionKey": "8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8",
     "mnemonic": "FileWrite",
     "configurationId": 3,
     "outputIds": [9],
@@ -109,7 +109,7 @@
     "isExecutable": true
   }, {
     "targetId": 4,
-    "actionKey": "04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d",
+    "actionKey": "6d4676cfc8cc9f2031a6a30402bfbe451f4d33cd46a92272cddb17441af265da",
     "mnemonic": "RepoMappingManifest",
     "configurationId": 3,
     "outputIds": [10],
@@ -117,7 +117,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 4,
-    "actionKey": "c9003ec327c69a6d7cc84512879d19c1353a0bb372ab45c23672289203c93160",
+    "actionKey": "23941fd4e6093d3ee7bc18e2ae73db2a79f007db9c7fa6c90977fc47de7ecccd",
     "mnemonic": "SourceSymlinkManifest",
     "configurationId": 3,
     "outputIds": [11],
@@ -125,7 +125,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 4,
-    "actionKey": "2d3875d14b12b47496a9004d1f82c6bcf72e8c046ffdd9e3c962823de9b5c1fe",
+    "actionKey": "5e2d081693a0cdca35fe93c28f1f347a104fc427e6073326245ce128e6f0541f",
     "mnemonic": "SymlinkTree",
     "configurationId": 3,
     "inputDepSetIds": [5],
@@ -143,7 +143,7 @@
     "executionPlatform": "@@platforms//host:host"
   }, {
     "targetId": 4,
-    "actionKey": "205428c674ece34895c9d37069735603ac04f06cc7f559f119763b18bb7e84d8",
+    "actionKey": "6ff7a6d9e8ae0f0d2e54c37977421c903806c134117396c1e00b1968a500b478",
     "mnemonic": "TestRunner",
     "configurationId": 3,
     "arguments": ["external/bazel_tools/tools/test/test-setup.sh", "b/t1"],
@@ -181,7 +181,7 @@
     "directArtifactIds": [1, 2, 3, 4]
   }, {
     "id": 3,
-    "directArtifactIds": [6, 2]
+    "directArtifactIds": [5, 2]
   }, {
     "id": 4,
     "directArtifactIds": [1, 2]
@@ -201,19 +201,19 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-opt",
-    "platformName": "darwin_arm64",
-    "checksum": "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }, {
     "id": 2,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    "mnemonic": "k8-opt",
+    "platformName": "k8",
+    "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   }, {
     "id": 3,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
   }],
   "ruleClasses": [{
     "id": 1,
@@ -257,7 +257,7 @@
     "label": "bazel-out"
   }, {
     "id": 12,
-    "label": "darwin_arm64-opt",
+    "label": "k8-fastbuild",
     "parentId": 13
   }, {
     "id": 11,
@@ -273,7 +273,7 @@
     "parentId": 10
   }, {
     "id": 17,
-    "label": "darwin_arm64-fastbuild",
+    "label": "k8-opt",
     "parentId": 13
   }, {
     "id": 16,
@@ -290,15 +290,15 @@
   }, {
     "id": 18,
     "label": "lib2.txt",
-    "parentId": 15
+    "parentId": 10
   }, {
     "id": 19,
     "label": "sm_cat.txt",
-    "parentId": 15
+    "parentId": 10
   }, {
     "id": 21,
     "label": "b",
-    "parentId": 16
+    "parentId": 11
   }, {
     "id": 20,
     "label": "t1",
@@ -342,7 +342,7 @@
   }, {
     "id": 34,
     "label": "testlogs",
-    "parentId": 17
+    "parentId": 12
   }, {
     "id": 33,
     "label": "b",

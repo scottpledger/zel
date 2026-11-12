@@ -119,7 +119,11 @@ pub fn chm_order(entries: &[(i32, usize)], parallelism: usize) -> Vec<usize> {
 /// Iteration order of a default `java.util.HashMap` (table 16, load factor 0.75) after inserting
 /// the distinct `(hash, id)` entries in order.
 pub fn hashmap_order(entries: &[(i32, usize)]) -> Vec<usize> {
-    let mut cap = 16usize;
+    hashmap_order_cap(entries, 16)
+}
+
+pub fn hashmap_order_cap(entries: &[(i32, usize)], init_cap: usize) -> Vec<usize> {
+    let mut cap = init_cap.max(2).next_power_of_two();
     while entries.len() > cap * 3 / 4 {
         cap *= 2;
     }

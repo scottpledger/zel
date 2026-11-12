@@ -81,7 +81,7 @@
         </list>
         <string name="generator_name" value="sm"/>
         <string name="generator_function" value="smacro"/>
-        <string name="generator_location" value="ate@WS@/a/BUILD:6:7"/>
+        <string name="generator_location" value="a/BUILD:6:7"/>
         <list name="srcs">
             <label value="//a:sm_fg"/>
         </list>
@@ -94,7 +94,7 @@
         </list>
         <string name="generator_name" value="sm"/>
         <string name="generator_function" value="smacro"/>
-        <string name="generator_location" value="ate@WS@/a/BUILD:6:7"/>
+        <string name="generator_location" value="a/BUILD:6:7"/>
         <list name="srcs">
             <label value="//a:x.txt"/>
             <label value="//a:y.txt"/>

@@ -1,11 +1,11 @@
 @@//a:x.txt
-@@//a:lib
-@@//a:lib
-@@//a:srcs_fg
 @@//a:sm_fg
 @@//a:srcs_fg
-@@//a:tr
+@@//a:srcs_fg
 @@//a:lib
-@@//a:lib2
+@@//a:lib
+@@//a:tr
 @@//a:sm_cat
+@@//a:lib2
+@@//a:lib
 @@//b:t1

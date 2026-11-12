@@ -1276,6 +1276,7 @@ impl WorkerSpawnRunner {
             argv: key.args.clone(),
             env,
             cwd: self.exec_root.to_string_lossy().into_owned(),
+            debug_output: None,
         });
         if result.status == SpawnStatus::Success {
             let missing: Vec<String> = spawn

@@ -14,6 +14,7 @@
 
 use crate::syntax::ast::*;
 use crate::types::list::StarlarkError;
+use crate::Location;
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -41,12 +42,20 @@ impl Resolver {
 
     pub fn resolve_module(&mut self, stmts: &[Stmt]) -> Result<(), StarlarkError> {
         let mut saw_non_load = false;
+        let mut first_non_load_loc: Option<Location> = None;
         let mut loaded_names = HashSet::new();
 
         for stmt in stmts {
             match stmt {
                 Stmt::Load(load, loc) => {
                     if saw_non_load && !self.allow_late_loads {
+                        if !loc.file.is_empty() && !loc.file.ends_with("BUILD") && !loc.file.ends_with("BUILD.bazel") {
+                            let f_loc = first_non_load_loc.unwrap_or_else(|| Location::new(&loc.file, 1, 1));
+                            let f_loc = if f_loc.file.is_empty() { Location::new(&loc.file, 1, 1) } else { f_loc };
+                            return Err(StarlarkError(format!(
+                                "{loc}: load statements must appear before any other statement\nERROR: {f_loc}: \tfirst non-load statement appears here"
+                            )));
+                        }
                         return Err(StarlarkError(format!(
                             "{loc}: load statements must appear before any other statement"
                         )));
@@ -64,6 +73,23 @@ impl Resolver {
                 // for this check.
                 Stmt::Expr(Expr::Literal(crate::types::value::Value::String(_))) if !saw_non_load => {}
                 _ => {
+                    if !saw_non_load {
+                        first_non_load_loc = Some(Location::new(
+                            match stmt {
+                                Stmt::Def(f) => &f.location.file,
+                                Stmt::Assign { location, .. } => &location.file,
+                                Stmt::If { location, .. } => &location.file,
+                                Stmt::For { location, .. } => &location.file,
+                                Stmt::Return(_, location) => &location.file,
+                                Stmt::Break(location) => &location.file,
+                                Stmt::Continue(location) => &location.file,
+                                Stmt::Pass(location) => &location.file,
+                                _ => "",
+                            },
+                            1,
+                            1,
+                        ));
+                    }
                     saw_non_load = true;
                 }
             }

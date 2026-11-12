@@ -16,14 +16,6 @@ filegroup(
 # Rule viol instantiated at (most recent call last):
 #   @WS@/pg/BUILD:2:10 in <toplevel>
 
-# @WS@/d/BUILD:2:10
-filegroup(
-  name = "ok",
-  srcs = ["//c:cdata"],
-)
-# Rule ok instantiated at (most recent call last):
-#   @WS@/d/BUILD:2:10 in <toplevel>
-
 # @WS@/b/BUILD:5:5
 xlib(
   name = "shlib",
@@ -35,6 +27,14 @@ xlib(
 #   @WS@/b/BUILD:5:5 in <toplevel>
 # Rule xlib defined at (most recent call last):
 #   @WS@/defs.bzl:36:12 in <toplevel>
+
+# @WS@/d/BUILD:2:10
+filegroup(
+  name = "ok",
+  srcs = ["//c:cdata"],
+)
+# Rule ok instantiated at (most recent call last):
+#   @WS@/d/BUILD:2:10 in <toplevel>
 
 # @WS@/b/BUILD:4:7
 x_test(

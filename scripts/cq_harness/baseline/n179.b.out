@@ -1,10 +1,10 @@
 digraph mygraph {
   node [shape=box];
-  "//a:lib2 (2d89340)"
-  "//a:lib2 (2d89340)" -> "//a:lib (2d89340)"
-  "//a:lib (2d89340)"
-  "//a:lib (2d89340)" -> "@ext//lib:data (2d89340)"
-  "@ext//lib:data (2d89340)"
-  "@ext//lib:data (2d89340)" -> "@ext//lib:d.txt (null)"
+  "//a:lib2 (a7a71fd)"
+  "//a:lib2 (a7a71fd)" -> "//a:lib (a7a71fd)"
+  "//a:lib (a7a71fd)"
+  "//a:lib (a7a71fd)" -> "@ext//lib:data (a7a71fd)"
+  "@ext//lib:data (a7a71fd)"
+  "@ext//lib:data (a7a71fd)" -> "@ext//lib:d.txt (null)"
   "@ext//lib:d.txt (null)"
 }

@@ -331,7 +331,20 @@ fn convert_rule_attrs(
         }
         Value::Struct(Arc::new(StructValue::new(m)))
     };
-    for (name, attr) in attrs {
+    let mut attr_order: Vec<&String> = attrs.keys().collect();
+    attr_order.sort_by(|a, b| {
+        match (a.starts_with('_'), b.starts_with('_')) {
+            (true, false) => std::cmp::Ordering::Greater,
+            (false, true) => std::cmp::Ordering::Less,
+            _ => match (rule.extra.rule_class.as_ref().and_then(|rc| rc.attr_order.iter().position(|x| x == *a)),
+                        rule.extra.rule_class.as_ref().and_then(|rc| rc.attr_order.iter().position(|x| x == *b))) {
+                (Some(pa), Some(pb)) => pa.cmp(&pb),
+                _ => a.cmp(b),
+            },
+        }
+    });
+    for name in attr_order {
+        let attr = &attrs[name];
         if HIDDEN_ATTRS.contains(&name.as_str()) {
             continue;
         }
@@ -468,6 +481,20 @@ pub fn analyze_starlark_rule(
     };
 
     // 1. Attributes.
+    if rc.is_test {
+        let mut trimmed = cfg.clone();
+        trimmed.keep_test = false;
+        if let Ok(tt) = Label::parse_canonical("@bazel_tools//tools/test:default_test_toolchain_type") {
+            if let Ok(ct) = inputs.resolver.configured_target(&tt, &trimmed) {
+                let _ = inputs.resolver.check_dependency(rule, "$toolchains", &ct);
+            }
+        }
+        if let Ok(empty_tc) = Label::parse_canonical("@bazel_tools//tools/test:empty_toolchain") {
+            if let Ok(ct) = inputs.resolver.configured_target(&empty_tc, &trimmed) {
+                let _ = inputs.resolver.check_dependency(rule, "[toolchain dependency: test]", &ct);
+            }
+        }
+    }
     let AttrBundle {
         attr_fields,
         file_fields,

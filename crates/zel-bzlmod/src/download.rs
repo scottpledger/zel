@@ -627,9 +627,6 @@ impl UrlRewriter {
                             loc, line
                         ));
                     }
-                    if !Self::valid_urlencode_syntax(parts[2]) {
-                        return Err(format!("{}: Invalid urlencode syntax in `rewrite` replacement: {}", loc, parts[2]));
-                    }
                     let re = Regex::new(parts[1]).map_err(|e| {
                         format!("{}: Invalid regex in `rewrite`: {} in `{}`", loc, e.to_string().replace(" near index ", " at index "), parts[1])
                     })?;
@@ -649,52 +646,6 @@ impl UrlRewriter {
             }
         }
         Ok(())
-    }
-
-    /// `UrlRewriter.isValidUrlEncodeSyntax`: after removing all valid replacement tokens no
-    /// `urlencode(` may remain.
-    fn valid_urlencode_syntax(repl: &str) -> bool {
-        let b = repl.as_bytes();
-        let mut out = String::new();
-        let mut i = 0;
-        let digits = |from: usize| -> usize {
-            let mut j = from;
-            while j < b.len() && b[j].is_ascii_digit() {
-                j += 1;
-            }
-            j
-        };
-        while i < b.len() {
-            let rest = &repl[i..];
-            let mut consumed = 0;
-            for (pre, post) in [("${urlencode($", ")}"), ("urlencode($", ")"), ("${", "}")] {
-                if let Some(t) = rest.strip_prefix(pre) {
-                    let d = digits(i + pre.len());
-                    if d > i + pre.len() && repl[d..].starts_with(post) {
-                        consumed = d + post.len() - i;
-                        break;
-                    }
-                    let _ = t;
-                }
-            }
-            if consumed == 0 && rest.starts_with('$') {
-                let d = digits(i + 1);
-                if d > i + 1 {
-                    consumed = d - i;
-                }
-            }
-            if consumed == 0 && rest.starts_with('\\') && rest.len() > 1 {
-                consumed = 1 + rest[1..].chars().next().map(|c| c.len_utf8()).unwrap_or(0);
-            }
-            if consumed > 0 {
-                i += consumed;
-            } else {
-                let c = rest.chars().next().unwrap();
-                out.push(c);
-                i += c.len_utf8();
-            }
-        }
-        !out.contains("urlencode(")
     }
 
     /// `UrlRewriter.getDownloaderUrlRewriter`: `configs` are relative to the workspace root; an
@@ -1075,7 +1026,7 @@ impl Downloader {
                         // Retries of HTTP-level failures are silent (`HttpConnector`); `DownloadManager`'s own
                         // retries (`UnknownHostException`) call the downloader again, which reports every URL
                         // failure of every pass (`HttpDownloader.recordFailure`).
-                        let outer = e.msg.starts_with("Unknown host");
+                        let outer = e.msg.starts_with("Unknown host") || e.msg == "Connection refused";
                         if outer || !(e.retryable && attempt < self.retries) {
                             record_warning(url, &e.msg);
                         }
@@ -1084,7 +1035,7 @@ impl Downloader {
                 }
             }
             if any_retryable && attempt < self.retries {
-                if !last_err.starts_with("Unknown host") {
+                if !last_err.starts_with("Unknown host") && last_err != "Connection refused" {
                     std::thread::sleep(wait);
                     wait = wait.saturating_mul(2);
                 }
@@ -1213,6 +1164,9 @@ impl Downloader {
                 // `UnknownHostException` (retried by `DownloadManager`).
                 let host = url.split("://").nth(1).and_then(|r| r.split(['/', ':']).next()).unwrap_or("");
                 return Err(fe(format!("Unknown host: {host}"), false));
+            }
+            if code == 7 {
+                return Err(fe("Connection refused".to_string(), true));
             }
             let retryable = stderr.contains("error: 5") || stderr.contains("error: 429") || matches!(code, 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56);
             return Err(fe(format!("GET {} failed: {}", url, stderr), retryable));

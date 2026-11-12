@@ -1,4 +1,4 @@
 digraph mygraph {
   node [shape=box];
-  "//a:lib (2d89340)\n//a:lib (7e2fa55)\n//b:t1 (1a589d1)"
+  "//a:lib (a7a71fd)\n//a:lib (bf3a44e)\n//b:t1 (e722a21)"
 }

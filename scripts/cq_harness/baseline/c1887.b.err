@@ -5,6 +5,6 @@ WARNING: Build options --action_env and --host_action_env have changed, discardi
 Analyzing: target //a:lib2 (0 packages loaded, 0 targets configured)
 INFO: Analyzed target //a:lib2 (0 packages loaded, 4 targets configured).
 INFO: Found 1 target...
-INFO: Elapsed time: 0.074s, Critical Path: 0.00s
+INFO: Elapsed time: 0.045s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

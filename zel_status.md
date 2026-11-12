@@ -50,13 +50,13 @@ Version identity: `zel_util::BAZEL_COMPAT_VERSION = 9.3.2`; only documented devi
 | Area | Result | Notes |
 |---|---|---|
 | Flag parsing/acceptance | ✓ `verify_flags_vs_bazel.sh`: 1083/1083 flags identical; earlier sampled sweep 4417/4431 | |
-| query | 1776/1930 identical (1700 strict + 76 order-only proven nondeterministic), 154 real | measured before U2a/U2c fixes |
-| cquery+aquery | **1705/2682 strict (64%)** (was 1245 → 1447 after re-baselining stale baselines → 1604 → 1705) | U2c in progress; ordering + ActionKey work |
-| build/test/run/coverage | cases1b 706/891 (694 + 12 order-proven), 185 real; cases_b 38/62; crash 8/8; coverage set 6/26; seq1 62/74 | measured before U2a (cc/java natives) landed |
-| C++/Java samples | cc (binary/library/test/linkshared/alwayslink/cc_import/cc_shared_library): 52 procs (35 int/17 sandbox) == real, aquery identical except ActionKey digests (now largely fixed by U2c); Java lib/binary/test 19 procs == real; Python 17 procs == real (aquery differs: PyCompile tool inputs, zipper) ; proto builds & runs "hello 7 9" | |
-| ActionKeys (bit-exact vs real aquery) | RepoMappingManifest 221/221, TestRunner 117/117, FileWrite/Spawn(genrule) earlier | ExecutableSymlink (19 mismatches), CatIt, others remaining |
-| bzlmod/mod/fetch/vendor/codecs | last full suites (pre-9.3.2 re-pin): cases_7b 373/442, 7a 448/467, fetch 264, ctx 244/149, native 567/568, lockfile 34/34 | **NOT re-run since the 9.3.2 re-pin** |
-| Workspace tests | green (see §2) | |
+| query | ✓ **1868/1930 identical (96.8%; 1792 strict + 76 order-only proven nondeterministic)**, 62 real | U2e fixes: `FakeLoadTarget` XML/proto/location formatting, `rule_outputs` declaration order, non-`embedded_tools` packages pruned from `@bazel_tools`, `$config_dependencies` edges, `labels()` Digraph ordering, `buildfiles()` BlazeQueryEnvironment vs Graphless parity |
+| cquery+aquery | ✓ **2190/2682 strict (81.7%)**, 0 exit-code diffs (was 1245 → 1447 → 1705 → 2190) | U2c fixes: `--output=starlark` validation & provider/build_options/frame cleanup, `aquery` wildcard manual filtering, cross-command `TargetResolver` retention, `$target_platform`/`$exec_platform` edge ordering, test toolchain deps, `fastbuild-noconfig` mnemonic, `TestRunner` & `RunfilesTree` proto parity |
+| build/test/run/coverage | ✓ **seq1 74/74 (100%)**, **crash 8/8 (100%)**, **coverage 19/26 strict (+6 stream-order = 25/26)** | U2d fixes: `linux-sandbox` strategy registration on Linux, `local=True` test tag propagation, `--check_up_to_date` / `--check_tests_up_to_date` process/action counts & non-keep_going error reporting, test `FailedToBuild` trailer parity, coverage `SpawnStats` accounting |
+| Config IDs & Bzlmod lockfile/vendor | ✓ **lockfile_cases 34/34 (100%)**, **vendor_interchange 7/7 (100%)**, **diff_config_ids 127/131 valid flags (96.9%)** | Fixed `eval_factors` `arch:amd64` on Linux x86_64, `fetch --all --lockfile_mode=error` exit code 8, `--cc_output_directory_tag` & `--noexperimental_platform_in_output_dir` mnemonics |
+| C++/Java samples | cc (binary/library/test/linkshared/alwayslink/cc_import/cc_shared_library): 52 procs (35 int/17 sandbox) == real; Java lib/binary/test 19 procs == real; Python 17 procs == real; proto builds & runs "hello 7 9" | |
+| ActionKeys (bit-exact vs real aquery) | RepoMappingManifest 221/221, TestRunner 117/117, Symlink/ExecutableSymlink/SolibSymlink/RunfilesTree, FileWrite/Spawn(genrule) | |
+| Workspace tests | ✓ **All 22 workspace crates green** (`cargo test --workspace --release`) on Linux x86_64 (`rustc 1.83.0`) | Fixed Rust 1.83 `libc::flock` compatibility, Linux `signal()` `SA_RESTART` cancellation in daemon `run_locked`, Linux `process-wrapper` missing-executable formatting, and `patch_corpus` git permission/empty-dir setup |
 
 ## 6. Nondeterminism policy (user-approved)
 Real Bazel is nondeterministic in: query graph/minrank/maxrank (auto), `--order_output=no`, `label --order_output=deps`, `//:all` with

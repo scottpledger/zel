@@ -4,6 +4,6 @@ Loading: 0 packages loaded
 Analyzing: 14 targets (0 packages loaded, 0 targets configured)
 INFO: Analyzed 14 targets (0 packages loaded, 0 targets configured).
 INFO: Found 14 targets...
-INFO: Elapsed time: 0.059s, Critical Path: 0.00s
+INFO: Elapsed time: 0.030s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

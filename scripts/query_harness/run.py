@@ -24,7 +24,7 @@ def ns(s,ws,ob):
 def nh(s):
     s=re.sub(r'\b[0-9a-f]{64}\b','H64',s)
     return re.sub(r'(?<![0-9a-zA-Z_])[0-9a-f]{7}(?![0-9a-zA-Z_])','H7',s)
-noise=re.compile(r'^(\s*- Only in|WARNING: Running Bazel server needs to be killed|INFO: Current working directory|Computing main repo|INFO: [0-9]+ process|Starting local Bazel|\s+no actions running|INFO: (Elapsed|Analyzed|Build completed|Invocation|Streaming|Current date|Repository|Reading|Computing|Analyzed)|Loading:|Analyzing:|\(|DEBUG:| no actions|Starting local|\[|Computing|INFO: Build|INFO: From|INFO: Writing|Fetching|.*\d+ packages loaded|INFO: Elapsed|\s*currently loading)')
+noise=re.compile(r'^(\s*- Only in|WARNING: Running Bazel server needs to be killed|INFO: Current working directory|Computing main repo|INFO: [0-9]+ process|Starting local Bazel|\s+no actions running|INFO: (Elapsed|Analyzed|Build completed|Invocation|Streaming|Current date|Repository|Reading|Computing|Analyzed|Options provided)|\s+Inherited |Loading:|Analyzing:|\(|DEBUG:| no actions|Starting local|\[|Computing|INFO: Build|INFO: From|INFO: Writing|Fetching|.*\d+ packages loaded|INFO: Elapsed|\s*currently loading)')
 def decode(cmd,data):
     m=re.search(r'--output=(\w+)',cmd)
     if not m or m.group(1) not in('proto','streamed_proto'): return None
@@ -82,7 +82,10 @@ def main():
         if os.path.exists(base):shutil.rmtree(base)
         os.makedirs(base)
         shutil.copytree(HERE+'/ext',base+'/ext')
-        for w in('ws','wsbroken'): shutil.copytree(HERE+'/'+w,base+'/'+w)
+        for w in('ws','wsbroken'):
+            shutil.copytree(HERE+'/'+w,base+'/'+w)
+            shutil.copy(HERE+'/../../MODULE.bazel.lock',base+'/'+w+'/MODULE.bazel.lock')
+            open(base+'/'+w+'/.bazelrc','w').write('common --registry=file:///tmp/vendored-registry\n')
         while True:
             try:i,w,c=q.get_nowait()
             except queue.Empty:return

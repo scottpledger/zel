@@ -290,6 +290,27 @@ pub fn convert_raws(
                     }
                 }
             }
+            "ExecutionInfoModifier" => {
+                if raw.is_empty() {
+                    Ok("ExecutionInfoModifier{option=, expressions=[]}".to_string())
+                } else {
+                    let mut exprs = Vec::new();
+                    for spec in raw.split(',') {
+                        let Some((pat, rest)) = spec.rsplit_once('=') else {
+                            return Err(format!("malformed expression '{spec}'"));
+                        };
+                        let (remove, key) = if let Some(k) = rest.strip_prefix('-') {
+                            (true, k)
+                        } else if let Some(k) = rest.strip_prefix('+') {
+                            (false, k)
+                        } else {
+                            return Err(format!("malformed expression '{spec}'"));
+                        };
+                        exprs.push(format!("Expression{{regex={pat}, remove={remove}, key={key}}}"));
+                    }
+                    Ok(format!("ExecutionInfoModifier{{option={raw}, expressions=[{}]}}", exprs.join(", ")))
+                }
+            }
             other => Ok(other.to_string()),
         }
     };
@@ -699,7 +720,16 @@ impl BuildOptions {
             }
         }
         o.set("platforms", ConfigValue::List(vec![exec_platform.to_string()]));
-        o.set("platform_suffix", ConfigValue::Scalar("exec".into()));
+        let suffix = if orig.get("experimental_exec_configuration_distinguisher").map(|v| v.display().to_ascii_uppercase()) == Some("LEGACY".to_string()) {
+            let mut h: i32 = 0;
+            for u in exec_platform.encode_utf16() {
+                h = h.wrapping_mul(31).wrapping_add(u as i32);
+            }
+            format!("exec-{:X}", h as u32)
+        } else {
+            "exec".to_string()
+        };
+        o.set("platform_suffix", ConfigValue::Scalar(suffix));
         o
     }
 
@@ -743,7 +773,12 @@ impl BuildOptions {
         // `scope` get the `DEFAULT` placeholder (verified against the 9.3.2 binary: ids only match with it).
         let mut scopes: BTreeMap<String, String> = self.scopes.clone();
         for k in self.starlark.keys() {
-            scopes.entry(k.clone()).or_insert_with(|| "DEFAULT".to_string());
+            let def_scope = if k.starts_with("@@rules_python+//python/config_settings:") {
+                "UNIVERSAL"
+            } else {
+                "DEFAULT"
+            };
+            scopes.entry(k.clone()).or_insert_with(|| def_scope.to_string());
         }
         add_string(
             &mut buf,

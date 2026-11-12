@@ -5,15 +5,15 @@ digraph mygraph {
   "//a:gg" -> "@ext//lib:data"
   "//a:gg" -> "@bazel_tools//tools/genrule:genrule-setup.sh"
   "//a:gg" -> "//b:tool"
+  "@bazel_tools//tools/genrule:genrule-setup.sh"
   "@ext//lib:data"
   "@ext//lib:data" -> "@ext//lib:d.txt"
-  "@ext//lib:d.txt"
-  "//a:sel"
-  "//a:sel" -> "//a:def_cs\n//a:y.txt\n//a:z.txt\n//a:opt_cs\n//a:x.txt"
-  [label="//a:def_cs//conditions:default//a:opt_cs"];
-  "@bazel_tools//tools/genrule:genrule-setup.sh"
   "//b:tool"
   "//b:tool" -> "//b:tool.cc"
   "//b:tool.cc"
-  "//a:def_cs\n//a:y.txt\n//a:z.txt\n//a:opt_cs\n//a:x.txt"
+  "@ext//lib:d.txt"
+  "//a:sel"
+  "//a:sel" -> "//a:x.txt\n//a:y.txt\n//a:z.txt\n//a:def_cs\n//a:opt_cs"
+  [label="//a:opt_cs//a:def_cs//conditions:default"];
+  "//a:x.txt\n//a:y.txt\n//a:z.txt\n//a:def_cs\n//a:opt_cs"
 }

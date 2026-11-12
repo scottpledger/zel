@@ -4,6 +4,6 @@ Loading: 0 packages loaded
 Analyzing: target //a:tr (0 packages loaded, 0 targets configured)
 ERROR: nope is not exported from //:defs.bzl
 ERROR: Analysis of aspects '[//:defs.bzl%nope] with parameters {} on //a:tr' failed; build aborted: nope is not exported from //:defs.bzl
-INFO: Elapsed time: 0.081s
+INFO: Elapsed time: 0.029s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

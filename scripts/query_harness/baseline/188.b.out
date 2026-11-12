@@ -22,29 +22,6 @@
     <source-file location="@OB@/external/bazel_tools/tools/genrule/genrule-setup.sh:1:1" name="@bazel_tools//tools/genrule:genrule-setup.sh">
         <visibility-label name="//visibility:public"/>
     </source-file>
-    <rule class="xbin" location="@WS@/b/BUILD:2:5" name="//b:tool">
-        <string name="name" value="tool"/>
-        <list name="visibility">
-            <label value="//visibility:public"/>
-        </list>
-        <list name="srcs">
-            <label value="//b:tool.cc"/>
-        </list>
-        <rule-input name="//b:tool.cc"/>
-    </rule>
-    <source-file location="@WS@/b/tool.cc:1:1" name="//b:tool.cc">
-        <visibility-label name="//visibility:private"/>
-    </source-file>
-    <rule class="filegroup" location="@OB@/external/ext+/lib/BUILD:1:10" name="@ext//lib:data">
-        <string name="name" value="data"/>
-        <list name="visibility">
-            <label value="//visibility:public"/>
-        </list>
-        <list name="srcs">
-            <label value="@ext//lib:d.txt"/>
-        </list>
-        <rule-input name="@ext//lib:d.txt"/>
-    </rule>
     <rule class="filegroup" location="@WS@/a/BUILD:11:10" name="//a:sel">
         <string name="name" value="sel"/>
         <list name="srcs">
@@ -58,10 +35,7 @@
         <rule-input name="//a:y.txt"/>
         <rule-input name="//a:z.txt"/>
     </rule>
-    <source-file location="@WS@/a/y.txt:1:1" name="//a:y.txt">
-        <visibility-label name="//visibility:public"/>
-    </source-file>
-    <source-file location="@WS@/a/x.txt:1:1" name="//a:x.txt">
+    <source-file location="@WS@/a/z.txt:1:1" name="//a:z.txt">
         <visibility-label name="//visibility:public"/>
     </source-file>
     <rule class="config_setting" location="@WS@/a/BUILD:10:15" name="//a:def_cs">
@@ -73,6 +47,19 @@
             </pair>
         </dict>
     </rule>
+    <rule class="xbin" location="@WS@/b/BUILD:2:5" name="//b:tool">
+        <string name="name" value="tool"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="//b:tool.cc"/>
+        </list>
+        <rule-input name="//b:tool.cc"/>
+    </rule>
+    <source-file location="@WS@/a/x.txt:1:1" name="//a:x.txt">
+        <visibility-label name="//visibility:public"/>
+    </source-file>
     <rule class="config_setting" location="@WS@/a/BUILD:9:15" name="//a:opt_cs">
         <string name="name" value="opt_cs"/>
         <dict name="values">
@@ -82,10 +69,23 @@
             </pair>
         </dict>
     </rule>
-    <source-file location="@WS@/a/z.txt:1:1" name="//a:z.txt">
+    <rule class="filegroup" location="@OB@/external/ext+/lib/BUILD:1:10" name="@ext//lib:data">
+        <string name="name" value="data"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="@ext//lib:d.txt"/>
+        </list>
+        <rule-input name="@ext//lib:d.txt"/>
+    </rule>
+    <source-file location="@OB@/external/ext+/lib/d.txt:1:1" name="@ext//lib:d.txt">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <source-file location="@WS@/a/y.txt:1:1" name="//a:y.txt">
         <visibility-label name="//visibility:public"/>
     </source-file>
-    <source-file location="@OB@/external/ext+/lib/d.txt:1:1" name="@ext//lib:d.txt">
+    <source-file location="@WS@/b/tool.cc:1:1" name="//b:tool.cc">
         <visibility-label name="//visibility:private"/>
     </source-file>
 </query>

@@ -18,6 +18,12 @@ def norm(s,ws,ob,dbg=False):
     s=re.sub(r'temp\d{10,}','tempN',s)  # Bazel's random scratch dir inside the repo directory
     s=re.sub(r'\b[0-9a-f]{64}\b','H64',s)
     s=re.sub(r'sha256-[A-Za-z0-9+/]{43}=','SRI',s)
+    # Resolution of the built-in bazel_tools closure is parallel. With an empty registry,
+    # either implementation may report any one of the missing closure modules first.
+    if '/emptyreg/modules/' in s:
+        s=re.sub(r'(bazel_tools@_ -> )[^:]+:', r'\1<MISSING>:', s)
+        s=re.sub(r'module [^ ]+ not found in registries:', 'module <MISSING> not found in registries:', s)
+        s=re.sub(r'/emptyreg/modules/[^/]+/[^/]+/MODULE\.bazel', '/emptyreg/modules/<MISSING>/MODULE.bazel', s)
     pat=r'(?m)^(Starting local|\.\.\. still trying to connect|Computing main|Loading:|Analyzing:|INFO: (Elapsed|Analyzed|Build completed|Found|Invocation|Streaming|Current date|Repository|Reading|Fetching|Updated|All requested)|'+('' if dbg else 'DEBUG:|')+r'\(\d+:\d+:\d+\)|Fetching ).*\n?'
     s=re.sub(pat,'',s)
     return s
@@ -30,7 +36,9 @@ def run_one(bin,args,ws,ob,env=None):
 def do_case(c):
     name=c['name']; res={}
     for k,bin in (('b',B),('z',Z)):
-        ws=f'{ROOT}/{name}/{k}'; ob=f'{ROOT}/{name}/ob_{k}'
+        # Use the same workspace basename for both binaries. Repository rules can observe
+        # `repository_ctx.workspace_root`; differing leaf names would make equivalent runs diverge.
+        ws=f'{ROOT}/{name}/{k}/ws'; ob=f'{ROOT}/{name}/ob_{k}'
         shutil.rmtree(f'{ROOT}/{name}/{k}',ignore_errors=True); shutil.rmtree(ob,ignore_errors=True)
         os.makedirs(ws)
         files=dict(c.get('files',{}))
@@ -127,6 +135,9 @@ def tree(root):
     for dp,dn,fn in os.walk(root):
         for x in sorted(dn+fn):
             p=os.path.join(dp,x); r=os.path.relpath(p,root)
+            # Java's createTempDirectory suffix is random; compare the resulting entry and mode,
+            # not two unrelated random suffixes.
+            r=re.sub(r'(?<=/)temp\d+|^temp\d+', 'tempN', r)
             st=os.lstat(p)
             if os.path.islink(p): out.append(f'{r} L {_n(os.readlink(p).encode()).decode().replace(root,"ROOT")}')
             elif os.path.isdir(p): out.append(f'{r} D {oct(st.st_mode&0o777)}')

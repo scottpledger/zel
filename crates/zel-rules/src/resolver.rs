@@ -469,7 +469,7 @@ impl TargetResolver {
         let Ok(pkg) = self.package(l.package_identifier()) else { return false };
         match pkg.targets.get(l.name()) {
             Some(Target::Rule(r)) => match r.rule_class.as_str() {
-                "platform" | "toolchain_type" | "toolchain" => true,
+                "platform" | "toolchain_type" | "toolchain" | "empty_toolchain" => true,
                 "alias" if depth < 8 => match r.attr_or_default("actual") {
                     Some(AttrValue::Label(Some(a))) => self.is_platform_like(&a, depth + 1),
                     _ => false,
@@ -482,6 +482,75 @@ impl TargetResolver {
 
     pub fn set_defer_cycle_dedup(&self, v: bool) {
         self.defer_cycle_dedup.store(v, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn copy_exec_from(&self, other: &TargetResolver) {
+        let mut cache = self.cache.lock().unwrap();
+        let mut order = self.order.lock().unwrap();
+        let mut edges = self.edges.lock().unwrap();
+        let mut pkg_sets = self.pkg_sets.lock().unwrap();
+        for (k, ct) in other.cache.lock().unwrap().iter() {
+            if (ct.configuration.is_exec && ct.configuration.short_hash() == "04bf134")
+                || ct.configuration.core_only
+            {
+                cache.insert(k.clone(), ct.clone());
+                order.push(ct.clone());
+                if let Some(e) = other.edges.lock().unwrap().get(k) {
+                    edges.insert(k.clone(), e.clone());
+                }
+                if let Some(p) = other.pkg_sets.lock().unwrap().get(k) {
+                    pkg_sets.insert(k.clone(), p.clone());
+                }
+            }
+        }
+    }
+
+    pub fn clear_exec(&self) {
+        let mut cache = self.cache.lock().unwrap();
+        cache.retain(|_, ct| ct.configuration.core_only);
+        let kept_keys: std::collections::HashSet<(String, String)> = cache.keys().cloned().collect();
+        drop(cache);
+        self.order.lock().unwrap().retain(|ct| ct.configuration.core_only);
+        self.edges.lock().unwrap().retain(|k, _| kept_keys.contains(k));
+        self.pkg_sets.lock().unwrap().retain(|k, _| kept_keys.contains(k));
+    }
+
+    pub fn retain_exec_only(&self) {
+        let mut cache = self.cache.lock().unwrap();
+        cache.retain(|_, ct| {
+            (ct.configuration.is_exec && ct.configuration.short_hash() == "04bf134")
+                || ct.configuration.core_only
+        });
+        let kept_keys: std::collections::HashSet<(String, String)> = cache.keys().cloned().collect();
+        drop(cache);
+        self.order.lock().unwrap().retain(|ct| {
+            (ct.configuration.is_exec && ct.configuration.short_hash() == "04bf134")
+                || ct.configuration.core_only
+        });
+        self.edges.lock().unwrap().retain(|k, _| kept_keys.contains(k));
+        self.pkg_sets.lock().unwrap().retain(|k, _| kept_keys.contains(k));
+        self.reported_cycles.lock().unwrap().clear();
+        self.warnings.lock().unwrap().clear();
+        self.aspects.lock().unwrap().clear();
+    }
+
+    pub fn update_for_command(&self, mut config: AnalysisConfig) {
+        if config.expander.is_none() {
+            config.expander = Some(Arc::new(LoaderExpander { loader: self.loader.clone() }));
+        }
+        if config.check_visibility != self.config.check_visibility
+            || config.allow_unresolved_symlinks != self.config.allow_unresolved_symlinks
+            || config.no_compact_repo_mapping != self.config.no_compact_repo_mapping
+            || config.host_platform != self.config.host_platform
+            || config.shell_executable != self.config.shell_executable
+            || config.toolchain_patterns != self.config.toolchain_patterns
+            || config.execution_platform_patterns != self.config.execution_platform_patterns
+        {
+            self.retain_exec_only();
+            return;
+        }
+        self.reported_cycles.lock().unwrap().clear();
+        self.warnings.lock().unwrap().clear();
     }
 
     pub fn direct_deps(&self, label: &Label, cfg: &BuildConfigurationKey) -> Vec<(Label, BuildConfigurationKey)> {
@@ -549,13 +618,7 @@ impl TargetResolver {
                 if self.loader.config().lookup.fs.exists(&path, true) || is_prereq {
                     Target::InputFile { label: label.clone() }
                 } else {
-                    return Err(format!(
-                        "no such target '{}': target '{}' not declared in package '{}' defined by {}",
-                        label.canonical_form(),
-                        label.name(),
-                        label.package_name(),
-                        pkg.build_file
-                    ));
+                    return Err(pkg.get_target(label.name(), self.loader.config().lookup.fs.as_ref()).unwrap_err());
                 }
             }
         };

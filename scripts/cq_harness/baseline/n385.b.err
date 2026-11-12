@@ -1,6 +1,7 @@
 Computing main repo mapping: 
 Loading: 
 Loading: 0 packages loaded
+WARNING: Build option --features has changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
 Analyzing: 26 targets (0 packages loaded, 0 targets configured)
 ERROR: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
  - nonexistent
@@ -10,25 +11,25 @@ ERROR: @WS@/pg/BUILD:1:10: in filegroup rule //pg:private: Visibility error:
 target '//b:mk' is not visible from
 target '//pg:private'
 Recommendation: modify the visibility declaration if you think the dependency is legitimate. For more info see https://bazel.build/concepts/visibility
-ERROR: @WS@/pg/BUILD:1:10: Analysis of target '//pg:private' (config: 2d89340) failed
-WARNING: errors encountered while analyzing target '//pg:private', it will not be built.
-ERROR: @WS@/c/BUILD:3:10: in filegroup rule //c:cyc2: cycle in dependency graph:
-    //c:cyc2 (1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607)
-.-> //c:cyc2 (2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c)
-|   //c:cyc1 (2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c)
-`-- //c:cyc2 (2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c)
-WARNING: errors encountered while analyzing target '//c:cyc2', it will not be built.
+ERROR: @WS@/pg/BUILD:1:10: Analysis of target '//pg:private' (config: a7a71fd) failed
 WARNING: errors encountered while analyzing target '//d:dep_bad', it will not be built.
 Analysis failed
-ERROR: @WS@/c/BUILD:2:10: in filegroup rule //c:cyc1: cycle in dependency graph: target depends on an already-reported cycle
+WARNING: errors encountered while analyzing target '//pg:private', it will not be built.
+ERROR: @WS@/c/BUILD:2:10: in filegroup rule //c:cyc1: cycle in dependency graph:
+    //c:cyc1 (e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a)
+.-> //c:cyc1 (a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18)
+|   //c:cyc2 (a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18)
+`-- //c:cyc1 (a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18)
 WARNING: errors encountered while analyzing target '//c:cyc1', it will not be built.
+ERROR: @WS@/c/BUILD:3:10: in filegroup rule //c:cyc2: cycle in dependency graph: target depends on an already-reported cycle
+WARNING: errors encountered while analyzing target '//c:cyc2', it will not be built.
 WARNING: errors encountered while analyzing target '//d:bad', it will not be built.
 Analysis failed
 INFO: Analysis succeeded for only 21 of 26 top-level targets
-INFO: Analyzed 26 targets (0 packages loaded, 416 targets configured).
+INFO: Analyzed 26 targets (0 packages loaded, 417 targets configured).
 INFO: Found 21 targets...
-WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//a:cl, config=BuildConfigurationKey[2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c]}]
+WARNING: Targets were missing from graph: [ConfiguredTargetKey{label=//a:cl, config=BuildConfigurationKey[a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18]}]
 ERROR: command succeeded, but not all targets were analyzed
-INFO: Elapsed time: 0.080s, Critical Path: 0.00s
+INFO: Elapsed time: 0.051s, Critical Path: 0.00s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

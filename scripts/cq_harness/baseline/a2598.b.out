@@ -1,15 +1,15 @@
 action 'Executing genrule //a:gg'
   Mnemonic: Genrule
   Target: //a:gg
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 49105e9efe6e500c789d87ba2c51973a496974c57e600aa8a957fce9d5433ca3
-  Inputs: [a/y.txt, bazel-out/darwin_arm64-opt-exec/bin/b/tool, bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/gg.out]
+  ActionKey: 03d29fb4c70b856cb808b5e4768db7d1a1f5ca96b0bee7607dcc862e69959155
+  Inputs: [a/y.txt, bazel-out/k8-opt-exec/bin/b/tool, bazel-out/k8-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/gg.out]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec /bin/bash \
     -c \
-    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/y.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/y.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out')
-# Configuration: 334d30cce92f9036b1276505d868663345e4a37a289dd888a042fd7649e31cf6
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/y.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/gg.out ; echo a/y.txt >> bazel-out/k8-fastbuild/bin/a/gg.out')
+# Configuration: 362c0685813bff2a0ac83b66374d7bf793fbaa51750a5c913dd68c843fccbd3c
 # Execution platform: @@platforms//host:host
 

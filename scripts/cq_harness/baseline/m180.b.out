@@ -1,139 +1,139 @@
 action 'Writing script b/t1'
   Mnemonic: FileWrite
   Target: //b:t1
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
+  ActionKey: 8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/t1]
+  Outputs: [bazel-out/k8-opt/bin/b/t1]
   IsExecutable: true
 
 action 'Writing repo mapping manifest for //b:t1'
   Mnemonic: RepoMappingManifest
   Target: //b:t1
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: 04f49936f1b200d226f347d5043d8bb23a6f57469ac99e66d1b21f8e9239000d
+  ActionKey: 6d4676cfc8cc9f2031a6a30402bfbe451f4d33cd46a92272cddb17441af265da
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/t1.repo_mapping]
+  Outputs: [bazel-out/k8-opt/bin/b/t1.repo_mapping]
   IsExecutable: false
 
 action 'Creating source manifest for //b:t1'
   Mnemonic: SourceSymlinkManifest
   Target: //b:t1
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: e98c1a3c2532ef0693b68f3627afc6755a8487279f7f0709d4dc2e8bcb83f535
+  ActionKey: 74062775261b7755eae597314d4af91baaf3ba141b632eaf73b8f80f38d29682
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/t1.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt/bin/b/t1.runfiles_manifest]
   IsExecutable: false
 
-action 'Creating runfiles tree bazel-out/darwin_arm64-opt/bin/b/t1.runfiles'
+action 'Creating runfiles tree bazel-out/k8-opt/bin/b/t1.runfiles'
   Mnemonic: SymlinkTree
   Target: //b:t1
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: 7fbc7eb3bf22f0779af5d0d8eec71f5b5c91f4e15f9bfeee0649455e4f387066
-  Inputs: [bazel-out/darwin_arm64-opt/bin/b/t1.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/t1.runfiles/MANIFEST]
+  ActionKey: 9a029160899b354acf0f65320b1e4d636f13576569d46b45b4301b950bbc1d18
+  Inputs: [bazel-out/k8-opt/bin/b/t1.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt/bin/b/t1.runfiles/MANIFEST]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
 
 runfiles for //b:t1
   Mnemonic: RunfilesTree
   Target: //b:t1
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
   ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
-  Inputs: [bazel-out/darwin_arm64-opt/bin/a/lib2.txt, bazel-out/darwin_arm64-opt/bin/b/t1, bazel-out/darwin_arm64-opt/bin/b/t1.repo_mapping, bazel-out/darwin_arm64-opt/bin/b/t1.runfiles/MANIFEST]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/t1.runfiles]
+  Inputs: [bazel-out/k8-opt/bin/a/lib2.txt, bazel-out/k8-opt/bin/b/t1, bazel-out/k8-opt/bin/b/t1.repo_mapping, bazel-out/k8-opt/bin/b/t1.runfiles/MANIFEST]
+  Outputs: [bazel-out/k8-opt/bin/b/t1.runfiles]
 
 action 'Testing //b:t1'
   Mnemonic: TestRunner
   Target: //b:t1
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: 205428c674ece34895c9d37069735603ac04f06cc7f559f119763b18bb7e84d8
-  Inputs: [bazel-out/darwin_arm64-opt/bin/b/t1.runfiles, external/bazel_tools/tools/test/generate-xml.sh, external/bazel_tools/tools/test/test-setup.sh]
-  Outputs: [bazel-out/darwin_arm64-opt/testlogs/b/t1/test.cache_status, bazel-out/darwin_arm64-opt/testlogs/b/t1/test.log, bazel-out/darwin_arm64-opt/testlogs/b/t1/test.outputs (TreeArtifact), bazel-out/darwin_arm64-opt/testlogs/b/t1/test.xml]
+  ActionKey: 6ff7a6d9e8ae0f0d2e54c37977421c903806c134117396c1e00b1968a500b478
+  Inputs: [bazel-out/k8-opt/bin/b/t1.runfiles, external/bazel_tools/tools/test/generate-xml.sh, external/bazel_tools/tools/test/test-setup.sh]
+  Outputs: [bazel-out/k8-opt/testlogs/b/t1/test.cache_status, bazel-out/k8-opt/testlogs/b/t1/test.log, bazel-out/k8-opt/testlogs/b/t1/test.outputs (TreeArtifact), bazel-out/k8-opt/testlogs/b/t1/test.xml]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec external/bazel_tools/tools/test/test-setup.sh \
     b/t1)
-# Configuration: dbe73ee21cbd4dd28c3fba8c9b741ea22fe47237fe7021c5cf0bf4361f1b0e17
-# Execution platform: @@platforms//host:host
-
-action 'Cat @@//a:lib2'
-  Mnemonic: CatIt
-  Target: //a:lib2
-  Configuration: darwin_arm64-opt
-  Execution platform: @@platforms//host:host
-  ActionKey: c57881fd0f74bd92a28c31cdcc77b880fd39a7aade31e5bcf1c2691b8cc64bc8
-  Inputs: [a/y.txt, bazel-out/darwin_arm64-opt/bin/a/lib.txt]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/a/lib2.txt]
-  Command Line: (exec /bin/bash \
-    -c \
-    'cat bazel-out/darwin_arm64-opt/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-opt/bin/a/lib2.txt')
-# Configuration: 7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565
+# Configuration: 498bb92da760dd79755822c370202df896e233a5c94f8b74d237c0f41b576e8f
 # Execution platform: @@platforms//host:host
 
 action 'Creating symlink external/bazel_tools/tools/test/collect_coverage [for tool]'
   Mnemonic: ExecutableSymlink
   Target: @bazel_tools//tools/test:collect_coverage
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
   ActionKey: c90914cc1e7ea06f84518cf4f179e63dbd20dad9358a550644494828e4a4ed28
   Inputs: [external/bazel_tools/tools/test/collect_coverage.sh]
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage]
+  Outputs: [bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage]
 
 action 'Writing repo mapping manifest for @@bazel_tools//tools/test:collect_coverage [for tool]'
   Mnemonic: RepoMappingManifest
   Target: @bazel_tools//tools/test:collect_coverage
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
-  ActionKey: 4b21d44b9fea9b91d1b51c310b27165a673872e2010b8ebb6696edcdb8a988da
+  ActionKey: 96e386d23d200dd8f90f1f1cb57c734baf5cc263a1b9daec3f31184dd9b4be06
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.repo_mapping]
+  Outputs: [bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.repo_mapping]
   IsExecutable: false
 
 action 'Creating source manifest for @@bazel_tools//tools/test:collect_coverage [for tool]'
   Mnemonic: SourceSymlinkManifest
   Target: @bazel_tools//tools/test:collect_coverage
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
-  ActionKey: 5fb4de8574921ef018cc19534daa894b939b08085e280e130ee2d67188ac55d2
+  ActionKey: 6a4d5d1c4c0ce605a5f6e7d0c62e6002571fb421e546cbe3015842589fc4e101
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles_manifest]
   IsExecutable: false
 
-action 'Creating runfiles tree bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles [for tool]'
+action 'Creating runfiles tree bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles [for tool]'
   Mnemonic: SymlinkTree
   Target: @bazel_tools//tools/test:collect_coverage
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
-  ActionKey: 55010e04ccb777eb180d1379e3a73130033c3aab15e569bd7a3d8a1d8f63bfb8
-  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles/MANIFEST]
+  ActionKey: 47107eebd74fa3772e2893b396f84942fffbd5aae83806f530b42269205852e7
+  Inputs: [bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles/MANIFEST]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
 
 runfiles for @@bazel_tools//tools/test:collect_coverage
   Mnemonic: RunfilesTree
   Target: @bazel_tools//tools/test:collect_coverage
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
   ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
-  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage, bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.repo_mapping, bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles/MANIFEST, external/bazel_tools/tools/test/collect_coverage.sh]
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles]
+  Inputs: [bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage, bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.repo_mapping, bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles/MANIFEST, external/bazel_tools/tools/test/collect_coverage.sh]
+  Outputs: [bazel-out/k8-opt-exec/bin/external/bazel_tools/tools/test/collect_coverage.runfiles]
+
+action 'Cat @@//a:lib2'
+  Mnemonic: CatIt
+  Target: //a:lib2
+  Configuration: k8-opt
+  Execution platform: @@platforms//host:host
+  ActionKey: 04e6b0326b4f531bd3a2cf9cb2dbaef980564408bcfd35d93806c28a37c73205
+  Inputs: [a/y.txt, bazel-out/k8-opt/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/lib2.txt]
+  Command Line: (exec /bin/bash \
+    -c \
+    'cat bazel-out/k8-opt/bin/a/lib.txt a/y.txt > bazel-out/k8-opt/bin/a/lib2.txt')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
+# Execution platform: @@platforms//host:host
 
 action 'Cat @@//a:lib'
   Mnemonic: CatIt
   Target: //a:lib
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329
+  ActionKey: c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012
   Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/lib.txt]
   Command Line: (exec /bin/bash \
     -c \
-    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txt')
-# Configuration: 7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565
+    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txt')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
 # Execution platform: @@platforms//host:host
 

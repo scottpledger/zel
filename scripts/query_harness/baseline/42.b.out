@@ -1,4 +1,4 @@
 digraph mygraph {
   node [shape=box];
-  "//:all_tests\n//:top_alias\n//:tagged"
+  "//:tagged\n//:top_alias\n//:all_tests"
 }

@@ -50,7 +50,7 @@ fn host_repr(kind: &str, id: &str) -> Option<String> {
     let t = table().lock().unwrap();
     match (kind, t.items.get(idx)?) {
         ("file", Obj::File(a)) => Some(if a.is_source {
-            format!("<source file {}>", a.exec_path)
+            format!("<source file {}>", a.root_relative_path)
         } else {
             format!("<generated file {}>", a.root_relative_path_for_repr())
         }),

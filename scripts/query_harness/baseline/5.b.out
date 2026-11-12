@@ -67,7 +67,7 @@ genrule(
   tags = ["fast"],
   generator_name = "lm",
   generator_function = "lmacro",
-  generator_location = "ate@WS@/a/BUILD:7:7",
+  generator_location = "a/BUILD:7:7",
   outs = ["//a:lm.o"],
   cmd = "echo lm > $@",
 )
@@ -80,7 +80,7 @@ filegroup(
   name = "lm_grp",
   generator_name = "lm",
   generator_function = "lmacro",
-  generator_location = "ate@WS@/a/BUILD:7:7",
+  generator_location = "a/BUILD:7:7",
   srcs = ["//a:lm"],
 )
 # Rule lm_grp instantiated at (most recent call last):
@@ -109,7 +109,7 @@ catrule(
   visibility = ["//visibility:public"],
   generator_name = "sm",
   generator_function = "smacro",
-  generator_location = "ate@WS@/a/BUILD:6:7",
+  generator_location = "a/BUILD:6:7",
   srcs = ["//a:sm_fg"],
 )
 # Rule sm_cat instantiated at (most recent call last):
@@ -125,7 +125,7 @@ filegroup(
   visibility = ["//visibility:public"],
   generator_name = "sm",
   generator_function = "smacro",
-  generator_location = "ate@WS@/a/BUILD:6:7",
+  generator_location = "a/BUILD:6:7",
   srcs = ["//a:x.txt", "//a:y.txt"],
 )
 # Rule sm_fg instantiated at (most recent call last):

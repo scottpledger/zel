@@ -8,6 +8,6 @@ ERROR: Starlark evaluation error for @@bazel_tools//tools/allowlists/function_tr
 	File "/tmp/cqh/fmt.star", line 2, column 45, in format
 		return str(target.label) + " " + str(len(providers(target)))
 Error in len: in call to len(), parameter 'x' got value of type 'NoneType', want 'iterable or string'
-INFO: Elapsed time: 0.063s, Critical Path: 0.00s
+INFO: Elapsed time: 0.035s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

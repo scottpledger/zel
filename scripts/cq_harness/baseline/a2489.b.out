@@ -1,7 +1,7 @@
 {
   "actions": [{
     "targetId": 1,
-    "actionKey": "c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69",
+    "actionKey": "a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87",
     "mnemonic": "CatIt",
     "configurationId": 1,
     "executionPlatform": "@@platforms//host:host"
@@ -13,9 +13,9 @@
   }],
   "configuration": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }],
   "ruleClasses": [{
     "id": 1,

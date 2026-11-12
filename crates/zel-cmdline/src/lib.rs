@@ -465,10 +465,34 @@ pub fn validate_package_identifier(input: &str) -> Result<(), LabelSyntaxError> 
 }
 
 /// A parsed Bazel target label (`@@repo//pkg:target`), matching `Label.java`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone)]
 pub struct Label {
     package_identifier: PackageIdentifier,
     name: String,
+    unambiguous_display: bool,
+}
+
+impl PartialEq for Label {
+    fn eq(&self, other: &Self) -> bool {
+        self.package_identifier == other.package_identifier && self.name == other.name
+    }
+}
+impl Eq for Label {}
+impl PartialOrd for Label {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for Label {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        (&self.package_identifier, &self.name).cmp(&(&other.package_identifier, &other.name))
+    }
+}
+impl std::hash::Hash for Label {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.package_identifier, state);
+        std::hash::Hash::hash(&self.name, state);
+    }
 }
 
 impl Label {
@@ -481,7 +505,13 @@ impl Label {
         Ok(Self {
             package_identifier: pkg,
             name: name.to_string(),
+            unambiguous_display: false,
         })
+    }
+
+    pub fn with_unambiguous_display(mut self) -> Self {
+        self.unambiguous_display = true;
+        self
     }
 
     /// Parses an absolute label (`//pkg:target`, `@repo//pkg:target`, `@@repo//pkg`, `@repo`).
@@ -530,7 +560,11 @@ impl Label {
     }
 
     pub fn canonical_form(&self) -> String {
-        format!("{}:{}", self.package_identifier.canonical_form(), self.name)
+        if self.unambiguous_display {
+            self.unambiguous_canonical_form()
+        } else {
+            format!("{}:{}", self.package_identifier.canonical_form(), self.name)
+        }
     }
 
     pub fn unambiguous_canonical_form(&self) -> String {
@@ -841,7 +875,8 @@ pub fn read_target_patterns(
     let path = cwd.join(target_pattern_file);
     let bytes = std::fs::read(&path).map_err(|e| {
         format!(
-            "I/O error reading from {}: {}",
+            "I/O error reading from {}: [unix_jni.cc:382] {} ({})",
+            path.display(),
             path.display(),
             io_error_message(&e)
         )
@@ -1040,7 +1075,7 @@ mod tests {
         );
         let err = read_target_patterns(&[], "missing.txt", &dir).unwrap_err();
         assert!(err.starts_with("I/O error reading from "), "{err}");
-        assert!(err.ends_with("missing.txt: No such file or directory"), "{err}");
+        assert!(err.ends_with("missing.txt (No such file or directory)"), "{err}");
         assert_eq!(
             read_target_patterns(&["//x".to_string()], "", &dir).unwrap(),
             vec!["//x"]

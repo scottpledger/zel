@@ -347,6 +347,10 @@ fn analyze_rule(
         inputs.allow_unresolved_symlinks = acfg.allow_unresolved_symlinks;
         inputs.compact_repo_mapping = !acfg.no_compact_repo_mapping;
         inputs.exec_platform = Some(acfg.default_exec_platform());
+        if let Ok(Some(plat_ct)) = toolchain::target_platform(&cfg, &resolver, acfg) {
+            let _ = resolver.check_dependency(rule, "$target_platform", &plat_ct);
+            toolchain::record_exec_platform_edge(rule, &cfg, &resolver, acfg);
+        }
         let types = toolchain_requests(spec.kwargs.get("toolchains"));
         let mut rule_ecw: Vec<Label> =
             spec.kwargs.get("exec_compatible_with").map(label_list).unwrap_or_default();
@@ -385,14 +389,24 @@ fn analyze_rule(
             }
         }
         let mut ct = analyze_starlark_rule(rule, &cfg, inputs)?;
-        if let Ok(Some(plat_ct)) = toolchain::target_platform(&cfg, &resolver, acfg) {
-            let _ = resolver.check_dependency(rule, "$target_platform", &plat_ct);
-            toolchain::record_exec_platform_edge(rule, &cfg, &resolver, acfg);
-        }
         ct.visibility = rule.extra.effective_visibility.clone();
         return Ok(ct);
     }
 
+    if rule.rule_class != "platform"
+        && rule.rule_class != "constraint_value"
+        && rule.rule_class != "constraint_setting"
+        && rule.rule_class != "package_group"
+        && rule.rule_class != "alias"
+        && rule.rule_class != "toolchain_type"
+        && (rule.rule_class != "config_setting" || rule.extra.attr_values.get("constraint_values").map_or(false, |v| !v.labels().is_empty()))
+        && rule.label.name() != "host_platform"
+    {
+        if let Ok(Some(plat_ct)) = toolchain::target_platform(config, &resolver, acfg) {
+            let _ = resolver.check_dependency(rule, "$target_platform", &plat_ct);
+            toolchain::record_exec_platform_edge(rule, &config, &resolver, acfg);
+        }
+    }
     let n = native::Nctx { rule, cfg: config, resolver: &resolver, acfg };
     let mut ct = match rule.rule_class.as_str() {
         "filegroup" => native::filegroup(&n)?,
@@ -438,17 +452,6 @@ fn analyze_rule(
             ))
         }
     };
-    if rule.rule_class != "platform"
-        && rule.rule_class != "constraint_value"
-        && rule.rule_class != "constraint_setting"
-        && rule.rule_class != "package_group"
-        && rule.label.name() != "host_platform"
-    {
-        if let Ok(Some(plat_ct)) = toolchain::target_platform(config, &resolver, acfg) {
-            let _ = resolver.check_dependency(rule, "$target_platform", &plat_ct);
-            toolchain::record_exec_platform_edge(rule, &config, &resolver, acfg);
-        }
-    }
     ct.visibility = rule.extra.effective_visibility.clone();
     ct.testonly = rule.testonly;
     Ok(ct)

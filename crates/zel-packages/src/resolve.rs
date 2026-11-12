@@ -30,9 +30,12 @@ use zel_vfs::{DirentType, PathFragment};
 fn suggest_targets(input: &str, words: &[String]) -> String {
     let lower = input.to_lowercase();
     let max = std::cmp::min(5, (input.chars().count() + 1) / 2);
+    if max == 0 {
+        return String::new();
+    }
     let mut by_dist: BTreeMap<usize, Vec<String>> = BTreeMap::new();
     for w in words {
-        if let Some(d) = edit_distance(&lower, &w.to_lowercase(), max) {
+        if let Some(d) = edit_distance(&lower, &w.to_lowercase(), max - 1) {
             by_dist.entry(d).or_default().push(w.clone());
         }
     }
@@ -156,7 +159,7 @@ impl Package {
             if matches!(t, Target::InputFile { .. }) {
                 let base = tn.rsplit('/').next().unwrap_or(tn);
                 let stem = base.split('.').next().unwrap_or(base);
-                if tn == name || base == name || stem == name {
+                if tn == name || base == name || (name.contains('.') && stem == name) {
                     matching_source_files.push(tn.clone());
                 }
             }
@@ -185,17 +188,22 @@ impl Package {
                 return pretty_print_targets(&consuming);
             }
         }
-        let rules: Vec<String> = self
+        let mut all: Vec<String> = self
             .targets
             .iter()
-            .filter(|(_, t)| matches!(t, Target::Rule(_)))
-            .map(|(n, _)| n.clone())
+            .filter_map(|(k, t)| {
+                if matches!(t, Target::InputFile { .. }) {
+                    Some(k.clone())
+                } else {
+                    None
+                }
+            })
             .collect();
-        let s = suggest_targets(name, &rules);
-        if !s.is_empty() {
-            return s;
+        for (k, t) in &self.targets {
+            if !matches!(t, Target::InputFile { .. }) {
+                all.push(k.clone());
+            }
         }
-        let all: Vec<String> = self.targets.keys().cloned().collect();
         suggest_targets(name, &all)
     }
 }
@@ -360,11 +368,16 @@ impl PatternResolver {
                 let mut pkgs = Vec::new();
                 self.find_packages_below(directory, &mut pkgs)?;
                 let mut failed: Option<String> = None;
+                let mut pkg_err_events = Vec::new();
                 for id in pkgs {
                     match self.package(&id) {
                         Ok(pkg) => {
                             self.take_events(&pkg, events);
                             if pkg.contains_errors {
+                                pkg_err_events.push(PackageEvent::error(
+                                    None,
+                                    format!("package contains errors: {}", id.package_fragment()),
+                                ));
                                 failed.get_or_insert_with(|| {
                                     format!("error loading package '{}': Package '{}' contains errors", id.package_fragment(), id.package_fragment())
                                 });
@@ -377,6 +390,8 @@ impl PatternResolver {
                         }
                     }
                 }
+                pkg_err_events.reverse();
+                events.extend(pkg_err_events);
                 match failed {
                     Some(m) => Err(m),
                     None => Ok(out),

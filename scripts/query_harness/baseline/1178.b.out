@@ -7,6 +7,9 @@ digraph mygraph {
   "//a:lib" -> "//a:x.txt"
   "//a:lib" -> "//a:srcs_fg"
   "//a:lib" -> "@ext//lib:data"
+  "@ext//lib:data"
+  "@ext//lib:data" -> "@ext//lib:d.txt"
+  "@ext//lib:d.txt"
   "//a:srcs_fg"
   "//a:srcs_fg" -> "//a:x.txt"
   "//a:srcs_fg" -> "//a:y.txt"
@@ -14,7 +17,4 @@ digraph mygraph {
   "//a:z.txt"
   "//a:y.txt"
   "//a:x.txt"
-  "@ext//lib:data"
-  "@ext//lib:data" -> "@ext//lib:d.txt"
-  "@ext//lib:d.txt"
 }

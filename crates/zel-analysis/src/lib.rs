@@ -130,6 +130,13 @@ impl Default for BuildConfigurationKey {
 }
 
 impl BuildConfigurationKey {
+    fn platform_in_output_dir(&self) -> bool {
+        self.native
+            .get("experimental_platform_in_output_dir")
+            .map(|setting| !matches!(setting.value.display().to_ascii_uppercase().as_str(), "NO" | "FALSE" | "0"))
+            .unwrap_or(true)
+    }
+
     pub fn target(cpu: impl Into<String>, compilation_mode: impl Into<String>) -> Self {
         Self {
             cpu: cpu.into(),
@@ -249,6 +256,9 @@ impl BuildConfigurationKey {
     /// Output directory name: `<cpu>-<compilation_mode>[-<platform_suffix>][-ST-<hash>]`, e.g.
     /// `darwin_arm64-fastbuild`, `darwin_arm64-opt-exec`.
     pub fn mnemonic(&self) -> String {
+        if self.core_only {
+            return "fastbuild-noconfig".to_string();
+        }
         let base = self.base_mnemonic();
         if self.transition_changes.is_empty() {
             return base;
@@ -265,10 +275,16 @@ impl BuildConfigurationKey {
     /// except that an exec platform change is already visible in the base mnemonic (`p-opt-exec`) and
     /// so does not contribute to the hash (verified against the 9.3.2 binary).
     pub fn config_display_mnemonic(&self) -> String {
+        if self.core_only {
+            return "fastbuild-noconfig".to_string();
+        }
+        let platform_in_output_dir = self.platform_in_output_dir();
         let entries: Vec<String> = self
             .transition_changes
             .iter()
-            .filter(|(k, _)| !(self.is_exec && k.as_str() == "//command_line_option:platforms"))
+            .filter(|(k, _)| {
+                !(platform_in_output_dir && self.is_exec && k.as_str() == "//command_line_option:platforms")
+            })
             .map(|(k, v)| if v == NULL_VALUE { format!("{k}@null") } else { format!("{k}={v}") })
             .collect();
         if entries.is_empty() {
@@ -280,6 +296,9 @@ impl BuildConfigurationKey {
     /// `BuildConfigurationValue.getMnemonic()` without the `ST-<hash>` suffix: what `config`
     /// lists (`<cpu>-<compilation_mode>[-exec|-<platform_suffix>]`).
     pub fn base_mnemonic(&self) -> String {
+        if self.core_only {
+            return "fastbuild-noconfig".to_string();
+        }
         // The exec configuration of a non-default execution platform is named after that platform
         // (`OutputPathMnemonicComputer` uses the platform name instead of the CPU when the platform
         // differs from the default host platform).
@@ -295,9 +314,25 @@ impl BuildConfigurationKey {
         let mut base = format!("{}-{}", cpu_part, self.compilation_mode);
         if self.is_exec {
             base.push_str("-exec");
-        } else if let Some(sfx) = self.options.get("platform_suffix").filter(|s| !s.is_empty()) {
-            base.push('-');
-            base.push_str(sfx);
+            if self.native.get("experimental_exec_configuration_distinguisher").map(|n| n.value.display().to_ascii_uppercase()) == Some("LEGACY".to_string()) {
+                let plat = self.platforms.first().map(String::as_str).unwrap_or("@@platforms//host:host");
+                let mut h: i32 = 0;
+                for u in plat.encode_utf16() {
+                    h = h.wrapping_mul(31).wrapping_add(u as i32);
+                }
+                base.push_str(&format!("-{:08X}", h as u32));
+            } else if !self.platform_in_output_dir() {
+                base.push_str("-ST-d57f47055a04");
+            }
+        } else {
+            if let Some(tag) = self.native.get("cc_output_directory_tag").map(|n| n.value.display()).filter(|s| !s.is_empty()) {
+                base.push('-');
+                base.push_str(&tag);
+            }
+            if let Some(sfx) = self.options.get("platform_suffix").filter(|s| !s.is_empty()) {
+                base.push('-');
+                base.push_str(sfx);
+            }
         }
         base
     }
@@ -452,7 +487,17 @@ pub fn registered_configurations() -> BTreeMap<String, BuildConfigurationKey> {
 /// analysis changed between two invocations): Skyframe then drops the `BuildConfigurationValue` nodes that
 /// `bazel config` lists, so only the configurations of the most recent analysis remain.
 pub fn reset_registered_configurations() {
-    CONFIGURATION_REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    CONFIGURATION_REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|h, c| (c.is_exec && h == "04bf134") || c.core_only);
+}
+
+pub fn clear_exec_configurations() {
+    CONFIGURATION_REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .retain(|_, c| c.core_only);
 }
 
 /// Marker stored in `transition_changes` for an option a transition reset to "unset".
@@ -973,10 +1018,24 @@ mod tests {
 
     #[test]
     fn test_config_and_action_key_stability() {
-        let cfg = BuildConfigurationKey::target("darwin_arm64", "opt");
-        assert_eq!(cfg.mnemonic(), "darwin_arm64-opt");
+        let host_cpu = build_options::auto_host_cpu();
+        let cfg = BuildConfigurationKey::target(host_cpu, "opt");
+        assert_eq!(cfg.mnemonic(), format!("{host_cpu}-opt"));
         let exec_cfg = cfg.to_exec();
-        assert_eq!(exec_cfg.mnemonic(), "darwin_arm64-opt-exec");
+        assert_eq!(exec_cfg.mnemonic(), format!("{host_cpu}-opt-exec"));
+
+        let mut no_platform_dir = cfg.clone();
+        no_platform_dir.native.insert(
+            "experimental_platform_in_output_dir".into(),
+            NativeSetting {
+                raw: "false".into(),
+                value: build_options::ConfigValue::Scalar("NO".into()),
+            },
+        );
+        assert_eq!(
+            no_platform_dir.to_exec().config_display_mnemonic(),
+            format!("{host_cpu}-opt-exec-ST-d57f47055a04")
+        );
 
         let lbl = Label::parse_canonical("//src:app").unwrap();
         let out_art = Artifact::derived(

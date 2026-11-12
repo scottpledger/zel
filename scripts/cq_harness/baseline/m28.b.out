@@ -9,9 +9,9 @@ rule_class_id: 1
 }
 configuration {
 id: 1
-mnemonic: "darwin_arm64-fastbuild"
-platform_name: "darwin_arm64"
-checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+mnemonic: "k8-fastbuild"
+platform_name: "k8"
+checksum: "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
 }
 path_fragments {
 id: 5
@@ -19,7 +19,7 @@ label: "bazel-out"
 }
 path_fragments {
 id: 4
-label: "darwin_arm64-fastbuild"
+label: "k8-fastbuild"
 parent_id: 5
 }
 path_fragments {
@@ -43,7 +43,7 @@ path_fragment_id: 1
 }
 actions {
 target_id: 1
-action_key: "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"
+action_key: "8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8"
 mnemonic: "FileWrite"
 configuration_id: 1
 output_ids: 1
@@ -62,7 +62,7 @@ path_fragment_id: 6
 }
 actions {
 target_id: 1
-action_key: "957b5a405a35c995a6343ea1cd2ca35c35ec3da330b8eb847fca68b5361b76b3"
+action_key: "d9c763e9607c82cd1c4b271ee97fcffb18467419a1ea481262f07fccbecd2141"
 mnemonic: "RepoMappingManifest"
 configuration_id: 1
 output_ids: 2
@@ -80,7 +80,7 @@ path_fragment_id: 7
 }
 actions {
 target_id: 1
-action_key: "a1ad5e7b302707c0c15c7c8b5ef2ecded373a5896f695af8edd9cbb48cf3fe4d"
+action_key: "effa2c346c572920289017fc7ac53855df26ff7810d235bb0e97eb0e990fe0e6"
 mnemonic: "SourceSymlinkManifest"
 configuration_id: 1
 output_ids: 3
@@ -107,7 +107,7 @@ path_fragment_id: 8
 }
 actions {
 target_id: 1
-action_key: "b039f77de3072d90a05e7981fe405e14a0d8fa24b254c5e21418200b6f71313b"
+action_key: "cefd2f0a5d573b2244dd32cb6aededcd7687f8d6093e7d8dcd1bea5a24851d94"
 mnemonic: "SymlinkTree"
 configuration_id: 1
 input_dep_set_ids: 1
@@ -232,7 +232,7 @@ is_tree_artifact: true
 }
 actions {
 target_id: 1
-action_key: "0e439c536470aa9a95fc3bb976b2151d28adf8d6edb356420b0010b2d0cc60e3"
+action_key: "ac20220c57ed821cb929a6df3cace52d666d3f44a00af06610368ec622a68ba4"
 mnemonic: "TestRunner"
 configuration_id: 1
 arguments: "external/bazel_tools/tools/test/test-setup.sh"

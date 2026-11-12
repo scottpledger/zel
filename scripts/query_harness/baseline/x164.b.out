@@ -36,7 +36,7 @@ genrule(
   tags = ["fast"],
   generator_name = "lm",
   generator_function = "lmacro",
-  generator_location = "ate@WS@/a/BUILD:7:7",
+  generator_location = "a/BUILD:7:7",
   outs = ["//a:lm.o"],
   cmd = "echo lm > $@",
 )

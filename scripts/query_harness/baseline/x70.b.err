@@ -5,10 +5,6 @@ ERROR: package contains errors: e
 ERROR: package contains errors: e: 'is' not supported, use '==' instead
 ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
  - nonexistent and referenced by '//d:bad'
-Loading: 8 packages loaded
-    currently loading: @@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//
-Loading: 13 packages loaded
-    currently loading: @@bazel_tools//tools/cpp ... (2 packages)
 ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
  - nonexistent and referenced by '//d:bad'
 ERROR: Evaluation of query "deps(//...)" failed: errors were encountered while computing transitive closure

@@ -6,8 +6,8 @@ Mnemonics:
   FileWrite: 12
 
 Configurations:
-  darwin_arm64-opt: 1
-  darwin_arm64-fastbuild: 17
+  k8-opt: 1
+  k8-fastbuild: 17
 
 Execution Platforms:
   @@platforms//host:host: 18

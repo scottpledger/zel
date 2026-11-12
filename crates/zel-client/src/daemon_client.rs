@@ -160,6 +160,46 @@ pub struct OutputBaseLock {
     _file: File,
 }
 
+#[cfg(unix)]
+extern "C" {
+    fn flock(fd: i32, operation: i32) -> i32;
+}
+
+#[cfg(unix)]
+fn try_lock_exclusive(file: &File) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    const LOCK_EX: i32 = 2;
+    const LOCK_NB: i32 = 4;
+    let rc = unsafe { flock(file.as_raw_fd(), LOCK_EX | LOCK_NB) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn try_lock_exclusive(_file: &File) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn lock_shared_blocking(file: &File) -> io::Result<()> {
+    use std::os::unix::io::AsRawFd;
+    const LOCK_SH: i32 = 1;
+    let rc = unsafe { flock(file.as_raw_fd(), LOCK_SH) };
+    if rc == 0 {
+        Ok(())
+    } else {
+        Err(io::Error::last_os_error())
+    }
+}
+
+#[cfg(not(unix))]
+fn lock_shared_blocking(_file: &File) -> io::Result<()> {
+    Ok(())
+}
+
 fn read_lock_owner(file: &mut File) -> String {
     let mut s = String::new();
     let _ = file.seek(SeekFrom::Start(0));
@@ -184,7 +224,7 @@ pub fn acquire_output_base_lock(
                 return Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code());
             }
         };
-        if file.try_lock().is_ok() {
+        if try_lock_exclusive(&file).is_ok() {
             let _ = file.set_len(0);
             let _ = file.seek(SeekFrom::Start(0));
             let cwd = std::env::current_dir().map(|p| p.display().to_string()).unwrap_or_default();
@@ -228,7 +268,7 @@ pub fn acquire_install_base_lock(install_base: &str) -> Result<Option<File>, std
         .write(true)
         .truncate(false)
         .open(parent.join(format!("{name}.lock")))?;
-    f.lock_shared()?;
+    lock_shared_blocking(&f)?;
     Ok(Some(f))
 }
 

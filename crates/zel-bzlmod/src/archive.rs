@@ -541,8 +541,6 @@ const FORMATS: &[(&[&str], ArchiveKind)] = &[
     (&["bz2"], ArchiveKind::Bz2),
     (&["ar", "deb"], ArchiveKind::Ar),
     (&["7z"], ArchiveKind::SevenZ),
-    (&["tar.br"], ArchiveKind::TarBr),
-    (&["br"], ArchiveKind::Br),
 ];
 
 fn all_extensions(prefix: &str) -> Vec<String> {
@@ -2104,7 +2102,7 @@ mod tests {
         assert_eq!(detect_kind(Path::new("b.tzst")).unwrap(), ArchiveKind::TarZst);
         let e = detect_kind(Path::new("/x/foo.rar")).unwrap_err();
         assert!(e.starts_with("Expected a file with a .zip, .jar,"), "{}", e);
-        assert!(e.ends_with(" or .br suffix (got /x/foo.rar)"), "{}", e);
+        assert!(e.ends_with(" or .7z suffix (got /x/foo.rar)"), "{}", e);
         let e = kind_for_type("rar").unwrap_err();
         assert!(e.starts_with("No decompressor found for type rar. Available types are: zip, jar,"));
         assert_eq!(kind_for_type("nupkg").unwrap(), ArchiveKind::Zip);
@@ -2116,12 +2114,12 @@ mod tests {
         for n in ["a.tar.br", "a.br"] {
             fs::write(d.join(n), b"x").unwrap();
             let e = extract(&d.join(n), &d.join("o"), &ExtractOptions::default()).unwrap_err();
-            assert!(e.starts_with("Unsupported archive format"), "{}: {}", n, e);
+            assert!(e.starts_with("Expected a file with"), "{}: {}", n, e);
         }
         let mut o = ExtractOptions::default();
         o.archive_type = Some("tar.br".into());
         fs::write(d.join("blob"), b"x").unwrap();
-        assert!(extract(&d.join("blob"), &d.join("o"), &o).unwrap_err().starts_with("Unsupported"));
+        assert!(extract(&d.join("blob"), &d.join("o"), &o).unwrap_err().starts_with("No decompressor"));
         o.archive_type = Some("bogus".into());
         assert!(extract(&d.join("blob"), &d.join("o"), &o).unwrap_err().starts_with("No decompressor"));
     }

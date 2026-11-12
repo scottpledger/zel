@@ -1,6 +1,6 @@
-bazel-out/darwin_arm64-fastbuild/bin/a/gg.out
-external/ext+/lib/d.txt
-bazel-out/darwin_arm64-opt-exec/bin/b/tool
+bazel-out/k8-fastbuild/bin/a/gg.out
 a/z.txt
+bazel-out/k8-opt-exec/bin/b/tool
 external/bazel_tools/tools/genrule/genrule-setup.sh
+external/ext+/lib/d.txt
 b/tool.cc

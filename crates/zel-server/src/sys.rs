@@ -29,10 +29,15 @@ pub static SIGNAL_COUNT: AtomicUsize = AtomicUsize::new(0);
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
     fn signal(sig: i32, handler: usize) -> usize;
+    fn sysv_signal(sig: i32, handler: usize) -> usize;
 }
 
 #[cfg(unix)]
 extern "C" fn on_signal(sig: i32) {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let _ = signal(sig, on_signal as usize);
+    }
     LAST_SIGNAL.store(sig, Ordering::SeqCst);
     SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst);
 }
@@ -41,7 +46,9 @@ extern "C" fn on_signal(sig: i32) {
 pub fn install_handler(sig: i32) {
     #[cfg(unix)]
     // SAFETY: `on_signal` is async-signal-safe (only atomic stores).
+    // On glibc, `signal` is BSD-compatible (`SA_RESTART`), so re-install immediately inside `on_signal`.
     unsafe {
+        let _ = sysv_signal;
         signal(sig, on_signal as usize);
     }
     #[cfg(not(unix))]

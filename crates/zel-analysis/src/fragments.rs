@@ -30,6 +30,7 @@ fn m(name: &str, v: Value) -> (String, Value) {
         body: vec![Stmt::Return(Some(Expr::Literal(v)), loc.clone())],
         location: loc,
         module: None,
+        repr_override: None,
         closure: ClosureEnv::default(),
     }));
     (name.to_string(), f)

@@ -2,17 +2,17 @@ digraph mygraph {
   node [shape=box];
   "//a:gg"
   "//a:gg" -> "//a:sel"
+  "//a:gg" -> "//b:tool"
   "//a:gg" -> "@bazel_tools//tools/genrule:genrule-setup.sh"
   "//a:gg" -> "@ext//lib:data"
-  "//a:gg" -> "//b:tool"
+  "@bazel_tools//tools/genrule:genrule-setup.sh"
+  "//a:sel"
+  "//a:sel" -> "//a:x.txt\n...and 4 more items"
+  [label="//a:opt_cs//a:def_cs//conditions:default"];
+  "//a:x.txt\n...and 4 more items"
   "//b:tool"
   "//b:tool" -> "//b:tool.cc"
   "//b:tool.cc"
-  "@bazel_tools//tools/genrule:genrule-setup.sh"
-  "//a:sel"
-  "//a:sel" -> "//a:opt_cs\n...and 4 more items"
-  [label="//conditions:default//a:def_cs//a:opt_cs"];
-  "//a:opt_cs\n...and 4 more items"
   "@ext//lib:data"
   "@ext//lib:data" -> "@ext//lib:d.txt"
   "@ext//lib:d.txt"

@@ -1,10 +1,10 @@
-:catrule//a:lib*jdarwin_arm64-fastbuilddarwin_arm64"@2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c*ddarwin_arm64-optdarwin_arm64"@7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565BaBx.txt
-Bz.txt
-BexternalB
-ext+B	libBd.txt
-By.txt"
-"B	bazel-outBdarwin_arm64-fastbuildB	binB
+:catrule//a:lib*Vk8-fastbuildk8"@a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18Ba*Pk8-optk8"@bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dcBx.txt
+By.txt
+Bz.txt
+BexternalB
+ext+B	libBd.txt
+""B	bazel-outBk8-optB	binB
 aB	lib.txt
-Bdarwin_arm64-opt
-	B	binBaBlib.txt
-�@2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8"CatIt(2	/bin/bash2-c2lcat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txtBJhr@@platforms//host:host�@e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329"CatIt(2	/bin/bash2-c2fcat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txtBJhr@@platforms//host:host
+
+	�@c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012"CatIt(2	/bin/bash2-c2\cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txtBJhr@@platforms//host:hostBk8-fastbuildB	binBaBlib.txt
+�@d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6"CatIt(2	/bin/bash2-c2bcat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/lib.txtBJhr@@platforms//host:host

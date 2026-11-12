@@ -14,6 +14,6 @@ INFO: Analysis succeeded for only 1 of 3 top-level targets
 INFO: Analyzed 3 targets (0 packages loaded, 0 targets configured).
 INFO: Found 1 target...
 ERROR: command succeeded, but not all targets were analyzed
-INFO: Elapsed time: 0.057s, Critical Path: 0.00s
+INFO: Elapsed time: 0.036s, Critical Path: 0.00s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

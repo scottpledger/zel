@@ -1,64 +1,64 @@
 action 'Executing genrule //a:gg'
   Mnemonic: Genrule
   Target: //a:gg
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542
-  Inputs: [a/z.txt, bazel-out/darwin_arm64-opt-exec/bin/b/tool, bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/a/gg.out]
+  ActionKey: efb257e0353d4c7aac216fe391aa37dd298024cb3045911ff7162b8d43f0682d
+  Inputs: [a/z.txt, bazel-out/k8-opt-exec/bin/b/tool, bazel-out/k8-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/gg.out]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec /bin/bash \
     -c \
-    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out')
-# Configuration: 2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/k8-fastbuild/bin/a/gg.out')
+# Configuration: a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18
 # Execution platform: @@platforms//host:host
 
 action 'Writing script b/tool [for tool]'
   Mnemonic: FileWrite
   Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
-  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
+  ActionKey: 8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool]
+  Outputs: [bazel-out/k8-opt-exec/bin/b/tool]
   IsExecutable: true
 
 action 'Writing repo mapping manifest for //b:tool [for tool]'
   Mnemonic: RepoMappingManifest
   Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
-  ActionKey: 9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a
+  ActionKey: 61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.repo_mapping]
+  Outputs: [bazel-out/k8-opt-exec/bin/b/tool.repo_mapping]
   IsExecutable: false
 
 action 'Creating source manifest for //b:tool [for tool]'
   Mnemonic: SourceSymlinkManifest
   Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
-  ActionKey: e346326417c6d035de7958c9d53a1d985c71b8977bd881813c6084ab02bda792
+  ActionKey: 278c5f46d0d07301d3cf8edaf39aecdca38dc722cc58edda142aa04e824d5e20
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt-exec/bin/b/tool.runfiles_manifest]
   IsExecutable: false
 
-action 'Creating runfiles tree bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles [for tool]'
+action 'Creating runfiles tree bazel-out/k8-opt-exec/bin/b/tool.runfiles [for tool]'
   Mnemonic: SymlinkTree
   Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
-  ActionKey: 9d08d249af1fb388108eb2399cb831dc2a7d2046b2f108ae6cad2a57b326aabf
-  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles/MANIFEST]
+  ActionKey: 9f18d61fe318c622b23edd15c2b9b185a8dc0e972d9c1498add946aeb8c125c7
+  Inputs: [bazel-out/k8-opt-exec/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt-exec/bin/b/tool.runfiles/MANIFEST]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
 
 runfiles for //b:tool
   Mnemonic: RunfilesTree
   Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
   ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
-  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool, bazel-out/darwin_arm64-opt-exec/bin/b/tool.repo_mapping, bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles/MANIFEST]
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles]
+  Inputs: [bazel-out/k8-opt-exec/bin/b/tool, bazel-out/k8-opt-exec/bin/b/tool.repo_mapping, bazel-out/k8-opt-exec/bin/b/tool.runfiles/MANIFEST]
+  Outputs: [bazel-out/k8-opt-exec/bin/b/tool.runfiles]
 

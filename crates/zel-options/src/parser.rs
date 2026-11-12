@@ -159,7 +159,7 @@ impl ParsedCommandOptions {
             }
 
             // 2. Non-flag argument is a target / query argument
-            if !arg.starts_with('-') || arg == "-" {
+            if !arg.starts_with('-') {
                 opts.targets.push(arg.clone());
                 i += 1;
                 continue;

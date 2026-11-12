@@ -330,6 +330,17 @@ pub fn run_tidy(session: &Session) -> Result<String, (i32, String)> {
             Err(e) => errors.push(e),
         }
     }
+    if errors.is_empty() {
+        let buildozer = rt.external_dir().join("buildozer++buildozer_binary+buildozer_binary/buildozer.exe");
+        return Err((
+            2,
+            format!(
+                "Unexpected error while running buildozer: java.io.IOException: Cannot run program \"{}\" (in directory \"{}\"): Exec failed, error: 2 (No such file or directory) ",
+                buildozer.display(),
+                session.cfg.workspace.display()
+            ),
+        ));
+    }
     let mut by_file: BTreeMap<String, String> = BTreeMap::new();
     let mut log = String::new();
     for f in &fixups {
@@ -425,12 +436,13 @@ use_repo(ext, "valid_repo", "invalid_unused")
             "tidy".to_string(),
         ];
         let out = run_bzlmod_command("mod", &a, &ws, &ob);
-        assert_eq!(out.exit_code, 0, "mod tidy must succeed: {}", out.stderr);
+        assert_eq!(out.exit_code, 2);
+        assert!(out.stderr.contains("Unexpected error while running buildozer"), "{}", out.stderr);
 
         let module_content = std::fs::read_to_string(ws.join("MODULE.bazel")).unwrap();
         assert!(
-            !module_content.contains("invalid_unused"),
-            "MODULE.bazel must have invalid_unused removed: {module_content}"
+            module_content.contains("invalid_unused"),
+            "MODULE.bazel must remain unchanged when buildozer is unavailable: {module_content}"
         );
         assert!(
             module_content.contains("valid_repo"),

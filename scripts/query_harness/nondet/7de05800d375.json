@@ -1,7 +1,7 @@
 {
  "bazel": "/tmp/bazel-9.3.2",
  "case_id": "7de05800d375",
- "classified_as": "UNCLASSIFIED",
+ "classified_as": "ORDERLESS",
  "cmd": "query 'deps(//b:t1)' --graph:factored --output=graph --keep_going",
  "distinct": 6,
  "harness": "query",
@@ -14,7 +14,7 @@
   "46ddf9c982fbf7b9"
  ],
  "history": [],
- "mode": "STRICT",
+ "mode": "ORDERLESS",
  "n_runs": 6,
  "pre": "",
  "runs": [

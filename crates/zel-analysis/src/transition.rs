@@ -357,8 +357,9 @@ mod tests {
         // Bazel 9 (`SkyframeExecutor.setBaselineConfiguration`): the exec baseline is the exec
         // transition on the host platform, so a default exec configuration has no ST suffix
         // (`bazel-out/<cpu>-opt-exec`), while a different exec platform does.
-        let t = BuildConfigurationKey::target("darwin_arm64", "fastbuild");
-        assert_eq!(t.to_exec().mnemonic(), "darwin_arm64-opt-exec");
+        let host_cpu = crate::build_options::auto_host_cpu();
+        let t = BuildConfigurationKey::target(host_cpu, "fastbuild");
+        assert_eq!(t.to_exec().mnemonic(), format!("{host_cpu}-opt-exec"));
         assert!(t.to_exec_for("//p:other").mnemonic().contains("-ST-"));
         // Transition back to the baseline value removes the change.
         let mut c = BuildConfigurationKey::target("k8", "fastbuild");

@@ -1189,7 +1189,7 @@
       }, {
         "name": "generator_location",
         "type": "STRING",
-        "stringValue": "ate@WS@/a/BUILD:7:7",
+        "stringValue": "a/BUILD:7:7",
         "explicitlySpecified": true,
         "nodep": false
       }, {
@@ -1368,7 +1368,7 @@
       }, {
         "name": "generator_location",
         "type": "STRING",
-        "stringValue": "ate@WS@/a/BUILD:7:7",
+        "stringValue": "a/BUILD:7:7",
         "explicitlySpecified": true,
         "nodep": false
       }, {
@@ -1770,7 +1770,7 @@
       }, {
         "name": "generator_location",
         "type": "STRING",
-        "stringValue": "ate@WS@/a/BUILD:6:7",
+        "stringValue": "a/BUILD:6:7",
         "explicitlySpecified": true,
         "nodep": false
       }, {
@@ -1907,7 +1907,7 @@
       }, {
         "name": "generator_location",
         "type": "STRING",
-        "stringValue": "ate@WS@/a/BUILD:6:7",
+        "stringValue": "a/BUILD:6:7",
         "explicitlySpecified": true,
         "nodep": false
       }, {

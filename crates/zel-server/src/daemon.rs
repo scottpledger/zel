@@ -420,7 +420,7 @@ fn run_locked(
         }
     };
     d.touch();
-    if cancelled_at.is_some() {
+    if cancel.load(Ordering::SeqCst) || cancelled_at.is_some() {
         out.exit_code = ExitCode::INTERRUPTED.numeric_exit_code();
         // The killed spawn's error is not reported by Bazel (`build interrupted` is the only error).
         let text = String::from_utf8_lossy(&out.standard_error).into_owned();

@@ -1,63 +1,63 @@
 action 'Writing script b/t2'
   Mnemonic: FileWrite
   Target: //b:t2
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
+  ActionKey: 8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t2]
   IsExecutable: true
 
 action 'Writing repo mapping manifest for //b:t2'
   Mnemonic: RepoMappingManifest
   Target: //b:t2
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 957b5a405a35c995a6343ea1cd2ca35c35ec3da330b8eb847fca68b5361b76b3
+  ActionKey: d9c763e9607c82cd1c4b271ee97fcffb18467419a1ea481262f07fccbecd2141
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.repo_mapping]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t2.repo_mapping]
   IsExecutable: false
 
 action 'Creating source manifest for //b:t2'
   Mnemonic: SourceSymlinkManifest
   Target: //b:t2
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: a1ad5e7b302707c0c15c7c8b5ef2ecded373a5896f695af8edd9cbb48cf3fe4d
+  ActionKey: effa2c346c572920289017fc7ac53855df26ff7810d235bb0e97eb0e990fe0e6
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles_manifest]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t2.runfiles_manifest]
   IsExecutable: false
 
-action 'Creating runfiles tree bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles'
+action 'Creating runfiles tree bazel-out/k8-fastbuild/bin/b/t2.runfiles'
   Mnemonic: SymlinkTree
   Target: //b:t2
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: b039f77de3072d90a05e7981fe405e14a0d8fa24b254c5e21418200b6f71313b
-  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles/MANIFEST]
+  ActionKey: cefd2f0a5d573b2244dd32cb6aededcd7687f8d6093e7d8dcd1bea5a24851d94
+  Inputs: [bazel-out/k8-fastbuild/bin/b/t2.runfiles_manifest]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t2.runfiles/MANIFEST]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
 
 runfiles for //b:t2
   Mnemonic: RunfilesTree
   Target: //b:t2
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
   ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
-  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2, bazel-out/darwin_arm64-fastbuild/bin/b/t2.repo_mapping, bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles/MANIFEST]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles]
+  Inputs: [bazel-out/k8-fastbuild/bin/b/t2, bazel-out/k8-fastbuild/bin/b/t2.repo_mapping, bazel-out/k8-fastbuild/bin/b/t2.runfiles/MANIFEST]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t2.runfiles]
 
 action 'Testing //b:t2'
   Mnemonic: TestRunner
   Target: //b:t2
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 0e439c536470aa9a95fc3bb976b2151d28adf8d6edb356420b0010b2d0cc60e3
-  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles, external/bazel_tools/tools/test/generate-xml.sh, external/bazel_tools/tools/test/test-setup.sh]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/testlogs/b/t2/test.cache_status, bazel-out/darwin_arm64-fastbuild/testlogs/b/t2/test.log, bazel-out/darwin_arm64-fastbuild/testlogs/b/t2/test.outputs (TreeArtifact), bazel-out/darwin_arm64-fastbuild/testlogs/b/t2/test.xml]
+  ActionKey: ac20220c57ed821cb929a6df3cace52d666d3f44a00af06610368ec622a68ba4
+  Inputs: [bazel-out/k8-fastbuild/bin/b/t2.runfiles, external/bazel_tools/tools/test/generate-xml.sh, external/bazel_tools/tools/test/test-setup.sh]
+  Outputs: [bazel-out/k8-fastbuild/testlogs/b/t2/test.cache_status, bazel-out/k8-fastbuild/testlogs/b/t2/test.log, bazel-out/k8-fastbuild/testlogs/b/t2/test.outputs (TreeArtifact), bazel-out/k8-fastbuild/testlogs/b/t2/test.xml]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec external/bazel_tools/tools/test/test-setup.sh \
     b/t2)
-# Configuration: 1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607
+# Configuration: e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a
 # Execution platform: @@platforms//host:host
 

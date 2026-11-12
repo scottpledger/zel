@@ -174,7 +174,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -350,7 +350,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -501,7 +501,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -782,7 +782,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -965,7 +965,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -1148,7 +1148,7 @@ results {
     }
   }
   configuration {
-    checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+    checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   }
   configuration_id: 2
 }
@@ -1328,7 +1328,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -1458,7 +1458,7 @@ results {
       attribute {
         name: "generator_location"
         type: STRING
-        string_value: "ate@WS@/a/BUILD:7:7"
+        string_value: "a/BUILD:7:7"
         explicitly_specified: true
         nodep: false
       }
@@ -1604,7 +1604,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -1673,7 +1673,7 @@ results {
       attribute {
         name: "generator_location"
         type: STRING
-        string_value: "ate@WS@/a/BUILD:7:7"
+        string_value: "a/BUILD:7:7"
         explicitly_specified: true
         nodep: false
       }
@@ -1767,7 +1767,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -1918,7 +1918,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -2087,7 +2087,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -2167,7 +2167,7 @@ results {
       attribute {
         name: "generator_location"
         type: STRING
-        string_value: "ate@WS@/a/BUILD:6:7"
+        string_value: "a/BUILD:6:7"
         explicitly_specified: true
         nodep: false
       }
@@ -2265,7 +2265,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -2334,7 +2334,7 @@ results {
       attribute {
         name: "generator_location"
         type: STRING
-        string_value: "ate@WS@/a/BUILD:6:7"
+        string_value: "a/BUILD:6:7"
         explicitly_specified: true
         nodep: false
       }
@@ -2431,7 +2431,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -2598,7 +2598,7 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
@@ -2765,7 +2765,7 @@ results {
     }
   }
   configuration {
-    checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+    checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   }
   configuration_id: 2
 }
@@ -2937,15 +2937,15 @@ results {
     }
   }
   configuration {
-    checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+    checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   }
   configuration_id: 1
 }
 configurations {
   id: 1
-  mnemonic: "darwin_arm64-fastbuild"
-  platform_name: "darwin_arm64"
-  checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+  mnemonic: "k8-fastbuild"
+  platform_name: "k8"
+  checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -3094,7 +3094,7 @@ configurations {
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -3206,7 +3206,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"
@@ -4330,9 +4330,9 @@ configurations {
 }
 configurations {
   id: 2
-  mnemonic: "darwin_arm64-opt"
-  platform_name: "darwin_arm64"
-  checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+  mnemonic: "k8-opt"
+  platform_name: "k8"
+  checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -4481,7 +4481,7 @@ configurations {
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -4593,7 +4593,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"

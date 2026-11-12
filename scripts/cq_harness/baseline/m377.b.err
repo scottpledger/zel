@@ -1,10 +1,10 @@
 Computing main repo mapping: 
 Loading: 
 Loading: 0 packages loaded
-WARNING: Build options --features and --host_action_env have changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
+WARNING: Build options --action_env and --host_action_env have changed, discarding analysis cache (this can be expensive, see https://bazel.build/advanced/performance/iteration-speed).
 Analyzing: target //:top_alias (0 packages loaded, 0 targets configured)
 INFO: Analyzed target //:top_alias (0 packages loaded, 4 targets configured).
 INFO: Found 1 target...
-INFO: Elapsed time: 0.065s, Critical Path: 0.00s
+INFO: Elapsed time: 0.034s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

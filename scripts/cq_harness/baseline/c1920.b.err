@@ -7,6 +7,6 @@ ERROR: no such package 'nonexistent': BUILD file not found in any of the followi
 ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
  - nonexistent and referenced by '//d:bad'
 ERROR: Analysis of target '//d:bad' failed; build aborted: Analysis failed
-INFO: Elapsed time: 0.057s
+INFO: Elapsed time: 0.038s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

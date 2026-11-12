@@ -26,15 +26,25 @@ def norm(s, ws, ob):
     s = re.sub(r"\x1b\[[0-9;]*[mKA-Z]", "", s)
     out = []
     for l in s.replace("\r", "\n").split("\n"):
-        if re.match(r"^(\(\d\d:\d\d:\d\d\) )?(Computing main|Loading:|Analyzing:|Fetching|PROGRESS:|\[[\d,]+ / |Starting local|\s*$)", l):
+        if re.match(r"^(\(\d\d:\d\d:\d\d\) )?(Computing main|Loading:|Analyzing:|Fetching|PROGRESS:|\[[\d,]+ / |Starting local| no actions running|INFO:\s*$|\s*$)", l):
             continue
         # java.util.logging SimpleFormatter header of the coverage output generator (wall clock).
-        l = re.sub(r"^[A-Z][a-z]{2} \d\d, \d{4} \d{1,2}:\d\d:\d\d [AP]M (com\.google\.devtools\.coverageoutputgenerator\.\S+ \S+)$", r"JAVALOG \1", l)
+        l = re.sub(r"([A-Z][a-z]{2} \d\d, \d{4} \d{1,2}:\d\d:\d\d [AP]M )(com\.google\.devtools\.coverageoutputgenerator\.\S+ \S+)", r"JAVALOG \2", l)
+        # linux-sandbox --sandbox_debug timestamp, child PID, and argv pointer address
+        l = re.sub(r"^\d+\.\d+: (src/main/tools/linux-sandbox)", r"TS: \1", l)
+        l = re.sub(r'(execvp\([^,]+, )0x[0-9a-f]+(\))', r'\1ADDR\2', l)
+        if l.startswith("TS: src/main/tools/linux-sandbox.cc:215: done manipulating pipes"):
+            continue
+        l = re.sub(r"(linux-sandbox-pid1 has PID )\d+", r"\1PID", l)
         l = re.sub(r"^\(\d\d:\d\d:\d\d\) ", "(TS) ", l)  # --show_timestamps (wall clock)
+        l = re.sub(r"^-- Test timed out at \d{4}-\d\d-\d\d \d\d:\d\d:\d\d UTC --$", "-- Test timed out at TS UTC --", l)
+        l = re.sub(r"localhost/(\[0:0:0:0:0:0:0:1\]|127\.0\.0\.1):", "localhost/LOOPBACK:", l)
+        l = re.sub(r"bazel-out/_tmp/actions/stdout-\d+", "bazel-out/_tmp/actions/stdout-N", l)
         l = re.sub(r"\d+\.\d+ ?s\b", "Ns", l)
         l = re.sub(r"\(\d+ packages loaded[^)]*\)", "(N packages loaded)", l)
         l = re.sub(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", "UUID", l)
         l = re.sub(r"[0-9a-f]{32,64}", "HASH", l)
+        l = re.sub(r"sandbox/(linux-sandbox|darwin-sandbox|processwrapper-sandbox)/\d+/", r"sandbox/\1/N/", l)
         l = re.sub(r"Critical Path: \S+", "Critical Path: T", l)
         l = re.sub(r"\d+ targets configured", "N targets configured", l)
         out.append(l)
@@ -66,6 +76,7 @@ def setup(base, fx):
     for n in ("wsb", "wsz"):
         shutil.rmtree(os.path.join(base, n), ignore_errors=True)
         shutil.copytree(fx, os.path.join(base, n), symlinks=True)
+        open(os.path.join(base, n, ".bazelrc"), "w").write("common --registry=file:///tmp/vendored-registry\n")
     shutil.copy(os.path.join(fx, "MODULE.bazel.lock"), os.path.join(base, "wsz", "MODULE.bazel.lock")) if False else None
     for n in ("obb", "obz"):
         os.makedirs(os.path.join(base, n), exist_ok=True)

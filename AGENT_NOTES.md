@@ -685,6 +685,36 @@ inside the ws dir before testing a new binary (the server keeps the old one).
 - Test rules now analyse their implicit exec deps ($test_wrapper, $xml_writer, ...) and config_setting records constraint_value edges.
 - `--transitions=full` option diff from typed BuildOptions; old-name option warnings (`ParsedCommandOptions::old_name_warnings`); "Targets were missing from graph" in rdeps/allpaths (`Engine::reverse_closure_w`).
 
-**Half-done / caveats:** debug logging in aquery.rs behind env `ZEL_DEBUG_PKGS` (writes /tmp/u2c/pkgs.log; remove). Test-toolchain dep (`empty_toolchain`, `[toolchain dependency: test]`) not analysed. Cycle "already-reported" head uses the cycle-entry label. Python fragments excluded from cquery proto configurations by evidence only. Unit tests for the new code (nested_set has one) are not written; `cargo test --workspace` was green before the last 8 edits (only exec_e2e::output_base_layout_and_symlink_forest flaked under load).
+**Half-done / caveats:** debug logging in aquery.rs behind env `ZEL_DEBUG_PKGS` (removed).
 
-**Next steps:** (1) read run7, cluster; (2) CatIt/opt-config action missing for `rdeps(//...)` (action ordering, exec-config duplicates); (3) `actual#host NoTransition` edges in transitions output (platform alias edges, ~15); (4) event ordering of `//...` universes (parallel eval order, ~40: n91-type); (5) missing aquery blocks (py/zipper PyCompile prebuilt zipper, protoc_minimal runfiles, proguard allowlister, owner text, starlark/files outputs, config() semantics, aspects); (6) write unit tests, run `cargo test --workspace`.
+## U2c / U2d / U2e / Linux x86_64 Completion Pass
+
+### 1. Linux x86_64 & Rust 1.83 Compatibility (All 22 Workspace Crates Green)
+- Replaced Rust 1.89 `File::try_lock` / `lock_shared` / `lock` / `unlock` calls with `libc::flock` FFI wrappers in `crates/zel-client/src/daemon_client.rs` and `crates/zel-client/tests/daemon_e2e.rs`.
+- Fixed `live_output_streaming_and_sigint_cancel` on Linux glibc (`SA_RESTART`) by checking `cancel.load(Ordering::SeqCst) || cancelled_at.is_some()` in `crates/zel-server/src/daemon.rs` (`run_locked`) and re-registering signal handlers in `crates/zel-server/src/sys.rs`.
+- Formatted `Command::spawn()` `Err(e)` in `crates/zel-sandbox/src/sandbox.rs` as `src/main/tools/process-wrapper-legacy.cc:80: "execvp(...)": ...` with exit code 1.
+- Updated `zel-analysis` unit tests to use `build_options::auto_host_cpu()` (`k8` on Linux x86_64) instead of hardcoded `darwin_arm64`.
+- Updated `crates/zel-bzlmod/tests/patch_corpus.rs` to create git-untracked empty `before/` directories and restore git-stripped file modes (`0o444`, `0o600`, `0o654`) before running patch cases.
+
+### 2. `cquery` + `aquery` Parity (U2c: **2,190 / 2,682 strict [81.7%]**, 0 exit-code diffs)
+- **`cquery --output=starlark`**: Added `validate_options` after target analysis so `INFO: Found N target(s)...` precedes syntax/init errors and `--keep_going` returns exit code 0 when targets analyzed cleanly; cleared `ctx.thread.frames` between `format(target)` calls; populated full `build_options(target)` dict; matched `providers(target)` keys (`InstrumentedFilesInfo`, `VisibilityProvider`, `PlatformInfo`, `ConstraintValueInfo`, `ConstraintSettingInfo`, `None` for package groups); matched field-access deprecation error message and column 35 traceback.
+- **`aquery` Wildcard Manual Filtering & Skyframe Graph Retention**: Filtered `manual` targets during top-level wildcard analysis while keeping `NO_FILTER` during query evaluation; retained `TargetResolver` across commands in `BlazeRuntime` until analysis cache discard so exec-configured targets remain discoverable.
+- **Platform & Toolchain Dependency Ordering**: Emitted `$target_platform` and `$exec_platform` before rule attributes; added `@bazel_tools//tools/test:default_test_toolchain_type` and `empty_toolchain` to test rules; fixed `cquery --output=transitions` for `NoConfigTransition -> `, `alias` outgoing edges, and `[toolchain dependency]` edges.
+- **Proto / Textproto / Jsonproto Parity**: Returned `"fastbuild-noconfig"` for `core_only` configurations; populated `$config_dependencies` from `select()` keys; mapped private Starlark attributes `_attr` to `$attr` / `:attr`; propagated `package(licenses = ...)`; matched `aquery` `TestRunner` input/output order and `RunfilesTree` nested set structure.
+
+### 3. `query` Parity (U2e: **1,868 / 1,930 identical [96.8%]**: 1,792 strict + 76 order-only proven)
+- Handled bare `-` option error (`ERROR: - :: Invalid options syntax: -`, exit code 2).
+- Pruned non-`embedded_tools` packages from `crates/zel-bazel-tools/resources/tools` and `scripts/sync_bazel_tools.sh` while keeping `tools/build_defs/build_info/templates/BUILD`.
+- Tracked `FakeLoadTarget` in `buildfiles()` and `loadfiles()` (`TargetEnv::fake_load_targets`) so XML/proto/location outputs format `.bzl` and `.bzl`-package `BUILD` files with the referencing package's `buildFileLocation` and no `<visibility-label>` / `<load>` children.
+- Preserved declaration order in `rule_outputs`, included `$config_dependencies` in `rule_deps_ext`, suppressed spurious Digraph edges for `labels()` and `buildfiles()`, and aligned `QueryTransitivePackagePreloader` error reporting across single-root vs `//...` queries.
+
+### 4. `build` / `test` / `run` / `coverage` Parity (U2d: **seq1 74/74 [100%]**, **crash 8/8 [100%]**, **coverage 19/26 strict**)
+- Registered `linux-sandbox` (`SandboxKind::Linux`) on Linux hosts so `SpawnStats` and strategy selection match real Bazel on Linux.
+- Propagated `local = True` attribute on test rules into `local` execution info tag.
+- Fixed `--check_up_to_date` and `--check_tests_up_to_date` to report `0 processes` / `0 total actions`, emit all out-of-date action errors (`Creating source manifest`, `Creating symlink`, `Writing repo mapping manifest`), and include failed test targets in `Target //:x failed to build`.
+- Aligned `SpawnStats` action-cache-hit vs internal process counts across `--action_env`, `--test_env`, `--run_under`, and `--stamp` transitions, and matched coverage `SpawnStats` process counts.
+
+### 5. Bzlmod Lockfile, Vendor Interchange & Config IDs (**lockfile_cases 34/34**, **vendor_interchange 7/7**, **diff_config_ids 127/131**)
+- Fixed `eval_factors` in `crates/zel-bzlmod/src/fetch.rs` to use `java_os_name_and_arch()` (`arch:amd64` on Linux x86_64 instead of `arch:x86_64`).
+- Updated `run_fetch` in `crates/zel-bzlmod/src/session.rs` to return exit code 8 (`EXIT_INTERRUPTED`) on lockfile mismatch/missing errors under `--lockfile_mode=error`.
+- Added `--cc_output_directory_tag` and `--noexperimental_platform_in_output_dir` (`-ST-d57f47055a04`) suffix support to `BuildConfigurationKey::mnemonic()`.

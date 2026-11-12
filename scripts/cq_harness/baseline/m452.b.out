@@ -300,15 +300,15 @@ results {
     }
   }
   configuration {
-    checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+    checksum: "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
   }
   configuration_id: 1
 }
 configurations {
   id: 1
-  mnemonic: "darwin_arm64-fastbuild"
-  platform_name: "darwin_arm64"
-  checksum: "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+  mnemonic: "k8-fastbuild"
+  platform_name: "k8"
+  checksum: "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
   fragments {
     name: "com.google.devtools.build.lib.analysis.PlatformConfiguration"
     fragment_option_names: "com.google.devtools.build.lib.analysis.PlatformOptions"
@@ -461,7 +461,7 @@ configurations {
     }
     options {
       name: "cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "enable_runfiles"
@@ -573,7 +573,7 @@ configurations {
     }
     options {
       name: "host_cpu"
-      value: "darwin_arm64"
+      value: "k8"
     }
     options {
       name: "host_features"

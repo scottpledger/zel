@@ -1,0 +1,7 @@
+test_suite rule //:all_tests
+xlib rule //b:shlib
+x_test rule //b:t2
+filegroup rule //c:cdata
+filegroup rule //d:dep_bad
+filegroup rule //d:ok
+filegroup rule //pg:viol

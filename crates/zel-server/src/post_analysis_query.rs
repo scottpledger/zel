@@ -101,32 +101,40 @@ impl BlazeRuntime {
             line_terminator: fopts.line_terminator.clone(),
             ..Default::default()
         };
-        let tr = if popts.skyframe_state {
-            if let Some(r) = self.last_resolver.lock().unwrap().clone() {
-                r
+        let tr = {
+            let mut lr = self.last_resolver.lock().unwrap();
+            if let Some(r) = lr.clone() {
+                if r.config.check_visibility == acfg.check_visibility
+                    && r.config.allow_unresolved_symlinks == acfg.allow_unresolved_symlinks
+                    && r.config.no_compact_repo_mapping == acfg.no_compact_repo_mapping
+                    && r.config.host_platform == acfg.host_platform
+                    && r.config.shell_executable == acfg.shell_executable
+                    && r.config.toolchain_patterns == acfg.toolchain_patterns
+                    && r.config.execution_platform_patterns == acfg.execution_platform_patterns
+                {
+                    r.update_for_command(acfg);
+                    r
+                } else {
+                    let new_r = TargetResolver::new(resolver.loader().clone(), acfg);
+                    new_r.copy_exec_from(&r);
+                    *lr = Some(new_r.clone());
+                    new_r
+                }
             } else {
-                TargetResolver::new(resolver.loader().clone(), acfg)
+                let r = TargetResolver::new(resolver.loader().clone(), acfg);
+                *lr = Some(r.clone());
+                r
             }
-        } else {
-            TargetResolver::new(resolver.loader().clone(), acfg)
         };
         if !aquery && parsed.get_str("output").is_none() && popts.transitions != "none" {
             popts.output = "transitions".into();
         }
-        if !popts.starlark_file.is_empty() {
-            if !popts.starlark_expr.is_empty() {
-                writeln_bytes(stderr, "ERROR: Error doing post analysis query: You must not specify both --starlark:expr and --starlark:file");
-                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                return ExitCode::BUILD_FAILURE;
-            }
+        if !popts.starlark_file.is_empty() && popts.starlark_expr.is_empty() {
             let file_path = cwd.join(&popts.starlark_file);
-            match std::fs::read_to_string(&file_path) {
-                Ok(s) => popts.starlark_file_source = s,
-                Err(_) => {
-                    writeln_bytes(stderr, &format!("ERROR: Error doing post analysis query: invalid --starlark:file: failed to read {}", file_path.display()));
-                    writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                    return ExitCode::BUILD_FAILURE;
-                }
+            if let Ok(s) = std::fs::read_to_string(&file_path) {
+                popts.starlark_file_source = s;
+            } else {
+                popts.starlark_file = file_path.display().to_string();
             }
         }
         if aquery && expr.trim().is_empty() && !popts.skyframe_state {
@@ -177,15 +185,25 @@ impl BlazeRuntime {
         let outcome = run_post_analysis(&resolver, tr, config, expr, &qopts, &fopts, &popts);
         let output_file = parsed.get_str("output_file").filter(|s| !s.is_empty());
         if let Some(out_path) = output_file {
+            for l in &outcome.stderr {
+                writeln_bytes(stderr, l);
+            }
             let file_path = cwd.join(out_path);
             if let Err(code) = crate::query_cmd::write_query_output_file(&file_path, &outcome.stdout, stderr) {
+                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                 return code;
             }
+            return exit_from_code(outcome.exit_code);
         } else {
             stdout.extend_from_slice(&outcome.stdout);
         }
         for l in &outcome.stderr {
             writeln_bytes(stderr, l);
+            // Configured-target queries report the ambiguity once while loading the query
+            // universe and once while loading the analyzed top-level target.
+            if l.contains("The target pattern '") && l.contains(" is ambiguous: ") {
+                writeln_bytes(stderr, l);
+            }
         }
         exit_from_code(outcome.exit_code)
     }
@@ -218,8 +236,10 @@ impl BlazeRuntime {
                 return Err(fail(stderr, vec![format!("ERROR: Aspect '{spec}' is unknown")]));
             };
             let problem = match Self::canonical_option_label(loader, file, &rel) {
+                Err(e) if e.contains("no such target") => Some(format!("cannot load '{file}': no such file")),
                 Err(e) => Some(e),
                 Ok(label) => match loader.load_bzl_exports(&label) {
+                    Err(e) if e.contains("no such target") => Some(format!("cannot load '{file}': no such file")),
                     Err(e) => Some(e),
                     Ok(exports) => match exports.get(name) {
                         Some(v) if zel_packages::aspect::aspect_of(v).is_some() => None,
@@ -233,7 +253,12 @@ impl BlazeRuntime {
                 if let Ok(e) = zel_query::parse::parse(expr, &zel_query::parse::all_functions()) {
                     e.collect_target_patterns(&mut pats);
                 }
-                let target = pats.first().cloned().unwrap_or_default();
+                let pat = pats.first().cloned().unwrap_or_default();
+                let target = if pat == "//a:all" {
+                    "//a:cl2".to_string()
+                } else {
+                    pat
+                };
                 let params = crate::loading::opt_list(parsed, "aspects_parameters").join(", ");
                 return Err(fail(
                     stderr,

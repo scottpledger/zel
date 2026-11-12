@@ -137,7 +137,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -278,147 +278,7 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
-    },
-    "configurationId": 1
-  }, {
-    "target": {
-      "type": "RULE",
-      "rule": {
-        "name": "//d:ok",
-        "ruleClass": "filegroup",
-        "location": "@WS@/d/BUILD:2:10",
-        "attribute": [{
-          "name": "$config_dependencies",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": ":action_listener",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "aspect_hints",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "compatible_with",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "data",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "deprecation",
-          "type": "STRING",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "distribs",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "features",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "generator_function",
-          "type": "STRING",
-          "stringValue": "",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "generator_location",
-          "type": "STRING",
-          "stringValue": "",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "generator_name",
-          "type": "STRING",
-          "stringValue": "",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "licenses",
-          "type": "LICENSE",
-          "license": {
-            "licenseType": ["NONE"]
-          },
-          "explicitlySpecified": false
-        }, {
-          "name": "name",
-          "type": "STRING",
-          "stringValue": "ok",
-          "explicitlySpecified": true,
-          "nodep": false
-        }, {
-          "name": "output_group",
-          "type": "STRING",
-          "stringValue": "",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "output_licenses",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "package_metadata",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "restricted_to",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "srcs",
-          "type": "LABEL_LIST",
-          "stringListValue": ["//c:cdata"],
-          "explicitlySpecified": true,
-          "nodep": false
-        }, {
-          "name": "tags",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "target_compatible_with",
-          "type": "LABEL_LIST",
-          "explicitlySpecified": false,
-          "nodep": false
-        }, {
-          "name": "testonly",
-          "type": "BOOLEAN",
-          "intValue": 0,
-          "stringValue": "false",
-          "explicitlySpecified": false,
-          "booleanValue": false
-        }, {
-          "name": "transitive_configs",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": true
-        }, {
-          "name": "visibility",
-          "type": "STRING_LIST",
-          "explicitlySpecified": false,
-          "nodep": true
-        }],
-        "ruleInput": ["//c:cdata"]
-      }
-    },
-    "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -570,7 +430,147 @@
       }
     },
     "configuration": {
-      "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+    },
+    "configurationId": 1
+  }, {
+    "target": {
+      "type": "RULE",
+      "rule": {
+        "name": "//d:ok",
+        "ruleClass": "filegroup",
+        "location": "@WS@/d/BUILD:2:10",
+        "attribute": [{
+          "name": "$config_dependencies",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": ":action_listener",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "aspect_hints",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "compatible_with",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "data",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "deprecation",
+          "type": "STRING",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "distribs",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "features",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "generator_function",
+          "type": "STRING",
+          "stringValue": "",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "generator_location",
+          "type": "STRING",
+          "stringValue": "",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "generator_name",
+          "type": "STRING",
+          "stringValue": "",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "licenses",
+          "type": "LICENSE",
+          "license": {
+            "licenseType": ["NONE"]
+          },
+          "explicitlySpecified": false
+        }, {
+          "name": "name",
+          "type": "STRING",
+          "stringValue": "ok",
+          "explicitlySpecified": true,
+          "nodep": false
+        }, {
+          "name": "output_group",
+          "type": "STRING",
+          "stringValue": "",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "output_licenses",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "package_metadata",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "restricted_to",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "srcs",
+          "type": "LABEL_LIST",
+          "stringListValue": ["//c:cdata"],
+          "explicitlySpecified": true,
+          "nodep": false
+        }, {
+          "name": "tags",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "target_compatible_with",
+          "type": "LABEL_LIST",
+          "explicitlySpecified": false,
+          "nodep": false
+        }, {
+          "name": "testonly",
+          "type": "BOOLEAN",
+          "intValue": 0,
+          "stringValue": "false",
+          "explicitlySpecified": false,
+          "booleanValue": false
+        }, {
+          "name": "transitive_configs",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": true
+        }, {
+          "name": "visibility",
+          "type": "STRING_LIST",
+          "explicitlySpecified": false,
+          "nodep": true
+        }],
+        "ruleInput": ["//c:cdata"]
+      }
+    },
+    "configuration": {
+      "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
     },
     "configurationId": 1
   }, {
@@ -823,15 +823,15 @@
       }
     },
     "configuration": {
-      "checksum": "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607"
+      "checksum": "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
     },
     "configurationId": 2
   }],
   "configurations": [{
     "id": 1,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c",
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -945,7 +945,7 @@
         "value": "fastbuild"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -1029,7 +1029,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"
@@ -1882,9 +1882,9 @@
     }]
   }, {
     "id": 2,
-    "mnemonic": "darwin_arm64-fastbuild",
-    "platformName": "darwin_arm64",
-    "checksum": "1a589d14ca3886895c1228db75ec6c30d0c253d2c9f4c3070e5f3535de94c607",
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a",
     "fragments": [{
       "name": "com.google.devtools.build.lib.analysis.PlatformConfiguration",
       "fragmentOptionNames": ["com.google.devtools.build.lib.analysis.PlatformOptions"]
@@ -2001,7 +2001,7 @@
         "value": "fastbuild"
       }, {
         "name": "cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "enable_runfiles",
         "value": "AUTO"
@@ -2085,7 +2085,7 @@
         "value": "opt"
       }, {
         "name": "host_cpu",
-        "value": "darwin_arm64"
+        "value": "k8"
       }, {
         "name": "host_features",
         "value": "[]"

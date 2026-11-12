@@ -1,30 +1,30 @@
 action 'Executing genrule //a:gg'
   Mnemonic: Genrule
   Target: //a:gg
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: 53f7714ee5c7c9e3b6b4441332ae8783df39713cb40576e7421a5e53fc558e57
-  Inputs: [a/x.txt, bazel-out/darwin_arm64-opt-exec/bin/b/tool, bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/a/gg.out]
+  ActionKey: 52a91c6b3ef768fa870a6ade5f42a05febcbc4d09f6be886be8aad04ef9f8bf0
+  Inputs: [a/x.txt, bazel-out/k8-opt-exec/bin/b/tool, bazel-out/k8-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/gg.out]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec /bin/bash \
     -c \
-    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/x.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/gg.out ; echo a/x.txt >> bazel-out/darwin_arm64-opt/bin/a/gg.out')
-# Configuration: 7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/x.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/gg.out ; echo a/x.txt >> bazel-out/k8-opt/bin/a/gg.out')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
 # Execution platform: @@platforms//host:host
 
 action 'Executing genrule //a:lm'
   Mnemonic: Genrule
   Target: //a:lm
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: e4cf7154af705b5590d52ea28ebbe5fc4335034e6f850660ee26e89df0613524
+  ActionKey: 2eccb33175d1d6505c806638e6071194e18f0a7363bdd9793fb6fa2847362411
   Inputs: [external/bazel_tools/tools/genrule/genrule-setup.sh]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/a/lm.o]
+  Outputs: [bazel-out/k8-opt/bin/a/lm.o]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
   Command Line: (exec /bin/bash \
     -c \
-    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/darwin_arm64-opt/bin/a/lm.o')
-# Configuration: 7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/k8-opt/bin/a/lm.o')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
 # Execution platform: @@platforms//host:host
 

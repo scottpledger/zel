@@ -11,6 +11,6 @@ ERROR: Evaluation of query "//nonexistent:x" failed: no such package 'nonexisten
 WARNING: --keep_going specified, ignoring errors. Results may be inaccurate
 INFO: Empty query results
 ERROR: command succeeded, but there were errors parsing the target pattern
-INFO: Elapsed time: 0.059s, Critical Path: 0.00s
+INFO: Elapsed time: 0.032s, Critical Path: 0.00s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

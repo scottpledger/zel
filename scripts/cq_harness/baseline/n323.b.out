@@ -1,7 +1,7 @@
 digraph mygraph {
   node [shape=box];
-  "//b:t2 (1a589d1)"
-  "//b:t2 (1a589d1)" -> "//b:shlib (2d89340)"
-  "//b:shlib (2d89340)"
-  "//b:mk (2d89340)\n//b:t1 (1a589d1)\n//b:tool (2d89340)"
+  "//b:t2 (e722a21)"
+  "//b:t2 (e722a21)" -> "//b:shlib (a7a71fd)"
+  "//b:shlib (a7a71fd)"
+  "//b:mk (a7a71fd)\n//b:t1 (e722a21)\n//b:tool (a7a71fd)"
 }

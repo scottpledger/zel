@@ -91,12 +91,13 @@ pub fn apply_aspect_with_params(
     if !target_matches_required_providers(&ct, &def.required_providers) {
         return Ok(ct);
     }
+    let aspect_id = def.display_id();
     let sig = format!(
         "{}|{}#{}|{}|{}|{}|{}",
         ct.label.canonical_form(),
         ct.configuration.mnemonic(),
         ct.configuration.short_hash(),
-        def.id,
+        aspect_id,
         ct.providers.keys().cloned().collect::<Vec<_>>().join(","),
         ct.typed_actions.len(),
         params.iter().map(|(k, v)| format!("{k}={}", v.to_value().repr())).collect::<Vec<_>>().join(";")
@@ -104,7 +105,6 @@ pub fn apply_aspect_with_params(
     if let Some(hit) = resolver.aspect_cache_get(&sig) {
         return Ok(hit);
     }
-    let aspect_id = def.display_id();
     let loc = rule.extra.location.clone().map(|l| format!("{l}: ")).unwrap_or_default();
     let prefix = format!("{loc}in {aspect_id} aspect on {} rule {}: ", rc.name, ct.label.canonical_form());
     let wrap = |e: String| {
@@ -127,7 +127,9 @@ pub fn apply_aspect_with_params(
             Ok(dep)
         }
     };
-    let rule_bundle = convert_rule_attrs(&rule, &rc.attrs, &cfg, inputs, &pkg_dir, out_root, &wrap, Some(&hook))?;
+    let mut rule_attrs = rc.attrs.clone();
+    rule_attrs.retain(|_, a| !a.name.starts_with('_') || def.attr_aspects.iter().any(|x| x == "*" || x == &a.name));
+    let rule_bundle = convert_rule_attrs(&rule, &rule_attrs, &cfg, inputs, &pkg_dir, out_root, &wrap, Some(&hook))?;
 
     // 2. The aspect's own attributes (implicit dependencies and parameters).
     let mut aspect_attr_map: BTreeMap<String, Attribute> = BTreeMap::new();

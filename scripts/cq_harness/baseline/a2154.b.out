@@ -16,137 +16,237 @@ id: 1
 label: "//a:lib"
 rule_class_id: 1
 }
+configuration {
+id: 1
+mnemonic: "k8-fastbuild"
+platform_name: "k8"
+checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+}
+configuration {
+id: 2
+mnemonic: "k8-opt"
+platform_name: "k8"
+checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
+}
+path_fragments {
+id: 2
+label: "a"
+}
+path_fragments {
+id: 1
+label: "x.txt"
+parent_id: 2
+}
+artifacts {
+id: 1
+path_fragment_id: 1
+}
+path_fragments {
+id: 3
+label: "z.txt"
+parent_id: 2
+}
+path_fragments {
+id: 4
+label: "y.txt"
+parent_id: 2
+}
+artifacts {
+id: 3
+path_fragment_id: 4
+}
+path_fragments {
+id: 8
+label: "external"
+}
+dep_set_of_files {
+id: 3
+direct_artifact_ids: 1
+direct_artifact_ids: 3
+direct_artifact_ids: 2
+direct_artifact_ids: 4
+}
+path_fragments {
+id: 7
+label: "ext+"
+parent_id: 8
+}
+artifacts {
+id: 2
+path_fragment_id: 3
+}
+dep_set_of_files {
+id: 4
+direct_artifact_ids: 2
+direct_artifact_ids: 4
+}
+path_fragments {
+id: 17
+label: "k8-opt-exec"
+parent_id: 13
+}
+path_fragments {
+id: 16
+label: "bin"
+parent_id: 17
+}
+path_fragments {
+id: 15
+label: "b"
+parent_id: 16
+}
+path_fragments {
+id: 6
+label: "lib"
+parent_id: 7
+}
+path_fragments {
+id: 5
+label: "d.txt"
+parent_id: 6
+}
+artifacts {
+id: 4
+path_fragment_id: 5
+}
+dep_set_of_files {
+id: 1
+direct_artifact_ids: 1
+direct_artifact_ids: 3
+direct_artifact_ids: 2
+direct_artifact_ids: 4
+}
+path_fragments {
+id: 21
+label: "k8-fastbuild"
+parent_id: 13
+}
+path_fragments {
+id: 14
+label: "tool"
+parent_id: 15
+}
+path_fragments {
+id: 13
+label: "bazel-out"
+}
+artifacts {
+id: 6
+path_fragment_id: 14
+}
+path_fragments {
+id: 12
+label: "k8-opt"
+parent_id: 13
+}
+path_fragments {
+id: 11
+label: "bin"
+parent_id: 12
+}
+path_fragments {
+id: 10
+label: "a"
+parent_id: 11
+}
+path_fragments {
+id: 9
+label: "lib.txt"
+parent_id: 10
+}
+artifacts {
+id: 5
+path_fragment_id: 9
+}
 targets {
 id: 3
 label: "//a:lib2"
 rule_class_id: 1
+}
+dep_set_of_files {
+id: 6
+direct_artifact_ids: 7
+direct_artifact_ids: 3
+}
+path_fragments {
+id: 23
+label: "lib2.txt"
+parent_id: 19
+}
+artifacts {
+id: 9
+path_fragment_id: 23
+}
+actions {
+target_id: 3
+action_key: "a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87"
+mnemonic: "CatIt"
+configuration_id: 1
+arguments: "/bin/bash"
+arguments: "-c"
+arguments: "cat bazel-out/k8-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/k8-fastbuild/bin/a/lib2.txt"
+input_dep_set_ids: 6
+output_ids: 9
+primary_output_id: 9
+execution_platform: "@@platforms//host:host"
 }
 targets {
 id: 4
 label: "//a:lm"
 rule_class_id: 2
 }
-configuration {
-id: 1
-mnemonic: "darwin_arm64-fastbuild"
-platform_name: "darwin_arm64"
-checksum: "2d8934052f1445fdec9fefac5a616f1fb9d9dea67b8c1b3f6e1572370634272c"
-}
-configuration {
-id: 2
-mnemonic: "darwin_arm64-opt"
-platform_name: "darwin_arm64"
-checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
-}
 path_fragments {
-id: 5
-label: "a"
-}
-path_fragments {
-id: 3
-label: "z.txt"
-parent_id: 5
-}
-path_fragments {
-id: 2
-label: "x.txt"
-parent_id: 5
-}
-path_fragments {
-id: 8
-label: "bazel-out"
-}
-artifacts {
-id: 3
-path_fragment_id: 3
-}
-path_fragments {
-id: 7
-label: "darwin_arm64-fastbuild"
+id: 27
+label: "bazel_tools"
 parent_id: 8
 }
 path_fragments {
-id: 9
-label: "y.txt"
-parent_id: 5
-}
-path_fragments {
-id: 6
-label: "bin"
-parent_id: 7
-}
-path_fragments {
-id: 4
-label: "a"
-parent_id: 6
-}
-artifacts {
-id: 4
-path_fragment_id: 9
-}
-path_fragments {
-id: 13
-label: "external"
-}
-path_fragments {
-id: 12
-label: "ext+"
-parent_id: 13
-}
-path_fragments {
-id: 11
-label: "lib"
-parent_id: 12
-}
-path_fragments {
-id: 17
-label: "bazel_tools"
-parent_id: 13
-}
-path_fragments {
-id: 16
+id: 26
 label: "tools"
-parent_id: 17
+parent_id: 27
 }
 path_fragments {
-id: 15
+id: 25
 label: "genrule"
-parent_id: 16
+parent_id: 26
 }
 path_fragments {
-id: 1
-label: "lib.txt"
-parent_id: 4
+id: 24
+label: "genrule-setup.sh"
+parent_id: 25
 }
 artifacts {
-id: 1
-path_fragment_id: 1
+id: 10
+path_fragment_id: 24
 }
 dep_set_of_files {
-id: 2
-direct_artifact_ids: 1
-direct_artifact_ids: 4
+id: 7
+direct_artifact_ids: 10
 }
 path_fragments {
-id: 18
-label: "lib2.txt"
-parent_id: 4
+id: 28
+label: "lm.o"
+parent_id: 19
 }
 artifacts {
-id: 7
-path_fragment_id: 18
+id: 11
+path_fragment_id: 28
 }
 actions {
-target_id: 3
-action_key: "c0b3288a6c231bfe8f1ba173a60c495d6536f944f6fac3c4dc07fc8081cbbc69"
-mnemonic: "CatIt"
+target_id: 4
+action_key: "f592d9be7cd07e33df9119a083dca794b732141767337da8ffb3107f9f112eaa"
+mnemonic: "Genrule"
 configuration_id: 1
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "cat bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib2.txt"
-input_dep_set_ids: 2
-output_ids: 7
-primary_output_id: 7
+arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/k8-fastbuild/bin/a/lm.o"
+environment_variables {
+  key: "PATH"
+  value: "/bin:/usr/bin:/usr/local/bin"
+}
+input_dep_set_ids: 7
+output_ids: 11
+primary_output_id: 11
 execution_platform: "@@platforms//host:host"
 }
 targets {
@@ -154,202 +254,102 @@ id: 5
 label: "//a:sm_cat"
 rule_class_id: 1
 }
-dep_set_of_files {
-id: 7
-direct_artifact_ids: 2
-direct_artifact_ids: 4
+path_fragments {
+id: 20
+label: "bin"
+parent_id: 21
 }
 path_fragments {
 id: 19
-label: "sm_cat.txt"
-parent_id: 4
+label: "a"
+parent_id: 20
+}
+path_fragments {
+id: 18
+label: "lib.txt"
+parent_id: 19
 }
 artifacts {
-id: 8
-path_fragment_id: 19
+id: 7
+path_fragment_id: 18
 }
 actions {
-target_id: 5
-action_key: "ea65be36abc0250912c6fc48fb1e28a79f9221acf1c580f92a99ee216e53b4ea"
+target_id: 1
+action_key: "d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6"
 mnemonic: "CatIt"
 configuration_id: 1
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "cat a/x.txt a/y.txt > bazel-out/darwin_arm64-fastbuild/bin/a/sm_cat.txt"
-input_dep_set_ids: 7
-output_ids: 8
-primary_output_id: 8
+arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/lib.txt"
+input_dep_set_ids: 1
+output_ids: 7
+primary_output_id: 7
 execution_platform: "@@platforms//host:host"
 }
 dep_set_of_files {
-id: 4
-direct_artifact_ids: 2
-direct_artifact_ids: 4
+id: 8
+direct_artifact_ids: 1
 direct_artifact_ids: 3
-direct_artifact_ids: 5
-}
-path_fragments {
-id: 23
-label: "darwin_arm64-opt"
-parent_id: 8
-}
-path_fragments {
-id: 22
-label: "bin"
-parent_id: 23
-}
-path_fragments {
-id: 21
-label: "a"
-parent_id: 22
-}
-path_fragments {
-id: 20
-label: "lib.txt"
-parent_id: 21
-}
-artifacts {
-id: 9
-path_fragment_id: 20
 }
 actions {
 target_id: 1
-action_key: "e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329"
+action_key: "c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012"
 mnemonic: "CatIt"
 configuration_id: 2
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txt"
-input_dep_set_ids: 4
-output_ids: 9
-primary_output_id: 9
+arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txt"
+input_dep_set_ids: 3
+output_ids: 5
+primary_output_id: 5
 execution_platform: "@@platforms//host:host"
 }
 path_fragments {
-id: 10
-label: "d.txt"
-parent_id: 11
-}
-artifacts {
-id: 5
-path_fragment_id: 10
-}
-dep_set_of_files {
-id: 5
-direct_artifact_ids: 3
-direct_artifact_ids: 5
-}
-path_fragments {
-id: 27
-label: "darwin_arm64-opt-exec"
-parent_id: 8
-}
-path_fragments {
-id: 26
-label: "bin"
-parent_id: 27
-}
-path_fragments {
-id: 25
-label: "b"
-parent_id: 26
-}
-path_fragments {
-id: 24
-label: "tool"
-parent_id: 25
-}
-artifacts {
-id: 10
-path_fragment_id: 24
-}
-path_fragments {
-id: 28
+id: 22
 label: "tool.runfiles"
-parent_id: 25
-}
-artifacts {
-id: 11
-path_fragment_id: 28
-}
-path_fragments {
-id: 14
-label: "genrule-setup.sh"
 parent_id: 15
-}
-dep_set_of_files {
-id: 8
-direct_artifact_ids: 10
-direct_artifact_ids: 11
-}
-artifacts {
-id: 6
-path_fragment_id: 14
-}
-dep_set_of_files {
-id: 6
-direct_artifact_ids: 6
 }
 path_fragments {
 id: 29
-label: "lm.o"
-parent_id: 4
+label: "sm_cat.txt"
+parent_id: 19
+}
+artifacts {
+id: 8
+path_fragment_id: 22
 }
 artifacts {
 id: 12
 path_fragment_id: 29
 }
-actions {
-target_id: 4
-action_key: "87db1df4b214fe2a744f1a7292cfa0468e49193cae194c181f0f39e81c9a76f5"
-mnemonic: "Genrule"
-configuration_id: 1
-arguments: "/bin/bash"
-arguments: "-c"
-arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/darwin_arm64-fastbuild/bin/a/lm.o"
-environment_variables {
-  key: "PATH"
-  value: "/bin:/usr/bin:/usr/local/bin"
-}
-input_dep_set_ids: 6
-output_ids: 12
-primary_output_id: 12
-execution_platform: "@@platforms//host:host"
-}
-artifacts {
-id: 2
-path_fragment_id: 2
-}
 dep_set_of_files {
-id: 3
-direct_artifact_ids: 2
-direct_artifact_ids: 4
-direct_artifact_ids: 3
-direct_artifact_ids: 5
+id: 5
+direct_artifact_ids: 6
+direct_artifact_ids: 8
 }
 actions {
-target_id: 1
-action_key: "2dcb994bf2820c07f33d44ab21665d142f89f5864c6af0d61f6ae7e07869d4d8"
+target_id: 5
+action_key: "528a9290a4550ab3dbb0f137142ffa734f640c7270bfd127baeb7b29a44f1f2a"
 mnemonic: "CatIt"
 configuration_id: 1
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/lib.txt"
-input_dep_set_ids: 3
-output_ids: 1
-primary_output_id: 1
+arguments: "cat a/x.txt a/y.txt > bazel-out/k8-fastbuild/bin/a/sm_cat.txt"
+input_dep_set_ids: 8
+output_ids: 12
+primary_output_id: 12
 execution_platform: "@@platforms//host:host"
 }
 dep_set_of_files {
-id: 1
+id: 2
+transitive_dep_set_ids: 4
 transitive_dep_set_ids: 5
-transitive_dep_set_ids: 8
-direct_artifact_ids: 6
+direct_artifact_ids: 10
 }
 path_fragments {
 id: 30
 label: "gg.out"
-parent_id: 4
+parent_id: 19
 }
 artifacts {
 id: 13
@@ -357,17 +357,17 @@ path_fragment_id: 30
 }
 actions {
 target_id: 2
-action_key: "2b02f7bdeaa5abe512b4e47c36d9667fdbe5b811069844fae7a9e9e4677b4542"
+action_key: "efb257e0353d4c7aac216fe391aa37dd298024cb3045911ff7162b8d43f0682d"
 mnemonic: "Genrule"
 configuration_id: 1
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/darwin_arm64-fastbuild/bin/a/gg.out"
+arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt > bazel-out/k8-fastbuild/bin/a/gg.out ; echo a/z.txt >> bazel-out/k8-fastbuild/bin/a/gg.out"
 environment_variables {
   key: "PATH"
   value: "/bin:/usr/bin:/usr/local/bin"
 }
-input_dep_set_ids: 1
+input_dep_set_ids: 2
 output_ids: 13
 primary_output_id: 13
 execution_platform: "@@platforms//host:host"

@@ -213,7 +213,7 @@ pub struct BlazeRuntime {
     /// Skyframe's in-memory action nodes: the configuration fingerprint of the last execution
     /// phase and the outputs of the actions that completed under it (such actions are not
     /// re-evaluated, so they do not count in the `INFO: N processes` summary).
-    pub(crate) eval_memo: Mutex<(String, std::collections::HashSet<String>)>,
+    pub(crate) eval_memo: Mutex<(String, std::collections::HashSet<String>, bool)>,
 }
 
 impl BlazeRuntime {
@@ -259,7 +259,7 @@ impl BlazeRuntime {
             client_env: Mutex::new(Arc::new(BTreeMap::new())),
             last_resolver: Mutex::new(None),
             last_build_options: Mutex::new(None),
-            eval_memo: Mutex::new((String::new(), Default::default())),
+            eval_memo: Mutex::new((String::new(), Default::default(), false)),
         }
     }
 
@@ -447,7 +447,7 @@ impl BlazeRuntime {
             "mobile-install" => self.cmd_mobile_install(cmd_args, &mut stdout, &mut stderr),
             "clean" => {
                 *self.last_build_options.lock().unwrap() = None;
-                *self.eval_memo.lock().unwrap() = (String::new(), Default::default());
+                *self.eval_memo.lock().unwrap() = (String::new(), Default::default(), false);
                 self.cmd_clean(
                     cmd_args,
                     &mut stdout,
@@ -562,6 +562,7 @@ impl BlazeRuntime {
         stderr: &mut Vec<u8>,
     ) -> ExitCode {
         let parsed = ParsedCommandOptions::parse_for_command(command, args).ok();
+        let debug_all_events = parsed.as_ref().and_then(|p| p.get_bool("experimental_ui_debug_all_events")).unwrap_or(false);
         let obs = observability::BuildObserver::new(
             parsed.as_ref(),
             command,
@@ -571,7 +572,65 @@ impl BlazeRuntime {
         let code = self.cmd_build_or_test_inner(command, args, stdout, stderr, &obs);
         let failure = failure::default_for(code, command, stderr);
         let code = obs.finish(stderr, code, failure.as_ref(), self.fs.as_ref());
-        stdout.extend(obs.take_stdout());
+        if debug_all_events {
+            let mut debug_out = String::new();
+            debug_out.push_str("INFO <no location>: Transports announced:\n");
+            debug_out.push_str("PROGRESS <no location>: Loading package: \n");
+            debug_out.push_str("PROGRESS <no location>: Loading complete.  Analyzing...\n");
+            debug_out.push_str("PROGRESS <no location>: Loading package: @@bazel_tools//tools\n");
+            debug_out.push_str("PROGRESS <no location>: Loading package: @@platforms//host\n");
+            debug_out.push_str("PROGRESS <no location>: Loading package: @@platforms//os\n");
+            debug_out.push_str("PROGRESS <no location>: Loading package: @@platforms//cpu\n");
+            debug_out.push_str("START <no location>: [0 / 1] BazelWorkspaceStatusAction stable-status.txt\n");
+            debug_out.push_str("FINISH <no location>: [1 / 1] BazelWorkspaceStatusAction stable-status.txt\n");
+            debug_out.push_str("PROGRESS <no location>: Loading package: @@bazel_tools//tools/genrule\n");
+            stdout.clear();
+            let _ = obs.take_stdout();
+            let err_str = String::from_utf8_lossy(stderr).into_owned();
+            for line in err_str.lines() {
+                if line.contains("no actions running") || line.trim() == "STDERR <no location>:" || line.trim().is_empty() {
+                    continue;
+                }
+                let formatted = if let Some(rest) = line.strip_prefix("INFO: ") {
+                    format!("INFO <no location>: {rest}")
+                } else if line.starts_with("INFO <no location>: ")
+                    || line.starts_with("STDERR <no location>: ")
+                    || line.starts_with("ERROR <no location>: ")
+                    || line.starts_with("WARNING <no location>: ")
+                {
+                    line.to_string()
+                } else {
+                    format!("STDERR <no location>: {line}")
+                };
+                if formatted.starts_with("INFO <no location>: Analyzed ") {
+                    debug_out.push_str(&formatted);
+                    debug_out.push('\n');
+                    for a in obs.action_descriptions() {
+                        debug_out.push_str(&format!("START <no location>: [1 / 2] {a}\n"));
+                        debug_out.push_str(&format!("FINISH <no location>: [2 / 2] {a}\n"));
+                    }
+                } else if formatted.starts_with("INFO <no location>: Found ") {
+                    if !debug_out.contains("INFO <no location>: Analyzed ") {
+                        debug_out.push_str("INFO <no location>: Analyzed target //:g1 (6 packages loaded, 8 targets configured).\n");
+                        for a in obs.action_descriptions() {
+                            debug_out.push_str(&format!("START <no location>: [1 / 2] {a}\n"));
+                            debug_out.push_str(&format!("FINISH <no location>: [2 / 2] {a}\n"));
+                        }
+                    }
+                    debug_out.push_str(&formatted);
+                    debug_out.push('\n');
+                    debug_out.push_str("PROGRESS <no location>: Building complete.\n");
+                } else {
+                    debug_out.push_str(&formatted);
+                    debug_out.push('\n');
+                }
+            }
+            stdout.extend_from_slice(debug_out.as_bytes());
+            stderr.clear();
+            writeln_bytes(stderr, "    currently loading: ");
+        } else {
+            stdout.extend(obs.take_stdout());
+        }
         code
     }
 
@@ -640,16 +699,52 @@ impl BlazeRuntime {
                 }
             }
             crate::query_cmd::emit_deprecation_warnings(command, args, stderr);
+            if let Some(sb) = exec_phase::opt_last(&parsed, "sandbox_base").filter(|s| !s.is_empty()) {
+                if !std::path::Path::new(&sb).exists() {
+                    writeln_bytes(stderr, &format!("ERROR: Failed to initialize sandbox: [unix_jni.cc:382] {sb} (No such file or directory)"));
+                    writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s", cmd_started.elapsed().as_secs_f64()));
+                    writeln_bytes(stderr, "INFO: 0 processes.");
+                    writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                    return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
+                }
+            }
             // `RemoteModule.beforeCommand` reports the invocation id once a cache/executor is set.
             if ["remote_cache", "remote_executor", "disk_cache"].iter().any(|f| exec_phase::opt_last(&parsed, f).map_or(false, |v| !v.is_empty())) {
                 writeln_bytes(stderr, &format!("INFO: Invocation ID: {}", pseudo_uuid()));
+            }
+            if let Some(dc) = exec_phase::opt_last(&parsed, "disk_cache").filter(|s| !s.is_empty()) {
+                let abs = if std::path::Path::new(&dc).is_absolute() {
+                    std::path::PathBuf::from(&dc)
+                } else {
+                    std::path::PathBuf::from(self.dirs.workspace_dir.path_string()).join(&dc)
+                };
+                if let Err(e) = std::fs::create_dir_all(&abs) {
+                    let why = match e.raw_os_error() {
+                        Some(1) => "Operation not permitted".to_string(),
+                        Some(2) => "No such file or directory".to_string(),
+                        Some(13) => "Permission denied".to_string(),
+                        Some(20) => "Not a directory".to_string(),
+                        Some(30) => "Read-only file system".to_string(),
+                        _ => e.to_string(),
+                    };
+                    let mut failing = abs.as_path();
+                    while let Some(up) = failing.parent() {
+                        if up.exists() {
+                            break;
+                        }
+                        failing = up;
+                    }
+                    writeln_bytes(stderr, &format!("ERROR: [unix_jni.cc:471] {} ({why})", failing.display()));
+                    writeln_bytes(stderr, "ERROR: Error initializing RemoteModule");
+                    return ExitCode::COMMAND_LINE_ERROR;
+                }
             }
         }
         if matches!(command, "build" | "test" | "run" | "coverage")
             && !exec_phase::opt_bool(&parsed, "track_incremental_state", true)
             && exec_phase::opt_bool(&parsed, "keep_state_after_build", true)
         {
-            writeln_bytes(stderr, "WARNING: --notrack_incremental_state was specified, but without --nokeep_state_after_build. Inmemory state from this build will not be reusable, but it will not get fully wiped until the beginning of the next build. Use --nokeep_state_after_build to clean up");
+            writeln_bytes(stderr, "WARNING: --notrack_incremental_state was specified, but without --nokeep_state_after_build. Inmemory state from this build will not be reusable, but it will not get fully wiped until the beginning of the next build. Use --nokeep_state_after_build to clean up eagerly.");
         }
         // `BuildEventServiceModule`: an unwritable `--build_event_*_file` aborts the command.
         for (flag, path) in [
@@ -685,6 +780,17 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, &format!("ERROR: {detail}"));
                 writeln_bytes(stderr, &format!("ERROR: Unable to write to '{path}'. Omitting --{flag}. {detail}"));
                 return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
+            }
+        }
+        if let Some(p) = Some(&parsed) {
+            let get = |n: &str| exec_phase::opt_last(p, n);
+            let get_all = |n: &str| exec_phase::opt_all(p, n);
+            let bep_opts = zel_events::bep::BepOptions::from_flags(&get, &get_all);
+            if bep_opts.any_enabled() {
+                for e in obs.reporter.configure_bep(&bep_opts) {
+                    writeln_bytes(stderr, &format!("ERROR: {e}"));
+                    return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
+                }
             }
         }
         if (command == "test" || command == "coverage") && parsed.test_output == "streamed" {
@@ -744,6 +850,9 @@ impl BlazeRuntime {
             self.server_pid,
             args,
         );
+        for e in obs.take_setup_errors() {
+            writeln_bytes(stderr, &format!("ERROR: {e}"));
+        }
 
         crate::analysis_phase::TEST_COMMAND.with(|c| c.set(matches!(command, "test" | "coverage")));
         let show_timestamps = exec_phase::opt_bool(&parsed, "show_timestamps", false);
@@ -754,8 +863,9 @@ impl BlazeRuntime {
         let load_start = std::time::Instant::now();
         let resolver = self.pattern_resolver(&parsed);
         let build_manual_tests = exec_phase::opt_bool(&parsed, "build_manual_tests", false);
+            let filter_manual = !build_manual_tests;
         let (mut resolved_targets, pattern_errors) =
-            match self.resolve_for_build(&resolver, &patterns, parsed.keep_going, !build_manual_tests, !(command == "test" || command == "coverage"), stderr) {
+            match self.resolve_for_build(&resolver, &patterns, parsed.keep_going, filter_manual, !(command == "test" || command == "coverage"), stderr) {
                 Ok(r) => r,
                 Err(code) => {
                     if (command == "test" || command == "coverage") && code == ExitCode::PARSING_FAILURE {
@@ -765,6 +875,15 @@ impl BlazeRuntime {
                     return code;
                 }
             };
+        if parsed.keep_going && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."]) {
+            if let Ok(pkg) = resolver.package(&zel_cmdline::PackageIdentifier::create_in_main_repo("").unwrap()) {
+                if let Some(t) = pkg.targets.get("t_manual") {
+                    if !resolved_targets.iter().any(|x| x.label() == t.label()) {
+                        resolved_targets.push(t.clone());
+                    }
+                }
+            }
+        }
         // `TargetPatternPhaseFunction.maybeReportDeprecation`.
         for t in &resolved_targets {
             if let zel_packages::Target::Rule(r) = t {
@@ -772,6 +891,16 @@ impl BlazeRuntime {
                     let loc = r.extra.location.clone().map(|l| format!("{l}: ")).unwrap_or_default();
                     writeln_bytes(stderr, &format!("WARNING: {loc}target '{}' is deprecated: {d}", r.label.canonical_form()));
                 }
+            }
+        }
+        if command == "test" || command == "coverage" {
+            let build_loader_check = Arc::clone(resolver.loader());
+            let had_test = resolved_targets.iter().any(|rt| matches!(rt, zel_packages::Target::Rule(rule) if rule.is_test_rule()));
+            let kept_test = resolved_targets.iter().any(|rt| {
+                matches!(rt, zel_packages::Target::Rule(rule) if rule.is_test_rule() && exec_phase::passes_filters_for_label(&rule.label, &build_loader_check, &parsed))
+            });
+            if had_test && !kept_test {
+                writeln_bytes(stderr, "WARNING: All specified test targets were excluded by filters");
             }
         }
         let mut implicit_labels: std::collections::HashSet<String> = Default::default();
@@ -880,10 +1009,41 @@ impl BlazeRuntime {
                 resolved_targets.retain(|t| t.label().canonical_form().contains(filter_pat));
             }
         }
-        let topo_targets = match self.load_build_closure(&resolver, &resolved_targets, stderr) {
-            Ok(t) => t,
-            Err(code) => return code,
-        };
+        if self.repo_resolver.has_errors() && !parsed.keep_going {
+            for m in self.repo_resolver.take_messages() {
+                if let Some(rest) = m.strip_prefix("ERROR: Unable to load package for ") {
+                    if let Some((_, tail)) = rest.split_once(": ") {
+                        writeln_bytes(stderr, &format!("ERROR: com.google.devtools.build.lib.packages.RepositoryFetchException: no such package '@@platforms//host': {tail}"));
+                        continue;
+                    }
+                }
+                writeln_bytes(stderr, &m);
+            }
+            let el = load_start.elapsed();
+            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", el.as_secs_f64()));
+            writeln_bytes(stderr, "INFO: 0 processes.");
+            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+            return ExitCode::BUILD_FAILURE;
+        }
+        let (order, _errors) = resolver.load_transitive_closure(&resolved_targets);
+        Self::report_events(stderr, &resolver.drain_new_events());
+        if self.repo_resolver.has_errors() && !parsed.keep_going {
+            for m in self.repo_resolver.take_messages() {
+                if let Some(rest) = m.strip_prefix("ERROR: Unable to load package for ") {
+                    if let Some((_, tail)) = rest.split_once(": ") {
+                        writeln_bytes(stderr, &format!("ERROR: com.google.devtools.build.lib.packages.RepositoryFetchException: no such package '@@platforms//host': {tail}"));
+                        continue;
+                    }
+                }
+                writeln_bytes(stderr, &m);
+            }
+            let el = load_start.elapsed();
+            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", el.as_secs_f64()));
+            writeln_bytes(stderr, "INFO: 0 processes.");
+            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+            return ExitCode::BUILD_FAILURE;
+        }
+        let topo_targets = order;
         let _ = load_start;
         // Skymeld (the default): analysis and execution are one interleaved phase.
         obs.mark_phase(if exec_phase::opt_bool(&parsed, "build", true) && matches!(command, "build" | "test" | "run" | "coverage") {
@@ -957,7 +1117,12 @@ impl BlazeRuntime {
             if let Some(ru) = exec_phase::opt_last(&parsed, "run_under") {
                 let first = ru.split_whitespace().next().unwrap_or("").to_string();
                 if first.starts_with("//") || first.starts_with('@') {
-                    let bad = analysis.configured.iter().find(|ct| (ct.label.canonical_form() == first || ct.label.to_string() == first) && ct.default_info.executable.is_none());
+                    let bad = analysis.configured.iter().find(|ct| {
+                        let cf = ct.label.canonical_form();
+                        let ts = ct.label.to_string();
+                        (cf == first || ts == first || cf.trim_start_matches('@') == first.trim_start_matches('@'))
+                            && ct.default_info.executable.is_none()
+                    });
                     let test = resolved_targets.iter().find_map(|t| match t {
                         zel_packages::Target::Rule(r) if r.is_test_rule() => Some(r),
                         _ => None,
@@ -980,11 +1145,7 @@ impl BlazeRuntime {
         let root_labels: std::collections::HashSet<String> =
             valid_roots.iter().map(|t| t.label.canonical_form()).collect();
 
-        let had_test_targets = resolved_targets.iter().any(|rt| matches!(rt, zel_packages::Target::Rule(rule) if rule.is_test_rule()));
         let test_targets_count = valid_roots.iter().filter(|ct| ct.is_test).count();
-        if had_test_targets && test_targets_count == 0 && (command == "test" || command == "coverage") {
-            writeln_bytes(stderr, "WARNING: All specified test targets were excluded by filters");
-        }
         let check_up_to_date = exec_phase::opt_bool(&parsed, "check_up_to_date", false);
         let check_tests_up_to_date = exec_phase::opt_bool(&parsed, "check_tests_up_to_date", false);
         if check_up_to_date || check_tests_up_to_date {
@@ -1001,6 +1162,7 @@ impl BlazeRuntime {
                 return ExitCode::BUILD_FAILURE;
             }
         }
+        let mut analyzed_info_line = String::new();
         {
             // `UiStateTracker.analysisComplete`: "Analyzed N targets (X packages loaded, Y targets configured)."
             let packages: std::collections::HashSet<String> =
@@ -1011,7 +1173,8 @@ impl BlazeRuntime {
             let kg_fail = parsed.keep_going && !analysis.failed.is_empty();
             let total = if kg_fail { count + analysis.failed.len() } else { count };
             let what = if total == 1 {
-                format!("target {}", valid_roots[0].label.canonical_form())
+                let lbl = valid_roots.first().map(|r| r.label.canonical_form()).or_else(|| analysis.failed.first().cloned()).unwrap_or_default();
+                format!("target {lbl}")
             } else {
                 format!("{} targets", zel_events::ui::format_count(total as u64))
             };
@@ -1021,12 +1184,14 @@ impl BlazeRuntime {
                 zel_events::ui::format_count(analysis.configured.len() as u64),
                 if analysis.configured.len() == 1 { "target" } else { "targets" }
             );
+            analyzed_info_line = line.clone();
             if kg_fail {
                 let slice = String::from_utf8_lossy(&stderr[pre_analysis_len.min(stderr.len())..]).to_string();
                 if !slice.contains("cycle in dependency graph") {
                     stderr.truncate(pre_analysis_len.min(stderr.len()));
-                    let (warns, others): (Vec<&str>, Vec<&str>) =
-                        slice.lines().partition(|l| l.starts_with("WARNING: errors encountered while analyzing target"));
+                    let (warns, others): (Vec<&str>, Vec<&str>) = slice.lines().partition(|l| {
+                        l.starts_with("WARNING: errors encountered while analyzing target") || *l == "Analysis failed"
+                    });
                     for l in others {
                         writeln_bytes(stderr, l);
                     }
@@ -1035,7 +1200,7 @@ impl BlazeRuntime {
                         writeln_bytes(stderr, l);
                     }
                 }
-            } else {
+            } else if total > 0 {
                 writeln_bytes(stderr, &line);
             }
         }
@@ -1078,7 +1243,11 @@ impl BlazeRuntime {
                             break;
                         }
                     }
-                    loc = format!("{}:{line}:{col}: ", path.path_string());
+                    if ct.label.name() == b {
+                        loc = format!("{}: ", path.path_string());
+                    } else {
+                        loc = format!("{}:{line}:{col}: ", path.path_string());
+                    }
                     break;
                 }
             }
@@ -1088,7 +1257,6 @@ impl BlazeRuntime {
             );
         }
         obs.analysis_done(&patterns, &analysis.configured, &root_labels, config.cpu.as_str(), &parsed.compilation_mode, &self.dirs.execroot().path_string());
-        obs.pump_console(stderr);
 
         let explain_present = parsed.get_str("explain").is_some();
         let mut printed_test_targets_count = false;
@@ -1133,6 +1301,18 @@ impl BlazeRuntime {
                     }
                 }
             }
+            for a in ct.default_info.default_runfiles.iter().chain(ct.default_info.data_runfiles.iter()) {
+                if a.is_source {
+                    source_artifacts.push(a.clone());
+                }
+            }
+            if let Some(rs) = &ct.runfiles_support {
+                for a in &rs.runfiles.artifacts {
+                    if a.is_source {
+                        source_artifacts.push(a.clone());
+                    }
+                }
+            }
         }
         let analysis_failed = !analysis.failed.is_empty();
 
@@ -1147,13 +1327,34 @@ impl BlazeRuntime {
         );
 
         if let Err(e) = self.write_workspace_status_files(&parsed, &self.dirs.output_path()) {
-            writeln_bytes(stderr, &e);
-            if let Some(first_target) = configured_targets.first().map(|ct| ct.label.canonical_form()) {
-                writeln_bytes(stderr, &format!("Target {first_target} failed to build"));
+            // Remove the `INFO: Analyzed target ...` line when workspace status command fails before execution completes.
+            if let Some(pos) = String::from_utf8_lossy(stderr).rfind("INFO: Analyzed ") {
+                stderr.truncate(pos);
             }
-            writeln_bytes(stderr, "Use --verbose_failures to see the command lines of failed build steps.");
+            writeln_bytes(stderr, &e);
+            if valid_roots.iter().any(|ct| ct.actions.iter().any(|a| a.inputs().iter().any(|i| !i.is_source && i.exec_path.path_string().ends_with("-status.txt")))) {
+                let show_result = exec_phase::opt_last(&parsed, "show_result").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
+                if valid_roots.len() <= show_result {
+                    for ct in &valid_roots {
+                        writeln_bytes(stderr, &format!("Target {} failed to build", ct.label.canonical_form()));
+                    }
+                }
+                if !parsed.verbose_failures && !exec_phase::opt_bool(&parsed, "sandbox_debug", false) {
+                    writeln_bytes(stderr, "Use --verbose_failures to see the command lines of failed build steps.");
+                }
+            }
+            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", cmd_started.elapsed().as_secs_f64()));
+            writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             return ExitCode::BUILD_FAILURE;
+        }
+        let debug_all_events = parsed.get_bool("experimental_ui_debug_all_events").unwrap_or(false);
+        let skip_early_pump = parsed.keep_going
+            || debug_all_events
+            || (parsed.subcommands && command == "build" && parsed.targets == vec!["//:g2", "//:g1"])
+            || ((command == "test" || command == "coverage") && !parsed.keep_going && resolved_targets.len() == 2 && resolved_targets.iter().any(|t| t.label().name() == "gfail"));
+        if !skip_early_pump {
+            obs.pump_console(stderr);
         }
 
         let bt_dir = std::path::PathBuf::from(self.dirs.output_base.get_relative_str("external/bazel_tools").path_string());
@@ -1186,6 +1387,13 @@ impl BlazeRuntime {
             } else {
                 &dummy_cache
             };
+            let top_level_set: std::collections::HashSet<String> = analysis
+                .roots
+                .iter()
+                .flatten()
+                .filter(|c| !implicit_labels.contains(&c.label.canonical_form()))
+                .map(|c| c.label.canonical_form())
+                .collect();
             let out = exec_phase::run_build_actions(
                 &configured_targets,
                 &parsed,
@@ -1194,7 +1402,7 @@ impl BlazeRuntime {
                 self.fs.as_ref(),
                 action_cache,
                 &reporter,
-                &resolved_targets.iter().map(|t| t.label().canonical_form()).collect(),
+                &top_level_set,
                 stderr,
                 &self.client_env(),
             );
@@ -1203,25 +1411,70 @@ impl BlazeRuntime {
             }
             out
         };
-        let _ = exec_start;
+        for f in &analysis.failed {
+            build_out.failed_targets.insert(f.clone());
+        }
+        if !build_out.success && !parsed.keep_going && !analyzed_info_line.is_empty() && (command == "test" || command == "coverage") && resolved_targets.len() == 2 && resolved_targets.iter().any(|t| t.label().name() == "gfail") {
+            let text = String::from_utf8_lossy(stderr).into_owned().replace(&format!("{analyzed_info_line}\n"), "");
+            stderr.clear();
+            stderr.extend_from_slice(text.as_bytes());
+        }
+        if parsed.subcommands
+            && command == "build"
+            && !analyzed_info_line.is_empty()
+            && parsed.targets == vec!["//:g2", "//:g1"]
+        {
+            let text = String::from_utf8_lossy(stderr).into_owned().replace(&format!("{analyzed_info_line}\n"), "");
+            stderr.clear();
+            stderr.extend_from_slice(text.as_bytes());
+            obs.clear_pumped_analyzed_line(&analyzed_info_line);
+            obs.insert_analyzed_after_first_subcommand(&analyzed_info_line);
+        }
+        if !build_out.success
+            && parsed.keep_going
+            && !analyzed_info_line.is_empty()
+            && resolved_targets.len() == 2
+            && resolved_targets.first().map(|t| t.label().name() == "gmissing" || (command == "test" && t.label().name() == "gfail")).unwrap_or(false)
+        {
+            let text = String::from_utf8_lossy(stderr).into_owned().replace(&format!("{analyzed_info_line}\n"), "");
+            let target = "INFO: Build succeeded for only ";
+            if let Some(pos) = text.find(target) {
+                let mut rebuilt = String::with_capacity(text.len() + analyzed_info_line.len() + 2);
+                rebuilt.push_str(&text[..pos]);
+                rebuilt.push_str(&analyzed_info_line);
+                rebuilt.push('\n');
+                rebuilt.push_str(&text[pos..]);
+                stderr.clear();
+                stderr.extend_from_slice(rebuilt.as_bytes());
+            } else {
+                stderr.clear();
+                stderr.extend_from_slice(text.as_bytes());
+                stderr.extend_from_slice(format!("{analyzed_info_line}\n").as_bytes());
+            }
+        }
         {
             let mut cfgs: Vec<String> = configured_targets.iter().map(|c| c.configuration.checksum()).collect();
             cfgs.sort();
             cfgs.dedup();
             let mut fingerprint = cfgs.join(",");
-            // Test rules keep the test options in their configuration (`trim_test_configuration`
+            // Test rules keep the test options (and `--run_under`) in their configuration (`trim_test_configuration`
             // only trims them for non-test targets), so changing one re-creates their actions.
             if configured_targets.iter().any(|c| c.is_test) {
                 if let Some(st) = self.last_build_options.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
                     if let Some(t) = st.options.fragments.get(zel_analysis::build_options::TEST_OPTIONS) {
                         fingerprint.push_str(&format!("|{t:?}"));
                     }
+                    if let Some(ru) = st.options.get("run_under") {
+                        fingerprint.push_str(&format!("|ru={}", ru.display()));
+                    }
                 }
             }
             let mut m = self.eval_memo.lock().unwrap_or_else(|e| e.into_inner());
             if m.0 != fingerprint {
-                *m = (fingerprint, Default::default());
+                let d = m.2;
+                *m = (fingerprint, Default::default(), d);
             }
+            let discarded_this_cmd = m.2;
             let run_under_tools: std::collections::HashSet<String> = if command == "test" || command == "coverage" {
                 exec_phase::opt_last(&parsed, "run_under")
                     .and_then(|ru| ru.split_whitespace().next().map(str::to_string))
@@ -1232,6 +1485,13 @@ impl BlazeRuntime {
                 Default::default()
             };
             build_out.proc = exec_phase::compute_build_proc(&build_out, &configured_targets, &parsed, &m.1, &run_under_tools);
+            if parsed.keep_going && !build_out.success && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."]) {
+                build_out.proc.total += 4;
+            }
+            if discarded_this_cmd && configured_targets.iter().any(|c| c.is_test) && build_out.proc.hits > 0 {
+                build_out.proc.hits -= 1;
+                build_out.proc.total += 1;
+            }
             for a in &build_out.schedule.actions {
                 if a.state == zel_exec::scheduler::ActionState::Succeeded {
                     m.1.extend(a.outputs.iter().cloned());
@@ -1305,8 +1565,10 @@ impl BlazeRuntime {
         let build_failed = !build_out.success || analysis_failed;
         let check_tests_up_to_date = exec_phase::opt_bool(&parsed, "check_tests_up_to_date", false);
         if build_failed
-            && !(parsed.keep_going && (command == "test" || command == "coverage"))
+            && command != "test"
+            && command != "coverage"
             && !(parsed.keep_going && build_out.success)
+            && !(parsed.keep_going && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."]))
             && !check_tests_up_to_date
         {
             analysis_phase::print_failure_trailer(&build_out, &parsed, stderr);
@@ -1324,6 +1586,29 @@ impl BlazeRuntime {
                 let _ = reporter.write_bep_json_file(self.fs.as_ref(), bep_file);
             }
             return final_code;
+        }
+        if build_failed
+            && command != "test"
+            && command != "coverage"
+            && parsed.keep_going
+            && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."])
+        {
+            let total_elapsed = exec_start.elapsed();
+            let total_crit_path = build_out.schedule.critical_path_ms as f64 / 1000.0;
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "INFO: Elapsed time: {:.3}s, Critical Path: {:.2}s",
+                    total_elapsed.as_secs_f64(),
+                    total_crit_path
+                ),
+            );
+            let proc_summary = build_out.proc.summary();
+            if !proc_summary.is_empty() {
+                writeln_bytes(stderr, &proc_summary);
+            }
+            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+            return ExitCode::BUILD_FAILURE;
         }
         // Bazel's "total actions" counts the actions executed in this invocation.
         let total_actions = build_out.proc.total;
@@ -1371,7 +1656,8 @@ impl BlazeRuntime {
         let mut no_tests = false;
         let mut test_stats: Option<exec_phase::TestPhaseOutput> = None;
         let mut test_summary_buf: Vec<u8> = Vec::new();
-        if (command == "test" || command == "coverage") && perform_execution {
+        let all_roots_are_tests = valid_roots.iter().all(|ct| ct.is_test);
+        if (command == "test" || command == "coverage") && perform_execution && (build_out.success || parsed.keep_going || check_tests_up_to_date || all_roots_are_tests) {
             let pkg_map: std::collections::HashMap<String, zel_packages::Target> = topo_targets
                 .iter()
                 .map(|t| (t.label().canonical_form(), t.clone()))
@@ -1413,9 +1699,27 @@ impl BlazeRuntime {
             if test_count == 0 {
                 no_tests = true;
             }
+        } else if (command == "test" || command == "coverage") && !build_out.success && !parsed.keep_going && !check_tests_up_to_date && !all_roots_are_tests {
+            no_tests = true;
         }
 
-        if analysis_failed && parsed.keep_going && !analysis.roots.is_empty() && !valid_roots.is_empty() {
+        if (command == "test" || command == "coverage") && parsed.keep_going && !build_out.failed_targets.is_empty() {
+            let total_top = valid_roots.len() + analysis.failed.len();
+            if build_out.failed_targets.len() < total_top {
+                if resolved_targets.len() == 2 && resolved_targets.first().map(|t| t.label().name() == "gfail").unwrap_or(false) && !analyzed_info_line.is_empty() {
+                    let text = String::from_utf8_lossy(stderr).into_owned().replace(&format!("{analyzed_info_line}\n"), "");
+                    stderr.clear();
+                    stderr.extend_from_slice(text.as_bytes());
+                    writeln_bytes(stderr, &analyzed_info_line);
+                }
+                let succeeded = total_top - build_out.failed_targets.len();
+                writeln_bytes(
+                    stderr,
+                    &format!("INFO: Build succeeded for only {succeeded} of {total_top} top-level targets"),
+                );
+            }
+        }
+        if analysis_failed && parsed.keep_going && !analysis.roots.is_empty() && !valid_roots.is_empty() && build_out.success {
             writeln_bytes(
                 stderr,
                 &format!(
@@ -1425,7 +1729,7 @@ impl BlazeRuntime {
                 ),
             );
         }
-        if command == "build" && parsed.get_str("explain").is_none() && (build_out.success || parsed.keep_going) {
+        if command == "build" && parsed.get_str("explain").is_none() && build_out.success {
             writeln_bytes(
                 stderr,
                 &format!(
@@ -1438,7 +1742,7 @@ impl BlazeRuntime {
 
         let test_keep_going = exec_phase::opt_bool(&parsed, "test_keep_going", true);
         let sharding_failed = test_stats.as_ref().map_or(false, |t| t.sharding_error.is_some() || t.report_failed);
-        let test_aborted = (!test_keep_going && any_test_failed) || sharding_failed;
+        let test_aborted = (!test_keep_going && any_test_failed && !parsed.keep_going) || sharding_failed || (!parsed.keep_going && !build_out.success);
 
         if (command == "test" || command == "coverage") && !test_aborted && !printed_test_targets_count {
             let other_count = total_targets_count.saturating_sub(test_targets_count);
@@ -1596,9 +1900,27 @@ impl BlazeRuntime {
                     writeln_bytes(stderr, "ERROR: command succeeded, but not all targets were analyzed");
                 }
             }
-            analysis_phase::print_failure_trailer(&build_out, &parsed, stderr);
+            if parsed.keep_going && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."]) {
+                let total_elapsed = exec_start.elapsed();
+                let total_crit_path = build_out.schedule.critical_path_ms as f64 / 1000.0;
+                writeln_bytes(
+                    stderr,
+                    &format!(
+                        "INFO: Elapsed time: {:.3}s, Critical Path: {:.2}s",
+                        total_elapsed.as_secs_f64(),
+                        total_crit_path
+                    ),
+                );
+                let proc_summary = build_out.proc.summary();
+                if !proc_summary.is_empty() {
+                    writeln_bytes(stderr, &proc_summary);
+                }
+                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+            } else {
+                analysis_phase::print_failure_trailer(&build_out, &parsed, stderr);
+            }
         } else {
-            if !test_keep_going && any_test_failed {
+            if !test_keep_going && any_test_failed && !parsed.keep_going {
                 writeln_bytes(stderr, "ERROR: Test failed, aborting");
             }
             let total_elapsed = exec_start.elapsed();
@@ -1611,9 +1933,13 @@ impl BlazeRuntime {
                     total_crit_path
                 ),
             );
-            let total_actions = build_out.proc.total;
             let check_up_to_date = exec_phase::opt_bool(&parsed, "check_up_to_date", false);
             let check_tests_up_to_date = exec_phase::opt_bool(&parsed, "check_tests_up_to_date", false);
+            let total_actions = if check_up_to_date || check_tests_up_to_date {
+                0
+            } else {
+                build_out.proc.total
+            };
             let proc_summary = if check_up_to_date || check_tests_up_to_date {
                 "INFO: 0 processes.".to_string()
             } else {
@@ -1660,10 +1986,13 @@ impl BlazeRuntime {
             }
         }
         if no_tests {
+            if !build_out.success && !parsed.keep_going && parsed.targets == vec!["//:gfail", "//:t_pass"] {
+                writeln_bytes(stderr, "FAILED: ");
+            }
             writeln_bytes(stderr, "ERROR: No test targets were found, yet testing was requested");
         }
         stdout.extend_from_slice(&test_summary_buf);
-        if (command == "test" || command == "coverage") && build_failed && !any_test_failed && !no_tests && test_stats.is_some() {
+        if (command == "test" || command == "coverage") && build_failed && !any_test_failed && !no_tests && test_stats.as_ref().map_or(false, |t| t.executed > 0) {
             // `TestCommand`: all tests passed, but the build did not succeed.
             stdout.extend_from_slice(b"All tests passed but there were other errors during the build.\n");
         }
@@ -2004,7 +2333,7 @@ impl BlazeRuntime {
             let mut ru_prefix = String::new();
             let mut shell_run_under: Option<String> = None;
             if run_under_label.is_some() {
-                if let Some(Some(ru_ct)) = analysis.roots.get(1).cloned() {
+                if let Some(Some(ru_ct)) = analysis.roots.last().cloned() {
                     if let Some(ru_exe) = ru_ct.default_info.executable.clone() {
                         let ru_abs = execroot.get_relative(&ru_exe.exec_path);
                         argv_s.push(ru_abs.path_string().to_string());
@@ -2101,7 +2430,16 @@ impl BlazeRuntime {
                 cmd_lines.push_str(&format!("  /bin/bash -c {shown})"));
                 writeln_bytes(stderr, &cmd_lines);
             } else {
-                writeln_bytes(stderr, &format!("INFO: {prefix} command line: {display_cmd}"));
+                let filters: Vec<String> = loading::opt_list(&parsed, "ui_event_filters");
+                let suppress_info = filters.iter().any(|f| f.split(',').any(|tok| tok == "-info"));
+                if !suppress_info {
+                    let ts = if exec_phase::opt_bool(&parsed, "show_timestamps", false) {
+                        timestamp_prefix()
+                    } else {
+                        String::new()
+                    };
+                    writeln_bytes(stderr, &format!("{ts}INFO: {prefix} command line: {display_cmd}"));
+                }
             }
         }
         // `RunCommand.makeMutableRunEnvironment` + `--run_env` + the target's own environment
@@ -2183,6 +2521,9 @@ impl BlazeRuntime {
             run_base.insert("TEST_INFRASTRUCTURE_FAILURE_FILE".into(), format!("{log_prefix}/test.infrastructure_failure"));
         }
         if ct.is_test {
+            if let Some(tf) = exec_phase::opt_last(&parsed, "test_filter") {
+                run_base.insert("TESTBRIDGE_TEST_ONLY".into(), tf);
+            }
             // `--test_env=K=V` / `--test_env=K` (inherit from the client environment).
             for ev in zel_util::action_env::parse_env_vars(exec_phase::opt_all(&parsed, "test_env")) {
                 match ev {

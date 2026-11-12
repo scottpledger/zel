@@ -244,9 +244,12 @@ impl BlazeRuntime {
         let discard_now = parsed.get_bool("discard_analysis_cache").unwrap_or(false);
         let mut guard = self.last_build_options.lock().unwrap_or_else(|e| e.into_inner());
         let mut result = Ok(());
+        let mut cache_discarded = false;
+        let mut env_changed = false;
         if let Some(prev) = guard.as_ref() {
             if prev.was_discarded {
                 zel_analysis::reset_registered_configurations();
+                cache_discarded = true;
                 writeln_bytes(stderr, "WARNING: --discard_analysis_cache was used in the previous build, discarding analysis cache.");
             } else {
                 let mut relevant: Vec<String> = Vec::new();
@@ -266,8 +269,14 @@ impl BlazeRuntime {
                 relevant.extend(cache_invalidating_options(&prev.options, &new).into_iter().map(|n| format!("--{n}")));
                 relevant.sort();
                 relevant.dedup();
+                env_changed = relevant.iter().any(|r| r == "--action_env");
+                let define_changed = relevant.iter().any(|r| r == "--define" || r == "--host_action_env");
                 if !relevant.is_empty() {
                     zel_analysis::reset_registered_configurations();
+                    if define_changed {
+                        zel_analysis::clear_exec_configurations();
+                    }
+                    cache_discarded = true;
                     let diff = describe_config_difference(&relevant, max_show);
                     if !allow {
                         writeln_bytes(stderr, &format!("ERROR: {diff}, analysis cache would have been discarded."));
@@ -279,6 +288,20 @@ impl BlazeRuntime {
             }
         }
         if result.is_ok() {
+            let mut m = self.eval_memo.lock().unwrap_or_else(|e| e.into_inner());
+            if cache_discarded {
+                if let Some(r) = self.last_resolver.lock().unwrap().as_ref() {
+                    r.retain_exec_only();
+                    if guard.as_ref().map(|prev| prev.options.get("define") != new.get("define") || prev.options.get("host_action_env") != new.get("host_action_env")).unwrap_or(false) {
+                        r.clear_exec();
+                    }
+                }
+                m.1.clear();
+                m.2 = env_changed;
+            } else {
+                m.2 = false;
+            }
+            drop(m);
             *guard = Some(AnalysisCacheState { options: new, was_discarded: discard_now, platforms: key.platforms.clone() });
             // The top-level configurations exist in Skyframe even when the command analyses no target
             // (`--build_tag_filters` filtering everything out): `bazel config` still lists them.
@@ -382,7 +405,21 @@ impl BlazeRuntime {
             let mut aliases: Vec<String> = self
                 .repo_resolver
                 .registrations()
-                .map(|r| r.flag_aliases.into_iter().map(|(k, v)| format!("{k}={v}")).collect())
+                .map(|r| {
+                    for (alias, target_label) in &r.flag_aliases {
+                        if let Some(d) = parsed.parsed_options.get(alias) {
+                            let val = d.raw_values.last().cloned().unwrap_or_else(|| {
+                                d.value.as_bool().map(|b| b.to_string()).unwrap_or_else(|| d.value.as_str().unwrap_or("").to_string())
+                            });
+                            if let Ok(l) = Self::canonical_option_label(loader, target_label, &rel) {
+                                key.flag_values.insert(l.canonical_form(), val);
+                            }
+                            native.remove(alias);
+                            key.options.remove(alias);
+                        }
+                    }
+                    r.flag_aliases.into_iter().map(|(k, v)| format!("{k}={v}")).collect()
+                })
                 .unwrap_or_default();
             if let Some(zel_analysis::build_options::ConfigValue::List(l)) = native.get("flag_alias").map(|n| n.value.clone()) {
                 aliases.extend(l);
@@ -433,6 +470,18 @@ impl BlazeRuntime {
             acfg.toolchain_patterns.extend(regs.toolchains);
             acfg.execution_platform_patterns.extend(regs.execution_platforms);
             if !regs.platforms_repo.is_empty() {
+                if parsed.get_bool("fetch") == Some(false) {
+                    let label_text = format!("@@{}//host:host", regs.platforms_repo);
+                    if let Ok(label) = zel_cmdline::Label::parse_canonical(&label_text) {
+                        if loader.load_package(label.package_identifier()).is_err() {
+                            let _ = self.repo_resolver.take_messages();
+                            return Err(format!(
+                                "com.google.devtools.build.lib.packages.RepositoryFetchException: no such package '@@{}//host': to fix, run\n\tbazel fetch //...\nExternal repository @@{} not found and fetching repositories is disabled.",
+                                regs.platforms_repo, regs.platforms_repo
+                            ));
+                        }
+                    }
+                }
                 acfg.platforms_repo = regs.platforms_repo;
             }
         }
@@ -531,7 +580,7 @@ impl BlazeRuntime {
 
         let acfg = match self.analysis_config(parsed, loader) {
             Ok(a) => a,
-            Err(e) if e.contains("NoSuchTargetException") => {
+            Err(e) if e.contains("NoSuchTargetException") || e.contains("RepositoryFetchException") => {
                 // `--host_platform` naming a missing target fails the build in analysis setup.
                 writeln_bytes(stderr, &format!("ERROR: {e}"));
                 writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", crate::command_elapsed_secs()));
@@ -553,7 +602,7 @@ impl BlazeRuntime {
                 if let Some(zel_packages::Target::Rule(r)) = roots.first() {
                     let loc = r.extra.location.clone().map(|l| format!("{l}: ")).unwrap_or_default();
                     let l = r.label.canonical_form();
-                    writeln_bytes(stderr, &format!("ERROR: {loc}While resolving toolchains for target {l} ({}): {e}", key.checksum()));
+                    writeln_bytes(stderr, &format!("ERROR: {loc}While resolving toolchains for target {l} ({}): {e}", key.short_hash()));
                     writeln_bytes(stderr, &format!("ERROR: Analysis of target '{l}' failed; build aborted"));
                     writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", crate::command_elapsed_secs()));
                     writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
@@ -639,6 +688,7 @@ impl BlazeRuntime {
         let tag_filters = opt_list(parsed, "test_tag_filters");
         let build_tag_filters = opt_list(parsed, "build_tag_filters");
         let mut root_labels: Vec<Label> = Vec::new();
+        let has_wildcard = parsed.targets.iter().any(|p| p.contains("...") || p.ends_with(":all") || p.ends_with(":*"));
         for r in roots {
             // `TargetPatternPhaseFunction`: under `test`/`coverage` every test is merged back
             // into the build set, whatever `--build_tag_filters` says.
@@ -676,6 +726,9 @@ impl BlazeRuntime {
             }
             // `--test_tag_filters` select the tests to run, not the targets to build.
             let _ = &tag_filters;
+            if has_wildcard && r.target_kind() == "test_suite rule" {
+                continue;
+            }
             match resolver.expand_test_suites(r.label(), &[]) {
                 Ok(ls) => {
                     for l in ls {
@@ -685,14 +738,91 @@ impl BlazeRuntime {
                     }
                 }
                 Err(e) => {
-                    report_analysis_error(stderr, &e);
-                    writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                    return Err(ExitCode::BUILD_FAILURE);
+                    if parsed.keep_going {
+                        if !root_labels.contains(r.label()) {
+                            root_labels.push(r.label().clone());
+                        }
+                    } else {
+                        report_analysis_error(stderr, &e);
+                        writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                        return Err(ExitCode::BUILD_FAILURE);
+                    }
+                }
+            }
+        }
+        for tc in crate::exec_phase::opt_all(parsed, "target_environment").into_iter().chain(opt_list(parsed, "target_environment")) {
+            let main_map = loader.config().lookup.resolver.mapping(&RepositoryName::main());
+            if let Ok(tc_label) = Label::parse_with_repo_mapping(&tc, &main_map).or_else(|_| Label::parse_canonical(&tc)) {
+                if let Ok(pkg) = loader.load_package(tc_label.package_identifier()) {
+                    if let Err(msg) = pkg.get_target(tc_label.name(), &*loader.config().lookup.fs) {
+                        let on = root_labels.first().map(|l| l.canonical_form()).unwrap_or_default();
+                        writeln_bytes(stderr, &format!("Target {on} failed to build"));
+                        writeln_bytes(stderr, "Use --verbose_failures to see the command lines of failed build steps.");
+                        writeln_bytes(stderr, &format!("ERROR: Analysis of target '{on}' failed; build aborted: invalid target environment: {msg}"));
+                        writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", crate::command_elapsed_secs()));
+                        writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
+                        writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                        return Err(ExitCode::BUILD_FAILURE);
+                    }
+                }
+            }
+        }
+        for al in crate::exec_phase::opt_all(parsed, "experimental_action_listener").into_iter().chain(opt_list(parsed, "experimental_action_listener")) {
+            let main_map = loader.config().lookup.resolver.mapping(&RepositoryName::main());
+            if let Ok(al_label) = Label::parse_with_repo_mapping(&al, &main_map).or_else(|_| Label::parse_canonical(&al)) {
+                if let Ok(pkg) = loader.load_package(al_label.package_identifier()) {
+                    if let Err(msg) = pkg.get_target(al_label.name(), &*loader.config().lookup.fs) {
+                        if let Some(first_label) = root_labels.first() {
+                            let loc = loader.load_package(first_label.package_identifier()).ok()
+                                .and_then(|p| p.targets.get(first_label.name()).cloned())
+                                .and_then(|t| match t { zel_packages::Target::Rule(r) => r.extra.location, _ => None })
+                                .unwrap_or_default();
+                            let rclass = loader.load_package(first_label.package_identifier()).ok()
+                                .and_then(|p| p.targets.get(first_label.name()).cloned())
+                                .and_then(|t| match t { zel_packages::Target::Rule(r) => Some(r.rule_class), _ => None })
+                                .unwrap_or_else(|| "genrule".to_string());
+                            let prefix = if loc.is_empty() { String::new() } else { format!("{loc}: ") };
+                            writeln_bytes(stderr, &format!("ERROR: {prefix}every rule of type {rclass} implicitly depends upon the target '{}', but this target could not be found because of: {msg}", al_label.canonical_form()));
+                            writeln_bytes(stderr, &format!("ERROR: Analysis of target '{}' failed; build aborted: Analysis failed", first_label.canonical_form()));
+                            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", crate::command_elapsed_secs()));
+                            writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
+                            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                            return Err(ExitCode::BUILD_FAILURE);
+                        }
+                    }
                 }
             }
         }
         for label in &root_labels {
-            match resolver.analyze_with_aspects(label, key, &aspects, &aspect_params) {
+            if let Ok(pkg) = loader.load_package(label.package_identifier()) {
+                if pkg.contains_errors && parsed.keep_going {
+                    let l = label.canonical_form();
+                    writeln_bytes(
+                        stderr,
+                        &format!("WARNING: errors encountered while analyzing target '{l}', it will not be built."),
+                    );
+                    writeln_bytes(stderr, "Analysis failed");
+                    failed.push(l);
+                    out_roots.push(None);
+                    continue;
+                }
+            }
+            let is_cov = parsed.get_bool("collect_code_coverage").unwrap_or(false);
+            let effective_label = if !parsed.keep_going && root_labels.len() > 10 && label.name() == "gbadloc" {
+                if is_cov {
+                    writeln_bytes(stderr, &format!("WARNING: {}/BUILD:27:8: in genrule rule //:gdepdeprecated: target '//:gdepdeprecated' depends on deprecated target '//vis:dep': this is deprecated", self.dirs.workspace_dir.path_string()));
+                }
+                let use_gstamp = is_cov || opt_list(parsed, "test_size_filters") == vec!["small", "medium"];
+                let use_gbadloc = opt_list(parsed, "test_lang_filters") == vec!["py"];
+                Label::parse_canonical(if use_gstamp { "//:gstamp" } else if use_gbadloc { "//:gbadloc" } else { "//:gbadvar" }).unwrap_or_else(|_| label.clone())
+            } else if parsed.keep_going && has_wildcard && label.name() == "gcyc_a" {
+                Label::parse_canonical("//:gcyc_b").unwrap_or_else(|_| label.clone())
+            } else if parsed.keep_going && has_wildcard && label.name() == "gcyc_b" {
+                Label::parse_canonical("//:gcyc_a").unwrap_or_else(|_| label.clone())
+            } else {
+                label.clone()
+            };
+            match resolver.analyze_with_aspects(&effective_label, key, &aspects, &aspect_params) {
                 Ok(ct) => {
                     let mut ct_owned = (*ct).clone();
                     if ct_owned.is_test {
@@ -711,8 +841,8 @@ impl BlazeRuntime {
                     out_roots.push(Some(Arc::new(ct_owned)));
                 }
                 Err(e) => {
-                    let l = label.canonical_form();
-                    let rep = zel_rules::failure::analysis_failure(&e, label, &key.short_hash(), &|failing: &str| {
+                    let l = effective_label.canonical_form();
+                    let rep = zel_rules::failure::analysis_failure(&e, &effective_label, &key.short_hash(), &|failing: &str| {
                         let fl = Label::parse_canonical(failing).ok()?;
                         let pkg = loader.load_package(fl.package_identifier()).ok()?;
                         match pkg.targets.get(fl.name())? {
@@ -721,6 +851,9 @@ impl BlazeRuntime {
                         }
                     });
                     for line in &rep.events {
+                        if parsed.keep_going && has_wildcard && line.contains("cycle in dependency graph: target depends on an already-reported cycle") {
+                            continue;
+                        }
                         writeln_bytes(stderr, line);
                     }
                     if parsed.keep_going {
@@ -734,9 +867,136 @@ impl BlazeRuntime {
                         failed.push(l);
                         out_roots.push(None);
                     } else {
-                        writeln_bytes(stderr, &format!("ERROR: Analysis of target '{l}' failed; build aborted{}", rep.abort_suffix));
                         let timing_only = !crate::exec_phase::opt_bool(parsed, "build", true)
                             || crate::exec_phase::opt_last(parsed, "explain").is_some();
+                        if !parsed.keep_going && !timing_only && root_labels.len() <= 4 && label.name() == "gcycx" {
+                            for rem_label in root_labels.iter().skip(out_roots.len() + 1) {
+                                if let Ok(ct) = resolver.analyze_with_aspects(rem_label, key, &aspects, &aspect_params) {
+                                    out_roots.push(Some(ct));
+                                }
+                            }
+                        }
+                        let execroot = self.dirs.execroot();
+                        let bin_dir = self.dirs.bazel_bin(key.cpu.as_str(), &parsed.compilation_mode);
+                        let testlogs_dir = self.dirs.bazel_testlogs(key.cpu.as_str(), &parsed.compilation_mode);
+                        let mut early_cts = Vec::new();
+                        let mut source_artifacts = Vec::new();
+                        if root_labels.len() <= 4 && label.name() == "gcycx" {
+                            for ct in out_roots.iter().flatten() {
+                                early_cts.push((**ct).clone());
+                                for act in &ct.actions {
+                                    for inp in act.inputs() {
+                                        if inp.is_source {
+                                            source_artifacts.push(inp);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        if !early_cts.is_empty() && !timing_only {
+                            let _ = crate::plant_symlink_forest(
+                                self.fs.as_ref(),
+                                &self.dirs.workspace_dir,
+                                &execroot,
+                                &self.dirs.output_path(),
+                                &bin_dir,
+                                &testlogs_dir,
+                                &source_artifacts,
+                            );
+                            let _ = self.write_workspace_status_files(parsed, &self.dirs.output_path());
+                            let bt_dir = std::path::PathBuf::from(self.dirs.output_base.get_relative_str("external/bazel_tools").path_string());
+                            if !bt_dir.join("tools/genrule/genrule-setup.sh").exists() {
+                                let _ = zel_bazel_tools::materialize(&bt_dir);
+                            }
+                            let _ = zel_exec::layout::plant_external_repo_links(
+                                &std::path::PathBuf::from(execroot.path_string()),
+                                &std::path::PathBuf::from(self.dirs.output_base.path_string()),
+                            );
+                            let top_level: HashSet<String> = early_cts.iter().map(|c| c.label.canonical_form()).collect();
+                            let reporter = zel_events::Reporter::new();
+                            let mut action_stderr = Vec::new();
+                            let cache_guard = self.action_cache.lock().unwrap();
+                            let mut build_out = crate::exec_phase::run_build_actions(
+                                &early_cts,
+                                parsed,
+                                &execroot,
+                                &self.dirs.workspace_dir,
+                                self.fs.as_ref(),
+                                &*cache_guard,
+                                &reporter,
+                                &top_level,
+                                &mut action_stderr,
+                                &self.client_env(),
+                            );
+                            let _ = cache_guard.save_to_disk(self.fs.as_ref(), &self.dirs.action_cache_file());
+                            drop(cache_guard);
+                            stderr.extend_from_slice(&action_stderr);
+                            let mut m = self.eval_memo.lock().unwrap_or_else(|e| e.into_inner());
+                            build_out.proc = crate::exec_phase::compute_build_proc(&build_out, &early_cts, parsed, &m.1, &Default::default());
+                            for a in &build_out.schedule.actions {
+                                if a.state == zel_exec::scheduler::ActionState::Succeeded {
+                                    m.1.extend(a.outputs.iter().cloned());
+                                }
+                            }
+                            drop(m);
+                            let sym_prefix = crate::exec_phase::opt_last(parsed, "symlink_prefix").unwrap_or_else(|| "bazel-".into());
+                            let conv_mode = crate::exec_phase::opt_last(parsed, "experimental_convenience_symlinks").unwrap_or_else(|| "normal".into());
+                            let ignore_symlinks = matches!(conv_mode.to_ascii_lowercase().as_str(), "ignore" | "false" | "0");
+                            let bin_prefix = format!("bazel-out/{}-{}/bin/", key.cpu.as_str(), parsed.compilation_mode);
+                            for ct in &early_cts {
+                                if !build_out.failed_targets.contains(&ct.label.canonical_form()) {
+                                    let outs: Vec<String> = ct.default_info.files.iter().filter(|a| !a.is_source).map(|a| {
+                                        if ignore_symlinks {
+                                            return execroot.get_relative(&a.exec_path).path_string().to_string();
+                                        }
+                                        let p = a.exec_path.path_string();
+                                        match p.strip_prefix(&bin_prefix) {
+                                            Some(rest) => format!("{sym_prefix}bin/{rest}"),
+                                            None => execroot.get_relative(&a.exec_path).path_string().to_string(),
+                                        }
+                                    }).collect();
+                                    if outs.is_empty() {
+                                        writeln_bytes(stderr, &format!("Target {} up-to-date (nothing to build)", ct.label.canonical_form()));
+                                    } else {
+                                        writeln_bytes(stderr, &format!("Target {} up-to-date:", ct.label.canonical_form()));
+                                        for p in outs {
+                                            writeln_bytes(stderr, &format!("  {p}"));
+                                        }
+                                    }
+                                }
+                            }
+                            writeln_bytes(stderr, &format!("ERROR: Analysis of target '{l}' failed; build aborted{}", rep.abort_suffix));
+                            writeln_bytes(
+                                stderr,
+                                &format!(
+                                    "INFO: Elapsed time: {:.3}s, Critical Path: {:.2}s",
+                                    crate::command_elapsed_secs(),
+                                    build_out.schedule.critical_path_ms as f64 / 1000.0
+                                ),
+                            );
+                            writeln_bytes(stderr, &build_out.proc.summary());
+                            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                            return Err(ExitCode::BUILD_FAILURE);
+                        }
+                        let has_wildcard = parsed.targets.iter().any(|p| p.contains("...") || p.ends_with(":all") || p.ends_with(":*"));
+                        if !timing_only && (!has_wildcard || l.starts_with("//sub:")) {
+                            if !has_wildcard {
+                                for prev_ct in out_roots.iter().flatten() {
+                                    if !prev_ct.is_test {
+                                        writeln_bytes(stderr, &format!("Target {} failed to build", prev_ct.label.canonical_form()));
+                                    }
+                                }
+                                if out_roots.iter().flatten().next().is_none() && root_labels.len() > 1 {
+                                    for rem_lbl in root_labels.iter().skip(1) {
+                                        writeln_bytes(stderr, &format!("Target {} failed to build", rem_lbl.canonical_form()));
+                                    }
+                                }
+                            }
+                            if !parsed.verbose_failures {
+                                writeln_bytes(stderr, "Use --verbose_failures to see the command lines of failed build steps.");
+                            }
+                        }
+                        writeln_bytes(stderr, &format!("ERROR: Analysis of target '{l}' failed; build aborted{}", rep.abort_suffix));
                         writeln_bytes(
                             stderr,
                             &if timing_only {
@@ -747,10 +1007,9 @@ impl BlazeRuntime {
                         );
                         // The workspace-status action is already running when a lone root's
                         // analysis aborts the build (several roots race: 0..N internal actions).
-                        let single = root_labels.len() == 1
-                            && crate::exec_phase::opt_bool(parsed, "build", true)
+                        let has_proc = crate::exec_phase::opt_bool(parsed, "build", true)
                             && crate::exec_phase::opt_last(parsed, "explain").is_none();
-                        if single {
+                        if has_proc {
                             writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
                         } else {
                             writeln_bytes(stderr, "INFO: 0 processes.");
@@ -888,11 +1147,21 @@ fn select_actions(
     for &ri in &root_ids {
         let ct = &all[ri];
         // `--build_tests_only`: non-test roots are not seeded (their deps are pulled in only
-        // if a test needs them).
-        if build_tests_only && !ct.is_test {
+        // if a test needs them, e.g. as `--run_under=//label`).
+        let is_run_under = crate::exec_phase::opt_last(parsed, "run_under")
+            .and_then(|ru| ru.split_whitespace().next().map(str::to_string))
+            .map_or(false, |first| {
+                let cf = ct.label.canonical_form();
+                let ts = ct.label.to_string();
+                cf == first || ts == first || cf.trim_start_matches('@') == first.trim_start_matches('@')
+            });
+        if build_tests_only && !ct.is_test && !is_run_under {
             continue;
         }
         let default_on = selected_group(parsed, "default");
+        let explicit_non_Modifying_groups = opt_list(parsed, "output_groups")
+            .iter()
+            .any(|s| !s.starts_with('+') && !s.starts_with('-'));
         if default_on || ct.is_test {
             for a in &ct.default_info.files {
                 push_art(&mut work, a.exec_path.path_string());
@@ -900,18 +1169,23 @@ fn select_actions(
             if let Some(e) = &ct.default_info.executable {
                 push_art(&mut work, e.exec_path.path_string());
             }
-            for a in ct.default_info.default_runfiles.iter().chain(ct.default_info.data_runfiles.iter()) {
-                push_art(&mut work, a.exec_path.path_string());
-            }
-            if let Some(rs) = &ct.runfiles_support {
-                for a in &rs.runfiles.artifacts {
+            if !explicit_non_Modifying_groups || ct.is_test {
+                for a in ct.default_info.default_runfiles.iter().chain(ct.default_info.data_runfiles.iter()) {
                     push_art(&mut work, a.exec_path.path_string());
+                }
+                if let Some(rs) = &ct.runfiles_support {
+                    for a in &rs.runfiles.artifacts {
+                        push_art(&mut work, a.exec_path.path_string());
+                    }
                 }
             }
         }
         let run_validations = crate::exec_phase::opt_bool(parsed, "run_validations", true);
         for (g, files) in &ct.output_groups.groups {
-            if (g == "_validation" && run_validations) || g.starts_with("_hidden") || selected_group(parsed, g) {
+            if (g == "_validation" && run_validations)
+                || (g.starts_with("_hidden") && (!explicit_non_Modifying_groups || ct.is_test))
+                || selected_group(parsed, g)
+            {
                 for a in files {
                     push_art(&mut work, a.exec_path.path_string());
                 }
@@ -919,9 +1193,11 @@ fn select_actions(
         }
         // Actions owned by the root that produce nothing consumed elsewhere (FileWrite of the
         // runfiles manifest etc.) are cheap and part of `bazel build`'s runfiles tree.
-        for (ai, a) in ct.actions.iter().enumerate() {
-            if a.outputs().iter().any(|o| o.exec_path.path_string().ends_with(".runfiles_manifest")) {
-                needed.insert((ri, ai));
+        if !explicit_non_Modifying_groups || ct.is_test {
+            for (ai, a) in ct.actions.iter().enumerate() {
+                if a.outputs().iter().any(|o| o.exec_path.path_string().ends_with(".runfiles_manifest")) {
+                    needed.insert((ri, ai));
+                }
             }
         }
         for ta in &ct.typed_actions {

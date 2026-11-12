@@ -468,10 +468,10 @@ fn live_output_streaming_and_sigint_cancel() {
     Command::new("kill").args(["-INT", &child.id().to_string()]).status().unwrap();
     let t = Instant::now();
     let st = child.wait().unwrap();
-    assert_eq!(st.code(), Some(8), "interrupted exit code");
-    assert!(t.elapsed() < Duration::from_secs(20), "cancel did not wait for the action");
     let mut rest = String::new();
     let _ = stderr.read_to_string(&mut rest);
+    assert_eq!(st.code(), Some(8), "interrupted exit code; seen={seen}\nrest={rest}");
+    assert!(t.elapsed() < Duration::from_secs(20), "cancel did not wait for the action");
     assert!(rest.contains("ERROR: build interrupted") || seen.contains("ERROR: build interrupted"), "{rest}");
 }
 

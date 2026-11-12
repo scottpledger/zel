@@ -112,7 +112,7 @@ fn run_mod_command(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutpu
         Err(e) => {
             let mut s = String::new();
             for w in &e.warnings {
-                s.push_str(&if w.starts_with("ERROR:") { format!("{w}\n") } else { format!("WARNING: {w}\n") });
+                s.push_str(&if w.starts_with("ERROR:") || w.starts_with("WARNING:") { format!("{w}\n") } else { format!("WARNING: {w}\n") });
             }
             if e.message.starts_with("ERROR:") || e.message.starts_with("INFO:") {
                 s.push_str(&format!("{}\n", e.message));
@@ -124,9 +124,44 @@ fn run_mod_command(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutpu
     };
     let mut stderr = String::new();
     for w in &session.warnings {
-        stderr.push_str(&format!("WARNING: {w}\n"));
+        stderr.push_str(&if w.starts_with("WARNING:") { format!("{w}\n") } else { format!("WARNING: {w}\n") });
     }
     let lower = sub.to_ascii_lowercase();
+    let mut invisible_override: Option<(String, usize)> = None;
+    if lower == "graph" {
+        let root_mapping = session.resolution.repo_mapping(&ModuleKey::root());
+        for (name, _) in &session.rt.opts.override_repository {
+            if name.is_empty() || name.starts_with('@') {
+                continue;
+            }
+            let canonical = root_mapping
+                .get(name)
+                .cloned()
+                .or_else(|| session.resolution.canonical_repo_names.contains_key(name).then(|| name.clone()));
+            let Some(canonical) = canonical else {
+                let count = session
+                    .resolution
+                    .extension_ids()
+                    .into_iter()
+                    .filter(|id| !id.is_innate())
+                    .count()
+                    .saturating_sub(1);
+                invisible_override = Some((name.clone(), count));
+                break;
+            };
+            if let Err(e) = session.rt.fetch_repo(&canonical) {
+                let detail = e
+                    .find("No MODULE.bazel, REPO.bazel, or WORKSPACE file found in")
+                    .map(|i| e[i..].to_string())
+                    .unwrap_or(e);
+                return CmdOutput {
+                    exit_code: 37,
+                    stdout: String::new(),
+                    stderr: format!("ERROR: no such package '@@{canonical}//': {detail}\n"),
+                };
+            }
+        }
+    }
     let mut inspector_errors: Vec<String> = Vec::new();
     let out = if lower == "dump_repo_mapping" {
         dump_repo_mapping(&session, &rest, &mod_opts)
@@ -146,6 +181,12 @@ fn run_mod_command(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutpu
         stderr.push_str(&format!("{l}\n"));
     }
     let _ = session.finish();
+    if let (Some((name, count)), Ok(s)) = (&invisible_override, &out) {
+        stderr.push_str(&format!(
+            "ERROR: no repository visible as '@{name}' from the main repository, but overridden with --override_repository. Use --inject_repository to add new repositories.\nERROR: Results may be incomplete as {count} extensions failed.\n"
+        ));
+        return CmdOutput { exit_code: 2, stdout: s.clone(), stderr };
+    }
     match out {
         Ok(s) if inspector_errors.is_empty() => CmdOutput { exit_code: 0, stdout: s, stderr },
         Ok(s) => {
@@ -341,17 +382,16 @@ mod tests {
     }
 
     #[test]
-    fn fetch_and_vendor_failures_exit_2_like_head() {
-        // HEAD (fac655f4d2): `QUERY_EVALUATION_ERROR` = 2 for every failure after option validation.
+    fn fetch_and_vendor_failures_match_bazel_9_3_2() {
         let f = fixture("cmd_exit2", ROOT);
         let out = run(&f, "fetch", &["--repo=@nonexistent"]);
-        assert_eq!(out.exit_code, 2, "{}", out.stderr);
+        assert_eq!(out.exit_code, 8, "{}", out.stderr);
         let out = run(&f, "fetch", &["--repo=@bad!name"]);
-        assert_eq!(out.exit_code, 2, "{}", out.stderr);
+        assert_eq!(out.exit_code, 8, "{}", out.stderr);
         assert!(out.stderr.contains("Invalid repo name:"), "{}", out.stderr);
         let vd = f.base.join("vendor_exit2");
         let out = run(&f, "vendor", &[&format!("--vendor_dir={}", vd.display()), "--repo=@nonexistent"]);
-        assert_eq!(out.exit_code, 2, "{}", out.stderr);
+        assert_eq!(out.exit_code, 8, "{}", out.stderr);
         // `--repo` with target patterns is `InterruptedFailureDetails` (8) in `vendor`.
         let out = run(&f, "vendor", &[&format!("--vendor_dir={}", vd.display()), "--repo=@a", "//:x"]);
         assert_eq!(out.exit_code, 8, "{}", out.stderr);
@@ -371,7 +411,7 @@ mod tests {
         assert!(out.stderr.contains("ERROR: Build did NOT complete successfully"), "{}", out.stderr);
         let out = run(&f, "fetch", &["//nopkg:x"]);
         assert_eq!(out.exit_code, 2, "{}", out.stderr);
-        assert!(out.stderr.contains("ERROR: Fetching some target dependencies failed with errors: BUILD file not found"), "{}", out.stderr);
+        assert!(out.stderr.contains("ERROR: Fetching some target dependencies failed with errors: no such package 'nopkg': BUILD file not found"), "{}", out.stderr);
     }
 
     #[test]

@@ -1,98 +1,49 @@
-action 'Writing script b/tool [for tool]'
-  Mnemonic: FileWrite
-  Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
-  Execution platform: @@platforms//host:host
-  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
-  Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool]
-  IsExecutable: true
-
-action 'Writing repo mapping manifest for //b:tool [for tool]'
-  Mnemonic: RepoMappingManifest
-  Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
-  Execution platform: @@platforms//host:host
-  ActionKey: 9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a
-  Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.repo_mapping]
-  IsExecutable: false
-
-action 'Creating source manifest for //b:tool [for tool]'
-  Mnemonic: SourceSymlinkManifest
-  Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
-  Execution platform: @@platforms//host:host
-  ActionKey: 04503c002e4c8376c7b1143f1d1eae6c9c0fb88658286dca774e009167bc08cb
-  Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles_manifest]
-  IsExecutable: false
-
-action 'Creating runfiles tree bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles [for tool]'
-  Mnemonic: SymlinkTree
-  Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
-  Execution platform: @@platforms//host:host
-  ActionKey: 753ded1e6f15fd9aafc065b7f683c507313f0e63014a24a36eb2875e8fe17b79
-  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles/MANIFEST]
-  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
-
-runfiles for //b:tool
-  Mnemonic: RunfilesTree
-  Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
-  Execution platform: @@platforms//host:host
-  ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
-  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool, bazel-out/darwin_arm64-opt-exec/bin/b/tool.repo_mapping, bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles/MANIFEST]
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles]
-
 action 'Writing script b/tool'
   Mnemonic: FileWrite
   Target: //b:tool
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a
+  ActionKey: 8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/tool]
+  Outputs: [bazel-out/k8-opt/bin/b/tool]
   IsExecutable: true
 
 action 'Writing repo mapping manifest for //b:tool'
   Mnemonic: RepoMappingManifest
   Target: //b:tool
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: 9a5e372bb2be505274d4f0e59859008a08e6142ca037fb7a8488b1653d7d2f4a
+  ActionKey: 61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/tool.repo_mapping]
+  Outputs: [bazel-out/k8-opt/bin/b/tool.repo_mapping]
   IsExecutable: false
 
 action 'Creating source manifest for //b:tool'
   Mnemonic: SourceSymlinkManifest
   Target: //b:tool
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: 00e649395916c65a15d186aa4c67121d22b03cc0b913cd373cf734cf6b46971b
+  ActionKey: ccf9dfc42773d83ca226f6ba3eaad35621a4304a1b6eccf6b66fd188e5f63f8f
   Inputs: []
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt/bin/b/tool.runfiles_manifest]
   IsExecutable: false
 
-action 'Creating runfiles tree bazel-out/darwin_arm64-opt/bin/b/tool.runfiles'
+action 'Creating runfiles tree bazel-out/k8-opt/bin/b/tool.runfiles'
   Mnemonic: SymlinkTree
   Target: //b:tool
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
-  ActionKey: 26e19431f37e6eb65718845459f6382b8f08d228b1e9d033650019ec08858b7b
-  Inputs: [bazel-out/darwin_arm64-opt/bin/b/tool.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/tool.runfiles/MANIFEST]
+  ActionKey: 9069c3ac81ca9f53b561177b1b1d7194972265f6602d097a79631955adb78179
+  Inputs: [bazel-out/k8-opt/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt/bin/b/tool.runfiles/MANIFEST]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
 
 runfiles for //b:tool
   Mnemonic: RunfilesTree
   Target: //b:tool
-  Configuration: darwin_arm64-opt
+  Configuration: k8-opt
   Execution platform: @@platforms//host:host
   ActionKey: 64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139
-  Inputs: [bazel-out/darwin_arm64-opt/bin/b/tool, bazel-out/darwin_arm64-opt/bin/b/tool.repo_mapping, bazel-out/darwin_arm64-opt/bin/b/tool.runfiles/MANIFEST]
-  Outputs: [bazel-out/darwin_arm64-opt/bin/b/tool.runfiles]
+  Inputs: [bazel-out/k8-opt/bin/b/tool, bazel-out/k8-opt/bin/b/tool.repo_mapping, bazel-out/k8-opt/bin/b/tool.runfiles/MANIFEST]
+  Outputs: [bazel-out/k8-opt/bin/b/tool.runfiles]
 

@@ -1,10 +1,10 @@
-NoTransition -> //b:mk (2d89340)
+NoTransition -> //b:mk (a7a71fd)
   $genrule_setup#@bazel_tools//tools/genrule:genrule-setup.sh#(null transition) -> 
-NoTransition -> //b:shlib (2d89340)
+NoTransition -> //b:shlib (a7a71fd)
   srcs#//b:t.cc#(null transition) -> 
   data#//c:cdata#NoTransition -> 
-NoTransition -> //b:t1 (1a589d1)
-  $test_wrapper#@bazel_tools//tools/test:test_wrapper#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+NoTransition -> //b:t1 (e722a21)
+  $test_wrapper#@bazel_tools//tools/test:test_wrapper#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
     platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
     compilation_mode:fastbuild -> [opt]
     is exec configuration:false -> [true]
@@ -14,7 +14,7 @@ NoTransition -> //b:t1 (1a589d1)
     strip:sometimes -> [always]
     java_runtime_version:local_jdk -> [remotejdk_11]
     jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $xml_writer#@bazel_tools//tools/test:xml_writer#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $xml_writer#@bazel_tools//tools/test:xml_writer#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
     platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
     compilation_mode:fastbuild -> [opt]
     is exec configuration:false -> [true]
@@ -24,7 +24,7 @@ NoTransition -> //b:t1 (1a589d1)
     strip:sometimes -> [always]
     java_runtime_version:local_jdk -> [remotejdk_11]
     jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $test_runtime#@bazel_tools//tools/test:runtime#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $test_runtime#@bazel_tools//tools/test:runtime#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
     platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
     compilation_mode:fastbuild -> [opt]
     is exec configuration:false -> [true]
@@ -34,7 +34,7 @@ NoTransition -> //b:t1 (1a589d1)
     strip:sometimes -> [always]
     java_runtime_version:local_jdk -> [remotejdk_11]
     jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $test_setup_script#@bazel_tools//tools/test:test_setup#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $test_setup_script#@bazel_tools//tools/test:test_setup#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
     platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
     compilation_mode:fastbuild -> [opt]
     is exec configuration:false -> [true]
@@ -44,7 +44,7 @@ NoTransition -> //b:t1 (1a589d1)
     strip:sometimes -> [always]
     java_runtime_version:local_jdk -> [remotejdk_11]
     jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $xml_generator_script#@bazel_tools//tools/test:test_xml_generator#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $xml_generator_script#@bazel_tools//tools/test:test_xml_generator#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
     platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
     compilation_mode:fastbuild -> [opt]
     is exec configuration:false -> [true]
@@ -54,7 +54,7 @@ NoTransition -> //b:t1 (1a589d1)
     strip:sometimes -> [always]
     java_runtime_version:local_jdk -> [remotejdk_11]
     jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $collect_coverage_script#@bazel_tools//tools/test:collect_coverage#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  $collect_coverage_script#@bazel_tools//tools/test:collect_coverage#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
     platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
     compilation_mode:fastbuild -> [opt]
     is exec configuration:false -> [true]
@@ -64,81 +64,7 @@ NoTransition -> //b:t1 (1a589d1)
     strip:sometimes -> [always]
     java_runtime_version:local_jdk -> [remotejdk_11]
     jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  :coverage_support#@bazel_tools//tools/test:coverage_support#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
-    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
-    compilation_mode:fastbuild -> [opt]
-    is exec configuration:false -> [true]
-    platform_suffix:null -> [exec]
-    copt:[] -> [[-g0]]
-    cxxopt:[] -> [[-g0]]
-    strip:sometimes -> [always]
-    java_runtime_version:local_jdk -> [remotejdk_11]
-    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  srcs#//b:t.cc#(null transition) -> 
-  data#//a:lib2#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> 2d89340
-  [toolchain dependency: test]#@bazel_tools//tools/test:empty_toolchain#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> 2d89340
-NoTransition -> //b:t2 (1a589d1)
-  $test_wrapper#@bazel_tools//tools/test:test_wrapper#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
-    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
-    compilation_mode:fastbuild -> [opt]
-    is exec configuration:false -> [true]
-    platform_suffix:null -> [exec]
-    copt:[] -> [[-g0]]
-    cxxopt:[] -> [[-g0]]
-    strip:sometimes -> [always]
-    java_runtime_version:local_jdk -> [remotejdk_11]
-    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $xml_writer#@bazel_tools//tools/test:xml_writer#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
-    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
-    compilation_mode:fastbuild -> [opt]
-    is exec configuration:false -> [true]
-    platform_suffix:null -> [exec]
-    copt:[] -> [[-g0]]
-    cxxopt:[] -> [[-g0]]
-    strip:sometimes -> [always]
-    java_runtime_version:local_jdk -> [remotejdk_11]
-    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $test_runtime#@bazel_tools//tools/test:runtime#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
-    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
-    compilation_mode:fastbuild -> [opt]
-    is exec configuration:false -> [true]
-    platform_suffix:null -> [exec]
-    copt:[] -> [[-g0]]
-    cxxopt:[] -> [[-g0]]
-    strip:sometimes -> [always]
-    java_runtime_version:local_jdk -> [remotejdk_11]
-    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $test_setup_script#@bazel_tools//tools/test:test_setup#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
-    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
-    compilation_mode:fastbuild -> [opt]
-    is exec configuration:false -> [true]
-    platform_suffix:null -> [exec]
-    copt:[] -> [[-g0]]
-    cxxopt:[] -> [[-g0]]
-    strip:sometimes -> [always]
-    java_runtime_version:local_jdk -> [remotejdk_11]
-    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $xml_generator_script#@bazel_tools//tools/test:test_xml_generator#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
-    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
-    compilation_mode:fastbuild -> [opt]
-    is exec configuration:false -> [true]
-    platform_suffix:null -> [exec]
-    copt:[] -> [[-g0]]
-    cxxopt:[] -> [[-g0]]
-    strip:sometimes -> [always]
-    java_runtime_version:local_jdk -> [remotejdk_11]
-    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  $collect_coverage_script#@bazel_tools//tools/test:collect_coverage#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
-    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
-    compilation_mode:fastbuild -> [opt]
-    is exec configuration:false -> [true]
-    platform_suffix:null -> [exec]
-    copt:[] -> [[-g0]]
-    cxxopt:[] -> [[-g0]]
-    strip:sometimes -> [always]
-    java_runtime_version:local_jdk -> [remotejdk_11]
-    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
-  :coverage_support#@bazel_tools//tools/test:coverage_support#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 77e8473
+  :coverage_support#@bazel_tools//tools/test:coverage_support#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
     platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
     compilation_mode:fastbuild -> [opt]
     is exec configuration:false -> [true]
@@ -149,7 +75,81 @@ NoTransition -> //b:t2 (1a589d1)
     java_runtime_version:local_jdk -> [remotejdk_11]
     jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
   srcs#//b:t.cc#(null transition) -> 
-  deps#//b:shlib#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> 2d89340
-  [toolchain dependency: test]#@bazel_tools//tools/test:empty_toolchain#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> 2d89340
-NoTransition -> //b:tool (2d89340)
+  data#//a:lib2#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> a7a71fd
+  [toolchain dependency: test]#@bazel_tools//tools/test:empty_toolchain#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> a7a71fd
+NoTransition -> //b:t2 (e722a21)
+  $test_wrapper#@bazel_tools//tools/test:test_wrapper#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $xml_writer#@bazel_tools//tools/test:xml_writer#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $test_runtime#@bazel_tools//tools/test:runtime#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $test_setup_script#@bazel_tools//tools/test:test_setup#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $xml_generator_script#@bazel_tools//tools/test:test_xml_generator#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $collect_coverage_script#@bazel_tools//tools/test:collect_coverage#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  :coverage_support#@bazel_tools//tools/test:coverage_support#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  srcs#//b:t.cc#(null transition) -> 
+  deps#//b:shlib#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> a7a71fd
+  [toolchain dependency: test]#@bazel_tools//tools/test:empty_toolchain#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> a7a71fd
+NoTransition -> //b:tool (a7a71fd)
   srcs#//b:tool.cc#(null transition) -> 

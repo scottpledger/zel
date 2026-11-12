@@ -12,6 +12,6 @@ INFO: Analyzed target //d:dep_bad (0 packages loaded, 0 targets configured).
 INFO: Found 0 targets...
 INFO: Empty query results
 ERROR: command succeeded, but not all targets were analyzed
-INFO: Elapsed time: 0.063s, Critical Path: 0.00s
+INFO: Elapsed time: 0.030s, Critical Path: 0.00s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully

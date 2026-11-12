@@ -1,7 +1,7 @@
-NoTransition -> //a:lib2 (2d89340)
+NoTransition -> //a:lib2 (a7a71fd)
   srcs#//a:lib#NoTransition -> 
   srcs#//a:y.txt#(null transition) -> 
-NoTransition -> //a:tr (2d89340)
-  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 7e2fa55
+NoTransition -> //a:tr (a7a71fd)
+  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> bf3a44e
     compilation_mode:fastbuild -> [opt]
   $allowlist_function_transition#@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist#(null transition) -> 

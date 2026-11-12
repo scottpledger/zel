@@ -1,9 +1,3 @@
-Starting local Bazel server (9.3.2) and connecting to it...
- no actions running
- no actions running
- no actions running
- no actions running
- no actions running
 Loading: 0 packages loaded
 ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead
 ERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline

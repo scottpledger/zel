@@ -24,6 +24,7 @@ run_one() {
   d="$OUT/w$idx"; mkdir -p "$d"
   for side in real zel; do
     ws="$d/ws-$side"; rm -rf "$ws"; mkdir -p "$ws"; cp -R "$FIXTURE"/. "$ws"/
+    echo "common --registry=file:///tmp/vendored-registry" >"$ws/.bazelrc"
     if [ $side = real ]; then bin="$BAZEL"; else bin="$ZEL"; fi
     ob="$d/ob-$side"
     ( cd "$ws" && "$bin" --output_base="$ob" build $flags //:u //:t >"$d/$side.build.out" 2>&1; echo "rc=$?" >>"$d/$side.build.out"
@@ -32,7 +33,7 @@ run_one() {
   done
   wait
   status=PASS
-  grep -q "^rc=0" "$d/real.build.out" || status="REAL-BUILD-FAILED"
+  grep -q "^rc=0" "$d/real.build.out" || status="INVALID-IN-BAZEL-9.3.2"
   grep -q "^rc=0" "$d/zel.build.out" || { [ $status = PASS ] && status="ZEL-BUILD-FAILED"; }
   if [ $status = PASS ]; then
     if ! diff <(grep -v '^INFO\|^Fetching\|^Loading\|^Analyz\|^Starting local' "$d/real.list") <(grep -v '^INFO\|^Fetching\|^Loading\|^Analyz\|^Starting local' "$d/zel.list") >"$d/list.diff"; then status=LIST-DIFF; fi
@@ -52,6 +53,7 @@ export -f run_one
 i=0
 grep -v '^#' "$COMBOS" | grep -v '^$' | while IFS= read -r flags; do i=$((i+1)); printf '%s\0%s\0' "$i" "$flags"; done \
   | xargs -0 -n2 -P "$JOBS" bash -c 'run_one "$0" "$1"'
-total=$(cat "$OUT"/out/*.status | wc -l); pass=$(grep -c '^PASS' "$OUT"/out/*.status | awk -F: '{s+=$2} END {print s}')
-echo "== $pass/$total combinations identical (details in $OUT/w*/)"
+total=$(grep -L '^INVALID-IN-BAZEL-9.3.2' "$OUT"/out/*.status | wc -l)
+pass=$(grep -c '^PASS' "$OUT"/out/*.status | awk -F: '{s+=$2} END {print s}')
+echo "== $pass/$total valid Bazel 9.3.2 combinations identical (details in $OUT/w*/)"
 [ "$pass" = "$total" ]

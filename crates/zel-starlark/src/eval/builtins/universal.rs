@@ -209,7 +209,6 @@ pub fn eval_universal_function(
                     "repository_ctx" => {
                         attrs.extend(vec![
                             "attr".to_string(),
-                            "copy".to_string(),
                             "delete".to_string(),
                             "download".to_string(),
                             "download_and_extract".to_string(),
@@ -236,7 +235,6 @@ pub fn eval_universal_function(
                     }
                     "module_ctx" => {
                         attrs.extend(vec![
-                            "copy".to_string(),
                             "download".to_string(),
                             "download_and_extract".to_string(),
                             "execute".to_string(),
@@ -405,6 +403,7 @@ pub fn eval_universal_function(
                 .contains(&name),
                 Value::ProviderInstance { fields, .. } => fields.contains_key(name),
                 Value::Depset(_) => name == "to_list",
+                Value::Label(_) => ["relative", "package_relative", "same_package_label"].contains(&name),
                 Value::List(_) => ["append", "clear", "extend", "index", "insert", "pop", "remove"].contains(&name),
                 Value::Tuple(_) => false,
                 Value::String(_) => [

@@ -1,40 +1,30 @@
-action 'Creating runfiles tree bazel-out/darwin_arm64-fastbuild/bin/b/t1.runfiles'
+action 'Creating runfiles tree bazel-out/k8-fastbuild/bin/b/t1.runfiles'
   Mnemonic: SymlinkTree
   Target: //b:t1
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 2d3875d14b12b47496a9004d1f82c6bcf72e8c046ffdd9e3c962823de9b5c1fe
-  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t1.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t1.runfiles/MANIFEST]
+  ActionKey: 5e2d081693a0cdca35fe93c28f1f347a104fc427e6073326245ce128e6f0541f
+  Inputs: [bazel-out/k8-fastbuild/bin/b/t1.runfiles_manifest]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t1.runfiles/MANIFEST]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
 
-action 'Creating runfiles tree bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles'
-  Mnemonic: SymlinkTree
-  Target: //b:t2
-  Configuration: darwin_arm64-fastbuild
-  Execution platform: @@platforms//host:host
-  ActionKey: 30a0f1d28876513357ac5520ee17b3b0a52de7b9c0db45b08d32e6b95e9144a3
-  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/t2.runfiles/MANIFEST]
-  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
-
-action 'Creating runfiles tree bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles'
+action 'Creating runfiles tree bazel-out/k8-opt-exec/bin/b/tool.runfiles [for tool]'
   Mnemonic: SymlinkTree
   Target: //b:tool
-  Configuration: darwin_arm64-fastbuild
+  Configuration: k8-opt-exec
   Execution platform: @@platforms//host:host
-  ActionKey: 7dc5a94dd5304ba87abeb760f1f8f4a43319e6ba0b28414858e2bf1ad1e22529
-  Inputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-fastbuild/bin/b/tool.runfiles/MANIFEST]
+  ActionKey: 9f18d61fe318c622b23edd15c2b9b185a8dc0e972d9c1498add946aeb8c125c7
+  Inputs: [bazel-out/k8-opt-exec/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt-exec/bin/b/tool.runfiles/MANIFEST]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
 
-action 'Creating runfiles tree bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles [for tool]'
+action 'Creating runfiles tree bazel-out/k8-fastbuild/bin/b/tool.runfiles'
   Mnemonic: SymlinkTree
   Target: //b:tool
-  Configuration: darwin_arm64-opt-exec
+  Configuration: k8-fastbuild
   Execution platform: @@platforms//host:host
-  ActionKey: 9d08d249af1fb388108eb2399cb831dc2a7d2046b2f108ae6cad2a57b326aabf
-  Inputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles_manifest]
-  Outputs: [bazel-out/darwin_arm64-opt-exec/bin/b/tool.runfiles/MANIFEST]
+  ActionKey: b4383eb49e620ed4369432971c7220f133f5f750c1ffc573d2c133419df8ad0e
+  Inputs: [bazel-out/k8-fastbuild/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/tool.runfiles/MANIFEST]
   Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
 

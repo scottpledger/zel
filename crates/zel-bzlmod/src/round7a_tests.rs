@@ -97,7 +97,8 @@ fn downloader_config_files() {
     let r = UrlRewriter::from_config_paths(&d, &["a.cfg".into(), "b.cfg".into()]).unwrap().unwrap();
     assert_eq!(r.amend(&["https://example.com/x".to_string(), "https://other.org/y".to_string()]), vec!["https://example.com/x".to_string()]);
     assert_eq!(r.all_blocked_message.as_deref(), Some("hi there"));
-    assert!(UrlRewriter::parse("c", "rewrite a b${urlencode(x)}\n").unwrap_err().contains("Invalid urlencode syntax in `rewrite` replacement"));
+    // Bazel 9.3.2 accepts malformed urlencode replacement syntax when parsing the config.
+    assert!(UrlRewriter::parse("c", "rewrite a b${urlencode(x)}\n").is_ok());
     assert!(UrlRewriter::parse("c", "rewrite a/(.*) b/${urlencode($1)}\n").is_ok());
     assert!(UrlRewriter::parse("c", "rewrite a/(.*) b/urlencode($1)\n").is_ok());
     assert!(UrlRewriter::parse("c", "rewrite ( x\n").unwrap_err().contains(" at index "));

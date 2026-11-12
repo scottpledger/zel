@@ -458,7 +458,13 @@ impl NameWalker {
         match e {
             Expr::Ident(name, loc) => {
                 if !self.defined(name) {
-                    let suggestion = did_you_mean(name, self.candidates.iter().map(|s| s.as_str()));
+                    let suggestion = did_you_mean(
+                        name,
+                        self.candidates
+                            .iter()
+                            .map(|s| s.as_str())
+                            .chain(self.scopes.iter().flat_map(|scope| scope.iter().map(|s| s.as_str()))),
+                    );
                     self.errors.push(SyntaxError {
                         location: loc.clone(),
                         message: format!("name '{name}' is not defined{suggestion}"),

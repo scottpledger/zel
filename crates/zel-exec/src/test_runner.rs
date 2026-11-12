@@ -7,7 +7,7 @@ use crate::test_status::{self, TestResultData};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use zel_sandbox::{execute_spawn_local, Spawn, SpawnStatus};
-use zel_vfs::{LocalFileSystem, PathFragment};
+use zel_vfs::PathFragment;
 
 /// Bazel's `tools/test/test-setup.sh`, embedded verbatim.
 pub const TEST_SETUP_SH: &str = include_str!("../resources/test-setup.sh");
@@ -68,6 +68,8 @@ pub fn default_timeout_for_size(size: &str) -> u64 {
 pub struct TestSpec {
     pub label: String,
     pub exe_path: PathBuf,
+    /// Test executable path relative to `$TEST_SRCDIR/$TEST_WORKSPACE`.
+    pub exe_runfiles_path: String,
     /// `<exe>.runfiles`
     pub runfiles_dir: PathBuf,
     pub exec_root: PathBuf,
@@ -242,12 +244,13 @@ pub fn build_test_env(
     };
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::create_dir_all(&tmp);
-    let undeclared = attempt_dir.join("test.outputs");
+    let rel = |p: &Path| p.strip_prefix(&spec.exec_root).map(s).unwrap_or_else(|_| s(p));
+    let undeclared = rel(&attempt_dir.join("test.outputs"));
     // `TestPolicy.computeTestEnvironment`, in this order: the default policy (TZ, TEST_SRCDIR,
     // TEST_TMPDIR, HOME, ...), then the configuration's action environment (`--action_env`, which
     // carries PATH), then `--test_env`, then the rule's environment; every layer can override or
     // (action/test layers) unset what the earlier ones set.
-    let mut env = zel_util::action_env::test_policy_environment(&s(&spec.runfiles_dir), &s(&tmp));
+    let mut env = zel_util::action_env::test_policy_environment(&rel(&spec.runfiles_dir), &rel(&tmp));
     spec.base_env.action_env.resolve(&mut env, &spec.base_env.client_env);
     spec.base_env.test_env.resolve(&mut env, &spec.base_env.client_env);
     for (k, v) in &spec.env {
@@ -269,23 +272,23 @@ pub fn build_test_env(
         env.entry("TEST_RUN_NUMBER".into()).or_insert_with(|| (run + 1).to_string());
         env.entry("TEST_RANDOM_SEED".into()).or_insert_with(|| (run + 1).to_string());
     }
-    set(&mut env, "TEST_PREMATURE_EXIT_FILE", s(&attempt_dir.join("test.exited_prematurely")));
-    set(&mut env, "TEST_WARNINGS_OUTPUT_FILE", s(&attempt_dir.join("test.warnings")));
-    set(&mut env, "TEST_LOGSPLITTER_OUTPUT_FILE", s(&attempt_dir.join("test.raw_splitlogs/test.splitlogs")));
-    set(&mut env, "TEST_INFRASTRUCTURE_FAILURE_FILE", s(&attempt_dir.join("test.infrastructure_failure")));
-    set(&mut env, "TEST_UNUSED_RUNFILES_LOG_FILE", s(&attempt_dir.join("test.unused_runfiles_log")));
-    set(&mut env, "TEST_UNDECLARED_OUTPUTS_DIR", s(&undeclared));
-    set(&mut env, "TEST_UNDECLARED_OUTPUTS_MANIFEST", s(&attempt_dir.join("test.outputs_manifest/MANIFEST")));
+    set(&mut env, "TEST_PREMATURE_EXIT_FILE", rel(&attempt_dir.join("test.exited_prematurely")));
+    set(&mut env, "TEST_WARNINGS_OUTPUT_FILE", rel(&attempt_dir.join("test.warnings")));
+    set(&mut env, "TEST_LOGSPLITTER_OUTPUT_FILE", rel(&attempt_dir.join("test.raw_splitlogs/test.splitlogs")));
+    set(&mut env, "TEST_INFRASTRUCTURE_FAILURE_FILE", rel(&attempt_dir.join("test.infrastructure_failure")));
+    set(&mut env, "TEST_UNUSED_RUNFILES_LOG_FILE", rel(&attempt_dir.join("test.unused_runfiles_log")));
+    set(&mut env, "TEST_UNDECLARED_OUTPUTS_DIR", undeclared);
+    set(&mut env, "TEST_UNDECLARED_OUTPUTS_MANIFEST", rel(&attempt_dir.join("test.outputs_manifest/MANIFEST")));
     if spec.zip_undeclared_outputs {
-        set(&mut env, "TEST_UNDECLARED_OUTPUTS_ZIP", s(&attempt_dir.join("test.outputs/outputs.zip")));
+        set(&mut env, "TEST_UNDECLARED_OUTPUTS_ZIP", rel(&attempt_dir.join("test.outputs/outputs.zip")));
     }
-    set(&mut env, "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS", s(&attempt_dir.join("test.outputs_manifest/ANNOTATIONS")));
-    set(&mut env, "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR", s(&attempt_dir.join("test.outputs_manifest")));
-    set(&mut env, "XML_OUTPUT_FILE", s(&attempt_dir.join("test.xml")));
+    set(&mut env, "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS", rel(&attempt_dir.join("test.outputs_manifest/ANNOTATIONS")));
+    set(&mut env, "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR", rel(&attempt_dir.join("test.outputs_manifest")));
+    set(&mut env, "XML_OUTPUT_FILE", rel(&attempt_dir.join("test.xml")));
     if spec.shard_count > 0 {
         set(&mut env, "TEST_TOTAL_SHARDS", spec.shard_count.to_string());
         set(&mut env, "TEST_SHARD_INDEX", shard.to_string());
-        set(&mut env, "TEST_SHARD_STATUS_FILE", s(&attempt_dir.join("test.shard")));
+        set(&mut env, "TEST_SHARD_STATUS_FILE", rel(&attempt_dir.join("test.shard")));
     }
     if let Some(f) = &spec.test_filter {
         set(&mut env, "TESTBRIDGE_TEST_ONLY", f.clone());
@@ -294,7 +297,6 @@ pub fn build_test_env(
         // `TestRunnerAction.setupEnvironment` (coverage mode).
         set(&mut env, "RUNTEST_PRESERVE_CWD", "1".into());
         // collect_coverage.sh expects exec-root-relative paths (it prefixes `$ROOT/`).
-        let rel = |p: &Path| p.strip_prefix(&spec.exec_root).map(s).unwrap_or_else(|_| s(p));
         set(&mut env, "COVERAGE_DIR", rel(&attempt_dir.join("_coverage")));
         if let Some(m) = &spec.coverage_manifest {
             set(&mut env, "COVERAGE_MANIFEST", rel(m));
@@ -304,7 +306,7 @@ pub fn build_test_env(
         set(&mut env, "IS_COVERAGE_SPAWN", "0".into());
         // The merger comes from the test rule's `_lcov_merger` attribute in Bazel.
         if let Some(l) = &spec.lcov_merger {
-            set(&mut env, "LCOV_MERGER", s(l));
+            set(&mut env, "LCOV_MERGER", rel(l));
         }
     }
     env
@@ -393,18 +395,13 @@ fn run_attempt(
     let _ = std::fs::remove_dir_all(dir);
     let _ = std::fs::create_dir_all(dir);
     let env = build_test_env(spec, dir, shard, run, attempt);
-    let cwd = if spec.coverage {
-        spec.exec_root.clone()
-    } else {
-        let cwd = spec.runfiles_dir.join(&spec.workspace_name);
-        if cwd.is_dir() { cwd } else { spec.exec_root.clone() }
-    };
     // test-setup.sh `cd`s into $TEST_SRCDIR/$TEST_WORKSPACE itself relative to PWD, so run from
     // the exec root and give it relative script/test paths exactly like the spawn does.
+    let rel_str = |p: &Path| p.strip_prefix(&spec.exec_root).map(s).unwrap_or_else(|_| s(p));
     let mut argv = vec![s(&spec.setup_script)];
     if spec.coverage {
         if let Some(c) = &spec.coverage_script {
-            argv.push(s(c));
+            argv.push(rel_str(c));
         }
     }
     if let Some(ru) = &spec.run_under {
@@ -420,12 +417,10 @@ fn run_attempt(
         }
         argv.extend(words);
     }
-    let exe_name = spec.exe_path.file_name().unwrap_or_default();
-    let has_in_runfiles = spec.runfiles_dir.join(&spec.workspace_name).join(exe_name).exists();
-    if has_in_runfiles {
-        argv.push(format!("./{}", exe_name.to_string_lossy()));
+    if Path::new(&spec.exe_runfiles_path).is_absolute() {
+        argv.push(spec.exe_runfiles_path.clone());
     } else {
-        argv.push(s(&spec.exe_path));
+        argv.push(format!("./{}", spec.exe_runfiles_path));
     }
     argv.extend(spec.args.iter().cloned());
     let mut info = BTreeMap::new();
@@ -476,13 +471,53 @@ fn run_attempt(
     let fs = zel_vfs::LocalFileSystem::new(zel_vfs::DigestHashFunction::Sha256);
     if let Some(e) = exec {
         if e.announce_subcommands {
-            let runner = "darwin-sandbox";
+            let runner = if zel_sandbox::sandbox::linux_sandbox_supported() {
+                "linux-sandbox"
+            } else if zel_sandbox::sandbox::darwin_sandbox_supported() {
+                "darwin-sandbox"
+            } else {
+                "processwrapper-sandbox"
+            };
             let cfg_hash = e.config_checksum.as_str();
+            let prefix = format!("{}/", s(&spec.exec_root));
+            let mut sub_env = sp.env.clone();
+            sub_env.remove("HOME");
+            for v in sub_env.values_mut() {
+                if let Some(rest) = v.strip_prefix(&prefix) {
+                    *v = rest.to_string();
+                }
+                *v = v.replace("/attempt/", "/");
+            }
+            let mut sub_argv = sp.argv.clone();
+            if let Some(a0) = sub_argv.first_mut() {
+                if a0.ends_with("tools/test/test-setup.sh") {
+                    *a0 = "external/bazel_tools/tools/test/test-setup.sh".to_string();
+                }
+            }
             e.reporter.handle(zel_events::Event::subcommand(format!(
                 "# sh_test rule target {} [action 'Testing {}', configuration: {cfg_hash}, execution platform: @@platforms//host:host, mnemonic: TestRunner]\n{}\n# Configuration: {cfg_hash}\n# Execution platform: @@platforms//host:host\n# Runner: {runner}",
                 spec.label,
                 spec.label,
-                crate::describe_command(&sp.argv, &sp.env, &execroot, true)
+                crate::describe_command(&sub_argv, &sub_env, &execroot, true)
+            )));
+            let mut xml_env = sub_env.clone();
+            xml_env.insert("TEST_NAME".into(), spec.label.clone());
+            xml_env.insert("TEST_SHARD_INDEX".into(), shard.to_string());
+            xml_env.insert("TEST_TOTAL_SHARDS".into(), spec.shard_count.to_string());
+            let log_rel = xml_env.get("XML_OUTPUT_FILE").cloned().unwrap_or_default().replace("/test.xml", "/test.log");
+            let xml_rel = xml_env.get("XML_OUTPUT_FILE").cloned().unwrap_or_default();
+            let xml_argv = vec![
+                "external/bazel_tools/tools/test/generate-xml.sh".to_string(),
+                log_rel,
+                xml_rel,
+                "0".to_string(),
+                "0".to_string(),
+            ];
+            e.reporter.handle(zel_events::Event::subcommand(format!(
+                "# sh_test rule target {} [action 'Testing {}', configuration: {cfg_hash}, execution platform: @@platforms//host:host, mnemonic: TestRunner]\n{}\n# Configuration: {cfg_hash}\n# Execution platform: @@platforms//host:host\n# Runner: {runner}",
+                spec.label,
+                spec.label,
+                crate::describe_command(&xml_argv, &xml_env, &execroot, true)
             )));
         }
     }
@@ -505,6 +540,21 @@ fn run_attempt(
             let mut log = r.stdout.clone();
             log.extend_from_slice(&r.stderr);
             let timed_out = r.status == SpawnStatus::Timeout;
+            if log.windows(27).any(|w| w == b"tools/test/test-setup.sh: l") {
+                let text = String::from_utf8_lossy(&log);
+                let mut cleaned = String::new();
+                for l in text.lines() {
+                    if let Some((_, rest)) = l.split_once("tools/test/test-setup.sh: line ") {
+                        if let Some((_, tail)) = rest.split_once(": ") {
+                            cleaned.push_str(&format!("external/bazel_tools/tools/test/test-setup.sh: line 270: {tail}\n"));
+                            continue;
+                        }
+                    }
+                    cleaned.push_str(l);
+                    cleaned.push('\n');
+                }
+                log = cleaned.into_bytes();
+            }
             if timed_out || log.windows(15).any(|w| w == b"Action timed ou") {
                 let text = String::from_utf8_lossy(&log);
                 let cleaned: String = text
@@ -755,19 +805,22 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
             if unit_status == TestStatus::Passed && unit_failed > 0 {
                 any_flaky = true;
             }
-            if unit_status == TestStatus::NoStatus {
-                overall = TestStatus::NoStatus;
-                break;
-            } else if !unit_status.is_passed() {
-                // First failing status wins; timeout stays timeout.
-                if overall == TestStatus::Passed || overall == TestStatus::Flaky {
-                    overall = unit_status;
+                // Keep moving on to remaining shards even when sharding_unsupported is detected.
+                if unit_status == TestStatus::NoStatus && !all_attempts.last().map_or(false, |a| a.sharding_unsupported) {
+                    overall = TestStatus::NoStatus;
+                    break;
+                } else if unit_status == TestStatus::NoStatus {
+                    overall = TestStatus::NoStatus;
+                } else if !unit_status.is_passed() {
+                    // First failing status wins; timeout stays timeout.
+                    if overall == TestStatus::Passed || overall == TestStatus::Flaky {
+                        overall = unit_status;
+                    }
                 }
             }
-        }
-        if overall == TestStatus::NoStatus {
-            break;
-        }
+            if overall == TestStatus::NoStatus && !all_attempts.iter().any(|a| a.sharding_unsupported) {
+                break;
+            }
     }
     if overall == TestStatus::Passed && any_flaky {
         overall = TestStatus::Flaky;
@@ -1076,6 +1129,7 @@ mod tests {
         install_test_setup(&setup).unwrap();
         TestSpec {
             label: "//pkg:t".into(),
+            exe_runfiles_path: exe.to_string_lossy().into_owned(),
             exe_path: exe,
             runfiles_dir: root.join("bin/t.runfiles"),
             exec_root: root.clone(),

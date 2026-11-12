@@ -9,6 +9,14 @@ catrule(
 # Rule catrule defined at (most recent call last):
 #   @WS@/defs.bzl:6:15 in <toplevel>
 
+# @OB@/external/platforms/host/BUILD:14:9
+platform(
+  name = "host",
+  constraint_values = ["@@platforms//cpu:x86_64", "@@platforms//os:linux"],
+)
+# Rule host instantiated at (most recent call last):
+#   @OB@/external/platforms/host/BUILD:14:9 in <toplevel>
+
 # @WS@/a/BUILD:4:8
 catrule(
   name = "lib",
@@ -29,21 +37,29 @@ alias(
 # Rule host_platform instantiated at (most recent call last):
 #   @OB@/external/bazel_tools/tools/BUILD:5:6 in <toplevel>
 
-# @OB@/external/platforms/host/BUILD:14:9
-platform(
-  name = "host",
-  constraint_values = ["@@platforms//cpu:aarch64", "@@platforms//os:osx"],
-)
-# Rule host instantiated at (most recent call last):
-#   @OB@/external/platforms/host/BUILD:14:9 in <toplevel>
-
-# @OB@/external/platforms/cpu/BUILD:57:17
+# @OB@/external/platforms/os/BUILD:41:17
 constraint_value(
-  name = "aarch64",
+  name = "linux",
+  constraint_setting = "@@platforms//os:os",
+)
+# Rule linux instantiated at (most recent call last):
+#   @OB@/external/platforms/os/BUILD:41:17 in <toplevel>
+
+# @WS@/a/BUILD:3:10
+filegroup(
+  name = "srcs_fg",
+  srcs = ["//a:x.txt", "//a:y.txt", "//a:z.txt"],
+)
+# Rule srcs_fg instantiated at (most recent call last):
+#   @WS@/a/BUILD:3:10 in <toplevel>
+
+# @OB@/external/platforms/cpu/BUILD:162:17
+constraint_value(
+  name = "x86_64",
   constraint_setting = "@@platforms//cpu:cpu",
 )
-# Rule aarch64 instantiated at (most recent call last):
-#   @OB@/external/platforms/cpu/BUILD:57:17 in <toplevel>
+# Rule x86_64 instantiated at (most recent call last):
+#   @OB@/external/platforms/cpu/BUILD:162:17 in <toplevel>
 
 # @OB@/external/ext+/lib/BUILD:1:10
 filegroup(
@@ -53,22 +69,6 @@ filegroup(
 )
 # Rule data instantiated at (most recent call last):
 #   @OB@/external/ext+/lib/BUILD:1:10 in <toplevel>
-
-# @OB@/external/platforms/os/BUILD:71:17
-constraint_value(
-  name = "osx",
-  constraint_setting = "@@platforms//os:os",
-)
-# Rule osx instantiated at (most recent call last):
-#   @OB@/external/platforms/os/BUILD:71:17 in <toplevel>
-
-# @WS@/a/BUILD:3:10
-filegroup(
-  name = "srcs_fg",
-  srcs = ["//a:x.txt", "//a:y.txt", "//a:z.txt"],
-)
-# Rule srcs_fg instantiated at (most recent call last):
-#   @WS@/a/BUILD:3:10 in <toplevel>
 
 # @OB@/external/platforms/cpu/BUILD:14:19
 constraint_setting(

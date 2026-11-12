@@ -9,9 +9,9 @@ rule_class_id: 1
 }
 configuration {
 id: 1
-mnemonic: "darwin_arm64-opt"
-platform_name: "darwin_arm64"
-checksum: "7e2fa553ea14e861344b8eab53a9b626e6f898c5d5ad8b33d054dfb0ee4e7565"
+mnemonic: "k8-opt"
+platform_name: "k8"
+checksum: "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
 }
 path_fragments {
 id: 2
@@ -80,7 +80,7 @@ label: "bazel-out"
 }
 path_fragments {
 id: 12
-label: "darwin_arm64-opt"
+label: "k8-opt"
 parent_id: 13
 }
 path_fragments {
@@ -104,12 +104,12 @@ path_fragment_id: 9
 }
 actions {
 target_id: 1
-action_key: "e95b7f1186a14e84b9f1a777543f2527e6d76f013a89aa8c3e4bd91008ff5329"
+action_key: "c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012"
 mnemonic: "CatIt"
 configuration_id: 1
 arguments: "/bin/bash"
 arguments: "-c"
-arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/darwin_arm64-opt/bin/a/lib.txt"
+arguments: "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txt"
 input_dep_set_ids: 1
 output_ids: 5
 primary_output_id: 5

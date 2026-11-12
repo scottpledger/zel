@@ -1,12 +1,12 @@
 //a:x.txt (null)
-NoTransition -> //a:srcs_fg (663e844)
-  srcs#//a:x.txt#(null transition) -> 
-  srcs#//a:y.txt#(null transition) -> 
-  srcs#//a:z.txt#(null transition) -> 
-NoTransition -> //a:lib (663e844)
+NoTransition -> //a:lib (cb0ea15)
   srcs#//a:x.txt#(null transition) -> 
   srcs#//a:srcs_fg#NoTransition -> 
   srcs#@ext//lib:data#NoTransition -> 
-NoTransition -> //a:tr (d2c2765)
-  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 663e844
+NoTransition -> //a:srcs_fg (cb0ea15)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+NoTransition -> //a:tr (094359e)
+  dep#//a:lib#(Starlark transition:@WS@/defs.bzl:27:15 + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> cb0ea15
   $allowlist_function_transition#@bazel_tools//tools/allowlists/function_transition_allowlist:function_transition_allowlist#(null transition) -> 

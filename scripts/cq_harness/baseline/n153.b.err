@@ -5,6 +5,6 @@ WARNING: Build option --compilation_mode has changed, discarding analysis cache 
 Analyzing: 14 targets (0 packages loaded, 0 targets configured)
 INFO: Analyzed 14 targets (0 packages loaded, 15 targets configured).
 INFO: Found 14 targets...
-INFO: Elapsed time: 0.063s, Critical Path: 0.00s
+INFO: Elapsed time: 0.039s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions

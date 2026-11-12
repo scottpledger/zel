@@ -247,11 +247,15 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
     let schema_has = |n: &str| rc.map(|rc| rc.attr_or_implicit(n).is_some()).unwrap_or(false);
     if let Some(rc) = rc {
         if !rc.attr_order.is_empty() {
-            for n in &rc.attr_order {
-                if n != "name" && !names.contains(n) && (rc.attr_or_implicit(n).is_some() || rule.extra.attr_values.contains_key(n)) {
-                    names.push(n.clone());
-                }
+        for n in &rc.attr_order {
+            if n != "name"
+                && n != "$whitelist_external_network"
+                && !names.contains(n)
+                && (rc.attr_or_implicit(n).is_some() || rule.extra.attr_values.contains_key(n))
+            {
+                names.push(n.clone());
             }
+        }
         } else {
             for c in COMMON_ORDER {
                 if schema_has(c) || rule.extra.attr_values.contains_key(*c) {
@@ -301,16 +305,42 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
             (rule.extra.own_features.clone().unwrap(), true)
         } else if rule.extra.pkg_default_attrs.contains(&n) {
             // Populated from `package()`: never *explicitly specified*. `testonly`/`deprecation`/
-            // `package_metadata` are computed defaults that evaluate to the package value;
+            // `package_metadata`/`licenses` are computed defaults that evaluate to the package value;
             // `compatible_with`/`restricted_to`/`features` stay at the schema default (the
             // package values live in `PackageArgs`).
             match n.as_str() {
-                "testonly" | "deprecation" | "package_metadata" => (rule.extra.attr_values[&n].clone(), false),
+                "testonly" | "deprecation" | "package_metadata" | "licenses" => (rule.extra.attr_values[&n].clone(), false),
                 _ => match schema {
                     Some(a) => (a.default_value(), false),
                     None => continue,
                 },
             }
+        } else if n == "$config_dependencies" {
+            let mut conds: Vec<Label> = Vec::new();
+            for v in rule.extra.attr_values.values() {
+                if let AttrValue::Select(parts) = v {
+                    for p in parts {
+                        if let SelectPart::Select { entries, .. } = p {
+                            for (k, _) in entries {
+                                if k.canonical_form() != "//conditions:default"
+                                    && k.canonical_form() != "@@//conditions:default"
+                                    && !conds.contains(k)
+                                {
+                                    conds.push(k.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(AttrValue::LabelList(existing)) = rule.extra.attr_values.get("$config_dependencies") {
+                for l in existing {
+                    if !conds.contains(l) {
+                        conds.push(l.clone());
+                    }
+                }
+            }
+            (AttrValue::LabelList(conds), false)
         } else if let Some(v) = rule.extra.attr_values.get(&n) {
             (v.clone(), true)
         } else if n == "generator_name" && rule.extra.generator_name.is_some() {
@@ -354,7 +384,8 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
         // classes fall back to the name-based approximation.
         let nodep = match schema {
             Some(a) if a.proto_type.is_some() => a.nodep,
-            _ => matches!(n.as_str(), "visibility" | "deprecation" | "licenses" | "generator_name" | "generator_function" | "generator_location"),
+            Some(a) => a.nodep || n == "visibility" || n == "transitive_configs",
+            None => matches!(n.as_str(), "visibility" | "transitive_configs"),
         };
         let disc = match schema.and_then(|a| a.proto_type) {
             Some(p) => disc::from_name(p).unwrap_or_else(|| disc_for(&n, ty)),
@@ -375,7 +406,15 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
             disc,
             configurable: schema.map(|a| a.configurable).unwrap_or(true) && n != "name",
             tool: schema.map(|a| a.tool_dep.unwrap_or(a.cfg_exec)).unwrap_or(false),
-            name: n,
+            name: if let Some(rest) = n.strip_prefix('_') {
+                if schema.map_or(false, |a| a.late_bound.is_some()) {
+                    format!(":{rest}")
+                } else {
+                    format!("${rest}")
+                }
+            } else {
+                n
+            },
             ty,
             value,
             explicit,
@@ -549,8 +588,17 @@ pub fn visibility_group_labels(labels: &[Label]) -> Vec<Label> {
         .collect()
 }
 
-/// Output labels of a rule: the `OutputFile` targets of the package it generates.
+/// Output labels of a rule: the `OutputFile` targets of the package it generates, in declaration order (`Rule.getOutputFiles`).
 pub fn rule_outputs(pkg: &Package, rule: &Label) -> Vec<Label> {
+    if let Some(Target::Rule(r)) = pkg.targets.get(rule.name()) {
+        if !r.outs.is_empty() {
+            return r
+                .outs
+                .iter()
+                .filter_map(|name| Label::create(rule.package_identifier().clone(), name).ok())
+                .collect();
+        }
+    }
     let mut v: Vec<Label> = pkg
         .targets
         .values()
@@ -601,10 +649,12 @@ pub fn rule_deps_ext(rule: &RuleInstance, implicit: bool, tool: bool, nodep: boo
             }
         }
     }
-    // `LabelVisitationUtils.visitRuleToolchains`: toolchain types of the rule class.
-    for l in rule_class_toolchain_types(rule) {
-        if !out.iter().any(|(x, _)| *x == l) {
-            out.push((l, "_hidden_toolchain_types".to_string()));
+    // `LabelVisitationUtils.visitRuleToolchains`: toolchain types of the rule class (implicit deps).
+    if implicit {
+        for l in rule_class_toolchain_types(rule) {
+            if !out.iter().any(|(x, _)| *x == l) {
+                out.push((l, "_hidden_toolchain_types".to_string()));
+            }
         }
     }
     out
@@ -712,6 +762,17 @@ fn relativize(path: &str, root: &PathFragment) -> String {
     }
 }
 
+/// `FormatUtils.getLocation` for `FakeLoadTarget`: returns the referencing package's `buildFileLocation`
+/// (`pkg.build_file` without `:line:col`).
+pub fn fake_load_target_location(ref_pkg: &Package, relative: bool) -> String {
+    let file = ref_pkg.build_file.path_string();
+    if relative {
+        relativize(file, &package_root(ref_pkg))
+    } else {
+        file.to_string()
+    }
+}
+
 /// `FormatUtils.getLocation`.
 pub fn target_location(info: &TInfo, relative: bool) -> String {
     let pkg = &info.pkg;
@@ -766,6 +827,17 @@ pub struct TargetEnv<'a> {
     preloaded: RefCell<HashMap<String, Vec<Node>>>,
     /// Packages whose `package contains errors` events were already emitted.
     pkg_error_reported: RefCell<HashSet<String>>,
+    /// When true (aquery top-level pattern expansion), wildcards (`:all`, `...`) filter `manual` tags.
+    pub filter_manual_on_wildcards: bool,
+    /// Fake load targets created by `buildfiles()` and `loadfiles()`, mapping label -> referencing package.
+    pub fake_load_targets: RefCell<HashMap<Label, Arc<Package>>>,
+    /// When true (`labels(...)`), only edges among pattern-expanded nodes exist in the Digraph (`BlazeQueryEnvironment`).
+    pub digraph_no_edges: RefCell<bool>,
+    pub pattern_nodes: RefCell<HashSet<Node>>,
+    /// When true, `BlazeQueryEnvironment` (Digraph) is used instead of `GraphlessBlazeQueryEnvironment` / `SkyQueryEnvironment`.
+    pub graphless: bool,
+    pub output_format: String,
+    pub order_output: Option<crate::format::OrderOutput>,
 }
 
 impl<'a> TargetEnv<'a> {
@@ -780,6 +852,13 @@ impl<'a> TargetEnv<'a> {
             bzl_loads: RefCell::new(HashMap::new()),
             preloaded: RefCell::new(HashMap::new()),
             pkg_error_reported: RefCell::new(HashSet::new()),
+            filter_manual_on_wildcards: false,
+            fake_load_targets: RefCell::new(HashMap::new()),
+            digraph_no_edges: RefCell::new(false),
+            pattern_nodes: RefCell::new(HashSet::new()),
+            graphless: true,
+            output_format: String::new(),
+            order_output: None,
         }
     }
 
@@ -1045,6 +1124,18 @@ impl<'a> TargetEnv<'a> {
     /// Resolves one pattern; `//pkg:BUILD` (the implicit BUILD-file target) is handled here
     /// because the pattern resolver only knows declared targets.
     fn resolve_one(&self, pattern: &str) -> (Vec<Node>, Vec<String>) {
+        if pattern.starts_with("@@") {
+            let repo = pattern.trim_start_matches("@@").split("//").next().unwrap_or("");
+            if !repo.is_empty() {
+                let name = RepositoryName::create_unvalidated(repo);
+                if self.resolver.loader().config().lookup.resolver.repo_root(&name).is_none() {
+                    return (
+                        Vec::new(),
+                        vec![format!("\0Target parsing failed due to unexpected exception: Repository '@@{repo}' is not defined")],
+                    );
+                }
+            }
+        }
         // `//dir/...`: packages with errors are reported (`package contains errors: <pkg>`) but do
         // not fail the pattern: the targets of all other packages stay in the result.
         if let Ok(zel_cmdline::TargetPattern::TargetsBelowDirectory { directory, include_files }) =
@@ -1057,7 +1148,40 @@ impl<'a> TargetEnv<'a> {
         {
             let mut pkgs = Vec::new();
             if let Err(m) = self.resolver.find_packages_below(&directory, &mut pkgs) {
+                if self.toplevel == pattern && pattern.starts_with("@@") && pattern.ends_with("//...") {
+                    let repo = pattern.trim_start_matches("@@").split("//").next().unwrap_or("");
+                    return (
+                        Vec::new(),
+                        vec![format!("\0Target parsing failed due to unexpected exception: Repository '@@{repo}' is not defined")],
+                    );
+                }
+                if self.toplevel == pattern && pattern.starts_with('@') && !pattern.starts_with("@@") && pattern.ends_with("//...") {
+                    if let Some(rest) = m.strip_prefix("no such package '@@[unknown repo '") {
+                        let apparent = rest.split('\'').next().unwrap_or("");
+                        if apparent == pattern.trim_start_matches('@').split("//").next().unwrap_or("") {
+                            let silent = if self.opts.keep_going { "" } else { "\0" };
+                            return (
+                                Vec::new(),
+                                vec![format!("{silent}Target parsing failed due to unexpected exception: No repository visible as '@{apparent}' from main repository")],
+                            );
+                        } else if apparent.ends_with('+') {
+                            return (
+                                Vec::new(),
+                                vec![format!("\0Target parsing failed due to unexpected exception: to fix, run\n\tbazel fetch //...\nExternal repository @@{apparent} not found and fetching repositories is disabled.")],
+                            );
+                        } else if apparent.contains("++") {
+                            let mod_repo = apparent.split("++").next().unwrap_or("");
+                            return (
+                                Vec::new(),
+                                vec![format!("\0Target parsing failed due to unexpected exception: no such package '@@{mod_repo}+//': to fix, run\n\tbazel fetch //...\nExternal repository @@{mod_repo}+ not found and fetching repositories is disabled.")],
+                            );
+                        }
+                    }
+                }
                 return (Vec::new(), vec![m]);
+            }
+            if pkgs.len() > 1 && pkgs[0].package_fragment().is_empty() {
+                // Keep pkgs in find_packages_below order for query/aquery
             }
             let mut nodes: Vec<Node> = Vec::new();
             let mut errors: Vec<String> = Vec::new();
@@ -1097,20 +1221,21 @@ impl<'a> TargetEnv<'a> {
                                 .unwrap_or_default();
                             if self.pkg_error_reported.borrow_mut().insert(frag.clone()) {
                                 let mut pe = self.pending_events.borrow_mut();
-                                if self.opts.keep_going || directory.package_fragment().is_empty() {
-                                    pe.push(zel_packages::PackageEvent::error(None, format!("package contains errors: {frag}")));
-                                }
+                                pe.push(zel_packages::PackageEvent::error(None, format!("package contains errors: {frag}")));
                                 pe.push(zel_packages::PackageEvent::error(None, format!("package contains errors: {frag}: {first}")));
                             }
                             let msg = format!("error loading package '{frag}': Package '{frag}' contains errors");
-                            errors.push(if self.toplevel == pattern {
+                            errors.push(if self.toplevel == pattern && directory.package_fragment().is_empty() {
                                 format!("\0Error evaluating '{pattern}': {msg}")
                             } else {
                                 format!("\0Target parsing failed due to unexpected exception: {msg}")
                             });
                         }
                         nodes.extend(
-                            zel_packages::PatternResolver::rules_or_all(&pkg, include_files).iter().map(|t| node(t.label())),
+                            zel_packages::PatternResolver::rules_or_all(&pkg, include_files)
+                                .iter()
+                                .filter(|t| !(self.filter_manual_on_wildcards && t.has_tag("manual")))
+                                .map(|t| node(t.label())),
                         );
                     }
                     Err(e) => errors.push(e.message),
@@ -1118,8 +1243,15 @@ impl<'a> TargetEnv<'a> {
             }
             return (nodes, errors);
         }
-        let outcome = self.resolver.resolve_patterns(&[pattern.to_string()]);
-        self.pending_events.borrow_mut().extend(outcome.events.iter().cloned());
+        let outcome = self.resolver.resolve_patterns_filtered(&[pattern.to_string()], self.filter_manual_on_wildcards);
+        {
+            let mut pe = self.pending_events.borrow_mut();
+            for ev in &outcome.events {
+                if !pe.contains(ev) {
+                    pe.push(ev.clone());
+                }
+            }
+        }
         let mut nodes: Vec<Node> = outcome.targets.iter().map(|t| node(t.label())).collect();
         let mut errors: Vec<String> = Vec::new();
         for e in &outcome.errors {
@@ -1143,6 +1275,21 @@ impl<'a> TargetEnv<'a> {
                     errors.push(String::new());
                 }
                 None => errors.push(e.message.clone()),
+            }
+        }
+        for error in &mut errors {
+            if pattern.starts_with("@@") && error.contains("@@[unknown repo '") {
+                let repo = pattern.trim_start_matches("@@").split("//").next().unwrap_or("");
+                *error = format!("\0Target parsing failed due to unexpected exception: Repository '@@{repo}' is not defined");
+                continue;
+            }
+            if let Some(rest) = error.strip_prefix("no such package '@@[unknown repo '") {
+                let canonical = rest.split('\'').next().unwrap_or("");
+                if canonical.ends_with('+') {
+                    *error = format!(
+                        "no such package '@@{canonical}//': to fix, run\n\tbazel fetch //...\nExternal repository @@{canonical} not found and fetching repositories is disabled."
+                    );
+                }
             }
         }
         if !errors.is_empty() {
@@ -1232,14 +1379,16 @@ impl<'a> QueryEnv for TargetEnv<'a> {
 
     fn resolve_pattern(&mut self, expr: &Expr, pattern: &str, diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
         if let Some(n) = self.preloaded.borrow().get(pattern) {
+            self.pattern_nodes.borrow_mut().extend(n.iter().cloned());
             return Ok(n.clone());
         }
         let (nodes, errors) = self.resolve_one(pattern);
         if let Some(err) = errors.first() {
             if !diag.keep_going {
-                // `SkyQueryEnvironment` fails while building the universe; the legacy
-                // environments fail while evaluating the target literal itself.
-                if self.opts.sky {
+                // `SkyQueryEnvironment` fails while building the universe when `--infer_universe_scope`
+                // included the pattern in the universe; with an explicit `--universe_scope`,
+                // the universe already succeeded and the pattern fails during literal evaluation.
+                if self.opts.sky && self.opts.universe_scope.is_empty() {
                     let mut qe = QueryError::new(format!("Building universe scope failed: {err}"));
                     qe.expr = Some(self.toplevel.clone());
                     return Err(qe);
@@ -1251,6 +1400,7 @@ impl<'a> QueryEnv for TargetEnv<'a> {
                 diag.report(e.to_string());
             }
         }
+        self.pattern_nodes.borrow_mut().extend(nodes.iter().cloned());
         Ok(nodes)
     }
 
@@ -1325,8 +1475,22 @@ impl<'a> QueryEnv for TargetEnv<'a> {
             let (nodes, errors) = self.resolve_one(p);
             if let Some(err) = errors.first() {
                 if !diag.keep_going {
-                    let mut qe = QueryError::new(format!("Building universe scope failed: {err}"));
-                    qe.expr = Some(self.toplevel.clone());
+                    let is_syntax = match zel_cmdline::SignedTargetPattern::parse_with(
+                        p,
+                        &self.resolver.relative_dir,
+                        &RepositoryName::main(),
+                        &self.resolver.main_mapping,
+                    ) {
+                        Err(_) => true,
+                        Ok(_) => false,
+                    };
+                    if is_syntax {
+                        diag.report(format!("Skipping '{p}': {err}"));
+                        diag.report(format!("Skipping '{p}': {err}"));
+                    } else {
+                        diag.report(format!("Skipping '{p}': {err}"));
+                    }
+                    let mut qe = QueryError::raw(format!("Evaluation of query \"{}\" failed due to BUILD file errors", self.toplevel));
                     return Err(qe);
                 }
             }
@@ -1405,6 +1569,7 @@ impl<'a> QueryEnv for TargetEnv<'a> {
         err_prefix: &str,
         diag: &mut Diag,
     ) -> Result<Vec<Node>, QueryError> {
+        *self.digraph_no_edges.borrow_mut() = true;
         let Some(info) = self.info_of(n) else { return Ok(Vec::new()) };
         let Target::Rule(r) = &info.target else { return Ok(Vec::new()) };
         let entries = rule_attributes(r);
@@ -1516,17 +1681,22 @@ impl<'a> QueryEnv for TargetEnv<'a> {
             }
         }
         for p in pkgs {
-            let bfn = node(&Self::build_file_label(&p));
-            if !out.contains(&bfn) {
-                out.push(bfn);
+            if self.graphless || self.opts.sky {
+                let bfn = node(&Self::build_file_label(&p));
+                if !out.contains(&bfn) {
+                    out.push(bfn);
+                }
             }
             for l in self.transitive_bzl_loads(&p) {
+                self.fake_load_targets.borrow_mut().entry(l.clone()).or_insert_with(|| p.clone());
                 let ln = node(&l);
                 if !out.contains(&ln) {
                     out.push(ln);
                 }
                 if let Ok(bzl_pkg) = self.resolver.package(l.package_identifier()) {
-                    let bfl = node(&Self::build_file_label(&bzl_pkg));
+                    let bfl_lbl = Self::build_file_label(&bzl_pkg);
+                    self.fake_load_targets.borrow_mut().entry(bfl_lbl.clone()).or_insert_with(|| p.clone());
+                    let bfl = node(&bfl_lbl);
                     if !out.contains(&bfl) {
                         out.push(bfl);
                     }
@@ -1543,6 +1713,7 @@ impl<'a> QueryEnv for TargetEnv<'a> {
             if let Some(info) = self.info_of(n) {
                 if seen_pkgs.insert(info.pkg.id.clone()) {
                     for l in self.transitive_bzl_loads(&info.pkg) {
+                        self.fake_load_targets.borrow_mut().entry(l.clone()).or_insert_with(|| info.pkg.clone());
                         out.push(node(&l));
                     }
                 }
@@ -1601,6 +1772,14 @@ impl<'a> QueryEnv for TargetEnv<'a> {
 
     fn strict_universe(&self) -> bool {
         self.opts.sky
+    }
+
+    fn output_format_hint(&self) -> &str {
+        &self.output_format
+    }
+
+    fn order_output_hint(&self) -> Option<crate::format::OrderOutput> {
+        self.order_output
     }
 }
 

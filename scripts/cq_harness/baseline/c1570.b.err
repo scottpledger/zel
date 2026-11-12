@@ -5,6 +5,6 @@ Analyzing: target //a:lib (0 packages loaded, 0 targets configured)
 INFO: Analyzed target //a:lib (0 packages loaded, 0 targets configured).
 INFO: Found 1 target...
 ERROR: Invalid output format 'xml'. Valid values are: label_kind, label, transitions, proto, streamed_proto, textproto, jsonproto, build, graph, starlark, files
-INFO: Elapsed time: 0.058s, Critical Path: 0.00s
+INFO: Elapsed time: 0.048s, Critical Path: 0.00s
 INFO: 0 processes.
 ERROR: Build did NOT complete successfully
