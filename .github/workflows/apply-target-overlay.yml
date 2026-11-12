@@ -1,0 +1,85 @@
+name: Apply target overlay once
+
+on:
+  push:
+    branches: [feat/more-functionality]
+    paths:
+      - .github/target-publish/**
+      - .github/workflows/apply-target-overlay.yml
+
+permissions:
+  contents: write
+
+concurrency:
+  group: target-overlay-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 1
+
+      - name: Apply verified overlay
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          b64="$RUNNER_TEMP/overlay.b64"
+          xz="$RUNNER_TEMP/overlay.tar.xz"
+          tar="$RUNNER_TEMP/overlay.tar"
+          paths="$RUNNER_TEMP/overlay-paths.z"
+
+          cat .github/target-publish/* > "$b64"
+          echo "f6fef263fd6625c41326a19814be86ba6f0f64b14e5a7e060ccf465923714c5d  $b64" |
+            sha256sum -c -
+
+          base64 -d "$b64" > "$xz"
+          xz -t "$xz"
+          xz -dc "$xz" > "$tar"
+
+          TAR="$tar" PATHS="$paths" python3 <<'PY'
+          import os
+          import pathlib
+          import tarfile
+
+          with tarfile.open(os.environ["TAR"]) as tf:
+              members = tf.getmembers()
+              files = []
+              for member in members:
+                  path = pathlib.PurePosixPath(member.name)
+                  if path.is_absolute() or ".." in path.parts or ".git" in path.parts:
+                      raise SystemExit(f"unsafe archive path: {member.name!r}")
+                  if not (member.isfile() or member.isdir() or member.issym()):
+                      raise SystemExit(f"unsupported archive member: {member.name!r}")
+                  if member.isfile() or member.issym():
+                      files.append(member.name)
+
+              tf.extractall(".", members=members, filter="data")
+
+          pathlib.Path(os.environ["PATHS"]).write_bytes(
+              b"".join(name.encode() + b"\0" for name in files)
+          )
+          PY
+
+          git add --pathspec-from-file="$paths" --pathspec-file-nul
+          git rm -qr -- .github/target-publish
+          git rm -q -- .github/workflows/apply-target-overlay.yml
+
+          test "$(git write-tree)" = \
+            5766ae2cf37296215f87482d1e78464566042052
+          test "$(git ls-files --others --exclude-standard | wc -l)" -eq 0
+
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git commit -m "Apply target overlay [overlay-applied]"
+
+          test "$(git show -s --format=%T HEAD)" = \
+            5766ae2cf37296215f87482d1e78464566042052
+
+          git push origin "HEAD:${GITHUB_REF_NAME}"
