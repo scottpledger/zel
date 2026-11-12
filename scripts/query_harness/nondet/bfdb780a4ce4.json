@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "bfdb780a4ce4",
+ "classified_as": "ORDERLESS",
+ "cmd": "query '@ext//lib:all' --output=graph --graph:node_limit=20 --keep_going",
+ "distinct": 2,
+ "harness": "query",
+ "hashes": [
+  "81880375f31b011e",
+  "1bcaca28fa987f01",
+  "1bcaca28fa987f01",
+  "81880375f31b011e",
+  "1bcaca28fa987f01",
+  "81880375f31b011e"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"@ext//lib:data\\n...and 1 more items\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"@ext//lib:gen\\n...and 1 more items\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"@ext//lib:gen\\n...and 1 more items\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"@ext//lib:data\\n...and 1 more items\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"@ext//lib:gen\\n...and 1 more items\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"@ext//lib:data\\n...and 1 more items\"\n}\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}
