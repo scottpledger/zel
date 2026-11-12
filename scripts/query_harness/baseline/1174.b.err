@@ -1,4 +1,4 @@
 Loading: 0 packages loaded
 ERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'
 ERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'
-ERROR: Evaluation of query "//a:lib" failed: no such package 'a': BUILD file not found on package path
+ERROR: Evaluation of query "//a:lib" failed due to BUILD file errors

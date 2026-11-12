@@ -9,7 +9,7 @@ Mnemonics:
   RunfilesTree: 1
 
 Configurations:
-  darwin_arm64-fastbuild: 6
+  k8-fastbuild: 6
 
 Execution Platforms:
   @@platforms//host:host: 6

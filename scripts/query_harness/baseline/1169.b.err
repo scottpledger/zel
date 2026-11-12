@@ -1,3 +1,5 @@
 INFO: Options provided by the client:
   Inherited 'common' options: --isatty=0 --terminal_columns=80
+INFO: Reading rc options for 'query' from @WS@/.bazelrc:
+  Inherited 'common' options: --registry=file:///tmp/vendored-registry
 ERROR: - :: Invalid options syntax: -

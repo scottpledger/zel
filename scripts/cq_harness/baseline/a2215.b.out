@@ -9,8 +9,8 @@ Mnemonics:
   Genrule: 1
 
 Configurations:
-  darwin_arm64-fastbuild: 1
-  darwin_arm64-opt-exec: 5
+  k8-fastbuild: 1
+  k8-opt-exec: 5
 
 Execution Platforms:
   @@platforms//host:host: 6

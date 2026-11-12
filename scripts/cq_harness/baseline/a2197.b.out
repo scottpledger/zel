@@ -10,8 +10,8 @@ Mnemonics:
   RunfilesTree: 3
 
 Configurations:
-  darwin_arm64-opt-exec: 5
-  darwin_arm64-fastbuild: 12
+  k8-opt-exec: 5
+  k8-fastbuild: 12
 
 Execution Platforms:
   @@platforms//host:host: 17

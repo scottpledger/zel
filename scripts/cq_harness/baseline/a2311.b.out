@@ -5,8 +5,8 @@ Mnemonics:
   CatIt: 2
 
 Configurations:
-  darwin_arm64-opt: 1
-  darwin_arm64-fastbuild: 2
+  k8-opt: 1
+  k8-fastbuild: 2
 
 Execution Platforms:
   @@platforms//host:host: 3

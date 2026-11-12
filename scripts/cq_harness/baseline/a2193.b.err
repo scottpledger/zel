@@ -2,8 +2,8 @@ Computing main repo mapping:
 Loading: 
 Loading: 0 packages loaded
 Analyzing: 4 targets (0 packages loaded, 0 targets configured)
-INFO: Analyzed 4 targets (0 packages loaded, 3 targets configured).
+INFO: Analyzed 4 targets (0 packages loaded, 0 targets configured).
 INFO: Found 4 targets...
-INFO: Elapsed time: 0.062s, Critical Path: 0.00s
+INFO: Elapsed time: 0.032s, Critical Path: 0.00s
 INFO: 0 processes.
 INFO: Build completed successfully, 0 total actions
