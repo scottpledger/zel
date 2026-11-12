@@ -1,4 +1,4 @@
 digraph mygraph {
   node [shape=box];
-  "//:top_alias (1a589d1)"
+  "//:top_alias (e722a21)"
 }

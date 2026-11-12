@@ -1,4 +1,2 @@
 Loading: 0 packages loaded
-ERROR: Evaluation of query "//b:t1" failed: no such package 'b': BUILD file not found on package path
-WARNING: --keep_going specified, ignoring errors. Results may be inaccurate
-INFO: Empty results
+WARNING: Targets were missing from graph: [//b:t1]

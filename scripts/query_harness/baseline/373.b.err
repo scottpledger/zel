@@ -1,2 +1,1 @@
-./run.sh: eval: line 13: unexpected EOF while looking for matching `''
-./run.sh: eval: line 14: syntax error: unexpected end of file
+/bin/sh: 1: Syntax error: Unterminated quoted string

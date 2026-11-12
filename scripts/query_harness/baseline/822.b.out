@@ -1,3 +1,7 @@
+//:all_tests
+//b:shlib
+//b:t2
 //c:cdata
 //d:dep_bad
 //d:ok
+//pg:viol

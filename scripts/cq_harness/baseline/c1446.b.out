@@ -1,2 +1,2 @@
 external/ext+/lib/d.txt
-bazel-out/darwin_arm64-fastbuild/bin/external/ext+/lib/g.out
+bazel-out/k8-fastbuild/bin/external/ext+/lib/g.out
