@@ -335,68 +335,22 @@ if [[ -n "$TEST_UNDECLARED_OUTPUTS_DIR" && -n "$TEST_UNDECLARED_OUTPUTS_MANIFEST
   undeclared_outputs="$(find -L "$TEST_UNDECLARED_OUTPUTS_DIR" -type f | sort)"
   # Only write the manifest if there are any undeclared outputs.
   if [[ ! -z "$undeclared_outputs" ]]; then
-    # stat has different flags for different systems. -c is supported by GNU,
-    # and -f by BSD/macOS. Detect once instead of once per file. The format
-    # emits "<name><tab><size>" so that sizes can be looked up by name below.
-    tab="$(printf '\t')"
-    if stat -L -f"%N${tab}%z" /dev/null >/dev/null 2>&1; then
-      stat_fmt="-f%N${tab}%z"
-    else
-      stat_fmt="-c%n${tab}%s"
-    fi
-
     # For each file, write a tab-separated line with name (relative to
     # TEST_UNDECLARED_OUTPUTS_DIR), size, and mime type to the manifest. e.g.
     # foo.txt	9	text/plain
-    #
-    # stat and file are invoked in batches rather than once per file, which is
-    # orders of magnitude faster for tests with many undeclared outputs.
-    rel_paths="$(
-      PREFIX="$TEST_UNDECLARED_OUTPUTS_DIR/" awk '
-        BEGIN { prefix = ENVIRON["PREFIX"]; len = length(prefix) }
-        { print (index($0, prefix) == 1 ? substr($0, len + 1) : $0) }
-      ' <<< "$undeclared_outputs"
-    )"
-
-    # Sizes are looked up by name so that a file which cannot be stat'ed (for
-    # example one deleted after the find above) only affects its own row,
-    # instead of shifting the columns of every row after it.
-    stat_output="$(printf '%s\n' "$undeclared_outputs" | tr '\n' '\0' \
-      | xargs -0 stat -L "$stat_fmt" 2>/dev/null)"
-    file_sizes="$(
-      awk -F"$tab" '
-        NR == FNR {
-          if (NF > 1) size[substr($0, 1, length($0) - length($NF) - 1)] = $NF
-          next
-        }
-        { print (($0 in size) ? size[$0] : "Could not stat " $0) }
-      ' <(printf '%s\n' "$stat_output") <(printf '%s\n' "$undeclared_outputs")
-    )"
-
-    # file -b does not print file names, so a dropped entry can only be
-    # detected by comparing line counts. Fall back to one invocation per file
-    # if that happens, or if file is not installed at all.
-    if ! command -v file >/dev/null 2>&1; then
-      file_types="$(awk '{print "Could not establish file type for " $0}' <<< "$undeclared_outputs")"
-    else
-      file_types="$(printf '%s\n' "$undeclared_outputs" | tr '\n' '\0' \
-        | xargs -0 file -L -b --mime-type 2>/dev/null)"
-      if [[ -z "$file_types" ]] \
-          || [[ "$(wc -l <<< "$file_types")" -ne "$(wc -l <<< "$undeclared_outputs")" ]]; then
-        file_types="$(
-          while IFS= read -r undeclared_output; do
-            out="$(file -L -b --mime-type "$undeclared_output" 2>/dev/null)" \
-              && printf '%s\n' "$out" \
-              || printf 'Could not establish file type for %s\n' "$undeclared_output"
-          done <<< "$undeclared_outputs"
-        )"
+    while IFS= read -r undeclared_output; do
+      rel_path="${undeclared_output#"$TEST_UNDECLARED_OUTPUTS_DIR/"}"
+      # stat has different flags for different systems. -c is supported by GNU,
+      # and -f by BSD (and thus OSX). Try both.
+      file_size="$(stat -L -f%z "$undeclared_output" 2>/dev/null || stat -L -c%s "$undeclared_output" 2>/dev/null || echo "Could not stat $undeclared_output")"
+      if command -v file >/dev/null 2>&1; then
+        file_type="$(file -L -b --mime-type "$undeclared_output" 2>/dev/null || echo "Could not establish file type for $undeclared_output")"
+      else
+        file_type="Could not establish file type for $undeclared_output"
       fi
-    fi
 
-    paste \
-      <(printf '%s\n' "$rel_paths") \
-      <(printf '%s\n' "$file_sizes") \
-      <(printf '%s\n' "$file_types") \
+      printf '%s\t%s\t%s\n' "$rel_path" "$file_size" "$file_type"
+    done <<< "$undeclared_outputs" \
       > "$TEST_UNDECLARED_OUTPUTS_MANIFEST"
     if [[ ! -s "$TEST_UNDECLARED_OUTPUTS_MANIFEST" ]]; then
       rm "$TEST_UNDECLARED_OUTPUTS_MANIFEST"

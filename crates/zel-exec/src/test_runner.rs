@@ -497,8 +497,67 @@ pub fn format_exit_status(exit_code: i32) -> String {
     }
 }
 
+/// Encodes raw test log bytes for inclusion in an XML 1.0 CDATA section matching
+/// `tools/test/generate-xml.sh`: illegal XML/UTF-8 bytes are replaced with `?`, trailing newlines
+/// are stripped (like command substitution), and `]]>` is split as `]]>]]<![CDATA[>`.
+pub fn encode_xml_log_bytes(raw: &[u8]) -> String {
+    let mut end = raw.len();
+    while end > 0 && raw[end - 1] == b'\n' {
+        end -= 1;
+    }
+    let b = &raw[..end];
+    let mut sanitized: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0usize;
+    while i < b.len() {
+        let b0 = b[i];
+        if b0 == b'\t' || b0 == b'\n' || b0 == b'\r' || (0x20..=0x7F).contains(&b0) {
+            sanitized.push(b0);
+            i += 1;
+        } else if (0xC2..=0xDF).contains(&b0)
+            && i + 1 < b.len()
+            && (0x80..=0xBF).contains(&b[i + 1])
+        {
+            sanitized.extend_from_slice(&b[i..i + 2]);
+            i += 2;
+        } else if i + 2 < b.len() && (0x80..=0xBF).contains(&b[i + 2]) {
+            let b1 = b[i + 1];
+            let b2 = b[i + 2];
+            let ok3 = (b0 == 0xE0 && (0xA0..=0xBF).contains(&b1))
+                || ((0xE1..=0xEC).contains(&b0) && (0x80..=0xBF).contains(&b1))
+                || (b0 == 0xED && (0x80..=0x9F).contains(&b1))
+                || (b0 == 0xEE && (0x80..=0xBF).contains(&b1))
+                || (b0 == 0xEF
+                    && ((0x80..=0xBE).contains(&b1)
+                        || (b1 == 0xBF && (0x80..=0xBD).contains(&b2))));
+            if ok3 {
+                sanitized.extend_from_slice(&b[i..i + 3]);
+                i += 3;
+                continue;
+            }
+            if i + 3 < b.len() && (0x80..=0xBF).contains(&b[i + 3]) {
+                let ok4 = (b0 == 0xF0 && (0x90..=0xBF).contains(&b1))
+                    || ((0xF1..=0xF3).contains(&b0) && (0x80..=0xBF).contains(&b1))
+                    || (b0 == 0xF4 && (0x80..=0x8F).contains(&b1));
+                if ok4 {
+                    sanitized.extend_from_slice(&b[i..i + 4]);
+                    i += 4;
+                    continue;
+                }
+            }
+            sanitized.push(b'?');
+            i += 1;
+        } else {
+            sanitized.push(b'?');
+            i += 1;
+        }
+    }
+    let text = String::from_utf8(sanitized)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
+    text.replace("]]>", "]]>]]<![CDATA[>")
+}
+
 /// Minimal JUnit XML for a test that did not write `XML_OUTPUT_FILE` itself
-/// (like `test-setup.sh`'s generated report).
+/// (like `test-setup.sh` / `generate-xml.sh`'s generated report).
 pub fn synthesize_xml(
     label: &str,
     exit_code: i32,
@@ -524,7 +583,7 @@ pub fn synthesize_xml(
         "<testsuites>\n  <testsuite name=\"{0}\" tests=\"1\" failures=\"0\" errors=\"{1}\">\n    <testcase name=\"{0}\" classname=\"\" status=\"run\" duration=\"{2}\" time=\"{2}\">",
         esc(target_name),
         if failed { 1 } else { 0 },
-        secs
+        secs,
     ));
     if failed {
         x.push_str(&format!("<error message=\"{}\"></error>", esc(&msg)));
@@ -533,6 +592,41 @@ pub fn synthesize_xml(
     x.push_str(&format!(
         "</testcase>\n      <system-out>\nGenerated test.log (if the file is not UTF-8, then this may be unreadable):\n<![CDATA[{}]]>\n      </system-out>\n    </testsuite>\n</testsuites>\n",
         crate::junit_runner::XmlEscapers::sanitize_cdata(trimmed_log)
+    ));
+    x
+}
+
+/// Byte-preserving fallback XML writer matching `tools/test/generate-xml.sh` on raw `test.log`
+/// bytes (whole-second duration, `?` replacement for illegal XML/UTF-8 bytes, and `]]>` split).
+pub fn synthesize_xml_bytes(
+    label: &str,
+    exit_code: i32,
+    timed_out: bool,
+    duration_ms: u64,
+    log: &[u8],
+) -> String {
+    let esc = crate::junit_runner::XmlEscapers::escape_attribute;
+    let failed = exit_code != 0 || timed_out;
+    let msg = if timed_out {
+        "timed out".to_string()
+    } else {
+        format!("exited with error code {exit_code}")
+    };
+    let target_name = label.rsplit_once(':').map(|x| x.1).unwrap_or(label);
+    let secs = duration_ms / 1000;
+    let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
+    x.push_str(&format!(
+        "<testsuites>\n  <testsuite name=\"{0}\" tests=\"1\" failures=\"0\" errors=\"{1}\">\n    <testcase name=\"{0}\" classname=\"\" status=\"run\" duration=\"{2}\" time=\"{2}\">",
+        esc(target_name),
+        if failed { 1 } else { 0 },
+        secs,
+    ));
+    if failed {
+        x.push_str(&format!("<error message=\"{}\"></error>", esc(&msg)));
+    }
+    let encoded_log = encode_xml_log_bytes(log);
+    x.push_str(&format!(
+        "</testcase>\n      <system-out>\nGenerated test.log (if the file is not UTF-8, then this may be unreadable):\n<![CDATA[{encoded_log}]]>\n      </system-out>\n    </testsuite>\n</testsuites>\n"
     ));
     x
 }
@@ -802,6 +896,7 @@ fn run_attempt(
         rel_exec(&dir.join("test.exited_prematurely")),
         rel_exec(&dir.join("test.infrastructure_failure")),
         rel_exec(&dir.join("test.outputs")),
+        rel_exec(&dir.join("test.outputs_manifest")),
     ];
     if spec.coverage {
         outputs.push(rel_exec(&dir.join("coverage.dat")));
@@ -1134,14 +1229,7 @@ fn run_attempt(
             if xml_generated {
                 write_writable_file(
                     &xml,
-                    synthesize_xml(
-                        &spec.label,
-                        exit_code,
-                        timed_out,
-                        dur,
-                        &String::from_utf8_lossy(&log),
-                    )
-                    .as_bytes(),
+                    synthesize_xml_bytes(&spec.label, exit_code, timed_out, dur, &log).as_bytes(),
                 )?;
             }
             Ok(AttemptResult {

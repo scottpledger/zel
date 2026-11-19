@@ -315,3 +315,226 @@ exit 0
     assert_eq!(cached.status, r.status);
     assert_eq!(cached.exit_code, 0);
 }
+
+#[test]
+fn lcov_merger_supports_split_flags_gcov_gcov_json_symlinks_and_profdata() {
+    let d = tmp("gcov-profdata");
+    let m = merger(&d.join("tools"));
+
+    // 1. Space-separated flags, symlinked .dat, .gcov intermediate text, and .gcov.json.gz.
+    let cd1 = d.join("cov1");
+    std::fs::create_dir_all(&cd1).unwrap();
+    std::fs::write(cd1.join("base.dat"), lcov("src/s.c", &[(1, 2)], &[], &[])).unwrap();
+    std::os::unix::fs::symlink(cd1.join("base.dat"), cd1.join("link.dat")).unwrap();
+
+    let gcov_text = "\
+version: 11.2
+cwd: /work
+file:src/tmp.cpp
+function:10,20,3,_Z3foov
+function:30,0,_Z3barv
+lcount:10,3,0
+lcount:11,2
+branch:10,taken
+branch:10,nottaken
+branch:11,notexec
+";
+    std::fs::write(cd1.join("tmp.cpp.gcov"), gcov_text).unwrap();
+
+    let json_doc = r#"{
+  "format_version": "2",
+  "files": [
+    {
+      "file": "src/baz.cc",
+      "functions": [
+        {"name": "main", "demangled_name": "main", "start_line": 4, "execution_count": 2}
+      ],
+      "lines": [
+        {"line_number": 4, "count": 3, "branches": []},
+        {
+          "line_number": 5,
+          "count": 3,
+          "branches": [
+            {"count": 1, "fallthrough": true, "throw": false},
+            {"count": 2, "fallthrough": false, "throw": false}
+          ]
+        }
+      ]
+    }
+  ]
+}"#;
+    let json_raw = d.join("baz.cc.gcov.json");
+    std::fs::write(&json_raw, json_doc).unwrap();
+    let gz_status = std::process::Command::new("gzip")
+        .args(["-c", json_raw.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(gz_status.status.success());
+    std::fs::write(cd1.join("baz.cc.gcov.json.gz"), &gz_status.stdout).unwrap();
+
+    let out1 = d.join("merged1.dat");
+    let (code1, _, err1) = run_merger(
+        &m,
+        &[
+            "--coverage_dir".into(),
+            cd1.display().to_string(),
+            "--output_file".into(),
+            out1.display().to_string(),
+        ],
+    );
+    assert_eq!(code1, 0, "{err1}");
+    let got1 = std::fs::read_to_string(&out1).unwrap();
+    // Symlinked .dat doubled line 1 count (2 + 2 = 4).
+    assert!(
+        got1.contains("SF:src/s.c\nFNF:0\nFNH:0\nDA:1,4\n"),
+        "{got1}"
+    );
+    // .gcov intermediate text parsed functions, lines, and branches.
+    assert!(
+        got1.contains("SF:src/tmp.cpp\nFN:30,_Z3barv\nFN:10,_Z3foov\nFNDA:0,_Z3barv\nFNDA:3,_Z3foov\nFNF:2\nFNH:1\nBRDA:10,0,0,1\nBRDA:10,0,1,0\nBRDA:11,0,0,-\nBRF:3\nBRH:1\nDA:10,3\nDA:11,2\n"),
+        "{got1}"
+    );
+    // .gcov.json.gz parsed functions, lines, and branches.
+    assert!(
+        got1.contains("SF:src/baz.cc\nFN:4,main\nFNDA:2,main\nFNF:1\nFNH:1\nBRDA:5,0,0,1\nBRDA:5,0,1,2\nBRF:2\nBRH:2\nDA:4,3\nDA:5,3\n"),
+        "{got1}"
+    );
+
+    // 2. Lone .profdata is copied verbatim over output_file.
+    let cd_prof = d.join("cov_prof_only");
+    std::fs::create_dir_all(&cd_prof).unwrap();
+    std::fs::write(cd_prof.join("test.profdata"), b"\xfflprofd\x00rawbytes").unwrap();
+    let out_prof = d.join("out.profdata");
+    let (cp_code, _, cp_err) = run_merger(
+        &m,
+        &[
+            "--coverage_dir".into(),
+            cd_prof.display().to_string(),
+            "--output_file".into(),
+            out_prof.display().to_string(),
+        ],
+    );
+    assert_eq!(cp_code, 0, "{cp_err}");
+    assert_eq!(std::fs::read(&out_prof).unwrap(), b"\xfflprofd\x00rawbytes");
+
+    // 3. .profdata + LCOV logs warning and exits 0 without writing output_file.
+    std::fs::write(
+        cd_prof.join("extra.dat"),
+        lcov("src/s.c", &[(1, 1)], &[], &[]),
+    )
+    .unwrap();
+    let out_mixed = d.join("out_mixed.dat");
+    let (mix_code, _, mix_err) = run_merger(
+        &m,
+        &[
+            format!("--coverage_dir={}", cd_prof.display()),
+            format!("--output_file={}", out_mixed.display()),
+        ],
+    );
+    assert_eq!(mix_code, 0);
+    assert!(
+        mix_err.contains("doesn't support LLVM profdata coverage amongst other coverage formats"),
+        "{mix_err}"
+    );
+    assert!(!out_mixed.exists());
+
+    // 4. Multiple .profdata files log SEVERE (.profadata) and fall back to LCOV / empty output.
+    std::fs::write(cd_prof.join("second.profdata"), b"prof-second").unwrap();
+    let out_multi = d.join("out_multi.dat");
+    let (mul_code, _, mul_err) = run_merger(
+        &m,
+        &[
+            format!("--coverage_dir={}", cd_prof.display()),
+            format!("--output_file={}", out_multi.display()),
+        ],
+    );
+    assert_eq!(mul_code, 0);
+    assert!(
+        mul_err.contains("2 .profadata files were found instead."),
+        "{mul_err}"
+    );
+    assert!(std::fs::read_to_string(&out_multi)
+        .unwrap()
+        .contains("SF:src/s.c"));
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+#[test]
+fn collect_coverage_java_classpath_prefix_xml_encoding_and_undeclared_outputs_stat() {
+    // 1. `synthesize_xml_bytes`: whole seconds + illegal XML/UTF-8 -> '?' + `]]>` CDATA split.
+    let raw_log = b"ok f\xc3\xbcbar\x00\x07\xff\xed\xa0\x80\xef\xbf\xbf end ]]> tail\n";
+    let xml = synthesize_xml_bytes("//pkg:my_test", 0, false, 3_750, raw_log);
+    assert!(
+        xml.contains("duration=\"3\" time=\"3\""),
+        "expected whole seconds duration/time in XML:\n{xml}"
+    );
+    assert!(
+        xml.contains("<![CDATA[ok fübar????????? end ]]>]]<![CDATA[> tail]]>"),
+        "unexpected CDATA encoding:\n{xml}"
+    );
+    assert!(!xml.contains('\u{fffd}'), "{xml}");
+
+    // 2. `collect_coverage.sh` prefixes `$TEST_SRCDIR/` (not `$TEST_SRCDIR/$TEST_WORKSPACE/`)
+    // for `JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE`, and `test-setup.sh` stats undeclared outputs
+    // individually (including filenames with spaces/quotes).
+    let d = tmp("java-cp-and-undecl");
+    let mut spec = coverage_spec(
+        &d,
+        r#"
+mkdir -p "$TEST_UNDECLARED_OUTPUTS_DIR"
+printf 'hello1234' > "$TEST_UNDECLARED_OUTPUTS_DIR/weird 'name'.txt"
+printf 'SF:pkg/lib.c\nDA:1,1\nend_of_record\n' > "$COVERAGE_DIR/c.dat"
+"#,
+        0,
+    );
+    std::fs::write(
+        spec.exec_root.join("java_cp.txt"),
+        "_main/pkg/app.jar\nrules_java+/toolchains/rt.jar\n",
+    )
+    .unwrap();
+    let fake_singlejar = spec.exec_root.join("fake_singlejar.sh");
+    let captured_params = d.join("captured_params.txt");
+    std::fs::write(
+        &fake_singlejar,
+        format!(
+            "#!/bin/sh\ncp \"${{1#@}}\" '{}'\n",
+            captured_params.display()
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&fake_singlejar, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    spec.env.insert(
+        "JAVA_RUNTIME_CLASSPATH_FOR_COVERAGE".into(),
+        "java_cp.txt".into(),
+    );
+    spec.env
+        .insert("SINGLE_JAR_TOOL".into(), "fake_singlejar.sh".into());
+
+    let r = run_test(&spec).unwrap();
+    assert!(
+        r.status.is_passed(),
+        "{}",
+        String::from_utf8_lossy(&std::fs::read(&r.log_path).unwrap())
+    );
+    let params = std::fs::read_to_string(&captured_params).unwrap();
+    let expected_prefix = format!("{}/", spec.runfiles_dir.display());
+    assert!(
+        params.contains(&format!("{expected_prefix}_main/pkg/app.jar\n")),
+        "expected $TEST_SRCDIR/ prefix without extra $TEST_WORKSPACE/, got:\n{params}"
+    );
+    assert!(
+        params.contains(&format!("{expected_prefix}rules_java+/toolchains/rt.jar\n")),
+        "{params}"
+    );
+
+    let manifest_text =
+        std::fs::read_to_string(spec.test_log_dir.join("test.outputs_manifest/MANIFEST")).unwrap();
+    assert!(
+        manifest_text.starts_with("weird 'name'.txt\t9\t"),
+        "unexpected undeclared outputs manifest:\n{manifest_text}"
+    );
+    let _ = std::fs::remove_dir_all(&d);
+}
