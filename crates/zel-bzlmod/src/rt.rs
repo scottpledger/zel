@@ -12,7 +12,7 @@ use zel_starlark::{
 };
 
 /// Command-line / environment configuration of the external repository subsystem.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ExternalOptions {
     pub output_base: PathBuf,
     pub workspace_root: PathBuf,
@@ -35,6 +35,30 @@ pub struct ExternalOptions {
     pub experimental_repository_ctx_execute_wasm: bool,
     pub experimental_sibling_repository_layout: bool,
     pub credential_helpers: Vec<(String, PathBuf)>,
+}
+
+impl Default for ExternalOptions {
+    fn default() -> Self {
+        Self {
+            output_base: PathBuf::new(),
+            workspace_root: PathBuf::new(),
+            distdirs: Vec::new(),
+            repository_cache: None,
+            repo_contents_cache: None,
+            disable_download: false,
+            override_repository: BTreeMap::new(),
+            downloader_rewriter: None,
+            semantics_fingerprint: Vec::new(),
+            download_retries: 5,
+            client_env: BTreeMap::new(),
+            vendor_dir: None,
+            force: false,
+            nofetch: false,
+            verbose: false,
+            experimental_repository_ctx_execute_wasm: false,
+            credential_helpers: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone)]

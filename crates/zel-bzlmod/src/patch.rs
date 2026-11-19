@@ -159,7 +159,8 @@ fn line_type(line: &str, reading: bool, git: bool) -> Lt {
     Lt::Unknown
 }
 
-/// Reads lines the way Guava's `readLines` does (\n, \r\n and \r terminate lines); latin1.
+/// Reads lines the way Bazel 9's `PatchUtil` does (`ISO_8859_1` internal byte strings;
+/// `\n`, `\r\n`, and `\r` terminate lines).
 fn read_lines(path: &Path) -> R<Vec<String>> {
     let bytes = std::fs::read(path).map_err(|e| io_msg(path, &e))?;
     Ok(split_lines(&bytes))
@@ -270,7 +271,9 @@ fn normalize(base: &Path, rel: &str) -> PathBuf {
 }
 
 fn get_file_path(path: &str, out_dir: &Path, loc: usize) -> R<PathBuf> {
-    let fp = normalize(out_dir, path);
+    let raw_path_bytes: Vec<u8> = path.chars().map(|c| c as u32 as u8).collect();
+    let decoded_path = String::from_utf8_lossy(&raw_path_bytes);
+    let fp = normalize(out_dir, &decoded_path);
     if !fp.starts_with(out_dir) {
         return Err(format!(
             "Cannot patch file outside of external repository ({}), file path = \"{}\" at line {}",
@@ -621,7 +624,10 @@ fn apply_to_file(
         }
     };
     let mut content = old_content;
-    for d in deltas.iter().rev() {
+    let mut order: Vec<usize> = (0..deltas.len()).collect();
+    order.sort_by_key(|&idx| deltas[idx].pos);
+    for idx in order.into_iter().rev() {
+        let d = &deltas[idx];
         apply_delta(&mut content, d, 2).map_err(|m| {
             format!(
                 "in patch applied to {}: {}, error applying change near line {}",
@@ -1020,5 +1026,20 @@ mod tests {
         assert!(std::fs::read_to_string(d.join("MODULE.bazel"))
             .unwrap()
             .contains("0.6.1"));
+    }
+
+    #[test]
+    fn out_of_order_hunks_and_utf8_filename_patch() {
+        let d = tmp("ooo-utf8");
+        let target = d.join("café.txt");
+        std::fs::write(&target, "l1\nl2\nl3\nl4\nl5\nl6\n").unwrap();
+        // Second hunk (line 5) appears before first hunk (line 1) in the unified diff.
+        let diff = "--- a/café.txt\n+++ b/café.txt\n@@ -5,2 +5,2 @@\n-l5\n+L5_NEW\n l6\n@@ -1,2 +1,2 @@\n-l1\n+L1_NEW\n l2\n";
+        std::fs::write(d.join("ooo.patch"), diff.as_bytes()).unwrap();
+        apply(&d.join("ooo.patch"), 1, &d).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "L1_NEW\nl2\nl3\nl4\nL5_NEW\nl6\n"
+        );
     }
 }

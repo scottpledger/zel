@@ -124,11 +124,17 @@ impl RepoContentsCache {
         // Symlink fetched_repo_dir to cache_repo_dir
         #[cfg(unix)]
         {
-            let _ = std::os::unix::fs::symlink(&cache_repo_dir, fetched_repo_dir);
+            std::os::unix::fs::symlink(&cache_repo_dir, fetched_repo_dir)?;
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
         {
-            let _ = copy_dir_recursive(&cache_repo_dir, fetched_repo_dir);
+            if let Err(e) = std::os::windows::fs::symlink_dir(&cache_repo_dir, fetched_repo_dir) {
+                copy_dir_recursive(&cache_repo_dir, fetched_repo_dir).map_err(|_| e)?;
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            copy_dir_recursive(&cache_repo_dir, fetched_repo_dir)?;
         }
 
         Ok(CandidateRepo {
@@ -143,11 +149,13 @@ impl RepoContentsCache {
             return Ok(());
         }
         let cutoff = if max_age.is_zero() {
-            SystemTime::UNIX_EPOCH
+            None
         } else {
-            SystemTime::now()
-                .checked_sub(max_age)
-                .unwrap_or(SystemTime::UNIX_EPOCH)
+            Some(
+                SystemTime::now()
+                    .checked_sub(max_age)
+                    .unwrap_or(SystemTime::UNIX_EPOCH),
+            )
         };
 
         let trash_dir = self.ensure_trash_dir()?;
@@ -159,9 +167,12 @@ impl RepoContentsCache {
         };
 
         for entry in entries.flatten() {
+            let Ok(ft) = entry.file_type() else {
+                continue;
+            };
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().to_string();
-            if !path.is_dir() || name == TRASH_PATH || name == LOCK_PATH {
+            if !ft.is_dir() || ft.is_symlink() || name == TRASH_PATH || name == LOCK_PATH {
                 continue;
             }
 
@@ -170,25 +181,40 @@ impl RepoContentsCache {
                 Err(_) => continue,
             };
 
+            let mut candidates: Vec<(SystemTime, CandidateRepo)> = Vec::new();
             for sub in sub_entries.flatten() {
+                let Ok(sft) = sub.file_type() else {
+                    continue;
+                };
+                if sft.is_symlink() {
+                    continue;
+                }
                 let p = sub.path();
                 if let Some(cand) = CandidateRepo::from_recorded_inputs_file(&p) {
-                    let mtime = fs::metadata(&cand.recorded_inputs_file)
+                    let mtime = fs::symlink_metadata(&cand.recorded_inputs_file)
                         .and_then(|m| m.modified())
                         .unwrap_or(SystemTime::UNIX_EPOCH);
+                    candidates.push((mtime, cand));
+                }
+            }
+            // Newest-mtime-first so the freshest live copy wins deduplication.
+            candidates.sort_by(|a, b| b.0.cmp(&a.0));
 
+            for (mtime, cand) in candidates {
+                let is_expired = cutoff.is_some_and(|c| mtime < c);
+                let is_duplicate = if is_expired {
+                    false
+                } else {
                     let content = fs::read(&cand.recorded_inputs_file).unwrap_or_default();
                     let content_hash = crate::hash::sha256_hex(&content);
+                    !seen_hashes.insert(content_hash)
+                };
 
-                    let is_expired = mtime < cutoff;
-                    let is_duplicate = !seen_hashes.insert(content_hash);
-
-                    if is_expired || is_duplicate {
-                        let _ = fs::remove_file(&cand.recorded_inputs_file);
-                        let trash_target = trash_dir.join(generate_uuid());
-                        if fs::rename(&cand.contents_dir, &trash_target).is_err() {
-                            let _ = remove_dir_all(&cand.contents_dir);
-                        }
+                if is_expired || is_duplicate {
+                    let _ = fs::remove_file(&cand.recorded_inputs_file);
+                    let trash_target = trash_dir.join(generate_uuid());
+                    if fs::rename(&cand.contents_dir, &trash_target).is_err() {
+                        let _ = remove_dir_all(&cand.contents_dir);
                     }
                 }
             }
@@ -271,5 +297,34 @@ mod filetime {
             drop(f);
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gc_retains_newest_duplicate_and_expired_entry_does_not_evict_live() {
+        let root = std::env::temp_dir().join(format!("zel-rcc-gc-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let cache = RepoContentsCache::new(&root);
+
+        let bucket = root.join("predeclared_key_abc");
+        let old_dir = bucket.join("aaaa0001");
+        let new_dir = bucket.join("bbbb0002");
+        fs::create_dir_all(&old_dir).unwrap();
+        fs::write(bucket.join("aaaa0001.recorded_inputs"), "hash-same\n").unwrap();
+        // Ensure distinct mtime so `bbbb0002.recorded_inputs` is strictly newer.
+        std::thread::sleep(Duration::from_millis(20));
+        fs::create_dir_all(&new_dir).unwrap();
+        fs::write(bucket.join("bbbb0002.recorded_inputs"), "hash-same\n").unwrap();
+
+        cache.run_gc(Duration::from_secs(3600)).unwrap();
+        assert!(!old_dir.exists(), "older duplicate should be GC-removed");
+        assert!(new_dir.exists(), "newest duplicate must be retained");
+
+        let _ = fs::remove_dir_all(&root);
     }
 }

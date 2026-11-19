@@ -313,7 +313,7 @@ fn check_size(check_type: u8) -> usize {
 
 pub fn xz_decompress(input: &[u8]) -> Result<Vec<u8>, String> {
     let mut output = Vec::new();
-    match xz_into(input, &mut output) {
+    match xz_into(input, &mut output, false) {
         Ok(()) => Ok(output),
         Err(e) => {
             super::stash_partial(output);
@@ -322,10 +322,21 @@ pub fn xz_decompress(input: &[u8]) -> Result<Vec<u8>, String> {
     }
 }
 
-fn xz_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
+pub fn xz_decompress_concatenated(input: &[u8]) -> Result<Vec<u8>, String> {
+    let mut output = Vec::new();
+    match xz_into(input, &mut output, true) {
+        Ok(()) => Ok(output),
+        Err(e) => {
+            super::stash_partial(output);
+            Err(e)
+        }
+    }
+}
+
+fn xz_into(input: &[u8], output: &mut Vec<u8>, concatenated: bool) -> Result<(), String> {
     let mut pos = 0usize;
 
-    {
+    loop {
         if input.len() - pos < 12 {
             return Err(if pos == 0 && input.is_empty() {
                 "XZ input is empty".into()
@@ -507,9 +518,20 @@ fn xz_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
         if footer[8..10] != stream_flags {
             return Err("XZ Stream Footer flags mismatch Stream Header flags".into());
         }
-        // Bazel reads a single XZ stream (XZCompressorInputStream without concatenation): bytes after the
-        // first stream's footer are never looked at.
-        let _ = pos;
+        pos += 12;
+        if !concatenated {
+            // `XzFunction` (`XZCompressorInputStream` without concatenation) reads a single XZ stream.
+            break;
+        }
+        while pos + 4 <= input.len() && input[pos..pos + 4] == [0, 0, 0, 0] {
+            pos += 4;
+        }
+        if pos == input.len() {
+            break;
+        }
+        if input[pos..].iter().all(|&b| b == 0) {
+            return Err("XZ stream padding is not a multiple of 4 bytes".into());
+        }
     }
     Ok(())
 }

@@ -2123,6 +2123,7 @@ fn dispatch_object_inner(
                 executable: if extract_after { false } else { executable },
                 canonical_id,
                 context: urls.first().cloned().unwrap_or_default(),
+                archive_type: type_suffix.clone().unwrap_or_default(),
             };
             let extract_opts = if extract_after {
                 Some(ExtractOptions {
@@ -2929,9 +2930,7 @@ impl Rt {
         if let Some(c) = &self.opts.repository_cache {
             d.repo_cache = Some(RepositoryCache::new(c.clone()));
         }
-        if self.opts.download_retries > 0 {
-            d.retries = self.opts.download_retries;
-        }
+        d.retries = self.opts.download_retries;
         d.rewriter = self.opts.downloader_rewriter.clone();
         d.credential_helpers = self.opts.credential_helpers.clone();
         d.client_env = self.opts.client_env.clone();

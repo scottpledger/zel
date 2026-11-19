@@ -829,7 +829,9 @@ impl UrlRewriter {
                 if let Some(caps) = re.full_match(&without_scheme) {
                     matched = true;
                     let expanded = expand_replacement(repl, &caps);
-                    let s = if expanded.starts_with("http://") || expanded.starts_with("https://") {
+                    let lower_exp = expanded.to_ascii_lowercase();
+                    let s = if lower_exp.starts_with("http://") || lower_exp.starts_with("https://")
+                    {
                         expanded
                     } else {
                         format!("{}://{}", parsed.scheme, expanded)
@@ -914,7 +916,14 @@ impl RepositoryCache {
         if !f.is_file() {
             return Ok(None);
         }
-        let data = fs::read(&f).map_err(|e| format!("Failed to read {}: {}", f.display(), e))?;
+        let data = fs::read(&f).map_err(|e| {
+            format!(
+                "Failed to read {}: {}\n\nPlease delete the directory {} and try again.",
+                f.display(),
+                e,
+                self.entry_dir(c).display()
+            )
+        })?;
         if let Err(e) = c.verify(&data) {
             return Err(format!(
                 "{}\n\nPlease delete the directory {} and try again.",
@@ -969,6 +978,8 @@ pub struct DownloadRequest {
     pub canonical_id: String,
     /// Used in error messages ("Failed to download <context>: download is disabled.").
     pub context: String,
+    /// Optional archive type (`gz`, `tgz`, `tar.gz`, ...) used to suppress double gunzip.
+    pub archive_type: String,
 }
 
 #[derive(Clone, Debug)]
@@ -1076,6 +1087,7 @@ impl Downloader {
             };
 
         // 1. Already present with the right checksum.
+        let mut cache_err: Option<String> = None;
         if let Some(c) = &checksum {
             if let Ok(existing) = fs::read(&req.output) {
                 if c.matches(&existing) {
@@ -1083,14 +1095,24 @@ impl Downloader {
                     return finish(&existing, String::new(), true);
                 }
             }
-            // 2. Repository cache.
+            // 2. Repository cache (a corrupt entry falls through to re-download and repair).
             if let Some(cache) = &self.repo_cache {
-                if let Some(f) = cache.get(c, &req.canonical_id)? {
-                    let data = fs::read(&f)
-                        .map_err(|e| format!("Failed to read {}: {}", f.display(), e))?;
-                    self.write_output(&req.output, &data, req.executable)?;
-                    // `DownloadCacheHitEvent(context, cacheKey, mainUrl)`.
-                    return finish(&data, req.urls.first().cloned().unwrap_or_default(), true);
+                match cache.get(c, &req.canonical_id) {
+                    Ok(Some(f)) => {
+                        if let Ok(data) = fs::read(&f) {
+                            self.write_output(&req.output, &data, req.executable)?;
+                            // `DownloadCacheHitEvent(context, cacheKey, mainUrl)`.
+                            return finish(
+                                &data,
+                                req.urls.first().cloned().unwrap_or_default(),
+                                true,
+                            );
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        cache_err = Some(e);
+                    }
                 }
             }
             // 3. distdir.
@@ -1121,6 +1143,9 @@ impl Downloader {
         }
 
         if self.disable_download {
+            if let Some(ce) = cache_err {
+                return Err(ce);
+            }
             return Err(format!(
                 "Failed to download {}: download is disabled.",
                 context
@@ -1216,6 +1241,15 @@ impl Downloader {
                 attempt += 1;
                 continue;
             }
+            if let Some(ce) = cache_err {
+                return Err(format!(
+                    "Error downloading [{}] to {}: {} ({})",
+                    urls.join(", "),
+                    req.output.display(),
+                    last_err,
+                    ce
+                ));
+            }
             return Err(format!(
                 "Error downloading [{}] to {}: {}",
                 urls.join(", "),
@@ -1269,6 +1303,10 @@ impl Downloader {
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
+        let set_header = |hdrs: &mut Vec<(String, String)>, key: String, val: String| {
+            hdrs.retain(|(ek, _)| !ek.eq_ignore_ascii_case(&key));
+            hdrs.push((key, val));
+        };
         // Mirrors `CredentialHelperCredentials.getRequestMetadata` +
         // `HttpConnectorMultiplexer.getHeaderFunction`:
         // - When a `--credential_helper` matches `url`, its headers override matching keys in
@@ -1276,7 +1314,7 @@ impl Downloader {
         //   userinfo, `.netrc`) are never consulted — even if the helper returned `{}` or
         //   only non-`Authorization` headers; helper failures propagate as `FetchError`.
         // - Only when no `--credential_helper` matches `url` (`Ok(None)`) do we fall back to
-        //   `req.auth`, URL userinfo, and `.netrc`.
+        //   `req.auth` (`StaticCredentials`, overwriting `baseHeaders`), URL userinfo, and `.netrc`.
         if let Some(extra) = crate::netrc::resolve_credential_helper_headers(
             url,
             &self.credential_helpers,
@@ -1290,39 +1328,54 @@ impl Downloader {
             h.extend(extra);
             return Ok(h);
         }
+        let matched_auth = req.auth.get(url).or_else(|| {
+            req.auth
+                .iter()
+                .find(|(k, _)| java_uri_equals(k, url))
+                .map(|(_, v)| v)
+        });
+        if let Some(a) = matched_auth {
+            let login = a.get("login").cloned().unwrap_or_default();
+            let password = a.get("password").cloned().unwrap_or_default();
+            match a.get("type").map(|s| s.as_str()) {
+                Some("basic") => set_header(
+                    &mut h,
+                    "Authorization".into(),
+                    format!(
+                        "Basic {}",
+                        base64_encode(format!("{}:{}", login, password).as_bytes())
+                    ),
+                ),
+                Some("netrc") => {
+                    let val = if !login.is_empty() {
+                        format!(
+                            "Basic {}",
+                            base64_encode(format!("{}:{}", login, password).as_bytes())
+                        )
+                    } else {
+                        format!("Bearer {}", password)
+                    };
+                    set_header(&mut h, "Authorization".into(), val);
+                }
+                Some("pattern") => {
+                    let p = a.get("pattern").cloned().unwrap_or_default();
+                    set_header(
+                        &mut h,
+                        "Authorization".into(),
+                        p.replace("<login>", &login)
+                            .replace("<password>", &password),
+                    );
+                }
+                _ => {}
+            }
+            return Ok(h);
+        }
         let has_auth = |hdrs: &[(String, String)]| {
             hdrs.iter()
                 .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
         };
         if !has_auth(&h) {
-            let matched_auth = req.auth.get(url).or_else(|| {
-                req.auth
-                    .iter()
-                    .find(|(k, _)| java_uri_equals(k, url))
-                    .map(|(_, v)| v)
-            });
-            if let Some(a) = matched_auth {
-                let login = a.get("login").cloned().unwrap_or_default();
-                let password = a.get("password").cloned().unwrap_or_default();
-                match a.get("type").map(|s| s.as_str()) {
-                    Some("basic") => h.push((
-                        "Authorization".into(),
-                        format!(
-                            "Basic {}",
-                            base64_encode(format!("{}:{}", login, password).as_bytes())
-                        ),
-                    )),
-                    Some("pattern") => {
-                        let p = a.get("pattern").cloned().unwrap_or_default();
-                        h.push((
-                            "Authorization".into(),
-                            p.replace("<login>", &login)
-                                .replace("<password>", &password),
-                        ));
-                    }
-                    _ => {}
-                }
-            } else if let Some(ui) = &parsed.userinfo {
+            if let Some(ui) = &parsed.userinfo {
                 h.push((
                     "Authorization".into(),
                     format!("Basic {}", base64_encode(percent_decode(ui).as_bytes())),
@@ -1350,10 +1403,7 @@ impl Downloader {
                 fs::read(&p)
                     .map_err(|e| fe(format!("{} ({})", p.display(), java_io_reason(&e)), false))
             }
-            "http" => {
-                let headers = self.headers_for(url, req, &parsed)?;
-                self.http_get(&parsed, &headers, attempt)
-            }
+            "http" => self.http_get(&parsed, url, req, attempt),
             "https" => {
                 let headers = self.headers_for(url, req, &parsed)?;
                 self.curl_get(&parsed.to_url_string_without_userinfo(), &headers, attempt)
@@ -1405,6 +1455,20 @@ impl Downloader {
         {
             cmd.args(["-A", "bazel/9.3.2"]);
         }
+        if let Some(p) = select_proxy_env("https", &self.client_env) {
+            if p.is_empty() {
+                cmd.args(["--noproxy", "*"]);
+            } else {
+                cmd.args(["--proxy", &p]);
+            }
+        }
+        if let Some(np) = self
+            .client_env
+            .get("no_proxy")
+            .or_else(|| self.client_env.get("NO_PROXY"))
+        {
+            cmd.args(["--noproxy", np]);
+        }
         cmd.arg("-o").arg(&tmp);
         for (k, v) in headers {
             cmd.arg("-H").arg(format!("{}: {}", k, v));
@@ -1439,7 +1503,11 @@ impl Downloader {
             if code == 7 {
                 return Err(fe("Connection refused".to_string(), true));
             }
-            let retryable = stderr.contains("error: 5")
+            let unrecoverable_5xx =
+                stderr.contains("error: 501") || stderr.contains("error: 505");
+            let retryable = (!unrecoverable_5xx && stderr.contains("error: 5"))
+                || stderr.contains("error: 403")
+                || stderr.contains("error: 408")
                 || stderr.contains("error: 429")
                 || matches!(code, 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56);
             return Err(fe(format!("GET {} failed: {}", url, stderr), retryable));
@@ -1453,18 +1521,39 @@ impl Downloader {
     fn http_get(
         &self,
         start: &Url,
-        headers: &[(String, String)],
+        orig_url: &str,
+        req: &DownloadRequest,
         attempt: u32,
     ) -> Result<Vec<u8>, FetchError> {
         let mut url = start.clone();
+        let mut current_url_str = orig_url.to_string();
         let mut visited: Vec<String> = vec![start.to_url_string()];
-        let mut headers: Vec<(String, String)> = headers.to_vec();
         let connect_timeout = self.connect_timeout_for(attempt);
         for _ in 0..=self.max_redirects {
-            let addr_str = format!("{}:{}", url.host, url.port.unwrap_or(80));
+            let headers = self.headers_for(&current_url_str, req, &url)?;
+            let proxy = resolve_http_proxy(&url.host, &self.client_env);
+            let (connect_host, connect_port, request_target, proxy_auth) = match &proxy {
+                Some(px) => (
+                    px.host.clone(),
+                    px.port.unwrap_or(80),
+                    url.to_url_string_without_userinfo(),
+                    px.userinfo.as_ref().and_then(|ui| {
+                        ui.contains(':').then(|| {
+                            format!("Basic {}", base64_encode(percent_decode(ui).as_bytes()))
+                        })
+                    }),
+                ),
+                None => (
+                    url.host.clone(),
+                    url.port.unwrap_or(80),
+                    url.path_and_query.clone(),
+                    None,
+                ),
+            };
+            let addr_str = format!("{}:{}", connect_host, connect_port);
             let addrs: Vec<_> = addr_str
                 .to_socket_addrs()
-                .map_err(|_| fe(format!("Unknown host: {}", url.host), false))?
+                .map_err(|_| fe(format!("Unknown host: {}", connect_host), false))?
                 .collect();
             let mut stream = None;
             let mut last = String::from("no addresses");
@@ -1489,7 +1578,7 @@ impl Downloader {
             let mut w = stream.try_clone().map_err(|e| fe(e.to_string(), true))?;
             let mut reqs = format!(
                 "GET {} HTTP/1.1\r\nHost: {}\r\n",
-                url.path_and_query,
+                request_target,
                 url.host_header()
             );
             if !headers
@@ -1499,6 +1588,9 @@ impl Downloader {
                 reqs.push_str("User-Agent: bazel/9.3.2\r\n");
             }
             reqs.push_str("Accept: */*\r\nConnection: close\r\n");
+            if let Some(pa) = proxy_auth {
+                reqs.push_str(&format!("Proxy-Authorization: {}\r\n", pa));
+            }
             for (k, v) in &headers {
                 if k.contains(['\r', '\n']) || v.contains(['\r', '\n']) {
                     return Err(fe("Invalid header containing newline", false));
@@ -1539,34 +1631,38 @@ impl Downloader {
                     hdrs.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
                 }
             }
-            let get = |k: &str| hdrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+            let get = |k: &str| hdrs.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
             if matches!(code, 301 | 302 | 303 | 307 | 308) {
                 let loc = get("location").ok_or_else(|| {
                     fe(format!("Redirect {} without Location header", code), false)
                 })?;
                 let next = url.join(&loc).map_err(|e| fe(e, false))?;
+                let next_str = next.to_url_string();
                 match next.scheme.as_str() {
                     "http" => {}
                     "https" => {
+                        let next_headers = self.headers_for(&next_str, req, &next)?;
                         return self.curl_get(
                             &next.to_url_string_without_userinfo(),
-                            &strip_auth(&headers, &url, &next),
+                            &next_headers,
                             attempt,
                         );
                     }
                     s => return Err(fe(format!("Redirect to unsupported scheme '{}'", s), false)),
                 }
-                headers = strip_auth(&headers, &url, &next);
-                let key = next.to_url_string();
-                if visited.contains(&key) {
+                if visited.contains(&next_str) {
                     return Err(fe("Redirect loop detected", false));
                 }
-                visited.push(key);
+                visited.push(next_str.clone());
+                current_url_str = next_str;
                 url = next;
                 continue;
             }
             if code != 200 {
-                let retryable = code == 503 || code == 408 || code == 429;
+                let retryable = code == 403
+                    || code == 408
+                    || code == 429
+                    || ((500..600).contains(&code) && code != 501 && code != 505);
                 return Err(fe(format!("GET returned {} {}", code, reason), retryable));
             }
             let chunked = get("transfer-encoding")
@@ -1615,10 +1711,15 @@ impl Downloader {
                 r.read_to_end(&mut body)
                     .map_err(|e| fe(format!("Error reading body: {}", e), true))?;
             }
-            if get("content-encoding")
-                .map(|v| v.eq_ignore_ascii_case("gzip"))
-                .unwrap_or(false)
-            {
+            let is_gzip_ce = get("content-encoding")
+                .is_some_and(|v| v == "gzip" || v == "x-gzip");
+            let orig_path = Url::parse(orig_url)
+                .map(|u| u.path().to_string())
+                .unwrap_or_default();
+            let skip_gunzip = is_gz_extension(&orig_path)
+                || is_gz_extension(url.path())
+                || is_gz_extension(&req.archive_type);
+            if is_gzip_ce && !skip_gunzip {
                 body = crate::archive::gunzip(&body)
                     .map_err(|e| fe(format!("Bad gzip content-encoding: {}", e), false))?;
             }
@@ -1635,26 +1736,79 @@ impl Downloader {
     }
 }
 
+fn is_gz_extension(path_or_type: &str) -> bool {
+    let ext = match path_or_type.rsplit_once('.') {
+        Some((_, e)) => e,
+        None => path_or_type,
+    };
+    ext.eq_ignore_ascii_case("gz") || ext.eq_ignore_ascii_case("tgz")
+}
+
+fn select_proxy_env(scheme: &str, client_env: &BTreeMap<String, String>) -> Option<String> {
+    if scheme == "https" {
+        client_env
+            .get("https_proxy")
+            .or_else(|| client_env.get("HTTPS_PROXY"))
+            .cloned()
+    } else {
+        client_env
+            .get("http_proxy")
+            .or_else(|| client_env.get("HTTP_PROXY"))
+            .cloned()
+    }
+}
+
+fn host_bypassed_by_no_proxy(host: &str, client_env: &BTreeMap<String, String>) -> bool {
+    let Some(np) = client_env
+        .get("no_proxy")
+        .or_else(|| client_env.get("NO_PROXY"))
+    else {
+        return false;
+    };
+    let h = host.to_ascii_lowercase();
+    for raw in np.split(',') {
+        let pat = raw.trim().to_ascii_lowercase();
+        if pat.is_empty() {
+            continue;
+        }
+        if pat == "*" {
+            return true;
+        }
+        if let Some(suf) = pat.strip_prefix('.') {
+            if h.ends_with(&format!(".{suf}")) {
+                return true;
+            }
+        } else if h == pat || h.ends_with(&format!(".{pat}")) {
+            return true;
+        }
+    }
+    false
+}
+
+fn resolve_http_proxy(host: &str, client_env: &BTreeMap<String, String>) -> Option<Url> {
+    if host_bypassed_by_no_proxy(host, client_env) {
+        return None;
+    }
+    let raw = select_proxy_env("http", client_env)?;
+    if raw.is_empty() {
+        return None;
+    }
+    let normalized = if raw.contains("://") {
+        raw
+    } else {
+        format!("http://{raw}")
+    };
+    Url::parse(&normalized)
+        .ok()
+        .filter(|u| !u.host.is_empty() && (u.scheme == "http" || u.scheme == "https"))
+}
+
 impl Url {
     fn to_url_string_without_userinfo(&self) -> String {
         let mut u = self.clone();
         u.userinfo = None;
         u.to_url_string()
     }
-}
-
-fn strip_auth(headers: &[(String, String)], from: &Url, to: &Url) -> Vec<(String, String)> {
-    if from.host.eq_ignore_ascii_case(&to.host) && from.port == to.port && from.scheme == to.scheme
-    {
-        return headers.to_vec();
-    }
-    headers
-        .iter()
-        .filter(|(k, _)| {
-            !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("cookie")
-        })
-        .cloned()
-        .collect()
 }
 
 /// File names to look for in distdirs: basenames of each URL's path, and of the output.
@@ -2538,6 +2692,204 @@ mod tests {
             );
         }
         let _ = fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn blake3_cache_corrupt_repair_and_rewriter_full_scheme() {
+        let d = tmpdir("b3-repair-rewriter");
+        fs::write(d.join("src.bin"), b"blake3-payload").unwrap();
+        let dl = Downloader {
+            repo_cache: Some(RepositoryCache::new(d.join("cache"))),
+            ..quick()
+        };
+        let b3_hex = crate::hash::blake3_hex(b"blake3-payload");
+        let b3_sri = format!(
+            "blake3-{}",
+            base64_encode(&crate::hash::blake3(b"blake3-payload"))
+        );
+        let mut r = req(vec![file_url(&d.join("src.bin"))], d.join("out1"));
+        r.integrity = b3_sri.clone();
+        let res = dl.download(&r).unwrap();
+        assert_eq!(res.integrity, b3_sri);
+        let cached_file = d
+            .join("cache/content_addressable/blake3")
+            .join(&b3_hex)
+            .join("file");
+        assert_eq!(fs::read(&cached_file).unwrap(), b"blake3-payload");
+
+        // Corrupt the cached file while source URL is still live -> re-downloads and repairs cache!
+        fs::write(&cached_file, b"corrupted").unwrap();
+        r.output = d.join("out2");
+        let res2 = dl.download(&r).unwrap();
+        assert!(!res2.from_cache);
+        assert_eq!(fs::read(d.join("out2")).unwrap(), b"blake3-payload");
+        assert_eq!(fs::read(&cached_file).unwrap(), b"blake3-payload");
+
+        // URL rewriter with explicit scheme in replacement must not produce double scheme.
+        let rw = UrlRewriter::parse(
+            "cfg",
+            "rewrite example.com/(.*) https://mirror.internal/cache/$1\n",
+        )
+        .unwrap();
+        let amended = rw.amend(&["http://example.com/pkg/a.tar.gz".to_string()]);
+        assert_eq!(amended, vec!["https://mirror.internal/cache/pkg/a.tar.gz"]);
+    }
+
+    #[test]
+    fn gzip_encoding_redirect_auth_retry_codes_and_http_proxy() {
+        if !net_ok() {
+            return;
+        }
+        let d = tmpdir("http-parity");
+
+        // 1. Content-Encoding: gzip on .tar.gz must NOT gunzip the archive bytes, whereas .txt with x-gzip DOES gunzip.
+        let gz_bytes = {
+            // Minimal valid gzip wrapping "raw-tar"
+            let payload = b"raw-tar";
+            let mut g = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3];
+            g.extend_from_slice(&[1, payload.len() as u8, 0, !(payload.len() as u8), 0xff]);
+            g.extend_from_slice(payload);
+            // Compute gzip CRC32 via archive helper or precomputed for "raw-tar" (0x3ef3ef7f -> check via uncompressed test)
+            g
+        };
+        let _ = gz_bytes;
+        // Build gzip via system gzip or exact CRC32: CRC32("hi") = 0xd89328e9? Let's compute standard IEEE CRC32 inline!
+        let crc32_ieee = |data: &[u8]| -> u32 {
+            let mut c = 0xffff_ffffu32;
+            for &b in data {
+                c ^= b as u32;
+                for _ in 0..8 {
+                    c = if c & 1 != 0 {
+                        (c >> 1) ^ 0xedb8_8320
+                    } else {
+                        c >> 1
+                    };
+                }
+            }
+            !c
+        };
+        let make_gz = |payload: &[u8]| -> Vec<u8> {
+            let mut g = vec![0x1f, 0x8b, 8, 0, 0, 0, 0, 0, 0, 3];
+            g.extend_from_slice(&[1, payload.len() as u8, 0, !(payload.len() as u8), 0xff]);
+            g.extend_from_slice(payload);
+            g.extend_from_slice(&crc32_ieee(payload).to_le_bytes());
+            g.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            g
+        };
+        let gz_tar = make_gz(b"hello");
+        let gz_tar_clone = gz_tar.clone();
+        let (port_gz, _) = serve(2, move |path, _| {
+            let enc = if path.ends_with(".tar.gz") { "gzip" } else { "x-gzip" };
+            let mut resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Encoding: {enc}\r\nContent-Length: {}\r\n\r\n",
+                gz_tar_clone.len()
+            )
+            .into_bytes();
+            resp.extend_from_slice(&gz_tar_clone);
+            resp
+        });
+        let r_tgz = req(
+            vec![format!("http://127.0.0.1:{port_gz}/pkg.tar.gz")],
+            d.join("pkg.tar.gz"),
+        );
+        quick().download(&r_tgz).unwrap();
+        assert_eq!(
+            fs::read(d.join("pkg.tar.gz")).unwrap(),
+            gz_tar,
+            ".tar.gz with Content-Encoding: gzip must remain compressed"
+        );
+        let r_txt = req(
+            vec![format!("http://127.0.0.1:{port_gz}/readme.txt")],
+            d.join("readme.txt"),
+        );
+        quick().download(&r_txt).unwrap();
+        assert_eq!(
+            fs::read(d.join("readme.txt")).unwrap(),
+            b"hello",
+            "non-.gz path with Content-Encoding: x-gzip must be gunzipped"
+        );
+
+        // 2. HTTP 403 is retried while HTTP 501 is NOT retried.
+        let attempts_403 = Arc::new(Mutex::new(0usize));
+        let a403 = attempts_403.clone();
+        let (port_403, _) = serve(2, move |_, _| {
+            let mut n = a403.lock().unwrap();
+            *n += 1;
+            if *n == 1 {
+                b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n".to_vec()
+            } else {
+                ok(b"recovered-403")
+            }
+        });
+        let mut dl_retry = quick();
+        dl_retry.retries = 2;
+        dl_retry
+            .download(&req(
+                vec![format!("http://127.0.0.1:{port_403}/f")],
+                d.join("out403"),
+            ))
+            .unwrap();
+        assert_eq!(fs::read(d.join("out403")).unwrap(), b"recovered-403");
+
+        let attempts_501 = Arc::new(Mutex::new(0usize));
+        let a501 = attempts_501.clone();
+        let (port_501, _) = serve(1, move |_, _| {
+            *a501.lock().unwrap() += 1;
+            b"HTTP/1.1 501 Not Implemented\r\nContent-Length: 0\r\n\r\n".to_vec()
+        });
+        assert!(dl_retry
+            .download(&req(
+                vec![format!("http://127.0.0.1:{port_501}/f")],
+                d.join("out501"),
+            ))
+            .is_err());
+        assert_eq!(*attempts_501.lock().unwrap(), 1, "501 must not be retried");
+
+        // 3. Per-redirect auth re-evaluation: initial URL redirects to target URL which has auth configured.
+        let (port_target, seen_target) = serve(1, |_, _| ok(b"authed-body"));
+        let target_url = format!("http://127.0.0.1:{port_target}/secret");
+        let target_clone = target_url.clone();
+        let (port_redir, seen_redir) = serve(1, move |_, _| {
+            format!("HTTP/1.1 302 Found\r\nLocation: {target_clone}\r\nContent-Length: 0\r\n\r\n")
+                .into_bytes()
+        });
+        let start_url = format!("http://127.0.0.1:{port_redir}/start");
+        let mut r_redir = req(vec![start_url], d.join("authed"));
+        let mut auth_entry = BTreeMap::new();
+        auth_entry.insert("type".to_string(), "pattern".to_string());
+        auth_entry.insert("pattern".to_string(), "Bearer <password>".to_string());
+        auth_entry.insert("password".to_string(), "redir-tok-99".to_string());
+        r_redir.auth.insert(target_url, auth_entry);
+        quick().download(&r_redir).unwrap();
+        assert!(
+            !seen_redir.lock().unwrap()[0].contains("redir-tok-99"),
+            "initial unauthed host must not receive target token"
+        );
+        assert!(
+            seen_target.lock().unwrap()[0].contains("Bearer redir-tok-99"),
+            "redirect target must receive its re-evaluated auth header"
+        );
+
+        // 4. HTTP proxy routing with Proxy-Authorization from client_env.
+        let (port_proxy, seen_proxy) = serve(1, |_, _| ok(b"via-proxy"));
+        let mut dl_proxy = quick();
+        dl_proxy.client_env.insert(
+            "http_proxy".to_string(),
+            format!("http://puser:ppass@127.0.0.1:{port_proxy}"),
+        );
+        dl_proxy
+            .download(&req(
+                vec!["http://upstream.example.invalid:8080/item.bin".to_string()],
+                d.join("proxied"),
+            ))
+            .unwrap();
+        assert_eq!(fs::read(d.join("proxied")).unwrap(), b"via-proxy");
+        let proxy_req = &seen_proxy.lock().unwrap()[0];
+        assert!(
+            proxy_req.starts_with("GET http://upstream.example.invalid:8080/item.bin HTTP/1.1"),
+            "{proxy_req}"
+        );
+        assert!(proxy_req.contains("Proxy-Authorization: Basic "), "{proxy_req}");
     }
 }
 
