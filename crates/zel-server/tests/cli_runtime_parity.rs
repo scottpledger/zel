@@ -289,6 +289,62 @@ genrule(
 }
 
 #[test]
+fn client_env_home_expands_tilde_in_early_repository_option_checks() {
+    let w = make_ws("client-env-tilde");
+    // Normalize through `PathFragment` so Windows tests strip `\\?\` identically to `workspace_dir`.
+    let ws_norm = PathBuf::from(PathFragment::create(w.ws.to_str().unwrap()).path_string());
+    let root_norm = ws_norm.parent().unwrap().to_path_buf();
+    let custom_home = root_norm.join("custom_home");
+    std::fs::create_dir_all(&custom_home).unwrap();
+    std::fs::write(custom_home.join("valid_dl.cfg"), "rewrite (.*) $1\n").unwrap();
+    std::fs::write(custom_home.join("bad_dl.cfg"), "invalid_directive foo\n").unwrap();
+
+    let home_custom_arg = format!("--client_env=HOME={}", custom_home.display());
+    let ok_dl = w.run(&[
+        "info",
+        &home_custom_arg,
+        "--downloader_config=~/valid_dl.cfg",
+        "workspace",
+    ]);
+    assert_eq!(ok_dl.code, 0, "{}", ok_dl.err);
+
+    let bad_dl = w.run(&[
+        "info",
+        &home_custom_arg,
+        "--downloader_config=~/bad_dl.cfg",
+        "workspace",
+    ]);
+    assert_eq!(bad_dl.code, 2, "{}", bad_dl.err);
+    assert!(
+        bad_dl.err.contains("Failed to parse downloader config"),
+        "{}",
+        bad_dl.err
+    );
+
+    let home_root_arg = format!("--client_env=HOME={}", root_norm.display());
+    let bad_cache = w.run(&[
+        "info",
+        &home_root_arg,
+        "--repo_contents_cache=~/ws/inside_cache",
+        "workspace",
+    ]);
+    assert_eq!(bad_cache.code, 2, "{}", bad_cache.err);
+    assert!(
+        bad_cache.err.contains("is inside the main repo"),
+        "{}",
+        bad_cache.err
+    );
+
+    let ok_cache = w.run(&[
+        "info",
+        &home_custom_arg,
+        "--repo_contents_cache=~/outside_cache",
+        "workspace",
+    ]);
+    assert_eq!(ok_cache.code, 0, "{}", ok_cache.err);
+}
+
+#[test]
 fn shutdown_leaves_output_base_intact() {
     let w = make_ws("shutdown");
     let r = w.run(&["shutdown"]);

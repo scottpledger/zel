@@ -521,10 +521,11 @@ impl BlazeRuntime {
                 | "test"
                 | "vendor"
         ) {
-            zel_bzlmod::session::check_downloader_config(
+            zel_bzlmod::session::check_downloader_config_with_env(
                 command,
                 cmd_args,
                 std::path::Path::new(self.dirs.workspace_dir.path_string()),
+                &client_env,
             )
             .err()
         } else {

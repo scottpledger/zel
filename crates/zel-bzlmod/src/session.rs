@@ -411,15 +411,27 @@ pub fn check_downloader_config(
     args: &[String],
     workspace: &Path,
 ) -> Result<(), String> {
-    check_repo_contents_cache_location(command, args, workspace)?;
-    check_override_flags(command, args, workspace)?;
+    let client_env = ParsedCommandOptions::extract_client_env(args);
+    check_downloader_config_with_env(command, args, workspace, &client_env)
+}
+
+/// Like [`check_downloader_config`] using a pre-extracted `--client_env` map so tilde expansion
+/// uses the exact same `HOME` / `USERPROFILE` resolution as [`BzlmodConfig::from_parsed`].
+pub fn check_downloader_config_with_env(
+    command: &str,
+    args: &[String],
+    workspace: &Path,
+    client_env: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    check_repo_contents_cache_location(command, args, workspace, client_env)?;
+    check_override_flags(command, args, workspace, client_env)?;
     if !args.iter().any(|a| a.contains("downloader_config")) {
         return Ok(());
     }
     let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else {
         return Ok(());
     };
-    let user_home = resolve_user_home(&BTreeMap::new());
+    let user_home = resolve_user_home(client_env);
     let downloader_configs: Vec<String> = raw(&parsed, "downloader_config")
         .into_iter()
         .map(|c| {
@@ -437,7 +449,12 @@ pub fn check_downloader_config(
 
 /// Option-parsing failures of `--override_repository`, `--override_module` and the `--inject_*` flags
 /// (`While parsing option --x=y: ...`), reported before any command runs.
-fn check_override_flags(command: &str, args: &[String], workspace: &Path) -> Result<(), String> {
+fn check_override_flags(
+    command: &str,
+    args: &[String],
+    workspace: &Path,
+    client_env: &BTreeMap<String, String>,
+) -> Result<(), String> {
     if !args.iter().any(|a| {
         a.starts_with("--override_repository")
             || a.starts_with("--override_module")
@@ -452,7 +469,7 @@ fn check_override_flags(command: &str, args: &[String], workspace: &Path) -> Res
         &parsed,
         workspace,
         Path::new("/nonexistent-output-base"),
-        BTreeMap::new(),
+        client_env.clone(),
     ) {
         Err(e)
             if e.starts_with("While parsing option --override_")
@@ -470,17 +487,20 @@ fn check_repo_contents_cache_location(
     command: &str,
     args: &[String],
     workspace: &Path,
+    client_env: &BTreeMap<String, String>,
 ) -> Result<(), String> {
-    if !args
-        .iter()
-        .any(|a| a.starts_with("--repository_cache=") || a.starts_with("--repo_contents_cache="))
-    {
+    if !args.iter().any(|a| {
+        a == "--repository_cache"
+            || a.starts_with("--repository_cache=")
+            || a == "--repo_contents_cache"
+            || a.starts_with("--repo_contents_cache=")
+    }) {
         return Ok(());
     }
     let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else {
         return Ok(());
     };
-    let user_home = resolve_user_home(&BTreeMap::new());
+    let user_home = resolve_user_home(client_env);
     let abs = |s: &str| expand_option_path(s, workspace, user_home.as_deref(), cfg!(windows));
     let contents = match raw(&parsed, "repo_contents_cache").last() {
         Some(s) if !s.is_empty() => abs(s),
@@ -1849,5 +1869,118 @@ mod repo_env_tests {
             format_option_path_fragment(&win_ws, true),
             "D:/ws/sub/mod_b"
         );
+    }
+
+    #[test]
+    fn early_option_checks_expand_tilde_from_client_env_matching_from_parsed() {
+        let root = std::env::temp_dir().join(format!(
+            "zel-bzlmod-tilde-client-env-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        let ob = root.join("ob");
+        let custom_home = root.join("custom_home");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::create_dir_all(&ob).unwrap();
+        std::fs::create_dir_all(&custom_home).unwrap();
+        std::fs::write(custom_home.join("valid_dl.cfg"), "rewrite (.*) $1\n").unwrap();
+        std::fs::write(custom_home.join("bad_dl.cfg"), "invalid_directive foo\n").unwrap();
+
+        assert_ne!(
+            std::env::var("HOME").ok().as_deref(),
+            custom_home.to_str(),
+            "custom_home must differ from process HOME"
+        );
+
+        let run_both = |raw_args: &[String]| -> (Result<(), String>, Result<BzlmodConfig, String>) {
+            let early = check_downloader_config("build", raw_args, &ws);
+            let client_env = ParsedCommandOptions::extract_client_env(raw_args);
+            let parsed = ParsedCommandOptions::parse_for_command("build", raw_args).unwrap();
+            let full = BzlmodConfig::from_parsed(&parsed, &ws, &ob, client_env);
+            (early, full)
+        };
+
+        // Valid `--downloader_config=~/...` under custom `--client_env=HOME=...` succeeds in both.
+        let valid_dl_args = vec![
+            format!("--client_env=HOME={}", custom_home.display()),
+            "--downloader_config=~/valid_dl.cfg".to_string(),
+        ];
+        let (early_ok, full_ok) = run_both(&valid_dl_args);
+        assert!(early_ok.is_ok(), "{early_ok:?}");
+        assert!(
+            full_ok.expect("from_parsed").downloader_rewriter.is_some(),
+            "downloader rewriter should be loaded from custom client HOME"
+        );
+
+        // Malformed `--downloader_config=~/...` under custom `--client_env=HOME=...` fails identically.
+        let bad_dl_args = vec![
+            format!("--client_env=HOME={}", custom_home.display()),
+            "--downloader_config=~/bad_dl.cfg".to_string(),
+        ];
+        let (early_bad, full_bad) = run_both(&bad_dl_args);
+        assert_eq!(early_bad.unwrap_err(), full_bad.unwrap_err());
+
+        // Windows-style `--client_env=HOME=` + `--client_env=USERPROFILE=<custom_home>` also matches.
+        let userprofile_dl_args = vec![
+            "--client_env=HOME=".to_string(),
+            format!("--client_env=USERPROFILE={}", custom_home.display()),
+            "--downloader_config=~/valid_dl.cfg".to_string(),
+        ];
+        let (early_up, full_up) = run_both(&userprofile_dl_args);
+        assert!(early_up.is_ok(), "{early_up:?}");
+        assert!(full_up.is_ok(), "{full_up:?}");
+
+        // `--repo_contents_cache=~/...` expanding inside `ws` via `--client_env=HOME=<root>` is
+        // rejected by early check (both `=` and two-token forms), matching `from_parsed`'s path.
+        let inside_cache_args = vec![
+            format!("--client_env=HOME={}", root.display()),
+            "--repo_contents_cache=~/ws/cache_inside".to_string(),
+        ];
+        let (early_inside, full_inside) = run_both(&inside_cache_args);
+        let expected_inside = ws.join("cache_inside");
+        assert_eq!(
+            full_inside
+                .expect("from_parsed")
+                .repo_contents_cache
+                .as_deref(),
+            Some(expected_inside.as_path())
+        );
+        let inside_err = early_inside.expect_err("cache inside main repo must fail");
+        assert!(
+            inside_err.contains(&expected_inside.display().to_string())
+                && inside_err.contains("is inside the main repo"),
+            "{inside_err}"
+        );
+
+        let two_token_inside_args = vec![
+            "--client_env".to_string(),
+            format!("HOME={}", root.display()),
+            "--repo_contents_cache".to_string(),
+            "~/ws/cache_inside".to_string(),
+        ];
+        let two_token_err =
+            check_downloader_config("build", &two_token_inside_args, &ws).unwrap_err();
+        assert!(
+            two_token_err.contains("is inside the main repo"),
+            "{two_token_err}"
+        );
+
+        // `--repo_contents_cache=~/...` expanding outside `ws` via `--client_env=HOME=<custom_home>` succeeds.
+        let outside_cache_args = vec![
+            format!("--client_env=HOME={}", custom_home.display()),
+            "--repo_contents_cache=~/cache_outside".to_string(),
+        ];
+        let (early_outside, full_outside) = run_both(&outside_cache_args);
+        assert!(early_outside.is_ok(), "{early_outside:?}");
+        assert_eq!(
+            full_outside
+                .expect("from_parsed")
+                .repo_contents_cache
+                .as_deref(),
+            Some(custom_home.join("cache_outside").as_path())
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }
