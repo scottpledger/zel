@@ -158,6 +158,10 @@ pub(crate) struct BuildObserver {
     out: Arc<BufferOutErr>,
     profile_path: Option<(String, bool)>,
     sampler: Option<ResourceSampler>,
+    default_profile: bool,
+    output_base: String,
+    invocation_id: String,
+    include_run_residue: bool,
     bes: Option<Arc<bes::BesTransport>>,
     setup_errors: std::sync::Mutex<Vec<String>>,
     started: Instant,
@@ -324,10 +328,13 @@ impl ActionListener for ActionObserver {
                     .iter()
                     .map(|(p, _)| SpawnFile {
                         path: p.clone(),
+                        is_tool: a.tool_inputs.contains(p),
                         ..Default::default()
                     })
                     .collect()
             };
+            let (remotable, cacheable, remote_cacheable) =
+                zel_events::exec_log::execution_flags(&a.execution_info);
             let _ = self.include_label;
             log.log(&SpawnRecord {
                 args: a.argv.clone(),
@@ -345,9 +352,9 @@ impl ActionListener for ActionObserver {
                 } else {
                     Vec::new()
                 },
-                remotable: true,
-                cacheable: true,
-                remote_cacheable: true,
+                remotable,
+                cacheable,
+                remote_cacheable,
                 mnemonic: a.mnemonic.clone(),
                 target_label: a.owner.clone(),
                 runner: if r.cache_hit {
@@ -436,6 +443,9 @@ impl BuildObserver {
                 Some((k.to_string(), v.to_string()))
             })
             .collect();
+        let include_run_residue = parsed
+            .and_then(|p| p.get_bool("experimental_run_bep_event_include_residue"))
+            .unwrap_or(false);
         let mut bes_t = None;
         if bep_enabled {
             match bes::transport_from_options(&bep_opts, &build_request_id, &invocation_id, command)
@@ -455,6 +465,7 @@ impl BuildObserver {
 
         // Profiler.
         let profile_flag = get("profile");
+        let default_profile = profile_flag.is_none();
         let is_build_like = command == "query" || zel_options::command_analyzes(command);
         let profile_path = profiler::resolve_profile_path(
             profile_flag.as_deref(),
@@ -544,6 +555,10 @@ impl BuildObserver {
             out,
             profile_path,
             sampler,
+            default_profile,
+            output_base: output_base.to_string(),
+            invocation_id,
+            include_run_residue,
             bes: bes_t,
             setup_errors: std::sync::Mutex::new(setup_errors),
             started,
@@ -618,10 +633,54 @@ impl BuildObserver {
             children,
         ));
         r.post_bep_node(BepBuilder::build_metadata(&self.build_metadata));
+        let dash_pos = args.iter().position(|a| a == "--");
+        let before_dash = match dash_pos {
+            Some(i) => &args[..i],
+            None => args,
+        };
+        let after_dash = match dash_pos {
+            Some(i) => &args[i + 1..],
+            None => &[],
+        };
         let mut full = vec![self.command.clone()];
-        full.extend(args.iter().cloned());
+        let mut residue: Vec<String> = before_dash
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .cloned()
+            .chain(after_dash.iter().cloned())
+            .collect();
+        if self.command == "run" && !self.include_run_residue && residue.len() > 1 {
+            residue = vec![residue[0].clone(), "REDACTED".to_string()];
+            if let Some(i) = dash_pos {
+                full.extend(args[..i].iter().cloned());
+                full.push("--".to_string());
+                full.push("REDACTED".to_string());
+            } else {
+                let mut seen_target = false;
+                let mut added_redacted = false;
+                for a in args {
+                    if !a.starts_with('-') {
+                        if !seen_target {
+                            seen_target = true;
+                            full.push(a.clone());
+                        } else if !added_redacted {
+                            added_redacted = true;
+                            full.push("REDACTED".to_string());
+                        }
+                    } else if !seen_target {
+                        full.push(a.clone());
+                    }
+                }
+            }
+        } else {
+            full.extend(args.iter().cloned());
+        }
         r.post_bep_node(BepBuilder::unstructured_command_line(&full));
-        let opts: Vec<(String, String)> = explicit_options
+        let exp_before_dash = match explicit_options.iter().position(|a| a == "--") {
+            Some(i) => &explicit_options[..i],
+            None => explicit_options,
+        };
+        let opts: Vec<(String, String)> = exp_before_dash
             .iter()
             .filter_map(|o| o.strip_prefix("--"))
             .map(|o| match o.split_once('=') {
@@ -629,16 +688,11 @@ impl BuildObserver {
                 None => (o.to_string(), String::new()),
             })
             .collect();
-        let residue: Vec<String> = args
-            .iter()
-            .filter(|a| !a.starts_with('-'))
-            .cloned()
-            .collect();
         r.post_bep_node(BepBuilder::options_parsed(
             &[],
             &[],
-            explicit_options,
-            explicit_options,
+            exp_before_dash,
+            exp_before_dash,
             "",
         ));
         let structured = |label: &str| {
@@ -866,6 +920,7 @@ impl BuildObserver {
                         .map(|a| {
                             let p = a.exec_path.path_string().to_string();
                             let (prefix, rest) = split_exec_path(&p);
+                            let full_path = format!("{execroot}/{p}");
                             if a.is_tree_artifact {
                                 let dir_msg = BepBuilder::file_without_uri(&rest, &prefix);
                                 if seen_dir.insert(p) {
@@ -873,9 +928,12 @@ impl BuildObserver {
                                 }
                                 dir_msg
                             } else if a.is_unresolved_symlink {
-                                BepBuilder::file_without_uri(&rest, &prefix)
+                                let target = std::fs::read_link(&full_path)
+                                    .ok()
+                                    .map(|t| t.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                BepBuilder::symlink_file(&rest, &prefix, &target)
                             } else {
-                                let full_path = format!("{execroot}/{p}");
                                 let (len, dig) = match zel_util::sha256::hash_file(
                                     std::path::Path::new(&full_path),
                                 ) {
@@ -1375,12 +1433,38 @@ impl BuildObserver {
         }
         // Profile.
         if let Some((path, _)) = &self.profile_path {
-            let p = PathFragment::create(path);
-            if let Err(e) = self.profiler.write_to(fs, &p) {
-                self.reporter.handle(Event::error(
-                    None,
-                    format!("Error while writing profile file: {e}"),
-                ));
+            let default_cmd_profile = format!("{}/command.profile.gz", self.output_base);
+            if self.default_profile && path == &default_cmd_profile {
+                let per_inv = format!(
+                    "{}/command-{}.profile.gz",
+                    self.output_base, self.invocation_id
+                );
+                let per_inv_pf = PathFragment::create(&per_inv);
+                if let Err(e) = self.profiler.write_to(fs, &per_inv_pf) {
+                    self.reporter.handle(Event::error(
+                        None,
+                        format!("Error while writing profile file: {e}"),
+                    ));
+                } else {
+                    let link_path = std::path::Path::new(&default_cmd_profile);
+                    let _ = std::fs::remove_file(link_path);
+                    let target_name = format!("command-{}.profile.gz", self.invocation_id);
+                    #[cfg(unix)]
+                    let linked = std::os::unix::fs::symlink(&target_name, link_path).is_ok();
+                    #[cfg(not(unix))]
+                    let linked = false;
+                    if !linked {
+                        let _ = std::fs::copy(&per_inv, link_path);
+                    }
+                }
+            } else {
+                let p = PathFragment::create(path);
+                if let Err(e) = self.profiler.write_to(fs, &p) {
+                    self.reporter.handle(Event::error(
+                        None,
+                        format!("Error while writing profile file: {e}"),
+                    ));
+                }
             }
         }
         self.ui.after_command();

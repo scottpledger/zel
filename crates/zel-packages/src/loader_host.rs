@@ -2881,11 +2881,6 @@ impl PackageLoader {
                 }
             }
         }
-        let finalizer = match kw.get("finalizer") {
-            None => false,
-            Some(Value::Bool(b)) => *b,
-            Some(other) => return Err(herr(ctx, type_mismatch("finalizer", other, "bool", "macro"))),
-        };
         if let Some(a) = kw.get("attrs") {
             let Value::Dict(d) = a else {
                 return Err(herr(ctx, type_mismatch("attrs", a, "dict", "macro")));
@@ -2899,10 +2894,6 @@ impl PackageLoader {
                         ctx,
                         format!("Cannot declare a macro attribute named '{k}'"),
                     ));
-                }
-                if matches!(v, Value::None) {
-                    attrs.retain(|x| x.name != k);
-                    continue;
                 }
                 if matches!(v, Value::None) {
                     attrs.retain(|x| x.name != k);

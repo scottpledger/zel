@@ -1677,6 +1677,25 @@ impl BepBuilder {
         f
     }
 
+    pub fn symlink_file(name: &str, prefix: &[String], symlink_target_path: &str) -> Msg {
+        let mut f = Msg::new("build_event_stream.File");
+        for p in prefix {
+            f.set_str("path_prefix", p.clone());
+        }
+        f.set_str("name", name);
+        f.set_str("symlink_target_path", symlink_target_path);
+        f
+    }
+
+    pub fn directory_file(name: &str, prefix: &[String]) -> Msg {
+        let mut f = Msg::new("build_event_stream.File");
+        for p in prefix {
+            f.set_str("path_prefix", p.clone());
+        }
+        f.set_str("name", name);
+        f
+    }
+
     /// Splits a flattened file list into `NamedSetOfFiles` events respecting
     /// `--build_event_max_named_set_of_file_entries` (`max_entries`, only splits when `>= 2`).
     /// Recursively folds chunks so no node's total degree (`files + file_sets`) exceeds `max_entries`.

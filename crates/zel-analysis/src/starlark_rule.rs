@@ -148,7 +148,7 @@ impl AnalysisInputs {
             toolchains: BTreeMap::new(),
             extra_make_variables: BTreeMap::new(),
             workspace_name: "_main".to_string(),
-            allow_unresolved_symlinks: false,
+            allow_unresolved_symlinks: true,
             compact_repo_mapping: true,
             exec_platform: None,
             exec_group_toolchains: BTreeMap::new(),

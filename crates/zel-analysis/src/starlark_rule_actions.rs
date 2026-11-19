@@ -602,7 +602,52 @@ fn ctx_method(
                 mk_list(vec![]),
             ]))
         }
-        "coverage_instrumented" => Ok(Value::Bool(coverage_enabled(&st.cfg))),
+        "coverage_instrumented" => {
+            check_kwargs("coverage_instrumented", pos, kw, &["target"])?;
+            if !coverage_enabled(&st.cfg) || st.cfg.is_exec {
+                return Ok(Value::Bool(false));
+            }
+            let (lbl, is_test) = match arg(pos, kw, 0, "target") {
+                None | Some(Value::None) => (st.label.clone(), st.rule.is_test_rule()),
+                Some(v) => {
+                    let ct = target_of(&v).ok_or_else(|| {
+                        StarlarkError("coverage_instrumented: expected Target or None".into())
+                    })?;
+                    (ct.label.clone(), ct.is_test)
+                }
+            };
+            if is_test && !st.cfg.bool_option("instrument_test_targets", false) {
+                return Ok(Value::Bool(false));
+            }
+            let spec = st
+                .cfg
+                .option_str("instrumentation_filter")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "-/javatests[/:],-/test/java[/:]".to_string());
+            let mut inc: Vec<zel_util::java_regex::Regex> = Vec::new();
+            let mut exc: Vec<zel_util::java_regex::Regex> = Vec::new();
+            for piece in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                if let Some(rest) = piece.strip_prefix('-') {
+                    if let Ok(r) = zel_util::java_regex::Regex::new(rest) {
+                        exc.push(r);
+                    }
+                } else {
+                    let pat = piece.strip_prefix('+').unwrap_or(piece);
+                    if let Ok(r) = zel_util::java_regex::Regex::new(pat) {
+                        inc.push(r);
+                    }
+                }
+            }
+            let cand = lbl.to_string();
+            let matched = if exc.iter().any(|r| r.find(&cand).is_some()) {
+                false
+            } else if inc.is_empty() {
+                true
+            } else {
+                inc.iter().any(|r| r.find(&cand).is_some())
+            };
+            Ok(Value::Bool(matched))
+        }
         "resolve_tools" => {
             st.check_mutable("resolve_tools")?;
             check_kwargs("resolve_tools", pos, kw, &["tools"])?;

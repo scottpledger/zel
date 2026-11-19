@@ -553,11 +553,9 @@ mod tests {
         assert_eq!(r1.executed(), 1);
         let r2 = execute_actions(&a, 1, false, &r, &fs, &cache, &rep, &opts);
         assert_eq!(r2.cache_hits(), 1);
-        std::fs::write(
-            format!("{}/bazel-out/k8-fastbuild/bin/pkg/z", r),
-            "tampered",
-        )
-        .unwrap();
+        let out_file = format!("{}/bazel-out/k8-fastbuild/bin/pkg/z", r);
+        let _ = std::fs::remove_file(&out_file);
+        std::fs::write(&out_file, "tampered").unwrap();
         let r3 = execute_actions(&a, 1, false, &r, &fs, &cache, &rep, &opts);
         assert_eq!(r3.executed(), 1);
         assert_eq!(
@@ -590,6 +588,8 @@ fn action_info(a: &ActionAnalysisMetadata) -> zel_events::ActionInfo {
         argv,
         env,
         progress_message,
+        execution_info,
+        tools,
         ..
     } = a
     {
@@ -597,6 +597,11 @@ fn action_info(a: &ActionAnalysisMetadata) -> zel_events::ActionInfo {
         info.argv = argv.clone();
         info.env = env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
         info.progress_message = progress_message.clone();
+        info.execution_info = execution_info.clone();
+        info.tool_inputs = tools
+            .iter()
+            .map(|t| t.exec_path.path_string().to_string())
+            .collect();
     }
     if info.progress_message.is_empty() {
         info.progress_message = format!("{} {}", info.mnemonic, info.owner);

@@ -77,6 +77,7 @@ struct Rusage {
 #[cfg(unix)]
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
+    fn signal(sig: i32, handler: usize) -> usize;
     fn setsid() -> i32;
     fn umask(mask: u32) -> u32;
     fn wait4(pid: i32, status: *mut i32, options: i32, rusage: *mut Rusage) -> i32;
@@ -84,6 +85,54 @@ extern "C" {
 
 #[cfg(unix)]
 const WNOHANG: i32 = 1;
+
+#[cfg(unix)]
+static GOT_SIGTERM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn on_wrapper_sigterm(sig: i32) {
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let _ = signal(sig, on_wrapper_sigterm as *const () as usize);
+    }
+    record_wrapper_signal(sig);
+    GOT_SIGTERM.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[cfg(unix)]
+struct SigtermGuard {
+    installed: bool,
+    prev: usize,
+}
+
+#[cfg(unix)]
+impl SigtermGuard {
+    fn install(enable: bool) -> Self {
+        GOT_SIGTERM.store(false, std::sync::atomic::Ordering::SeqCst);
+        if !enable {
+            return Self {
+                installed: false,
+                prev: 0,
+            };
+        }
+        let prev = unsafe { signal(SIGTERM, on_wrapper_sigterm as *const () as usize) };
+        Self {
+            installed: prev != usize::MAX,
+            prev,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SigtermGuard {
+    fn drop(&mut self) {
+        if self.installed {
+            unsafe {
+                let _ = signal(SIGTERM, self.prev);
+            }
+        }
+    }
+}
 
 /// Sends `sig` to the process group `pgid` (`kill(-pgid, sig)`).
 pub fn signal_process_group(pgid: u32, sig: i32) {
@@ -765,6 +814,8 @@ pub fn run(
     let mut cancelled = false;
     #[cfg(unix)]
     let (termination, usage) = {
+        let _sigterm_guard = SigtermGuard::install(opt.graceful_sigterm);
+        let mut forwarded_sigterm = false;
         let mut status: i32 = 0;
         let mut ru = Rusage::default();
         loop {
@@ -780,12 +831,24 @@ pub fn run(
                 }
                 return Err(e);
             }
+            if opt.graceful_sigterm
+                && !forwarded_sigterm
+                && GOT_SIGTERM.load(std::sync::atomic::Ordering::SeqCst)
+            {
+                forwarded_sigterm = true;
+                signal_process_group(pid as u32, SIGTERM);
+                if term_sent.is_none() {
+                    term_sent = Some(Instant::now());
+                }
+            }
             if let Some(t) = timeout {
                 if !timed_out && started.elapsed() >= t {
                     timed_out = true;
                     // SIGALRM => OnGracefulSignal => KillEverything(pid, graceful=true, delay).
                     signal_process_group(pid as u32, SIGTERM);
-                    term_sent = Some(Instant::now());
+                    if term_sent.is_none() {
+                        term_sent = Some(Instant::now());
+                    }
                 }
             }
             let ext_sig = WRAPPER_SIGNAL.load(std::sync::atomic::Ordering::SeqCst);
@@ -797,6 +860,7 @@ pub fn run(
                     cancelled = true;
                 }
                 if opt.graceful_sigterm {
+                    forwarded_sigterm = true;
                     if term_sent.is_none() {
                         signal_process_group(pid as u32, SIGTERM);
                         term_sent = Some(Instant::now());
@@ -823,6 +887,8 @@ pub fn run(
             Termination::Signaled(SIGALRM)
         } else if received_sig != 0 {
             Termination::Signaled(received_sig)
+        } else if forwarded_sigterm {
+            Termination::Signaled(SIGTERM)
         } else if status & 0x7f == 0 {
             Termination::Exited((status >> 8) & 0xff)
         } else {
@@ -1166,5 +1232,34 @@ mod tests {
             "hello world\n"
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn graceful_sigterm_forwards_term_and_reports_sigterm() {
+        let cancel = CancelFlag::new();
+        let cancel_bg = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            cancel_bg.cancel();
+        });
+        let o = ProcessWrapperOptions {
+            graceful_sigterm: true,
+            kill_delay_secs: 5.0,
+            cancel: Some(cancel),
+            args: s(&[
+                "/bin/sh",
+                "-c",
+                "trap 'echo got_term; exit 0' TERM; while :; do sleep 0.05; done",
+            ]),
+            ..Default::default()
+        };
+        let t = Instant::now();
+        let r = run(&o, None, None).unwrap();
+        assert!(r.cancelled);
+        assert_eq!(r.termination, Termination::Signaled(SIGTERM));
+        assert_eq!(r.termination.exit_code(), 143);
+        assert!(t.elapsed().as_secs_f64() < 3.0);
+        assert!(String::from_utf8_lossy(&r.stdout).contains("got_term"));
     }
 }

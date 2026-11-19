@@ -215,6 +215,7 @@ struct Rusage {
 #[cfg(unix)]
 extern "C" {
     fn getrusage(who: i32, usage: *mut Rusage) -> i32;
+    fn getrlimit(resource: i32, rlim: *mut [u64; 2]) -> i32;
     fn setrlimit(resource: i32, rlim: *const [u64; 2]) -> i32;
 }
 
@@ -428,6 +429,45 @@ pub fn set_batch_cpu_scheduling() {
         // SAFETY: SCHED_BATCH (3) with priority 0 is valid for unprivileged processes.
         unsafe {
             sched_setscheduler(0, 3, &param);
+        }
+    }
+}
+
+/// Raises soft `RLIMIT_NOFILE` and `RLIMIT_NPROC` up to their hard limits (matching Bazel's
+/// `unlimit_resources()` in `blaze_util_posix.cc`).
+pub fn unlimit_resources() {
+    #[cfg(unix)]
+    {
+        #[cfg(target_os = "linux")]
+        const RLIMIT_NOFILE: i32 = 7;
+        #[cfg(target_os = "macos")]
+        const RLIMIT_NOFILE: i32 = 8;
+
+        #[cfg(target_os = "linux")]
+        const RLIMIT_NPROC: i32 = 6;
+        #[cfg(target_os = "macos")]
+        const RLIMIT_NPROC: i32 = 7;
+
+        // macOS clamps `RLIMIT_NOFILE` to `OPEN_MAX` (10240) when `rlim_max` is `RLIM_INFINITY`.
+        #[cfg(target_os = "macos")]
+        const OPEN_MAX_CAP: u64 = 10240;
+
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        for res in [RLIMIT_NOFILE, RLIMIT_NPROC] {
+            let mut rl = [0u64; 2];
+            // SAFETY: valid pointer to `rl`.
+            if unsafe { getrlimit(res, &mut rl) } == 0 && rl[0] < rl[1] {
+                #[cfg(target_os = "macos")]
+                let target = if res == RLIMIT_NOFILE && rl[1] > OPEN_MAX_CAP {
+                    OPEN_MAX_CAP.max(rl[0])
+                } else {
+                    rl[1]
+                };
+                #[cfg(not(target_os = "macos"))]
+                let target = rl[1];
+                rl[0] = target;
+                let _ = unsafe { setrlimit(res, &rl) };
+            }
         }
     }
 }

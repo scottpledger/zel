@@ -149,6 +149,7 @@ const CONFIG_OPTIONS: &[&str] = &[
     "extra_execution_platforms",
     "collect_code_coverage",
     "instrument_test_targets",
+    "instrumentation_filter",
     "test_env",
     "action_env",
     "host_action_env",
@@ -591,9 +592,8 @@ impl BlazeRuntime {
             .filter(|h| !h.is_empty())
             .map(|h| h.to_string());
         acfg.check_visibility = parsed.get_bool("check_visibility").unwrap_or(true);
-        acfg.allow_unresolved_symlinks = parsed
-            .get_bool("allow_unresolved_symlinks")
-            .unwrap_or(false);
+        acfg.allow_unresolved_symlinks =
+            parsed.get_bool("allow_unresolved_symlinks").unwrap_or(true);
         acfg.no_compact_repo_mapping = !parsed
             .get_bool("incompatible_compact_repo_mapping_manifest")
             .unwrap_or(true);
@@ -919,18 +919,32 @@ impl BlazeRuntime {
                         {
                             tags = ts;
                         }
-                        let mut keep = true;
-                        for f in &build_tag_filters {
-                            if let Some(neg) = f.strip_prefix('-') {
-                                if tags.iter().any(|t| t == neg) {
-                                    keep = false;
-                                    break;
+                        if rule.attr_or_default("local")
+                            == Some(zel_packages::attr::AttrValue::Bool(true))
+                            && !tags.iter().any(|t| t == "local")
+                        {
+                            tags.push("local".to_string());
+                        }
+                        let mut pos_filters = Vec::new();
+                        let mut excluded = false;
+                        for raw in &build_tag_filters {
+                            for f in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+                                if let Some(neg) = f.strip_prefix('-') {
+                                    if tags.iter().any(|t| t == neg) {
+                                        excluded = true;
+                                        break;
+                                    }
+                                } else {
+                                    pos_filters.push(f.trim_start_matches('+'));
                                 }
-                            } else if !tags.iter().any(|t| t == f) {
-                                keep = false;
+                            }
+                            if excluded {
                                 break;
                             }
                         }
+                        let keep = !excluded
+                            && (pos_filters.is_empty()
+                                || pos_filters.iter().any(|p| tags.iter().any(|t| t == p)));
                         if !keep {
                             continue;
                         }

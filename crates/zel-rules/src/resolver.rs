@@ -236,6 +236,7 @@ impl AnalysisConfig {
 
     pub fn new() -> Self {
         Self {
+            allow_unresolved_symlinks: true,
             check_visibility: true,
             platforms_repo: "platforms".to_string(),
             ..Default::default()

@@ -47,8 +47,10 @@ pub(crate) fn read_query(
     if !query_file.is_empty() {
         let path = cwd.join(query_file);
         return match std::fs::read(&path) {
-            // The file is read as ISO-8859-1 by Bazel.
-            Ok(bytes) => Ok(bytes.iter().map(|&b| b as char).collect()),
+            Ok(bytes) => match std::str::from_utf8(&bytes) {
+                Ok(s) => Ok(s.to_string()),
+                Err(_) => Ok(bytes.iter().map(|&b| b as char).collect()),
+            },
             Err(_) => Err(format!("I/O error reading from {}", path.display())),
         };
     }

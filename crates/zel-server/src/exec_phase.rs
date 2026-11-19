@@ -865,6 +865,7 @@ pub(crate) fn run_build_actions(
             "experimental_use_validation_aspect",
             false,
         ),
+        writable_outputs: opt_bool(parsed, "experimental_writable_outputs", false),
         tool_runfiles: {
             let mut tr = BTreeMap::new();
             let enable_rf = opt_bool(parsed, "enable_runfiles", true);
@@ -1733,26 +1734,33 @@ pub(crate) fn test_attrs(rule: Option<&Target>, parsed: &ParsedCommandOptions) -
     a
 }
 
-/// Tags that are execution requirements (`ExecutionRequirements` / `TargetUtils.getExecutionInfo`).
-fn test_execution_info(tags: &[String]) -> BTreeMap<String, String> {
-    const REQ: &[&str] = &[
-        "local",
-        "no-sandbox",
-        "no-cache",
-        "no-remote",
-        "no-remote-cache",
-        "no-remote-exec",
-        "no-local",
-        "requires-network",
-        "block-network",
-        "requires-fakeroot",
-    ];
-    tags.iter()
+/// Tags that are execution requirements (`ExecutionRequirements` / `TargetUtils.getExecutionInfo`
+/// plus `TestTargetProperties` `--incompatible_exclusive_test_sandboxed`).
+pub fn test_execution_info(tags: &[String], exclusive_sandboxed: bool) -> BTreeMap<String, String> {
+    let mut info: BTreeMap<String, String> = tags
+        .iter()
         .filter(|t| {
-            REQ.contains(&t.as_str()) || t.starts_with("cpu:") || t.starts_with("resources:")
+            let s = t.as_str();
+            s == "local"
+                || s == "worker-key-mnemonic"
+                || s.starts_with("block-")
+                || s.starts_with("requires-")
+                || s.starts_with("no-")
+                || s.starts_with("supports-")
+                || s.starts_with("disable-")
+                || s.starts_with("cpu:")
+                || s.starts_with("resources:")
         })
         .map(|t| (t.clone(), String::new()))
-        .collect()
+        .collect();
+    if tags.iter().any(|t| t == "exclusive") && !tags.iter().any(|t| t == "local") {
+        if exclusive_sandboxed {
+            info.entry("no-remote-exec".to_string()).or_default();
+        } else {
+            info.entry("local".to_string()).or_default();
+        }
+    }
+    info
 }
 
 /// A `+x,-y` filter list: `(included, excluded)`.
@@ -2577,7 +2585,8 @@ pub(crate) fn run_tests(
         inputs.extend(std::mem::take(&mut cc_cov_extra_input));
         inputs.sort();
         inputs.dedup();
-        let mut info = test_execution_info(&attrs.tags);
+        let exclusive_sandboxed = opt_bool(parsed, "incompatible_exclusive_test_sandboxed", true);
+        let mut info = test_execution_info(&attrs.tags, exclusive_sandboxed);
         // `TestTargetProperties`: the `testing.ExecutionInfo` provider's requirements.
         if let Some(zel_starlark::Value::ProviderInstance { fields, .. }) =
             ct.providers.get("ExecutionInfo")
@@ -2616,7 +2625,10 @@ pub(crate) fn run_tests(
             info.entry("no-remote-exec".into())
                 .or_insert_with(|| "1".into());
         }
-        if is_streamed {
+        if is_streamed
+            || test_strat.as_deref() == Some("standalone")
+            || test_strat.as_deref() == Some("local")
+        {
             info.entry("local".into()).or_insert_with(|| "1".into());
         }
         if attrs.tags.iter().any(|t| t == "local" || t == "no-sandbox") {
@@ -3615,7 +3627,14 @@ pub(crate) fn run_tests(
                 if r.cached {
                     if mode == "errors" && (!r.status.is_passed() || r.status == TestStatus::Flaky)
                     {
-                        for flog in &r.failed_logs {
+                        let fallback_log;
+                        let logs: &[String] = if !r.failed_logs.is_empty() {
+                            &r.failed_logs
+                        } else {
+                            fallback_log = [r.log_path.to_string_lossy().into_owned()];
+                            &fallback_log
+                        };
+                        for flog in logs {
                             if let Ok(b) = std::fs::read(flog) {
                                 let stripped = strip_test_setup_header(&b);
                                 writeln(

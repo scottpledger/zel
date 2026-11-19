@@ -98,6 +98,21 @@ pub struct SpawnRecord {
     pub total_time_ms: Option<i64>,
 }
 
+/// Derives `(remotable, cacheable, remote_cacheable)` from spawn execution requirements,
+/// matching `Spawns.mayBeExecutedRemotely`, `mayBeCached`, and `mayBeCachedRemotely`.
+pub fn execution_flags(
+    exec_info: &std::collections::BTreeMap<String, String>,
+) -> (bool, bool, bool) {
+    let no_remote = exec_info.contains_key("no-remote") || exec_info.contains_key("local");
+    let no_remote_exec = exec_info.contains_key("no-remote-exec");
+    let no_cache = exec_info.contains_key("no-cache");
+    let no_remote_cache = exec_info.contains_key("no-remote-cache");
+    let remotable = !no_remote && !no_remote_exec;
+    let cacheable = !no_cache;
+    let remote_cacheable = cacheable && !no_remote && !no_remote_cache;
+    (remotable, cacheable, remote_cacheable)
+}
+
 fn digest(hash: &str, size: i64, fname: &str) -> Msg {
     let mut d = Msg::new("tools.protos.Digest");
     d.set_str("hash", hash);

@@ -591,3 +591,148 @@ consumer(name = "check")
         "t=True,True,TGT_L,TGT_L_LI,[\"tgt_launcher.bin\"],[\"tgt_launcher.bin\", \"data_t.txt\"]\nh=True,True,EXEC_L,EXEC_L_LI,[\"exec_launcher.bin\"],[\"exec_launcher.bin\", \"data_h.txt\"]\n"
     );
 }
+
+#[test]
+fn wave5_coverage_build_tags_invocation_id_bep_residue_and_workspace_status() {
+    let w = Ws::new("w5b");
+    w.write(
+        "defs.bzl",
+        r##"
+def _cov_check(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".info")
+    # Also verify allow_unresolved_symlinks defaults to True on attr.label_list:
+    ctx.actions.write(
+        out,
+        "cov=%s\n" % ctx.coverage_instrumented(),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+cov_rule = rule(
+    implementation = _cov_check,
+    attrs = {"deps": attr.label_list(allow_files = True)},
+)
+
+def _sym(ctx):
+    lnk = ctx.actions.declare_symlink(ctx.label.name + ".lnk")
+    ctx.actions.symlink(output = lnk, target_path = "dangling/target")
+    return [DefaultInfo(files = depset([lnk]))]
+
+sym_rule = rule(implementation = _sym)
+
+def _bin(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name)
+    ctx.actions.write(exe, "#!/bin/sh\nexit 0\n", is_executable = True)
+    rf = ctx.runfiles(files = ctx.files.data)
+    return [DefaultInfo(executable = exe, files = depset([exe]), runfiles = rf)]
+
+my_bin = rule(implementation = _bin, executable = True, attrs = {"data": attr.label_list(allow_files = True)})
+my_test = rule(implementation = _bin, test = True, attrs = {"data": attr.label_list(allow_files = True)})
+"##,
+    );
+    w.write(
+        "pkg/BUILD",
+        r#"
+load("//:defs.bzl", "cov_rule", "sym_rule", "my_bin", "my_test")
+sym_rule(name = "unresolved")
+cov_rule(name = "c", deps = [":unresolved"])
+genrule(name = "g_a", outs = ["a.out"], cmd = "echo a > $@", tags = ["alpha"])
+genrule(name = "g_b", outs = ["b.out"], cmd = "echo b > $@", local = 1)
+my_bin(name = "runner")
+my_test(name = "my_sh_test", data = ["d.txt"])
+"#,
+    );
+    w.write("pkg/runner.sh", "#!/bin/sh\nexit 0\n");
+    w.write("pkg/d.txt", "hello");
+    w.write("status.sh", "#!/bin/sh\necho STABLE_FOO $MY_STATUS_VAR\n");
+
+    // 1. allow_unresolved_symlinks defaults to True + coverage_instrumented honors default filter.
+    let (code, _, err, _) = w.run(&["coverage", "//pkg:c"]);
+    assert_eq!(code, 4, "{err}");
+    assert!(
+        err.contains("Using default value for --instrumentation_filter: \"^//pkg[/:]\"."),
+        "{err}"
+    );
+    let cov_txt = std::fs::read_to_string(w.ws.join("bazel-bin/pkg/c.info")).unwrap();
+    assert_eq!(cov_txt.trim(), "cov=True");
+
+    // 2. --build_tag_filters uses OR for positive filters and recognizes `local = 1` as `local` tag.
+    let (code, _, err, _) = w.run(&[
+        "build",
+        "--build_tag_filters=alpha,local",
+        "//pkg:g_a",
+        "//pkg:g_b",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(w.ws.join("bazel-bin/pkg/a.out").exists());
+    assert!(w.ws.join("bazel-bin/pkg/b.out").exists());
+
+    // 3. --invocation_id honored in BEP & command-<uuid>.profile.gz symlinked by command.profile.gz,
+    //    and `bazel build` materializes .runfiles for sh_test when --build_runfile_links=true.
+    let bep_json = w.root.join("run_bep.json");
+    let custom_inv = "11111111-2222-4333-8444-555555555555";
+    let (code, _, err, _) = w.run(&[
+        "build",
+        &format!("--invocation_id={custom_inv}"),
+        "//pkg:my_sh_test",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        w.root
+            .join(format!("ob/command-{custom_inv}.profile.gz"))
+            .exists(),
+        "per-invocation profile should exist"
+    );
+    assert!(w.root.join("ob/command.profile.gz").exists());
+    assert!(
+        w.ws.join("bazel-bin/pkg/my_sh_test.runfiles").is_dir(),
+        "bazel build should materialize test runfiles tree"
+    );
+
+    // 4. `bazel run` BEP redacts post-`--` arguments to REDACTED by default.
+    let (code, _, err, req) = w.run(&[
+        "run",
+        &format!("--build_event_json_file={}", bep_json.display()),
+        "//pkg:runner",
+        "--",
+        "--secret_token=xyz",
+        "arg2",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    assert!(req.is_some());
+    let bep_str = std::fs::read_to_string(&bep_json).unwrap();
+    assert!(bep_str.contains("REDACTED"), "{bep_str}");
+    assert!(!bep_str.contains("secret_token"), "{bep_str}");
+
+    // 5. workspace_status_command receives --client_env and honors SOURCE_DATE_EPOCH without
+    //    clobbering unchanged stable-status.txt.
+    let status_sh = w.ws.join("status.sh");
+    let (code, _, err, _) = w.run(&[
+        "build",
+        "--stamp",
+        &format!("--workspace_status_command={}", status_sh.display()),
+        "--client_env=MY_STATUS_VAR=from_client",
+        "--client_env=SOURCE_DATE_EPOCH=1700000000",
+        "//pkg:g_a",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let stable =
+        std::fs::read_to_string(w.root.join("ob/execroot/_main/bazel-out/stable-status.txt"))
+            .unwrap();
+    assert!(stable.contains("STABLE_FOO from_client"), "{stable}");
+    let volatile = std::fs::read_to_string(
+        w.root
+            .join("ob/execroot/_main/bazel-out/volatile-status.txt"),
+    )
+    .unwrap();
+    assert!(
+        volatile.contains("BUILD_TIMESTAMP 1700000000"),
+        "{volatile}"
+    );
+
+    // 6. --query_file decodes ISO-8859-1 bytes cleanly.
+    let qfile = w.root.join("latin1.q");
+    std::fs::write(&qfile, b"//pkg:g_a\n").unwrap();
+    let (code, out, err, _) = w.run(&["query", &format!("--query_file={}", qfile.display())]);
+    assert_eq!(code, 0, "{err}");
+    assert_eq!(out.trim(), "//pkg:g_a");
+}

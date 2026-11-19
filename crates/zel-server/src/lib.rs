@@ -759,6 +759,17 @@ impl BlazeRuntime {
         stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
     ) -> ExitCode {
+        self.cmd_build_or_test_with_bep_args(command, args, None, stdout, stderr)
+    }
+
+    fn cmd_build_or_test_with_bep_args(
+        &self,
+        command: &str,
+        args: &[String],
+        bep_args: Option<&[String]>,
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
         let parsed = ParsedCommandOptions::parse_for_command(command, args).ok();
         let debug_all_events = parsed
             .as_ref()
@@ -786,7 +797,7 @@ impl BlazeRuntime {
             );
         }
         obs.reporter.set_deferred_finish(true);
-        let code = self.cmd_build_or_test_inner(command, args, stdout, stderr, &obs);
+        let code = self.cmd_build_or_test_inner(command, args, bep_args, stdout, stderr, &obs);
         let failure = failure::default_for(code, command, stderr);
         let code = obs.finish(stderr, code, failure.as_ref(), self.fs.as_ref());
         if debug_all_events {
@@ -864,6 +875,7 @@ impl BlazeRuntime {
         &self,
         command: &str,
         args: &[String],
+        bep_args: Option<&[String]>,
         stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
         obs: &observability::BuildObserver,
@@ -1130,13 +1142,14 @@ impl BlazeRuntime {
         let reporter = &obs.reporter;
         obs.mark_phase(zel_events::profiler::ProfilePhase::TARGET_PATTERN_EVAL);
         let working_dir = self.command_cwd(&parsed).to_string_lossy().into_owned();
+        let cmdline_args = bep_args.unwrap_or(args);
         obs.begin_build(
             &patterns,
-            args,
+            cmdline_args,
             &self.dirs.workspace_dir.to_string(),
             &working_dir,
             self.server_pid,
-            args,
+            cmdline_args,
         );
         for e in obs.take_setup_errors() {
             writeln_bytes(stderr, &format!("ERROR: {e}"));
@@ -2414,32 +2427,35 @@ impl BlazeRuntime {
             }
         }
 
-        // `bazel build` creates `<binary>.runfiles` trees for top-level executables and transitive
-        // executables (e.g. `data` deps and tools) when `--build_runfile_links` is enabled.
+        // `bazel build` creates `<binary>.runfiles` trees for top-level executables (including
+        // tests) and transitive executables (e.g. `data` deps and tools) when
+        // `--build_runfile_links` is enabled.
         if command == "build" {
             let build_links = exec_phase::opt_bool(&parsed, "build_runfile_links", true);
             let mut built_rf: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for t in &resolved_targets {
-                let l = t.label().canonical_form();
-                if build_out.failed_targets.contains(&l) {
-                    continue;
-                }
-                if let Some(ct) = configured_targets
-                    .iter()
-                    .find(|c| c.label.canonical_form() == l)
-                {
-                    if ct.default_info.executable.is_some() && !ct.is_test {
-                        built_rf.insert(ct.label.canonical_form());
-                        if let Err(e) = exec_phase::build_target_runfiles(
-                            ct,
-                            std::path::Path::new(execroot.path_string()),
-                            workspace_name,
-                            &parsed,
-                        ) {
-                            writeln_bytes(
-                                stderr,
-                                &format!("WARNING: failed to create runfiles for {l}: {e}"),
-                            );
+            if build_links {
+                for t in &resolved_targets {
+                    let l = t.label().canonical_form();
+                    if build_out.failed_targets.contains(&l) {
+                        continue;
+                    }
+                    if let Some(ct) = configured_targets
+                        .iter()
+                        .find(|c| c.label.canonical_form() == l)
+                    {
+                        if ct.default_info.executable.is_some() {
+                            built_rf.insert(ct.label.canonical_form());
+                            if let Err(e) = exec_phase::build_target_runfiles(
+                                ct,
+                                std::path::Path::new(execroot.path_string()),
+                                workspace_name,
+                                &parsed,
+                            ) {
+                                writeln_bytes(
+                                    stderr,
+                                    &format!("WARNING: failed to create runfiles for {l}: {e}"),
+                                );
+                            }
                         }
                     }
                 }
@@ -2447,7 +2463,6 @@ impl BlazeRuntime {
             if build_links {
                 for ct in &configured_targets {
                     if ct.runfiles_support.is_some()
-                        && !ct.is_test
                         && !implicit_labels.contains(&ct.label.canonical_form())
                         && !build_out
                             .failed_targets
@@ -3182,7 +3197,8 @@ impl BlazeRuntime {
         if let Some(ref rul) = run_under_label {
             build_args.push(rul.clone());
         }
-        let build_exit = self.cmd_build_or_test("run", &build_args, stdout, stderr);
+        let build_exit =
+            self.cmd_build_or_test_with_bep_args("run", &build_args, Some(args), stdout, stderr);
         if build_exit != ExitCode::SUCCESS {
             // `RunCommand`: a failed build never runs the target.
             if !String::from_utf8_lossy(stderr)
@@ -3359,6 +3375,17 @@ impl BlazeRuntime {
                 return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
             }
         };
+        for ru_ct in analysis.roots.iter().skip(1).flatten() {
+            if let Err(e) = exec_phase::build_target_runfiles(
+                ru_ct,
+                std::path::Path::new(execroot.path_string()),
+                &self.dirs.execroot_workspace_name(),
+                &parsed,
+            ) {
+                writeln_bytes(stderr, &format!("ERROR: Error creating runfiles: {e}"));
+                return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
+            }
+        }
         let client_cwd = self.command_cwd(&parsed).to_string_lossy().into_owned();
         let run_in_cwd = exec_phase::opt_bool(&parsed, "run_in_cwd", false);
         let cwd = if run_in_cwd {
@@ -4604,30 +4631,42 @@ fn instrumented_prefix(package: &str) -> String {
 }
 
 /// `InstrumentationFilterSupport.computeInstrumentationFilter`: the default
-/// `--instrumentation_filter` derived from the packages of the test targets on the command line
+/// `--instrumentation_filter` derived from the packages of the targets on the command line
 /// (`None` when there are none, in which case Bazel prints nothing).
 fn default_instrumentation_filter(targets: &[zel_packages::Target]) -> Option<String> {
     let mut pkgs: std::collections::BTreeSet<String> = Default::default();
+    let has_test_or_suite = targets.iter().any(|t| match t {
+        zel_packages::Target::Rule(rule) => {
+            rule.is_test_rule() || t.target_kind() == "test_suite rule"
+        }
+        _ => false,
+    });
     for t in targets {
         let zel_packages::Target::Rule(rule) = t else {
             continue;
         };
         let is_suite = t.target_kind() == "test_suite rule";
-        if !rule.is_test_rule() && !is_suite {
+        if has_test_or_suite && !rule.is_test_rule() && !is_suite {
             continue;
         }
         pkgs.insert(instrumented_prefix(t.label().package_name()));
         if is_suite {
-            if let Some(zel_packages::attr::AttrValue::StrList(tests)) =
-                rule.attr_or_default("tests")
-            {
-                for l in tests {
-                    if let Some(rest) = l.strip_prefix("//") {
-                        pkgs.insert(instrumented_prefix(rest.split(':').next().unwrap_or("")));
-                    } else if l.starts_with(':') {
-                        pkgs.insert(instrumented_prefix(t.label().package_name()));
+            match rule.attr_or_default("tests") {
+                Some(zel_packages::attr::AttrValue::LabelList(tests)) => {
+                    for l in tests {
+                        pkgs.insert(instrumented_prefix(l.package_name()));
                     }
                 }
+                Some(zel_packages::attr::AttrValue::StrList(tests)) => {
+                    for l in tests {
+                        if let Some(rest) = l.strip_prefix("//") {
+                            pkgs.insert(instrumented_prefix(rest.split(':').next().unwrap_or("")));
+                        } else if l.starts_with(':') {
+                            pkgs.insert(instrumented_prefix(t.label().package_name()));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
     }
@@ -5043,6 +5082,7 @@ genrule(
             "{err}"
         );
         // Tamper with the output: it must be rebuilt.
+        let _ = std::fs::remove_file(ws.join("bazel-bin/p/ok.txt"));
         std::fs::write(ws.join("bazel-bin/p/ok.txt"), "x").unwrap();
         let (_, err) = run(&["build", "//p:ok"]);
         assert!(err.contains("2 total actions"), "{err}");

@@ -2108,8 +2108,13 @@ pub fn expand_argument_with_cancel(
         return Err(cancelled_error());
     }
     let is_external = is_external_repo_arg(arg);
-    if arg.starts_with('@') && !arg.starts_with("@@") && !is_external {
-        let value = &arg[1..];
+    let flagfile = if arg.starts_with('@') && !arg.starts_with("@@") && !is_external {
+        Some(&arg[1..])
+    } else {
+        arg.strip_prefix("--flagfile=")
+            .or_else(|| arg.strip_prefix("-flagfile="))
+    };
+    if let Some(value) = flagfile {
         if !declared_inputs.iter().any(|i| i == value) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -2489,6 +2494,11 @@ impl WorkerSpawnRunner {
                 if let Some(par) = p.parent() {
                     std::fs::create_dir_all(par)?;
                 }
+            }
+            for dir in &spawn.output_dirs {
+                let p = self.exec_root.join(dir.path_string());
+                delete_tree(&p)?;
+                std::fs::create_dir_all(&p)?;
             }
         }
         let b = match self.pool.borrow(&key) {
@@ -2989,5 +2999,20 @@ mod tests {
         assert!(reg.unregister_request(42));
         assert!(!reg.check_if_request_is_cancelled(42));
         assert!(!reg.unregister_request(42));
+    }
+
+    #[test]
+    fn expand_argument_supports_flagfile_equals_prefixes() {
+        let d = std::env::temp_dir().join(format!("zel-wf-flagfile-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(d.join("a.flags"), "--one\n-flagfile=b.flags\n").unwrap();
+        std::fs::write(d.join("b.flags"), "--two\n").unwrap();
+
+        let declared = vec!["a.flags".to_string(), "b.flags".to_string()];
+        let mut out = Vec::new();
+        expand_argument(&d, &declared, "--flagfile=a.flags", &mut out).unwrap();
+        assert_eq!(out, vec!["--one", "--two"]);
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
