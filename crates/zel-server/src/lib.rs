@@ -4070,10 +4070,28 @@ impl BlazeRuntime {
         );
 
         if !status_cmd.is_empty() {
-            let res = std::process::Command::new("/bin/sh")
-                .arg("-c")
-                .arg(status_cmd)
+            let expanded_cmd = expand_workspace_status_command(status_cmd, &client_env);
+            #[cfg(windows)]
+            let mut cmd = {
+                use std::os::windows::process::CommandExt;
+                let win_cmd = format_windows_workspace_status_command(&expanded_cmd);
+                let comspec = std::env::var_os("ComSpec")
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or_else(|| std::ffi::OsString::from(r"C:\Windows\System32\cmd.exe"));
+                let mut c = std::process::Command::new(comspec);
+                c.args(["/S", "/E:ON", "/V:ON", "/D", "/C"]);
+                c.raw_arg(format!("\"{win_cmd}\""));
+                c
+            };
+            #[cfg(not(windows))]
+            let mut cmd = {
+                let mut c = std::process::Command::new("/bin/sh");
+                c.arg("-c").arg(&expanded_cmd);
+                c
+            };
+            let res = cmd
                 .current_dir(self.dirs.workspace_dir.path_string())
+                .envs(client_env.iter())
                 .output();
             match res {
                 Ok(out) if out.status.success() => {
@@ -4134,6 +4152,78 @@ impl BlazeRuntime {
         let _ = self.fs.write_file(&volatile_path, volatile_str.as_bytes());
         zel_exec::invalidate_computed_digest(volatile_path.path_string());
         Ok(())
+    }
+}
+
+/// Expands leading `~` / `~/` (and `~\` on Windows) in `--workspace_status_command` using
+/// `HOME` / `USERPROFILE` from `client_env` (falling back to the process environment when neither
+/// key is specified in `client_env`), matching `OptionsUtils.PathFragmentConverter`.
+fn expand_workspace_status_command(
+    status_cmd: &str,
+    client_env: &std::collections::BTreeMap<String, String>,
+) -> String {
+    let non_empty = |v: Option<&String>| v.filter(|s| !s.is_empty()).cloned();
+    let non_empty_env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+    let home = non_empty(client_env.get("HOME"))
+        .or_else(|| non_empty(client_env.get("USERPROFILE")))
+        .or_else(|| {
+            if client_env.contains_key("HOME") || client_env.contains_key("USERPROFILE") {
+                None
+            } else {
+                non_empty_env("HOME").or_else(|| non_empty_env("USERPROFILE"))
+            }
+        });
+    let Some(home) = home else {
+        return status_cmd.to_string();
+    };
+    let home_trimmed = home.trim_end_matches(['/', '\\']);
+    if status_cmd == "~" {
+        home
+    } else if let Some(rest) = status_cmd.strip_prefix("~/").or_else(|| {
+        if cfg!(windows) {
+            status_cmd.strip_prefix("~\\")
+        } else {
+            None
+        }
+    }) {
+        format!("{home_trimmed}/{rest}")
+    } else {
+        status_cmd.to_string()
+    }
+}
+
+/// Formats `--workspace_status_command` for `CMD.EXE /S /E:ON /V:ON /D /C` on Windows, matching
+/// Bazel 9.3.2 `CommandBuilder.transformArgvForWindows`:
+/// - strips a leading `/bin/sh -c ` or `/bin/bash -c ` wrapper (`argvStartsWithSh()`);
+/// - strips a Windows verbatim drive prefix (`\\?\C:\...` / `//?/C:/...`) that `CMD.EXE` rejects;
+/// - converts `/` separators to `\` when the leading command token does not end with `.exe` (e.g.
+///   `.bat` / `.cmd` scripts converted through `PathFragmentConverter`), while preserving `/` flags
+///   on `.exe` invocations such as `foo.exe /flag`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn format_windows_workspace_status_command(status_cmd: &str) -> String {
+    let trimmed = status_cmd.trim_start_matches([' ', '\t']);
+    let body = trimmed
+        .strip_prefix("/bin/sh -c ")
+        .or_else(|| trimmed.strip_prefix("/bin/bash -c "))
+        .unwrap_or(status_cmd);
+    let body = body
+        .strip_prefix(r"\\?\")
+        .or_else(|| body.strip_prefix("//?/"))
+        .filter(|rest| {
+            rest.as_bytes()
+                .get(0..2)
+                .is_some_and(|b| b[0].is_ascii_alphabetic() && b[1] == b':')
+        })
+        .unwrap_or(body);
+    let first_token = body.split([' ', '\t']).next().unwrap_or("");
+    let unquoted = first_token.trim_matches('"');
+    if !unquoted.to_ascii_lowercase().ends_with(".exe") {
+        body.replace('/', "\\")
+    } else if first_token.contains('/') {
+        let fixed_first = first_token.replace('/', "\\");
+        format!("{fixed_first}{}", &body[first_token.len()..])
+    } else {
+        body.to_string()
     }
 }
 
@@ -4970,5 +5060,38 @@ genrule(
         );
         assert!(!err.contains("Target //p:ok failed"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn windows_workspace_status_command_formatting_matches_command_builder() {
+        assert_eq!(
+            super::format_windows_workspace_status_command(
+                "C:/Users/runneradmin/AppData/Local/Temp/ws/status.bat"
+            ),
+            r"C:\Users\runneradmin\AppData\Local\Temp\ws\status.bat"
+        );
+        assert_eq!(
+            super::format_windows_workspace_status_command(
+                r"\\?\C:\Users\runneradmin\AppData\Local\Temp\ws\status.cmd"
+            ),
+            r"C:\Users\runneradmin\AppData\Local\Temp\ws\status.cmd"
+        );
+        assert_eq!(
+            super::format_windows_workspace_status_command("/bin/sh -c tools/get_status.bat"),
+            r"tools\get_status.bat"
+        );
+        assert_eq!(
+            super::format_windows_workspace_status_command("C:/tools/status_gen.exe /quiet"),
+            r"C:\tools\status_gen.exe /quiet"
+        );
+
+        let mut client_env = std::collections::BTreeMap::new();
+        client_env.insert("HOME".to_string(), String::new());
+        client_env.insert("USERPROFILE".to_string(), "C:/Users/alice".to_string());
+        let expanded = super::expand_workspace_status_command("~/bin/status.bat", &client_env);
+        assert_eq!(
+            super::format_windows_workspace_status_command(&expanded),
+            r"C:\Users\alice\bin\status.bat"
+        );
     }
 }

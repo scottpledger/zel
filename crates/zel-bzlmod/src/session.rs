@@ -1948,7 +1948,9 @@ mod repo_env_tests {
         );
         let inside_err = early_inside.expect_err("cache inside main repo must fail");
         assert!(
-            inside_err.contains(&expected_inside.display().to_string())
+            inside_err
+                .replace('\\', "/")
+                .contains(&expected_inside.to_string_lossy().replace('\\', "/"))
                 && inside_err.contains("is inside the main repo"),
             "{inside_err}"
         );

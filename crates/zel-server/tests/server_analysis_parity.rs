@@ -239,27 +239,61 @@ filegroup(name = "sel", srcs = select({":j17": ["a.txt"], "//conditions:default"
 #[test]
 fn build_info_translation_reads_execution_time_status_and_preserves_constant_metadata() {
     let w = Ws::new("build-info");
-    w.write(
-        "status.sh",
-        "#!/bin/sh\necho 'STABLE_CUSTOM v1.2.3 with spaces'\necho 'BUILD_SCM_REVISION deadbeef'\necho 'BUILD_SCM_STATUS clean'\n",
-    );
+    let status_script = if cfg!(windows) {
+        w.write(
+            "status.bat",
+            "@echo off\r\necho STABLE_CUSTOM v1.2.3 with spaces\r\necho BUILD_SCM_REVISION deadbeef\r\necho BUILD_SCM_STATUS clean\r\n",
+        );
+        "status.bat"
+    } else {
+        w.write(
+            "status.sh",
+            "#!/bin/sh\necho 'STABLE_CUSTOM v1.2.3 with spaces'\necho 'BUILD_SCM_REVISION deadbeef'\necho 'BUILD_SCM_STATUS clean'\n",
+        );
+        "status.sh"
+    };
     w.write("tmpl_v.txt", "ts={TS};date={DATE};rev={REV}\n");
     w.write("tmpl_s.txt", "label={LBL};custom={CUSTOM}\n");
+    let combine_snippet = if cfg!(windows) {
+        let comspec = std::env::var("ComSpec")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| r"C:\Windows\System32\cmd.exe".to_string())
+            .replace('\\', "/");
+        format!(
+            r#"    ctx.actions.run(
+        executable = "{comspec}",
+        arguments = ["/d", "/s", "/c", "copy /y /b %s+%s %s >nul" % (vf.path.replace("/", "\\"), sf.path.replace("/", "\\"), combined.path.replace("/", "\\"))],
+        inputs = [vf, sf],
+        outputs = [combined],
+        mnemonic = "CombineBuildInfo",
+    )"#
+        )
+    } else {
+        r#"    ctx.actions.run_shell(
+        inputs = [vf, sf],
+        outputs = [combined],
+        command = "cat '%s' '%s' > '%s'" % (vf.path, sf.path, combined.path),
+        mnemonic = "CombineBuildInfo",
+    )"#
+        .to_string()
+    };
     w.write(
         "defs.bzl",
-        r#"
+        &format!(
+            r#"
 def _tr_v(d):
-    return {
-        "{TS}": d.get("BUILD_TIMESTAMP", "?"),
-        "{DATE}": d.get("FORMATTED_DATE", "?"),
-        "{REV}": d.get("BUILD_SCM_REVISION", "?"),
-    }
+    return {{
+        "{{TS}}": d.get("BUILD_TIMESTAMP", "?"),
+        "{{DATE}}": d.get("FORMATTED_DATE", "?"),
+        "{{REV}}": d.get("BUILD_SCM_REVISION", "?"),
+    }}
 
 def _tr_s(d):
-    return {
-        "{LBL}": d.get("BUILD_EMBED_LABEL", "?"),
-        "{CUSTOM}": d.get("STABLE_CUSTOM", "?"),
-    }
+    return {{
+        "{{LBL}}": d.get("BUILD_EMBED_LABEL", "?"),
+        "{{CUSTOM}}": d.get("STABLE_CUSTOM", "?"),
+    }}
 
 def _impl(ctx):
     vf = ctx.actions.transform_version_file(
@@ -273,20 +307,15 @@ def _impl(ctx):
         output_file_name = "stable_out.txt",
     )
     combined = ctx.actions.declare_file("combined.txt")
-    ctx.actions.run_shell(
-        inputs = [vf, sf],
-        outputs = [combined],
-        command = "cat '%s' '%s' > '%s'" % (vf.path, sf.path, combined.path),
-        mnemonic = "CombineBuildInfo",
-    )
+{combine_snippet}
     return [DefaultInfo(files = depset([vf, sf, combined]))]
 
 stamp_probe = rule(
     implementation = _impl,
-    attrs = {
+    attrs = {{
         "tv": attr.label(default = ":tmpl_v.txt", allow_single_file = True),
         "ts": attr.label(default = ":tmpl_s.txt", allow_single_file = True),
-    },
+    }},
 )
 
 def _cc_java_probe_impl(ctx):
@@ -297,12 +326,13 @@ def _cc_java_probe_impl(ctx):
 
 cc_java_probe = rule(
     implementation = _cc_java_probe_impl,
-    attrs = {
+    attrs = {{
         "cc_bi": attr.label(default = "@bazel_tools//tools/build_defs/build_info:cc_build_info"),
         "java_bi": attr.label(default = "@bazel_tools//tools/build_defs/build_info:java_build_info"),
-    },
+    }},
 )
-"#,
+"#
+        ),
     );
     w.write(
         "BUILD",
@@ -315,7 +345,7 @@ cc_java_probe(name = "builtin_bi")
 
     let status_flag = format!(
         "--workspace_status_command={}",
-        w.ws.join("status.sh").display()
+        PathFragment::create(w.ws.join(status_script).to_str().unwrap())
     );
 
     let (code1, _, err1, _) = w.run(&[
@@ -370,7 +400,9 @@ cc_java_probe(name = "builtin_bi")
 
     // Rebuild with only volatile timestamp changed: `volatile_out.txt` updates unconditionally,
     // while `CombineBuildInfo` stays cached because `volatile_out.txt` has constant metadata.
-    let explain_path = w.root.join("explain2.txt");
+    let explain_path = PathBuf::from(
+        PathFragment::create(w.root.join("explain2.txt").to_str().unwrap()).path_string(),
+    );
     let explain_flag = format!("--explain={}", explain_path.display());
     let (code2, _, err2, _) = w.run(&[
         "build",
@@ -392,14 +424,21 @@ cc_java_probe(name = "builtin_bi")
     let explain2 = std::fs::read_to_string(&explain_path).unwrap_or_default();
     assert!(!explain2.contains("CombineBuildInfo"), "{explain2}");
 
-    // Rebuild with stable `--embed_label` changed: stable file changes, invalidating `CombineBuildInfo`,
-    // which then consumes both the new stable output and the updated volatile output.
+    // Rebuild with stable `--embed_label` changed (also exercising `~/` expansion via `--client_env=HOME`):
+    // stable file changes, invalidating `CombineBuildInfo`, which then consumes both the new stable
+    // output and the updated volatile output.
+    let home_root_flag = format!(
+        "--client_env=HOME={}",
+        PathFragment::create(w.root.to_str().unwrap()).path_string()
+    );
+    let tilde_status_flag = format!("--workspace_status_command=~/ws/{status_script}");
     let (code3, _, err3, _) = w.run(&[
         "build",
         "--stamp",
         "--embed_label=rel-9.3.3",
         "--client_env=SOURCE_DATE_EPOCH=1700000900",
-        &status_flag,
+        &home_root_flag,
+        &tilde_status_flag,
         "//:probe",
     ]);
     assert_eq!(code3, 0, "{err3}");
@@ -429,11 +468,13 @@ fn launcher_flag_alias_forwards_cc_and_default_providers_for_target_and_exec() {
         "CcLauncherInfo = provider(fields = [\"tag\"])\ncc_common = struct(launcher_provider = CcLauncherInfo)\n",
     )
     .unwrap();
+    let rc_dir_starlark = PathFragment::create(rc_dir.to_str().unwrap())
+        .path_string()
+        .to_string();
     w.write(
         "MODULE.bazel",
         &format!(
-            "module(name = \"w\")\nbazel_dep(name = \"rules_cc\", version = \"0.2.25\")\nlocal_path_override(module_name = \"rules_cc\", path = \"{}\")\n",
-            rc_dir.display()
+            "module(name = \"w\")\nbazel_dep(name = \"rules_cc\", version = \"0.2.25\")\nlocal_path_override(module_name = \"rules_cc\", path = \"{rc_dir_starlark}\")\n"
         ),
     );
     w.write("data_t.txt", "target-data\n");
