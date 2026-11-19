@@ -1266,4 +1266,45 @@ filegroup(
             out.stderr
         );
     }
+
+    #[test]
+    fn fetch_and_vendor_resolve_target_pattern_file_against_client_cwd() {
+        let f = fixture("cmd_fetch_vendor_client_cwd", ROOT);
+        // Place a broken pattern file at workspace root so resolving against `cfg.workspace`
+        // instead of `--client_cwd` would fail.
+        write(&f.ws, "BUILD.bazel", "filegroup(name = 'root_only')\n");
+        write(&f.ws, "patterns.txt", "//:does_not_exist_at_root\n");
+        write(&f.ws, "sub/BUILD.bazel", "filegroup(name = 'sub_app')\n");
+        write(&f.ws, "sub/patterns.txt", ":sub_app\n");
+
+        let out = run(
+            &f,
+            "fetch",
+            &["--client_cwd=sub", "--target_pattern_file=patterns.txt"],
+        );
+        assert_eq!(out.exit_code, 0, "{}", out.stderr);
+
+        let abs_sub = f.ws.join("sub");
+        let out_abs = run(
+            &f,
+            "fetch",
+            &[
+                &format!("--client_cwd={}", abs_sub.display()),
+                "--target_pattern_file=patterns.txt",
+            ],
+        );
+        assert_eq!(out_abs.exit_code, 0, "{}", out_abs.stderr);
+
+        let vd = f.base.join("vendor_sub_cwd");
+        let out_vendor = run(
+            &f,
+            "vendor",
+            &[
+                &format!("--vendor_dir={}", vd.display()),
+                "--client_cwd=sub",
+                "--target_pattern_file=patterns.txt",
+            ],
+        );
+        assert_eq!(out_vendor.exit_code, 0, "{}", out_vendor.stderr);
+    }
 }

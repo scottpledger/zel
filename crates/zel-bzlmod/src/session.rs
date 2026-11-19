@@ -827,6 +827,30 @@ const EXIT_FETCH_FAILED: i32 = 8;
 /// `Interrupted.Code.INTERRUPTED` exit code, used by `createFailedBlazeCommandResult(reporter, message)`.
 const EXIT_INTERRUPTED: i32 = 8;
 
+/// Resolves the command's host working directory (for `--target_pattern_file`) and workspace-relative
+/// working directory (for relative target patterns) from `--client_cwd`, matching `BlazeRuntime::command_cwd`
+/// and `BlazeRuntime::command_relative_dir`.
+fn command_working_dirs(
+    workspace: &Path,
+    parsed: &ParsedCommandOptions,
+) -> (PathBuf, zel_vfs::PathFragment) {
+    let ws_pf = zel_vfs::PathFragment::create(&workspace.to_string_lossy());
+    match parsed.get_str("client_cwd") {
+        Some(cwd) if !cwd.is_empty() => {
+            let pf = zel_vfs::PathFragment::create(cwd);
+            if pf.is_absolute() {
+                let rel = pf
+                    .relative_to(&ws_pf)
+                    .unwrap_or_else(|_| zel_vfs::PathFragment::empty());
+                (PathBuf::from(pf.path_string()), rel)
+            } else {
+                (PathBuf::from(ws_pf.get_relative(&pf).path_string()), pf)
+            }
+        }
+        _ => (workspace.to_path_buf(), zel_vfs::PathFragment::empty()),
+    }
+}
+
 /// `bazel fetch` (`--all`, `--configure`, `--force`, `--repo`, target patterns).
 pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput {
     let mut cfg = cfg;
@@ -840,15 +864,14 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
     let all = parsed.get_bool("all").unwrap_or(false);
     let configure = parsed.get_bool("configure").unwrap_or(false);
     let repos = raw(parsed, "repo");
+    let (working_dir, working_dir_rel) = command_working_dirs(&cfg.workspace, parsed);
     let target_pattern_file = parsed.get_str("target_pattern_file").unwrap_or("");
-    let targets = match zel_cmdline::read_target_patterns(
-        &parsed.targets,
-        target_pattern_file,
-        &cfg.workspace,
-    ) {
-        Ok(ts) => ts,
-        Err(e) => return CmdOutput::fail(EXIT_COMMAND_LINE, format!("ERROR: {e}\n")),
-    };
+    let targets =
+        match zel_cmdline::read_target_patterns(&parsed.targets, target_pattern_file, &working_dir)
+        {
+            Ok(ts) => ts,
+            Err(e) => return CmdOutput::fail(EXIT_COMMAND_LINE, format!("ERROR: {e}\n")),
+        };
     let count = [all, configure, !repos.is_empty(), !targets.is_empty()]
         .iter()
         .filter(|b| **b)
@@ -872,7 +895,7 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
     let rt = session.rt.clone();
     let result: Result<String, (i32, String)> = (|| {
         if !targets.is_empty() {
-            return fetch_targets(&session, &targets)
+            return fetch_targets(&session, &targets, &working_dir_rel)
                 .map(|_| {
                     "All external dependencies for the requested targets fetched successfully."
                         .to_string()
@@ -987,7 +1010,11 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
 }
 
 /// Fetches the external repositories needed by `targets` via real target dependency closure analysis.
-fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
+fn fetch_targets(
+    session: &Session,
+    targets: &[String],
+    working_dir_rel: &zel_vfs::PathFragment,
+) -> Result<(), String> {
     let rt = &session.rt;
     let mut fetched_repos: HashSet<String> = HashSet::new();
 
@@ -1034,7 +1061,7 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
     // 2. Package loader and pattern resolver for target dependency closure analysis
     let loader = rt.package_loader();
     let resolver =
-        zel_packages::resolve::PatternResolver::new(loader.clone(), zel_vfs::PathFragment::empty());
+        zel_packages::resolve::PatternResolver::new(loader.clone(), working_dir_rel.clone());
     let outcome = resolver.resolve_patterns(targets);
     for event in &outcome.events {
         rt.info(format!("WARNING: {}", event.message));
@@ -1131,15 +1158,14 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
     }
     let repos = raw(parsed, "repo");
     let lockfile_deps = parsed.get_bool("lockfile_deps").unwrap_or(false);
+    let (working_dir, working_dir_rel) = command_working_dirs(&cfg.workspace, parsed);
     let target_pattern_file = parsed.get_str("target_pattern_file").unwrap_or("");
-    let targets = match zel_cmdline::read_target_patterns(
-        &parsed.targets,
-        target_pattern_file,
-        &cfg.workspace,
-    ) {
-        Ok(ts) => ts,
-        Err(e) => return CmdOutput::fail(EXIT_COMMAND_LINE, format!("ERROR: {e}\n")),
-    };
+    let targets =
+        match zel_cmdline::read_target_patterns(&parsed.targets, target_pattern_file, &working_dir)
+        {
+            Ok(ts) => ts,
+            Err(e) => return CmdOutput::fail(EXIT_COMMAND_LINE, format!("ERROR: {e}\n")),
+        };
     if !repos.is_empty() && !targets.is_empty() {
         return CmdOutput::fail(
             EXIT_INTERRUPTED,
@@ -1217,7 +1243,7 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
             *ok_msg.borrow_mut() =
                 format!("INFO: All external dependencies for {subject} vendored successfully.");
             err.push_str(&format!("INFO: Vendoring dependencies for {subject}...\n"));
-            fetch_targets(&session, &targets)?;
+            fetch_targets(&session, &targets, &working_dir_rel)?;
             names = rt.state_fetched();
             if lockfile_deps {
                 for id in session.resolution.extension_ids() {
