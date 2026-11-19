@@ -1504,7 +1504,13 @@ impl DepResolver for TargetResolver {
             // Visibility of a private (underscore) attribute's default is checked from the
             // package of the rule's definition (--incompatible_visibility_private_attributes_at_definition),
             // with fallback to the consuming target's package.
-            let def_label = if attr.starts_with('_') {
+            let is_late_bound = consumer
+                .extra
+                .rule_class
+                .as_ref()
+                .and_then(|rc| rc.attrs.get(attr))
+                .is_some_and(|a| a.late_bound.is_some());
+            let def_label = if attr.starts_with('_') && !is_late_bound {
                 consumer
                     .extra
                     .rule_class

@@ -115,7 +115,15 @@ pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
             }
             match option_values(n.cfg, &key) {
                 Some(vals) => {
-                    if !vals.contains(&v) {
+                    let norm_v = if vals.len() == 1 && matches!(vals[0].as_str(), "true" | "false")
+                    {
+                        parse_bazel_bool(&v)
+                            .map(|b| b.to_string())
+                            .unwrap_or_else(|| v.clone())
+                    } else {
+                        v.clone()
+                    };
+                    if !vals.contains(&norm_v) {
                         matches = false;
                     }
                 }
@@ -166,6 +174,18 @@ pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
                 continue;
             };
             let norm_expected = match &actual {
+                Value::Bool(_) => match parse_bazel_bool(&expected) {
+                    Some(b) => b.to_string(),
+                    None => {
+                        errors.push(format!(
+                            "Error while parsing user-defined configuration value: '{}' cannot be converted to {} type bool",
+                            expected,
+                            l.canonical_form()
+                        ));
+                        matches = false;
+                        continue;
+                    }
+                },
                 Value::Label(_) => {
                     let pkg = n.rule.label.package_identifier();
                     let entries = n
@@ -300,12 +320,17 @@ const KNOWN_OPTIONS: &[&str] = &[
     "collect_code_coverage",
 ];
 
+fn parse_bazel_bool(raw: &str) -> Option<bool> {
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "t" | "y" => Some(true),
+        "false" | "0" | "no" | "f" | "n" => Some(false),
+        _ => None,
+    }
+}
+
 fn flag_value_matches(actual: &Value, expected: &str) -> bool {
     match actual {
-        Value::Bool(b) => matches!(
-            (b, expected),
-            (true, "true" | "True" | "1" | "yes") | (false, "false" | "False" | "0" | "no")
-        ),
+        Value::Bool(b) => parse_bazel_bool(expected) == Some(*b),
         Value::String(s) => s == expected,
         Value::Int(i) => i.to_string() == expected,
         Value::Label(l) => {

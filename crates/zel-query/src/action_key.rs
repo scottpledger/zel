@@ -421,6 +421,19 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
                 fp.add_string(k).add_string(v);
             }
         }
+        ActionKind::BuildInfoTranslate {
+            template,
+            status_file,
+            is_volatile,
+            translator,
+        } => {
+            fp.add_string(TEMPLATE_GUID);
+            fp.add_string("false");
+            fp.add_string(&format!("ARTIFACT: {}", template.exec_path.path_string()));
+            fp.add_string(status_file.exec_path.path_string());
+            fp.add_string(if *is_volatile { "volatile" } else { "stable" });
+            fp.add_string(&translator.key);
+        }
     }
     // `SymlinkAction`, `SolibSymlinkAction` and `RunfilesTreeAction` are platform agnostic: they
     // override `getExecutionPlatform` with `PlatformInfo.EMPTY_PLATFORM_INFO`.

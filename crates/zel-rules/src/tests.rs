@@ -3903,3 +3903,80 @@ package_group(name = "grp", packages = ["not_a_valid_spec"])
         "expected spec parse error from analyze_target, got: {inline_err}"
     );
 }
+
+#[test]
+fn boolean_build_setting_and_config_setting_accept_short_case_insensitive_tokens() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _bool_flag_impl(ctx):
+    return []
+
+bool_flag = rule(
+    implementation = _bool_flag_impl,
+    build_setting = config.bool(flag = True),
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "bool_flag")
+bool_flag(name = "flag", build_setting_default = False)
+config_setting(name = "on_t", flag_values = {":flag": "t"})
+config_setting(name = "on_upper_y", flag_values = {":flag": "Y"})
+config_setting(name = "off_f", flag_values = {":flag": "f"})
+config_setting(name = "off_upper_n", flag_values = {":flag": "N"})
+filegroup(name = "sel", srcs = select({":on_t": ["on.txt"], ":off_f": ["off.txt"]}))
+"#,
+        ),
+        ("on.txt", ""),
+        ("off.txt", ""),
+    ]);
+    let is_match =
+        |ct: &zel_analysis::ConfiguredTarget| match ct.providers.get("ConfigMatchingProvider") {
+            Some(Value::ProviderInstance { fields, .. }) => fields.get("matches").cloned(),
+            _ => None,
+        };
+    for raw_true in ["t", "T", "y", "Y", "YES", "True", "1"] {
+        let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        cfg.flag_values
+            .insert("//:flag".into(), raw_true.to_string());
+        let (r, _) = ws.resolver_with(cfg.clone(), AnalysisConfig::new());
+        let ct_t = r
+            .analyze(&Label::parse_canonical("//:on_t").unwrap(), &cfg)
+            .unwrap();
+        let ct_y = r
+            .analyze(&Label::parse_canonical("//:on_upper_y").unwrap(), &cfg)
+            .unwrap();
+        let ct_f = r
+            .analyze(&Label::parse_canonical("//:off_f").unwrap(), &cfg)
+            .unwrap();
+        let sel = r
+            .analyze(&Label::parse_canonical("//:sel").unwrap(), &cfg)
+            .unwrap();
+        assert_eq!(is_match(&ct_t), Some(Value::Bool(true)), "{raw_true}");
+        assert_eq!(is_match(&ct_y), Some(Value::Bool(true)), "{raw_true}");
+        assert_eq!(is_match(&ct_f), Some(Value::Bool(false)), "{raw_true}");
+        assert_eq!(sel.default_info.files[0].exec_path.to_string(), "on.txt");
+    }
+    for raw_false in ["f", "F", "n", "N", "NO", "False", "0"] {
+        let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        cfg.flag_values
+            .insert("//:flag".into(), raw_false.to_string());
+        let (r, _) = ws.resolver_with(cfg.clone(), AnalysisConfig::new());
+        let ct_f = r
+            .analyze(&Label::parse_canonical("//:off_f").unwrap(), &cfg)
+            .unwrap();
+        let ct_n = r
+            .analyze(&Label::parse_canonical("//:off_upper_n").unwrap(), &cfg)
+            .unwrap();
+        let sel = r
+            .analyze(&Label::parse_canonical("//:sel").unwrap(), &cfg)
+            .unwrap();
+        assert_eq!(is_match(&ct_f), Some(Value::Bool(true)), "{raw_false}");
+        assert_eq!(is_match(&ct_n), Some(Value::Bool(true)), "{raw_false}");
+        assert_eq!(sel.default_info.files[0].exec_path.to_string(), "off.txt");
+    }
+}

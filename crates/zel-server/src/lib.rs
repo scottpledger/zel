@@ -4031,18 +4031,42 @@ impl BlazeRuntime {
         let mut stable_map = std::collections::BTreeMap::new();
         let mut volatile_map = std::collections::BTreeMap::new();
 
-        let user = std::env::var("USER").unwrap_or_else(|_| "bazel".to_string());
+        let client_env = self.client_env();
+        let user = client_env
+            .get("USER")
+            .cloned()
+            .or_else(|| std::env::var("USER").ok())
+            .unwrap_or_else(|| "bazel".to_string());
         let host = zel_exec::layout::hostname();
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
+        let source_date_epoch = client_env
+            .get("SOURCE_DATE_EPOCH")
+            .cloned()
+            .or_else(|| std::env::var("SOURCE_DATE_EPOCH").ok());
+        let now = match source_date_epoch
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            Some(raw) => raw.parse::<u64>().map_err(|_| {
+                format!(
+                    "ERROR: Invalid value '{raw}' for SOURCE_DATE_EPOCH: Specify a non-negative integer value of seconds since the epoch."
+                )
+            })?,
+            None => std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
+        };
 
         stable_map.insert("BUILD_EMBED_LABEL".to_string(), embed_label.to_string());
         stable_map.insert("BUILD_HOST".to_string(), host);
         stable_map.insert("BUILD_USER".to_string(), user);
 
         volatile_map.insert("BUILD_TIMESTAMP".to_string(), now.to_string());
+        volatile_map.insert(
+            "FORMATTED_DATE".to_string(),
+            zel_analysis::format_utc_build_date(now as i64),
+        );
 
         if !status_cmd.is_empty() {
             let res = std::process::Command::new("/bin/sh")
@@ -4053,20 +4077,23 @@ impl BlazeRuntime {
             match res {
                 Ok(out) if out.status.success() => {
                     let text = String::from_utf8_lossy(&out.stdout);
-                    for line in text.lines() {
-                        let line = line.trim();
+                    for raw_line in text.split('\n') {
+                        let line = raw_line.strip_suffix('\r').unwrap_or(raw_line);
                         if line.is_empty() {
                             continue;
                         }
                         let (k, v) = line.split_once(' ').unwrap_or((line, ""));
+                        if k.is_empty() {
+                            continue;
+                        }
                         if k.starts_with("STABLE_")
                             || k == "BUILD_EMBED_LABEL"
                             || k == "BUILD_HOST"
                             || k == "BUILD_USER"
                         {
-                            stable_map.insert(k.to_string(), v.trim().to_string());
+                            stable_map.insert(k.to_string(), v.to_string());
                         } else {
-                            volatile_map.insert(k.to_string(), v.trim().to_string());
+                            volatile_map.insert(k.to_string(), v.to_string());
                         }
                     }
                 }
@@ -4086,23 +4113,25 @@ impl BlazeRuntime {
             }
         }
 
-        let out_dir = std::path::PathBuf::from(output_path.path_string());
-        let _ = std::fs::create_dir_all(&out_dir);
+        let _ = self.fs.create_directory_and_parents(output_path);
+        let stable_path = output_path.get_relative_str("stable-status.txt");
+        let volatile_path = output_path.get_relative_str("volatile-status.txt");
 
         let mut stable_str = String::new();
         for (k, v) in &stable_map {
             stable_str.push_str(&format!("{k} {v}\n"));
         }
-        let stable_path = out_dir.join("stable-status.txt");
-        if std::fs::read(&stable_path).ok().as_deref() != Some(stable_str.as_bytes()) {
-            let _ = std::fs::write(&stable_path, stable_str);
+        if self.fs.read_file(&stable_path).ok().as_deref() != Some(stable_str.as_bytes()) {
+            let _ = self.fs.write_file(&stable_path, stable_str.as_bytes());
+            zel_exec::invalidate_computed_digest(stable_path.path_string());
         }
 
         let mut volatile_str = String::new();
         for (k, v) in &volatile_map {
             volatile_str.push_str(&format!("{k} {v}\n"));
         }
-        let _ = std::fs::write(out_dir.join("volatile-status.txt"), volatile_str);
+        let _ = self.fs.write_file(&volatile_path, volatile_str.as_bytes());
+        zel_exec::invalidate_computed_digest(volatile_path.path_string());
         Ok(())
     }
 }

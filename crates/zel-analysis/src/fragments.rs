@@ -488,10 +488,17 @@ pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey)
     let opt = |k: &str| {
         cfg.options
             .get(k)
-            .filter(|v| !v.is_empty())
+            .filter(|v| !v.is_empty() && *v != "null")
             .and_then(|v| Label::parse_canonical(v).ok())
     };
     match (fragment, name) {
+        ("java", "launcher") => opt("java_launcher").or_else(|| {
+            cfg.build_options()
+                .get("java_launcher")
+                .map(|v| v.display())
+                .filter(|v| !v.is_empty() && v != "null")
+                .and_then(|v| Label::parse_canonical(&v).ok())
+        }),
         ("apple", "xcode_config_label") => {
             opt("xcode_version_config").or_else(|| tools("tools/cpp:host_xcodes"))
         }

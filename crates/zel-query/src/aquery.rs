@@ -90,6 +90,13 @@ fn pretty_print(a: &Action, for_tool: bool) -> String {
                     a.outputs.first().map(pretty_path).unwrap_or_default()
                 )
             }
+            ActionKind::BuildInfoTranslate { is_volatile, .. } => {
+                if *is_volatile {
+                    "Translating volatile BuildInfo file".to_string()
+                } else {
+                    "Translating stable BuildInfo file".to_string()
+                }
+            }
             ActionKind::Spawn { .. } => {
                 if a.mnemonic == "Genrule" {
                     format!("Executing genrule {}", a.owner)
@@ -240,6 +247,7 @@ fn executable_actions(
         is_tree_artifact: false,
         root,
         is_unresolved_symlink: false,
+        is_constant_metadata: false,
         exec_path: zel_vfs::PathFragment::create(&rs.runfiles_dir),
         root_relative_path: zel_vfs::PathFragment::create(&format!(
             "{}.runfiles",
@@ -299,6 +307,7 @@ fn executable_actions(
             is_tree_artifact: tree,
             root,
             is_unresolved_symlink: false,
+            is_constant_metadata: false,
             exec_path: zel_vfs::PathFragment::create(&format!("{logs}/{name}")),
             root_relative_path: zel_vfs::PathFragment::create(&format!("testlogs/{short}/{name}")),
             owner_label: label.clone(),
@@ -308,6 +317,7 @@ fn executable_actions(
             is_tree_artifact: false,
             root: zel_analysis::ArtifactRoot::Source,
             is_unresolved_symlink: false,
+            is_constant_metadata: false,
             exec_path: zel_vfs::PathFragment::create(&format!("external/bazel_tools/{p}")),
             root_relative_path: zel_vfs::PathFragment::create(p),
             owner_label: label.clone(),
@@ -667,6 +677,7 @@ fn tool_runfiles_inputs(
                 is_tree_artifact: false,
                 root: exe.root,
                 is_unresolved_symlink: false,
+                is_constant_metadata: false,
                 exec_path: zel_vfs::PathFragment::create(&rs.runfiles_dir),
                 root_relative_path: zel_vfs::PathFragment::create(&format!(
                     "{}.runfiles",
@@ -1504,6 +1515,13 @@ fn proto_output(
                     m.rmsg(16, "substitutions", kv(k, v));
                 }
                 let _ = is_executable;
+            }
+            ActionKind::BuildInfoTranslate { template, .. } => {
+                m.str(
+                    15,
+                    "template_content",
+                    template_content(template, templates),
+                );
             }
             ActionKind::FileWrite { .. } if e.owner_kind.starts_with("genquery") => {}
             ActionKind::FileWrite {

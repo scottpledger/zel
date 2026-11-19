@@ -1269,6 +1269,22 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
                 p.payload.push(0);
             }
         }
+        ActionAnalysisMetadata::BuildInfoTranslateAction {
+            template,
+            status_file,
+            is_volatile,
+            translator,
+            ..
+        } => {
+            p.kind = "build_info_translate".into();
+            p.payload
+                .extend_from_slice(template.exec_path.path_string().as_bytes());
+            p.payload.push(0);
+            p.payload
+                .extend_from_slice(status_file.exec_path.path_string().as_bytes());
+            p.payload.push(*is_volatile as u8);
+            p.payload.extend_from_slice(translator.key.as_bytes());
+        }
     }
     p
 }
@@ -1340,6 +1356,11 @@ pub fn execute_action_with(
         }
     }
     let action_inputs = action.inputs();
+    let constant_metadata_paths: std::collections::HashSet<&str> = action_inputs
+        .iter()
+        .filter(|a| a.is_constant_metadata)
+        .map(|a| a.exec_path.path_string())
+        .collect();
     let source_by_exec: std::collections::HashMap<&str, &Artifact> = action_inputs
         .iter()
         .filter(|a| a.is_source && !a.is_tree_artifact && !a.is_unresolved_symlink)
@@ -1348,7 +1369,11 @@ pub fn execute_action_with(
     let md_digest_of = |discovered: &[String]| -> String {
         let mut all: Vec<(String, Option<String>)> = Vec::new();
         for p in declared_inputs.iter().chain(discovered.iter()) {
-            let d = if let Some(fc) = &opts.file_cache {
+            let d = if constant_metadata_paths.contains(p.as_str()) {
+                let target = execroot.get_relative_str(p);
+                fs.exists(&target, true)
+                    .then(|| "CONSTANT_METADATA".to_string())
+            } else if let Some(fc) = &opts.file_cache {
                 if let Some(src_art) = source_by_exec.get(p.as_str()) {
                     match fc.get_artifact_metadata(src_art) {
                         Ok(m) => Some(zel_util::to_hex(&m.digest)),
@@ -1389,6 +1414,14 @@ pub fn execute_action_with(
     } else {
         false
     };
+    let is_unconditional = is_busted
+        || matches!(
+            action,
+            ActionAnalysisMetadata::BuildInfoTranslateAction {
+                is_volatile: true,
+                ..
+            }
+        );
 
     let out_digest = |o: &Artifact| -> Option<String> {
         let p = abs(&o.exec_path);
@@ -1414,7 +1447,7 @@ pub fn execute_action_with(
             &md_digest_of,
             &current,
         );
-        if !is_busted && reason == MustExecuteReason::UpToDate {
+        if !is_unconditional && reason == MustExecuteReason::UpToDate {
             return Ok(ActionExecutionOutcome::ok(true));
         }
         if let Some(path) = &opts.explain {
@@ -1424,7 +1457,7 @@ pub fn execute_action_with(
                 .append(true)
                 .open(path)
             {
-                let reason_desc = if is_busted {
+                let reason_desc = if is_unconditional {
                     "unconditional execution is requested.".to_string()
                 } else {
                     format!("{}.", reason.explanation())
@@ -1466,6 +1499,13 @@ pub fn execute_action_with(
             }
             ActionAnalysisMetadata::TemplateExpansionAction { output, .. } => {
                 format!("Expanding template {}", output.root_relative_path)
+            }
+            ActionAnalysisMetadata::BuildInfoTranslateAction { is_volatile, .. } => {
+                if *is_volatile {
+                    "Translating volatile BuildInfo file".to_string()
+                } else {
+                    "Translating stable BuildInfo file".to_string()
+                }
             }
             ActionAnalysisMetadata::SymlinkAction { output, .. } => {
                 format!("Creating symlink {}", output.root_relative_path)
@@ -1689,6 +1729,95 @@ pub fn execute_action_with(
                 }
             }
             let _ = is_executable;
+        }
+        ActionAnalysisMetadata::BuildInfoTranslateAction {
+            template,
+            status_file,
+            output,
+            is_volatile,
+            translator,
+            ..
+        } => {
+            let tmpl_path = execroot.get_relative(&template.exec_path);
+            let raw = match fs.read_file(&tmpl_path) {
+                Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+                Err(_) => {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: Translating {} BuildInfo file {} failed: missing input file '{}'",
+                            if *is_volatile { "volatile" } else { "stable" },
+                            output.root_relative_path,
+                            template.root_relative_path
+                        )],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ))
+                }
+            };
+            let mut status_map: BTreeMap<String, String> = if *is_volatile {
+                BTreeMap::from([
+                    ("BUILD_TIMESTAMP".to_string(), "0".to_string()),
+                    (
+                        "FORMATTED_DATE".to_string(),
+                        "1970 Jan 1 00 00 00 Thu".to_string(),
+                    ),
+                ])
+            } else {
+                BTreeMap::from([
+                    ("BUILD_EMBED_LABEL".to_string(), String::new()),
+                    ("BUILD_HOST".to_string(), "hostname".to_string()),
+                    ("BUILD_USER".to_string(), "username".to_string()),
+                ])
+            };
+            let status_path = execroot.get_relative(&status_file.exec_path);
+            if fs.exists(&status_path, true) {
+                status_map.clear();
+                if let Err(e) =
+                    zel_analysis::read_workspace_status_file(fs, &status_path, &mut status_map)
+                {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: Translating {} BuildInfo file {} failed: {e}",
+                            if *is_volatile { "volatile" } else { "stable" },
+                            output.root_relative_path,
+                        )],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+            }
+            let subs = match translator.translate(&status_map) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: Translating {} BuildInfo file {} failed: {e}",
+                            if *is_volatile { "volatile" } else { "stable" },
+                            output.root_relative_path,
+                        )],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ))
+                }
+            };
+            let mut expanded = raw;
+            for (k, v) in &subs {
+                if !k.is_empty() {
+                    expanded = expanded.replace(k, v);
+                }
+            }
+            let out_path = execroot.get_relative(&output.exec_path);
+            if let Some(parent) = out_path.parent_directory() {
+                fs.create_directory_and_parents(&parent)?;
+            }
+            let _ = fs.delete(&out_path);
+            fs.write_file(&out_path, expanded.as_bytes())?;
         }
         ActionAnalysisMetadata::SpawnAction {
             owner,

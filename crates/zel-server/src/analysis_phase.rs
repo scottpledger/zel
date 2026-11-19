@@ -164,6 +164,8 @@ const CONFIG_OPTIONS: &[&str] = &[
     "skip_incompatible_explicit_targets",
     "java_language_version",
     "java_runtime_version",
+    "java_launcher",
+    "host_java_launcher",
     "javacopt",
     "plugin",
     "compiler",
@@ -428,6 +430,16 @@ impl BlazeRuntime {
                 Self::canonical_option_label(loader, raw, &rel).map(|l| l.canonical_form())
             };
             let mut native = crate::commands::config::native_settings(parsed, &canon);
+            for lbl_opt in ["java_launcher", "host_java_launcher"] {
+                if let Some(n) = native.get(lbl_opt) {
+                    let rendered = n.value.display();
+                    if rendered == "null" || rendered.is_empty() {
+                        key.options.remove(lbl_opt);
+                    } else {
+                        key.options.insert(lbl_opt.to_string(), rendered);
+                    }
+                }
+            }
             // MODULE.bazel `flag_alias()`es are injected as implicit `--flag_alias` flags at
             // RC_FILE priority (before the command line's own).
             let mut aliases: Vec<String> = self

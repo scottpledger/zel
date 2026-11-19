@@ -113,7 +113,13 @@ fn host_method(
             "is_tool_configuration" => Ok(Value::Bool(st.cfg.is_exec)),
             "is_sibling_repository_layout" => Ok(Value::Bool(false)),
             // `--stamp` defaults to false for `bazel build`.
-            "stamp_binaries" => Ok(Value::Bool(st.cfg.options.get("stamp").is_some_and(|v| v == "true" || v == "1") && !st.cfg.is_exec)),
+            "stamp_binaries" => Ok(Value::Bool(
+                st.cfg
+                    .options
+                    .get("stamp")
+                    .is_some_and(|v| parse_bazel_bool(v) == Some(true))
+                    && !st.cfg.is_exec,
+            )),
             "runfiles_enabled" => Ok(Value::Bool(st.cfg.env.runfiles_enabled)),
             // Genfiles are merged into bin in this implementation.
             "has_separate_genfiles_directory" => Ok(Value::Bool(false)),
@@ -663,6 +669,18 @@ fn starts_with_dir(frag: &str, dir: &str) -> bool {
 }
 
 fn declare(st: &Arc<CtxState>, what: &str, pos: &[Value], kw: &BTreeMap<String, Value>, tree: bool, symlink: bool) -> HostResult {
+    declare_ext(st, what, pos, kw, tree, symlink, false)
+}
+
+fn declare_ext(
+    st: &Arc<CtxState>,
+    what: &str,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+    tree: bool,
+    symlink: bool,
+    constant_metadata: bool,
+) -> HostResult {
     let func = format!("declare_{what}");
     st.check_mutable(&format!("actions.{func}"))?;
     check_kwargs(&func, pos, kw, &["filename", "sibling"])?;
@@ -724,6 +742,9 @@ fn declare(st: &Arc<CtxState>, what: &str, pos: &[Value], kw: &BTreeMap<String, 
     }
     if symlink {
         a.is_unresolved_symlink = true;
+    }
+    if constant_metadata {
+        a.is_constant_metadata = true;
     }
     st.declared_artifacts.lock().unwrap().push(a.clone());
     Ok(file_value(&a))
@@ -898,39 +919,91 @@ fn actions_method(
             st.register(a)?;
             Ok(Value::None)
         }
-        // `transform_version_file` / `transform_info_file` read the workspace status files at
-        // execution time in Bazel. Here `transform_func` is applied at analysis time to the
-        // status of an unstamped build (constant `BUILD_TIMESTAMP`, ...); stamped builds
-        // (`--stamp`) are not supported.
         "transform_version_file" | "transform_info_file" => {
             st.check_mutable(&format!("actions.{method}"))?;
             check_kwargs(method, pos, kw, &["transform_func", "template", "output_file_name"])?;
             let func = arg(pos, kw, 0, "transform_func").cloned().ok_or_else(|| StarlarkError(format!("{method}() missing argument: transform_func")))?;
+            if !matches!(func, Value::UserFunction(_) | Value::BuiltinFunction(_)) {
+                return Err(StarlarkError(format!(
+                    "in call to {method}(), parameter 'transform_func' got value of type '{}', want 'callable'",
+                    func.type_name()
+                )));
+            }
             let template = want_file(arg(pos, kw, 1, "template").ok_or_else(|| StarlarkError(format!("{method}() missing argument: template")))?, method, "template")?;
             let name = want_str(arg(pos, kw, 2, "output_file_name").ok_or_else(|| StarlarkError(format!("{method}() missing argument: output_file_name")))?, method, "output_file_name")?;
-            let status: Vec<(&str, &str)> = if method == "transform_version_file" {
-                vec![("BUILD_TIMESTAMP", "0"), ("FORMATTED_DATE", "1970 Jan 01 00 00 00 Thu"), ("BUILD_SCM_REVISION", "0"), ("BUILD_SCM_STATUS", "")]
-            } else {
-                vec![("BUILD_EMBED_LABEL", ""), ("BUILD_HOST", "hostname"), ("BUILD_USER", "username")]
+            let is_volatile = method == "transform_version_file";
+            let status_file = Artifact {
+                is_source: false,
+                is_tree_artifact: false,
+                root: ArtifactRoot::Bin,
+                is_unresolved_symlink: false,
+                is_constant_metadata: is_volatile,
+                exec_path: PathFragment::create(if is_volatile {
+                    "bazel-out/volatile-status.txt"
+                } else {
+                    "bazel-out/stable-status.txt"
+                }),
+                root_relative_path: PathFragment::create(if is_volatile {
+                    "volatile-status.txt"
+                } else {
+                    "stable-status.txt"
+                }),
+                owner_label: st.label.clone(),
             };
-            let mut d = StarlarkDict::new();
-            for (k, v) in status {
-                let _ = d.insert(Value::String(k.into()), Value::String(v.into()));
-            }
-            let arg_dict = Value::Dict(Arc::new(Mutex::new(d)));
-            let result = ctx.call_value(func, vec![arg_dict], BTreeMap::new())?;
-            let subs = str_dict_ordered(&result, "transform_func result")?;
-            let out_v = declare(st, "file", &[Value::String(name)], &BTreeMap::new(), false, false)?;
+            let out_v = declare_ext(
+                st,
+                "file",
+                &[Value::String(name)],
+                &BTreeMap::new(),
+                false,
+                false,
+                is_volatile,
+            )?;
             let out = want_file(&out_v, method, "output_file_name")?;
+            let func_key = format!("{}:{method}:{func:?}", st.rule.rule_class);
+            let globals = ctx.globals.clone();
+            let host = ctx.host.clone();
+            let semantics = ctx.semantics.clone();
+            let translator = crate::BuildInfoTranslator::new(
+                func_key,
+                Arc::new(move |status_map: &BTreeMap<String, String>| {
+                    let mut eval = EvalContext::new(PathFragment::empty(), None);
+                    eval.semantics = semantics.clone();
+                    for (k, v) in &globals {
+                        eval.globals.insert(k.clone(), v.clone());
+                    }
+                    eval.host = host.clone();
+                    let mut d = StarlarkDict::new();
+                    for (k, v) in status_map {
+                        let _ = d.insert(Value::String(k.clone()), Value::String(v.clone()));
+                    }
+                    let arg_dict = Value::Dict(Arc::new(Mutex::new(d)));
+                    let result = eval
+                        .call_value(func.clone(), vec![arg_dict], BTreeMap::new())
+                        .map_err(|e| e.0)?;
+                    str_dict_ordered(&result, "transform_func result").map_err(|e| e.0)
+                }),
+            );
             // `BuildInfoFileWriteAction`: mnemonic `TranslateBuildInfo`.
             let mut a = Action::new(
                 st.label.clone(),
                 "TranslateBuildInfo",
-                ActionKind::TemplateExpand { template: template.clone(), substitutions: subs, is_executable: false, computed_substitutions: Vec::new() },
+                ActionKind::BuildInfoTranslate {
+                    template: template.clone(),
+                    status_file: status_file.clone(),
+                    is_volatile,
+                    translator,
+                },
             );
             a.progress_message = Some(
-                if method == "transform_version_file" { "Translating volatile BuildInfo file" } else { "Translating stable BuildInfo file" }.to_string(),
+                if is_volatile {
+                    "Translating volatile BuildInfo file"
+                } else {
+                    "Translating stable BuildInfo file"
+                }
+                .to_string(),
             );
+            a.inputs.push(status_file);
             a.inputs.push(template);
             a.outputs.push(out);
             st.register(a)?;

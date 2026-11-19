@@ -755,6 +755,7 @@ fn ctx_attr(st: &Arc<CtxState>, attr: &str) -> HostResult {
             is_tree_artifact: false,
             root: ArtifactRoot::Bin,
             is_unresolved_symlink: false,
+            is_constant_metadata: false,
             exec_path: PathFragment::create("bazel-out/stable-status.txt"),
             root_relative_path: PathFragment::create("stable-status.txt"),
             owner_label: st.label.clone(),
@@ -764,6 +765,7 @@ fn ctx_attr(st: &Arc<CtxState>, attr: &str) -> HostResult {
             is_tree_artifact: false,
             root: ArtifactRoot::Bin,
             is_unresolved_symlink: false,
+            is_constant_metadata: true,
             exec_path: PathFragment::create("bazel-out/volatile-status.txt"),
             root_relative_path: PathFragment::create("volatile-status.txt"),
             owner_label: st.label.clone(),
@@ -985,16 +987,24 @@ pub fn build_setting_type_of(rule: &zel_packages::RuleInstance) -> Option<String
     })
 }
 
+/// Parses Bazel's boolean flag tokens (`BooleanConverter`), case-insensitively accepting
+/// `true`/`1`/`yes`/`t`/`y` and `false`/`0`/`no`/`f`/`n`.
+fn parse_bazel_bool(raw: &str) -> Option<bool> {
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "t" | "y" => Some(true),
+        "false" | "0" | "no" | "f" | "n" => Some(false),
+        _ => None,
+    }
+}
+
 /// Java `toString` of a command-line value of a build setting of type `ty` (what `BuildOptions`' Starlark
 /// options map holds): `[a, b]` for lists, canonical integers/booleans, the raw text otherwise.
 pub fn render_flag_value(ty: &str, raw: &str) -> String {
     match ty {
         "int" => raw.parse::<i64>().map(|i| i.to_string()).unwrap_or_else(|_| raw.to_string()),
-        "bool" => match raw {
-            "true" | "1" | "yes" => "true".to_string(),
-            "false" | "0" | "no" => "false".to_string(),
-            _ => raw.to_string(),
-        },
+        "bool" => parse_bazel_bool(raw)
+            .map(|b| b.to_string())
+            .unwrap_or_else(|| raw.to_string()),
         "string_list" => {
             if raw.is_empty() {
                 "[]".to_string()
@@ -1034,11 +1044,10 @@ pub fn convert_flag_value(ty: &str, raw: &str) -> Result<Value, String> {
                 .map_err(|_| format!("expected value of type 'int' for flag value '{raw}'"))?;
             Value::Int(bi)
         }
-        "bool" => match raw {
-            "true" | "1" | "yes" => Value::Bool(true),
-            "false" | "0" | "no" => Value::Bool(false),
-            _ => return Err(format!("expected a boolean for flag value '{raw}'")),
-        },
+        "bool" => Value::Bool(
+            parse_bazel_bool(raw)
+                .ok_or_else(|| format!("expected a boolean for flag value '{raw}'"))?,
+        ),
         "string_list" => {
             if raw.is_empty() {
                 mk_list(vec![])

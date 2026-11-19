@@ -3541,6 +3541,7 @@ pub(crate) fn action_kind_name(a: &Action) -> &'static str {
         ActionKind::FileWrite { .. } => "FileWrite",
         ActionKind::Symlink { .. } => "Symlink",
         ActionKind::TemplateExpand { .. } => "TemplateExpand",
+        ActionKind::BuildInfoTranslate { .. } => "TranslateBuildInfo",
     }
 }
 
