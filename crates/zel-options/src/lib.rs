@@ -67,6 +67,6 @@ pub use rc::{
 };
 pub use semantics_info::starlark_semantics_string;
 pub use spellcheck::{did_you_mean, edit_distance, suggest};
-pub use startup::{split_command_line, StartupOptions};
+pub use startup::{absolute_path_from_flag, split_command_line, StartupOptions};
 pub use tags::{OptionDocumentationCategory, OptionEffectTag, OptionMetadataTag};
 pub use types::{OptionType, OptionValue, TriState};

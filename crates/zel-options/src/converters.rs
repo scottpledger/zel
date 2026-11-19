@@ -456,7 +456,7 @@ pub fn resolve_user_home(client_env: Option<&BTreeMap<String, String>>) -> Optio
     non_empty_env("HOME").or_else(|| non_empty_env("USERPROFILE"))
 }
 
-/// Expands a leading `~` or `~/` (and `~\` on Windows) using `home` when non-empty and normalizes
+/// Expands a leading `~` or `~/` (and `~\`) using `home` when non-empty and normalizes
 /// via `PathFragment::create` (`OptionsUtils.PathFragmentConverter`).
 pub fn expand_tilde_path_with_home(raw: &str, home: Option<&str>) -> String {
     if let Some(home) = home.filter(|h| !h.is_empty()) {
@@ -465,13 +465,7 @@ pub fn expand_tilde_path_with_home(raw: &str, home: Option<&str>) -> String {
             return zel_vfs::PathFragment::create(home)
                 .path_string()
                 .to_string();
-        } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| {
-            if cfg!(windows) {
-                raw.strip_prefix("~\\")
-            } else {
-                None
-            }
-        }) {
+        } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| raw.strip_prefix("~\\")) {
             return zel_vfs::PathFragment::create(&format!("{home_trimmed}/{rest}"))
                 .path_string()
                 .to_string();
