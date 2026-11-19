@@ -851,7 +851,14 @@ pub fn compare_int_and_float(x: &BigInt, y: f64) -> Ordering {
 /// `StarlarkFloat.finiteDoubleToIntExact`).
 pub fn finite_double_to_int_exact(x: f64) -> Result<BigInt, String> {
     if !x.is_finite() {
-        return Err("cannot convert float NaN or Inf to int".to_string());
+        let s = if x.is_nan() {
+            "nan"
+        } else if x.is_sign_positive() {
+            "+inf"
+        } else {
+            "-inf"
+        };
+        return Err(format!("can't convert float {s} to int"));
     }
     if x == 0.0 {
         return Ok(BigInt::zero());

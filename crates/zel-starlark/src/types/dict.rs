@@ -148,8 +148,28 @@ impl StarlarkDict {
         self.entries.iter().find(|(k, _)| k == key).map(|(_, v)| v)
     }
 
+    pub fn get_checked(&self, key: &Value) -> Result<Option<&Value>, StarlarkError> {
+        if !key.is_hashable() {
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                key.type_name()
+            )));
+        }
+        Ok(self.get(key))
+    }
+
     pub fn contains_key(&self, key: &Value) -> bool {
         self.entries.iter().any(|(k, _)| k == key)
+    }
+
+    pub fn contains_key_checked(&self, key: &Value) -> Result<bool, StarlarkError> {
+        if !key.is_hashable() {
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                key.type_name()
+            )));
+        }
+        Ok(self.contains_key(key))
     }
 
     pub fn insert(&mut self, key: Value, value: Value) -> Result<Option<Value>, StarlarkError> {
@@ -176,6 +196,12 @@ impl StarlarkDict {
     }
 
     pub fn pop(&mut self, key: &Value, default: Option<Value>) -> Result<Value, StarlarkError> {
+        if !key.is_hashable() {
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                key.type_name()
+            )));
+        }
         self.check_mutable()?;
         if !key.is_hashable() {
             return Err(StarlarkError(format!(
@@ -196,12 +222,11 @@ impl StarlarkDict {
     }
 
     pub fn popitem(&mut self) -> Result<(Value, Value), StarlarkError> {
-        self.check_mutable()?;
         if self.entries.is_empty() {
-            Err(StarlarkError("popitem(): dictionary is empty".to_string()))
-        } else {
-            Ok(self.entries.remove(0))
+            return Err(StarlarkError("popitem: empty dictionary".to_string()));
         }
+        self.check_mutable()?;
+        Ok(self.entries.remove(0))
     }
 
     pub fn setdefault(&mut self, key: Value, default: Value) -> Result<Value, StarlarkError> {

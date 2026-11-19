@@ -33,6 +33,8 @@ pub struct Resolver {
     pub allow_toplevel_rebinding: bool,
     /// `load()` binds globally rather than file-locally (BUILD files).
     pub load_binds_globally: bool,
+    /// Allow `load()` of `_`-prefixed symbols (`@_builtins`).
+    pub allow_load_private_symbols: bool,
 }
 
 impl Default for Resolver {
@@ -49,6 +51,7 @@ impl Resolver {
             allow_late_loads: false,
             allow_toplevel_rebinding: false,
             load_binds_globally: false,
+            allow_load_private_symbols: false,
         }
     }
 
@@ -80,7 +83,17 @@ impl Resolver {
                         )));
                     }
                     let mut per_load_seen = HashSet::new();
-                    for (local_name, _) in &load.symbols {
+                    for (idx, (local_name, exported_name)) in load.symbols.iter().enumerate() {
+                        if !self.allow_load_private_symbols && exported_name.starts_with('_') {
+                            let sym_loc = load
+                                .symbol_locations
+                                .get(idx)
+                                .map(|(_, orig_loc)| orig_loc)
+                                .unwrap_or(loc);
+                            return Err(StarlarkError(format!(
+                                "{sym_loc}: symbol '{exported_name}' is private and cannot be imported"
+                            )));
+                        }
                         if !per_load_seen.insert(local_name.clone()) {
                             return Err(StarlarkError(format!(
                                 "{loc}: load statement defines '{local_name}' more than once"
@@ -177,8 +190,11 @@ impl Resolver {
                     location,
                     ..
                 } if *op == AssignOp::Assign => {
-                    let mut names = HashSet::new();
-                    self.collect_target_bindings(target, &mut names);
+                    let names: Vec<String> = match target {
+                        AssignTarget::Ident(n) => vec![n.clone()],
+                        AssignTarget::Tuple(ps) => pattern_names(ps),
+                        _ => Vec::new(),
+                    };
                     for name in names {
                         if let Some(prev_loc) = toplevel_globals.get(&name) {
                             if !self.allow_toplevel_rebinding {
@@ -313,6 +329,25 @@ impl Resolver {
                     }
                 }
                 self.resolve_expr(value, scope, bound_vars)?;
+                match target {
+                    AssignTarget::Index { target, index } => {
+                        self.resolve_expr(target, scope, bound_vars)?;
+                        self.resolve_expr(index, scope, bound_vars)?;
+                    }
+                    AssignTarget::Attr { target, .. } => {
+                        self.resolve_expr(target, scope, bound_vars)?;
+                    }
+                    AssignTarget::Tuple(pats) => {
+                        for p in pats {
+                            let mut sub_exprs = Vec::new();
+                            p.walk_exprs(&mut |e| sub_exprs.push(e.clone()));
+                            for se in sub_exprs {
+                                self.resolve_expr(&se, scope, bound_vars)?;
+                            }
+                        }
+                    }
+                    AssignTarget::Ident(_) => {}
+                }
                 self.collect_target_bindings(target, bound_vars);
                 Ok(())
             }
@@ -339,6 +374,13 @@ impl Resolver {
                 ..
             } => {
                 self.resolve_expr(iter, scope, bound_vars)?;
+                for p in var_names {
+                    let mut sub_exprs = Vec::new();
+                    p.walk_exprs(&mut |e| sub_exprs.push(e.clone()));
+                    for se in sub_exprs {
+                        self.resolve_expr(&se, scope, bound_vars)?;
+                    }
+                }
                 for v in pattern_names(var_names) {
                     bound_vars.insert(v);
                 }

@@ -18,21 +18,29 @@
 
 pub mod bigint;
 pub mod eval;
+pub mod profiler;
 pub mod semantics;
 pub mod syntax;
 pub mod types;
 
 pub use bigint::BigInt;
-pub use eval::format::{percent_format, str_format};
+pub use eval::builtins::{
+    dotted_version_canonical_components, dotted_version_cmp, dotted_version_compare_to,
+    parse_dotted_version, to_int32, unpack_dict_pairs,
+};
+pub use eval::format::{format_float_conv, percent_format, str_format};
 pub use eval::frame::CallFrame;
 pub use eval::modules::json::{json_decode, json_encode, json_encode_with_host, json_indent};
 pub use eval::modules::proto::proto_encode_text;
 pub use eval::thread::{register_source, source_line, StarlarkThread};
+pub use profiler::{start_cpu_profile, stop_cpu_profile};
 pub use semantics::StarlarkSemantics;
 pub use syntax::ast::{
-    pattern_names, AssignOp, AssignTarget, BinaryOpKind, ClosureEnv, CmpOp, CompClause, Expr,
-    LoadStatement, ModuleEnv, ParamDef, Pattern, Scope, Stmt, UnaryOpKind, UserFunctionDef,
+    extract_doc_comments, pattern_names, AssignOp, AssignTarget, BinaryOpKind, ClosureEnv, CmpOp,
+    Comment, CompClause, DocComments, Expr, LoadStatement, ModuleEnv, ParamDef, Pattern, Scope,
+    Stmt, UnaryOpKind, UserFunctionDef,
 };
+pub use syntax::bazel_syntax::source_from_bytes;
 pub use syntax::checks::{
     check_dot_bazel_file_syntax, check_undefined_names, did_you_mean, SyntaxError,
 };
@@ -99,6 +107,10 @@ pub struct PreloadFailure {
 /// On success it returns the canonical form of each label, in order.
 pub type PreloadHook =
     Arc<dyn Fn(&[PreloadItem]) -> Result<Vec<String>, PreloadFailure> + Send + Sync>;
+
+/// Callback invoked immediately after a top-level global assignment (`x = rule(...)`, etc.).
+pub type PostAssignHook =
+    Arc<dyn Fn(&mut EvalContext, &str, &Value) -> Result<(), StarlarkError> + Send + Sync>;
 
 enum ControlFlow {
     None,
@@ -187,8 +199,14 @@ pub struct EvalContext {
     pub pre_call_loc: Location,
     /// Nesting depth inside top-level `if` / `for` statements (0 for un-indented top-level statements).
     pub top_level_stmt_depth: usize,
-    /// Non-`_` top-level assignments at `top_level_stmt_depth == 0` in source execution order.
+    /// Top-level assignments at `top_level_stmt_depth == 0` in source execution order.
     pub exported_assignments: Vec<(String, Value)>,
+    /// Allow `load(..., "_private")` (set only for `@_builtins`).
+    pub allow_load_private_symbols: bool,
+    /// Optional hook run immediately after each top-level global assignment.
+    pub post_assign_hook: Option<PostAssignHook>,
+    /// Nesting depth inside top-level `if` / `for` statement blocks.
+    pub stmt_block_depth: usize,
 }
 
 impl Default for EvalContext {
@@ -240,6 +258,9 @@ impl EvalContext {
             pre_call_loc: Location::default(),
             top_level_stmt_depth: 0,
             exported_assignments: Vec::new(),
+            allow_load_private_symbols: false,
+            post_assign_hook: None,
+            stmt_block_depth: 0,
         };
         ctx.init_builtins();
         ctx
@@ -281,11 +302,15 @@ impl EvalContext {
     }
 
     pub fn eval_str(&mut self, source: &str) -> Result<(), StarlarkError> {
-        let tokens = Lexer::new(&self.file_name, source)
-            .lex_all()
-            .map_err(|e| StarlarkError(e.to_string()))?;
+        let mut lex = Lexer::new(&self.file_name, source);
+        let tokens = lex.lex_all().map_err(|e| StarlarkError(e.to_string()))?;
+        let comments = std::mem::take(&mut lex.comments);
+        let standalone_lines = std::mem::take(&mut lex.standalone_comment_lines);
         let mut parser = Parser::new(tokens);
         let stmts = parser.parse_module()?;
+        let (doc_map, unused_docs) = extract_doc_comments(&stmts, &comments, &standalone_lines);
+        *self.module_env.doc_comments.lock().unwrap() = doc_map;
+        *self.module_env.unused_doc_comments.lock().unwrap() = unused_docs;
 
         if self.strict_names {
             let predeclared: Vec<String> = self.globals.keys().cloned().collect();
@@ -300,6 +325,7 @@ impl EvalContext {
         resolver.allow_late_loads = !is_bzl;
         resolver.allow_toplevel_rebinding = !is_bzl;
         resolver.load_binds_globally = !is_bzl;
+        resolver.allow_load_private_symbols = self.allow_load_private_symbols;
         resolver.resolve_module(&stmts)?;
         self.record_declared_globals(&stmts);
 
@@ -323,9 +349,30 @@ impl EvalContext {
     ///
     /// All static errors are returned (each already prefixed with `file:line:col:`); execution
     /// only starts if there are none.
+    /// Like [`EvalContext::eval_file_checked`], but reads raw file `bytes` directly without UTF-8
+    /// lossy replacement so non-UTF-8 bytes preserve 1-byte Latin-1 column offsets and values.
+    pub fn eval_bytes_checked(
+        &mut self,
+        bytes: &[u8],
+        dot_bazel: Option<(&str, bool)>,
+    ) -> Result<(), Vec<String>> {
+        let source = source_from_bytes(bytes);
+        register_source(&self.file_name, &source);
+        self.eval_file_checked_impl(&source, Some(bytes), dot_bazel)
+    }
+
     pub fn eval_file_checked(
         &mut self,
         source: &str,
+        dot_bazel: Option<(&str, bool)>,
+    ) -> Result<(), Vec<String>> {
+        self.eval_file_checked_impl(source, None, dot_bazel)
+    }
+
+    fn eval_file_checked_impl(
+        &mut self,
+        source: &str,
+        raw_bytes: Option<&[u8]>,
         dot_bazel: Option<(&str, bool)>,
     ) -> Result<(), Vec<String>> {
         // Everything up to the evaluation of the first statement is static ("compilation").
@@ -334,6 +381,8 @@ impl EvalContext {
         // Bazel's scanner/parser errors (recovering, capped at five parser errors) come first.
         let parsed = if self.allow_type_syntax {
             syntax::bazel_syntax::ParseOutput::empty()
+        } else if let Some(bytes) = raw_bytes {
+            syntax::bazel_syntax::parse_bytes(&self.file_name, bytes)
         } else {
             syntax::bazel_syntax::parse(&self.file_name, source)
         };
@@ -414,13 +463,16 @@ impl EvalContext {
                 .map(|e| e.error.to_string())
                 .collect()
         };
-        let tokens = match Lexer::new(&self.file_name, source).lex_all() {
+        let mut lex = Lexer::new(&self.file_name, source);
+        let tokens = match lex.lex_all() {
             Ok(t) => t,
             Err(e) => {
                 let r = resolver_errors_only();
                 return Err(if r.is_empty() { vec![e.to_string()] } else { r });
             }
         };
+        let comments = std::mem::take(&mut lex.comments);
+        let standalone_lines = std::mem::take(&mut lex.standalone_comment_lines);
         if self.static_names && self.file_name.ends_with(".bzl") {
             if let Some(line) = source.lines().next() {
                 if let Some((left, right)) = line.split_once(" = ") {
@@ -447,6 +499,9 @@ impl EvalContext {
                 return Err(if r.is_empty() { vec![e.0] } else { r });
             }
         };
+        let (doc_map, unused_docs) = extract_doc_comments(&stmts, &comments, &standalone_lines);
+        *self.module_env.doc_comments.lock().unwrap() = doc_map;
+        *self.module_env.unused_doc_comments.lock().unwrap() = unused_docs;
         if let (Some((where_, can_load)), true) = (dot_bazel, module_file) {
             let errors: Vec<String> = check_dot_bazel_file_syntax(&stmts, where_, can_load, true)
                 .iter()
@@ -581,6 +636,7 @@ impl EvalContext {
         resolver.allow_late_loads = !is_bzl;
         resolver.allow_toplevel_rebinding = !is_bzl;
         resolver.load_binds_globally = !is_bzl;
+        resolver.allow_load_private_symbols = self.allow_load_private_symbols;
         resolver.resolve_module(&stmts).map_err(|e| vec![e.0])?;
         self.record_declared_globals(&stmts);
         self.static_failure = false;
@@ -612,6 +668,9 @@ impl EvalContext {
     }
 
     fn exec_stmt_inner(&mut self, stmt: &Stmt) -> Result<ControlFlow, StarlarkError> {
+        self.thread
+            .check_step(self.semantics.max_computation_steps)?;
+        crate::profiler::record_sample(&self.thread);
         match stmt {
             Stmt::Pass(_) => Ok(ControlFlow::None),
             Stmt::Break(_) => Ok(ControlFlow::Break),
@@ -645,8 +704,15 @@ impl EvalContext {
                                 .canonical_loads
                                 .get(&load.module_label)
                                 .unwrap_or(&load.module_label);
+                            let dym = did_you_mean(
+                                exported_name,
+                                exports
+                                    .keys()
+                                    .filter(|k| !k.starts_with('_'))
+                                    .map(|s| s.as_str()),
+                            );
                             let what = format!(
-                                "file '{shown}' does not contain symbol '{exported_name}'"
+                                "file '{shown}' does not contain symbol '{exported_name}'{dym}"
                             );
                             match self
                                 .load_symbol_positions
@@ -668,10 +734,21 @@ impl EvalContext {
                             }
                         })?;
                         self.globals.insert(local_name.clone(), v.clone());
+                        self.module_env
+                            .globals
+                            .lock()
+                            .unwrap()
+                            .insert(local_name.clone(), v.clone());
                     }
                     // Helper functions referenced by loaded user functions resolve against their
                     // defining module (see `ModuleEnv`), so nothing else leaks into this module.
                     return Ok(ControlFlow::None);
+                }
+                if self.strict_names {
+                    return Err(StarlarkError(format!(
+                        "{loc}: cannot load '{}': no module loader configured",
+                        load.module_label
+                    )));
                 }
                 for (local_name, exported_name) in &load.symbols {
                     if !self.globals.contains_key(local_name) {
@@ -694,6 +771,7 @@ impl EvalContext {
                 location,
                 op_location,
             } => {
+                let is_top_level_stmt = self.thread.frames.is_empty() && self.stmt_block_depth == 0;
                 match target {
                     AssignTarget::Ident(name) => {
                         let saved_assign_loc =
@@ -712,7 +790,7 @@ impl EvalContext {
                                 })?;
                             self.apply_assign_op_inplace(*op, &prev, &val, op_location)?
                         };
-                        self.set_var(name, final_val);
+                        self.set_var_checked(name, final_val, is_top_level_stmt)?;
                     }
                     AssignTarget::Tuple(names) => {
                         let saved_assign_loc =
@@ -725,7 +803,12 @@ impl EvalContext {
                                 "{location}: augmented assignment to tuple not allowed"
                             )));
                         }
-                        self.bind_patterns(names, val, &location.to_string())?;
+                        self.bind_patterns_ext(
+                            names,
+                            val,
+                            &location.to_string(),
+                            is_top_level_stmt,
+                        )?;
                     }
                     AssignTarget::Index {
                         target: index_target,
@@ -738,76 +821,14 @@ impl EvalContext {
                         let val_res = self.eval_expr(value);
                         self.assign_stmt_location = saved_assign_loc;
                         let val = val_res?;
-                        match target_val {
-                            Value::List(l) => {
-                                let prev = {
-                                    let guard = l.lock().unwrap();
-                                    guard.check_mutable()?;
-                                    let len = guard.elements.len() as i64;
-                                    let idx = key_val.as_i64().ok_or_else(|| {
-                                        StarlarkError(format!(
-                                            "{location}: list index must be integer, not {}",
-                                            key_val.type_name()
-                                        ))
-                                    })?;
-                                    let actual = if idx < 0 { len + idx } else { idx };
-                                    if actual < 0 || actual >= len {
-                                        return Err(StarlarkError(format!(
-                                            "{location}: list index out of range"
-                                        )));
-                                    }
-                                    (actual as usize, guard.elements[actual as usize].clone())
-                                };
-                                if *op == AssignOp::Assign {
-                                    let mut guard = l.lock().unwrap();
-                                    guard.check_mutable()?;
-                                    guard.elements[prev.0] = val;
-                                } else {
-                                    let next_val = self.apply_assign_op_inplace(
-                                        *op,
-                                        &prev.1,
-                                        &val,
-                                        op_location,
-                                    )?;
-                                    let mut guard = l.lock().unwrap();
-                                    guard.check_mutable()?;
-                                    guard.elements[prev.0] = next_val;
-                                }
-                            }
-                            Value::Dict(d) => {
-                                if *op == AssignOp::Assign {
-                                    let mut guard = d.lock().unwrap();
-                                    guard.check_mutable()?;
-                                    guard.insert(key_val, val)?;
-                                } else {
-                                    let prev = {
-                                        let guard = d.lock().unwrap();
-                                        guard.check_mutable()?;
-                                        guard.get(&key_val).cloned().ok_or_else(|| {
-                                            StarlarkError(format!(
-                                                "{location}: key {} not found in dictionary",
-                                                key_val.repr()
-                                            ))
-                                        })?
-                                    };
-                                    let next_val = self.apply_assign_op_inplace(
-                                        *op,
-                                        &prev,
-                                        &val,
-                                        op_location,
-                                    )?;
-                                    let mut guard = d.lock().unwrap();
-                                    guard.check_mutable()?;
-                                    guard.insert(key_val, next_val)?;
-                                }
-                            }
-                            other => {
-                                return Err(StarlarkError(format!(
-                                    "{location}: type '{}' does not support item assignment",
-                                    other.type_name()
-                                )))
-                            }
-                        }
+                        self.assign_index_target(
+                            target_val,
+                            key_val,
+                            *op,
+                            val,
+                            location,
+                            op_location,
+                        )?;
                     }
                     AssignTarget::Attr {
                         target: attr_target,
@@ -882,31 +903,19 @@ impl EvalContext {
                 for (cond, body) in branches {
                     if self.eval_expr(cond)?.is_truthy() {
                         self.top_level_stmt_depth += 1;
-                        let res = (|| {
-                            for s in body {
-                                match self.exec_stmt(s)? {
-                                    ControlFlow::None => {}
-                                    other => return Ok(other),
-                                }
-                            }
-                            Ok(ControlFlow::None)
-                        })();
+                        self.stmt_block_depth += 1;
+                        let r = self.exec_block(body);
+                        self.stmt_block_depth -= 1;
                         self.top_level_stmt_depth -= 1;
-                        return res;
+                        return r;
                     }
                 }
                 self.top_level_stmt_depth += 1;
-                let res = (|| {
-                    for s in else_body {
-                        match self.exec_stmt(s)? {
-                            ControlFlow::None => {}
-                            other => return Ok(other),
-                        }
-                    }
-                    Ok(ControlFlow::None)
-                })();
+                self.stmt_block_depth += 1;
+                let r = self.exec_block(else_body);
+                self.stmt_block_depth -= 1;
                 self.top_level_stmt_depth -= 1;
-                res
+                r
             }
             Stmt::For {
                 var_names,
@@ -915,22 +924,13 @@ impl EvalContext {
                 ..
             } => {
                 let iter_val = self.eval_expr(iter)?;
-                // Depset direct iteration is forbidden in Bazel Starlark!
                 if matches!(iter_val, Value::Depset(_)) {
                     return Err(StarlarkError(
                         "iteration over depset is forbidden".to_string(),
                     ));
                 }
 
-                // Increment iteration count on iterable
-                match &iter_val {
-                    Value::List(l) => l.lock().unwrap().iter_count += 1,
-                    Value::Dict(d) => d.lock().unwrap().iter_count += 1,
-                    Value::Set(s) => s.lock().unwrap().iter_count += 1,
-                    _ => {}
-                }
-
-                // Ranges iterate lazily (`range(2147483647)` with an early `break` is common).
+                inc_iter_count(&iter_val);
                 let elements: Box<dyn Iterator<Item = Value>> = if let Value::Range(r) = &iter_val {
                     let (start, step, len) = (r.start, r.step, r.len);
                     Box::new(
@@ -940,14 +940,8 @@ impl EvalContext {
                 } else {
                     match eval::builtins::value_to_sequence(&iter_val) {
                         Ok(seq) => Box::new(seq.into_iter()),
-                        Err(e) => {
-                            match &iter_val {
-                                Value::List(l) => l.lock().unwrap().iter_count -= 1,
-                                Value::Dict(d) => d.lock().unwrap().iter_count -= 1,
-                                Value::Set(s) => s.lock().unwrap().iter_count -= 1,
-                                _ => {}
-                            }
-                            let _ = e;
+                        Err(_) => {
+                            dec_iter_count(&iter_val);
                             return Err(StarlarkError(format!(
                                 "{}: type '{}' is not iterable",
                                 iter.location(),
@@ -957,46 +951,136 @@ impl EvalContext {
                     }
                 };
 
-                let mut flow = ControlFlow::None;
-                let mut broke = false;
                 self.top_level_stmt_depth += 1;
-                let loop_res: Result<(), StarlarkError> = (|| {
-                    for elem in elements {
-                        self.bind_loop_vars(var_names, elem)?;
-                        for s in body {
-                            match self.exec_stmt(s)? {
-                                ControlFlow::None => {}
-                                ControlFlow::Continue => break,
-                                ControlFlow::Break => {
-                                    flow = ControlFlow::None;
-                                    broke = true;
-                                    break;
-                                }
-                                ControlFlow::Return(v) => {
-                                    flow = ControlFlow::Return(v);
-                                    break;
-                                }
+                self.stmt_block_depth += 1;
+                let mut loop_res: Result<ControlFlow, StarlarkError> = Ok(ControlFlow::None);
+                let mut broke = false;
+                for elem in elements {
+                    if let Err(e) = self.bind_loop_vars(var_names, elem) {
+                        loop_res = Err(e);
+                        break;
+                    }
+                    for s in body {
+                        match self.exec_stmt(s) {
+                            Ok(ControlFlow::None) => {}
+                            Ok(ControlFlow::Continue) => break,
+                            Ok(ControlFlow::Break) => {
+                                loop_res = Ok(ControlFlow::None);
+                                broke = true;
+                                break;
+                            }
+                            Ok(ControlFlow::Return(v)) => {
+                                loop_res = Ok(ControlFlow::Return(v));
+                                break;
+                            }
+                            Err(e) => {
+                                loop_res = Err(e);
+                                break;
                             }
                         }
-                        if broke || matches!(flow, ControlFlow::Return(_)) {
+                        if broke || !matches!(loop_res, Ok(ControlFlow::None)) {
                             break;
                         }
                     }
-                    Ok(())
-                })();
-                self.top_level_stmt_depth -= 1;
-
-                // Decrement iteration count
-                match &iter_val {
-                    Value::List(l) => l.lock().unwrap().iter_count -= 1,
-                    Value::Dict(d) => d.lock().unwrap().iter_count -= 1,
-                    Value::Set(s) => s.lock().unwrap().iter_count -= 1,
-                    _ => {}
+                    if broke || !matches!(loop_res, Ok(ControlFlow::None)) {
+                        break;
+                    }
                 }
-
-                loop_res?;
-                Ok(flow)
+                self.stmt_block_depth -= 1;
+                self.top_level_stmt_depth -= 1;
+                dec_iter_count(&iter_val);
+                loop_res
             }
+        }
+    }
+
+    fn exec_block(&mut self, body: &[Stmt]) -> Result<ControlFlow, StarlarkError> {
+        for s in body {
+            match self.exec_stmt(s)? {
+                ControlFlow::None => {}
+                other => return Ok(other),
+            }
+        }
+        Ok(ControlFlow::None)
+    }
+
+    fn assign_index_target(
+        &mut self,
+        target_val: Value,
+        key_val: Value,
+        op: AssignOp,
+        val: Value,
+        location: &Location,
+        op_location: &Location,
+    ) -> Result<(), StarlarkError> {
+        match target_val {
+            Value::List(l) => {
+                let prev = {
+                    let guard = l.lock().unwrap();
+                    guard.check_mutable()?;
+                    let len = guard.elements.len() as i64;
+                    let idx = match &key_val {
+                        Value::Int(_) => {
+                            to_int32(&key_val, "index").map_err(|e| with_loc(e, location))? as i64
+                        }
+                        other => {
+                            return Err(StarlarkError(format!(
+                                "{location}: list index must be integer, not {}",
+                                other.type_name()
+                            )));
+                        }
+                    };
+                    let actual = if idx < 0 { len + idx } else { idx };
+                    if actual < 0 || actual >= len {
+                        return Err(StarlarkError(format!(
+                            "{location}: list index out of range"
+                        )));
+                    }
+                    (actual as usize, guard.elements[actual as usize].clone())
+                };
+                if op == AssignOp::Assign {
+                    let mut guard = l.lock().unwrap();
+                    guard.check_mutable()?;
+                    guard.elements[prev.0] = val;
+                } else {
+                    let next_val = self.apply_assign_op_inplace(op, &prev.1, &val, op_location)?;
+                    let mut guard = l.lock().unwrap();
+                    guard.check_mutable()?;
+                    guard.elements[prev.0] = next_val;
+                }
+                Ok(())
+            }
+            Value::Dict(d) => {
+                if op == AssignOp::Assign {
+                    let mut guard = d.lock().unwrap();
+                    guard.check_mutable()?;
+                    guard.insert(key_val, val)?;
+                } else {
+                    let prev = {
+                        let guard = d.lock().unwrap();
+                        guard.check_mutable()?;
+                        guard
+                            .get_checked(&key_val)
+                            .map_err(|e| with_loc(e, location))?
+                            .cloned()
+                            .ok_or_else(|| {
+                                StarlarkError(format!(
+                                    "{location}: key {} not found in dictionary",
+                                    key_val.repr()
+                                ))
+                            })?
+                    };
+                    let next_val = self.apply_assign_op_inplace(op, &prev, &val, op_location)?;
+                    let mut guard = d.lock().unwrap();
+                    guard.check_mutable()?;
+                    guard.insert(key_val, next_val)?;
+                }
+                Ok(())
+            }
+            other => Err(StarlarkError(format!(
+                "{location}: type '{}' does not support item assignment",
+                other.type_name()
+            ))),
         }
     }
 
@@ -1256,10 +1340,15 @@ impl EvalContext {
         if name != "hasattr" && name != "getattr" {
             return None;
         }
-        let Some(Value::Host(kind, id)) = pos.first() else {
+        let target = pos.first().or_else(|| kw.get("x"))?;
+        let Value::Host(kind, id) = target else {
             return None;
         };
-        let attr = pos.get(1).and_then(|v| v.as_str())?.to_string();
+        let attr = pos
+            .get(1)
+            .or_else(|| kw.get("name"))
+            .and_then(|v| v.as_str())?
+            .to_string();
         let host = self.host.clone()?;
         let r = host(
             self,
@@ -1275,13 +1364,21 @@ impl EvalContext {
             ),
             _ => v,
         });
+        let has_default = pos.len() >= 3 || kw.contains_key("default");
         Some(match (name, r) {
             ("hasattr", r) => Ok(Value::Bool(r.is_ok())),
             (_, Ok(v)) => Ok(v),
-            (_, Err(e)) => match pos.get(2).cloned().or_else(|| kw.get("default").cloned()) {
-                Some(d) => Ok(d),
-                None => Err(e),
-            },
+            (_, Err(e)) => {
+                if has_default {
+                    Ok(pos
+                        .get(2)
+                        .or_else(|| kw.get("default"))
+                        .cloned()
+                        .unwrap_or(Value::None))
+                } else {
+                    Err(e)
+                }
+            }
         })
     }
 
@@ -1320,92 +1417,91 @@ impl EvalContext {
                 self.exported_assignments
                     .push((name.to_string(), val.clone()));
             }
+            self.module_env
+                .globals
+                .lock()
+                .unwrap()
+                .insert(name.to_string(), val.clone());
             self.globals.insert(name.to_string(), val);
         }
     }
 
-    fn bind_loop_vars(&mut self, var_names: &[Pattern], elem: Value) -> Result<(), StarlarkError> {
-        if var_names.len() == 1 {
-            match &var_names[0] {
-                Pattern::Name(n) => {
-                    self.set_var(n, elem);
-                    return Ok(());
-                }
-                Pattern::Tuple(inner) => {
-                    return self.bind_patterns(inner, elem, "");
-                }
-                Pattern::Index { target, index } => {
-                    return self.assign_index_value(target, index, elem, "");
-                }
+    fn set_var_checked(
+        &mut self,
+        name: &str,
+        val: Value,
+        run_post_assign: bool,
+    ) -> Result<(), StarlarkError> {
+        let is_global = self.thread.current_frame().is_none();
+        self.set_var(name, val.clone());
+        if is_global && run_post_assign {
+            if let Some(hook) = self.post_assign_hook.clone() {
+                hook(self, name, &val)?;
             }
         }
-        self.bind_patterns(var_names, elem, "")
+        Ok(())
     }
 
-    fn assign_index_value(
+    fn bind_loop_vars(&mut self, var_names: &[Pattern], elem: Value) -> Result<(), StarlarkError> {
+        if var_names.len() == 1 {
+            return self.bind_single_pattern(&var_names[0], elem, "", false);
+        }
+        self.bind_patterns_ext(var_names, elem, "", false)
+    }
+
+    fn bind_single_pattern(
         &mut self,
-        index_target: &Expr,
-        index_expr: &Expr,
+        pat: &Pattern,
         val: Value,
         loc: &str,
+        run_post_assign: bool,
     ) -> Result<(), StarlarkError> {
-        let prefix = if loc.is_empty() {
-            String::new()
-        } else {
-            format!("{loc}: ")
-        };
-        let target_val = self.eval_expr(index_target)?;
-        let key_val = self.eval_expr(index_expr)?;
-        match target_val {
-            Value::List(l) => {
-                let mut guard = l.lock().unwrap();
-                guard.check_mutable()?;
-                let len = guard.elements.len() as i64;
-                let idx = key_val.as_i64().ok_or_else(|| {
-                    StarlarkError(format!(
-                        "{prefix}list index must be integer, not {}",
-                        key_val.type_name()
-                    ))
-                })?;
-                let actual = if idx < 0 { len + idx } else { idx };
-                if actual < 0 || actual >= len {
-                    return Err(StarlarkError(format!("{prefix}list index out of range")));
-                }
-                guard.elements[actual as usize] = val;
-                Ok(())
+        match pat {
+            Pattern::Name(n) => self.set_var_checked(n, val, run_post_assign),
+            Pattern::Tuple(inner) => self.bind_patterns_ext(inner, val, loc, run_post_assign),
+            Pattern::Index {
+                target,
+                index,
+                location,
+            } => {
+                let target_val = self.eval_expr(target)?;
+                let key_val = self.eval_expr(index)?;
+                self.assign_index_target(
+                    target_val,
+                    key_val,
+                    AssignOp::Assign,
+                    val,
+                    location,
+                    location,
+                )
             }
-            Value::Dict(d) => {
-                let mut guard = d.lock().unwrap();
-                guard.check_mutable()?;
-                guard.insert(key_val, val)?;
-                Ok(())
+            Pattern::Attr {
+                target,
+                attr,
+                location,
+            } => {
+                let obj = self.eval_expr(target)?;
+                Err(StarlarkError(format!(
+                    "{location}: cannot set .{attr} field of {} value",
+                    obj.type_name()
+                )))
             }
-            other => Err(StarlarkError(format!(
-                "{prefix}type '{}' does not support item assignment",
-                other.type_name()
-            ))),
         }
     }
 
     /// Unpacks `val` (a sequence) into `pats`, recursing into nested tuple patterns.
-    fn bind_patterns(
+    fn bind_patterns_ext(
         &mut self,
         pats: &[Pattern],
         val: Value,
         loc: &str,
+        run_post_assign: bool,
     ) -> Result<(), StarlarkError> {
         let prefix = if loc.is_empty() {
             String::new()
         } else {
             format!("{loc}: ")
         };
-        if matches!(val, Value::String(_)) {
-            return Err(StarlarkError(format!(
-                "{prefix}got '{}' in sequence assignment (want {}-element sequence)",
-                val.type_name(),
-                pats.len()
-            )));
-        }
         let items = eval::builtins::value_to_sequence(&val).map_err(|_| {
             StarlarkError(format!(
                 "{prefix}got '{}' in sequence assignment (want {}-element sequence)",
@@ -1426,18 +1522,14 @@ impl EvalContext {
             )));
         }
         for (p, item) in pats.iter().zip(items) {
-            match p {
-                Pattern::Name(n) => self.set_var(n, item),
-                Pattern::Tuple(inner) => self.bind_patterns(inner, item, loc)?,
-                Pattern::Index { target, index } => {
-                    self.assign_index_value(target, index, item, loc)?
-                }
-            }
+            self.bind_single_pattern(p, item, loc, run_post_assign)?;
         }
         Ok(())
     }
 
     pub fn eval_expr(&mut self, expr: &Expr) -> Result<Value, StarlarkError> {
+        self.thread
+            .check_step(self.semantics.max_computation_steps)?;
         match expr {
             Expr::Literal(v) => Ok(v.clone()),
             Expr::Ident(name, loc) => {
@@ -1654,68 +1746,55 @@ impl EvalContext {
                 let recv = self.eval_expr(target)?;
                 let idx_val = self.eval_expr(index)?;
                 match (recv, idx_val) {
-                    (Value::List(l), Value::Int(i)) => {
+                    (Value::List(l), iv @ Value::Int(_)) => {
+                        let idx = to_int32(&iv, "index").map_err(|e| with_loc(e, loc))? as i64;
                         let guard = l.lock().unwrap();
                         let len = guard.elements.len() as i64;
-                        let actual = if let Some(n) = i.to_i64() {
-                            if n < 0 {
-                                len + n
-                            } else {
-                                n
-                            }
-                        } else {
-                            return Err(StarlarkError(format!("{loc}: index out of range")));
-                        };
+                        let actual = if idx < 0 { len + idx } else { idx };
                         if actual >= 0 && (actual as usize) < guard.elements.len() {
                             Ok(guard.elements[actual as usize].clone())
                         } else {
-                            Err(StarlarkError(format!("{loc}: index out of range (index is {}, but sequence has {} elements)", i, len)))
+                            Err(StarlarkError(format!(
+                                "{loc}: index out of range (index is {idx}, but sequence has {len} elements)"
+                            )))
                         }
                     }
-                    (Value::Tuple(t), Value::Int(i)) => {
+                    (Value::Tuple(t), iv @ Value::Int(_)) => {
+                        let idx = to_int32(&iv, "index").map_err(|e| with_loc(e, loc))? as i64;
                         let len = t.len() as i64;
-                        let actual = if let Some(n) = i.to_i64() {
-                            if n < 0 {
-                                len + n
-                            } else {
-                                n
-                            }
-                        } else {
-                            return Err(StarlarkError(format!("{loc}: index out of range")));
-                        };
+                        let actual = if idx < 0 { len + idx } else { idx };
                         if actual >= 0 && (actual as usize) < t.len() {
                             Ok(t[actual as usize].clone())
                         } else {
-                            Err(StarlarkError(format!("{loc}: index out of range (index is {}, but sequence has {} elements)", i, len)))
+                            Err(StarlarkError(format!(
+                                "{loc}: index out of range (index is {idx}, but sequence has {len} elements)"
+                            )))
                         }
                     }
-                    (Value::String(s), Value::Int(i)) => {
-                        let chars: Vec<char> = s.chars().collect();
-                        let len = chars.len() as i64;
-                        let actual = if let Some(n) = i.to_i64() {
-                            if n < 0 {
-                                len + n
-                            } else {
-                                n
-                            }
+                    (Value::String(s), iv @ Value::Int(_)) => {
+                        let idx = to_int32(&iv, "index").map_err(|e| with_loc(e, loc))? as i64;
+                        let units: Vec<u16> = s.encode_utf16().collect();
+                        let len = units.len() as i64;
+                        let actual = if idx < 0 { len + idx } else { idx };
+                        if actual >= 0 && (actual as usize) < units.len() {
+                            Ok(Value::String(String::from_utf16_lossy(&[
+                                units[actual as usize]
+                            ])))
                         } else {
-                            return Err(StarlarkError(format!("{loc}: index out of range")));
-                        };
-                        if actual >= 0 && (actual as usize) < chars.len() {
-                            Ok(Value::String(chars[actual as usize].to_string()))
-                        } else {
-                            Err(StarlarkError(format!("{loc}: index out of range (index is {}, but sequence has {} elements)", i, len)))
+                            Err(StarlarkError(format!(
+                                "{loc}: index out of range (index is {idx}, but sequence has {len} elements)"
+                            )))
                         }
                     }
-                    (Value::Range(r), Value::Int(i)) => {
-                        if let Some(n) = i.to_i64() {
-                            if let Some(val) = r.get(n) {
-                                Ok(Value::Int(BigInt::from_i64(val)))
-                            } else {
-                                Err(StarlarkError(format!("{loc}: index out of range")))
-                            }
+                    (Value::Range(r), iv @ Value::Int(_)) => {
+                        let idx = to_int32(&iv, "index").map_err(|e| with_loc(e, loc))? as i64;
+                        if let Some(val) = r.get(idx) {
+                            Ok(Value::Int(BigInt::from_i64(val)))
                         } else {
-                            Err(StarlarkError(format!("{loc}: index out of range")))
+                            Err(StarlarkError(format!(
+                                "{loc}: index out of range (index is {idx}, but sequence has {} elements)",
+                                r.len
+                            )))
                         }
                     }
                     (Value::Host(kind, id), key) => {
@@ -1732,14 +1811,18 @@ impl EvalContext {
                         )
                         .map_err(|e| StarlarkError(format!("{loc}: {}", e.0)))
                     }
-                    (Value::Dict(d), key) => {
-                        d.lock().unwrap().get(&key).cloned().ok_or_else(|| {
+                    (Value::Dict(d), key) => d
+                        .lock()
+                        .unwrap()
+                        .get_checked(&key)
+                        .map_err(|e| with_loc(e, loc))?
+                        .cloned()
+                        .ok_or_else(|| {
                             StarlarkError(format!(
                                 "{loc}: key {} not found in dictionary",
                                 key.repr()
                             ))
-                        })
-                    }
+                        }),
                     // `target[OutputGroupInfo]["group"]`: provider instances index by field name.
                     (
                         Value::ProviderInstance {
@@ -1769,7 +1852,13 @@ impl EvalContext {
                 let e_val = end.as_ref().map(|e| self.eval_expr(e)).transpose()?;
                 let st_val = step.as_ref().map(|e| self.eval_expr(e)).transpose()?;
 
-                let step_num = match st_val.as_ref().and_then(|v| v.as_i64()) {
+                let s_idx = parse_slice_operand(s_val.as_ref(), "start index")
+                    .map_err(|e| with_loc(e, loc))?;
+                let e_idx = parse_slice_operand(e_val.as_ref(), "end index")
+                    .map_err(|e| with_loc(e, loc))?;
+                let step_num = match parse_slice_operand(st_val.as_ref(), "slice step")
+                    .map_err(|e| with_loc(e, loc))?
+                {
                     Some(0) => {
                         return Err(StarlarkError(format!("{loc}: slice step cannot be zero")))
                     }
@@ -1779,39 +1868,31 @@ impl EvalContext {
 
                 match recv {
                     Value::String(s) => {
-                        let chars: Vec<char> = s.chars().collect();
-                        let sliced =
-                            slice_sequence(&chars, s_val.as_ref(), e_val.as_ref(), step_num);
-                        Ok(Value::String(sliced.into_iter().collect()))
+                        let units: Vec<u16> = s.encode_utf16().collect();
+                        let sliced = slice_sequence_i64(&units, s_idx, e_idx, step_num);
+                        Ok(Value::String(String::from_utf16_lossy(&sliced)))
                     }
                     Value::List(l) => {
                         let guard = l.lock().unwrap();
-                        let sliced = slice_sequence(
-                            &guard.elements,
-                            s_val.as_ref(),
-                            e_val.as_ref(),
-                            step_num,
-                        );
+                        let sliced = slice_sequence_i64(&guard.elements, s_idx, e_idx, step_num);
                         Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
                             sliced,
                             Arc::clone(&self.mutability),
                         )))))
                     }
                     Value::Tuple(t) => {
-                        let sliced = slice_sequence(&t, s_val.as_ref(), e_val.as_ref(), step_num);
+                        let sliced = slice_sequence_i64(&t, s_idx, e_idx, step_num);
                         Ok(Value::Tuple(sliced))
                     }
                     Value::Range(r) => {
-                        let vec = r.to_vec();
-                        let sliced = slice_sequence(&vec, s_val.as_ref(), e_val.as_ref(), step_num);
-                        Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
-                            sliced
-                                .into_iter()
-                                .map(BigInt::from_i64)
-                                .map(Value::Int)
-                                .collect(),
-                            Arc::clone(&self.mutability),
-                        )))))
+                        let sub = r
+                            .slice(
+                                s_idx.map(|v| v as i32),
+                                e_idx.map(|v| v as i32),
+                                step_num as i32,
+                            )
+                            .map_err(|e| with_loc(e, loc))?;
+                        Ok(Value::Range(sub))
                     }
                     other => Err(StarlarkError(format!(
                         "{loc}: type '{}' is not sliceable",
@@ -1824,9 +1905,25 @@ impl EvalContext {
                 body,
                 location: loc,
             } => {
+                let mut evaluated_params = Vec::with_capacity(params.len());
+                for p in params {
+                    let default_val = if let Some(ref def_expr) = p.default {
+                        let v = self.eval_expr(def_expr)?;
+                        Some(Expr::Literal(v))
+                    } else {
+                        None
+                    };
+                    evaluated_params.push(ParamDef {
+                        name: p.name.clone(),
+                        default: default_val,
+                        is_args: p.is_args,
+                        is_kwargs: p.is_kwargs,
+                        is_kw_only: p.is_kw_only,
+                    });
+                }
                 let user_def = Arc::new(UserFunctionDef {
                     name: "lambda".to_string(),
-                    params: params.clone(),
+                    params: evaluated_params,
                     body: vec![Stmt::Return(Some((**body).clone()), loc.clone())],
                     location: loc.clone(),
                     module: Some(self.current_module_env()),
@@ -2069,14 +2166,43 @@ impl EvalContext {
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a * b)),
                 (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a.to_f64() * b)),
                 (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a * b.to_f64())),
-                (Value::String(s), Value::Int(n)) | (Value::Int(n), Value::String(s)) => {
-                    let count = n.to_i64().unwrap_or(0).max(0) as usize;
+                (Value::String(s), n_val @ Value::Int(_))
+                | (n_val @ Value::Int(_), Value::String(s)) => {
+                    let count_i32 =
+                        to_int32(n_val, "repeat count").map_err(|e| with_loc(e, loc))?;
+                    let count = count_i32.max(0) as usize;
+                    let total = s.len().checked_mul(count).ok_or_else(|| {
+                        StarlarkError(format!(
+                            "{loc}: excessive repeat ({} * {count} characters)",
+                            s.len()
+                        ))
+                    })?;
+                    if total > (1 << 24) {
+                        return Err(StarlarkError(format!(
+                            "{loc}: excessive repeat ({} * {count} characters)",
+                            s.len()
+                        )));
+                    }
                     Ok(Value::String(s.repeat(count)))
                 }
-                (Value::List(items), Value::Int(n)) | (Value::Int(n), Value::List(items)) => {
-                    let count = n.to_i64().unwrap_or(0).max(0) as usize;
+                (Value::List(items), n_val @ Value::Int(_))
+                | (n_val @ Value::Int(_), Value::List(items)) => {
+                    let count_i32 =
+                        to_int32(n_val, "repeat count").map_err(|e| with_loc(e, loc))?;
+                    let count = count_i32.max(0) as usize;
                     let guard = items.lock().unwrap();
-                    let mut out = Vec::with_capacity(guard.elements.len() * count);
+                    let len = guard.elements.len();
+                    let total = len.checked_mul(count).ok_or_else(|| {
+                        StarlarkError(format!(
+                            "{loc}: excessive repeat ({len} * {count} elements)"
+                        ))
+                    })?;
+                    if total > (1 << 24) {
+                        return Err(StarlarkError(format!(
+                            "{loc}: excessive repeat ({len} * {count} elements)"
+                        )));
+                    }
+                    let mut out = Vec::with_capacity(total);
                     for _ in 0..count {
                         out.extend(guard.elements.clone());
                     }
@@ -2085,9 +2211,23 @@ impl EvalContext {
                         Arc::clone(&self.mutability),
                     )))))
                 }
-                (Value::Tuple(items), Value::Int(n)) | (Value::Int(n), Value::Tuple(items)) => {
-                    let count = n.to_i64().unwrap_or(0).max(0) as usize;
-                    let mut out = Vec::with_capacity(items.len() * count);
+                (Value::Tuple(items), n_val @ Value::Int(_))
+                | (n_val @ Value::Int(_), Value::Tuple(items)) => {
+                    let count_i32 =
+                        to_int32(n_val, "repeat count").map_err(|e| with_loc(e, loc))?;
+                    let count = count_i32.max(0) as usize;
+                    let len = items.len();
+                    let total = len.checked_mul(count).ok_or_else(|| {
+                        StarlarkError(format!(
+                            "{loc}: excessive repeat ({len} * {count} elements)"
+                        ))
+                    })?;
+                    if total > (1 << 24) {
+                        return Err(StarlarkError(format!(
+                            "{loc}: excessive repeat ({len} * {count} elements)"
+                        )));
+                    }
+                    let mut out = Vec::with_capacity(total);
                     for _ in 0..count {
                         out.extend(items.clone());
                     }
@@ -2102,7 +2242,7 @@ impl EvalContext {
             BinaryOpKind::Div => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => {
                     let bf = b.to_f64();
-                    if bf == 0.0 {
+                    if b.is_zero() || bf == 0.0 {
                         return Err(StarlarkError(format!(
                             "{loc}: floating-point division by zero"
                         )));
@@ -2127,7 +2267,7 @@ impl EvalContext {
                 }
                 (Value::Float(a), Value::Int(b)) => {
                     let bf = b.to_f64();
-                    if bf == 0.0 {
+                    if b.is_zero() || bf == 0.0 {
                         return Err(StarlarkError(format!(
                             "{loc}: floating-point division by zero"
                         )));
@@ -2149,19 +2289,25 @@ impl EvalContext {
                 }
                 (Value::Float(a), Value::Float(b)) => {
                     if *b == 0.0 {
-                        return Err(StarlarkError(format!("{loc}: integer division by zero")));
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point division by zero"
+                        )));
                     }
                     Ok(Value::Float((a / b).floor()))
                 }
                 (Value::Int(a), Value::Float(b)) => {
                     if *b == 0.0 {
-                        return Err(StarlarkError(format!("{loc}: integer division by zero")));
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point division by zero"
+                        )));
                     }
                     Ok(Value::Float((a.to_f64() / b).floor()))
                 }
                 (Value::Float(a), Value::Int(b)) => {
-                    if b.is_zero() {
-                        return Err(StarlarkError(format!("{loc}: integer division by zero")));
+                    if b.is_zero() || b.to_f64() == 0.0 {
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point division by zero"
+                        )));
                     }
                     Ok(Value::Float((a / b.to_f64()).floor()))
                 }
@@ -2171,46 +2317,53 @@ impl EvalContext {
                     r.type_name()
                 ))),
             },
-            BinaryOpKind::Mod => {
-                let float_mod = |a: f64, b: f64| -> Result<Value, StarlarkError> {
-                    if b == 0.0 {
+            BinaryOpKind::Mod => match (l, r) {
+                (Value::Int(a), Value::Int(b)) => {
+                    let m = a
+                        .floored_mod(b)
+                        .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
+                    Ok(Value::Int(m))
+                }
+                (Value::Float(a), Value::Float(b)) => {
+                    if *b == 0.0 {
                         return Err(StarlarkError(format!(
                             "{loc}: floating-point modulo by zero"
                         )));
                     }
-                    let mut r = a % b;
-                    if r != 0.0 && (r < 0.0) != (b < 0.0) {
-                        r += b;
-                    } else if r == 0.0 {
-                        r = 0.0f64.copysign(b);
-                    }
-                    Ok(Value::Float(r))
-                };
-                match (l, r) {
-                    (Value::Int(a), Value::Int(b)) => {
-                        let m = a
-                            .floored_mod(b)
-                            .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
-                        Ok(Value::Int(m))
-                    }
-                    (Value::Float(a), Value::Float(b)) => float_mod(*a, *b),
-                    (Value::Int(a), Value::Float(b)) => float_mod(a.to_f64(), *b),
-                    (Value::Float(a), Value::Int(b)) => float_mod(*a, b.to_f64()),
-                    (Value::String(fmt_str), Value::Tuple(args)) => {
-                        let res = percent_format(fmt_str, args, None)?;
-                        Ok(Value::String(res))
-                    }
-                    (Value::String(fmt_str), single) => {
-                        let res = percent_format(fmt_str, &[single.clone()], None)?;
-                        Ok(Value::String(res))
-                    }
-                    _ => Err(StarlarkError(format!(
-                        "{loc}: unsupported binary operation: {} % {}",
-                        l.type_name(),
-                        r.type_name()
-                    ))),
+                    Ok(Value::Float(floored_float_mod(*a, *b)))
                 }
-            }
+                (Value::Int(a), Value::Float(b)) => {
+                    if *b == 0.0 {
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point modulo by zero"
+                        )));
+                    }
+                    Ok(Value::Float(floored_float_mod(a.to_f64(), *b)))
+                }
+                (Value::Float(a), Value::Int(b)) => {
+                    let bf = b.to_f64();
+                    if b.is_zero() || bf == 0.0 {
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point modulo by zero"
+                        )));
+                    }
+                    Ok(Value::Float(floored_float_mod(*a, bf)))
+                }
+                (Value::String(fmt_str), Value::Tuple(args)) => {
+                    let res = percent_format(fmt_str, args, None).map_err(|e| with_loc(e, loc))?;
+                    Ok(Value::String(res))
+                }
+                (Value::String(fmt_str), single) => {
+                    let res = percent_format(fmt_str, &[single.clone()], None)
+                        .map_err(|e| with_loc(e, loc))?;
+                    Ok(Value::String(res))
+                }
+                _ => Err(StarlarkError(format!(
+                    "{loc}: unsupported binary operation: {} % {}",
+                    l.type_name(),
+                    r.type_name()
+                ))),
+            },
             BinaryOpKind::BitAnd => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.bit_and(b))),
                 (Value::Set(a), Value::Set(b)) => {
@@ -2242,10 +2395,17 @@ impl EvalContext {
                 ))),
             },
             BinaryOpKind::Shl => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => {
-                    let shift = b
-                        .to_i64()
-                        .ok_or_else(|| StarlarkError(format!("{loc}: shift count too large")))?;
+                (Value::Int(a), b_val @ Value::Int(b)) => {
+                    if b.is_negative() {
+                        return Err(StarlarkError(format!("{loc}: negative shift count: {b}")));
+                    }
+                    let shift =
+                        to_int32(b_val, "shift count").map_err(|e| with_loc(e, loc))? as i64;
+                    if shift >= 512 {
+                        return Err(StarlarkError(format!(
+                            "{loc}: argument too large to convert ({shift})"
+                        )));
+                    }
                     let res = a
                         .shl(shift)
                         .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
@@ -2259,9 +2419,10 @@ impl EvalContext {
             },
             BinaryOpKind::Shr => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => {
-                    let shift = b
-                        .to_i64()
-                        .ok_or_else(|| StarlarkError(format!("{loc}: shift count too large")))?;
+                    if b.is_negative() {
+                        return Err(StarlarkError(format!("{loc}: negative shift count: {b}")));
+                    }
+                    let shift = b.to_i64().unwrap_or(i64::MAX);
                     let res = a
                         .shr(shift)
                         .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
@@ -2281,16 +2442,8 @@ impl EvalContext {
         match container {
             Value::List(l) => Ok(l.lock().unwrap().elements.contains(item)),
             Value::Tuple(t) => Ok(t.contains(item)),
-            Value::Set(s) => Ok(s.lock().unwrap().contains(item)),
-            Value::Dict(d) => {
-                if !item.is_hashable() {
-                    return Err(StarlarkError(format!(
-                        "unhashable type: '{}'",
-                        item.type_name()
-                    )));
-                }
-                Ok(d.lock().unwrap().contains_key(item))
-            }
+            Value::Set(s) => s.lock().unwrap().contains_checked(item),
+            Value::Dict(d) => d.lock().unwrap().contains_key_checked(item),
             // `"group" in target[OutputGroupInfo]`: membership of a field name.
             Value::ProviderInstance { fields, .. } => {
                 Ok(item.as_str().is_some_and(|n| fields.contains_key(n)))
@@ -2364,7 +2517,27 @@ impl EvalContext {
         match &clauses[idx] {
             CompClause::For { var_names, iter } => {
                 let iter_val = self.eval_expr(iter)?;
-                let elements = eval::builtins::value_to_sequence(&iter_val)?;
+                if matches!(iter_val, Value::Depset(_)) {
+                    return Err(StarlarkError(
+                        "iteration over depset is forbidden".to_string(),
+                    ));
+                }
+                inc_iter_count(&iter_val);
+                let elements: Box<dyn Iterator<Item = Value>> = if let Value::Range(r) = &iter_val {
+                    let (start, step, len) = (r.start, r.step, r.len);
+                    Box::new(
+                        (0..len)
+                            .map(move |i| Value::Int(BigInt::from_i64(start + i as i64 * step))),
+                    )
+                } else {
+                    match eval::builtins::value_to_sequence(&iter_val) {
+                        Ok(seq) => Box::new(seq.into_iter()),
+                        Err(e) => {
+                            dec_iter_count(&iter_val);
+                            return Err(e);
+                        }
+                    }
+                };
                 if idx == 0 {
                     self.push_comp_frame();
                 }
@@ -2382,6 +2555,7 @@ impl EvalContext {
                 if idx == 0 {
                     self.thread.pop_frame();
                 }
+                dec_iter_count(&iter_val);
                 res
             }
             CompClause::If(cond) => {
@@ -2410,7 +2584,27 @@ impl EvalContext {
         match &clauses[idx] {
             CompClause::For { var_names, iter } => {
                 let iter_val = self.eval_expr(iter)?;
-                let elements = eval::builtins::value_to_sequence(&iter_val)?;
+                if matches!(iter_val, Value::Depset(_)) {
+                    return Err(StarlarkError(
+                        "iteration over depset is forbidden".to_string(),
+                    ));
+                }
+                inc_iter_count(&iter_val);
+                let elements: Box<dyn Iterator<Item = Value>> = if let Value::Range(r) = &iter_val {
+                    let (start, step, len) = (r.start, r.step, r.len);
+                    Box::new(
+                        (0..len)
+                            .map(move |i| Value::Int(BigInt::from_i64(start + i as i64 * step))),
+                    )
+                } else {
+                    match eval::builtins::value_to_sequence(&iter_val) {
+                        Ok(seq) => Box::new(seq.into_iter()),
+                        Err(e) => {
+                            dec_iter_count(&iter_val);
+                            return Err(e);
+                        }
+                    }
+                };
                 if idx == 0 {
                     self.push_comp_frame();
                 }
@@ -2429,6 +2623,7 @@ impl EvalContext {
                 if idx == 0 {
                     self.thread.pop_frame();
                 }
+                dec_iter_count(&iter_val);
                 res
             }
             CompClause::If(cond) => {
@@ -2449,7 +2644,7 @@ impl EvalContext {
         kw_var_args: &Option<Box<Expr>>,
         loc: &Location,
     ) -> Result<Value, StarlarkError> {
-        // Method call on receiver
+        // Method call on receiver: evaluate receiver, then pos, kw, *args, **kwargs.
         if let Expr::Attr {
             target,
             attr,
@@ -2463,6 +2658,13 @@ impl EvalContext {
             for a in pos_args {
                 eval_pos.push(self.eval_expr(a)?);
             }
+            let mut eval_kw = BTreeMap::new();
+            let mut kw_order = Vec::new();
+            for (k, v) in kw_args {
+                let val = self.eval_expr(v)?;
+                eval_kw.insert(k.clone(), val);
+                kw_order.push(k.clone());
+            }
             if let Some(va) = var_args {
                 let va_val = self.eval_expr(va)?;
                 eval_pos.extend(
@@ -2470,27 +2672,47 @@ impl EvalContext {
                         .map_err(|e| StarlarkError(format!("{}: {}", star_at(va, loc), e.0)))?,
                 );
             }
-            let mut eval_kw = BTreeMap::new();
-            for (k, v) in kw_args {
-                eval_kw.insert(k.clone(), self.eval_expr(v)?);
-            }
             if let Some(ka) = kw_var_args {
                 let ka_val = self.eval_expr(ka)?;
-                self.pending_dup_kw = merge_star_kwargs(&mut eval_kw, &ka_val)
+                self.pending_dup_kw = merge_star_kwargs(&mut eval_kw, &mut kw_order, &ka_val)
                     .map_err(|e| StarlarkError(format!("{}: {}", star_at(ka, loc), e.0)))?;
             }
-            self.call_kw_order = kw_call_order(kw_args, kw_var_args.as_deref().map(|_| &eval_kw));
+            self.call_kw_order = kw_order;
             self.arg_eval_loc = self.cur_call_loc.clone();
             self.cur_call_loc = loc.clone();
             self.attr_loc = attr_loc.clone();
             return self.eval_method_call(recv, attr, &eval_pos, &eval_kw, loc);
         }
 
+        // Evaluate callee BEFORE arguments (matching Starlark's left-to-right call evaluation).
+        enum PreCallee<'a> {
+            Bound(Value),
+            Builtin(&'a str),
+        }
+        let pre_callee = if let Expr::Ident(func_name, id_loc) = callee {
+            if let Some(bound_val) = self.lookup_var_checked(func_name, id_loc)? {
+                PreCallee::Bound(bound_val)
+            } else if is_known_builtin_name(func_name) {
+                PreCallee::Builtin(func_name.as_str())
+            } else {
+                PreCallee::Bound(self.eval_expr(callee)?)
+            }
+        } else {
+            PreCallee::Bound(self.eval_expr(callee)?)
+        };
+
         self.pre_call_loc = self.cur_call_loc.clone();
         self.cur_call_loc = loc.clone();
         let mut eval_pos = Vec::new();
         for a in pos_args {
             eval_pos.push(self.eval_expr(a)?);
+        }
+        let mut eval_kw = BTreeMap::new();
+        let mut kw_order = Vec::new();
+        for (k, v) in kw_args {
+            let val = self.eval_expr(v)?;
+            eval_kw.insert(k.clone(), val);
+            kw_order.push(k.clone());
         }
         if let Some(va) = var_args {
             let va_val = self.eval_expr(va)?;
@@ -2499,34 +2721,27 @@ impl EvalContext {
                     .map_err(|e| StarlarkError(format!("{}: {}", star_at(va, loc), e.0)))?,
             );
         }
-        let mut eval_kw = BTreeMap::new();
-        for (k, v) in kw_args {
-            eval_kw.insert(k.clone(), self.eval_expr(v)?);
-        }
         if let Some(ka) = kw_var_args {
             let ka_val = self.eval_expr(ka)?;
-            self.pending_dup_kw = merge_star_kwargs(&mut eval_kw, &ka_val)
+            self.pending_dup_kw = merge_star_kwargs(&mut eval_kw, &mut kw_order, &ka_val)
                 .map_err(|e| StarlarkError(format!("{}: {}", star_at(ka, loc), e.0)))?;
         }
 
-        self.call_kw_order = kw_call_order(kw_args, kw_var_args.as_deref().map(|_| &eval_kw));
+        self.call_kw_order = kw_order;
         self.arg_eval_loc = self.cur_call_loc.clone();
         self.cur_call_loc = loc.clone();
-        if let Expr::Ident(func_name, _) = callee {
-            if let Some(bound_val) = self.lookup_var_checked(func_name, loc)? {
-                return self.call_callable(bound_val, eval_pos, eval_kw, loc);
-            }
-            match self.try_call_builtin(func_name, eval_pos, eval_kw, loc)? {
-                Ok(res) => return Ok(res),
-                Err((ep, ek)) => {
-                    let callee_val = self.eval_expr(callee)?;
-                    return self.call_callable(callee_val, ep, ek, loc);
+        match pre_callee {
+            PreCallee::Bound(bound_val) => self.call_callable(bound_val, eval_pos, eval_kw, loc),
+            PreCallee::Builtin(func_name) => {
+                match self.try_call_builtin(func_name, eval_pos, eval_kw, loc)? {
+                    Ok(res) => Ok(res),
+                    Err((ep, ek)) => {
+                        let callee_val = self.eval_expr(callee)?;
+                        self.call_callable(callee_val, ep, ek, loc)
+                    }
                 }
             }
         }
-
-        let callee_val = self.eval_expr(callee)?;
-        self.call_callable(callee_val, eval_pos, eval_kw, loc)
     }
 
     fn json_encode_ctx(&mut self, arg: &Value) -> Result<String, StarlarkError> {
@@ -2936,15 +3151,48 @@ impl EvalContext {
                 }
             }
             "sorted" => {
+                if eval_pos.len() > 3 {
+                    return Err(with_loc(
+                        StarlarkError(format!(
+                            "sorted() accepts no more than 3 positional arguments but got {}",
+                            eval_pos.len()
+                        )),
+                        loc,
+                    ));
+                }
                 for k in eval_kw.keys() {
-                    if k != "key" && k != "reverse" {
+                    if k != "iterable" && k != "key" && k != "reverse" {
                         return Err(with_loc(
                             StarlarkError(format!("sorted() got unexpected keyword argument: {k}")),
                             loc,
                         ));
                     }
                 }
-                let key_fn = match eval_kw.get("key") {
+                if !eval_pos.is_empty() && eval_kw.contains_key("iterable") {
+                    return Err(with_loc(
+                        StarlarkError(
+                            "sorted() got multiple values for parameter 'iterable'".to_string(),
+                        ),
+                        loc,
+                    ));
+                }
+                if eval_pos.len() >= 2 && eval_kw.contains_key("key") {
+                    return Err(with_loc(
+                        StarlarkError(
+                            "sorted() got multiple values for parameter 'key'".to_string(),
+                        ),
+                        loc,
+                    ));
+                }
+                if eval_pos.len() >= 3 && eval_kw.contains_key("reverse") {
+                    return Err(with_loc(
+                        StarlarkError(
+                            "sorted() got multiple values for parameter 'reverse'".to_string(),
+                        ),
+                        loc,
+                    ));
+                }
+                let key_fn = match eval_pos.get(1).or_else(|| eval_kw.get("key")) {
                     None | Some(Value::None) => None,
                     Some(f) if eval::builtins::is_callable(f) => Some(f.clone()),
                     Some(other) => {
@@ -2958,16 +3206,31 @@ impl EvalContext {
                     }
                 };
                 if let Some(key_fn) = key_fn {
-                    let x = eval_pos.first().ok_or_else(|| {
-                        with_loc(
-                            StarlarkError("sorted() requires 1 argument".to_string()),
-                            loc,
-                        )
-                    })?;
-                    let reverse = eval_kw
-                        .get("reverse")
-                        .map(|v| v.is_truthy())
-                        .unwrap_or(false);
+                    let x = eval_pos
+                        .first()
+                        .or_else(|| eval_kw.get("iterable"))
+                        .ok_or_else(|| {
+                            with_loc(
+                                StarlarkError(
+                                    "sorted() missing 1 required positional argument: iterable"
+                                        .to_string(),
+                                ),
+                                loc,
+                            )
+                        })?;
+                    let reverse = match eval_pos.get(2).or_else(|| eval_kw.get("reverse")) {
+                        None => false,
+                        Some(Value::Bool(b)) => *b,
+                        Some(other) => {
+                            return Err(with_loc(
+                                StarlarkError(format!(
+                                    "got value of type '{}' for parameter 'reverse', want 'bool'",
+                                    other.type_name()
+                                )),
+                                loc,
+                            ));
+                        }
+                    };
                     let items =
                         eval::builtins::value_to_sequence(x).map_err(|e| with_loc(e, loc))?;
                     let mut decorated: Vec<(Value, Value)> = Vec::with_capacity(items.len());
@@ -3248,7 +3511,15 @@ impl EvalContext {
                     frame.parent_local_names = func.closure.local_names.clone();
                 }
 
-                // Bind parameters into frame
+                // Bind parameters into frame (capture kw_order before recursion can overwrite it)
+                let kw_iter_order: Vec<String> =
+                    if self.call_kw_order.iter().all(|k| eval_kw.contains_key(k))
+                        && self.call_kw_order.len() == eval_kw.len()
+                    {
+                        self.call_kw_order.clone()
+                    } else {
+                        eval_kw.keys().cloned().collect()
+                    };
                 let mut pos_idx = 0;
                 for param in &func.params {
                     if param.is_args {
@@ -3260,7 +3531,7 @@ impl EvalContext {
                         self.set_var(&param.name, Value::Tuple(rest));
                     } else if param.is_kwargs {
                         let mut d = StarlarkDict::new_in(Arc::clone(&self.mutability));
-                        for (k, v) in &eval_kw {
+                        for k in &kw_iter_order {
                             // Keywords consumed by named parameters are not collected.
                             if func
                                 .params
@@ -3269,7 +3540,9 @@ impl EvalContext {
                             {
                                 continue;
                             }
-                            let _ = d.insert(Value::String(k.clone()), v.clone());
+                            if let Some(v) = eval_kw.get(k) {
+                                let _ = d.insert(Value::String(k.clone()), v.clone());
+                            }
                         }
                         self.set_var(&param.name, Value::Dict(Arc::new(Mutex::new(d))));
                     } else if !param.is_kw_only && pos_idx < eval_pos.len() {
@@ -3345,51 +3618,19 @@ impl EvalContext {
                     )));
                 }
                 match bf.as_str() {
-                    "json.encode" => {
-                        let arg = eval_pos.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: json.encode requires 1 argument"))
-                        })?;
-                        Ok(Value::String(self.json_encode_ctx(arg)?))
-                    }
-                    "json.decode" => {
-                        let arg = eval_pos.first().and_then(|v| v.as_str()).ok_or_else(|| {
-                            StarlarkError(format!("{loc}: json.decode requires string argument"))
-                        })?;
-                        if eval_pos.len() > 1 && eval_kw.contains_key("default") {
-                            return Err(StarlarkError(format!(
-                                "{loc}: json.decode() got multiple values for parameter 'default'"
-                            )));
-                        }
-                        let default = eval_pos
-                            .get(1)
-                            .cloned()
-                            .or_else(|| eval_kw.get("default").cloned());
-                        json_decode(arg, default)
-                    }
-                    "json.indent" => {
-                        let arg = eval_pos.first().and_then(|v| v.as_str()).ok_or_else(|| {
-                            StarlarkError(format!("{loc}: json.indent requires string argument"))
-                        })?;
-                        let prefix = eval_kw.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
-                        let indent = eval_kw
-                            .get("indent")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("\t");
-                        Ok(Value::String(json_indent(arg, prefix, indent)?))
-                    }
-                    "json.encode_indent" => {
-                        let arg = eval_pos.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: json.encode_indent requires 1 argument"))
-                        })?;
-                        let prefix = eval_kw.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
-                        let indent = eval_kw
-                            .get("indent")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("\t");
-                        let encoded = self.json_encode_ctx(arg)?;
-                        Ok(Value::String(json_indent(&encoded, prefix, indent)?))
+                    "json.encode" | "json.decode" | "json.indent" | "json.encode_indent" => {
+                        self.eval_json_builtin(bf.as_str(), &eval_pos, &eval_kw, loc)
                     }
                     "proto.encode_text" => {
+                        if eval_pos.len() > 1 || !eval_kw.is_empty() {
+                            return Err(with_loc(
+                                StarlarkError(
+                                    "proto.encode_text() accepts exactly 1 positional argument"
+                                        .to_string(),
+                                ),
+                                loc,
+                            ));
+                        }
                         let arg = eval_pos.first().ok_or_else(|| {
                             StarlarkError(format!(
                                 "{loc}: proto.encode_text requires struct argument"
@@ -3545,55 +3786,96 @@ impl EvalContext {
                 ))),
             },
             Value::List(l) => {
+                if !kw_args.is_empty() {
+                    let k = kw_args.keys().next().unwrap();
+                    return Err(with_loc(
+                        StarlarkError(format!("{method}() got unexpected keyword argument '{k}'")),
+                        loc,
+                    ));
+                }
                 if method == "extend" {
-                    let items = pos_args.first().ok_or_else(|| {
-                        StarlarkError(format!("{loc}: extend() takes 1 argument"))
-                    })?;
-                    let seq = eval::builtins::value_to_sequence(items)?;
+                    if pos_args.len() != 1 {
+                        return Err(with_loc(
+                            StarlarkError("extend() takes exactly 1 argument".to_string()),
+                            loc,
+                        ));
+                    }
+                    let seq = eval::builtins::value_to_sequence(&pos_args[0])?;
                     l.lock().unwrap().extend(seq)?;
                     return Ok(Value::None);
                 }
                 let mut guard = l.lock().unwrap();
                 match method {
                     "append" => {
-                        let item = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: append() takes 1 argument"))
-                        })?;
-                        guard.append(item.clone())?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError("append() takes exactly 1 argument".to_string()),
+                                loc,
+                            ));
+                        }
+                        guard.append(pos_args[0].clone())?;
                         Ok(Value::None)
                     }
                     "clear" => {
+                        if !pos_args.is_empty() {
+                            return Err(with_loc(
+                                StarlarkError("clear() takes no arguments".to_string()),
+                                loc,
+                            ));
+                        }
                         guard.clear()?;
                         Ok(Value::None)
                     }
                     "index" => {
-                        let item = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: index() takes 1 argument"))
-                        })?;
-                        let s = pos_args.get(1).and_then(|v| v.as_i64());
-                        let e = pos_args.get(2).and_then(|v| v.as_i64());
-                        let idx = guard.index(item, s, e)?;
+                        if pos_args.is_empty() || pos_args.len() > 3 {
+                            return Err(with_loc(
+                                StarlarkError("index() takes 1 to 3 arguments".to_string()),
+                                loc,
+                            ));
+                        }
+                        let s = match pos_args.get(1) {
+                            None | Some(Value::None) => None,
+                            Some(v) => Some(to_int32(v, "start")? as i64),
+                        };
+                        let e = match pos_args.get(2) {
+                            None | Some(Value::None) => None,
+                            Some(v) => Some(to_int32(v, "end")? as i64),
+                        };
+                        let idx = guard.index(&pos_args[0], s, e)?;
                         Ok(Value::Int(BigInt::from_i64(idx)))
                     }
                     "insert" => {
-                        let idx = pos_args.first().and_then(|v| v.as_i64()).ok_or_else(|| {
-                            StarlarkError(format!("{loc}: insert() takes index argument"))
-                        })?;
-                        let item = pos_args.get(1).ok_or_else(|| {
-                            StarlarkError(format!("{loc}: insert() takes item argument"))
-                        })?;
-                        guard.insert(idx, item.clone())?;
+                        if pos_args.len() != 2 {
+                            return Err(with_loc(
+                                StarlarkError("insert() takes exactly 2 arguments".to_string()),
+                                loc,
+                            ));
+                        }
+                        let idx = to_int32(&pos_args[0], "index")? as i64;
+                        guard.insert(idx, pos_args[1].clone())?;
                         Ok(Value::None)
                     }
                     "pop" => {
-                        let idx = pos_args.first().and_then(|v| v.as_i64());
+                        if pos_args.len() > 1 {
+                            return Err(with_loc(
+                                StarlarkError("pop() takes at most 1 argument".to_string()),
+                                loc,
+                            ));
+                        }
+                        let idx = match pos_args.first() {
+                            None | Some(Value::None) => None,
+                            Some(v) => Some(to_int32(v, "i")? as i64),
+                        };
                         guard.pop(idx)
                     }
                     "remove" => {
-                        let item = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: remove() takes 1 argument"))
-                        })?;
-                        guard.remove(item)?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError("remove() takes exactly 1 argument".to_string()),
+                                loc,
+                            ));
+                        }
+                        guard.remove(&pos_args[0])?;
                         Ok(Value::None)
                     }
                     _ => Err(StarlarkError(format!(
@@ -3603,19 +3885,18 @@ impl EvalContext {
             }
             Value::Dict(d) => {
                 if method == "update" {
+                    if pos_args.len() > 1 {
+                        return Err(with_loc(
+                            StarlarkError(format!(
+                                "update() accepts no more than 1 positional argument but got {}",
+                                pos_args.len()
+                            )),
+                            loc,
+                        ));
+                    }
                     let mut pairs = Vec::new();
                     if let Some(first) = pos_args.first() {
-                        match first {
-                            Value::Dict(other_d) => {
-                                pairs.extend(other_d.lock().unwrap().items());
-                            }
-                            other => {
-                                let seq = eval::builtins::value_to_sequence(other)?;
-                                for item in seq {
-                                    pairs.push(eval::builtins::universal::unpack_pair(&item)?);
-                                }
-                            }
-                        }
+                        pairs.extend(unpack_dict_pairs(first, "update")?);
                     }
                     for (k, v) in kw_args {
                         pairs.push((Value::String(k.clone()), v.clone()));
@@ -3626,27 +3907,69 @@ impl EvalContext {
                 let mut guard = d.lock().unwrap();
                 match method {
                     "clear" => {
+                        if !pos_args.is_empty() || !kw_args.is_empty() {
+                            return Err(with_loc(
+                                StarlarkError("clear() takes no arguments".to_string()),
+                                loc,
+                            ));
+                        }
                         guard.clear()?;
                         Ok(Value::None)
                     }
                     "get" => {
-                        let key = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: get() takes at least 1 argument"))
-                        })?;
-                        if !key.is_hashable() {
-                            return Err(StarlarkError(format!(
-                                "{loc}: unhashable type: '{}'",
-                                key.type_name()
-                            )));
+                        if pos_args.len() > 2 {
+                            return Err(with_loc(
+                                StarlarkError("get() takes at most 2 arguments".to_string()),
+                                loc,
+                            ));
                         }
+                        for k in kw_args.keys() {
+                            if k != "key" && k != "default" {
+                                return Err(with_loc(
+                                    StarlarkError(format!(
+                                        "get() got unexpected keyword argument '{k}'"
+                                    )),
+                                    loc,
+                                ));
+                            }
+                        }
+                        if !pos_args.is_empty() && kw_args.contains_key("key") {
+                            return Err(with_loc(
+                                StarlarkError(
+                                    "get() got multiple values for parameter 'key'".to_string(),
+                                ),
+                                loc,
+                            ));
+                        }
+                        if pos_args.len() >= 2 && kw_args.contains_key("default") {
+                            return Err(with_loc(
+                                StarlarkError(
+                                    "get() got multiple values for parameter 'default'".to_string(),
+                                ),
+                                loc,
+                            ));
+                        }
+                        let key =
+                            pos_args
+                                .first()
+                                .or_else(|| kw_args.get("key"))
+                                .ok_or_else(|| {
+                                    StarlarkError(format!("{loc}: get() takes at least 1 argument"))
+                                })?;
                         let default = pos_args
                             .get(1)
                             .or_else(|| kw_args.get("default"))
                             .cloned()
                             .unwrap_or(Value::None);
-                        Ok(guard.get(key).cloned().unwrap_or(default))
+                        Ok(guard.get_checked(key)?.cloned().unwrap_or(default))
                     }
                     "items" => {
+                        if !pos_args.is_empty() || !kw_args.is_empty() {
+                            return Err(with_loc(
+                                StarlarkError("items() takes no arguments".to_string()),
+                                loc,
+                            ));
+                        }
                         let pairs: Vec<Value> = guard
                             .items()
                             .into_iter()
@@ -3657,53 +3980,116 @@ impl EvalContext {
                             Arc::clone(&self.mutability),
                         )))))
                     }
-                    "keys" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
-                        guard.keys(),
-                        Arc::clone(&self.mutability),
-                    ))))),
-                    "values" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
-                        guard.values(),
-                        Arc::clone(&self.mutability),
-                    ))))),
+                    "keys" => {
+                        if !pos_args.is_empty() || !kw_args.is_empty() {
+                            return Err(with_loc(
+                                StarlarkError("keys() takes no arguments".to_string()),
+                                loc,
+                            ));
+                        }
+                        Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                            guard.keys(),
+                            Arc::clone(&self.mutability),
+                        )))))
+                    }
+                    "values" => {
+                        if !pos_args.is_empty() || !kw_args.is_empty() {
+                            return Err(with_loc(
+                                StarlarkError("values() takes no arguments".to_string()),
+                                loc,
+                            ));
+                        }
+                        Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                            guard.values(),
+                            Arc::clone(&self.mutability),
+                        )))))
+                    }
                     "pop" => {
+                        if pos_args.len() > 2 {
+                            return Err(with_loc(
+                                StarlarkError("pop() takes at most 2 arguments".to_string()),
+                                loc,
+                            ));
+                        }
                         for k in kw_args.keys() {
-                            if k != "default" {
+                            if k != "key" && k != "default" {
                                 return Err(StarlarkError(format!(
                                     "{loc}: pop() got unexpected keyword argument: {k}"
                                 )));
                             }
                         }
-                        if pos_args.len() > 1 && kw_args.contains_key("default") {
+                        if !pos_args.is_empty() && kw_args.contains_key("key") {
+                            return Err(StarlarkError(format!(
+                                "{loc}: pop() got multiple values for parameter 'key'"
+                            )));
+                        }
+                        if pos_args.len() >= 2 && kw_args.contains_key("default") {
                             return Err(StarlarkError(format!(
                                 "{loc}: pop() got multiple values for parameter 'default'"
                             )));
                         }
-                        let key = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: pop() takes at least 1 argument"))
-                        })?;
-                        let default = pos_args.get(1).or_else(|| kw_args.get("default")).cloned();
+                        let key =
+                            pos_args
+                                .first()
+                                .or_else(|| kw_args.get("key"))
+                                .ok_or_else(|| {
+                                    StarlarkError(format!("{loc}: pop() takes at least 1 argument"))
+                                })?;
+                        let has_default = pos_args.len() >= 2 || kw_args.contains_key("default");
+                        let default = if has_default {
+                            Some(
+                                pos_args
+                                    .get(1)
+                                    .or_else(|| kw_args.get("default"))
+                                    .cloned()
+                                    .unwrap_or(Value::None),
+                            )
+                        } else {
+                            None
+                        };
                         guard.pop(key, default)
                     }
                     "popitem" => {
+                        if !pos_args.is_empty() || !kw_args.is_empty() {
+                            return Err(with_loc(
+                                StarlarkError("popitem() takes no arguments".to_string()),
+                                loc,
+                            ));
+                        }
                         let (k, v) = guard.popitem()?;
                         Ok(Value::Tuple(vec![k, v]))
                     }
                     "setdefault" => {
+                        if pos_args.len() > 2 {
+                            return Err(with_loc(
+                                StarlarkError("setdefault() takes at most 2 arguments".to_string()),
+                                loc,
+                            ));
+                        }
                         for k in kw_args.keys() {
-                            if k != "default" {
+                            if k != "key" && k != "default" {
                                 return Err(StarlarkError(format!(
                                     "{loc}: setdefault() got unexpected keyword argument: {k}"
                                 )));
                             }
                         }
-                        if pos_args.len() > 1 && kw_args.contains_key("default") {
+                        if !pos_args.is_empty() && kw_args.contains_key("key") {
+                            return Err(StarlarkError(format!(
+                                "{loc}: setdefault() got multiple values for parameter 'key'"
+                            )));
+                        }
+                        if pos_args.len() >= 2 && kw_args.contains_key("default") {
                             return Err(StarlarkError(format!(
                                 "{loc}: setdefault() got multiple values for parameter 'default'"
                             )));
                         }
-                        let key = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: setdefault() requires key"))
-                        })?;
+                        let key =
+                            pos_args
+                                .first()
+                                .or_else(|| kw_args.get("key"))
+                                .ok_or_else(|| {
+                                    StarlarkError(format!("{loc}: setdefault() requires key"))
+                                })?;
                         let default = pos_args
                             .get(1)
                             .or_else(|| kw_args.get("default"))
@@ -3717,6 +4103,13 @@ impl EvalContext {
                 }
             }
             Value::Set(s) => {
+                if !kw_args.is_empty() {
+                    let k = kw_args.keys().next().unwrap();
+                    return Err(with_loc(
+                        StarlarkError(format!("{method}() got unexpected keyword argument '{k}'")),
+                        loc,
+                    ));
+                }
                 let to_set = |v: &Value| -> Result<StarlarkSet, StarlarkError> {
                     match v {
                         Value::Set(os) => Ok(os.lock().unwrap().clone()),
@@ -3725,50 +4118,82 @@ impl EvalContext {
                 };
                 match method {
                     "add" => {
-                        let item = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: add() takes 1 argument"))
-                        })?;
-                        s.lock().unwrap().add(item.clone())?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError("add() takes exactly 1 argument".to_string()),
+                                loc,
+                            ));
+                        }
+                        s.lock().unwrap().add(pos_args[0].clone())?;
                         Ok(Value::None)
                     }
                     "clear" => {
+                        if !pos_args.is_empty() {
+                            return Err(with_loc(
+                                StarlarkError("clear() takes no arguments".to_string()),
+                                loc,
+                            ));
+                        }
                         s.lock().unwrap().clear()?;
                         Ok(Value::None)
                     }
                     "discard" => {
-                        let item = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: discard() takes 1 argument"))
-                        })?;
-                        s.lock().unwrap().discard(item)?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError("discard() takes exactly 1 argument".to_string()),
+                                loc,
+                            ));
+                        }
+                        s.lock().unwrap().discard(&pos_args[0])?;
                         Ok(Value::None)
                     }
                     "remove" => {
-                        let item = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: remove() takes 1 argument"))
-                        })?;
-                        s.lock().unwrap().remove(item)?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError("remove() takes exactly 1 argument".to_string()),
+                                loc,
+                            ));
+                        }
+                        s.lock().unwrap().remove(&pos_args[0])?;
                         Ok(Value::None)
                     }
-                    "pop" => s.lock().unwrap().pop(),
+                    "pop" => {
+                        if !pos_args.is_empty() {
+                            return Err(with_loc(
+                                StarlarkError("pop() takes no arguments".to_string()),
+                                loc,
+                            ));
+                        }
+                        s.lock().unwrap().pop()
+                    }
                     "issubset" => {
-                        let other = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: issubset() takes 1 argument"))
-                        })?;
-                        let other_set = to_set(other)?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError("issubset() takes exactly 1 argument".to_string()),
+                                loc,
+                            ));
+                        }
+                        let other_set = to_set(&pos_args[0])?;
                         Ok(Value::Bool(s.lock().unwrap().issubset(&other_set)))
                     }
                     "issuperset" => {
-                        let other = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: issuperset() takes 1 argument"))
-                        })?;
-                        let other_set = to_set(other)?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError("issuperset() takes exactly 1 argument".to_string()),
+                                loc,
+                            ));
+                        }
+                        let other_set = to_set(&pos_args[0])?;
                         Ok(Value::Bool(s.lock().unwrap().issuperset(&other_set)))
                     }
                     "isdisjoint" => {
-                        let other = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: isdisjoint() takes 1 argument"))
-                        })?;
-                        let other_set = to_set(other)?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError("isdisjoint() takes exactly 1 argument".to_string()),
+                                loc,
+                            ));
+                        }
+                        let other_set = to_set(&pos_args[0])?;
                         Ok(Value::Bool(s.lock().unwrap().isdisjoint(&other_set)))
                     }
                     "union" => {
@@ -3816,10 +4241,15 @@ impl EvalContext {
                         Ok(Value::Set(Arc::new(Mutex::new(res))))
                     }
                     "symmetric_difference" => {
-                        let other = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: symmetric_difference() takes 1 argument"))
-                        })?;
-                        let other_set = to_set(other)?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError(
+                                    "symmetric_difference() takes exactly 1 argument".to_string(),
+                                ),
+                                loc,
+                            ));
+                        }
+                        let other_set = to_set(&pos_args[0])?;
                         let mut res = s.lock().unwrap().symmetric_difference(&other_set);
                         res.mutability = Arc::clone(&self.mutability);
                         Ok(Value::Set(Arc::new(Mutex::new(res))))
@@ -3861,12 +4291,16 @@ impl EvalContext {
                         Ok(Value::None)
                     }
                     "symmetric_difference_update" => {
-                        let other = pos_args.first().ok_or_else(|| {
-                            StarlarkError(format!(
-                                "{loc}: symmetric_difference_update() takes 1 argument"
-                            ))
-                        })?;
-                        let other_set = to_set(other)?;
+                        if pos_args.len() != 1 {
+                            return Err(with_loc(
+                                StarlarkError(
+                                    "symmetric_difference_update() takes exactly 1 argument"
+                                        .to_string(),
+                                ),
+                                loc,
+                            ));
+                        }
+                        let other_set = to_set(&pos_args[0])?;
                         s.lock().unwrap().symmetric_difference_update(&other_set)?;
                         Ok(Value::None)
                     }
@@ -3937,61 +4371,19 @@ impl EvalContext {
                         });
                     }
                     match bf.as_str() {
-                        "json.encode" => {
-                            let arg = pos_args.first().ok_or_else(|| {
-                                StarlarkError(format!("{loc}: json.encode requires 1 argument"))
-                            })?;
-                            return Ok(Value::String(self.json_encode_ctx(arg)?));
-                        }
-                        "json.decode" => {
-                            let arg =
-                                pos_args.first().and_then(|v| v.as_str()).ok_or_else(|| {
-                                    StarlarkError(format!(
-                                        "{loc}: json.decode requires string argument"
-                                    ))
-                                })?;
-                            if pos_args.len() > 1 && kw_args.contains_key("default") {
-                                return Err(StarlarkError(format!(
-                                    "{loc}: json.decode() got multiple values for parameter 'default'"
-                                )));
-                            }
-                            let default = pos_args
-                                .get(1)
-                                .cloned()
-                                .or_else(|| kw_args.get("default").cloned());
-                            return json_decode(arg, default);
-                        }
-                        "json.indent" => {
-                            let arg =
-                                pos_args.first().and_then(|v| v.as_str()).ok_or_else(|| {
-                                    StarlarkError(format!(
-                                        "{loc}: json.indent requires string argument"
-                                    ))
-                                })?;
-                            let prefix =
-                                kw_args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
-                            let indent = kw_args
-                                .get("indent")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("\t");
-                            return Ok(Value::String(json_indent(arg, prefix, indent)?));
-                        }
-                        "json.encode_indent" => {
-                            let arg = pos_args.first().ok_or_else(|| {
-                                StarlarkError(format!(
-                                    "{loc}: json.encode_indent requires 1 argument"
-                                ))
-                            })?;
-                            let prefix =
-                                kw_args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
-                            let indent = kw_args
-                                .get("indent")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("\t");
-                            let encoded = self.json_encode_ctx(arg)?;
-                            return Ok(Value::String(json_indent(&encoded, prefix, indent)?));
+                        "json.encode" | "json.decode" | "json.indent" | "json.encode_indent" => {
+                            return self.eval_json_builtin(bf.as_str(), pos_args, kw_args, loc);
                         }
                         "proto.encode_text" => {
+                            if pos_args.len() > 1 || !kw_args.is_empty() {
+                                return Err(with_loc(
+                                    StarlarkError(
+                                        "proto.encode_text() accepts exactly 1 positional argument"
+                                            .to_string(),
+                                    ),
+                                    loc,
+                                ));
+                            }
                             let arg = pos_args.first().ok_or_else(|| {
                                 StarlarkError(format!(
                                     "{loc}: proto.encode_text requires struct argument"
@@ -4050,22 +4442,311 @@ impl EvalContext {
             ))),
         }
     }
+    fn eval_json_builtin(
+        &mut self,
+        bf: &str,
+        pos_args: &[Value],
+        kw_args: &BTreeMap<String, Value>,
+        loc: &Location,
+    ) -> Result<Value, StarlarkError> {
+        match bf {
+            "json.encode" => {
+                if pos_args.len() > 1 {
+                    return Err(with_loc(
+                        StarlarkError(format!(
+                            "json.encode() accepts no more than 1 positional argument but got {}",
+                            pos_args.len()
+                        )),
+                        loc,
+                    ));
+                }
+                for k in kw_args.keys() {
+                    if k != "x" {
+                        return Err(with_loc(
+                            StarlarkError(format!(
+                                "json.encode() got unexpected keyword argument '{k}'"
+                            )),
+                            loc,
+                        ));
+                    }
+                }
+                if !pos_args.is_empty() && kw_args.contains_key("x") {
+                    return Err(with_loc(
+                        StarlarkError(
+                            "json.encode() got multiple values for parameter 'x'".to_string(),
+                        ),
+                        loc,
+                    ));
+                }
+                let arg = pos_args
+                    .first()
+                    .or_else(|| kw_args.get("x"))
+                    .ok_or_else(|| {
+                        StarlarkError(format!("{loc}: json.encode requires 1 argument"))
+                    })?;
+                Ok(Value::String(self.json_encode_ctx(arg)?))
+            }
+            "json.decode" => {
+                if pos_args.len() > 2 {
+                    return Err(with_loc(
+                        StarlarkError(format!(
+                            "json.decode() accepts no more than 2 positional arguments but got {}",
+                            pos_args.len()
+                        )),
+                        loc,
+                    ));
+                }
+                for k in kw_args.keys() {
+                    if k != "x" && k != "default" {
+                        return Err(with_loc(
+                            StarlarkError(format!(
+                                "json.decode() got unexpected keyword argument '{k}'"
+                            )),
+                            loc,
+                        ));
+                    }
+                }
+                if !pos_args.is_empty() && kw_args.contains_key("x") {
+                    return Err(with_loc(
+                        StarlarkError(
+                            "json.decode() got multiple values for parameter 'x'".to_string(),
+                        ),
+                        loc,
+                    ));
+                }
+                if pos_args.len() >= 2 && kw_args.contains_key("default") {
+                    return Err(with_loc(
+                        StarlarkError(
+                            "json.decode() got multiple values for parameter 'default'".to_string(),
+                        ),
+                        loc,
+                    ));
+                }
+                let x_val = pos_args
+                    .first()
+                    .or_else(|| kw_args.get("x"))
+                    .ok_or_else(|| {
+                        StarlarkError(format!("{loc}: json.decode requires string argument"))
+                    })?;
+                let Some(arg) = x_val.as_str() else {
+                    return Err(StarlarkError(format!(
+                        "{loc}: in call to decode(), parameter 'x' got value of type '{}', want 'string'",
+                        x_val.type_name()
+                    )));
+                };
+                let has_default = pos_args.len() >= 2 || kw_args.contains_key("default");
+                let default = if has_default {
+                    Some(
+                        pos_args
+                            .get(1)
+                            .or_else(|| kw_args.get("default"))
+                            .cloned()
+                            .unwrap_or(Value::None),
+                    )
+                } else {
+                    None
+                };
+                json_decode(arg, default)
+            }
+            "json.indent" => {
+                if pos_args.len() > 1 {
+                    return Err(with_loc(
+                        StarlarkError(format!(
+                            "json.indent() accepts no more than 1 positional argument but got {}",
+                            pos_args.len()
+                        )),
+                        loc,
+                    ));
+                }
+                for k in kw_args.keys() {
+                    if k != "s" && k != "prefix" && k != "indent" {
+                        return Err(with_loc(
+                            StarlarkError(format!(
+                                "json.indent() got unexpected keyword argument '{k}'"
+                            )),
+                            loc,
+                        ));
+                    }
+                }
+                if !pos_args.is_empty() && kw_args.contains_key("s") {
+                    return Err(with_loc(
+                        StarlarkError(
+                            "json.indent() got multiple values for parameter 's'".to_string(),
+                        ),
+                        loc,
+                    ));
+                }
+                let s_val = pos_args
+                    .first()
+                    .or_else(|| kw_args.get("s"))
+                    .ok_or_else(|| {
+                        StarlarkError(format!("{loc}: json.indent requires string argument"))
+                    })?;
+                let Some(arg) = s_val.as_str() else {
+                    return Err(StarlarkError(format!(
+                        "{loc}: in call to indent(), parameter 's' got value of type '{}', want 'string'",
+                        s_val.type_name()
+                    )));
+                };
+                let prefix = match kw_args.get("prefix") {
+                    None => "",
+                    Some(Value::String(p)) => p.as_str(),
+                    Some(other) => {
+                        return Err(StarlarkError(format!(
+                            "{loc}: in call to indent(), parameter 'prefix' got value of type '{}', want 'string'",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let indent = match kw_args.get("indent") {
+                    None => "\t",
+                    Some(Value::String(p)) => p.as_str(),
+                    Some(other) => {
+                        return Err(StarlarkError(format!(
+                            "{loc}: in call to indent(), parameter 'indent' got value of type '{}', want 'string'",
+                            other.type_name()
+                        )));
+                    }
+                };
+                Ok(Value::String(json_indent(arg, prefix, indent)?))
+            }
+            "json.encode_indent" => {
+                if pos_args.len() > 1 {
+                    return Err(with_loc(
+                        StarlarkError(format!(
+                            "json.encode_indent() accepts no more than 1 positional argument but got {}",
+                            pos_args.len()
+                        )),
+                        loc,
+                    ));
+                }
+                for k in kw_args.keys() {
+                    if k != "x" && k != "prefix" && k != "indent" {
+                        return Err(with_loc(
+                            StarlarkError(format!(
+                                "json.encode_indent() got unexpected keyword argument '{k}'"
+                            )),
+                            loc,
+                        ));
+                    }
+                }
+                if !pos_args.is_empty() && kw_args.contains_key("x") {
+                    return Err(with_loc(
+                        StarlarkError(
+                            "json.encode_indent() got multiple values for parameter 'x'"
+                                .to_string(),
+                        ),
+                        loc,
+                    ));
+                }
+                let arg = pos_args
+                    .first()
+                    .or_else(|| kw_args.get("x"))
+                    .ok_or_else(|| {
+                        StarlarkError(format!("{loc}: json.encode_indent requires 1 argument"))
+                    })?;
+                let prefix = match kw_args.get("prefix") {
+                    None => "",
+                    Some(Value::String(p)) => p.as_str(),
+                    Some(other) => {
+                        return Err(StarlarkError(format!(
+                            "{loc}: in call to encode_indent(), parameter 'prefix' got value of type '{}', want 'string'",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let indent = match kw_args.get("indent") {
+                    None => "\t",
+                    Some(Value::String(p)) => p.as_str(),
+                    Some(other) => {
+                        return Err(StarlarkError(format!(
+                            "{loc}: in call to encode_indent(), parameter 'indent' got value of type '{}', want 'string'",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let encoded = self.json_encode_ctx(arg)?;
+                Ok(Value::String(json_indent(&encoded, prefix, indent)?))
+            }
+            _ => unreachable!(),
+        }
+    }
 }
 
-fn slice_sequence<T: Clone>(
+fn inc_iter_count(val: &Value) {
+    match val {
+        Value::List(l) => l.lock().unwrap().iter_count += 1,
+        Value::Dict(d) => d.lock().unwrap().iter_count += 1,
+        Value::Set(s) => s.lock().unwrap().iter_count += 1,
+        _ => {}
+    }
+}
+
+fn dec_iter_count(val: &Value) {
+    match val {
+        Value::List(l) => l.lock().unwrap().iter_count -= 1,
+        Value::Dict(d) => d.lock().unwrap().iter_count -= 1,
+        Value::Set(s) => s.lock().unwrap().iter_count -= 1,
+        _ => {}
+    }
+}
+
+fn floored_float_mod(a: f64, b: f64) -> f64 {
+    let mut r = a % b;
+    if r != 0.0 && (r < 0.0) != (b < 0.0) {
+        r += b;
+    } else if r == 0.0 {
+        r = 0.0f64.copysign(b);
+    }
+    r
+}
+
+fn parse_slice_operand(val: Option<&Value>, what: &str) -> Result<Option<i64>, StarlarkError> {
+    match val {
+        None | Some(Value::None) => Ok(None),
+        Some(v) => Ok(Some(to_int32(v, what)? as i64)),
+    }
+}
+
+fn is_known_builtin_name(name: &str) -> bool {
+    syntax::checks::UNIVERSE.contains(&name)
+        || matches!(
+            name,
+            "select"
+                | "depset"
+                | "glob"
+                | "struct"
+                | "provider"
+                | "rule"
+                | "repository_rule"
+                | "module_extension"
+                | "aspect"
+                | "tag_class"
+                | "Label"
+                | "exports_files"
+                | "package"
+                | "licenses"
+                | "register_toolchains"
+                | "register_execution_platforms"
+                | "chr"
+                | "ord"
+        )
+}
+
+fn slice_sequence_i64<T: Clone>(
     seq: &[T],
-    start_val: Option<&Value>,
-    end_val: Option<&Value>,
+    start_val: Option<i64>,
+    end_val: Option<i64>,
     step: i64,
 ) -> Vec<T> {
     let len = seq.len() as i64;
     if step > 0 {
-        let start = match start_val.and_then(|v| v.as_i64()) {
+        let start = match start_val {
             Some(i) if i < 0 => (len + i).max(0),
             Some(i) => i.min(len),
             None => 0,
         };
-        let end = match end_val.and_then(|v| v.as_i64()) {
+        let end = match end_val {
             Some(i) if i < 0 => (len + i).max(0),
             Some(i) => i.min(len),
             None => len,
@@ -4078,12 +4759,12 @@ fn slice_sequence<T: Clone>(
         }
         out
     } else {
-        let start = match start_val.and_then(|v| v.as_i64()) {
+        let start = match start_val {
             Some(i) if i < 0 => len + i,
             Some(i) => i.min(len - 1),
             None => len - 1,
         };
-        let end = match end_val.and_then(|v| v.as_i64()) {
+        let end = match end_val {
             Some(i) if i < 0 => len + i,
             Some(i) => i,
             None => -1,
@@ -4192,8 +4873,9 @@ my_cc_macro("engine", extra_deps = ["//base"])
             Some(&Value::Int(BigInt::from_i64(7)))
         );
 
-        // Spot Check 3: Chained comparisons
-        ctx.eval_str(r#"sc3 = 1 < 5 < 10"#).unwrap();
+        // Spot Check 3: Non-associative comparisons require parentheses
+        assert!(ctx.eval_str(r#"sc3 = 1 < 5 < 10"#).is_err());
+        ctx.eval_str(r#"sc3 = (1 < 5) and (5 < 10)"#).unwrap();
         assert_eq!(ctx.globals.get("sc3"), Some(&Value::Bool(true)));
 
         // Spot Check 4: Negative slicing
@@ -4295,7 +4977,7 @@ same = (l1 == l2)
 /// Whether `msg` already starts with a `path:line:col: ` position.
 /// Prefixes `e` with `loc` unless it already starts with a location.
 fn with_loc(e: StarlarkError, loc: &Location) -> StarlarkError {
-    if has_location_prefix(&e.0) {
+    if has_location_prefix(&e.0) || (loc.file.is_empty() && loc.line == 0) {
         e
     } else {
         StarlarkError(format!("{loc}: {}", e.0))
@@ -4308,44 +4990,20 @@ fn has_location_prefix(msg: &str) -> bool {
     matches!((l, c, rest), (Some(l), Some(c), Some(_)) if !l.is_empty() && l.bytes().all(|b| b.is_ascii_digit()) && !c.is_empty() && c.bytes().all(|b| b.is_ascii_digit()))
 }
 
-/// Keyword names of a call in source order; entries contributed by `**kwargs` follow, in sorted
-/// order of the merged map (the evaluator does not retain their original order).
-fn kw_call_order(
-    kw_args: &[(String, Expr)],
-    merged: Option<&BTreeMap<String, Value>>,
-) -> Vec<String> {
-    let mut out: Vec<String> = kw_args.iter().map(|(k, _)| k.clone()).collect();
-    if let Some(m) = merged {
-        for k in m.keys() {
-            if !out.contains(k) {
-                out.push(k.clone());
-            }
-        }
-    }
-    out
-}
-
 /// `f(*x)`: `x` must be iterable.
 fn star_args_seq(v: &Value) -> Result<Vec<Value>, StarlarkError> {
-    if matches!(
-        v,
-        Value::Int(_)
-            | Value::Bool(_)
-            | Value::None
-            | Value::UserFunction(_)
-            | Value::BuiltinFunction(_)
-    ) {
-        return Err(StarlarkError(format!(
+    eval::builtins::value_to_sequence(v).map_err(|_| {
+        StarlarkError(format!(
             "argument after * must be an iterable, not {}",
             v.type_name()
-        )));
-    }
-    eval::builtins::value_to_sequence(v)
+        ))
+    })
 }
 
 /// `f(**x)`: `x` must be a dict with string keys that do not repeat explicit keyword arguments.
 fn merge_star_kwargs(
     eval_kw: &mut BTreeMap<String, Value>,
+    kw_order: &mut Vec<String>,
     v: &Value,
 ) -> Result<Option<String>, StarlarkError> {
     let Value::Dict(d) = v else {
@@ -4363,8 +5021,12 @@ fn merge_star_kwargs(
                 k.type_name()
             )));
         };
-        if eval_kw.contains_key(s) && dup.is_none() {
-            dup = Some(s.to_string());
+        if eval_kw.contains_key(s) {
+            if dup.is_none() {
+                dup = Some(s.to_string());
+            }
+        } else {
+            kw_order.push(s.to_string());
         }
         eval_kw.insert(s.to_string(), val.clone());
     }

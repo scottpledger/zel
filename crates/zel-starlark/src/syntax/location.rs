@@ -30,14 +30,29 @@ impl Location {
             column,
         }
     }
+
+    pub fn from_file(file: impl Into<String>) -> Self {
+        Self {
+            file: file.into(),
+            line: 0,
+            column: 0,
+        }
+    }
+
+    pub fn builtin() -> Self {
+        Self::from_file("<builtin>")
+    }
 }
 
 impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.file.is_empty() {
-            write!(f, "{}:{}", self.line, self.column)
-        } else {
-            write!(f, "{}:{}:{}", self.file, self.line, self.column)
+        f.write_str(&self.file)?;
+        if self.line != 0 {
+            write!(f, ":{}", self.line)?;
+            if self.column != 0 {
+                write!(f, ":{}", self.column)?;
+            }
         }
+        Ok(())
     }
 }

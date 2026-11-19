@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use crate::eval::builtins::universal::value_to_sequence;
+use crate::eval::builtins::universal::{to_int32, value_to_sequence};
 use crate::eval::format::str_format;
 use crate::types::list::{StarlarkError, StarlarkList};
 use crate::types::mutability::Mutability;
@@ -54,19 +54,31 @@ pub fn eval_string_method_in(
                 .first()
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| StarlarkError("count() requires sub string".to_string()))?;
-            let slice = get_slice(s, pos_args.get(1), pos_args.get(2))?;
+            let slice = get_slice_utf16(s, pos_args.get(1), pos_args.get(2))?;
             if sub.is_empty() {
                 Ok(Value::Int(crate::bigint::BigInt::from_u64(
-                    (slice.chars().count() + 1) as u64,
+                    (slice.len() + 1) as u64,
                 )))
             } else {
-                let cnt = slice.matches(sub).count();
+                let sub_u16: Vec<u16> = sub.encode_utf16().collect();
+                let mut cnt = 0usize;
+                let mut i = 0usize;
+                while i + sub_u16.len() <= slice.len() {
+                    if slice[i..i + sub_u16.len()] == sub_u16[..] {
+                        cnt += 1;
+                        i += sub_u16.len();
+                    } else {
+                        i += 1;
+                    }
+                }
                 Ok(Value::Int(crate::bigint::BigInt::from_u64(cnt as u64)))
             }
         }
         "elems" => {
-            let elems: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
-            // Bazel returns a list, whose slice `[:]` is a mutable copy.
+            let elems: Vec<Value> = s
+                .encode_utf16()
+                .map(|u| Value::String(String::from_utf16_lossy(&[u])))
+                .collect();
             Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
                 elems,
                 Arc::clone(mutability),
@@ -74,15 +86,25 @@ pub fn eval_string_method_in(
         }
         "endswith" => {
             let (start, end) = (pos_args.get(1), pos_args.get(2));
-            let slice = get_slice(s, start, end)?;
+            let slice = get_slice_utf16(s, start, end)?;
             match pos_args.first() {
-                Some(Value::String(suffix)) => Ok(Value::Bool(slice.ends_with(suffix))),
+                Some(Value::String(suffix)) => {
+                    let suf_u16: Vec<u16> = suffix.encode_utf16().collect();
+                    Ok(Value::Bool(slice.ends_with(&suf_u16)))
+                }
                 Some(Value::Tuple(suffixes)) => {
+                    for (i, suf) in suffixes.iter().enumerate() {
+                        if !matches!(suf, Value::String(_)) {
+                            return Err(StarlarkError(format!(
+                                "at index {i} of sub, got element of type {}, want string",
+                                suf.type_name()
+                            )));
+                        }
+                    }
                     for suf in suffixes {
-                        if let Some(suffix_str) = suf.as_str() {
-                            if slice.ends_with(suffix_str) {
-                                return Ok(Value::Bool(true));
-                            }
+                        let suf_u16: Vec<u16> = suf.as_str().unwrap().encode_utf16().collect();
+                        if slice.ends_with(&suf_u16) {
+                            return Ok(Value::Bool(true));
                         }
                     }
                     Ok(Value::Bool(false))
@@ -97,13 +119,11 @@ pub fn eval_string_method_in(
                 .first()
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| StarlarkError("find() requires sub string".to_string()))?;
-            let (start_idx, _) = get_offsets(s, pos_args.get(1), pos_args.get(2));
-            let slice = get_slice(s, pos_args.get(1), pos_args.get(2))?;
-            if let Some(pos) = slice.find(sub) {
-                // Character index
-                let char_offset = slice[..pos].chars().count();
+            let (start_idx, _) = get_offsets_utf16(s, pos_args.get(1), pos_args.get(2))?;
+            let slice = get_slice_utf16(s, pos_args.get(1), pos_args.get(2))?;
+            if let Some(pos) = find_sub_utf16(&slice, &sub.encode_utf16().collect::<Vec<_>>()) {
                 Ok(Value::Int(crate::bigint::BigInt::from_i64(
-                    (start_idx + char_offset) as i64,
+                    (start_idx + pos) as i64,
                 )))
             } else {
                 Ok(Value::Int(crate::bigint::BigInt::from_i64(-1)))
@@ -115,15 +135,14 @@ pub fn eval_string_method_in(
                 .first()
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| StarlarkError("index() requires sub string".to_string()))?;
-            let (start_idx, _) = get_offsets(s, pos_args.get(1), pos_args.get(2));
-            let slice = get_slice(s, pos_args.get(1), pos_args.get(2))?;
-            if let Some(pos) = slice.find(sub) {
-                let char_offset = slice[..pos].chars().count();
+            let (start_idx, _) = get_offsets_utf16(s, pos_args.get(1), pos_args.get(2))?;
+            let slice = get_slice_utf16(s, pos_args.get(1), pos_args.get(2))?;
+            if let Some(pos) = find_sub_utf16(&slice, &sub.encode_utf16().collect::<Vec<_>>()) {
                 Ok(Value::Int(crate::bigint::BigInt::from_i64(
-                    (start_idx + char_offset) as i64,
+                    (start_idx + pos) as i64,
                 )))
             } else {
-                Err(StarlarkError(format!("substring not found: {sub:?}")))
+                Err(StarlarkError("substring not found".to_string()))
             }
         }
         "isalnum" => {
@@ -246,33 +265,121 @@ pub fn eval_string_method_in(
             ]))
         }
         "removeprefix" => {
-            let prefix = pos_args.first().and_then(|v| v.as_str()).unwrap_or("");
+            if pos_args.len() > 1 {
+                return Err(StarlarkError(format!(
+                    "removeprefix() accepts no more than 1 positional argument but got {}",
+                    pos_args.len()
+                )));
+            }
+            for k in kw_args.keys() {
+                if k != "prefix" {
+                    return Err(StarlarkError(format!(
+                        "removeprefix() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            if !pos_args.is_empty() && kw_args.contains_key("prefix") {
+                return Err(StarlarkError(
+                    "removeprefix() got multiple values for parameter 'prefix'".to_string(),
+                ));
+            }
+            let p_val = pos_args
+                .first()
+                .or_else(|| kw_args.get("prefix"))
+                .ok_or_else(|| {
+                    StarlarkError(
+                        "removeprefix() missing 1 required positional argument: prefix".to_string(),
+                    )
+                })?;
+            let Some(prefix) = p_val.as_str() else {
+                return Err(StarlarkError(format!(
+                    "in call to removeprefix(), parameter 'prefix' got value of type '{}', want 'string'",
+                    p_val.type_name()
+                )));
+            };
             Ok(Value::String(
                 s.strip_prefix(prefix).unwrap_or(s).to_string(),
             ))
         }
         "removesuffix" => {
-            let suffix = pos_args.first().and_then(|v| v.as_str()).unwrap_or("");
+            if pos_args.len() > 1 {
+                return Err(StarlarkError(format!(
+                    "removesuffix() accepts no more than 1 positional argument but got {}",
+                    pos_args.len()
+                )));
+            }
+            for k in kw_args.keys() {
+                if k != "suffix" {
+                    return Err(StarlarkError(format!(
+                        "removesuffix() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            if !pos_args.is_empty() && kw_args.contains_key("suffix") {
+                return Err(StarlarkError(
+                    "removesuffix() got multiple values for parameter 'suffix'".to_string(),
+                ));
+            }
+            let s_val = pos_args
+                .first()
+                .or_else(|| kw_args.get("suffix"))
+                .ok_or_else(|| {
+                    StarlarkError(
+                        "removesuffix() missing 1 required positional argument: suffix".to_string(),
+                    )
+                })?;
+            let Some(suffix) = s_val.as_str() else {
+                return Err(StarlarkError(format!(
+                    "in call to removesuffix(), parameter 'suffix' got value of type '{}', want 'string'",
+                    s_val.type_name()
+                )));
+            };
             Ok(Value::String(
                 s.strip_suffix(suffix).unwrap_or(s).to_string(),
             ))
         }
         "replace" => {
-            let old = pos_args.first().and_then(|v| v.as_str()).unwrap_or("");
-            let new = pos_args.get(1).and_then(|v| v.as_str()).unwrap_or("");
-            let maxsplit = pos_args
-                .get(2)
-                .or_else(|| kw_args.get("maxsplit"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(-1);
+            if !kw_args.is_empty() {
+                let k = kw_args.keys().next().unwrap();
+                return Err(StarlarkError(format!(
+                    "replace() got unexpected keyword argument '{k}'"
+                )));
+            }
+            if pos_args.len() < 2 {
+                return Err(StarlarkError(
+                    "replace() missing required positional arguments: old, new".to_string(),
+                ));
+            }
+            if pos_args.len() > 3 {
+                return Err(StarlarkError(format!(
+                    "replace() accepts no more than 3 positional arguments but got {}",
+                    pos_args.len()
+                )));
+            }
+            let Some(old) = pos_args[0].as_str() else {
+                return Err(StarlarkError(format!(
+                    "in call to replace(), parameter 'old' got value of type '{}', want 'string'",
+                    pos_args[0].type_name()
+                )));
+            };
+            let Some(new) = pos_args[1].as_str() else {
+                return Err(StarlarkError(format!(
+                    "in call to replace(), parameter 'new' got value of type '{}', want 'string'",
+                    pos_args[1].type_name()
+                )));
+            };
+            let count = match pos_args.get(2) {
+                None | Some(Value::None) => -1i32,
+                Some(v) => to_int32(v, "count")?,
+            };
 
-            if maxsplit == 0 {
+            if count == 0 {
                 return Ok(Value::String(s.to_string()));
             }
-            if maxsplit < 0 {
+            if count < 0 {
                 Ok(Value::String(s.replace(old, new)))
             } else {
-                Ok(Value::String(s.replacen(old, new, maxsplit as usize)))
+                Ok(Value::String(s.replacen(old, new, count as usize)))
             }
         }
         "rfind" => {
@@ -280,12 +387,11 @@ pub fn eval_string_method_in(
                 .first()
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| StarlarkError("rfind() requires sub string".to_string()))?;
-            let (start_idx, _) = get_offsets(s, pos_args.get(1), pos_args.get(2));
-            let slice = get_slice(s, pos_args.get(1), pos_args.get(2))?;
-            if let Some(pos) = slice.rfind(sub) {
-                let char_offset = slice[..pos].chars().count();
+            let (start_idx, _) = get_offsets_utf16(s, pos_args.get(1), pos_args.get(2))?;
+            let slice = get_slice_utf16(s, pos_args.get(1), pos_args.get(2))?;
+            if let Some(pos) = rfind_sub_utf16(&slice, &sub.encode_utf16().collect::<Vec<_>>()) {
                 Ok(Value::Int(crate::bigint::BigInt::from_i64(
-                    (start_idx + char_offset) as i64,
+                    (start_idx + pos) as i64,
                 )))
             } else {
                 Ok(Value::Int(crate::bigint::BigInt::from_i64(-1)))
@@ -296,15 +402,14 @@ pub fn eval_string_method_in(
                 .first()
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| StarlarkError("rindex() requires sub string".to_string()))?;
-            let (start_idx, _) = get_offsets(s, pos_args.get(1), pos_args.get(2));
-            let slice = get_slice(s, pos_args.get(1), pos_args.get(2))?;
-            if let Some(pos) = slice.rfind(sub) {
-                let char_offset = slice[..pos].chars().count();
+            let (start_idx, _) = get_offsets_utf16(s, pos_args.get(1), pos_args.get(2))?;
+            let slice = get_slice_utf16(s, pos_args.get(1), pos_args.get(2))?;
+            if let Some(pos) = rfind_sub_utf16(&slice, &sub.encode_utf16().collect::<Vec<_>>()) {
                 Ok(Value::Int(crate::bigint::BigInt::from_i64(
-                    (start_idx + char_offset) as i64,
+                    (start_idx + pos) as i64,
                 )))
             } else {
-                Err(StarlarkError(format!("substring not found: {sub:?}")))
+                Err(StarlarkError("substring not found".to_string()))
             }
         }
         "rpartition" => {
@@ -385,15 +490,7 @@ pub fn eval_string_method_in(
             let maxsplit_val = pos_args.get(1).or_else(|| kw_args.get("maxsplit"));
             let maxsplit = match maxsplit_val {
                 None => -1i64,
-                Some(Value::Int(i)) => i
-                    .to_i64()
-                    .ok_or_else(|| StarlarkError("maxsplit out of range".to_string()))?,
-                Some(other) => {
-                    return Err(StarlarkError(format!(
-                    "in call to rsplit(), parameter 'maxsplit' got value of type '{}', want 'int'",
-                    other.type_name()
-                )))
-                }
+                Some(v) => to_int32(v, "maxsplit")? as i64,
             };
 
             let mut parts: Vec<String> = Vec::new();
@@ -466,15 +563,7 @@ pub fn eval_string_method_in(
             let maxsplit_val = pos_args.get(1).or_else(|| kw_args.get("maxsplit"));
             let maxsplit = match maxsplit_val {
                 None => -1i64,
-                Some(Value::Int(i)) => i
-                    .to_i64()
-                    .ok_or_else(|| StarlarkError("maxsplit out of range".to_string()))?,
-                Some(other) => {
-                    return Err(StarlarkError(format!(
-                    "in call to split(), parameter 'maxsplit' got value of type '{}', want 'int'",
-                    other.type_name()
-                )))
-                }
+                Some(v) => to_int32(v, "maxsplit")? as i64,
             };
 
             let mut parts: Vec<String> = Vec::new();
@@ -500,7 +589,34 @@ pub fn eval_string_method_in(
             )))))
         }
         "splitlines" => {
-            let keepends = pos_args.first().map(|v| v.is_truthy()).unwrap_or(false);
+            if pos_args.len() > 1 {
+                return Err(StarlarkError(format!(
+                    "splitlines() accepts no more than 1 positional argument but got {}",
+                    pos_args.len()
+                )));
+            }
+            for k in kw_args.keys() {
+                if k != "keepends" {
+                    return Err(StarlarkError(format!(
+                        "splitlines() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            if !pos_args.is_empty() && kw_args.contains_key("keepends") {
+                return Err(StarlarkError(
+                    "splitlines() got multiple values for parameter 'keepends'".to_string(),
+                ));
+            }
+            let keepends = match pos_args.first().or_else(|| kw_args.get("keepends")) {
+                None => false,
+                Some(Value::Bool(b)) => *b,
+                Some(other) => {
+                    return Err(StarlarkError(format!(
+                        "in call to splitlines(), parameter 'keepends' got value of type '{}', want 'bool'",
+                        other.type_name()
+                    )));
+                }
+            };
             let mut lines = Vec::new();
             let mut start = 0;
             let bytes = s.as_bytes();
@@ -534,15 +650,25 @@ pub fn eval_string_method_in(
         }
         "startswith" => {
             let (start, end) = (pos_args.get(1), pos_args.get(2));
-            let slice = get_slice(s, start, end)?;
+            let slice = get_slice_utf16(s, start, end)?;
             match pos_args.first() {
-                Some(Value::String(prefix)) => Ok(Value::Bool(slice.starts_with(prefix))),
+                Some(Value::String(prefix)) => {
+                    let pre_u16: Vec<u16> = prefix.encode_utf16().collect();
+                    Ok(Value::Bool(slice.starts_with(&pre_u16)))
+                }
                 Some(Value::Tuple(prefixes)) => {
+                    for (i, pre) in prefixes.iter().enumerate() {
+                        if !matches!(pre, Value::String(_)) {
+                            return Err(StarlarkError(format!(
+                                "at index {i} of sub, got element of type {}, want string",
+                                pre.type_name()
+                            )));
+                        }
+                    }
                     for pre in prefixes {
-                        if let Some(prefix_str) = pre.as_str() {
-                            if slice.starts_with(prefix_str) {
-                                return Ok(Value::Bool(true));
-                            }
+                        let pre_u16: Vec<u16> = pre.as_str().unwrap().encode_utf16().collect();
+                        if slice.starts_with(&pre_u16) {
+                            return Ok(Value::Bool(true));
                         }
                     }
                     Ok(Value::Bool(false))
@@ -562,18 +688,18 @@ pub fn eval_string_method_in(
         }
         "title" => {
             let mut out = String::new();
-            let mut prev_alphanumeric = false;
+            let mut prev_letter = false;
             for c in s.chars() {
                 if c.is_alphabetic() {
-                    if !prev_alphanumeric {
+                    if !prev_letter {
                         out.extend(c.to_uppercase());
                     } else {
                         out.extend(c.to_lowercase());
                     }
-                    prev_alphanumeric = true;
+                    prev_letter = true;
                 } else {
                     out.push(c);
-                    prev_alphanumeric = c.is_alphanumeric();
+                    prev_letter = false;
                 }
             }
             Ok(Value::String(out))
@@ -585,41 +711,69 @@ pub fn eval_string_method_in(
     }
 }
 
-fn get_offsets(s: &str, start_val: Option<&Value>, end_val: Option<&Value>) -> (usize, usize) {
-    let len = s.chars().count();
-    let s_idx = match start_val.and_then(|v| v.as_i64()) {
-        Some(i) if i < 0 => (len as isize + i as isize).max(0) as usize,
-        Some(i) => (i as usize).min(len),
-        None => 0,
-    };
-    let e_idx = match end_val.and_then(|v| v.as_i64()) {
-        Some(i) if i < 0 => (len as isize + i as isize).max(0) as usize,
-        Some(i) => (i as usize).min(len),
-        None => len,
-    };
-    (s_idx.min(e_idx), e_idx)
-}
-
-fn get_slice<'a>(
-    s: &'a str,
+fn get_offsets_utf16(
+    s: &str,
     start_val: Option<&Value>,
     end_val: Option<&Value>,
-) -> Result<&'a str, StarlarkError> {
-    let (s_idx, e_idx) = get_offsets(s, start_val, end_val);
-    let mut byte_start = s.len();
-    let mut byte_end = s.len();
-    for (char_idx, (b_idx, _)) in s.char_indices().enumerate() {
-        if char_idx == s_idx {
-            byte_start = b_idx;
+) -> Result<(usize, usize), StarlarkError> {
+    let len = s.encode_utf16().count() as i64;
+    let s_idx = match start_val {
+        None | Some(Value::None) => 0usize,
+        Some(v) => {
+            let i = to_int32(v, "start")? as i64;
+            if i < 0 {
+                (len + i).max(0) as usize
+            } else {
+                i.min(len) as usize
+            }
         }
-        if char_idx == e_idx {
-            byte_end = b_idx;
-            break;
+    };
+    let e_idx = match end_val {
+        None | Some(Value::None) => len as usize,
+        Some(v) => {
+            let i = to_int32(v, "end")? as i64;
+            if i < 0 {
+                (len + i).max(0) as usize
+            } else {
+                i.min(len) as usize
+            }
         }
-    }
+    };
+    Ok((s_idx.min(e_idx), e_idx))
+}
+
+fn get_slice_utf16(
+    s: &str,
+    start_val: Option<&Value>,
+    end_val: Option<&Value>,
+) -> Result<Vec<u16>, StarlarkError> {
+    let (s_idx, e_idx) = get_offsets_utf16(s, start_val, end_val)?;
+    let units: Vec<u16> = s.encode_utf16().collect();
     if s_idx >= e_idx {
-        Ok("")
+        Ok(Vec::new())
     } else {
-        Ok(&s[byte_start..byte_end])
+        Ok(units[s_idx..e_idx].to_vec())
     }
+}
+
+fn find_sub_utf16(hay: &[u16], needle: &[u16]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if needle.len() > hay.len() {
+        return None;
+    }
+    (0..=hay.len() - needle.len()).find(|&i| hay[i..i + needle.len()] == *needle)
+}
+
+fn rfind_sub_utf16(hay: &[u16], needle: &[u16]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(hay.len());
+    }
+    if needle.len() > hay.len() {
+        return None;
+    }
+    (0..=hay.len() - needle.len())
+        .rev()
+        .find(|&i| hay[i..i + needle.len()] == *needle)
 }

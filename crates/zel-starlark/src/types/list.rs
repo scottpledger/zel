@@ -153,22 +153,16 @@ impl StarlarkList {
     }
 
     pub fn pop(&mut self, index: Option<i64>) -> Result<Value, StarlarkError> {
-        self.check_mutable()?;
-        if self.elements.is_empty() {
-            return Err(StarlarkError("pop from empty list".to_string()));
-        }
         let len = self.elements.len() as i64;
-        let idx = match index {
-            Some(i) => {
-                let actual = if i < 0 { len + i } else { i };
-                if actual < 0 || actual >= len {
-                    return Err(StarlarkError("pop index out of range".to_string()));
-                }
-                actual as usize
-            }
-            None => self.elements.len() - 1,
-        };
-        Ok(self.elements.remove(idx))
+        let i = index.unwrap_or(-1);
+        let actual = if i < 0 { len + i } else { i };
+        if actual < 0 || actual >= len {
+            return Err(StarlarkError(format!(
+                "index out of range (index is {i}, but sequence has {len} elements)"
+            )));
+        }
+        self.check_mutable()?;
+        Ok(self.elements.remove(actual as usize))
     }
 
     pub fn remove(&mut self, item: &Value) -> Result<(), StarlarkError> {
@@ -177,7 +171,7 @@ impl StarlarkList {
             .elements
             .iter()
             .position(|x| x == item)
-            .ok_or_else(|| StarlarkError(format!("item {item:?} not found in list")))?;
+            .ok_or_else(|| StarlarkError(format!("item {} not found in list", item.repr())))?;
         self.elements.remove(pos);
         Ok(())
     }
@@ -202,6 +196,9 @@ impl StarlarkList {
                 }
             }
         }
-        Err(StarlarkError(format!("item {item:?} not found in list")))
+        Err(StarlarkError(format!(
+            "item {} not found in list",
+            item.repr()
+        )))
     }
 }

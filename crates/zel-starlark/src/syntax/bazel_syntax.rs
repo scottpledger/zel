@@ -172,9 +172,41 @@ impl ParseOutput {
     }
 }
 
+/// Converts raw file bytes to a Rust `String` without `U+FFFD` replacement: valid UTF-8 is kept
+/// verbatim, while non-UTF-8 inputs preserve each raw byte `b` as `char::from(b)` (Latin-1).
+pub fn source_from_bytes(bytes: &[u8]) -> String {
+    match std::str::from_utf8(bytes) {
+        Ok(s) => s.to_string(),
+        Err(_) => bytes.iter().map(|&b| b as char).collect(),
+    }
+}
+
+fn decode_latin1_if_utf8(s: String, decode_utf8: bool) -> String {
+    if !decode_utf8 || s.is_ascii() {
+        return s;
+    }
+    if s.chars().all(|c| (c as u32) <= 0xff) {
+        let raw: Vec<u8> = s.chars().map(|c| c as u8).collect();
+        if let Ok(utf8) = std::str::from_utf8(&raw) {
+            return utf8.to_string();
+        }
+    }
+    s
+}
+
+/// Parses raw file `bytes` as Latin-1 (1 column per byte) without lossy UTF-8 replacement.
+pub fn parse_bytes(file: &str, bytes: &[u8]) -> ParseOutput {
+    let is_utf8 = std::str::from_utf8(bytes).is_ok();
+    parse_inner(file, bytes, is_utf8)
+}
+
 /// Parses `src` and returns scanner/parser errors plus the structural resolver errors.
 pub fn parse(file: &str, src: &str) -> ParseOutput {
-    let buf: Vec<char> = src.as_bytes().iter().map(|&b| b as char).collect();
+    parse_inner(file, src.as_bytes(), true)
+}
+
+fn parse_inner(file: &str, bytes: &[u8], decode_utf8: bool) -> ParseOutput {
+    let buf: Vec<char> = bytes.iter().map(|&b| b as char).collect();
     let mut p = Parser::new(Lexer::new(file, buf));
     p.parse_file_input();
     let mut rerrs = std::mem::take(&mut p.rerrors);
@@ -236,11 +268,11 @@ pub fn parse(file: &str, src: &str) -> ParseOutput {
                 .into_iter()
                 .map(|(n, a)| {
                     let (l, c) = p.lexer.location(a);
-                    (n, l, c)
+                    (decode_latin1_if_utf8(n, decode_utf8), l, c)
                 })
                 .collect();
             LoadInfo {
-                label,
+                label: decode_latin1_if_utf8(label, decode_utf8),
                 line,
                 column,
                 symbols,

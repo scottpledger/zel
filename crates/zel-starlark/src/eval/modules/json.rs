@@ -212,9 +212,19 @@ pub fn json_decode(s: &str, default: Option<Value>) -> Result<Value, StarlarkErr
 }
 
 pub fn json_indent(s: &str, prefix: &str, indent: &str) -> Result<String, StarlarkError> {
+    // Validate input JSON first (stopping after one top-level value if trailing whitespace only,
+    // or matching Bazel's single-value scanner).
+    let mut validator = JsonDecoder::new(s);
+    validator.skip_ws();
+    let _ = validator.parse_value()?;
+    let end_char_idx = validator.pos;
+
     let mut out = String::new();
-    let chars: Vec<char> = s.chars().collect();
+    let chars: Vec<char> = s.chars().take(end_char_idx).collect();
     let mut i = 0;
+    while i < chars.len() && matches!(chars[i], ' ' | '\t' | '\n' | '\r') {
+        i += 1;
+    }
     let mut depth = 0usize;
     let mut in_str = false;
 
@@ -225,7 +235,16 @@ pub fn json_indent(s: &str, prefix: &str, indent: &str) -> Result<String, Starla
                 out.push(c);
                 if i + 1 < chars.len() {
                     i += 1;
-                    out.push(chars[i]);
+                    let esc = chars[i];
+                    out.push(esc);
+                    if esc == 'u' {
+                        for _ in 0..4 {
+                            if i + 1 < chars.len() {
+                                i += 1;
+                                out.push(chars[i]);
+                            }
+                        }
+                    }
                 }
             } else if c == '"' {
                 in_str = false;
@@ -244,9 +263,9 @@ pub fn json_indent(s: &str, prefix: &str, indent: &str) -> Result<String, Starla
             }
             '{' | '[' => {
                 out.push(c);
-                // Check if immediately closed
                 let mut next_idx = i + 1;
-                while next_idx < chars.len() && chars[next_idx].is_whitespace() {
+                while next_idx < chars.len() && matches!(chars[next_idx], ' ' | '\t' | '\n' | '\r')
+                {
                     next_idx += 1;
                 }
                 if next_idx < chars.len()
@@ -285,7 +304,7 @@ pub fn json_indent(s: &str, prefix: &str, indent: &str) -> Result<String, Starla
                     out.push_str(indent);
                 }
             }
-            c if c.is_whitespace() => {}
+            ' ' | '\t' | '\n' | '\r' => {}
             other => out.push(other),
         }
         i += 1;

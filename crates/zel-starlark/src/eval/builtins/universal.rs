@@ -145,9 +145,11 @@ pub fn dir_attrs(x: &Value) -> Vec<String> {
                 .iter()
                 .map(|s| (*s).to_string()),
             ),
-            "dotted_version" => {
-                attrs.extend(["compare_to", "version"].iter().map(|s| (*s).to_string()))
-            }
+            "dotted_version" => attrs.extend(
+                ["compare_to", "to_string", "version"]
+                    .iter()
+                    .map(|s| (*s).to_string()),
+            ),
             "repository_ctx" => attrs.extend(
                 [
                     "attr",
@@ -274,6 +276,60 @@ pub fn eval_universal_function(
     eval_universal_function_in(name, pos_args, kw_args, &Mutability::create())
 }
 
+/// Converts `val` to a signed 32-bit integer (`StarlarkInt.toInt`).
+pub fn to_int32(val: &Value, what: &str) -> Result<i32, StarlarkError> {
+    let Value::Int(i) = val else {
+        return Err(StarlarkError(format!(
+            "got {} for {what}, want int",
+            val.type_name()
+        )));
+    };
+    let Some(v64) = i.to_i64() else {
+        return Err(StarlarkError(format!(
+            "got {i} for {what}, want value in signed 32-bit range"
+        )));
+    };
+    i32::try_from(v64).map_err(|_| {
+        StarlarkError(format!(
+            "got {i} for {what}, want value in signed 32-bit range"
+        ))
+    })
+}
+
+fn bind_1pos<'a>(
+    fn_name: &str,
+    param: &str,
+    pos_args: &'a [Value],
+    kw_args: &'a BTreeMap<String, Value>,
+    optional: bool,
+) -> Result<Option<&'a Value>, StarlarkError> {
+    if pos_args.len() > 1 {
+        return Err(StarlarkError(format!(
+            "{fn_name}() accepts no more than 1 positional argument but got {}",
+            pos_args.len()
+        )));
+    }
+    for k in kw_args.keys() {
+        if k != param {
+            return Err(StarlarkError(format!(
+                "{fn_name}() got unexpected keyword argument '{k}'"
+            )));
+        }
+    }
+    if !pos_args.is_empty() && kw_args.contains_key(param) {
+        return Err(StarlarkError(format!(
+            "{fn_name}() got multiple values for parameter '{param}'"
+        )));
+    }
+    let val = pos_args.first().or_else(|| kw_args.get(param));
+    if val.is_none() && !optional {
+        return Err(StarlarkError(format!(
+            "{fn_name}() missing 1 required positional argument: {param}"
+        )));
+    }
+    Ok(val)
+}
+
 pub fn eval_universal_function_in(
     name: &str,
     pos_args: &[Value],
@@ -298,9 +354,7 @@ pub fn eval_universal_function_with_semantics(
 ) -> Result<Option<Value>, StarlarkError> {
     match name {
         "abs" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("abs() takes exactly one argument".to_string()))?;
+            let x = bind_1pos("abs", "x", pos_args, kw_args, false)?.unwrap();
             match x {
                 Value::Int(i) => Ok(Some(Value::Int(i.abs()))),
                 Value::Float(f) => Ok(Some(Value::Float(f.abs()))),
@@ -311,9 +365,16 @@ pub fn eval_universal_function_with_semantics(
             }
         }
         "all" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("all() takes exactly one argument".to_string()))?;
+            let x = bind_1pos("all", "elements", pos_args, kw_args, false)?.unwrap();
+            if let Value::Range(r) = x {
+                for i in 0..r.len {
+                    let v = r.start + (i as i64) * r.step;
+                    if v == 0 {
+                        return Ok(Some(Value::Bool(false)));
+                    }
+                }
+                return Ok(Some(Value::Bool(true)));
+            }
             let items = value_to_sequence(x)?;
             for item in items {
                 if !item.is_truthy() {
@@ -323,9 +384,16 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(Value::Bool(true)))
         }
         "any" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("any() takes exactly one argument".to_string()))?;
+            let x = bind_1pos("any", "elements", pos_args, kw_args, false)?.unwrap();
+            if let Value::Range(r) = x {
+                for i in 0..r.len {
+                    let v = r.start + (i as i64) * r.step;
+                    if v != 0 {
+                        return Ok(Some(Value::Bool(true)));
+                    }
+                }
+                return Ok(Some(Value::Bool(false)));
+            }
             let items = value_to_sequence(x)?;
             for item in items {
                 if item.is_truthy() {
@@ -335,38 +403,21 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(Value::Bool(false)))
         }
         "bool" => {
-            let b = pos_args.first().map(|v| v.is_truthy()).unwrap_or(false);
+            let x = bind_1pos("bool", "x", pos_args, kw_args, true)?;
+            let b = x.map(|v| v.is_truthy()).unwrap_or(false);
             Ok(Some(Value::Bool(b)))
         }
         "dict" => {
+            if pos_args.len() > 1 {
+                return Err(StarlarkError(format!(
+                    "dict() accepts no more than 1 positional argument but got {}",
+                    pos_args.len()
+                )));
+            }
             let mut dict = StarlarkDict::new_in(Arc::clone(mutability));
             if let Some(first) = pos_args.first() {
-                match first {
-                    Value::Dict(d) => {
-                        let entries = d.lock().unwrap().entries.clone();
-                        for (k, v) in entries {
-                            let _ = dict.insert(k, v);
-                        }
-                    }
-                    Value::List(l) => {
-                        let elems = l.lock().unwrap().elements.clone();
-                        for item in &elems {
-                            let (k, v) = unpack_pair(item)?;
-                            dict.insert(k, v)?;
-                        }
-                    }
-                    Value::Tuple(t) => {
-                        for item in t {
-                            let (k, v) = unpack_pair(item)?;
-                            dict.insert(k, v)?;
-                        }
-                    }
-                    other => {
-                        return Err(StarlarkError(format!(
-                            "cannot convert {} to dict",
-                            other.type_name()
-                        )));
-                    }
+                for (k, v) in unpack_dict_pairs(first, "dict")? {
+                    dict.insert(k, v)?;
                 }
             }
             for (k, v) in kw_args {
@@ -375,9 +426,7 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(Value::Dict(Arc::new(Mutex::new(dict)))))
         }
         "dir" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("dir() takes exactly one argument".to_string()))?;
+            let x = bind_1pos("dir", "x", pos_args, kw_args, false)?.unwrap();
             let attrs = dir_attrs(x);
             Ok(Some(Value::List(Arc::new(Mutex::new(
                 StarlarkList::new_in(
@@ -387,29 +436,58 @@ pub fn eval_universal_function_with_semantics(
             )))))
         }
         "enumerate" => {
-            let x = pos_args.first().ok_or_else(|| {
-                StarlarkError("enumerate() takes at least 1 argument".to_string())
-            })?;
-            let start = pos_args
-                .get(1)
-                .or_else(|| kw_args.get("start"))
-                .and_then(|v| v.as_i64())
-                .unwrap_or(0);
+            if pos_args.len() > 2 {
+                return Err(StarlarkError(format!(
+                    "enumerate() accepts no more than 2 positional arguments but got {}",
+                    pos_args.len()
+                )));
+            }
+            for k in kw_args.keys() {
+                if k != "list" && k != "start" {
+                    return Err(StarlarkError(format!(
+                        "enumerate() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            if !pos_args.is_empty() && kw_args.contains_key("list") {
+                return Err(StarlarkError(
+                    "enumerate() got multiple values for parameter 'list'".to_string(),
+                ));
+            }
+            if pos_args.len() >= 2 && kw_args.contains_key("start") {
+                return Err(StarlarkError(
+                    "enumerate() got multiple values for parameter 'start'".to_string(),
+                ));
+            }
+            let x = pos_args
+                .first()
+                .or_else(|| kw_args.get("list"))
+                .ok_or_else(|| {
+                    StarlarkError("enumerate() missing 1 required positional argument: list".into())
+                })?;
+            let start = match pos_args.get(1).or_else(|| kw_args.get("start")) {
+                None => 0i32,
+                Some(v) => to_int32(v, "start")?,
+            };
             let items = value_to_sequence(x)?;
             let mut pairs = Vec::with_capacity(items.len());
             for (i, item) in items.into_iter().enumerate() {
-                let idx = BigInt::from_i64(start + i as i64);
-                pairs.push(Value::Tuple(vec![Value::Int(idx), item]));
+                let idx = start.wrapping_add(i as i32);
+                pairs.push(Value::Tuple(vec![
+                    Value::Int(BigInt::from_i64(idx as i64)),
+                    item,
+                ]));
             }
             Ok(Some(Value::List(Arc::new(Mutex::new(
                 StarlarkList::new_in(pairs, Arc::clone(mutability)),
             )))))
         }
         "float" => {
-            if pos_args.is_empty() {
+            let x_opt = bind_1pos("float", "x", pos_args, kw_args, true)?;
+            let Some(x) = x_opt else {
                 return Ok(Some(Value::Float(0.0)));
-            }
-            let val = match &pos_args[0] {
+            };
+            let val = match x {
                 Value::Float(f) => *f,
                 Value::Int(i) => i.to_f64(),
                 Value::Bool(b) => {
@@ -437,16 +515,59 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(Value::Float(val)))
         }
         "getattr" => {
-            let x = pos_args.first().ok_or_else(|| {
-                StarlarkError("getattr() requires at least 2 arguments".to_string())
-            })?;
-            let name = pos_args.get(1).and_then(|v| v.as_str()).ok_or_else(|| {
-                StarlarkError("getattr() attribute name must be string".to_string())
-            })?;
-            let default = pos_args
-                .get(2)
-                .cloned()
-                .or_else(|| kw_args.get("default").cloned());
+            if pos_args.len() > 3 {
+                return Err(StarlarkError(format!(
+                    "getattr() accepts no more than 3 positional arguments but got {}",
+                    pos_args.len()
+                )));
+            }
+            for k in kw_args.keys() {
+                if k != "x" && k != "name" && k != "default" {
+                    return Err(StarlarkError(format!(
+                        "getattr() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            if !pos_args.is_empty() && kw_args.contains_key("x") {
+                return Err(StarlarkError(
+                    "getattr() got multiple values for parameter 'x'".to_string(),
+                ));
+            }
+            if pos_args.len() >= 2 && kw_args.contains_key("name") {
+                return Err(StarlarkError(
+                    "getattr() got multiple values for parameter 'name'".to_string(),
+                ));
+            }
+            if pos_args.len() >= 3 && kw_args.contains_key("default") {
+                return Err(StarlarkError(
+                    "getattr() got multiple values for parameter 'default'".to_string(),
+                ));
+            }
+            let x = pos_args
+                .first()
+                .or_else(|| kw_args.get("x"))
+                .ok_or_else(|| {
+                    StarlarkError("getattr() requires at least 2 arguments".to_string())
+                })?;
+            let name = pos_args
+                .get(1)
+                .or_else(|| kw_args.get("name"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    StarlarkError("getattr() attribute name must be string".to_string())
+                })?;
+            let has_default = pos_args.len() >= 3 || kw_args.contains_key("default");
+            let default = if has_default {
+                Some(
+                    pos_args
+                        .get(2)
+                        .or_else(|| kw_args.get("default"))
+                        .cloned()
+                        .unwrap_or(Value::None),
+                )
+            } else {
+                None
+            };
 
             match x {
                 Value::Struct(s) => match s.get(name) {
@@ -519,12 +640,42 @@ pub fn eval_universal_function_with_semantics(
             }
         }
         "hasattr" => {
-            let x = pos_args.first().ok_or_else(|| {
-                StarlarkError("hasattr() requires at least 2 arguments".to_string())
-            })?;
-            let name = pos_args.get(1).and_then(|v| v.as_str()).ok_or_else(|| {
-                StarlarkError("hasattr() attribute name must be string".to_string())
-            })?;
+            if pos_args.len() > 2 {
+                return Err(StarlarkError(format!(
+                    "hasattr() accepts no more than 2 positional arguments but got {}",
+                    pos_args.len()
+                )));
+            }
+            for k in kw_args.keys() {
+                if k != "x" && k != "name" {
+                    return Err(StarlarkError(format!(
+                        "hasattr() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            if !pos_args.is_empty() && kw_args.contains_key("x") {
+                return Err(StarlarkError(
+                    "hasattr() got multiple values for parameter 'x'".to_string(),
+                ));
+            }
+            if pos_args.len() >= 2 && kw_args.contains_key("name") {
+                return Err(StarlarkError(
+                    "hasattr() got multiple values for parameter 'name'".to_string(),
+                ));
+            }
+            let x = pos_args
+                .first()
+                .or_else(|| kw_args.get("x"))
+                .ok_or_else(|| {
+                    StarlarkError("hasattr() requires at least 2 arguments".to_string())
+                })?;
+            let name = pos_args
+                .get(1)
+                .or_else(|| kw_args.get("name"))
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    StarlarkError("hasattr() attribute name must be string".to_string())
+                })?;
 
             let res = match x {
                 Value::Struct(s) => s.fields.contains_key(name),
@@ -537,7 +688,9 @@ pub fn eval_universal_function_with_semantics(
                 Value::Tuple(_) => false,
                 Value::String(_) => STRING_METHODS.contains(&name),
                 Value::Host(kind, _) => match kind.as_str() {
-                    "dotted_version" => name == "compare_to" || name == "version",
+                    "dotted_version" => {
+                        name == "compare_to" || name == "to_string" || name == "version"
+                    }
                     _ => false,
                 },
                 _ => false,
@@ -545,32 +698,34 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(Value::Bool(res)))
         }
         "hash" => {
-            let s = match pos_args.first() {
-                Some(Value::String(s)) => s.as_str(),
-                Some(other) => {
+            let v = bind_1pos("hash", "value", pos_args, kw_args, false)?.unwrap();
+            let s = match v {
+                Value::String(s) => s.as_str(),
+                other => {
                     return Err(StarlarkError(format!(
                     "in call to hash(), parameter 'value' got value of type '{}', want 'string'",
                     other.type_name()
                 )))
                 }
-                None => {
-                    return Err(StarlarkError(
-                        "hash() missing 1 required positional argument: value".to_string(),
-                    ))
-                }
             };
-            // Deterministic Java String.hashCode() returning 32-bit integer
+            // Deterministic Java String.hashCode() over UTF-16 code units returning 32-bit int
             let mut h: i32 = 0;
-            for c in s.chars() {
-                h = h.wrapping_mul(31).wrapping_add(c as i32);
+            for u in s.encode_utf16() {
+                h = h.wrapping_mul(31).wrapping_add(u as i32);
             }
             Ok(Some(Value::Int(BigInt::from_i64(h as i64))))
         }
         "int" => {
+            if pos_args.len() > 2 {
+                return Err(StarlarkError(format!(
+                    "int() accepts no more than 2 positional arguments but got {}",
+                    pos_args.len()
+                )));
+            }
             for k in kw_args.keys() {
                 if k != "x" && k != "base" {
                     return Err(StarlarkError(format!(
-                        "int() got unexpected keyword argument: {k}"
+                        "int() got unexpected keyword argument '{k}'"
                     )));
                 }
             }
@@ -579,63 +734,41 @@ pub fn eval_universal_function_with_semantics(
                     "int() got multiple values for parameter 'x'".to_string(),
                 ));
             }
-            if pos_args.len() > 1 && kw_args.contains_key("base") {
+            if pos_args.len() >= 2 && kw_args.contains_key("base") {
                 return Err(StarlarkError(
                     "int() got multiple values for parameter 'base'".to_string(),
                 ));
             }
-            if pos_args.len() > 2 {
-                return Err(StarlarkError(format!(
-                    "int() accepts no more than 2 positional arguments (got {})",
-                    pos_args.len()
-                )));
-            }
-            let Some(x_arg) = pos_args.first().or_else(|| kw_args.get("x")) else {
-                return Err(StarlarkError(
-                    "int() missing 1 required positional argument: x".to_string(),
-                ));
-            };
+            let x = pos_args
+                .first()
+                .or_else(|| kw_args.get("x"))
+                .ok_or_else(|| {
+                    StarlarkError("int() missing 1 required positional argument: x".to_string())
+                })?;
             let base_arg = pos_args.get(1).or_else(|| kw_args.get("base"));
-            if base_arg.is_some() && !matches!(x_arg, Value::String(_)) {
-                return Err(StarlarkError(
-                    "int() can't convert non-string with explicit base".to_string(),
-                ));
-            }
-            let base = match base_arg {
-                None => 10u32,
-                Some(Value::Int(bi)) => {
-                    let b = bi.to_i64().unwrap_or(-1);
-                    if b != 0 && !(2..=36).contains(&b) {
-                        return Err(StarlarkError(format!(
-                            "int() base must be >= 2 and <= 36, or 0: got {b}"
-                        )));
-                    }
-                    b as u32
-                }
-                Some(other) => {
-                    return Err(StarlarkError(format!(
-                        "in call to int(), parameter 'base' got value of type '{}', want 'int'",
-                        other.type_name()
-                    )));
-                }
-            };
 
-            let val = match x_arg {
+            if let Some(b_val) = base_arg {
+                if !matches!(x, Value::String(_)) {
+                    return Err(StarlarkError(
+                        "int() can't convert non-string with explicit base".to_string(),
+                    ));
+                }
+                let base_i32 = to_int32(b_val, "base")?;
+                let Value::String(s) = x else { unreachable!() };
+                let val = parse_starlark_int_str(s, Some(base_i32))?;
+                return Ok(Some(Value::Int(val)));
+            }
+
+            let val = match x {
                 Value::Int(i) => i.clone(),
                 Value::Float(f) => {
                     crate::bigint::finite_double_to_int_exact(*f).map_err(StarlarkError)?
                 }
                 Value::Bool(b) => BigInt::from_u64(if *b { 1 } else { 0 }),
-                Value::String(s) => {
-                    if base == 0 {
-                        BigInt::from_str_auto(s).map_err(StarlarkError)?
-                    } else {
-                        BigInt::from_str_radix(s, base).map_err(StarlarkError)?
-                    }
-                }
+                Value::String(s) => parse_starlark_int_str(s, None)?,
                 other => {
                     return Err(StarlarkError(format!(
-                        "cannot convert {} to int",
+                        "got {} for int(), want int, float, bool, or string",
                         other.type_name()
                     )))
                 }
@@ -643,20 +776,21 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(Value::Int(val)))
         }
         "len" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("len() takes exactly one argument".to_string()))?;
+            let x = bind_1pos("len", "x", pos_args, kw_args, false)?.unwrap();
             let len = match x {
-                Value::String(s) => s.chars().count(),
+                Value::String(s) => s.encode_utf16().count(),
                 Value::List(l) => l.lock().unwrap().elements.len(),
                 Value::Tuple(t) => t.len(),
                 Value::Dict(d) => d.lock().unwrap().len(),
                 Value::Set(s) => s.lock().unwrap().len(),
                 Value::Range(r) => r.len,
-                Value::Struct(s) => s.fields.len(),
+                Value::ProviderInstance {
+                    provider_name,
+                    fields,
+                } if provider_name == "OutputGroupInfo" => fields.len(),
                 other => {
                     return Err(StarlarkError(format!(
-                        "type '{}' has no len()",
+                        "{} is not iterable",
                         other.type_name()
                     )))
                 }
@@ -664,12 +798,13 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(Value::Int(BigInt::from_u64(len as u64))))
         }
         "list" => {
-            if pos_args.is_empty() {
+            let x = bind_1pos("list", "x", pos_args, kw_args, true)?;
+            let Some(v) = x else {
                 return Ok(Some(Value::List(Arc::new(Mutex::new(
                     StarlarkList::new_in(Vec::new(), Arc::clone(mutability)),
                 )))));
-            }
-            let items = value_to_sequence(&pos_args[0])?;
+            };
+            let items = value_to_sequence(v)?;
             Ok(Some(Value::List(Arc::new(Mutex::new(
                 StarlarkList::new_in(items, Arc::clone(mutability)),
             )))))
@@ -743,21 +878,27 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(min_item))
         }
         "range" => {
+            if !kw_args.is_empty() {
+                let k = kw_args.keys().next().unwrap();
+                return Err(StarlarkError(format!(
+                    "range() got unexpected keyword argument '{k}'"
+                )));
+            }
             let (start, stop, step) = match pos_args {
-                [stop_val] => (0, stop_val.as_i64().unwrap_or(0), 1),
+                [stop_val] => (0i64, to_int32(stop_val, "stop")? as i64, 1i64),
                 [start_val, stop_val] => (
-                    start_val.as_i64().unwrap_or(0),
-                    stop_val.as_i64().unwrap_or(0),
-                    1,
+                    to_int32(start_val, "start")? as i64,
+                    to_int32(stop_val, "stop")? as i64,
+                    1i64,
                 ),
                 [start_val, stop_val, step_val] => (
-                    start_val.as_i64().unwrap_or(0),
-                    stop_val.as_i64().unwrap_or(0),
-                    step_val.as_i64().unwrap_or(1),
+                    to_int32(start_val, "start")? as i64,
+                    to_int32(stop_val, "stop")? as i64,
+                    to_int32(step_val, "step")? as i64,
                 ),
                 _ => {
                     return Err(StarlarkError(
-                        "range() requires 1 to 3 arguments".to_string(),
+                        "range() requires 1 to 3 positional arguments".to_string(),
                     ))
                 }
             };
@@ -765,13 +906,17 @@ pub fn eval_universal_function_with_semantics(
             Ok(Some(Value::Range(r)))
         }
         "repr" => {
-            let s = pos_args.first().map(|v| v.repr()).unwrap_or_default();
-            Ok(Some(Value::String(s)))
+            let x = bind_1pos("repr", "x", pos_args, kw_args, false)?.unwrap();
+            Ok(Some(Value::String(x.repr())))
         }
         "reversed" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("reversed() requires 1 argument".to_string()))?;
+            let x = bind_1pos("reversed", "sequence", pos_args, kw_args, false)?.unwrap();
+            if !matches!(x, Value::List(_) | Value::Tuple(_) | Value::Range(_)) {
+                return Err(StarlarkError(format!(
+                    "in call to reversed(), parameter 'sequence' got value of type '{}', want 'sequence'",
+                    x.type_name()
+                )));
+            }
             let mut items = value_to_sequence(x)?;
             items.reverse();
             Ok(Some(Value::List(Arc::new(Mutex::new(
@@ -779,36 +924,55 @@ pub fn eval_universal_function_with_semantics(
             )))))
         }
         "set" => {
-            if pos_args.is_empty() {
+            let x = bind_1pos("set", "elements", pos_args, kw_args, true)?;
+            let Some(v) = x else {
                 return Ok(Some(Value::Set(Arc::new(Mutex::new(StarlarkSet::new_in(
                     Arc::clone(mutability),
                 ))))));
-            }
-            if pos_args.len() > 1 {
-                return Err(StarlarkError(
-                    "set() accepts no more than 1 positional argument".to_string(),
-                ));
-            }
-            let items = value_to_sequence(&pos_args[0])?;
+            };
+            let items = value_to_sequence(v)?;
             let s = StarlarkSet::from_elements_in(items, Arc::clone(mutability))?;
             Ok(Some(Value::Set(Arc::new(Mutex::new(s)))))
         }
         "sorted" => {
+            if pos_args.len() > 3 {
+                return Err(StarlarkError(format!(
+                    "sorted() accepts no more than 3 positional arguments but got {}",
+                    pos_args.len()
+                )));
+            }
             for k in kw_args.keys() {
-                if k != "key" && k != "reverse" {
+                if k != "iterable" && k != "key" && k != "reverse" {
                     return Err(StarlarkError(format!(
                         "sorted() got unexpected keyword argument: {k}"
                     )));
                 }
             }
+            if !pos_args.is_empty() && kw_args.contains_key("iterable") {
+                return Err(StarlarkError(
+                    "sorted() got multiple values for parameter 'iterable'".to_string(),
+                ));
+            }
+            if pos_args.len() >= 2 && kw_args.contains_key("key") {
+                return Err(StarlarkError(
+                    "sorted() got multiple values for parameter 'key'".to_string(),
+                ));
+            }
+            if pos_args.len() >= 3 && kw_args.contains_key("reverse") {
+                return Err(StarlarkError(
+                    "sorted() got multiple values for parameter 'reverse'".to_string(),
+                ));
+            }
             let x = pos_args
                 .first()
-                .ok_or_else(|| StarlarkError("sorted() requires 1 argument".to_string()))?;
-            let reverse = kw_args
-                .get("reverse")
-                .map(|v| v.is_truthy())
-                .unwrap_or(false);
-            if let Some(k) = kw_args.get("key") {
+                .or_else(|| kw_args.get("iterable"))
+                .ok_or_else(|| {
+                    StarlarkError(
+                        "sorted() missing 1 required positional argument: iterable".to_string(),
+                    )
+                })?;
+            let key_arg = pos_args.get(1).or_else(|| kw_args.get("key"));
+            if let Some(k) = key_arg {
                 if !matches!(k, Value::None) && !is_callable(k) {
                     return Err(StarlarkError(format!(
                         "parameter 'key' got value of type '{}', want 'callable or NoneType'",
@@ -816,6 +980,17 @@ pub fn eval_universal_function_with_semantics(
                     )));
                 }
             }
+            let rev_arg = pos_args.get(2).or_else(|| kw_args.get("reverse"));
+            let reverse = match rev_arg {
+                None => false,
+                Some(Value::Bool(b)) => *b,
+                Some(other) => {
+                    return Err(StarlarkError(format!(
+                        "got value of type '{}' for parameter 'reverse', want 'bool'",
+                        other.type_name()
+                    )));
+                }
+            };
             let mut items = value_to_sequence(x)?;
             fallible_merge_sort(&mut items, &mut |a, b| {
                 let ord = compare_values(a, b)?;
@@ -826,27 +1001,32 @@ pub fn eval_universal_function_with_semantics(
             )))))
         }
         "str" => {
-            let s = match pos_args.first() {
-                Some(Value::Label(l)) => l.unambiguous_canonical_form(),
-                Some(v) => v.to_string(),
-                None => String::new(),
+            let x = bind_1pos("str", "x", pos_args, kw_args, false)?.unwrap();
+            let s = match x {
+                Value::Label(l) => l.unambiguous_canonical_form(),
+                v => v.to_string(),
             };
             Ok(Some(Value::String(s)))
         }
         "tuple" => {
-            if pos_args.is_empty() {
+            let x = bind_1pos("tuple", "x", pos_args, kw_args, true)?;
+            let Some(v) = x else {
                 return Ok(Some(Value::Tuple(Vec::new())));
-            }
-            let items = value_to_sequence(&pos_args[0])?;
+            };
+            let items = value_to_sequence(v)?;
             Ok(Some(Value::Tuple(items)))
         }
         "type" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("type() requires 1 argument".to_string()))?;
+            let x = bind_1pos("type", "x", pos_args, kw_args, false)?.unwrap();
             Ok(Some(Value::String(x.type_name().to_string())))
         }
         "zip" => {
+            if !kw_args.is_empty() {
+                let k = kw_args.keys().next().unwrap();
+                return Err(StarlarkError(format!(
+                    "zip() got unexpected keyword argument '{k}'"
+                )));
+            }
             if pos_args.is_empty() {
                 return Ok(Some(Value::List(Arc::new(Mutex::new(
                     StarlarkList::new_in(Vec::new(), Arc::clone(mutability)),
@@ -866,8 +1046,115 @@ pub fn eval_universal_function_with_semantics(
                 StarlarkList::new_in(out, Arc::clone(mutability)),
             )))))
         }
+        "chr" => {
+            let x = bind_1pos("chr", "i", pos_args, kw_args, false)?.unwrap();
+            let cp = to_int32(x, "i")?;
+            if !(0..=0x10ffff).contains(&cp) {
+                return Err(StarlarkError(format!(
+                    "chr() arg not in range(0x110000) (got {cp})"
+                )));
+            }
+            let ch = char::from_u32(cp as u32).unwrap_or('\u{FFFD}');
+            Ok(Some(Value::String(ch.to_string())))
+        }
+        "ord" => {
+            let x = bind_1pos("ord", "s", pos_args, kw_args, false)?.unwrap();
+            let Some(s) = x.as_str() else {
+                return Err(StarlarkError(format!(
+                    "in call to ord(), parameter 's' got value of type '{}', want 'string'",
+                    x.type_name()
+                )));
+            };
+            let mut chars = s.chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else {
+                return Err(StarlarkError(format!(
+                    "ord() expected a string of length 1, but got length {}",
+                    s.encode_utf16().count()
+                )));
+            };
+            Ok(Some(Value::Int(BigInt::from_u64(c as u64))))
+        }
         _ => Ok(None),
     }
+}
+
+fn parse_starlark_int_str(raw: &str, explicit_base: Option<i32>) -> Result<BigInt, StarlarkError> {
+    if let Some(b) = explicit_base {
+        if b != 0 && !(2..=36).contains(&b) {
+            return Err(StarlarkError(format!(
+                "invalid base {b} (want 2 <= base <= 36)"
+            )));
+        }
+    }
+    let repr_raw = Value::String(raw.to_string()).repr();
+    let base = explicit_base.unwrap_or(10);
+    // Bazel StarlarkInt.parse rejects surrounding whitespace.
+    if raw.is_empty()
+        || raw.chars().next().is_some_and(|c| c.is_whitespace())
+        || raw.chars().last().is_some_and(|c| c.is_whitespace())
+    {
+        let b_disp = if base == 0 { 10 } else { base };
+        return Err(StarlarkError(format!(
+            "invalid base-{b_disp} literal: {repr_raw}"
+        )));
+    }
+    let (neg, rest) = if let Some(r) = raw.strip_prefix('-') {
+        (true, r)
+    } else if let Some(r) = raw.strip_prefix('+') {
+        (false, r)
+    } else {
+        (false, raw)
+    };
+    if rest.is_empty() {
+        let b_disp = if base == 0 { 10 } else { base };
+        return Err(StarlarkError(format!(
+            "invalid base-{b_disp} literal: {repr_raw}"
+        )));
+    }
+    let (eff_base, digits) = if base == 0 {
+        if let Some(d) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+            (16u32, d)
+        } else if let Some(d) = rest.strip_prefix("0o").or_else(|| rest.strip_prefix("0O")) {
+            (8u32, d)
+        } else if let Some(d) = rest.strip_prefix("0b").or_else(|| rest.strip_prefix("0B")) {
+            (2u32, d)
+        } else if rest.starts_with('0') && rest.bytes().any(|b| b != b'0') {
+            return Err(StarlarkError(format!(
+                "cannot infer base when string begins with a 0: {repr_raw}"
+            )));
+        } else {
+            (10u32, rest)
+        }
+    } else {
+        let bu = base as u32;
+        let d = match bu {
+            16 => rest
+                .strip_prefix("0x")
+                .or_else(|| rest.strip_prefix("0X"))
+                .unwrap_or(rest),
+            8 => rest
+                .strip_prefix("0o")
+                .or_else(|| rest.strip_prefix("0O"))
+                .unwrap_or(rest),
+            2 => rest
+                .strip_prefix("0b")
+                .or_else(|| rest.strip_prefix("0B"))
+                .unwrap_or(rest),
+            _ => rest,
+        };
+        (bu, d)
+    };
+    if digits.is_empty() || digits.starts_with('+') || digits.starts_with('-') {
+        return Err(StarlarkError(format!(
+            "invalid base-{eff_base} literal: {repr_raw}"
+        )));
+    }
+    let mut val = BigInt::from_str_radix(digits, eff_base)
+        .map_err(|_| StarlarkError(format!("invalid base-{eff_base} literal: {repr_raw}")))?;
+    if neg && !val.is_zero() {
+        val = val.neg();
+    }
+    Ok(val)
 }
 
 pub fn value_to_sequence(val: &Value) -> Result<Vec<Value>, StarlarkError> {
@@ -881,7 +1168,12 @@ pub fn value_to_sequence(val: &Value) -> Result<Vec<Value>, StarlarkError> {
             .map(|i| Value::Int(BigInt::from_i64(i)))
             .collect()),
         Value::Dict(d) => Ok(d.lock().unwrap().keys()),
-        Value::String(s) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
+        Value::ProviderInstance {
+            provider_name,
+            fields,
+        } if provider_name == "OutputGroupInfo" => {
+            Ok(fields.keys().cloned().map(Value::String).collect())
+        }
         other => Err(StarlarkError(format!(
             "got value of type '{}', want 'iterable'",
             other.type_name()
@@ -889,31 +1181,34 @@ pub fn value_to_sequence(val: &Value) -> Result<Vec<Value>, StarlarkError> {
     }
 }
 
-pub fn unpack_pair(item: &Value) -> Result<(Value, Value), StarlarkError> {
-    match item {
-        Value::List(l) => {
-            let guard = l.lock().unwrap();
-            if guard.elements.len() == 2 {
-                Ok((guard.elements[0].clone(), guard.elements[1].clone()))
-            } else {
-                Err(StarlarkError(
-                    "dictionary item must be a 2-element sequence".to_string(),
-                ))
-            }
-        }
-        Value::Tuple(t) => {
-            if t.len() == 2 {
-                Ok((t[0].clone(), t[1].clone()))
-            } else {
-                Err(StarlarkError(
-                    "dictionary item must be a 2-element sequence".to_string(),
-                ))
-            }
-        }
-        _ => Err(StarlarkError(
-            "dictionary item must be a 2-element sequence".to_string(),
-        )),
+pub fn unpack_dict_pairs(val: &Value, fn_name: &str) -> Result<Vec<(Value, Value)>, StarlarkError> {
+    if let Value::Dict(d) = val {
+        return Ok(d.lock().unwrap().items());
     }
+    let seq = value_to_sequence(val).map_err(|_| {
+        StarlarkError(format!(
+            "in {fn_name}, got {}, want iterable",
+            val.type_name()
+        ))
+    })?;
+    let mut pairs = Vec::with_capacity(seq.len());
+    for (idx, item) in seq.iter().enumerate() {
+        let sub = value_to_sequence(item).map_err(|_| {
+            StarlarkError(format!(
+                "in {fn_name}, dictionary update sequence element #{idx} is not iterable ({})",
+                item.type_name()
+            ))
+        })?;
+        if sub.len() != 2 {
+            return Err(StarlarkError(format!(
+                "in {fn_name}, item #{idx} has length {}, but exactly two elements are required",
+                sub.len()
+            )));
+        }
+        let mut it = sub.into_iter();
+        pairs.push((it.next().unwrap(), it.next().unwrap()));
+    }
+    Ok(pairs)
 }
 
 pub fn compare_values(a: &Value, b: &Value) -> Result<Ordering, StarlarkError> {

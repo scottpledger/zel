@@ -197,6 +197,20 @@ impl Value {
                 "repository_ctx" => "repository_ctx",
                 "module_ctx" => "module_ctx",
                 "extension_metadata" => "extension_metadata",
+                "dotted_version" => "DottedVersion",
+                "macro" => "macro",
+                "aspect" => "Aspect",
+                "subrule" => "subrule",
+                "transition" => "transition",
+                "toolchain_type" => "ToolchainTypeRequirement",
+                "action" => "Action",
+                "expanded_directory" => "ExpandedDirectory",
+                "template_ctx" => "template_ctx",
+                "analysis_failure" => "AnalysisFailure",
+                "cc_compilation_outputs" => "CcCompilationOutputs",
+                "cc_module_map" => "CcModuleMap",
+                "linker_input" => "LinkerInput",
+                "lto_compilation_context" => "LtoCompilationContext",
                 _ => "host_object",
             },
         }
@@ -355,7 +369,7 @@ impl Value {
                     provider_name: prov_b,
                     fields: f2,
                 },
-            ) => {
+            ) if prov_a != "OutputGroupInfo" && prov_b != "OutputGroupInfo" => {
                 if prov_a != prov_b {
                     fn printable(p: &str) -> &str {
                         if p.starts_with("%anonymous#") {
@@ -839,7 +853,7 @@ impl PartialEq for Value {
                     crate::eval::builtins::dotted_version_canonical_components(i1)
                         == crate::eval::builtins::dotted_version_canonical_components(i2)
                 } else {
-                    i1 == i2
+                    k1 == k2 && i1 == i2
                 }
             }
             _ => false,
@@ -968,6 +982,28 @@ impl Hash for Value {
             Self::Provider { name } => {
                 16u8.hash(state);
                 name.hash(state);
+            }
+            Self::RuleCallable {
+                rule_class,
+                executable,
+                test,
+            } => {
+                17u8.hash(state);
+                rule_class.hash(state);
+                executable.hash(state);
+                test.hash(state);
+            }
+            Self::Set(s) => {
+                18u8.hash(state);
+                let guard = s.lock().unwrap();
+                guard.elements.len().hash(state);
+                let mut acc = 0u64;
+                for x in &guard.elements {
+                    let mut sub = std::collections::hash_map::DefaultHasher::new();
+                    x.hash(&mut sub);
+                    acc ^= sub.finish();
+                }
+                acc.hash(state);
             }
             _ => {
                 // Non-hashable

@@ -186,6 +186,11 @@ impl DotBazelChecker {
                 if let AssignTarget::Attr { target, .. } = target {
                     self.expr(target);
                 }
+                if let AssignTarget::Tuple(pats) = target {
+                    for p in pats {
+                        p.walk_exprs(&mut |e| self.expr(e));
+                    }
+                }
                 self.expr(value);
             }
             Stmt::Expr(e) => self.expr(e),
@@ -460,7 +465,11 @@ impl NameWalker {
                         // Augmented assignment reads the target; plain assignment binds it.
                         let _ = n;
                     }
-                    AssignTarget::Tuple(_) => {}
+                    AssignTarget::Tuple(pats) => {
+                        for p in pats {
+                            p.walk_exprs(&mut |e| self.expr(e));
+                        }
+                    }
                 }
             }
             Stmt::Def(f) => {
@@ -490,8 +499,16 @@ impl NameWalker {
                 }
                 else_body.iter().for_each(|b| self.stmt(b));
             }
-            Stmt::For { iter, body, .. } => {
+            Stmt::For {
+                var_names,
+                iter,
+                body,
+                ..
+            } => {
                 self.expr(iter);
+                for p in var_names {
+                    p.walk_exprs(&mut |e| self.expr(e));
+                }
                 body.iter().for_each(|b| self.stmt(b));
             }
             Stmt::Return(Some(e), _) => self.expr(e),
