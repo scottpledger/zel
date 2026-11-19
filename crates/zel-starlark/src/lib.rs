@@ -185,6 +185,10 @@ pub struct EvalContext {
     pub attr_loc: Location,
     /// `cur_call_loc` as it was before the most recent call expression started evaluating.
     pub pre_call_loc: Location,
+    /// Nesting depth inside top-level `if` / `for` statements (0 for un-indented top-level statements).
+    pub top_level_stmt_depth: usize,
+    /// Non-`_` top-level assignments at `top_level_stmt_depth == 0` in source execution order.
+    pub exported_assignments: Vec<(String, Value)>,
 }
 
 impl Default for EvalContext {
@@ -234,6 +238,8 @@ impl EvalContext {
             arg_eval_loc: Location::default(),
             attr_loc: Location::default(),
             pre_call_loc: Location::default(),
+            top_level_stmt_depth: 0,
+            exported_assignments: Vec::new(),
         };
         ctx.init_builtins();
         ctx
@@ -875,22 +881,32 @@ impl EvalContext {
             } => {
                 for (cond, body) in branches {
                     if self.eval_expr(cond)?.is_truthy() {
-                        for s in body {
-                            match self.exec_stmt(s)? {
-                                ControlFlow::None => {}
-                                other => return Ok(other),
+                        self.top_level_stmt_depth += 1;
+                        let res = (|| {
+                            for s in body {
+                                match self.exec_stmt(s)? {
+                                    ControlFlow::None => {}
+                                    other => return Ok(other),
+                                }
                             }
+                            Ok(ControlFlow::None)
+                        })();
+                        self.top_level_stmt_depth -= 1;
+                        return res;
+                    }
+                }
+                self.top_level_stmt_depth += 1;
+                let res = (|| {
+                    for s in else_body {
+                        match self.exec_stmt(s)? {
+                            ControlFlow::None => {}
+                            other => return Ok(other),
                         }
-                        return Ok(ControlFlow::None);
                     }
-                }
-                for s in else_body {
-                    match self.exec_stmt(s)? {
-                        ControlFlow::None => {}
-                        other => return Ok(other),
-                    }
-                }
-                Ok(ControlFlow::None)
+                    Ok(ControlFlow::None)
+                })();
+                self.top_level_stmt_depth -= 1;
+                res
             }
             Stmt::For {
                 var_names,
@@ -943,27 +959,32 @@ impl EvalContext {
 
                 let mut flow = ControlFlow::None;
                 let mut broke = false;
-                for elem in elements {
-                    self.bind_loop_vars(var_names, elem)?;
-                    for s in body {
-                        match self.exec_stmt(s)? {
-                            ControlFlow::None => {}
-                            ControlFlow::Continue => break,
-                            ControlFlow::Break => {
-                                flow = ControlFlow::None;
-                                broke = true;
-                                break;
-                            }
-                            ControlFlow::Return(v) => {
-                                flow = ControlFlow::Return(v);
-                                break;
+                self.top_level_stmt_depth += 1;
+                let loop_res: Result<(), StarlarkError> = (|| {
+                    for elem in elements {
+                        self.bind_loop_vars(var_names, elem)?;
+                        for s in body {
+                            match self.exec_stmt(s)? {
+                                ControlFlow::None => {}
+                                ControlFlow::Continue => break,
+                                ControlFlow::Break => {
+                                    flow = ControlFlow::None;
+                                    broke = true;
+                                    break;
+                                }
+                                ControlFlow::Return(v) => {
+                                    flow = ControlFlow::Return(v);
+                                    break;
+                                }
                             }
                         }
+                        if broke || matches!(flow, ControlFlow::Return(_)) {
+                            break;
+                        }
                     }
-                    if broke || matches!(flow, ControlFlow::Return(_)) {
-                        break;
-                    }
-                }
+                    Ok(())
+                })();
+                self.top_level_stmt_depth -= 1;
 
                 // Decrement iteration count
                 match &iter_val {
@@ -973,6 +994,7 @@ impl EvalContext {
                     _ => {}
                 }
 
+                loop_res?;
                 Ok(flow)
             }
         }
@@ -1294,6 +1316,10 @@ impl EvalContext {
         if let Some(frame) = self.thread.current_frame_mut() {
             frame.locals.lock().unwrap().insert(name.to_string(), val);
         } else {
+            if self.top_level_stmt_depth == 0 && !name.starts_with('_') {
+                self.exported_assignments
+                    .push((name.to_string(), val.clone()));
+            }
             self.globals.insert(name.to_string(), val);
         }
     }

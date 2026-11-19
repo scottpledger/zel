@@ -164,7 +164,10 @@ impl AttrVal {
             Value::Dict(d) => {
                 let guard = d.lock().unwrap();
                 let is_label_keyed = !guard.entries.is_empty()
-                    && guard.entries.iter().all(|(k, _)| matches!(k, Value::Label(_)));
+                    && guard
+                        .entries
+                        .iter()
+                        .all(|(k, _)| matches!(k, Value::Label(_)));
                 if is_label_keyed {
                     AttrVal::LabelDict(
                         guard
@@ -489,7 +492,15 @@ impl std::fmt::Display for ModuleOverride {
                         _ => (k.clone(), v.clone()),
                     })
                     .collect();
-                let bzl = spec.bzl_file.strip_prefix('@').map(|r| format!("@@{r}")).unwrap_or_else(|| spec.bzl_file.clone());
+                let bzl = if spec.bzl_file.starts_with("@@") {
+                    spec.bzl_file.clone()
+                } else if let Some(r) = spec.bzl_file.strip_prefix('@') {
+                    format!("@@{r}")
+                } else if spec.bzl_file.starts_with("//") {
+                    format!("@@{}", spec.bzl_file)
+                } else {
+                    spec.bzl_file.clone()
+                };
                 write!(
                     f,
                     "NonRegistryOverride[repoSpec=RepoSpec[repoRuleId={bzl}%{}, attributes=AttributeValues{{attributes={}}}]]",
@@ -563,13 +574,16 @@ pub struct InterimModule {
     pub key: ModuleKey,
     pub name: String,
     pub version: Version,
+    pub compatibility_level: i64,
     pub repo_name: String,
     pub bazel_compatibility: Vec<String>,
     pub toolchains_to_register: Vec<String>,
     pub execution_platforms_to_register: Vec<String>,
     pub deps: Vec<(String, ModuleKey)>,
+    pub dep_max_compat: BTreeMap<String, i64>,
     pub original_deps: Vec<(String, ModuleKey)>,
     pub nodep_deps: Vec<ModuleKey>,
+    pub nodep_max_compat: Vec<i64>,
     pub registry_url: Option<String>,
     pub extension_usages: Vec<ExtensionUsage>,
     pub flag_aliases: Vec<(String, String)>,
@@ -628,7 +642,8 @@ mod tests {
             Json::Str("plain".into())
         );
         // Round trip, including dict keys, BigInt, LabelDict, float `.0`, and RepoSpec rule_id.
-        let big = zel_starlark::BigInt::from_str_radix("99999999999999999999999999999", 10).unwrap();
+        let big =
+            zel_starlark::BigInt::from_str_radix("99999999999999999999999999999", 10).unwrap();
         for v in [
             AttrVal::Str("@@//:x".into()),
             AttrVal::Str("'q'".into()),
@@ -653,7 +668,10 @@ mod tests {
         let spec = RepoSpec::new("//pkg:f%ile.bzl", "my_rule", vec![]);
         assert_eq!(spec.rule_id(), "@@//pkg:f%ile.bzl%my_rule");
         let parsed = RepoSpec::from_json(&Json::Obj(vec![
-            ("repoRuleId".into(), Json::Str("@@//pkg:defs.bzl%rule%with%pct".into())),
+            (
+                "repoRuleId".into(),
+                Json::Str("@@//pkg:defs.bzl%rule%with%pct".into()),
+            ),
             ("attributes".into(), Json::Obj(vec![])),
         ]))
         .unwrap();
