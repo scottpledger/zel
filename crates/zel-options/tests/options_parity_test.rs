@@ -1162,7 +1162,7 @@ fn test_startup_tilde_expansion_and_policy_use_default_and_append() {
                 .unwrap();
             assert_eq!(
                 s.output_user_root.as_ref().unwrap().path_string(),
-                PathFragment::create(&format!("{}/zel_sub", home.trim_end_matches('/')))
+                PathFragment::create(&format!("{}/zel_sub", home.trim_end_matches(['/', '\\'])))
                     .path_string()
             );
             s.apply_flag("--output_user_root=~", "command line")

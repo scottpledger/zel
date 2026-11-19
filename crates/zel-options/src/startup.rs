@@ -87,7 +87,7 @@ impl StartupOptions {
             home.unwrap_or_else(|| raw.to_string())
         } else if let Some(rest) = raw.strip_prefix("~/") {
             match home {
-                Some(h) => format!("{}/{rest}", h.trim_end_matches('/')),
+                Some(h) => format!("{}/{rest}", h.trim_end_matches(['/', '\\'])),
                 None => raw.to_string(),
             }
         } else {

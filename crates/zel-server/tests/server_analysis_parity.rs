@@ -595,6 +595,10 @@ consumer(name = "check")
 #[test]
 fn wave5_coverage_build_tags_invocation_id_bep_residue_and_workspace_status() {
     let w = Ws::new("w5b");
+    let bin_dir = w.root.join(format!(
+        "ob/execroot/_main/bazel-out/{}-fastbuild/bin",
+        zel_analysis::build_options::auto_host_cpu()
+    ));
     w.write(
         "defs.bzl",
         r##"
@@ -619,6 +623,16 @@ def _sym(ctx):
 
 sym_rule = rule(implementation = _sym)
 
+def _write_out(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".out")
+    ctx.actions.write(out, ctx.attr.val + "\n")
+    return [DefaultInfo(files = depset([out]))]
+
+write_rule = rule(
+    implementation = _write_out,
+    attrs = {"val": attr.string(default = "x")},
+)
+
 def _bin(ctx):
     exe = ctx.actions.declare_file(ctx.label.name)
     ctx.actions.write(exe, "#!/bin/sh\nexit 0\n", is_executable = True)
@@ -632,11 +646,11 @@ my_test = rule(implementation = _bin, test = True, attrs = {"data": attr.label_l
     w.write(
         "pkg/BUILD",
         r#"
-load("//:defs.bzl", "cov_rule", "sym_rule", "my_bin", "my_test")
+load("//:defs.bzl", "cov_rule", "sym_rule", "write_rule", "my_bin", "my_test")
 sym_rule(name = "unresolved")
 cov_rule(name = "c", deps = [":unresolved"])
-genrule(name = "g_a", outs = ["a.out"], cmd = "echo a > $@", tags = ["alpha"])
-genrule(name = "g_b", outs = ["b.out"], cmd = "echo b > $@", local = 1)
+write_rule(name = "g_a", val = "a", tags = ["alpha"])
+my_test(name = "g_b", local = True)
 my_bin(name = "runner")
 my_test(name = "my_sh_test", data = ["d.txt"])
 "#,
@@ -652,10 +666,10 @@ my_test(name = "my_sh_test", data = ["d.txt"])
         err.contains("Using default value for --instrumentation_filter: \"^//pkg[/:]\"."),
         "{err}"
     );
-    let cov_txt = std::fs::read_to_string(w.ws.join("bazel-bin/pkg/c.info")).unwrap();
+    let cov_txt = std::fs::read_to_string(bin_dir.join("pkg/c.info")).unwrap();
     assert_eq!(cov_txt.trim(), "cov=True");
 
-    // 2. --build_tag_filters uses OR for positive filters and recognizes `local = 1` as `local` tag.
+    // 2. --build_tag_filters uses OR for positive filters and recognizes `local = True`/`1` as `local` tag.
     let (code, _, err, _) = w.run(&[
         "build",
         "--build_tag_filters=alpha,local",
@@ -663,8 +677,8 @@ my_test(name = "my_sh_test", data = ["d.txt"])
         "//pkg:g_b",
     ]);
     assert_eq!(code, 0, "{err}");
-    assert!(w.ws.join("bazel-bin/pkg/a.out").exists());
-    assert!(w.ws.join("bazel-bin/pkg/b.out").exists());
+    assert!(bin_dir.join("pkg/g_a.out").exists());
+    assert!(bin_dir.join("pkg/g_b").exists());
 
     // 3. --invocation_id honored in BEP & command-<uuid>.profile.gz symlinked by command.profile.gz,
     //    and `bazel build` materializes .runfiles for sh_test when --build_runfile_links=true.
@@ -684,7 +698,7 @@ my_test(name = "my_sh_test", data = ["d.txt"])
     );
     assert!(w.root.join("ob/command.profile.gz").exists());
     assert!(
-        w.ws.join("bazel-bin/pkg/my_sh_test.runfiles").is_dir(),
+        bin_dir.join("pkg/my_sh_test.runfiles").is_dir(),
         "bazel build should materialize test runfiles tree"
     );
 
@@ -705,11 +719,20 @@ my_test(name = "my_sh_test", data = ["d.txt"])
 
     // 5. workspace_status_command receives --client_env and honors SOURCE_DATE_EPOCH without
     //    clobbering unchanged stable-status.txt.
-    let status_sh = w.ws.join("status.sh");
+    let status_cmd = if cfg!(windows) {
+        w.write(
+            "status.bat",
+            "@echo off\r\necho STABLE_FOO %MY_STATUS_VAR%\r\n",
+        );
+        "status.bat".to_string()
+    } else {
+        let status_sh = w.ws.join("status.sh");
+        format!("\"{}\"", status_sh.to_string_lossy().replace('\\', "/"))
+    };
     let (code, _, err, _) = w.run(&[
         "build",
         "--stamp",
-        &format!("--workspace_status_command={}", status_sh.display()),
+        &format!("--workspace_status_command={status_cmd}"),
         "--client_env=MY_STATUS_VAR=from_client",
         "--client_env=SOURCE_DATE_EPOCH=1700000000",
         "//pkg:g_a",
@@ -735,4 +758,132 @@ my_test(name = "my_sh_test", data = ["d.txt"])
     let (code, out, err, _) = w.run(&["query", &format!("--query_file={}", qfile.display())]);
     assert_eq!(code, 0, "{err}");
     assert_eq!(out.trim(), "//pkg:g_a");
+}
+
+#[test]
+fn actions_write_expands_tree_artifact_args_via_in_memory_fs() {
+    use zel_analysis::BuildConfigurationKey;
+    use zel_cmdline::Label;
+    use zel_events::Reporter;
+    use zel_exec::{execute_action_with, CompactPersistentActionCache, ExecOptions};
+    use zel_packages::{LoaderConfig, PackageLoader, SimpleRepoResolver};
+    use zel_rules::{AnalysisConfig, TargetResolver};
+    use zel_vfs::InMemoryFileSystem;
+
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let ws = PathFragment::create("/virtual/ws");
+    fs.create_directory_and_parents(&ws).unwrap();
+    fs.write_file(
+        &ws.get_relative_str("MODULE.bazel"),
+        b"module(name = \"m\")\n",
+    )
+    .unwrap();
+    fs.write_file(
+        &ws.get_relative_str("defs.bzl"),
+        br#"
+def _impl(ctx):
+    tree = ctx.actions.declare_directory(ctx.label.name + "_tree")
+    ctx.actions.run_shell(
+        outputs = [tree],
+        command = "mkdir -p %s" % tree.path,
+    )
+    out_shell = ctx.actions.declare_file(ctx.label.name + ".shell.params")
+    a1 = ctx.actions.args()
+    a1.add_all([tree])
+    ctx.actions.write(out_shell, a1)
+
+    out_flags = ctx.actions.declare_file(ctx.label.name + ".flags.params")
+    a2 = ctx.actions.args()
+    a2.set_param_file_format("flag_per_line")
+    a2.add_all("--srcs", [tree])
+    ctx.actions.write(out_flags, a2)
+    return [DefaultInfo(files = depset([out_shell, out_flags]))]
+
+tree_writer = rule(implementation = _impl)
+"#,
+    )
+    .unwrap();
+    fs.write_file(
+        &ws.get_relative_str("BUILD"),
+        b"load(\":defs.bzl\", \"tree_writer\")\ntree_writer(name = \"tw\")\n",
+    )
+    .unwrap();
+
+    let lc = LoaderConfig::new(
+        fs.clone() as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(ws)),
+    );
+    let resolver = TargetResolver::new(PackageLoader::new(lc), AnalysisConfig::new());
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let ct = resolver
+        .analyze(&Label::parse_canonical("//:tw").unwrap(), &cfg)
+        .unwrap();
+
+    // Populate the tree artifact strictly inside `exec_fs` (never touching host disk).
+    let exec_fs = InMemoryFileSystem::default();
+    let execroot = PathFragment::create("/virtual/execroot/_main");
+    let tree_art = ct
+        .typed_actions
+        .iter()
+        .flat_map(|a| a.outputs.iter())
+        .find(|o| o.is_tree_artifact)
+        .unwrap()
+        .clone();
+    let tree_dir = execroot.get_relative(&tree_art.exec_path);
+    exec_fs
+        .create_directory_and_parents(&tree_dir.get_relative_str("sub"))
+        .unwrap();
+    exec_fs
+        .write_file(&tree_dir.get_relative_str("z.cc"), b"int z;")
+        .unwrap();
+    exec_fs
+        .write_file(&tree_dir.get_relative_str("sub/a space.cc"), b"int a;")
+        .unwrap();
+
+    let cache = CompactPersistentActionCache::new();
+    let reporter = Reporter::new();
+    let opts = ExecOptions::default();
+    for act in &ct.actions {
+        if act.mnemonic() == "FileWrite" {
+            let res =
+                execute_action_with(act, &execroot, &exec_fs, &cache, &reporter, &opts).unwrap();
+            assert!(res.succeeded(), "{:?}", res.failure);
+        }
+    }
+
+    let tree_prefix = tree_art.exec_path.path_string();
+    let shell_out = ct
+        .default_info
+        .files
+        .iter()
+        .find(|f| f.exec_path.path_string().ends_with(".shell.params"))
+        .unwrap();
+    let flags_out = ct
+        .default_info
+        .files
+        .iter()
+        .find(|f| f.exec_path.path_string().ends_with(".flags.params"))
+        .unwrap();
+
+    let shell_text = String::from_utf8(
+        exec_fs
+            .read_file(&execroot.get_relative(&shell_out.exec_path))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        shell_text,
+        format!("'{tree_prefix}/sub/a space.cc'\n{tree_prefix}/z.cc\n")
+    );
+
+    let flags_text = String::from_utf8(
+        exec_fs
+            .read_file(&execroot.get_relative(&flags_out.exec_path))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        flags_text,
+        format!("--srcs={tree_prefix}/sub/a space.cc {tree_prefix}/z.cc\n")
+    );
 }

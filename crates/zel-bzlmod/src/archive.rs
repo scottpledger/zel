@@ -671,7 +671,16 @@ pub(crate) fn maybe_deprefix_symlink(
 ) -> String {
     if target.starts_with('/') {
         let tdp = deprefix(target, prefix, strip_components);
-        return join_rel(root, &tdp.segs).to_string_lossy().to_string();
+        let root_norm = root.to_string_lossy().replace('\\', "/");
+        let root_trimmed = root_norm.trim_end_matches('/');
+        if tdp.segs.is_empty() {
+            return if root_trimmed.is_empty() {
+                "/".to_string()
+            } else {
+                root_trimmed.to_string()
+            };
+        }
+        return format!("{root_trimmed}/{}", tdp.segs.join("/"));
     }
     let segs = normalize(target);
     let stripped = if strip_components != 0
@@ -3327,6 +3336,11 @@ mod corrupt_tests {
         assert_eq!(
             maybe_deprefix_symlink("/foo/include/hdr.h", &prefix, 0, root),
             "/extract/root/include/hdr.h"
+        );
+        let win_root = Path::new(r"C:\extract\root\");
+        assert_eq!(
+            maybe_deprefix_symlink("/foo/include/hdr.h", &prefix, 0, win_root),
+            "C:/extract/root/include/hdr.h"
         );
     }
 }
