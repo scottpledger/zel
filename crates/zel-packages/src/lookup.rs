@@ -250,8 +250,8 @@ impl IgnoredSubdirectories {
         self.ignored_reason(frag).is_some()
     }
 
-    /// Returns the matching ignore entry (`IgnoredSubdirectories.matchingEntry`) if `frag` is
-    /// covered by `.bazelignore` or `REPO.bazel` `ignore_directories()`.
+    /// Returns the matching `.bazelignore` prefix or `REPO.bazel` `ignore_directories()` entry
+    /// covering `frag`, if any (`IgnoredSubdirectories.matchingEntry`).
     pub fn matching_entry(&self, frag: &PathFragment) -> Option<String> {
         for e in &self.prefixes {
             if !e.is_empty() && frag.starts_with(e) {

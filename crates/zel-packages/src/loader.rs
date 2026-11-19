@@ -50,6 +50,14 @@ pub struct LoaderConfig {
     pub check_bzl_visibility: bool,
     /// Whether to apply `//tools/build_rules:prelude_bazel` (main repo only).
     pub use_prelude: bool,
+    /// `--experimental_sibling_repository_layout`: when `false`, `//...` skips top-level `external/`.
+    pub sibling_repository_layout: bool,
+    /// `--experimental_bzl_visibility` (default `true` in Bazel 9).
+    pub experimental_bzl_visibility: bool,
+    /// `--check_bzl_visibility` (default `true` in Bazel 9).
+    pub check_bzl_visibility: bool,
+    /// `--experimental_enable_scl_dialect` (default `true` in Bazel 9).
+    pub experimental_enable_scl_dialect: bool,
     /// Handler for host calls that belong to an embedding runtime (Bzlmod repository rules and
     /// `repository_ctx`/`module_ctx` methods called from helper `.bzl` files evaluated here).
     /// Consulted first for names accepted by [`is_external_host_call`].
@@ -96,6 +104,10 @@ impl LoaderConfig {
             experimental_bzl_visibility: true,
             check_bzl_visibility: true,
             use_prelude: true,
+            sibling_repository_layout: false,
+            experimental_bzl_visibility: true,
+            check_bzl_visibility: true,
+            experimental_enable_scl_dialect: true,
             external_host: None,
             bzl_override: None,
             sibling_repository_layout: false,
@@ -201,6 +213,7 @@ struct MacroDef {
     attrs: Vec<Attribute>,
     implementation: Value,
     finalizer: bool,
+    bzl_label: Option<Label>,
     /// Package of the `.bzl` file that defined the macro.
     def_pkg: PackageIdentifier,
     /// `file:line:col` of the statement that defined the macro (`macro(...)` call).
@@ -279,10 +292,13 @@ struct PackageState {
     contains_errors: bool,
     glob_io_error: Option<String>,
     macro_queue: std::collections::VecDeque<MacroCall>,
+    finalizer_queue: std::collections::VecDeque<MacroCall>,
+    in_finalizer_phase: bool,
+    finalizer_rule_snapshot: Option<Vec<(String, Value)>>,
+    /// Active `(macro_id, instance_name, call_pkg, macro_type_display)` frames for recursion checks.
+    active_macro_ids: Vec<(usize, String, PackageIdentifier, String)>,
     /// Stack of `(macro instance name, defining package, is_finalizer)` for the macro being expanded.
     macro_stack: Vec<(String, PackageIdentifier, bool)>,
-    /// Active `macro_id` chain for direct/indirect symbolic-macro recursion detection.
-    macro_call_ids: Vec<usize>,
     /// Parallel to `macro_stack`: (BUILD/caller call site, macro symbol name, macro definition location, main_submacro_defined).
     macro_frames: Vec<(String, String, String, bool)>,
     /// Explicit label values passed to top-level symbolic macro instances (for assumed input files).
@@ -706,8 +722,11 @@ impl PackageLoader {
             contains_errors: false,
             glob_io_error: None,
             macro_queue: Default::default(),
+            finalizer_queue: Default::default(),
+            in_finalizer_phase: false,
+            finalizer_rule_snapshot: None,
+            active_macro_ids: Vec::new(),
             macro_stack: Vec::new(),
-            macro_call_ids: Vec::new(),
             macro_frames: Vec::new(),
             top_level_macro_labels: Vec::new(),
             macro_violations: BTreeMap::new(),
@@ -786,11 +805,14 @@ impl PackageLoader {
         self.inject_builtin_toplevels(&mut ctx, true);
         self.install_host(&mut ctx, Some(Arc::clone(&state)), None, id.clone());
         let sink: Arc<Mutex<Vec<PackageEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let load_fatal: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         self.install_load_hook(
             &mut ctx,
             id.repository().clone(),
             id.clone(),
+            None,
             Arc::clone(&sink),
+            Arc::clone(&load_fatal),
             Vec::new(),
             Arc::new(Mutex::new(Vec::new())),
             None,
@@ -892,7 +914,14 @@ impl PackageLoader {
         let run_finalizers = run_macros && !state.lock().unwrap().contains_errors;
         let macro_ok = if run_finalizers {
             ctx.captured_prints = Some(Vec::new());
-            let ok = self.run_macro_queue(&mut ctx, &state);
+            let mut ok = self.run_macro_queue(&mut ctx, &state);
+            if ok {
+                let has_finalizers = !state.lock().unwrap().finalizer_queue.is_empty();
+                if has_finalizers {
+                    self.prepare_finalizer_phase(&state);
+                    ok = self.run_macro_queue(&mut ctx, &state);
+                }
+            }
             if let Some(prints) = ctx.captured_prints.take() {
                 let mut s = state.lock().unwrap();
                 for (loc, msg) in prints {
@@ -1093,13 +1122,96 @@ impl PackageLoader {
         }));
     }
 
-    #[allow(clippy::type_complexity, clippy::too_many_arguments)]
+    fn fmt_bzl_label(label: &Label) -> String {
+        if label.repository().is_main() {
+            format!("//{}:{}", label.package_name(), label.name())
+        } else {
+            label.canonical_form()
+        }
+    }
+
+    fn fmt_pkg_display(pkg: &PackageIdentifier) -> String {
+        if pkg.repository().is_main() {
+            format!("//{}", pkg.package_fragment())
+        } else {
+            pkg.canonical_form()
+        }
+    }
+
+    fn check_bzl_extension(&self, label: &Label) -> Result<(), String> {
+        let ok = if self.cfg.experimental_enable_scl_dialect {
+            label.name().ends_with(".bzl") || label.name().ends_with(".scl")
+        } else {
+            label.name().ends_with(".bzl")
+        };
+        if ok {
+            Ok(())
+        } else if self.cfg.experimental_enable_scl_dialect {
+            Err("The label must reference a file with extension \".bzl\" or \".scl\"".to_string())
+        } else {
+            Err("The label must reference a file with extension \".bzl\"".to_string())
+        }
+    }
+
+    fn check_bzl_load_visibility(
+        &self,
+        loaded_label: &Label,
+        module: &BzlModule,
+        loader_pkg: &PackageIdentifier,
+        caller_bzl: Option<&Label>,
+        loc: Option<String>,
+        sink: &Arc<Mutex<Vec<PackageEvent>>>,
+    ) -> Result<(), String> {
+        if loader_pkg.repository().name() == crate::builtins::BUILTINS_REPO
+            || loaded_label.package_identifier().repository().name()
+                == crate::builtins::BUILTINS_REPO
+        {
+            return Ok(());
+        }
+        if module
+            .visibility
+            .allows(loaded_label.package_identifier(), loader_pkg)
+        {
+            return Ok(());
+        }
+        let violation = format!(
+            "Starlark file {} is not visible for loading from package {}.",
+            Self::fmt_bzl_label(loaded_label),
+            Self::fmt_pkg_display(loader_pkg)
+        );
+        if self.cfg.check_bzl_visibility {
+            sink.lock()
+                .unwrap()
+                .push(PackageEvent::error(loc, violation.clone()));
+            if let Some(caller) = caller_bzl {
+                Err(format!(
+                    "module {} contains .bzl load visibility violations",
+                    Self::fmt_bzl_label(caller)
+                ))
+            } else {
+                Err(violation)
+            }
+        } else {
+            sink.lock().unwrap().push(PackageEvent {
+                kind: EventKind::Warning,
+                location: loc,
+                message: format!(
+                    "{violation} Continuing because --nocheck_bzl_visibility is active"
+                ),
+            });
+            Ok(())
+        }
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn install_load_hook(
         self: &Arc<Self>,
         ctx: &mut EvalContext,
         repo: RepositoryName,
         owner_pkg: PackageIdentifier,
+        caller_bzl: Option<(Label, String, Arc<Mutex<BTreeMap<String, (usize, usize)>>>)>,
         sink: Arc<Mutex<Vec<PackageEvent>>>,
+        fatal_override: Arc<Mutex<Option<String>>>,
         chain: Vec<String>,
         child_digests: Arc<Mutex<Vec<([u8; 32], Vec<(PathFragment, [u8; 32])>)>>>,
         bzl_vis_failed: Option<Arc<Mutex<bool>>>,
@@ -1108,36 +1220,25 @@ impl PackageLoader {
         ctx.load_hook = Some(Arc::new(move |module_label: &str| {
             let mapping = this.cfg.lookup.resolver.mapping(&repo);
             let label = parse_load_label(module_label, &owner_pkg, &mapping)?;
+            let call_loc = caller_bzl.as_ref().and_then(|(_, file, locs)| {
+                locs.lock()
+                    .unwrap()
+                    .get(module_label)
+                    .map(|(line, col)| format!("{file}:{line}:{col}"))
+            });
             match this.load_bzl(&label, &chain) {
                 Ok(m) => {
-                    if let Some(ref vis_failed) = bzl_vis_failed {
-                        if !m.visibility.allows(label.package_identifier(), &owner_pkg) {
-                            let msg = format!(
-                                "Starlark file {} is not visible for loading from package {}. Check the file's `visibility()` declaration, or override this check by passing --nocheck_bzl_visibility.",
-                                label.canonical_form(),
-                                owner_pkg.canonical_form(),
-                            );
-                            if this.cfg.check_bzl_visibility {
-                                sink.lock()
-                                    .unwrap()
-                                    .push(PackageEvent::error(None, msg.clone()));
-                                *vis_failed.lock().unwrap() = true;
-                                return Err(msg);
-                            } else {
-                                let mut s = sink.lock().unwrap();
-                                s.push(PackageEvent {
-                                    kind: EventKind::Warning,
-                                    location: None,
-                                    message: msg,
-                                });
-                                s.push(PackageEvent {
-                                    kind: EventKind::Warning,
-                                    location: None,
-                                    message:
-                                        "Continuing because --nocheck_bzl_visibility is active"
-                                            .to_string(),
-                                });
-                            }
+                    if bzl_vis_failed.is_some() {
+                        if let Err(vis_err) = this.check_bzl_load_visibility(
+                            &label,
+                            &m,
+                            &owner_pkg,
+                            caller_bzl.as_ref().map(|(l, _, _)| l),
+                            call_loc,
+                            &sink,
+                        ) {
+                            *fatal_override.lock().unwrap() = Some(vis_err.clone());
+                            return Err(vis_err);
                         }
                     }
                     child_digests
@@ -1149,9 +1250,62 @@ impl PackageLoader {
                 Err(e) => {
                     // Events of the failed module are reported before the importer's own error.
                     sink.lock().unwrap().extend(e.events.clone());
+                    if e.message.contains(".bzl load visibility violations") {
+                        let msg = match &call_loc {
+                            Some(loc) => format!("at {loc}: {}", e.message),
+                            None => e.message.clone(),
+                        };
+                        *fatal_override.lock().unwrap() = Some(msg.clone());
+                        return Err(msg);
+                    }
                     Err(e.message)
                 }
             }
+        }));
+    }
+
+    /// Validates `.bzl` / `.scl` `load()` statement labels and file extensions before execution.
+    fn install_bzl_preload_hook(
+        self: &Arc<Self>,
+        ctx: &mut EvalContext,
+        bzl_label: Label,
+        repo: RepositoryName,
+        owner_pkg: PackageIdentifier,
+        load_locs: Arc<Mutex<BTreeMap<String, (usize, usize)>>>,
+    ) {
+        let this = Arc::clone(self);
+        let file = ctx.file_name.clone();
+        ctx.preload_hook = Some(Arc::new(move |loads: &[zel_starlark::PreloadItem]| {
+            {
+                let mut locs = load_locs.lock().unwrap();
+                for (raw, (line, col)) in loads {
+                    locs.entry(raw.clone()).or_insert((*line, *col));
+                }
+            }
+            let mapping = this.cfg.lookup.resolver.mapping(&repo);
+            let mut events = Vec::new();
+            let mut canonical = Vec::new();
+            for (raw, (line, col)) in loads {
+                let parsed = parse_load_label(raw, &owner_pkg, &mapping)
+                    .and_then(|l| this.check_bzl_extension(&l).map(|()| l));
+                match parsed {
+                    Ok(l) => canonical.push(l.canonical_form()),
+                    Err(e) => {
+                        let e = e.strip_prefix("in load statement: ").unwrap_or(&e);
+                        events.push(format!("{file}:{line}:{col}: in load statement: {e}"));
+                    }
+                }
+            }
+            if !events.is_empty() {
+                return Err(zel_starlark::PreloadFailure {
+                    events,
+                    fatal: format!(
+                        "module {} has invalid load statements",
+                        Self::fmt_bzl_label(&bzl_label)
+                    ),
+                });
+            }
+            Ok(canonical)
         }));
     }
 
@@ -1173,18 +1327,10 @@ impl PackageLoader {
             let mut events = Vec::new();
             let mut labels = Vec::new();
             for (raw, (line, col)) in loads {
-                let parsed = parse_load_label(raw, &owner_pkg, &mapping).and_then(|l| {
-                    if l.name().ends_with(".bzl") || l.name().ends_with(".scl") {
-                        Ok(l)
-                    } else {
-                        Err(
-                            "The label must reference a file with extension \".bzl\" or \".scl\""
-                                .to_string(),
-                        )
-                    }
-                });
+                let parsed = parse_load_label(raw, &owner_pkg, &mapping)
+                    .and_then(|l| this.check_bzl_extension(&l).map(|()| l));
                 match parsed {
-                    Ok(l) => labels.push((l, (*line, *col))),
+                    Ok(l) => labels.push((l, *line, *col)),
                     Err(e) => {
                         let e = e.strip_prefix("in load statement: ").unwrap_or(&e);
                         events.push(format!("{file}:{line}:{col}: in load statement: {e}"));
@@ -1199,41 +1345,33 @@ impl PackageLoader {
             }
             let mut canonical = Vec::new();
             let mut has_visibility_violation = false;
-            for (label, (line, col)) in labels {
+            for (label, line, col) in labels {
                 match this.load_bzl(&label, &[]) {
                     Ok(m) => {
-                        if !m.visibility.allows(label.package_identifier(), &owner_pkg) {
-                            let loc = Some(format!("{file}:{line}:{col}"));
-                            let msg = format!(
-                                "Starlark file {} is not visible for loading from package {}. Check the file's `visibility()` declaration, or override this check by passing --nocheck_bzl_visibility.",
-                                label.canonical_form(),
-                                owner_pkg.canonical_form(),
-                            );
-                            if this.cfg.check_bzl_visibility {
-                                sink.lock().unwrap().push(PackageEvent::error(loc, msg));
-                                has_visibility_violation = true;
-                            } else {
-                                let mut s = sink.lock().unwrap();
-                                s.push(PackageEvent {
-                                    kind: EventKind::Warning,
-                                    location: loc,
-                                    message: msg,
-                                });
-                                s.push(PackageEvent {
-                                    kind: EventKind::Warning,
-                                    location: None,
-                                    message:
-                                        "Continuing because --nocheck_bzl_visibility is active"
-                                            .to_string(),
-                                });
-                            }
+                        if this
+                            .check_bzl_load_visibility(
+                                &label,
+                                &m,
+                                &owner_pkg,
+                                None,
+                                Some(format!("{file}:{line}:{col}")),
+                                &sink,
+                            )
+                            .is_err()
+                        {
+                            has_visibility_violation = true;
                         }
                     }
                     Err(e) => {
                         sink.lock().unwrap().extend(e.events.clone());
+                        let fatal = if e.message.contains(".bzl load visibility violations") {
+                            format!("at {file}:{line}:{col}: {}", e.message)
+                        } else {
+                            e.message
+                        };
                         return Err(zel_starlark::PreloadFailure {
                             events: Vec::new(),
-                            fatal: e.message,
+                            fatal,
                         });
                     }
                 }
@@ -1675,22 +1813,37 @@ impl PackageLoader {
             label.package_identifier().clone(),
         );
         let sink: Arc<Mutex<Vec<PackageEvent>>> = Arc::new(Mutex::new(Vec::new()));
+        let fatal_override: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         #[allow(clippy::type_complexity)]
         let child_digests: Arc<Mutex<Vec<([u8; 32], Vec<(PathFragment, [u8; 32])>)>>> =
             Arc::new(Mutex::new(Vec::new()));
-        let bzl_vis_failed = Arc::new(Mutex::new(false));
+        let bzl_vis_failed = (!is_builtins && !is_prelude).then(|| Arc::new(Mutex::new(false)));
+        let load_locs: Arc<Mutex<BTreeMap<String, (usize, usize)>>> =
+            Arc::new(Mutex::new(BTreeMap::new()));
+        if !is_builtins && !is_prelude {
+            self.install_bzl_preload_hook(
+                &mut ctx,
+                label.clone(),
+                label.package_identifier().repository().clone(),
+                label.package_identifier().clone(),
+                Arc::clone(&load_locs),
+            );
+        }
+        let bzl_file_name = ctx.file_name.clone();
         self.install_load_hook(
             &mut ctx,
             label.package_identifier().repository().clone(),
             label.package_identifier().clone(),
+            (!is_builtins && !is_prelude)
+                .then(|| (label.clone(), bzl_file_name, Arc::clone(&load_locs))),
             Arc::clone(&sink),
+            Arc::clone(&fatal_override),
             chain2,
             Arc::clone(&child_digests),
-            Some(Arc::clone(&bzl_vis_failed)),
+            bzl_vis_failed,
         );
         let res = ctx.eval_file_checked(&source, None);
         bzl_init.lock().unwrap().initializing = false;
-        let vis_failed = *bzl_vis_failed.lock().unwrap();
         let recorded_visibility = bzl_init
             .lock()
             .unwrap()
@@ -1719,26 +1872,16 @@ impl PackageLoader {
             }
         }
         if let Err(errs) = res {
-            if vis_failed {
-                return Err(BzlError {
-                    events,
-                    message: format!(
-                        "module {} contains .bzl load visibility violations",
-                        label.canonical_form()
-                    ),
-                    observed_files: observed_files
-                        .into_iter()
-                        .map(|(p, h)| (p, Some(h)))
-                        .collect(),
-                });
-            }
+            let fo = fatal_override.lock().unwrap().take();
             for line in errs {
+                if fo.is_some() {
+                    continue;
+                }
                 let (loc, msg) = split_location(&line);
                 events.push(PackageEvent::error(loc, msg));
             }
-            return Err(BzlError {
-                events,
-                message: format!(
+            let fatal_msg = fo.or_else(|| ctx.fatal_error.take()).unwrap_or_else(|| {
+                format!(
                     "{} of module '{}' failed",
                     if ctx.static_failure {
                         "compilation"
@@ -1749,7 +1892,11 @@ impl PackageLoader {
                         .package_identifier()
                         .package_fragment()
                         .get_relative_str(label.name())
-                ),
+                )
+            });
+            return Err(BzlError {
+                events,
+                message: fatal_msg,
                 observed_files: observed_files
                     .into_iter()
                     .map(|(p, h)| (p, Some(h)))
@@ -1951,6 +2098,7 @@ impl PackageLoader {
                             if let Some(m) = reg.macros.get_mut(idx) {
                                 if m.name.is_none() {
                                     m.name = Some(k.clone());
+                                    m.bzl_label = Some(label.clone());
                                 }
                             }
                         }

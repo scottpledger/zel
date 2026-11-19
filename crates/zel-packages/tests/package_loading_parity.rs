@@ -2,6 +2,7 @@ use std::sync::Arc;
 use zel_cmdline::{Label, PackageIdentifier, RepositoryMapping, RepositoryName};
 use zel_packages::attr::{convert_plain, AttrType, AttrValue, ConvertCtx};
 use zel_packages::glob::{evaluate, GlobContext, GlobOp};
+use zel_packages::lookup::{EventKind, RepoResolver};
 use zel_packages::{LoaderConfig, PackageLoader, PatternResolver, SimpleRepoResolver};
 use zel_starlark::{StarlarkDict, StarlarkList, Value};
 use zel_vfs::{FileSystem, InMemoryFileSystem, PathFragment};
@@ -467,4 +468,505 @@ genrule(
             .join("\n");
         assert!(errs.contains(expected), "for {bad_call}: {errs}");
     }
+}
+
+#[test]
+fn rule_output_matching_rule_name_emits_warning_without_failing_package() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    fs.create_directory_and_parents(&root).unwrap();
+    write(
+        &fs,
+        &root,
+        "pkg/BUILD",
+        "genrule(name = 'hello_world', outs = ['hello_world', 'other.out'], cmd = 'touch $@')\n",
+    );
+
+    let cfg = LoaderConfig::new(
+        Arc::clone(&fs) as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(root)),
+    );
+    let loader = PackageLoader::new(cfg);
+    let pkg = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("pkg").unwrap())
+        .unwrap();
+    assert!(!pkg.contains_errors, "{:?}", pkg.events);
+    assert!(
+        pkg.events.iter().any(|e| {
+            e.kind == EventKind::Warning
+                && e.message
+                    == "target 'hello_world' is both a rule and a file; please choose another name for the rule"
+        }),
+        "{:?}",
+        pkg.events
+    );
+    match pkg.targets.get("hello_world") {
+        Some(zel_packages::Target::Rule(r)) => {
+            assert_eq!(r.outs, vec!["hello_world", "other.out"]);
+        }
+        other => panic!("expected Rule target for hello_world, got {other:?}"),
+    }
+}
+
+#[test]
+fn symbolic_macros_eager_expansion_finalizer_snapshot_attrs_none_and_recursion() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    fs.create_directory_and_parents(&root).unwrap();
+    write(
+        &fs,
+        &root,
+        "pkg/defs.bzl",
+        r#"
+def _ord_impl(name, visibility):
+    native.filegroup(name = name + "_inner_lib", visibility = visibility)
+
+ord_macro = macro(implementation = _ord_impl)
+
+dropped_srcs_macro = macro(
+    implementation = _ord_impl,
+    inherit_attrs = native.filegroup,
+    attrs = {"srcs": None},
+)
+
+def _inner_fin_impl(name, visibility):
+    native.filegroup(name = name + "_inner_lib", visibility = visibility)
+
+inner_finalizer = macro(implementation = _inner_fin_impl, finalizer = True)
+
+def _fin_impl(name, visibility):
+    native.filegroup(name = name + "_inner_lib", visibility = visibility)
+    ord_macro(name = name + "_inner_macro")
+    inner_finalizer(name = name + "_inner_finalizer")
+    keys = list(native.existing_rules().keys())
+    expected = [
+        "top_before",
+        "macro_before_inner_lib",
+        "top_after",
+        "macro_after_inner_lib",
+    ]
+    if keys != expected:
+        fail("unexpected finalizer snapshot: %s vs %s" % (keys, expected))
+    if native.existing_rule(name + "_inner_lib") != None:
+        fail("finalizer saw its own target")
+
+my_finalizer = macro(implementation = _fin_impl, finalizer = True)
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "pkg/BUILD",
+        r#"
+load(":defs.bzl", "ord_macro", "dropped_srcs_macro", "my_finalizer")
+filegroup(name = "top_before")
+ord_macro(name = "macro_before")
+my_finalizer(name = "fin1")
+_chk1 = None if "macro_before_inner_lib" in existing_rules() else fail("ordinary macro was not expanded eagerly before subsequent BUILD statements")
+_chk2 = fail("finalizer ran too early during BUILD evaluation") if "fin1_inner_lib" in existing_rules() else None
+filegroup(name = "top_after")
+dropped_srcs_macro(name = "macro_after")
+my_finalizer(name = "fin2")
+"#,
+    );
+
+    let cfg = LoaderConfig::new(
+        Arc::clone(&fs) as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(root.clone())),
+    );
+    let loader = PackageLoader::new(cfg);
+    let pkg = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("pkg").unwrap())
+        .unwrap();
+    assert!(!pkg.contains_errors, "{:?}", pkg.events);
+    assert!(pkg.targets.contains_key("fin1_inner_lib"));
+    assert!(pkg.targets.contains_key("fin1_inner_finalizer_inner_lib"));
+    assert!(pkg.targets.contains_key("fin2_inner_lib"));
+
+    // Passing dropped `srcs` attribute fails with no such attribute.
+    write(
+        &fs,
+        &root,
+        "dropped_err/BUILD",
+        "load('//pkg:defs.bzl', 'dropped_srcs_macro')\ndropped_srcs_macro(name = 'x', srcs = [])\n",
+    );
+    let p_drop = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("dropped_err").unwrap())
+        .unwrap();
+    assert!(p_drop.contains_errors);
+    assert!(
+        p_drop.events.iter().any(|e| e
+            .message
+            .contains("no such attribute 'srcs' in 'dropped_srcs_macro' macro")),
+        "{:?}",
+        p_drop.events
+    );
+
+    // Direct and indirect symbolic macro recursion detection.
+    write(
+        &fs,
+        &root,
+        "rec/recursive.bzl",
+        r#"
+def _direct(name, visibility):
+    direct_m(name = name + "_x")
+
+direct_m = macro(implementation = _direct)
+
+def _a(name, visibility):
+    macro_b(name = name + "_b")
+
+def _b(name, visibility):
+    macro_a(name = name + "_a")
+
+macro_a = macro(implementation = _a)
+macro_b = macro(implementation = _b)
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "rec/BUILD",
+        "load(':recursive.bzl', 'direct_m', 'macro_a')\ndirect_m(name = 'abc')\nmacro_a(name = 'ind')\n",
+    );
+    let p_rec = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("rec").unwrap())
+        .unwrap();
+    assert!(p_rec.contains_errors);
+    let rec_msgs: Vec<&str> = p_rec.events.iter().map(|e| e.message.as_str()).collect();
+    let joined = rec_msgs.join("\n");
+    assert!(
+        joined.contains("macro 'abc_x' is a direct recursive call of 'abc'. Macro instantiation traceback (most recent call last):")
+            && joined.contains("\tPackage //rec, macro 'abc' of type //rec:recursive.bzl%direct_m"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("macro 'ind_b_a' is an indirect recursive call of 'ind'. Macro instantiation traceback (most recent call last):")
+            && joined.contains("\tPackage //rec, macro 'ind_b' of type //rec:recursive.bzl%macro_b"),
+        "{joined}"
+    );
+}
+
+#[test]
+fn bzl_load_visibility_and_extension_checks() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    let ext = PathFragment::create("/ext_repo");
+    fs.create_directory_and_parents(&root).unwrap();
+    fs.create_directory_and_parents(&ext).unwrap();
+
+    write(&fs, &root, "b/BUILD", "");
+    write(&fs, &root, "b/priv.bzl", "visibility('private')\nX = 1\n");
+    write(&fs, &root, "b/allow_a.bzl", "visibility(['//a'])\nX = 2\n");
+    write(
+        &fs,
+        &root,
+        "b/allow_a_sub.bzl",
+        "visibility(['//a/...'])\nX = 3\n",
+    );
+    write(&fs, &root, "b/not_bzl.txt", "X = 4\n");
+    write(&fs, &ext, "lib/BUILD", "");
+    write(&fs, &ext, "lib/bar.bzl", "visibility(['//...'])\nY = 9\n");
+
+    write(&fs, &root, "a/BUILD", "load('//b:allow_a.bzl', 'X')\n");
+    write(&fs, &root, "a/sub/BUILD", "load('//b:allow_a.bzl', 'X')\n");
+    write(
+        &fs,
+        &root,
+        "a/sub_ok/BUILD",
+        "load('//b:allow_a_sub.bzl', 'X')\n",
+    );
+    write(&fs, &root, "c/BUILD", "load('//c:foo.bzl', 'Z')\n");
+    write(
+        &fs,
+        &root,
+        "c/foo.bzl",
+        "load('//b:priv.bzl', 'X')\nZ = X\n",
+    );
+    write(&fs, &root, "d/BUILD", "load('//d:bad_ext.bzl', 'Z')\n");
+    write(
+        &fs,
+        &root,
+        "d/bad_ext.bzl",
+        "load('//b:not_bzl.txt', 'X')\nZ = X\n",
+    );
+    write(
+        &fs,
+        &root,
+        "cross/BUILD",
+        "load('@repo//lib:bar.bzl', 'Y')\n",
+    );
+
+    let mut resolver = SimpleRepoResolver::new(root.clone());
+    resolver.external.insert("repo+".into(), ext);
+    resolver
+        .apparent
+        .insert("repo".into(), RepositoryName::create("repo+").unwrap());
+    let resolver: Arc<dyn RepoResolver> = Arc::new(resolver);
+
+    let mut cfg = LoaderConfig::new(
+        Arc::clone(&fs) as Arc<dyn FileSystem>,
+        Arc::clone(&resolver),
+    );
+    cfg.experimental_enable_scl_dialect = false;
+    let loader = PackageLoader::new(cfg);
+
+    let p_a = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("a").unwrap())
+        .unwrap();
+    assert!(!p_a.contains_errors, "{:?}", p_a.events);
+
+    let p_sub_ok = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("a/sub_ok").unwrap())
+        .unwrap();
+    assert!(!p_sub_ok.contains_errors, "{:?}", p_sub_ok.events);
+
+    // `visibility(["//a"])` does NOT allow `//a/sub`.
+    let err_sub = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("a/sub").unwrap())
+        .unwrap_err();
+    assert!(
+        err_sub.events.iter().any(|e| {
+            e.message == "Starlark file //b:allow_a.bzl is not visible for loading from package //a/sub."
+        }),
+        "{err_sub:?}"
+    );
+
+    // Transitive `.bzl` visibility violation reports `module //c:foo.bzl contains .bzl load visibility violations`.
+    let err_c = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("c").unwrap())
+        .unwrap_err();
+    assert!(
+        err_c.events.iter().any(|e| {
+            e.message == "Starlark file //b:priv.bzl is not visible for loading from package //c."
+        }) && err_c
+            .message
+            .contains("module //c:foo.bzl contains .bzl load visibility violations"),
+        "{err_c:?}"
+    );
+
+    // `visibility(["//..."])` in `@repo//lib:bar.bzl` is same-repo only and rejects main `//cross`.
+    let err_cross = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("cross").unwrap())
+        .unwrap_err();
+    assert!(
+        err_cross.events.iter().any(|e| {
+            e.message
+                == "Starlark file @@repo+//lib:bar.bzl is not visible for loading from package //cross."
+        }),
+        "{err_cross:?}"
+    );
+
+    // Non-`.bzl` load inside `.bzl` with `--noexperimental_enable_scl_dialect` omits `.scl`.
+    let err_d = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("d").unwrap())
+        .unwrap_err();
+    assert!(
+        err_d.events.iter().any(|e| e
+            .message
+            .contains("The label must reference a file with extension \".bzl\"")
+            && !e.message.contains(".scl"))
+            && err_d
+                .message
+                .contains("module //d:bad_ext.bzl has invalid load statements"),
+        "{err_d:?}"
+    );
+
+    // `--nocheck_bzl_visibility` downgrades visibility errors to warnings and allows loading.
+    let mut warn_cfg = LoaderConfig::new(Arc::clone(&fs) as Arc<dyn FileSystem>, resolver);
+    warn_cfg.check_bzl_visibility = false;
+    let warn_loader = PackageLoader::new(warn_cfg);
+    let p_warn = warn_loader
+        .load_package(&PackageIdentifier::create_in_main_repo("a/sub").unwrap())
+        .unwrap();
+    assert!(!p_warn.contains_errors, "{:?}", p_warn.events);
+    assert!(
+        p_warn.events.iter().any(|e| e.kind == EventKind::Warning
+            && e.message
+                .contains("Continuing because --nocheck_bzl_visibility is active")),
+        "{:?}",
+        p_warn.events
+    );
+}
+
+#[test]
+fn testing_execution_info_defaults_exec_group_and_glob_rejects_question_mark() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    fs.create_directory_and_parents(&root).unwrap();
+    write(&fs, &root, "BUILD", "");
+    write(
+        &fs,
+        &root,
+        "exec_info.bzl",
+        "INFO = testing.ExecutionInfo({'supports-workers': '1'})\nGRP = INFO.exec_group\n",
+    );
+    let cfg = LoaderConfig::new(
+        Arc::clone(&fs) as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(root.clone())),
+    );
+    let loader = PackageLoader::new(cfg);
+    let bzl = Label::parse_canonical("//:exec_info.bzl").unwrap();
+    assert_eq!(
+        loader.load_bzl_export(&bzl, "GRP").unwrap(),
+        Value::String("test".into())
+    );
+
+    let gctx = GlobContext {
+        fs: fs.as_ref(),
+        package_dir: &root,
+        skip_convenience_symlinks: false,
+        lookup: None,
+    };
+    let err = zel_packages::glob::evaluate_checked(&gctx, &["?.txt".into()], &[], GlobOp::Files)
+        .unwrap_err();
+    match err {
+        zel_packages::glob::GlobEvalError::BadPattern(msg) => {
+            assert_eq!(msg, "invalid glob pattern '?.txt': wildcard ? forbidden");
+        }
+        other => panic!("expected BadPattern, got {other:?}"),
+    }
+}
+
+#[test]
+fn recursive_traversal_sentinel_external_execroot_and_bazelignore_warning() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    fs.create_directory_and_parents(&root).unwrap();
+    write(&fs, &root, "BUILD", "filegroup(name = 'root_fg')\n");
+    write(&fs, &root, ".bazelignore", "ignoreme\n");
+    write(&fs, &root, "ignoreme/BUILD", "filegroup(name = 'ig')\n");
+    write(
+        &fs,
+        &root,
+        "ignoreme/deep/BUILD",
+        "filegroup(name = 'igd')\n",
+    );
+
+    // Top-level `external/` is skipped by `//...` when sibling_repository_layout is false.
+    write(
+        &fs,
+        &root,
+        "external/extpkg/BUILD",
+        "filegroup(name = 'ext_fg')\n",
+    );
+
+    // Symlink target under `<output_base>/execroot` is skipped at any depth.
+    let exec_out = PathFragment::create("/tmp/ob/execroot/_main/pkg");
+    fs.create_directory_and_parents(&exec_out).unwrap();
+    fs.write_file(
+        &exec_out.get_relative_str("BUILD"),
+        b"filegroup(name = 'from_execroot')\n",
+    )
+    .unwrap();
+    fs.create_symbolic_link(&root.get_relative_str("convenience"), &exec_out)
+        .unwrap();
+    fs.create_directory_and_parents(&root.get_relative_str("d"))
+        .unwrap();
+    fs.create_symbolic_link(&root.get_relative_str("d/c"), &exec_out)
+        .unwrap();
+
+    // `DONT_FOLLOW_SYMLINKS_WHEN_TRAVERSING_THIS_DIRECTORY_VIA_A_RECURSIVE_TARGET_PATTERN`
+    let real_target = PathFragment::create("/real_ext_dir");
+    fs.create_directory_and_parents(&real_target).unwrap();
+    fs.write_file(
+        &real_target.get_relative_str("BUILD"),
+        b"filegroup(name = 'linked_fg')\n",
+    )
+    .unwrap();
+    write(
+        &fs,
+        &root,
+        "a/b/DONT_FOLLOW_SYMLINKS_WHEN_TRAVERSING_THIS_DIRECTORY_VIA_A_RECURSIVE_TARGET_PATTERN",
+        "",
+    );
+    write(
+        &fs,
+        &root,
+        "a/b/not_symlink/BUILD",
+        "filegroup(name = 'real_fg')\n",
+    );
+    fs.create_symbolic_link(&root.get_relative_str("a/b/symlink"), &real_target)
+        .unwrap();
+    fs.create_directory_and_parents(&root.get_relative_str("a/c"))
+        .unwrap();
+    fs.create_symbolic_link(&root.get_relative_str("a/c/symlink"), &real_target)
+        .unwrap();
+
+    let cfg = LoaderConfig::new(
+        Arc::clone(&fs) as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(root)),
+    );
+    let loader = PackageLoader::new(cfg);
+    let pr = PatternResolver::new(loader, PathFragment::empty());
+
+    let all = pr.resolve_patterns(&["//...".into()]);
+    assert!(all.errors.is_empty(), "{:?}", all.errors);
+    let all_labels: Vec<String> = all
+        .targets
+        .iter()
+        .map(|t| t.label().canonical_form())
+        .collect();
+    assert!(all_labels.contains(&"//:root_fg".to_string()));
+    assert!(all_labels.contains(&"//a/b/not_symlink:real_fg".to_string()));
+    assert!(all_labels.contains(&"//a/c/symlink:linked_fg".to_string()));
+    assert!(
+        !all_labels.contains(&"//a/b/symlink:linked_fg".to_string()),
+        "{all_labels:?}"
+    );
+    assert!(
+        !all_labels.contains(&"//external/extpkg:ext_fg".to_string()),
+        "{all_labels:?}"
+    );
+    assert!(
+        !all_labels.contains(&"//convenience:from_execroot".to_string()),
+        "{all_labels:?}"
+    );
+    assert!(
+        !all_labels.contains(&"//d/c:from_execroot".to_string()),
+        "{all_labels:?}"
+    );
+
+    // Recursive pattern rooted in `.bazelignore` directory succeeds with warning.
+    let ig1 = pr.resolve_patterns(&["//ignoreme/deep/...".into()]);
+    assert!(ig1.errors.is_empty(), "{:?}", ig1.errors);
+    assert!(ig1.targets.is_empty());
+    assert!(
+        ig1.events.iter().any(|e| {
+            e.kind == EventKind::Warning
+                && e.message == "Pattern '//ignoreme/deep/...' was filtered out by ignored directory 'ignoreme'"
+        }),
+        "{:?}",
+        ig1.events
+    );
+
+    // `//ignoreme/deep/... -//ignoreme/...` is pruned by negative pattern before warning.
+    let ig_neg_parent =
+        pr.resolve_patterns(&["//ignoreme/deep/...".into(), "-//ignoreme/...".into()]);
+    assert!(
+        ig_neg_parent.errors.is_empty(),
+        "{:?}",
+        ig_neg_parent.errors
+    );
+    assert!(ig_neg_parent.targets.is_empty());
+    assert!(
+        ig_neg_parent.events.is_empty(),
+        "{:?}",
+        ig_neg_parent.events
+    );
+
+    // `//ignoreme/... -//ignoreme/deep/...` still logs warning on `//ignoreme/...`.
+    let ig_neg_child =
+        pr.resolve_patterns(&["//ignoreme/...".into(), "-//ignoreme/deep/...".into()]);
+    assert!(ig_neg_child.errors.is_empty(), "{:?}", ig_neg_child.errors);
+    assert!(ig_neg_child.targets.is_empty());
+    assert!(
+        ig_neg_child.events.iter().any(|e| {
+            e.kind == EventKind::Warning
+                && e.message
+                    == "Pattern '//ignoreme/...' was filtered out by ignored directory 'ignoreme'"
+        }),
+        "{:?}",
+        ig_neg_child.events
+    );
 }

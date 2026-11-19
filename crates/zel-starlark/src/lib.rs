@@ -4493,7 +4493,7 @@ fn construct_native_provider(
             if matches!(eval_kw.get("exec_group"), None | Some(Value::None)) {
                 eval_kw.insert(
                     "exec_group".to_string(),
-                    Value::String("default".to_string()),
+                    Value::String("test".to_string()),
                 );
             }
             Ok(eval_kw)
