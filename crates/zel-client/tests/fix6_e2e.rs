@@ -252,14 +252,14 @@ fn client_fatal_framing_for_rc_and_startup_errors() {
     assert!(l < f, "{err}");
 
     // Import of an unreadable file: INTERNAL_ERROR (37) with the Parsing log lines.
-    // `rc_file.cc` (`blaze_util::Tokenize`) treats `\` as an escape character on all platforms,
-    // so normalize Windows path separators to `/` before writing into `.bazelrc`.
-    let missing_rc = w
-        .root
-        .join("missing.rc")
-        .to_string_lossy()
-        .replace('\\', "/");
-    fs::write(w.ws.join(".bazelrc"), format!("import \"{missing_rc}\"\n")).unwrap();
+    // `.bazelrc` tokenization (`blaze_util::Tokenize`) treats `\` as an escape character on all
+    // platforms, so paths in `.bazelrc` must use `/` or escaped `\\`.
+    let root_slash = w.root.to_string_lossy().replace('\\', "/");
+    fs::write(
+        w.ws.join(".bazelrc"),
+        format!("import \"{root_slash}/missing.rc\"\n"),
+    )
+    .unwrap();
     let o = w.run(&[], &["info", "release"], &[]);
     let err = s(&o.stderr);
     assert_eq!(o.status.code(), Some(37), "{err}");
@@ -267,6 +267,21 @@ fn client_fatal_framing_for_rc_and_startup_errors() {
     assert!(
         err.contains("] Unexpected error reading config file '")
             && err.contains("missing.rc': (error: 2): "),
+        "{err}"
+    );
+
+    let root_escaped = w.root.to_string_lossy().replace('\\', "\\\\");
+    fs::write(
+        w.ws.join(".bazelrc"),
+        format!("import {root_escaped}/missing_escaped.rc\n"),
+    )
+    .unwrap();
+    let o = w.run(&[], &["info", "release"], &[]);
+    let err = s(&o.stderr);
+    assert_eq!(o.status.code(), Some(37), "{err}");
+    assert!(
+        err.contains("] Unexpected error reading config file '")
+            && err.contains("missing_escaped.rc': (error: 2): "),
         "{err}"
     );
 

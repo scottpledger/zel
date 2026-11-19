@@ -1448,4 +1448,53 @@ mod tests {
         let flags: Vec<String> = opts.into_iter().map(|(o, _)| o).collect();
         assert_eq!(flags, vec!["--jobs=7"]);
     }
+
+    #[test]
+    fn test_rc_windows_path_escaping_in_imports() {
+        // Per `blaze_util::Tokenize` (`src/main/cpp/util/strings.cc`), `\` is an escape character
+        // in `.bazelrc` on all platforms: Windows drive paths must use `/` or escaped `\\`.
+        assert_eq!(
+            tokenize_rc_line(r"import C:/Users/runner/ws/missing.rc"),
+            vec!["import", "C:/Users/runner/ws/missing.rc"]
+        );
+        assert_eq!(
+            tokenize_rc_line(r"import C:\\Users\\runner\\ws\\missing.rc"),
+            vec!["import", r"C:\Users\runner\ws\missing.rc"]
+        );
+        assert_eq!(
+            tokenize_rc_line(r"import C:\Users\runner\ws\missing.rc"),
+            vec!["import", "C:Usersrunnerwsmissing.rc"]
+        );
+
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("C:/ws");
+        let configs = ws.get_relative_str("configs");
+        fs.create_directory_and_parents(&configs).unwrap();
+        fs.write_file(
+            &configs.get_relative_str("slash.bazelrc"),
+            b"build --jobs=4\n",
+        )
+        .unwrap();
+        fs.write_file(
+            &configs.get_relative_str("escaped.bazelrc"),
+            b"build --jobs=8\n",
+        )
+        .unwrap();
+        fs.write_file(
+            &ws.get_relative_str(".bazelrc"),
+            b"import C:/ws/configs/slash.bazelrc\nimport C:\\\\ws\\\\configs\\\\escaped.bazelrc\n",
+        )
+        .unwrap();
+
+        let mut config = BazelrcConfig::default();
+        config
+            .parse_file(&ws.get_relative_str(".bazelrc"), Some(&ws), &fs, "9.3.2")
+            .unwrap();
+        let flags: Vec<String> = config
+            .get_inherited_command_options("build")
+            .into_iter()
+            .map(|(o, _)| o)
+            .collect();
+        assert_eq!(flags, vec!["--jobs=4", "--jobs=8"]);
+    }
 }
