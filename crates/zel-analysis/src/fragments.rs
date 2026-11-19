@@ -177,6 +177,7 @@ impl<'a> Opts<'a> {
         Vec::new()
     }
 
+    #[allow(dead_code)]
     fn list_v(&self, k: &str) -> Value {
         mk_list(self.list(k).into_iter().map(Value::String).collect())
     }
@@ -396,6 +397,85 @@ pub fn parse_libc_top_label(raw: &str) -> Result<Option<Label>, String> {
     let rewritten = Label::create(lbl.package_identifier().clone(), "everything")
         .map_err(|e| format!("Invalid --grte_top label '{raw}': {e}"))?;
     Ok(Some(rewritten))
+}
+
+/// Tokenizes Java options (`ShellUtils.tokenize` on UTF-16 code units): splits only on ASCII
+/// space and tab, and inside `"..."` retains `\` unless followed by `\` or `"`.
+pub fn tokenize_java_options(s: &str) -> Result<Vec<String>, String> {
+    let units: Vec<u16> = s.encode_utf16().collect();
+    let mut out = Vec::new();
+    let mut cur: Vec<u16> = Vec::new();
+    let mut has_tok = false;
+    let mut quote: Option<u16> = None;
+    let mut i = 0;
+    while i < units.len() {
+        let u = units[i];
+        if let Some(q) = quote {
+            if u == q {
+                quote = None;
+            } else if q == u16::from(b'"') && u == u16::from(b'\\') {
+                if i + 1 >= units.len() {
+                    return Err("unterminated quotation".to_string());
+                }
+                let next = units[i + 1];
+                if next == u16::from(b'\\') || next == u16::from(b'"') {
+                    cur.push(next);
+                    i += 1;
+                } else {
+                    cur.push(u);
+                }
+            } else {
+                cur.push(u);
+            }
+        } else if u == u16::from(b' ') || u == u16::from(b'\t') {
+            if has_tok {
+                out.push(String::from_utf16_lossy(&cur));
+                cur.clear();
+                has_tok = false;
+            }
+        } else if u == u16::from(b'\'') || u == u16::from(b'"') {
+            quote = Some(u);
+            has_tok = true;
+        } else if u == u16::from(b'\\') {
+            i += 1;
+            if i >= units.len() {
+                return Err("unterminated backslash escape".to_string());
+            }
+            cur.push(units[i]);
+            has_tok = true;
+        } else {
+            cur.push(u);
+            has_tok = true;
+        }
+        i += 1;
+    }
+    if quote.is_some() {
+        return Err("unterminated quotation".to_string());
+    }
+    if has_tok {
+        out.push(String::from_utf16_lossy(&cur));
+    }
+    Ok(out)
+}
+
+/// Escapes and joins tokenized Java options into a single shell-quoted string
+/// (`JavaHelper.detokenizeJavaOptions`).
+pub fn detokenize_java_options(opts: &[String]) -> String {
+    opts.iter()
+        .map(|t| {
+            if !t.is_empty()
+                && t.bytes().all(|b| {
+                    b.is_ascii_alphanumeric()
+                        || matches!(b, b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'+' | b',' | b'@')
+                })
+            {
+                t.clone()
+            } else {
+                format!("'{}'", t.replace('\'', "'\\''"))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Checked variant of [`fragment`] that surfaces invalid fragment option errors.
@@ -657,22 +737,48 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
             ])
         }
         "java" => {
-            let flags = o.list("javacopt");
+            let mut flags: Vec<String> = Vec::new();
+            for raw_opt in o.list_unsplit("javacopt") {
+                match tokenize_java_options(&raw_opt) {
+                    Ok(toks) => flags.extend(toks),
+                    Err(_) => flags.push(raw_opt),
+                }
+            }
+            let depset_direct = if flags.is_empty() {
+                Vec::new()
+            } else {
+                vec![Value::String(detokenize_java_options(&flags))]
+            };
+            let reduce_cp = o
+                .s("experimental_java_classpath", "bazel")
+                .to_ascii_uppercase();
+            let gen_java_deps = o.b("java_deps", true) || reduce_cp != "OFF";
+            let root_pkg = zel_cmdline::PackageIdentifier::create_in_main_repo("")
+                .map_err(|e| e.to_string())?;
+            let empty_map = zel_cmdline::RepositoryMapping::always_fallback();
+            let mut plugin_labels = Vec::new();
+            for p in o.list("plugin") {
+                let norm_p = if p.starts_with("//") || p.starts_with('@') {
+                    p.clone()
+                } else {
+                    format!("//{p}")
+                };
+                let lbl = Label::parse_with_package_context(&norm_p, &root_pkg, &empty_map)
+                    .or_else(|_| Label::parse_canonical(&norm_p))
+                    .map_err(|e| format!("Invalid --plugin label '{p}': {e}"))?;
+                plugin_labels.push(Value::Label(lbl));
+            }
             mk(vec![
                 // Struct fields.
                 f(
                     "default_javac_flags",
-                    mk_list(flags.iter().cloned().map(Value::String).collect()),
+                    mk_list(flags.into_iter().map(Value::String).collect()),
                 ),
                 f(
                     "default_javac_flags_depset",
                     Value::Depset(Arc::new(
-                        Depset::new(
-                            DepsetOrder::Default,
-                            flags.into_iter().map(Value::String).collect(),
-                            vec![],
-                        )
-                        .map_err(|e| e.0)?,
+                        Depset::new(DepsetOrder::Preorder, depset_direct, vec![])
+                            .map_err(|e| e.0)?,
                     )),
                 ),
                 f(
@@ -691,13 +797,16 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     "one_version_enforcement_on_java_tests",
                     Value::Bool(o.b("one_version_enforcement_on_java_tests", true)),
                 ),
-                f("multi_release_deploy_jars", Value::Bool(true)),
+                f(
+                    "multi_release_deploy_jars",
+                    Value::Bool(o.b("incompatible_multi_release_deploy_jars", true)),
+                ),
                 f(
                     "run_android_lint",
                     Value::Bool(o.b("experimental_run_android_lint_on_java_rules", false)),
                 ),
-                f("default_jvm_opts", o.list_v("jvmopt")),
-                f("plugins", o.list_v("plugin")),
+                f("default_jvm_opts", o.list_unsplit_v("jvmopt")),
+                f("plugins", mk_list(plugin_labels)),
                 f("launcher", o.label("java_launcher")),
                 // Methods.
                 m("use_ijars", Value::Bool(o.b("use_ijars", true))),
@@ -706,20 +815,20 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     Value::Bool(o.b("java_header_compilation", true)),
                 ),
                 m("use_header_compilation_direct_deps", Value::Bool(true)),
-                m(
-                    "reduce_java_classpath",
-                    sv(&o.s("experimental_java_classpath", "bazel").to_uppercase()),
-                ),
+                m("reduce_java_classpath", sv(&reduce_cp)),
                 m(
                     "enforce_explicit_java_test_deps",
                     Value::Bool(o.b("explicit_java_test_deps", false)),
                 ),
-                m("generate_java_deps", Value::Bool(o.b("java_deps", true))),
+                m("generate_java_deps", Value::Bool(gen_java_deps)),
                 m(
                     "disallow_java_import_exports",
                     Value::Bool(o.b("incompatible_disallow_java_import_exports", false)),
                 ),
-                m("auto_create_java_test_deploy_jars", Value::Bool(false)),
+                m(
+                    "auto_create_java_test_deploy_jars",
+                    Value::Bool(o.b("experimental_java_test_auto_create_deploy_jar", false)),
+                ),
             ])
         }
         // `BazelPythonConfiguration`.
@@ -1071,6 +1180,7 @@ pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey)
                 None
             }
         }
+        ("java", "launcher") => opt("java_launcher"),
         ("coverage", "output_generator") => {
             if o.b("collect_code_coverage", false) {
                 tools("tools/test:lcov_merger")
@@ -1304,5 +1414,60 @@ mod tests {
             },
         );
         assert!(fragment_checked("cpp", &fdo_bad).is_ok());
+    }
+
+    #[test]
+    fn java_fragment_tokenize_options_depset_and_plugins() {
+        assert_eq!(
+            tokenize_java_options("a\nb \"\\n\\\"\\\\\" 'x y'").unwrap(),
+            vec!["a\nb", "\\n\"\\", "x y"]
+        );
+        let mut cfg = BuildConfigurationKey::default();
+        cfg.native.insert(
+            "javacopt".into(),
+            crate::NativeSetting {
+                raw: "-Xlint:all,serial -Werror".into(),
+                value: crate::build_options::ConfigValue::List(vec![
+                    "-Xlint:all,serial".into(),
+                    "-Werror".into(),
+                ]),
+            },
+        );
+        cfg.native.insert(
+            "jvmopt".into(),
+            crate::NativeSetting {
+                raw: "-Dfoo=a,b".into(),
+                value: crate::build_options::ConfigValue::List(vec!["-Dfoo=a,b".into(), "".into()]),
+            },
+        );
+        set_scalar(&mut cfg, "java_deps", "false");
+        set_scalar(&mut cfg, "experimental_java_classpath", "bazel");
+        set_scalar(&mut cfg, "plugin", "tools:my_plugin");
+        set_scalar(&mut cfg, "java_launcher", "//tools/jdk:custom_launcher");
+
+        let java = fragment_checked("java", &cfg).unwrap().unwrap();
+        assert_eq!(
+            struct_field(&java, "default_javac_flags"),
+            &mk_list(vec![sv("-Xlint:all,serial"), sv("-Werror")])
+        );
+        let Value::Depset(ds) = struct_field(&java, "default_javac_flags_depset") else {
+            panic!("expected depset");
+        };
+        assert_eq!(ds.order, DepsetOrder::Preorder);
+        assert_eq!(ds.to_list(), vec![sv("-Xlint:all,serial -Werror")]);
+        assert_eq!(
+            struct_field(&java, "default_jvm_opts"),
+            &mk_list(vec![sv("-Dfoo=a,b"), sv("")])
+        );
+        assert_eq!(
+            struct_field(&java, "plugins"),
+            &mk_list(vec![Value::Label(
+                Label::parse_canonical("@@//tools:my_plugin").unwrap()
+            )])
+        );
+        assert_eq!(
+            late_bound_label("java", "launcher", &cfg),
+            Some(Label::parse_canonical("@@//tools/jdk:custom_launcher").unwrap())
+        );
     }
 }

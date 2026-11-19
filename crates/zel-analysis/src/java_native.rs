@@ -86,18 +86,66 @@ fn java_native(
             let exec_paths = a(3, "exec_paths").map(|v| v.is_truthy()).unwrap_or(false);
             let raw: Vec<String> = match &st.attr_struct {
                 Value::Struct(s) => match s.fields.get(&attr) {
-                    Some(Value::List(l)) => l.lock().unwrap().elements.iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
-                    Some(Value::String(x)) => vec![x.clone()],
-                    _ => vec![],
+                    Some(Value::List(l)) => {
+                        let elems = &l.lock().unwrap().elements;
+                        let mut strs = Vec::with_capacity(elems.len());
+                        for elem in elems {
+                            match elem.as_str() {
+                                Some(st_s) => strs.push(st_s.to_string()),
+                                None => {
+                                    return err(format!(
+                                        "expand_java_opts: attribute '{attr}' must be a list of strings"
+                                    ))
+                                }
+                            }
+                        }
+                        strs
+                    }
+                    Some(other) => {
+                        return err(format!(
+                            "expand_java_opts: expected string list for attribute '{attr}', got {}",
+                            type_name(other)
+                        ))
+                    }
+                    None => {
+                        return err(format!(
+                            "expand_java_opts: rule has no string list attribute '{attr}'"
+                        ))
+                    }
                 },
-                _ => vec![],
+                _ => return err("expand_java_opts: invalid ctx.attr"),
             };
             let mut map: BTreeMap<Label, Vec<Artifact>> = BTreeMap::new();
-            for k in ["srcs", "deps", "data", "tools", "resources"] {
+            let mut dep_attrs = vec!["srcs", "deps", "implementation_deps", "tools", "resources"];
+            if !exec_paths {
+                dep_attrs.push("data");
+            }
+            for k in dep_attrs {
                 if let Some(ts) = st.deps.get(k) {
                     for t in ts {
-                        insert_target_location_keys(&mut map, t, target_files(t));
+                        let files = if matches!(k, "deps" | "tools") {
+                            if let Some(exe) = &t.get_actual().default_info.executable {
+                                vec![exe.clone()]
+                            } else {
+                                target_files(t)
+                            }
+                        } else {
+                            target_files(t)
+                        };
+                        insert_target_location_keys(&mut map, t, files);
                     }
+                }
+            }
+            let pkg_prefix = st.pkg_dir.path_string();
+            for out_art in &st.predeclared {
+                let rr = out_art.root_relative_path.path_string();
+                let rel_name = if pkg_prefix.is_empty() {
+                    rr
+                } else {
+                    rr.strip_prefix(&format!("{pkg_prefix}/")).unwrap_or(rr)
+                };
+                if let Ok(out_lbl) = Label::create(st.label.package_identifier().clone(), rel_name) {
+                    map.entry(out_lbl).or_default().push(out_art.clone());
                 }
             }
             let mode = if exec_paths { LocationMode::Exec } else { LocationMode::Runfiles };
@@ -105,7 +153,7 @@ fn java_native(
             let repo_map = st.repo_mapping();
             let mut out = Vec::new();
             for s in raw {
-                let s = expand_with_locations(
+                let expanded = match expand_with_locations(
                     &s,
                     &lookup,
                     &map,
@@ -114,19 +162,48 @@ fn java_native(
                     &st.inputs.workspace_name,
                     Some(&repo_map),
                     cfg!(windows),
-                )
-                .map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))?
-                .text;
+                ) {
+                    Ok(res) => res.text,
+                    Err(e) => {
+                        st.rule_errors.lock().unwrap().push(format!(
+                            "in {attr} attribute of {} rule {}: {e}",
+                            st.rule.rule_class,
+                            st.label.canonical_form()
+                        ));
+                        s
+                    }
+                };
                 if tokenize {
-                    for t in shell_tokenize(&s).map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))? {
-                        out.push(Value::String(t));
+                    match crate::fragments::tokenize_java_options(&expanded) {
+                        Ok(toks) => {
+                            for t in toks {
+                                out.push(Value::String(t));
+                            }
+                        }
+                        Err(e) => {
+                            st.rule_errors.lock().unwrap().push(format!(
+                                "in {attr} attribute of {} rule {}: {e}",
+                                st.rule.rule_class,
+                                st.label.canonical_form()
+                            ));
+                            out.push(Value::String(expanded));
+                        }
                     }
                 } else {
-                    out.push(Value::String(s));
+                    out.push(Value::String(expanded));
                 }
             }
             Ok(mk_list(out))
         })(),
+        "tokenize_javacopts" => {
+            let opts = a(0, "options");
+            Ok(mk_list(
+                java_tokenize_opts(opts)
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ))
+        }
         "create_header_compilation_action" => java_create_header_action(st, pos, kw),
         "create_compilation_action" => java_create_compile_action(st, pos, kw),
         "create_jvm_compile_action" => java_create_jvm_compile_action(st, pos, kw),
@@ -146,14 +223,16 @@ fn jstrs(v: Option<&Value>) -> Vec<String> {
     v.map(|v| items(v).iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default()
 }
 
-/// `JavaHelper.tokenizeJavaOptions(NestedSet)`: the depset's options in reverse order, each
-/// shell-tokenized (kept verbatim when tokenization fails).
+/// `JavaHelper.tokenizeJavaOptions`: reverses a `Depset`/`NestedSet` (preserving order for plain
+/// sequences) and tokenizes each string on space/tab (`ShellUtils.tokenize` on UTF-16 code units).
 fn java_tokenize_opts(v: Option<&Value>) -> Vec<String> {
     let mut raw = jstrs(v);
-    raw.reverse();
+    if matches!(v, Some(Value::Depset(_))) {
+        raw.reverse();
+    }
     let mut out = Vec::new();
     for o in raw {
-        match shell_tokenize(&o) {
+        match crate::fragments::tokenize_java_options(&o) {
             Ok(t) => out.extend(t),
             Err(_) => out.push(o),
         }
@@ -365,6 +444,53 @@ fn normalize_strict_deps_mode(raw: Option<&Value>) -> Result<String, StarlarkErr
     }
 }
 
+fn is_legal_exec_req_tag(tag: &str) -> bool {
+    tag == "local"
+        || tag.starts_with("no-")
+        || tag.starts_with("requires-")
+        || tag.starts_with("block-")
+        || tag.starts_with("supports-")
+        || tag.starts_with("disable-")
+        || tag.starts_with("cpu:")
+}
+
+fn apply_java_rule_tags_and_exec_group(
+    st: &CtxState,
+    a: &mut Action,
+    reject_supports_path_mapping: bool,
+) -> Result<(), StarlarkError> {
+    if st.inputs.allow_tags_propagation {
+        for tag in st.rule.rule_tags() {
+            if !is_legal_exec_req_tag(&tag) {
+                continue;
+            }
+            if reject_supports_path_mapping && tag == "supports-path-mapping" {
+                return err("Tag 'supports-path-mapping' is not permitted on Java resource jar action");
+            }
+            if let Some((k, v)) = tag.split_once(':') {
+                if k == "cpu" {
+                    a.execution_requirements
+                        .insert("cpu".to_string(), v.to_string());
+                    continue;
+                }
+            }
+            a.execution_requirements.insert(tag, String::new());
+        }
+    }
+    let java_group = st
+        .exec_groups
+        .iter()
+        .find(|g| *g == "java_toolchain" || g.contains("java_toolchain"))
+        .cloned();
+    if let Some(grp) = java_group {
+        if let Some(plat) = st.inputs.exec_group_platforms.get(&grp) {
+            a.exec_platform = Some(plat.clone());
+        }
+        a.exec_group = Some(grp);
+    }
+    Ok(())
+}
+
 
 /// `JavaCompilationHelper.getExecutionInfo` / `JavaHeaderCompileAction`: path mapping, the
 /// toolchain's worker capabilities (compile actions only) and, with
@@ -425,7 +551,10 @@ fn plugin_data(plugin_info: Option<&Value>, which: &str) -> (Vec<String>, Vec<Ar
 fn boot_class_path(v: Option<&Value>, toolchain: &Value) -> (Vec<Artifact>, Vec<Artifact>, Vec<Artifact>, Option<String>) {
     // JavaCompilationHelper.getBootclasspathOrDefault: the toolchain's when the target gives none.
     let given = v.filter(|v| matches!(v, Value::ProviderInstance { .. })).cloned().filter(|b| {
-        !cc_artifacts(jf(b, "bootclasspath").as_ref()).is_empty() || jf(b, "_system_path").is_some()
+        !cc_artifacts(jf(b, "bootclasspath").as_ref()).is_empty()
+            || !cc_artifacts(jf(b, "_auxiliary").as_ref()).is_empty()
+            || !cc_artifacts(jf(b, "_system_inputs").as_ref()).is_empty()
+            || jf(b, "_system_path").is_some()
     });
     let fallback = jf(toolchain, "_bootclasspath_info");
     let Some(b) = given.as_ref().or(fallback.as_ref()) else {
@@ -441,8 +570,24 @@ fn boot_class_path(v: Option<&Value>, toolchain: &Value) -> (Vec<Artifact>, Vec<
     (boot, aux, sys_inputs, sys_path)
 }
 
+/// `JavaTargetAttributes.build()`: places `direct_jars` ahead of `compile_time_classpath` in
+/// naive link (preorder) order, deduplicating by exec path.
+fn prepend_direct_jars_to_classpath(
+    aux: &[Artifact],
+    direct_jars: &[Artifact],
+    classpath: &[Artifact],
+) -> Vec<Artifact> {
+    dedup(
+        aux.iter()
+            .chain(direct_jars.iter())
+            .chain(classpath.iter())
+            .cloned()
+            .collect(),
+    )
+}
+
 /// `create_header_compilation_action` (`JavaCompilationHelper.createHeaderCompilationAction` +
-/// `JavaHeaderCompileAction.Builder.build`) for the direct-classpath (turbine) path.
+/// `JavaHeaderCompileAction.Builder.build`).
 fn java_create_header_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
     let g = |i: usize, k: &str| kw.get(k).or_else(|| pos.get(i)).filter(|v| !matches!(v, Value::None));
     let toolchain = g(1, "java_toolchain").ok_or_else(|| StarlarkError("missing java_toolchain".into()))?;
@@ -452,10 +597,12 @@ fn java_create_header_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<St
     let sources = cc_artifacts(g(5, "source_files"));
     let source_jars = cc_artifacts(g(6, "source_jars"));
     let classpath = cc_artifacts(g(7, "compile_time_classpath"));
-    let direct_jars = cc_artifacts(g(8, "direct_jars"));
-    let (boot, _aux, _sys, _sysp) = boot_class_path(g(9, "boot_class_path"), toolchain);
-    let javacopts =
-        crate::javac_options::JavacOptions::normalize_release_only(&java_tokenize_opts(g(11, "javac_opts")));
+    let raw_direct_jars = cc_artifacts(g(8, "direct_jars"));
+    let (boot, aux, _sys, _sysp) = boot_class_path(g(9, "boot_class_path"), toolchain);
+    let dep_artifacts = cc_artifacts(g(10, "compile_time_java_deps"));
+    let javacopts = crate::javac_options::JavacOptions::normalize_release_only(&java_tokenize_opts(
+        g(11, "javac_opts"),
+    ));
     let strict = normalize_strict_deps_mode(g(12, "strict_deps_mode"))?;
     let target_label = match g(13, "target_label") {
         Some(Value::Label(l)) => Some(l.clone()),
@@ -466,22 +613,48 @@ fn java_create_header_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<St
     let additional_inputs = cc_artifacts(g(16, "additional_inputs"));
     let header_compilation_jar = g(17, "header_compilation_jar").and_then(artifact_of);
     let hdr_direct = cc_artifacts(g(18, "header_compilation_direct_deps"));
+    let gensrc_output_jar = g(19, "gensrc_output_jar")
+        .or_else(|| g(19, "output_gensrc_jar"))
+        .and_then(artifact_of);
+    let resource_output_jar = g(20, "resource_output_jar").and_then(artifact_of);
+    let manifest_proto = g(21, "manifest_proto").and_then(artifact_of);
+    let additional_outputs = cc_artifacts(g(22, "additional_outputs"));
+    let has_ap_outputs = gensrc_output_jar.is_some()
+        || resource_output_jar.is_some()
+        || manifest_proto.is_some()
+        || !additional_outputs.is_empty();
 
     let builtin = jstrs(jf(toolchain, "_header_compiler_builtin_processors").as_ref());
     let direct_tool = jf(toolchain, "_header_compiler_direct");
-    let use_direct_cp = enable_direct && proc_classes.is_empty();
-    let use_hcd = direct_tool.is_some() && proc_classes.iter().all(|p| builtin.contains(p));
+    let use_direct_cp = enable_direct && proc_classes.is_empty() && !has_ap_outputs;
+    let use_hcd = !has_ap_outputs
+        && direct_tool.is_some()
+        && proc_classes.iter().all(|p| builtin.contains(p));
     let tool = if use_hcd { direct_tool } else { jf(toolchain, "_header_compiler") }
         .ok_or_else(|| StarlarkError("java_toolchain has no header compiler".into()))?;
     let (exe_line, tool_inputs) = java_tool_command(&tool, toolchain)?;
     let tools_jars = cc_artifacts(jf(toolchain, "tools").as_ref());
 
-    let (direct_jars, dep_artifacts_ignored) = if strict == "OFF" { (vec![], true) } else { (direct_jars, false) };
-    let _ = dep_artifacts_ignored;
+    let full_cp = prepend_direct_jars_to_classpath(&aux, &raw_direct_jars, &classpath);
+    let (direct_jars, dep_artifacts) = if strict == "OFF" {
+        (vec![], vec![])
+    } else {
+        (
+            if aux.is_empty() {
+                raw_direct_jars
+            } else {
+                aux.iter().cloned().chain(raw_direct_jars).collect()
+            },
+            dep_artifacts,
+        )
+    };
 
     let mut c = JCmd::default();
     c.exec_path("--output", Some(&out_jar));
     c.exec_path("--header_compilation_output", header_compilation_jar.as_ref());
+    c.exec_path("--gensrc_output", gensrc_output_jar.as_ref());
+    c.exec_path("--resource_output", resource_output_jar.as_ref());
+    c.exec_path("--output_manifest_proto", manifest_proto.as_ref());
     c.exec_path("--output_deps", Some(&deps_proto));
     c.exec_paths("--bootclasspath", &boot);
     c.exec_paths("--sources", &sources);
@@ -512,17 +685,30 @@ fn java_create_header_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<St
     inputs.extend(tool_inputs);
 
     let mut outputs = vec![out_jar.clone(), deps_proto.clone()];
-    if let Some(h) = &header_compilation_jar {
-        outputs.push(h.clone());
+    for extra_out in [
+        header_compilation_jar,
+        gensrc_output_jar,
+        resource_output_jar,
+        manifest_proto,
+    ]
+    .into_iter()
+    .flatten()
+    {
+        outputs.push(extra_out);
     }
+    outputs.extend(additional_outputs);
 
     if !use_direct_cp {
-        // Annotation-processing header compilation runs through the javac-based action.
+        // Annotation-processing header compilation runs through `JavaCompileAction` (`JavacTurbine`).
         if !use_hcd {
             inputs.extend(proc_jars.iter().cloned());
             inputs.extend(proc_data.iter().cloned());
         }
-        let builtin_used: Vec<String> = proc_classes.iter().filter(|p| builtin.contains(p)).cloned().collect();
+        let builtin_used: Vec<String> = builtin
+            .iter()
+            .filter(|p| proc_classes.contains(p))
+            .cloned()
+            .collect();
         c.all("--builtin_processors", &builtin_used);
         c.all("--processors", &proc_classes);
         if !use_hcd {
@@ -531,22 +717,31 @@ fn java_create_header_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<St
         if strict != "OFF" {
             c.exec_paths("--direct_dependencies", &direct_jars);
         }
-        let mut cp = JCmd::default();
-        cp.exec_paths("--classpath", &classpath);
-        inputs.extend(classpath.iter().cloned());
-        return java_register(
+        let incompatible = jstrs(jf(toolchain, "_reduced_classpath_incompatible_processors").as_ref());
+        let mut mode = java_classpath_mode(st);
+        if proc_classes.iter().any(|p| incompatible.contains(p)) || strict == "OFF" {
+            mode = "OFF".to_string();
+        }
+        return java_register_compile(
             st,
             "JavacTurbine",
             &exe_line,
-            vec![c.0, cp.0],
+            c.0,
+            full_cp,
+            direct_jars,
+            dep_artifacts,
+            vec![],
             inputs,
             tools_jars,
             outputs,
-            java_progress("Compiling Java headers", &out_jar, sources.len(), source_jars.len(), &proc_classes),
+            Some(deps_proto.clone()),
+            &mode,
+            utf8_env(st),
             java_exec_info(st, toolchain, false, Some(&deps_proto)),
+            java_progress("Compiling Java headers", &out_jar, sources.len(), source_jars.len(), &proc_classes),
         );
     }
-    let cp = if !hdr_direct.is_empty() || classpath.is_empty() { hdr_direct } else { classpath };
+    let cp = if !hdr_direct.is_empty() || full_cp.is_empty() { hdr_direct } else { full_cp };
     inputs.extend(cp.iter().cloned());
     c.exec_paths("--classpath", &cp);
     c.opt("--reduce_classpath_mode", Some("NONE"));
@@ -619,6 +814,7 @@ fn java_register_ext(
     a.tools = dedup(tools);
     a.outputs = outputs;
     a.use_default_shell_env = true;
+    apply_java_rule_tags_and_exec_group(st, &mut a, false)?;
     st.register(a)?;
     Ok(Value::None)
 }
@@ -626,9 +822,23 @@ fn java_register_ext(
 /// `JavaConfiguration.getReduceJavaClasspath` (`--experimental_java_classpath`, default `bazel`):
 /// `OFF`, `JAVABUILDER`, `BAZEL` or `BAZEL_NO_FALLBACK`.
 fn java_classpath_mode(st: &Arc<CtxState>) -> String {
-    match st.cfg.options.get("experimental_java_classpath").map(|v| v.to_uppercase()) {
-        Some(m) if matches!(m.as_str(), "OFF" | "JAVABUILDER" | "BAZEL" | "BAZEL_NO_FALLBACK") => m,
-        _ => "BAZEL".to_string(),
+    let raw = match crate::fragments::Opts::new(&st.cfg).b("java_deps", true) {
+        _ => st
+            .cfg
+            .options
+            .get("experimental_java_classpath")
+            .cloned()
+            .or_else(|| match st.cfg.build_options().get("experimental_java_classpath") {
+                Some(crate::build_options::ConfigValue::Scalar(s)) => Some(s.clone()),
+                _ => None,
+            })
+            .unwrap_or_else(|| "bazel".to_string())
+            .to_ascii_uppercase(),
+    };
+    if matches!(raw.as_str(), "OFF" | "JAVABUILDER" | "BAZEL" | "BAZEL_NO_FALLBACK") {
+        raw
+    } else {
+        "BAZEL".to_string()
     }
 }
 
@@ -716,6 +926,7 @@ fn java_register_compile(
     a.tools = dedup(tools);
     a.outputs = outputs;
     a.use_default_shell_env = true;
+    apply_java_rule_tags_and_exec_group(st, &mut a, false)?;
     st.register(a)?;
     Ok(Value::None)
 }
@@ -849,13 +1060,13 @@ fn java_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<S
     let toolchain = g(1, "java_toolchain").ok_or_else(|| StarlarkError("missing java_toolchain".into()))?;
     let output = g(2, "output").and_then(artifact_of).ok_or_else(|| StarlarkError("output must be a File".into()))?;
     let manifest = g(3, "manifest_proto").and_then(artifact_of);
-    let (proc_classes, proc_jars, proc_data) = plugin_data(g(4, "plugin_info"), "plugins");
-    let classpath = cc_artifacts(g(5, "compile_time_classpath"));
-    let direct_jars = cc_artifacts(g(6, "direct_jars"));
+    let (mut proc_classes, mut proc_jars, mut proc_data) = plugin_data(g(4, "plugin_info"), "plugins");
+    let mut classpath = cc_artifacts(g(5, "compile_time_classpath"));
+    let mut raw_direct_jars = cc_artifacts(g(6, "direct_jars"));
     let (boot, aux, sys_inputs, sys_path) = boot_class_path(g(7, "boot_class_path"), toolchain);
     let builder_jvm_flags = jstrs(g(8, "javabuilder_jvm_flags"));
     let dep_artifacts = cc_artifacts(g(9, "compile_time_java_deps"));
-    let raw_javacopts = java_tokenize_opts(g(10, "javac_opts"));
+    let mut raw_javacopts = java_tokenize_opts(g(10, "javac_opts"));
     let strict = normalize_strict_deps_mode(g(11, "strict_deps_mode"))?;
     let target_label = match g(12, "target_label") {
         Some(Value::Label(l)) => Some(l.clone()),
@@ -872,6 +1083,7 @@ fn java_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<S
     let classpath_resources = cc_artifacts(g(21, "classpath_resources"));
     let sourcepath = cc_artifacts(g(22, "sourcepath"));
     let injecting = g(23, "injecting_rule_kind").and_then(|v| v.as_str().map(str::to_string));
+    let enable_jspecify = g(24, "enable_jspecify").map(Value::is_truthy).unwrap_or(true);
     let additional_inputs = cc_artifacts(g(26, "additional_inputs"));
     let additional_outputs = cc_artifacts(g(27, "additional_outputs"));
     let extra_args: Vec<CommandLineArgs> = match g(28, "extra_args") {
@@ -886,6 +1098,25 @@ fn java_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<S
         }
         None => vec![],
     };
+
+    let jopts = crate::fragments::Opts::new(&st.cfg);
+    if enable_jspecify && jopts.b("experimental_enable_jspecify", true) && !sources.is_empty() {
+        if let Some(jsp) = jf(toolchain, "_jspecify_info") {
+            let (jp_cls, jp_jars, jp_data) = plugin_data(jf(&jsp, "processor").as_ref(), "plugins");
+            for cls in jp_cls {
+                if !proc_classes.contains(&cls) {
+                    proc_classes.push(cls);
+                }
+            }
+            proc_jars.extend(jp_jars);
+            proc_data.extend(jp_data);
+            let jsp_jars = cc_artifacts(jf(&jsp, "implicit_deps").as_ref());
+            raw_direct_jars.extend(jsp_jars.iter().cloned());
+            classpath.extend(jsp_jars);
+            raw_javacopts.extend(java_tokenize_opts(jf(&jsp, "javacopts").as_ref()));
+        }
+    }
+
     // `JavaCompilationHelper.createCompileAction`: the GenClass action reads the compile output.
     if let Some(gc) = &gen_class {
         java_gen_jar_action(st, toolchain, &output, manifest.as_ref(), gc)?;
@@ -928,17 +1159,65 @@ fn java_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<S
     }
     let tools_jars = cc_artifacts(jf(toolchain, "tools").as_ref());
     let incompatible = jstrs(jf(toolchain, "_reduced_classpath_incompatible_processors").as_ref());
-    // JavaCompileActionBuilder.build: strict deps OFF ignores direct jars and dependency artifacts;
-    // incompatible processors, strict deps OFF or a missing .jdeps turn the classpath mode OFF.
+    let full_cp = prepend_direct_jars_to_classpath(&aux, &raw_direct_jars, &classpath);
     let strict_off = strict == "OFF";
-    let (direct_jars, dep_artifacts) = if strict_off { (vec![], vec![]) } else { (direct_jars, dep_artifacts) };
+    let (direct_jars, dep_artifacts) = if strict_off { (vec![], vec![]) } else { (raw_direct_jars, dep_artifacts) };
     let mut mode = java_classpath_mode(st);
     if proc_classes.iter().any(|p| incompatible.contains(p)) || strict_off || deps_proto.is_none() {
         mode = "OFF".to_string();
     }
-    // JavaCompilationHelper: with bootclasspath auxiliary entries they are classpath entries and
-    // direct jars too.
     let direct_all: Vec<Artifact> = if aux.is_empty() { direct_jars } else { aux.iter().cloned().chain(direct_jars).collect() };
+
+    let mut coverage_inputs: Vec<Artifact> = Vec::new();
+    let mut post_processor_args: Vec<String> = Vec::new();
+    if jopts.b("collect_code_coverage", false) && !sources.is_empty() {
+        let jacoco_art = jf(toolchain, "_jacocorunner")
+            .and_then(|jr| {
+                artifact_of(&jr).or_else(|| {
+                    jf(&jr, "executable")
+                        .or_else(|| jf(&jr, "tool").and_then(|t| jf(&t, "executable")))
+                        .and_then(|v| artifact_of(&v))
+                })
+            });
+        if let Some(jrunner) = jacoco_art {
+            let out_rel = output.root_relative_path.path_string().to_string();
+            let cov_rel = match out_rel.rsplit_once('.') {
+                Some((stem, _)) => format!("{stem}-paths-for-coverage.txt"),
+                None => format!("{out_rel}-paths-for-coverage.txt"),
+            };
+            let cov_file = st.derived(PathFragment::create(&cov_rel));
+            let mut cov_body = sources.iter().map(jpath).collect::<Vec<_>>().join("\n");
+            if !cov_body.is_empty() {
+                cov_body.push('\n');
+            }
+            let mut fw = Action::new(
+                st.label.clone(),
+                "FileWrite",
+                ActionKind::FileWrite {
+                    content: crate::action::FileContent::Literal(cov_body),
+                    is_executable: false,
+                },
+            );
+            fw.outputs = vec![cov_file.clone()];
+            st.register(fw)?;
+            post_processor_args.push("--post_processor".into());
+            post_processor_args.push(jpath(&jrunner));
+            post_processor_args.push(jpath(&cov_file));
+            coverage_inputs.push(jrunner);
+            coverage_inputs.push(cov_file);
+        }
+    }
+
+    let fix_deps_tool = st
+        .cfg
+        .options
+        .get("experimental_fix_deps_tool")
+        .cloned()
+        .or_else(|| match st.cfg.build_options().get("experimental_fix_deps_tool") {
+            Some(crate::build_options::ConfigValue::Scalar(s)) if !s.is_empty() => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "add_dep".to_string());
 
     let mut c = JCmd::default();
     c.exec_path("--output", Some(&output));
@@ -971,18 +1250,8 @@ fn java_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<S
         c.opt("--strict_java_deps", Some(&strict));
         c.exec_paths("--direct_dependencies", &direct_all);
     }
-    let fix_deps_tool = st
-        .cfg
-        .options
-        .get("experimental_fix_deps_tool")
-        .map(String::as_str)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("add_dep");
-    c.opt("--experimental_fix_deps_tool", Some(fix_deps_tool));
-
-    // Full classpath (bootclasspath auxiliary entries precede the compile-time classpath).
-    let mut full_cp: Vec<Artifact> = aux;
-    full_cp.extend(classpath);
+    c.opt("--experimental_fix_deps_tool", Some(&fix_deps_tool));
+    c.0.extend(post_processor_args);
 
     // `JavaCompileActionBuilder`'s mandatory inputs.
     let mut inputs: Vec<Artifact> = Vec::new();
@@ -998,6 +1267,7 @@ fn java_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<S
     inputs.extend(additional_inputs);
     inputs.extend(sys_inputs);
     inputs.extend(tool_inputs);
+    inputs.extend(coverage_inputs);
 
     let mut outs = vec![output.clone()];
     outs.extend(additional_outputs);
@@ -1066,17 +1336,13 @@ fn java_segment_index_impl(segs: &[&str]) -> i64 {
 
 /// `JavaUtil.getJavaPath`: the path below the Java source root, if there is one.
 fn java_path(path: &str) -> Option<String> {
-    let segs: Vec<&str> = path.split('/').collect();
-    let mut idx = -1;
-    if path.starts_with("third_party/java") && segs.len() >= 2 {
-        let nested = java_segment_index_impl(&segs[2..]);
-        if nested >= 0 {
-            idx = nested + 2;
-        }
+    let norm = PathFragment::create(path);
+    let norm_str = norm.path_string();
+    if norm_str.is_empty() {
+        return None;
     }
-    if idx < 0 {
-        idx = java_segment_index_impl(&segs);
-    }
+    let segs: Vec<&str> = norm_str.split('/').collect();
+    let idx = java_segment_index_impl(&segs);
     if idx >= 0 {
         Some(segs[(idx as usize + 1)..].join("/"))
     } else {
@@ -1086,18 +1352,20 @@ fn java_path(path: &str) -> Option<String> {
 
 /// `BazelJavaSemantics.getDefaultJavaResourcePath`.
 fn default_java_resource_path(path: &str) -> String {
-    let segs: Vec<&str> = path.split('/').collect();
+    let norm = PathFragment::create(path);
+    let norm_str = norm.path_string();
+    let segs: Vec<&str> = norm_str.split('/').collect();
     for i in 0..segs.len().saturating_sub(2) {
         if segs[i] == "src" && segs[i + 2] == "resources" {
             return segs[(i + 3)..].join("/");
         }
     }
-    java_path(path).unwrap_or_else(|| path.to_string())
+    java_path(norm_str).unwrap_or_else(|| norm_str.to_string())
 }
 
 /// `JavaHelper.getJavaResourcePath`.
 fn java_resource_path(st: &Arc<CtxState>, r: &Artifact) -> Result<String, StarlarkError> {
-    // `Artifact.getOutputDirRelativePath`: includes `external/<repo>/` for external repositories.
+    // `Artifact.getOutputDirRelativePath`: includes `external/<repo>/` unless sibling layout.
     let mut p = if r.is_source { jpath(r) } else { r.root_relative_path.path_string().to_string() };
     let repo = st.label.package_identifier().repository().name().to_string();
     if !repo.is_empty() {
@@ -1110,6 +1378,8 @@ fn java_resource_path(st: &Arc<CtxState>, r: &Artifact) -> Result<String, Starla
             p = rest.to_string();
         }
     }
+    let p_frag = PathFragment::create(&p);
+    let p_norm = p_frag.path_string().to_string();
     let explicit_strip = match st.rule.extra.attr_values.get("resource_strip_prefix") {
         Some(v @ AttrValue::Select(_)) => crate::select::resolve_select(
             v,
@@ -1123,27 +1393,26 @@ fn java_resource_path(st: &Arc<CtxState>, r: &Artifact) -> Result<String, Starla
     };
     match explicit_strip {
         Some(AttrValue::Str(prefix)) => {
-            let norm_prefix = PathFragment::create(&prefix)
-                .path_string()
-                .trim_matches('/')
-                .to_string();
-            if norm_prefix.is_empty() {
-                return Ok(p);
+            let pre_frag = PathFragment::create(&prefix);
+            let pre_norm = pre_frag.path_string();
+            if pre_norm.is_empty() || pre_norm == "." {
+                return Ok(p_norm);
             }
-            let norm_p = PathFragment::create(&p)
-                .path_string()
-                .trim_start_matches('/')
-                .to_string();
-            if norm_p == norm_prefix {
+            if p_norm == pre_norm {
                 return Ok(String::new());
             }
-            let pre = format!("{norm_prefix}/");
-            match norm_p.strip_prefix(&pre) {
-                Some(rest) => Ok(rest.to_string()),
-                None => err(format!("attribute resource_strip_prefix: Resource file '{p}' is not under the specified prefix to strip")),
+            if let Some(rest) = p_norm.strip_prefix(&format!("{pre_norm}/")) {
+                return Ok(rest.to_string());
             }
+            st.rule_errors.lock().unwrap().push(format!(
+                "in resource_strip_prefix attribute of {} rule {}: Resource file '{}' is not under the specified prefix to strip",
+                st.rule.rule_class,
+                st.label.canonical_form(),
+                p_norm
+            ));
+            Ok(p_norm)
         }
-        _ => Ok(default_java_resource_path(&p)),
+        _ => Ok(default_java_resource_path(&p_norm)),
     }
 }
 
@@ -1217,6 +1486,7 @@ fn java_resource_jar_action(
     a.inputs = dedup(inputs);
     a.outputs = vec![output.clone()];
     a.use_default_shell_env = true;
+    apply_java_rule_tags_and_exec_group(st, &mut a, true)?;
     st.register(a)?;
     Ok(())
 }

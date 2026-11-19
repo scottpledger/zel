@@ -526,16 +526,59 @@ pub(crate) fn java_plugins_flag_alias(n: &Nctx) -> Result<ConfiguredTarget, Stri
     {
         return Err(format!("Rule {l} cannot use private rule"));
     }
-    let flag = n.cfg.options.get("plugin").cloned().unwrap_or_default();
+    let bo = n.cfg.build_options();
+    let raw_plugins: Vec<String> = if let Some(s) = n.cfg.options.get("plugin") {
+        s.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect()
+    } else {
+        match bo.get("plugin") {
+            Some(zel_analysis::build_options::ConfigValue::List(vs)) => vs
+                .iter()
+                .flat_map(|x| x.split(','))
+                .filter(|x| !x.is_empty())
+                .map(str::to_string)
+                .collect(),
+            Some(zel_analysis::build_options::ConfigValue::Scalar(s)) => {
+                s.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect()
+            }
+            _ => Vec::new(),
+        }
+    };
+    let root_pkg = zel_cmdline::PackageIdentifier::create_in_main_repo("")
+        .map_err(|e| e.to_string())?;
+    let main_entries: Vec<(String, zel_cmdline::RepositoryName)> = n
+        .resolver
+        .repo_mapping_entries("")
+        .into_iter()
+        .map(|(a, c)| {
+            let r = if c.is_empty() {
+                zel_cmdline::RepositoryName::main()
+            } else {
+                zel_cmdline::RepositoryName::create_unvalidated(&c)
+            };
+            (a, r)
+        })
+        .collect();
+    let main_repo_map = zel_cmdline::RepositoryMapping::new_ordered(
+        main_entries,
+        zel_cmdline::RepositoryName::main(),
+    );
     // `:java_plugins` (exec configuration): the labels of `--plugin`.
     let exec_cfg = n.cfg.to_exec_for(&n.acfg.default_exec_platform());
     const PLUGIN_INFO: &str = "@@rules_java+//java/private:java_info.bzl%JavaPluginInfo";
     let mut infos: Vec<zel_starlark::Value> = Vec::new();
-    for raw in flag.split(',').filter(|s| !s.is_empty()) {
-        let l = Label::parse_canonical(raw)
+    for raw in &raw_plugins {
+        let norm_raw = if raw.starts_with("//") || raw.starts_with('@') {
+            raw.clone()
+        } else {
+            format!("//{raw}")
+        };
+        let l = Label::parse_with_package_context(&norm_raw, &root_pkg, &main_repo_map)
+            .or_else(|_| Label::parse_canonical(&norm_raw))
             .map_err(|e| format!("--plugin: invalid label '{raw}': {e}"))?;
         let ct = n.resolver.configured_target(&l, &exec_cfg)?;
-        match ct.providers.get(PLUGIN_INFO) {
+        n.resolver.check_dependency(n.rule, ":java_plugins", &ct)?;
+        let actual = ct.get_actual();
+        match actual.providers.get(PLUGIN_INFO) {
             Some(i) => infos.push(i.clone()),
             None => {
                 return Err(format!(

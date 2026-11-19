@@ -2666,12 +2666,23 @@ pub fn execute_action_with(
                     }
                 }
                 if let Some(spec) = jc {
+                    let jdeps_path = execroot.get_relative_str(&spec.deps_proto);
+                    let raw_jdeps = fs.read_file(&jdeps_path).map_err(|e| e.to_string());
+                    let jdeps = match raw_jdeps {
+                        Ok(bytes) => {
+                            let rewritten = java_compile::create_full_output_deps(
+                                &bytes,
+                                &spec.transitive_inputs,
+                            )
+                            .unwrap_or_else(|_| bytes.clone());
+                            if rewritten != bytes {
+                                let _ = fs.write_file(&jdeps_path, &rewritten);
+                            }
+                            java_compile::parse_jdeps(&rewritten)
+                        }
+                        Err(e) => Err(e),
+                    };
                     if !java_fallback {
-                        let jdeps = match fs.read_file(&execroot.get_relative_str(&spec.deps_proto))
-                        {
-                            Ok(bytes) => java_compile::parse_jdeps(&bytes),
-                            Err(e) => Err(e.to_string()),
-                        };
                         match jdeps {
                             Ok(d) if d.requires_reduced_classpath_fallback => {
                                 // Delete the outputs of the reduced attempt and re-run with the full classpath.
