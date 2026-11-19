@@ -556,3 +556,30 @@ include!("py_native.rs");
 include!("starlark_rule_actions.rs");
 include!("starlark_rule_driver.rs");
 include!("starlark_rule_aspect.rs");
+
+#[cfg(test)]
+mod java_native_tests {
+    use super::*;
+
+    #[test]
+    fn strict_deps_mode_normalizes_default_and_strict_and_rejects_unknown() {
+        assert_eq!(normalize_strict_deps_mode(None).unwrap(), "ERROR");
+        assert_eq!(
+            normalize_strict_deps_mode(Some(&Value::String("default".into()))).unwrap(),
+            "ERROR"
+        );
+        assert_eq!(
+            normalize_strict_deps_mode(Some(&Value::String("strict".into()))).unwrap(),
+            "ERROR"
+        );
+        assert_eq!(
+            normalize_strict_deps_mode(Some(&Value::String("warn".into()))).unwrap(),
+            "WARN"
+        );
+        assert_eq!(
+            normalize_strict_deps_mode(Some(&Value::String("off".into()))).unwrap(),
+            "OFF"
+        );
+        assert!(normalize_strict_deps_mode(Some(&Value::String("bogus".into()))).is_err());
+    }
+}

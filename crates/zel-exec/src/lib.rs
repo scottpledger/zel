@@ -23,6 +23,7 @@ use std::sync::{Arc, Condvar, Mutex};
 
 pub mod action_cache;
 pub mod bin_tools;
+pub mod buildjar;
 pub mod digest;
 pub mod file_cache;
 pub mod input_expander;
@@ -2387,22 +2388,37 @@ fn expand_param_file_args(
 ) -> Vec<String> {
     let mut expanded = Vec::new();
     for arg in argv {
+        expand_param_file_arg_recursive(arg, execroot, fs, &mut expanded, 0);
+    }
+    expanded
+}
+
+fn expand_param_file_arg_recursive(
+    arg: &str,
+    execroot: &PathFragment,
+    fs: &dyn FileSystem,
+    expanded: &mut Vec<String>,
+    depth: usize,
+) {
+    if depth <= 64 {
+        if let Some(escaped) = arg.strip_prefix("@@") {
+            expanded.push(format!("@{escaped}"));
+            return;
+        }
         if let Some(param_path) = arg.strip_prefix('@') {
             let p = execroot.get_relative_str(param_path);
             if let Ok(b) = fs.read_file(&p) {
                 let content = String::from_utf8_lossy(&b);
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        expanded.push(trimmed.to_string());
+                for line in zel_util::jar::split_java_lines(&content) {
+                    if !line.is_empty() {
+                        expand_param_file_arg_recursive(line, execroot, fs, expanded, depth + 1);
                     }
                 }
-                continue;
+                return;
             }
         }
-        expanded.push(arg.clone());
     }
-    expanded
+    expanded.push(arg.to_string());
 }
 
 /// The checksum of the configuration an action runs in: derived from the output directory

@@ -27,6 +27,7 @@ pub mod args;
 pub mod build_options;
 mod build_options_table;
 pub mod fragments;
+pub mod javac_options;
 pub mod location;
 pub mod nested_set;
 pub mod objects;

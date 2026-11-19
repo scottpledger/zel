@@ -359,3 +359,61 @@ fn worker_no_tools_and_allowlist_enforcement() {
     assert_eq!(res.status, SpawnStatus::ExecutionFailed);
     assert!(String::from_utf8_lossy(&res.stderr).contains("because the action has no tools"));
 }
+
+#[test]
+fn multiplex_cancellable_worker_cancels_in_flight_request_and_reuses_worker() {
+    let env = setup("mux_cancel");
+    let opts = WorkerOptions {
+        multiplex: true,
+        cancellation: true,
+        ..Default::default()
+    };
+    let r = Arc::new(runner(&env, opts));
+    let info = &[
+        ("supports-multiplex-workers", "1"),
+        ("supports-worker-cancellation", "1"),
+    ];
+    let cancelled_spawn = worker_spawn(&env, "cancelled.out", "drop_me", &["--sleep_ms=500"], info);
+    let sibling_spawn = worker_spawn(&env, "sibling.out", "keep_me", &["--sleep_ms=120"], info);
+
+    let cancel_flag = zel_sandbox::process_wrapper::CancelFlag::new();
+    let cancel_trigger = cancel_flag.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(40));
+        cancel_trigger.cancel();
+    });
+
+    std::thread::scope(|sc| {
+        let r1 = r.clone();
+        let s1 = &cancelled_spawn;
+        let cf = cancel_flag.clone();
+        let h1 = sc.spawn(move || {
+            let hooks = zel_sandbox::ExecHooks {
+                cancel: Some(cf),
+                ..Default::default()
+            };
+            r1.exec_with(s1, &hooks)
+        });
+        let r2 = r.clone();
+        let s2 = &sibling_spawn;
+        let h2 = sc.spawn(move || r2.exec(s2));
+
+        let err = h1.join().unwrap().unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+        let ok = h2.join().unwrap().unwrap();
+        assert!(ok.is_ok(), "{}", String::from_utf8_lossy(&ok.stderr));
+    });
+
+    assert!(
+        !env.exec_root.join("cancelled.out").exists(),
+        "cancelled request must not write output"
+    );
+    assert!(env.exec_root.join("sibling.out").exists());
+
+    // Subsequent request must reuse the same live worker process (`started == 1`).
+    let follow = worker_spawn(&env, "follow.out", "reused", &[], info);
+    let res = r.exec(&follow).unwrap();
+    assert!(res.is_ok(), "{}", String::from_utf8_lossy(&res.stderr));
+    assert_eq!(r.pool.started.load(std::sync::atomic::Ordering::SeqCst), 1);
+    r.pool.shutdown();
+}

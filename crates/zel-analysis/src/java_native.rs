@@ -1,10 +1,5 @@
 // Analysis-time natives of `_builtins.internal.java_common_internal_do_not_use`
 // (`JavaStarlarkCommon.java`) that need the rule context. Included into `starlark_rule.rs`.
-//
-// Ported: expand_java_opts, check_provider_instances, get_runtime_classpath_for_archive,
-// target_kind, collect_native_deps_dirs, _check_java_toolchain_is_declared_on_rule.
-// Not yet ported (explicit errors): create_compilation_action, create_header_compilation_action,
-// create_jvm_compile_action (JavaCompileActionBuilder / JavaHeaderCompileAction).
 
 fn java_native(
     st: &Arc<CtxState>,
@@ -256,10 +251,32 @@ fn java_label_arg(l: &Label) -> String {
 }
 
 fn utf8_env(st: &Arc<CtxState>) -> BTreeMap<String, String> {
-    let mac = st.cfg.platforms.iter().any(|p| p.contains("osx") || p.contains("macos")) || cfg!(target_os = "macos");
+    let mac = if st.cfg.platforms.is_empty() {
+        cfg!(target_os = "macos")
+    } else {
+        st.cfg
+            .platforms
+            .iter()
+            .any(|p| p.contains("osx") || p.contains("macos"))
+    };
     let mut m = BTreeMap::new();
     m.insert("LC_CTYPE".to_string(), if mac { "en_US.UTF-8" } else { "C.UTF-8" }.to_string());
     m
+}
+
+fn normalize_strict_deps_mode(raw: Option<&Value>) -> Result<String, StarlarkError> {
+    let Some(v) = raw else {
+        return Ok("ERROR".to_string());
+    };
+    let Some(s) = v.as_str() else {
+        return Err(StarlarkError("strict_deps_mode must be a string".into()));
+    };
+    match s.to_ascii_uppercase().as_str() {
+        "DEFAULT" | "STRICT" | "ERROR" => Ok("ERROR".to_string()),
+        "WARN" => Ok("WARN".to_string()),
+        "OFF" => Ok("OFF".to_string()),
+        _ => Err(StarlarkError(format!("StrictDepsMode {s} not allowed"))),
+    }
 }
 
 
@@ -351,8 +368,9 @@ fn java_create_header_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<St
     let classpath = cc_artifacts(g(7, "compile_time_classpath"));
     let direct_jars = cc_artifacts(g(8, "direct_jars"));
     let (boot, _aux, _sys, _sysp) = boot_class_path(g(9, "boot_class_path"), toolchain);
-    let javacopts = java_tokenize_opts(g(11, "javac_opts"));
-    let strict = g(12, "strict_deps_mode").and_then(|v| v.as_str().map(|s| s.to_uppercase())).unwrap_or_else(|| "ERROR".into());
+    let javacopts =
+        crate::javac_options::JavacOptions::normalize_release_only(&java_tokenize_opts(g(11, "javac_opts")));
+    let strict = normalize_strict_deps_mode(g(12, "strict_deps_mode"))?;
     let target_label = match g(13, "target_label") {
         Some(Value::Label(l)) => Some(l.clone()),
         _ => None,
@@ -751,8 +769,8 @@ fn java_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<S
     let (boot, aux, sys_inputs, sys_path) = boot_class_path(g(7, "boot_class_path"), toolchain);
     let builder_jvm_flags = jstrs(g(8, "javabuilder_jvm_flags"));
     let dep_artifacts = cc_artifacts(g(9, "compile_time_java_deps"));
-    let javacopts = java_tokenize_opts(g(10, "javac_opts"));
-    let strict = g(11, "strict_deps_mode").and_then(|v| v.as_str().map(|s| s.to_uppercase())).unwrap_or_else(|| "ERROR".into());
+    let raw_javacopts = java_tokenize_opts(g(10, "javac_opts"));
+    let strict = normalize_strict_deps_mode(g(11, "strict_deps_mode"))?;
     let target_label = match g(12, "target_label") {
         Some(Value::Label(l)) => Some(l.clone()),
         _ => Some(st.label.clone()),
@@ -807,6 +825,14 @@ fn java_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<S
     }
     let builder = jf(toolchain, "_javabuilder").ok_or_else(|| StarlarkError("java_toolchain has no javabuilder".into()))?;
     let (mut exe_line, tool_inputs) = java_tool_command(&builder, toolchain)?;
+    let is_vanilla = exe_line
+        .iter()
+        .any(|part| part.contains("VanillaJavaBuilder"));
+    let javacopts = if is_vanilla {
+        crate::javac_options::JavacOptions::normalize_vanilla(&raw_javacopts)
+    } else {
+        crate::javac_options::JavacOptions::normalize_default(&raw_javacopts)
+    };
     // `javaToolchain.getJavaBuilder().withAdditionalJvmFlags(javaBuilderJvmFlags)`: flags precede `-jar`.
     if !builder_jvm_flags.is_empty() {
         let pos_jar = exe_line.iter().position(|s| s == "-jar").unwrap_or(exe_line.len());
@@ -859,7 +885,14 @@ fn java_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<S
         c.opt("--strict_java_deps", Some(&strict));
         c.exec_paths("--direct_dependencies", &direct_all);
     }
-    c.opt("--experimental_fix_deps_tool", Some("add_dep"));
+    let fix_deps_tool = st
+        .cfg
+        .options
+        .get("experimental_fix_deps_tool")
+        .map(String::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("add_dep");
+    c.opt("--experimental_fix_deps_tool", Some(fix_deps_tool));
 
     // Full classpath (bootclasspath auxiliary entries precede the compile-time classpath).
     let mut full_cp: Vec<Artifact> = aux;
@@ -1115,6 +1148,7 @@ fn java_gen_jar_action(
     inputs.extend(cc_artifacts(jf(&rt, "files").as_ref()));
     a.inputs = dedup(inputs);
     a.outputs = vec![gen_class_jar.clone()];
+    a.env = utf8_env(st);
     a.use_default_shell_env = true;
     st.register(a)?;
     Ok(())
