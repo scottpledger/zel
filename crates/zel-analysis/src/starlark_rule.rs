@@ -561,6 +561,53 @@ include!("starlark_rule_aspect.rs");
 mod java_native_tests {
     use super::*;
 
+    struct MapPlatformResolver {
+        platforms: BTreeMap<String, Arc<ConfiguredTarget>>,
+    }
+
+    impl DepResolver for MapPlatformResolver {
+        fn configured_target(
+            &self,
+            label: &Label,
+            _cfg: &BuildConfigurationKey,
+        ) -> Result<Arc<ConfiguredTarget>, String> {
+            self.platforms
+                .get(&label.canonical_form())
+                .cloned()
+                .ok_or_else(|| format!("missing platform {}", label.canonical_form()))
+        }
+    }
+
+    fn make_platform_ct(
+        label_str: &str,
+        os_constraint: Option<(&str, &str)>,
+    ) -> Arc<ConfiguredTarget> {
+        let label = Label::parse_canonical(label_str).unwrap();
+        let mut ct = ConfiguredTarget::new(
+            label.clone(),
+            BuildConfigurationKey::target("k8", "fastbuild").to_core_only(),
+            "platform".into(),
+        );
+        let mut constraints = Vec::new();
+        if let Some((setting, value)) = os_constraint {
+            constraints.push((
+                Value::Label(Label::parse_canonical(setting).unwrap()),
+                Value::Label(Label::parse_canonical(value).unwrap()),
+            ));
+        }
+        ct.providers.insert(
+            "PlatformInfo".into(),
+            provider_instance(
+                "PlatformInfo",
+                vec![
+                    ("label", Value::Label(label)),
+                    ("constraints", mk_dict(constraints)),
+                ],
+            ),
+        );
+        Arc::new(ct)
+    }
+
     #[test]
     fn strict_deps_mode_normalizes_default_and_strict_and_rejects_unknown() {
         assert_eq!(normalize_strict_deps_mode(None).unwrap(), "ERROR");
@@ -581,5 +628,104 @@ mod java_native_tests {
             "OFF"
         );
         assert!(normalize_strict_deps_mode(Some(&Value::String("bogus".into()))).is_err());
+    }
+
+    #[test]
+    fn utf8_env_follows_execution_or_host_os_not_target_platforms() {
+        let mac_exec = make_platform_ct(
+            "//pkg:macos_exec",
+            Some(("@@platforms+//os:os", "@@platforms+//os:macos")),
+        );
+        let osx_exec = make_platform_ct(
+            "//pkg:osx_exec",
+            Some(("@@platforms//os:os", "@@platforms//os:osx")),
+        );
+        let linux_exec = make_platform_ct(
+            "//pkg:linux_exec",
+            Some(("@@platforms//os:os", "@@platforms//os:linux")),
+        );
+        let bare_exec = make_platform_ct("//pkg:bare_exec", None);
+
+        let resolver: Arc<dyn DepResolver> = Arc::new(MapPlatformResolver {
+            platforms: BTreeMap::from([
+                (mac_exec.label.canonical_form(), mac_exec.clone()),
+                (osx_exec.label.canonical_form(), osx_exec.clone()),
+                (linux_exec.label.canonical_form(), linux_exec.clone()),
+                (bare_exec.label.canonical_form(), bare_exec.clone()),
+            ]),
+        });
+
+        // Cross-compiling to a Linux target platform on a macOS host (default/unresolved host exec
+        // platform) must emit `en_US.UTF-8`, never `C.UTF-8`.
+        let mut cfg_linux_target = BuildConfigurationKey::target("k8", "fastbuild");
+        cfg_linux_target.platforms = vec!["@@_main//pkg:linux_target".into()];
+        let mut inputs_default = AnalysisInputs::new(resolver.clone());
+        inputs_default.exec_platform = Some("@@platforms//host:host".into());
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_linux_target, &inputs_default, true)["LC_CTYPE"],
+            "en_US.UTF-8"
+        );
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_linux_target, &inputs_default, false)["LC_CTYPE"],
+            "C.UTF-8"
+        );
+
+        // Cross-compiling to a macOS target platform on a Linux host must emit `C.UTF-8`.
+        let mut cfg_macos_target = BuildConfigurationKey::target("darwin_arm64", "fastbuild");
+        cfg_macos_target.platforms = vec!["@@_main//pkg:macos_target".into()];
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_macos_target, &inputs_default, false)["LC_CTYPE"],
+            "C.UTF-8"
+        );
+
+        // Explicit execution platform OS constraints override host OS regardless of target platform.
+        let mut inputs_mac_exec = AnalysisInputs::new(resolver.clone());
+        inputs_mac_exec.exec_platform = Some(mac_exec.label.canonical_form());
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_linux_target, &inputs_mac_exec, false)["LC_CTYPE"],
+            "en_US.UTF-8"
+        );
+        let mut inputs_osx_exec = AnalysisInputs::new(resolver.clone());
+        inputs_osx_exec.exec_platform = Some(osx_exec.label.canonical_form());
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_linux_target, &inputs_osx_exec, false)["LC_CTYPE"],
+            "en_US.UTF-8"
+        );
+
+        let mut inputs_linux_exec = AnalysisInputs::new(resolver.clone());
+        inputs_linux_exec.exec_platform = Some(linux_exec.label.canonical_form());
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_macos_target, &inputs_linux_exec, true)["LC_CTYPE"],
+            "C.UTF-8"
+        );
+
+        // Execution platform with no `@platforms//os:os` constraint falls back to host OS
+        // (`ConstraintConstants.getOsFromConstraintsOrHost`).
+        let mut inputs_bare_exec = AnalysisInputs::new(resolver.clone());
+        inputs_bare_exec.exec_platform = Some(bare_exec.label.canonical_form());
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_linux_target, &inputs_bare_exec, true)["LC_CTYPE"],
+            "en_US.UTF-8"
+        );
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_macos_target, &inputs_bare_exec, false)["LC_CTYPE"],
+            "C.UTF-8"
+        );
+
+        // With `--incompatible_auto_exec_groups=true`, the Java toolchain exec group platform wins.
+        let mut cfg_auto_eg = cfg_linux_target.clone();
+        cfg_auto_eg
+            .options
+            .insert("incompatible_auto_exec_groups".into(), "true".into());
+        let mut inputs_auto_eg = AnalysisInputs::new(resolver);
+        inputs_auto_eg.exec_platform = Some(linux_exec.label.canonical_form());
+        inputs_auto_eg.exec_group_platforms.insert(
+            "@@bazel_tools//tools/jdk:toolchain_type".into(),
+            mac_exec.label.canonical_form(),
+        );
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_auto_eg, &inputs_auto_eg, false)["LC_CTYPE"],
+            "en_US.UTF-8"
+        );
     }
 }

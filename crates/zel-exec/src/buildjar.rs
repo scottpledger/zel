@@ -1125,6 +1125,31 @@ fn invoke_system_javac(
     }
     if !req.source_path.is_empty() {
         cmd.arg("-sourcepath").arg(join_paths(&req.source_path));
+    } else {
+        let inferred_module_src = (!vanilla)
+            .then(|| {
+                let mut mods = sources
+                    .iter()
+                    .filter(|f| f.file_name().is_some_and(|n| n == "module-info.java"));
+                let only = mods.next()?;
+                if mods.next().is_some() {
+                    return None;
+                }
+                let abs = if only.is_absolute() {
+                    only.clone()
+                } else {
+                    std::env::current_dir()
+                        .map(|cwd| cwd.join(only))
+                        .unwrap_or_else(|_| only.clone())
+                };
+                abs.parent().map(Path::to_path_buf)
+            })
+            .flatten();
+        if let Some(module_parent) = inferred_module_src {
+            cmd.arg("-sourcepath").arg(module_parent);
+        } else {
+            cmd.arg("-sourcepath").arg("");
+        }
     }
     for arg in req.processor_javac_args(true) {
         cmd.arg(arg);
@@ -3228,6 +3253,199 @@ mod tests {
         assert_eq!(use_jdeps.dependencies[0].kind, DependencyKind::Explicit);
         assert!(use_jdeps.dependencies[1].path.ends_with("libbar.jar"));
         assert_eq!(use_jdeps.dependencies[1].kind, DependencyKind::Implicit);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn empty_sourcepath_prevents_compiling_sources_bundled_in_classpath_jars() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            return;
+        }
+        let d = tmp_dir("empty-sourcepath");
+        std::fs::create_dir_all(d.join("dep")).unwrap();
+        std::fs::create_dir_all(d.join("app")).unwrap();
+        std::fs::create_dir_all(d.join("modsrc/pkg")).unwrap();
+
+        // Build a dependency jar that bundles an uncompiled `dep/BundledSource.java` alongside
+        // a compiled `dep/CompiledApi.class`.
+        std::fs::write(
+            d.join("dep/CompiledApi.java"),
+            "package dep; public class CompiledApi {}\n",
+        )
+        .unwrap();
+        let api_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libapi.jar",
+                    "--target_label",
+                    "//dep:api",
+                    "--sources",
+                    "dep/CompiledApi.java",
+                    "--strict_java_deps",
+                    "OFF",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(run_bazel_java_builder("javac", &api_req).unwrap().is_ok());
+
+        let uncompiled_src = d.join("dep/BundledSource.java");
+        std::fs::write(
+            &uncompiled_src,
+            "package dep; public class BundledSource {}\n",
+        )
+        .unwrap();
+        let mut dep_jc = JarCreator::new(d.join("dep_with_sources.jar"));
+        dep_jc.set_jar_owner(Some("//dep:with_sources".into()), None);
+        let api_bytes = std::fs::read(d.join("libapi.jar")).unwrap();
+        let api_zip = zel_util::zip::ZipReader::from_bytes(api_bytes).unwrap();
+        for entry in api_zip.entries() {
+            if entry.name.ends_with(".class") {
+                let class_path = d.join(&entry.name);
+                if let Some(par) = class_path.parent() {
+                    std::fs::create_dir_all(par).unwrap();
+                }
+                std::fs::write(&class_path, api_zip.read_entry_bytes(entry, true).unwrap())
+                    .unwrap();
+                assert!(dep_jc.add_entry(&entry.name, class_path));
+            }
+        }
+        assert!(dep_jc.add_entry("dep/BundledSource.java", uncompiled_src));
+        dep_jc.execute().unwrap();
+
+        // Referencing the uncompiled `dep.BundledSource` with empty `--sourcepath` must fail in
+        // both `BazelJavaBuilder` and `VanillaJavaBuilder` instead of compiling the `.java` entry
+        // out of `dep_with_sources.jar` into the output jar.
+        std::fs::write(
+            d.join("app/UseBundledSource.java"),
+            "package app; public class UseBundledSource { public dep.BundledSource s; }\n",
+        )
+        .unwrap();
+        let bad_opts = OptionsParser::parse(
+            &d,
+            [
+                "--output",
+                "libbad.jar",
+                "--target_label",
+                "//app:bad",
+                "--sources",
+                "app/UseBundledSource.java",
+                "--classpath",
+                "dep_with_sources.jar",
+                "--direct_dependencies",
+                "dep_with_sources.jar",
+                "--strict_java_deps",
+                "ERROR",
+            ],
+        )
+        .unwrap();
+        let bad_req =
+            JavaLibraryBuildRequest::from_options(bad_opts.clone(), &d, false, None).unwrap();
+        let bad_res = run_bazel_java_builder("javac", &bad_req).unwrap();
+        assert!(
+            !bad_res.is_ok(),
+            "expected javac to reject uncompiled source in classpath jar, got ok"
+        );
+        assert!(
+            bad_res.output.contains("BundledSource"),
+            "{}",
+            bad_res.output
+        );
+        assert!(!d.join("libbad.jar").exists());
+
+        let vanilla_req = JavaLibraryBuildRequest::from_options(bad_opts, &d, true, None).unwrap();
+        let vanilla_res = run_vanilla_java_builder("javac", &vanilla_req).unwrap();
+        assert!(
+            !vanilla_res.is_ok(),
+            "expected vanilla javac failure: {}",
+            vanilla_res.output
+        );
+        assert!(!d.join("libbad.jar").exists());
+
+        // Referencing the compiled `dep.CompiledApi` with `-Werror:all` succeeds cleanly with no
+        // `-Xlint:path` warning on `-sourcepath ""`, and never emits `dep/BundledSource.class`.
+        std::fs::write(
+            d.join("app/UseCompiledApi.java"),
+            "package app; public class UseCompiledApi { public dep.CompiledApi a; }\n",
+        )
+        .unwrap();
+        let ok_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libok.jar",
+                    "--target_label",
+                    "//app:ok",
+                    "--sources",
+                    "app/UseCompiledApi.java",
+                    "--classpath",
+                    "dep_with_sources.jar",
+                    "--direct_dependencies",
+                    "dep_with_sources.jar",
+                    "--strict_java_deps",
+                    "ERROR",
+                    "--javacopts",
+                    "-Werror:all",
+                    "--",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        let ok_res = run_bazel_java_builder("javac", &ok_req).unwrap();
+        assert!(ok_res.is_ok(), "{}", ok_res.output);
+        let ok_bytes = std::fs::read(d.join("libok.jar")).unwrap();
+        let ok_zip = zel_util::zip::ZipReader::from_bytes(ok_bytes).unwrap();
+        let names: Vec<&str> = ok_zip.entries().iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"app/UseCompiledApi.class"), "{names:?}");
+        assert!(!names.contains(&"dep/BundledSource.class"), "{names:?}");
+
+        // Single `module-info.java` with empty `--sourcepath` infers its parent directory as
+        // `SOURCE_PATH` (`BlazeJavacMain.setLocations`).
+        std::fs::write(
+            d.join("modsrc/module-info.java"),
+            "module demo.mod { exports pkg; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            d.join("modsrc/pkg/ModApi.java"),
+            "package pkg; public class ModApi {}\n",
+        )
+        .unwrap();
+        let mod_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libmod.jar",
+                    "--target_label",
+                    "//modsrc:mod",
+                    "--sources",
+                    "modsrc/module-info.java",
+                    "modsrc/pkg/ModApi.java",
+                    "--strict_java_deps",
+                    "OFF",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        let mod_res = run_bazel_java_builder("javac", &mod_req).unwrap();
+        assert!(mod_res.is_ok(), "{}", mod_res.output);
 
         let _ = std::fs::remove_dir_all(&d);
     }

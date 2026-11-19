@@ -250,18 +250,103 @@ fn java_label_arg(l: &Label) -> String {
     }
 }
 
-fn utf8_env(st: &Arc<CtxState>) -> BTreeMap<String, String> {
-    let mac = if st.cfg.platforms.is_empty() {
-        cfg!(target_os = "macos")
-    } else {
-        st.cfg
-            .platforms
-            .iter()
-            .any(|p| p.contains("osx") || p.contains("macos"))
+fn is_platforms_os_setting(label: &Label) -> bool {
+    let repo = label.package_identifier().repository().name();
+    let pkg = label.package_identifier().package_fragment().path_string();
+    pkg == "os"
+        && label.name() == "os"
+        && (repo == "platforms"
+            || repo.starts_with("platforms+")
+            || repo.starts_with("platforms~"))
+}
+
+fn is_darwin_os_value(label: &Label) -> bool {
+    let repo = label.package_identifier().repository().name();
+    let pkg = label.package_identifier().package_fragment().path_string();
+    pkg == "os"
+        && matches!(label.name(), "osx" | "macos")
+        && (repo == "platforms"
+            || repo.starts_with("platforms+")
+            || repo.starts_with("platforms~"))
+}
+
+fn java_exec_platform_label<'a>(
+    cfg: &'a BuildConfigurationKey,
+    inputs: &'a AnalysisInputs,
+) -> Option<&'a str> {
+    if cfg
+        .options
+        .get("incompatible_auto_exec_groups")
+        .is_some_and(|v| v == "true")
+    {
+        if let Some(ep) = inputs
+            .exec_group_platforms
+            .get("@@bazel_tools//tools/jdk:toolchain_type")
+            .or_else(|| {
+                inputs
+                    .exec_group_platforms
+                    .get("@bazel_tools//tools/jdk:toolchain_type")
+            })
+            .or_else(|| {
+                inputs
+                    .exec_group_platforms
+                    .iter()
+                    .find(|(k, _)| {
+                        k.ends_with("//tools/jdk:toolchain_type")
+                            || k.ends_with("//toolchains:toolchain_type")
+                    })
+                    .map(|(_, v)| v)
+            })
+        {
+            return Some(ep.as_str());
+        }
+    }
+    inputs
+        .exec_platform
+        .as_deref()
+        .or_else(|| cfg.options.get("host_platform").map(String::as_str))
+}
+
+fn platform_info_os_is_macos(ct: &ConfiguredTarget) -> Option<bool> {
+    let Value::ProviderInstance { fields, .. } = ct.providers.get("PlatformInfo")? else {
+        return None;
     };
+    let Value::Dict(d) = fields.get("constraints")? else {
+        return None;
+    };
+    for (k, v) in d.lock().unwrap().items() {
+        if let (Value::Label(setting), Value::Label(cv)) = (k, v) {
+            if is_platforms_os_setting(&setting) {
+                return Some(is_darwin_os_value(&cv));
+            }
+        }
+    }
+    None
+}
+
+fn utf8_env_for_inputs(
+    cfg: &BuildConfigurationKey,
+    inputs: &AnalysisInputs,
+    host_is_macos: bool,
+) -> BTreeMap<String, String> {
+    let mac = java_exec_platform_label(cfg, inputs)
+        .and_then(|raw| Label::parse_canonical(raw).ok())
+        .and_then(|label| {
+            let core_cfg = BuildConfigurationKey::target(&cfg.cpu, "fastbuild").to_core_only();
+            inputs.resolver.configured_target(&label, &core_cfg).ok()
+        })
+        .and_then(|ct| platform_info_os_is_macos(&ct))
+        .unwrap_or(host_is_macos);
     let mut m = BTreeMap::new();
-    m.insert("LC_CTYPE".to_string(), if mac { "en_US.UTF-8" } else { "C.UTF-8" }.to_string());
+    m.insert(
+        "LC_CTYPE".to_string(),
+        if mac { "en_US.UTF-8" } else { "C.UTF-8" }.to_string(),
+    );
     m
+}
+
+fn utf8_env(st: &Arc<CtxState>) -> BTreeMap<String, String> {
+    utf8_env_for_inputs(&st.cfg, &st.inputs, cfg!(target_os = "macos"))
 }
 
 fn normalize_strict_deps_mode(raw: Option<&Value>) -> Result<String, StarlarkError> {
