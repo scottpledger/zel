@@ -314,32 +314,40 @@ fn convert_per_label_attempts(
         }
         return Ok(OptionValue::String(input.to_string()));
     }
-    // `parseAsRegex`: last unescaped '@' separates the filter from the (single) option.
+    // `parseAsRegex`: first unescaped '@' (`split("(?<!\\\\)@", 2)`) separates the filter from the (single) option.
     let bytes: Vec<char> = input.chars().collect();
-    let at = (0..bytes.len())
-        .rev()
-        .find(|&i| bytes[i] == '@' && (i == 0 || bytes[i - 1] != '\\'));
-    let opts: Vec<String> = match at {
-        None => Vec::new(),
-        Some(i) => {
-            let piece: String = bytes[i + 1..].iter().collect();
-            let mut out = Vec::new();
-            let mut cur = String::new();
-            let pc: Vec<char> = piece.chars().collect();
-            for (k, c) in pc.iter().enumerate() {
-                if *c == ',' && (k == 0 || pc[k - 1] != '\\') {
-                    out.push(std::mem::take(&mut cur));
-                } else {
-                    cur.push(*c);
-                }
-            }
-            out.push(cur);
-            out.into_iter()
-                .filter(|o| !o.trim().is_empty())
-                .map(|o| o.replace("\\,", ",").replace("\\@", "@"))
-                .collect()
-        }
+    let at = (0..bytes.len()).find(|&i| bytes[i] == '@' && (i == 0 || bytes[i - 1] != '\\'));
+    let Some(i) = at else {
+        return Err(err(format!(
+            "'{input}' has multiple runs for a single pattern"
+        )));
     };
+    let filter_raw: String = bytes[..i].iter().collect();
+    let filter = filter_raw.replace("\\@", "@");
+    crate::converters_ext::regex_filter(&filter)?;
+    let piece: String = bytes[i + 1..].iter().collect();
+    // Reject additional unescaped '@' (`pieces.length != 2` in PerLabelOptionsConverter).
+    let pc: Vec<char> = piece.chars().collect();
+    if (0..pc.len()).any(|k| pc[k] == '@' && (k == 0 || pc[k - 1] != '\\')) {
+        return Err(err(format!(
+            "'{input}' has multiple runs for a single pattern"
+        )));
+    }
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    for (k, c) in pc.iter().enumerate() {
+        if *c == ',' && (k == 0 || pc[k - 1] != '\\') {
+            out.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(*c);
+        }
+    }
+    out.push(cur);
+    let opts: Vec<String> = out
+        .into_iter()
+        .filter(|o| !o.trim().is_empty())
+        .map(|o| o.replace("\\,", ",").replace("\\@", "@"))
+        .collect();
     if opts.len() != 1 {
         return Err(err(format!(
             "'{input}' has multiple runs for a single pattern"
@@ -538,8 +546,19 @@ pub(crate) fn convert_custom(name: &str, raw: &str) -> Result<OptionValue, Optio
         "TestResourcesConverter" => convert_test_resources(raw),
         "MultiResourceConverter" => convert_multi_resource(raw),
         "AbsolutePathFragmentConverter" => {
-            if raw.starts_with('/') {
-                Ok(OptionValue::String(raw.to_string()))
+            let expanded = if raw == "~" {
+                std::env::var("HOME").unwrap_or_else(|_| "~".to_string())
+            } else if let Some(rest) = raw.strip_prefix("~/") {
+                match std::env::var("HOME") {
+                    Ok(h) if !h.is_empty() => format!("{h}/{rest}"),
+                    _ => raw.to_string(),
+                }
+            } else {
+                raw.to_string()
+            };
+            let pf = zel_vfs::PathFragment::create(&expanded);
+            if pf.is_absolute() {
+                Ok(OptionValue::String(pf.path_string().to_string()))
             } else {
                 Err(err(format!("Not an absolute path: '{raw}'")))
             }
@@ -1059,5 +1078,40 @@ mod tests {
             "Expected path without uplevel references ('..') but got 'a/../../b'."
         );
         assert!(convert_workspace_path("a/../b").is_ok());
+    }
+
+    #[test]
+    fn per_label_attempts_and_run_under_and_tilde_path_parity() {
+        // Repo-qualified and escaped '@' split on first unescaped '@' (so literal '@' in regex must be escaped as '\@').
+        assert!(convert_per_label_attempts("\\@\\@my_repo//pkg:t@3", true).is_ok());
+        assert!(convert_per_label_attempts("@@my_repo//pkg:t@3", true).is_err());
+        assert!(convert_per_label_attempts("\\@escaped//pkg:t@default", true).is_ok());
+        assert!(convert_per_label_attempts("[unclosed@2", true).is_err());
+        let per_label_def = crate::flag_tables::ALL_COMMAND_OPTIONS
+            .iter()
+            .find(|d| d.name == "per_file_copt")
+            .unwrap();
+        assert!(convert_option("\\@repo//a:b@-O2", per_label_def).is_ok());
+
+        // Tilde expansion + normalization in AbsolutePathFragmentConverter.
+        if let Ok(home) = std::env::var("HOME") {
+            if home.starts_with('/') {
+                let v = convert_custom("AbsolutePathFragmentConverter", "~/sub/../dir").unwrap();
+                let expected = format!("{}/dir", home.trim_end_matches('/'));
+                assert_eq!(v, OptionValue::String(expected));
+            }
+        }
+
+        // ShellUtils.tokenize rules in RunUnderConverter.
+        let run_under_def = crate::flag_tables::ALL_COMMAND_OPTIONS
+            .iter()
+            .find(|d| d.name == "run_under")
+            .unwrap();
+        assert!(convert_option("tool \"a\\nb\\\"c\\\\d\"\targ2", run_under_def).is_ok());
+        let err = msg(convert_option("cmd \\", run_under_def));
+        assert!(
+            err.contains("Not a valid command prefix backslash at end of string"),
+            "{err}"
+        );
     }
 }

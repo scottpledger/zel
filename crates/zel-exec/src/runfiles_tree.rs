@@ -185,15 +185,24 @@ pub fn build_runfiles_tree(
         }
         std::fs::write(&input_manifest, &manifest_bytes)?;
     }
+    let out_manifest = dir.join("MANIFEST");
+    let helper = SymlinkTreeHelper::new(
+        input_manifest.clone(),
+        out_manifest,
+        dir.clone(),
+        workspace_name,
+    );
     if !opts.enable_runfiles {
-        // Manifest-only mode: no symlink tree.
-        let _ = delete_tree(&dir);
+        // Minimal runfiles directory (`SymlinkTreeHelper.createMinimalRunfilesDirectory`):
+        // keep the `.runfiles` root, delete trees below it, symlink `MANIFEST` -> input_manifest,
+        // and create the workspace subdirectory.
+        helper.create_minimal_runfiles_directory()?;
         return Ok(manifest);
     }
 
     let mut symlink_map: BTreeMap<PathFragment, Option<PathFragment>> = BTreeMap::new();
     for (k, v) in &resolved_entries {
-        if k == "MANIFEST" || k == "_repo_mapping" {
+        if k == "MANIFEST" {
             continue;
         }
         let target = if v.is_empty() {
@@ -204,33 +213,118 @@ pub fn build_runfiles_tree(
         symlink_map.insert(PathFragment::create(k), target);
     }
 
-    // Preserve `_repo_mapping` and `MANIFEST` across sync by updating them right after sync
-    // (or let sync clean unknown files, then write `_repo_mapping` and symlink/write `MANIFEST`).
-    let out_manifest = dir.join("MANIFEST");
-    let helper = SymlinkTreeHelper::new(
-        input_manifest,
-        out_manifest.clone(),
-        dir.clone(),
-        workspace_name,
-    );
     helper.create_runfiles_symlinks(&symlink_map)?;
-    if input_existed {
-        if std::fs::symlink_metadata(&out_manifest)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false)
-        {
-            let _ = std::fs::remove_file(&out_manifest);
+    helper.link_manifest()?;
+    if !symlink_map.contains_key(&PathFragment::create("_repo_mapping"))
+        && !opts.repo_mapping.is_empty()
+    {
+        let mut rm = String::new();
+        for (src, app, canon) in &opts.repo_mapping {
+            rm.push_str(&format!("{src},{app},{canon}\n"));
         }
-        std::fs::write(&out_manifest, &manifest_bytes)?;
-    } else {
-        helper.link_manifest()?;
+        std::fs::write(dir.join("_repo_mapping"), rm)?;
     }
-    let mut rm = String::new();
-    for (src, app, canon) in &opts.repo_mapping {
-        rm.push_str(&format!("{src},{app},{canon}\n"));
-    }
-    std::fs::write(dir.join("_repo_mapping"), rm)?;
     Ok(manifest)
+}
+
+/// Entry kind passed to [`compute_runfiles_artifact_map`] (`SymlinkTreeStrategy.java`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunfilesEntryKind {
+    /// Regular artifact or unresolved symlink target.
+    Artifact(PathFragment),
+    /// Nested `.runfiles` tree artifact (`Artifact.isRunfilesTree()`): dropped by `SymlinkTreeStrategy`.
+    NestedRunfilesTree(PathFragment),
+    /// Empty placeholder file (`empty_filenames`).
+    EmptyFile,
+}
+
+/// Computes the filtered runfiles symlink map per `SymlinkTreeStrategy.computeRunfilesArtifactMap`:
+/// - rejects empty and absolute runfiles keys,
+/// - drops nested `.runfiles` tree artifacts,
+/// - drops entries obscured by a non-null ancestor directory/symlink entry,
+/// - lets `empty_filenames` overwrite an existing entry,
+/// - adds `<workspace_name>/.runfile -> None` when no `<workspace_name>/...` entry was seen,
+/// - includes `_repo_mapping` only when `repo_mapping_manifest` is `Some`.
+pub fn compute_runfiles_artifact_map(
+    workspace_name: &str,
+    entries: &[(PathFragment, RunfilesEntryKind)],
+    empty_filenames: &[PathFragment],
+    repo_mapping_manifest: Option<&PathFragment>,
+) -> io::Result<BTreeMap<PathFragment, Option<PathFragment>>> {
+    let mut non_empty: BTreeMap<PathFragment, PathFragment> = BTreeMap::new();
+    for (key, kind) in entries {
+        if key.is_empty() || key.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid runfiles path: '{key}'"),
+            ));
+        }
+        match kind {
+            RunfilesEntryKind::NestedRunfilesTree(_) => continue,
+            RunfilesEntryKind::Artifact(target) => {
+                non_empty.insert(key.clone(), target.clone());
+            }
+            RunfilesEntryKind::EmptyFile => {}
+        }
+    }
+
+    // Drop entries obscured by a strict non-null ancestor (`a` obscures `a/b`).
+    let mut map: BTreeMap<PathFragment, Option<PathFragment>> = BTreeMap::new();
+    for (key, target) in &non_empty {
+        let mut obscured = false;
+        let mut cur = key.parent_directory();
+        while let Some(anc) = cur {
+            if anc.is_empty() {
+                break;
+            }
+            if non_empty.contains_key(&anc) {
+                obscured = true;
+                break;
+            }
+            cur = anc.parent_directory();
+        }
+        if !obscured {
+            map.insert(key.clone(), Some(target.clone()));
+        }
+    }
+
+    for (_, kind) in entries {
+        if matches!(kind, RunfilesEntryKind::EmptyFile) {
+            // Handled below alongside `empty_filenames` in entry order.
+        }
+    }
+    for (key, kind) in entries {
+        if matches!(kind, RunfilesEntryKind::EmptyFile) {
+            map.insert(key.clone(), None);
+        }
+    }
+    for empty in empty_filenames {
+        if empty.is_empty() || empty.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("Invalid empty runfiles path: '{empty}'"),
+            ));
+        }
+        let ws_prefixed = PathFragment::create(workspace_name).get_relative(empty);
+        map.insert(ws_prefixed, None);
+    }
+
+    let ws_prefix = format!("{workspace_name}/");
+    let has_ws_entry = map
+        .keys()
+        .any(|k| k.path_string() == workspace_name || k.path_string().starts_with(&ws_prefix));
+    if !has_ws_entry && !workspace_name.is_empty() {
+        map.insert(
+            PathFragment::create(&format!("{workspace_name}/.runfile")),
+            None,
+        );
+    }
+
+    if let Some(rm) = repo_mapping_manifest {
+        map.insert(PathFragment::create("_repo_mapping"), Some(rm.clone()));
+    }
+
+    Ok(map)
 }
 
 #[cfg(test)]
@@ -271,7 +365,7 @@ mod tests {
             std::fs::read(rf.join("_main/pkg/__init__.py")).unwrap(),
             b""
         );
-        assert!(rf.join("_repo_mapping").exists());
+        assert!(!rf.join("_repo_mapping").exists());
         assert_eq!(std::fs::read_to_string(rf.join("MANIFEST")).unwrap(), m);
         // Output MANIFEST is a symlink to `<exe>.runfiles_manifest`.
         #[cfg(unix)]
@@ -290,7 +384,7 @@ mod tests {
             root.join("pkg/data.txt").display()
         )));
         assert!(std::path::Path::new(&format!("{}.runfiles_manifest", exe.display())).exists());
-        // Stale entry removed on rebuild.
+        // Stale entry removed on rebuild, and MANIFEST remains a symlink even when input_manifest exists.
         std::fs::write(rf.join("_main/stale"), "x").unwrap();
         entries.remove("ext+/lib/x.txt");
         build_runfiles_tree(
@@ -303,13 +397,21 @@ mod tests {
         .unwrap();
         assert!(!rf.join("_main/stale").exists());
         assert!(!rf.join("ext+/lib/x.txt").exists());
-        // Manifest-only mode removes the tree.
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(rf.join("MANIFEST"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        // Manifest-only mode creates minimal runfiles directory (workspace subdir + MANIFEST symlink).
         let o = RunfilesTreeOptions {
             enable_runfiles: false,
             ..Default::default()
         };
         build_runfiles_tree(&root, &exe, "_main", &entries, &o).unwrap();
-        assert!(!rf.exists());
+        assert!(rf.exists());
+        assert!(rf.join("_main").is_dir());
+        assert!(rf.join("MANIFEST").exists());
+        assert!(!rf.join("_main/pkg/data.txt").exists());
     }
 
     #[test]

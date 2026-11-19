@@ -884,21 +884,26 @@ impl RemoteSpawnRunner {
                 stderr,
                 wall_time_ms: start.elapsed().as_millis() as u64,
                 runner_name: runner.to_string(),
-                missing: vec![],
-                usage: None,
-                executed_command: None,
+                ..Default::default()
             },
-            Err(e) => SpawnResult {
-                status: SpawnStatus::ExecutionFailed,
-                exit_code: 1,
-                stdout: vec![],
-                stderr: format!("Failed to apply remote result: {e}\n").into_bytes(),
-                wall_time_ms: start.elapsed().as_millis() as u64,
-                runner_name: runner.to_string(),
-                missing: vec![],
-                usage: None,
-                executed_command: None,
-            },
+            Err(e) => {
+                let evicted = matches!(&e, RemoteError::NotFound)
+                    || matches!(&e, RemoteError::Grpc(s) if s.code == 5);
+                SpawnResult {
+                    status: if evicted {
+                        SpawnStatus::RemoteCacheEvicted
+                    } else {
+                        SpawnStatus::ExecutionFailed
+                    },
+                    exit_code: if evicted { 39 } else { 1 },
+                    stderr: format!("Failed to apply remote result: {e}\n").into_bytes(),
+                    wall_time_ms: start.elapsed().as_millis() as u64,
+                    runner_name: runner.to_string(),
+                    catastrophic: evicted,
+                    failure_message: Some(format!("Failed to apply remote result: {e}")),
+                    ..Default::default()
+                }
+            }
         }
     }
 
@@ -906,13 +911,11 @@ impl RemoteSpawnRunner {
         SpawnResult {
             status,
             exit_code: 1,
-            stdout: vec![],
             stderr: format!("{msg}\n").into_bytes(),
             wall_time_ms: start.elapsed().as_millis() as u64,
             runner_name: "remote".into(),
-            missing: vec![],
-            usage: None,
-            executed_command: None,
+            failure_message: Some(msg),
+            ..Default::default()
         }
     }
 

@@ -258,7 +258,8 @@ impl BlazeRuntime {
             ExitCode::LOCAL_ENVIRONMENTAL_ERROR
         };
 
-        // `clearCaches`: action cache (persistent and in memory) and the digest cache.
+        // `clearCaches` + `WorkerModule.beforeCommand`: shut down persistent workers and clear caches.
+        crate::exec_phase::shutdown_worker_pools(self.dirs.output_base.path_string());
         let _ = self.fs.delete(&self.dirs.action_cache_file());
         if let Ok(cache) = self.action_cache.lock() {
             cache.clear();

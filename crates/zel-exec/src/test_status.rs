@@ -292,6 +292,26 @@ fn unescape(s: &str) -> String {
         .replace("&amp;", "&")
 }
 
+fn find_tag_end(xml: &str, start_after_lt: usize) -> Result<usize, String> {
+    let b = xml.as_bytes();
+    let mut j = start_after_lt;
+    let mut quote: Option<u8> = None;
+    while j < b.len() {
+        let ch = b[j];
+        match quote {
+            Some(q) if ch == q => quote = None,
+            Some(_) => {}
+            None => match ch {
+                b'"' | b'\'' => quote = Some(ch),
+                b'>' => return Ok(j),
+                _ => {}
+            },
+        }
+        j += 1;
+    }
+    Err("unterminated tag".into())
+}
+
 fn tokenize(xml: &str) -> Result<Vec<Tok>, String> {
     let b = xml.as_bytes();
     let mut i = 0;
@@ -309,34 +329,78 @@ fn tokenize(xml: &str) -> Result<Vec<Tok>, String> {
             i += xml[i..].find("]]>").ok_or("unterminated CDATA")? + 3;
             continue;
         }
-        if xml[i..].starts_with("<?") || xml[i..].starts_with("<!") {
-            i += xml[i..].find('>').ok_or("unterminated declaration")? + 1;
+        if xml[i..].starts_with("<?") {
+            i += xml[i..].find("?>").ok_or("unterminated declaration")? + 2;
             continue;
         }
-        let end = xml[i..].find('>').ok_or("unterminated tag")? + i;
+        if xml[i..].starts_with("<!") {
+            let end = find_tag_end(xml, i + 2)?;
+            i = end + 1;
+            continue;
+        }
+        let end = find_tag_end(xml, i + 1)?;
         let inner = &xml[i + 1..end];
-        if let Some(name) = inner.strip_prefix('/') {
-            out.push(Tok::End(name.trim().to_string()));
+        if let Some(after_slash) = inner.strip_prefix('/') {
+            if after_slash.is_empty()
+                || after_slash
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_whitespace())
+            {
+                return Err("malformed end tag".into());
+            }
+            let name = after_slash.trim_end();
+            if name.is_empty() || name.chars().any(char::is_whitespace) {
+                return Err("malformed end tag".into());
+            }
+            out.push(Tok::End(name.to_string()));
         } else {
-            let self_close = inner.ends_with('/');
-            let inner = inner.trim_end_matches('/');
-            let (name, rest) = match inner.find(char::is_whitespace) {
-                Some(p) => (&inner[..p], &inner[p..]),
-                None => (inner, ""),
+            if inner.is_empty() || inner.chars().next().is_some_and(char::is_whitespace) {
+                return Err("malformed start tag".into());
+            }
+            let (name_end, has_attrs) = match inner.find(|c: char| c.is_whitespace() || c == '/') {
+                Some(p) => (p, true),
+                None => (inner.len(), false),
             };
+            let name = &inner[..name_end];
+            if name.is_empty() {
+                return Err("empty element name".into());
+            }
+            let mut rest = if has_attrs { &inner[name_end..] } else { "" };
             let mut attrs = Vec::new();
-            let mut r = rest.trim_start();
-            while !r.is_empty() {
-                let Some(eq) = r.find('=') else { break };
-                let key = r[..eq].trim().to_string();
-                let after = r[eq + 1..].trim_start();
+            let mut self_close = false;
+            let mut need_ws = !rest.is_empty() && !rest.starts_with('/');
+            loop {
+                let before_len = rest.len();
+                rest = rest.trim_start();
+                let had_ws = rest.len() < before_len;
+                if rest.is_empty() {
+                    break;
+                }
+                if let Some(tail) = rest.strip_prefix('/') {
+                    if !tail.is_empty() {
+                        return Err("unexpected characters after '/' in start tag".into());
+                    }
+                    self_close = true;
+                    break;
+                }
+                if need_ws && !had_ws {
+                    return Err("missing whitespace between attributes".into());
+                }
+                let eq = rest.find('=').ok_or("bad attribute")?;
+                let key = rest[..eq].trim_end();
+                if key.is_empty() || key.chars().any(char::is_whitespace) {
+                    return Err("bad attribute name".into());
+                }
+                let after = rest[eq + 1..].trim_start();
                 let q = after.chars().next().ok_or("bad attribute")?;
                 if q != '"' && q != '\'' {
                     return Err("attribute without quotes".into());
                 }
                 let close = after[1..].find(q).ok_or("unterminated attribute")? + 1;
-                attrs.push((key, unescape(&after[1..close])));
-                r = after[close + 1..].trim_start();
+                attrs.push((key.to_string(), unescape(&after[1..close])));
+                rest = &after[close + 1..];
+                need_ws = true;
             }
             out.push(Tok::Start(name.to_string(), attrs, self_close));
         }
@@ -345,12 +409,37 @@ fn tokenize(xml: &str) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
+/// `TestXmlOutputParser.parseTimeToMillis`:
+/// - if `v` contains neither `.` nor `e`/`E`, parse as signed 64-bit integer milliseconds
+///   (`Long.parseLong`: optional leading `+`/`-`, no whitespace),
+/// - otherwise parse as 32-bit float seconds * 1000 rounded via `Math.round(float)`
+///   (`(x + 0.5).floor()` clamped to `i32::MIN..=i32::MAX`), rejecting whitespace and NaN/Infinity.
 fn parse_time_to_millis(v: &str) -> Result<i64, String> {
-    let f: f64 = v
-        .trim()
-        .parse()
-        .map_err(|_| format!("Number could not be parsed: {v}"))?;
-    Ok((f * 1000.0).round() as i64)
+    let bad = || format!("Number could not be parsed: {v}");
+    if v.is_empty() || v.bytes().any(|b| b <= b' ') || v.chars().any(char::is_whitespace) {
+        return Err(bad());
+    }
+    if !v.contains('.') && !v.contains('e') && !v.contains('E') {
+        let digits = v.strip_prefix('+').unwrap_or(v);
+        if digits.is_empty() || digits == "-" || digits.starts_with('+') {
+            return Err(bad());
+        }
+        return digits.parse::<i64>().map_err(|_| bad());
+    }
+    let f: f32 = v.parse::<f32>().map_err(|_| bad())?;
+    if !f.is_finite() {
+        return Err(bad());
+    }
+    let scaled = (f as f64) * 1000.0;
+    let rounded = (scaled + 0.5).floor();
+    let clamped = if rounded >= i32::MAX as f64 {
+        i32::MAX as i64
+    } else if rounded <= i32::MIN as f64 {
+        i32::MIN as i64
+    } else {
+        rounded as i64
+    };
+    Ok(clamped)
 }
 
 struct P {

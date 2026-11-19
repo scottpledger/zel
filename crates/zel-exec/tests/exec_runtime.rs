@@ -828,3 +828,469 @@ fn java_compile_reduced_classpath_falls_back_to_the_full_classpath() {
         "a single attempt with the reduced classpath"
     );
 }
+
+#[test]
+fn strategy_regexp_exemptions_salt_timeout_and_catastrophic_file_write() {
+    let w = ws("parity_exec");
+    let er = std::path::PathBuf::from(w.execroot.path_string());
+
+    // ExecutorBuilder salt: duplicate calls rejected, salt changes action cache key.
+    let mut eb = zel_exec::ExecutorBuilder::new();
+    assert_eq!(eb.action_execution_salt(), "");
+    eb.set_action_execution_salt("salt-one").unwrap();
+    assert!(eb.set_action_execution_salt("salt-two").is_err());
+
+    let cache = CompactPersistentActionCache::new();
+    let a = spawn(
+        "Genrule",
+        "echo salted > bazel-out/k8-fastbuild/bin/pkg/s",
+        vec![],
+        vec![out("bazel-out/k8-fastbuild/bin/pkg/s")],
+        &[],
+    );
+    let r1 = run(
+        &a,
+        &w,
+        &cache,
+        &ExecOptions {
+            action_execution_salt: "s1".into(),
+            ..Default::default()
+        },
+    );
+    assert!(!r1.cache_hit);
+    let r2 = run(
+        &a,
+        &w,
+        &cache,
+        &ExecOptions {
+            action_execution_salt: "s2".into(),
+            ..Default::default()
+        },
+    );
+    assert!(!r2.cache_hit, "different salt must invalidate action cache");
+
+    // Missing input vs literal "<missing>" digest must not collide.
+    assert_ne!(
+        cache.compute_md_digest(&[("pkg/x".to_string(), None)]),
+        cache.compute_md_digest(&[("pkg/x".to_string(), Some("<missing>".to_string()))]),
+    );
+
+    // Invalid fractional timeout fails without executing the command.
+    let marker = er.join("ran_invalid_timeout");
+    let bad_to = spawn(
+        "Genrule",
+        &format!(
+            "touch {} && touch bazel-out/k8-fastbuild/bin/pkg/to",
+            marker.display()
+        ),
+        vec![],
+        vec![out("bazel-out/k8-fastbuild/bin/pkg/to")],
+        &[("timeout", "1.5")],
+    );
+    let r_bad = run(&bad_to, &w, &cache, &ExecOptions::default());
+    assert!(!r_bad.succeeded());
+    assert!(!marker.exists(), "invalid timeout must not execute command");
+
+    // Negative timeout executes and reports Timeout with wall-time sentence.
+    let neg_to = spawn(
+        "Genrule",
+        "touch bazel-out/k8-fastbuild/bin/pkg/neg",
+        vec![],
+        vec![out("bazel-out/k8-fastbuild/bin/pkg/neg")],
+        &[("timeout", "-1")],
+    );
+    let r_neg = run(&neg_to, &w, &cache, &ExecOptions::default());
+    let f_neg = r_neg.failure.unwrap();
+    assert!(
+        f_neg.messages[0].contains("(Timeout):") && f_neg.messages[0].contains("(timed out after "),
+        "{:?}",
+        f_neg.messages
+    );
+
+    // Strategy regexp: TestRunner and None description are exempt; lookahead works.
+    let so = StrategyOptions::from_raw(
+        &["sandboxed".into()],
+        &[],
+        &[],
+        &["^(?!Skip).*Test.*=local".into()],
+    )
+    .unwrap();
+    let av = StrategyAvailability {
+        process_wrapper_sandbox: true,
+        ..Default::default()
+    };
+    let reg = SpawnStrategyRegistry::build(&so, &av).unwrap();
+    let mut test_sp = zel_sandbox::Spawn {
+        mnemonic: "TestRunner".into(),
+        ..Default::default()
+    };
+    let (strats_tr, _) = reg.resolve_opt(&test_sp, Some("Testing //pkg:t")).unwrap();
+    assert_eq!(
+        strats_tr[0],
+        zel_exec::strategy::StrategyKind::ProcessWrapperSandbox
+    );
+    test_sp.mnemonic = "Custom".into();
+    let (strats_none, _) = reg.resolve_opt(&test_sp, None).unwrap();
+    assert_eq!(
+        strats_none[0],
+        zel_exec::strategy::StrategyKind::ProcessWrapperSandbox
+    );
+    let (strats_match, _) = reg.resolve_opt(&test_sp, Some("RunTest //pkg:t")).unwrap();
+    assert_eq!(
+        strats_match[0],
+        zel_exec::strategy::StrategyKind::Standalone
+    );
+
+    // FileWriteAction follows symlink in place, and directory collision is catastrophic (exit 36),
+    // halting independent actions even with keep_going = true.
+    let target_file = er.join("real_target.txt");
+    std::fs::write(&target_file, b"old").unwrap();
+    let sym_out = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("pkg/link_out.txt"),
+        Label::parse_canonical("//pkg:fw").unwrap(),
+    );
+    let sym_abs = er.join(sym_out.exec_path.path_string());
+    std::fs::create_dir_all(sym_abs.parent().unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&target_file, &sym_abs).unwrap();
+        let fw = ActionAnalysisMetadata::FileWriteAction {
+            owner: Label::parse_canonical("//pkg:fw").unwrap(),
+            output: sym_out,
+            content: b"new-via-symlink".to_vec(),
+            is_executable: false,
+        };
+        let r_fw = run(&fw, &w, &cache, &ExecOptions::default());
+        assert!(r_fw.succeeded(), "{:?}", r_fw.failure);
+        assert!(std::fs::symlink_metadata(&sym_abs)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&target_file).unwrap(), b"new-via-symlink");
+    }
+
+    // Create a directory at FileWriteAction's output path -> exit 36 + catastrophic stop!
+    let bad_fw_art = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("pkg/dir_collision"),
+        Label::parse_canonical("//pkg:badfw").unwrap(),
+    );
+    std::fs::create_dir_all(er.join(bad_fw_art.exec_path.path_string())).unwrap();
+    let bad_fw = ActionAnalysisMetadata::FileWriteAction {
+        owner: Label::parse_canonical("//pkg:badfw").unwrap(),
+        output: bad_fw_art,
+        content: b"boom".to_vec(),
+        is_executable: false,
+    };
+    let after_marker = er.join("ran_after_catastrophic");
+    let indep = spawn(
+        "Genrule",
+        &format!(
+            "touch {} && touch bazel-out/k8-fastbuild/bin/pkg/indep",
+            after_marker.display()
+        ),
+        vec![],
+        vec![out("bazel-out/k8-fastbuild/bin/pkg/indep")],
+        &[],
+    );
+    let fs = zel_vfs::LocalFileSystem::default();
+    let rep = zel_events::Reporter::new();
+    let sched = zel_exec::execute_actions(
+        &[&bad_fw, &indep],
+        1,
+        true,
+        &w.execroot,
+        &fs,
+        &cache,
+        &rep,
+        &ExecOptions::default(),
+    );
+    let f0 = sched.actions[0]
+        .outcome
+        .as_ref()
+        .unwrap()
+        .failure
+        .as_ref()
+        .unwrap();
+    assert_eq!(f0.exit_code, 36);
+    assert!(f0.catastrophic);
+    assert_eq!(sched.actions[1].state, zel_exec::ActionState::NotRun);
+    assert!(!after_marker.exists());
+
+    // StreamedTestOutput: exact 77-dash + '\n' strips header; missing delimiter dumps raw without extra '\n'.
+    let stream_dir = er.join("stream_test");
+    std::fs::create_dir_all(&stream_dir).unwrap();
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let c1 = collected.clone();
+    let log1 = stream_dir.join("t1.log");
+    std::fs::write(
+        &log1,
+        b"Executing tests from //pkg:t\n-----------------------------------------------------------------------------\nbody-no-nl",
+    )
+    .unwrap();
+    let st1 = zel_exec::test_runner::StreamedTestOutput::start(
+        log1,
+        std::sync::Arc::new(move |b| c1.lock().unwrap().extend_from_slice(b)),
+    )
+    .unwrap();
+    st1.close().unwrap();
+    assert_eq!(collected.lock().unwrap().as_slice(), b"body-no-nl");
+
+    let collected2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let c2 = collected2.clone();
+    let log2 = stream_dir.join("t2.log");
+    std::fs::write(&log2, b"raw-without-header").unwrap();
+    let st2 = zel_exec::test_runner::StreamedTestOutput::start(
+        log2,
+        std::sync::Arc::new(move |b| c2.lock().unwrap().extend_from_slice(b)),
+    )
+    .unwrap();
+    st2.close().unwrap();
+    assert_eq!(collected2.lock().unwrap().as_slice(), b"raw-without-header");
+}
+
+#[test]
+fn streamed_test_output_emits_live_chunks_before_child_exits_and_posts_progress() {
+    use std::os::unix::fs::PermissionsExt;
+    use zel_exec::test_runner::{install_test_setup, run_test_in, TestBaseEnv, TestExec, TestSpec};
+
+    let w = ws("live-stream-test");
+    let er = std::path::Path::new(w.execroot.path_string());
+    let rf = er.join("bin/live.runfiles/_main");
+    std::fs::create_dir_all(&rf).unwrap();
+    let gate = er.join("release_child.gate");
+    let exe = er.join("bin/live");
+    let script = format!(
+        "#!/bin/sh\necho LIVE_STREAM_LINE\nwhile [ ! -f '{}' ]; do sleep 0.02; done\necho AFTER_GATE_LINE\n",
+        gate.display()
+    );
+    std::fs::write(&exe, script).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let setup = er.join("test-setup.sh");
+    install_test_setup(&setup).unwrap();
+
+    let spec = TestSpec {
+        label: "//pkg:live".into(),
+        exe_runfiles_path: exe.to_string_lossy().into_owned(),
+        exe_path: exe,
+        runfiles_dir: er.join("bin/live.runfiles"),
+        exec_root: er.to_path_buf(),
+        workspace_name: "_main".into(),
+        test_log_dir: er.join("testlogs/pkg/live"),
+        size: "small".into(),
+        timeout_secs: 30,
+        shard_count: 0,
+        runs_per_test: 1,
+        flaky_attempts: 1,
+        runs_per_test_detects_flakes: false,
+        run_under: None,
+        args: vec![],
+        env: BTreeMap::new(),
+        base_env: TestBaseEnv {
+            action_env: zel_util::action_env::EnvConfig::default().action_environment(false),
+            ..Default::default()
+        },
+        test_filter: None,
+        coverage: false,
+        coverage_script: None,
+        lcov_merger: None,
+        coverage_manifest: None,
+        zip_undeclared_outputs: false,
+        setup_script: setup,
+        kill_delay_ms: Some(200),
+        test_tmpdir: None,
+        check_sharding_support: false,
+    };
+
+    let rt = runtime(
+        &w,
+        StrategyOptions::from_raw(&["local".into()], &[], &[], &[]).unwrap(),
+        4.0,
+    );
+    let rep = Reporter::new();
+    let live_buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let live_buf_sink = live_buf.clone();
+
+    std::thread::scope(|scope| {
+        let test_handle = scope.spawn(|| {
+            let te = TestExec {
+                runtime: &rt,
+                reporter: &rep,
+                inputs: vec![],
+                execution_info: BTreeMap::new(),
+                resources: zel_exec::resources::ResourceSet::default(),
+                announce_subcommands: false,
+                config_checksum: "deadbeef".into(),
+                cache_results: false,
+                streamed_out: Some(Arc::new(move |chunk: &[u8]| {
+                    live_buf_sink.lock().unwrap().extend_from_slice(chunk);
+                })),
+            };
+            run_test_in(&spec, Some(&te)).unwrap()
+        });
+
+        // Wait for LIVE_STREAM_LINE to arrive BEFORE releasing the gate file (proving live streaming
+        // happens while the test subprocess is still running, not buffered until exit).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let got = String::from_utf8_lossy(&live_buf.lock().unwrap()).into_owned();
+            if got.contains("LIVE_STREAM_LINE\n") {
+                assert!(
+                    !got.contains("AFTER_GATE_LINE"),
+                    "gate has not been touched yet: {got}"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for live streamed output while child was running; got={got:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        std::fs::write(&gate, b"go").unwrap();
+        let res = test_handle.join().unwrap();
+        assert!(res.status.is_passed(), "{:?}", res.status);
+    });
+
+    let final_streamed = String::from_utf8_lossy(&live_buf.lock().unwrap()).into_owned();
+    assert_eq!(
+        final_streamed, "LIVE_STREAM_LINE\nAFTER_GATE_LINE\n",
+        "streamed body must strip setup header and avoid duplicating live chunks: {final_streamed:?}"
+    );
+    let events = rep.events();
+    assert!(
+        events.iter().any(|ev| {
+            ev.kind == zel_events::EventKind::Progress && ev.message == "Testing //pkg:live"
+        }),
+        "streamed TestRunner must still emit Progress event: {events:?}"
+    );
+}
+
+#[test]
+fn streamed_test_output_emits_full_trailers_after_setup_line_cleaning() {
+    use std::os::unix::fs::PermissionsExt;
+    use zel_exec::test_runner::{
+        install_test_setup, run_test_in, TestBaseEnv, TestExec, TestSpec, TestStatus,
+    };
+
+    let w = ws("stream-trailer-cleaned");
+    let er = std::path::Path::new(w.execroot.path_string());
+    let rf = er.join("bin/trailer.runfiles/_main");
+    std::fs::create_dir_all(&rf).unwrap();
+    let exe = er.join("bin/trailer");
+    // Emit a `tools/test/test-setup.sh: line ...` line whose prefix is much longer than
+    // `external/bazel_tools/tools/test/test-setup.sh: line 270: `, so post-run cleaning shortens
+    // `log` before trailers are appended.
+    let script = concat!(
+        "#!/bin/sh\n",
+        "echo '/very/long/sandbox/execroot/prefix/that/gets/shortened/dramatically/by/the/cleaner/tools/test/test-setup.sh: line 9999: simulated setup diagnostic'\n",
+        "if [ \"${TOUCH_PREMATURE:-0}\" = \"1\" ]; then\n",
+        "  touch \"$TEST_PREMATURE_EXIT_FILE\"\n",
+        "fi\n",
+        "exit 0\n",
+    );
+    std::fs::write(&exe, script).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let setup = er.join("test-setup.sh");
+    install_test_setup(&setup).unwrap();
+
+    let rt = runtime(
+        &w,
+        StrategyOptions::from_raw(&["local".into()], &[], &[], &[]).unwrap(),
+        4.0,
+    );
+
+    // 1. Premature-exit trailer must be streamed in full even after `log` shrank during cleaning.
+    let mut premature_env = BTreeMap::new();
+    premature_env.insert("TOUCH_PREMATURE".into(), "1".into());
+    let premature_spec = TestSpec {
+        label: "//pkg:premature".into(),
+        exe_runfiles_path: exe.to_string_lossy().into_owned(),
+        exe_path: exe.clone(),
+        runfiles_dir: er.join("bin/trailer.runfiles"),
+        exec_root: er.to_path_buf(),
+        workspace_name: "_main".into(),
+        test_log_dir: er.join("testlogs/pkg/premature"),
+        size: "small".into(),
+        timeout_secs: 30,
+        shard_count: 0,
+        runs_per_test: 1,
+        flaky_attempts: 1,
+        runs_per_test_detects_flakes: false,
+        run_under: None,
+        args: vec![],
+        env: premature_env,
+        base_env: TestBaseEnv {
+            action_env: zel_util::action_env::EnvConfig::default().action_environment(false),
+            ..Default::default()
+        },
+        test_filter: None,
+        coverage: false,
+        coverage_script: None,
+        lcov_merger: None,
+        coverage_manifest: None,
+        zip_undeclared_outputs: false,
+        setup_script: setup.clone(),
+        kill_delay_ms: Some(200),
+        test_tmpdir: None,
+        check_sharding_support: false,
+    };
+    let rep1 = Reporter::new();
+    let streamed1 = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let streamed1_sink = streamed1.clone();
+    let te1 = TestExec {
+        runtime: &rt,
+        reporter: &rep1,
+        inputs: vec![],
+        execution_info: BTreeMap::new(),
+        resources: zel_exec::resources::ResourceSet::default(),
+        announce_subcommands: false,
+        config_checksum: "deadbeef".into(),
+        cache_results: false,
+        streamed_out: Some(Arc::new(move |chunk: &[u8]| {
+            streamed1_sink.lock().unwrap().extend_from_slice(chunk);
+        })),
+    };
+    let res1 = run_test_in(&premature_spec, Some(&te1)).unwrap();
+    assert_eq!(res1.status, TestStatus::Failed);
+    let out1 = String::from_utf8_lossy(&streamed1.lock().unwrap()).into_owned();
+    assert!(
+        out1.ends_with("-- Test exited prematurely (TEST_PREMATURE_EXIT_FILE exists) --\n"),
+        "expected full premature-exit trailer in streamed output, got: {out1:?}"
+    );
+
+    // 2. Sharding-unsupported diagnostic trailer must also be streamed in full after cleaning.
+    let mut shard_spec = premature_spec;
+    shard_spec.label = "//pkg:unsharded".into();
+    shard_spec.test_log_dir = er.join("testlogs/pkg/unsharded");
+    shard_spec.env.clear();
+    shard_spec.shard_count = 2;
+    shard_spec.check_sharding_support = true;
+    let rep2 = Reporter::new();
+    let streamed2 = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let streamed2_sink = streamed2.clone();
+    let te2 = TestExec {
+        runtime: &rt,
+        reporter: &rep2,
+        inputs: vec![],
+        execution_info: BTreeMap::new(),
+        resources: zel_exec::resources::ResourceSet::default(),
+        announce_subcommands: false,
+        config_checksum: "deadbeef".into(),
+        cache_results: false,
+        streamed_out: Some(Arc::new(move |chunk: &[u8]| {
+            streamed2_sink.lock().unwrap().extend_from_slice(chunk);
+        })),
+    };
+    let res2 = run_test_in(&shard_spec, Some(&te2)).unwrap();
+    assert_eq!(res2.status, TestStatus::NoStatus);
+    let out2 = String::from_utf8_lossy(&streamed2.lock().unwrap()).into_owned();
+    assert!(
+        out2.contains(
+            "Sharding requested, but the test runner did not advertise support for it by touching TEST_SHARD_STATUS_FILE."
+        ),
+        "expected full sharding diagnostic trailer in streamed output, got: {out2:?}"
+    );
+}

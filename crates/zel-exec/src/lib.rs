@@ -98,11 +98,39 @@ pub fn plant_symlink_forest(
 }
 
 /// Why an action failed; formatted like Bazel's `ActionExecutionException` console output.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ActionFailure {
     /// `ERROR: ...` lines (without trailing newline) printed to the console.
     pub messages: Vec<String>,
     pub exit_code: i32,
+    pub catastrophic: bool,
+}
+
+/// Builder for execution configuration (`ExecutorBuilder.java`).
+#[derive(Debug, Clone, Default)]
+pub struct ExecutorBuilder {
+    action_execution_salt: Option<String>,
+}
+
+impl ExecutorBuilder {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn set_action_execution_salt(
+        &mut self,
+        salt: impl Into<String>,
+    ) -> Result<&mut Self, String> {
+        if self.action_execution_salt.is_some() {
+            return Err("actionExecutionSalt was already set".to_string());
+        }
+        self.action_execution_salt = Some(salt.into());
+        Ok(self)
+    }
+
+    pub fn action_execution_salt(&self) -> &str {
+        self.action_execution_salt.as_deref().unwrap_or("")
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +175,8 @@ pub struct DynamicOptions {
     pub ignore_local_signals: Vec<i32>,
     /// `--experimental_dynamic_cancel_remote_branch_on_local_win`.
     pub cancel_remote_branch_on_local_win: bool,
+    /// `--experimental_local_lockfree_output`.
+    pub local_lockfree_output: bool,
     /// `--debug_spawn_scheduler`.
     pub debug: bool,
 }
@@ -157,6 +187,7 @@ impl Default for DynamicOptions {
             local_execution_delay_ms: 1000,
             ignore_local_signals: Vec::new(),
             cancel_remote_branch_on_local_win: true,
+            local_lockfree_output: false,
             debug: false,
         }
     }
@@ -207,6 +238,7 @@ enum Branch {
 struct Race {
     winner: Mutex<Option<Branch>>,
     local_cancel: zel_sandbox::process_wrapper::CancelFlag,
+    outer_cancel: Option<zel_sandbox::process_wrapper::CancelFlag>,
     remote_cancelled: AtomicBool,
     local_done: (Mutex<bool>, Condvar),
     outcome: Mutex<RaceOutcome>,
@@ -219,10 +251,26 @@ struct Race {
 struct RaceOutcome {
     result: Option<(Branch, io::Result<zel_sandbox::SpawnResult>)>,
     finished: usize,
+    remote_publishing: bool,
 }
 
 impl Race {
+    fn is_outer_cancelled(&self) -> bool {
+        self.outer_cancel.as_ref().is_some_and(|c| c.is_cancelled())
+    }
+
+    fn cancel_all(&self) {
+        self.local_cancel.cancel();
+        self.remote_cancelled.store(true, Ordering::SeqCst);
+        self.local_done.1.notify_all();
+        self.changed.notify_all();
+    }
+
     fn is_cancelled(&self, b: Branch) -> bool {
+        if self.is_outer_cancelled() {
+            self.cancel_all();
+            return true;
+        }
         match b {
             Branch::Local => self.local_cancel.is_cancelled(),
             Branch::Remote => self.remote_cancelled.load(Ordering::SeqCst),
@@ -231,7 +279,13 @@ impl Race {
 
     /// `DynamicSpawnStrategy.stopBranch` (preceded by `maybeIgnoreFailure`): the first branch to
     /// get here wins and cancels the other; the loser must not publish any output.
-    fn lock(&self, b: Branch, exit_code: i32) -> bool {
+    fn lock_with_outer(
+        &self,
+        b: Branch,
+        exit_code: i32,
+        outer_lock: Option<&(dyn Fn(i32) -> bool + Send + Sync)>,
+        from_deliver: bool,
+    ) -> bool {
         // A local branch killed by an ignorable signal cancels itself in favor of remote.
         if b == Branch::Local
             && exit_code != 0
@@ -242,41 +296,68 @@ impl Race {
         if self.is_cancelled(b) {
             return false;
         }
-        {
+        let first_claim = {
             let mut w = self.winner.lock().unwrap();
             match *w {
-                Some(m) => return m == b,
-                None => *w = Some(b),
-            }
-        }
-        match b {
-            Branch::Remote => {
-                // `otherBranch.cancel()` + wait for the local branch to be done.
-                self.local_cancel.cancel();
-                let (m, cv) = &self.local_done;
-                let mut done = m.lock().unwrap();
-                while !*done {
-                    done = cv.wait(done).unwrap();
+                Some(m) if m != b => return false,
+                Some(_) => false,
+                None => {
+                    *w = Some(b);
+                    true
                 }
             }
-            Branch::Local => {
-                if self.cancel_remote_on_local_win {
-                    // The remote branch cannot be interrupted mid-RPC; it is flagged so that it
-                    // never publishes outputs and finishes in the background.
-                    self.remote_cancelled.store(true, Ordering::SeqCst);
+        };
+        if first_claim {
+            match b {
+                Branch::Remote => {
+                    // `otherBranch.cancel()` + `otherBranch.getDoneSemaphore().acquire()`,
+                    // aborting if outer cancellation arrives while waiting.
+                    self.local_cancel.cancel();
+                    let (m, cv) = &self.local_done;
+                    let mut done = m.lock().unwrap();
+                    while !*done && !self.is_cancelled(Branch::Remote) {
+                        done = cv.wait(done).unwrap();
+                    }
+                    if self.is_cancelled(Branch::Remote) {
+                        return false;
+                    }
+                }
+                Branch::Local => {
+                    if self.cancel_remote_on_local_win {
+                        // The remote branch cannot be interrupted mid-RPC; it is flagged so that it
+                        // never publishes outputs and finishes in the background.
+                        self.remote_cancelled.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+            if let Some(f) = outer_lock {
+                if !f(exit_code) {
+                    return false;
                 }
             }
         }
-        true
+        if b == Branch::Remote {
+            let mut o = self.outcome.lock().unwrap();
+            if self.is_cancelled(Branch::Remote) {
+                return false;
+            }
+            if !from_deliver {
+                o.remote_publishing = true;
+            }
+        }
+        !self.is_cancelled(b)
     }
 
     fn deliver(&self, b: Branch, r: io::Result<zel_sandbox::SpawnResult>) {
         let keep = match &r {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => false,
-            Ok(res) => self.lock(b, res.exit_code),
-            Err(_) => self.lock(b, 1),
+            Ok(res) => self.lock_with_outer(b, res.exit_code, None, true),
+            Err(_) => self.lock_with_outer(b, 1, None, true),
         };
         let mut o = self.outcome.lock().unwrap();
+        if b == Branch::Remote {
+            o.remote_publishing = false;
+        }
         o.finished += 1;
         if keep && o.result.is_none() {
             o.result = Some((b, r));
@@ -368,24 +449,23 @@ impl ExecRuntime {
             strategy::StrategyKind::Standalone => {
                 // `LocalSpawnRunner`: `--allowed_local_actions_regex` (`RegexPatternOption.matcher()`).
                 if let Some(pat) = &self.allowed_local_actions_regex {
-                    let allowed = zel_bzlmod::download::Regex::new(pat)
-                        .map(|r| r.full_match(&spawn.mnemonic).is_some())
+                    let allowed = zel_util::java_regex::Regex::new(pat)
+                        .map(|r| r.full_match(&spawn.mnemonic))
                         .unwrap_or(true);
                     if !allowed {
+                        let msg = format!(
+                            "Action type {} is not allowed to run locally due to regex filter: {pat}",
+                            spawn.mnemonic
+                        );
                         return Ok(Ok(zel_sandbox::SpawnResult {
-                            status: SpawnStatus::ExecutionFailed,
-                            exit_code: 1,
+                            status: SpawnStatus::ExecutionDenied,
+                            exit_code: -1,
                             stdout: Vec::new(),
-                            stderr: format!(
-                                "Action type {} is not allowed to run locally due to regex filter: {pat}\n",
-                                spawn.mnemonic
-                            )
-                            .into_bytes(),
+                            stderr: format!("{msg}\n").into_bytes(),
                             wall_time_ms: 0,
                             runner_name: "local".into(),
-                            missing: Vec::new(),
-                            usage: None,
-                            executed_command: None,
+                            failure_message: Some(msg),
+                            ..Default::default()
                         }));
                     }
                 }
@@ -489,6 +569,67 @@ impl ExecRuntime {
         fs: &dyn FileSystem,
         reporter: &Reporter,
     ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
+        self.execute_opt(
+            spawn,
+            Some(description),
+            Some(description),
+            execroot,
+            fs,
+            reporter,
+        )
+    }
+
+    pub fn execute_opt(
+        self: &Arc<Self>,
+        spawn: &Spawn,
+        strategy_description: Option<&str>,
+        progress_event: Option<&str>,
+        execroot: &PathFragment,
+        fs: &dyn FileSystem,
+        reporter: &Reporter,
+    ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
+        self.execute_opt_with_hooks(
+            spawn,
+            strategy_description,
+            progress_event,
+            execroot,
+            fs,
+            reporter,
+            &Default::default(),
+        )
+    }
+
+    pub fn execute_with_hooks(
+        self: &Arc<Self>,
+        spawn: &Spawn,
+        description: &str,
+        execroot: &PathFragment,
+        fs: &dyn FileSystem,
+        reporter: &Reporter,
+        hooks: &zel_sandbox::ExecHooks,
+    ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
+        self.execute_opt_with_hooks(
+            spawn,
+            Some(description),
+            Some(description),
+            execroot,
+            fs,
+            reporter,
+            hooks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_opt_with_hooks(
+        self: &Arc<Self>,
+        spawn: &Spawn,
+        strategy_description: Option<&str>,
+        progress_event: Option<&str>,
+        execroot: &PathFragment,
+        fs: &dyn FileSystem,
+        reporter: &Reporter,
+        hooks: &zel_sandbox::ExecHooks,
+    ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
         if self.remote.is_none() {
             if let Some(e) = self.remote_setup_error.clone() {
                 return Err(format!(
@@ -496,7 +637,13 @@ impl ExecRuntime {
                 ));
             }
         }
-        let (mut strategies, progress) = self.registry.resolve(spawn, description)?;
+        let (mut strategies, resolved_progress) =
+            self.registry.resolve_opt(spawn, strategy_description)?;
+        let progress = resolved_progress.or_else(|| {
+            progress_event
+                .filter(|p| !p.is_empty())
+                .map(|p| p.to_string())
+        });
         if let Some(p) = progress {
             reporter.handle(Event {
                 kind: zel_events::EventKind::Progress,
@@ -507,19 +654,23 @@ impl ExecRuntime {
         }
         let chosen = strategies.remove(0);
         if chosen == strategy::StrategyKind::Dynamic {
-            return self.exec_dynamic(spawn, execroot, fs);
+            return self.exec_dynamic_with_hooks(spawn, execroot, fs, hooks);
         }
-        self.run_strategy(chosen, spawn, execroot, fs, &Default::default())
+        self.run_strategy(chosen, spawn, execroot, fs, hooks)
     }
 
     /// `DynamicSpawnStrategy.exec`: runs the local and the remote strategy of the spawn in
     /// parallel; the first branch to finish publishes its outputs and cancels the other.
-    fn exec_dynamic(
+    fn exec_dynamic_with_hooks(
         self: &Arc<Self>,
         spawn: &Spawn,
         execroot: &PathFragment,
         fs: &dyn FileSystem,
+        outer_hooks: &zel_sandbox::ExecHooks,
     ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
+        if outer_hooks.is_cancelled() {
+            return Ok(Err(zel_sandbox::cancelled_error()));
+        }
         let local = self.registry.dynamic_can_exec_local(spawn);
         let remote = self.registry.dynamic_can_exec_remote(spawn);
         let (local, remote) = match (local, remote) {
@@ -530,17 +681,14 @@ impl ExecRuntime {
                 ));
             }
             // `maybeExecuteNonDynamically`.
-            (None, Some(r)) => {
-                return self.run_strategy(r, spawn, execroot, fs, &Default::default())
-            }
-            (Some(l), None) => {
-                return self.run_strategy(l, spawn, execroot, fs, &Default::default())
-            }
+            (None, Some(r)) => return self.run_strategy(r, spawn, execroot, fs, outer_hooks),
+            (Some(l), None) => return self.run_strategy(l, spawn, execroot, fs, outer_hooks),
             (Some(l), Some(r)) => (l, r),
         };
         let race = Arc::new(Race {
             winner: Mutex::new(None),
             local_cancel: Default::default(),
+            outer_cancel: outer_hooks.cancel.clone(),
             remote_cancelled: AtomicBool::new(false),
             local_done: (Mutex::new(false), Condvar::new()),
             outcome: Mutex::new(RaceOutcome::default()),
@@ -548,12 +696,33 @@ impl ExecRuntime {
             ignore_local_signals: self.dynamic.ignore_local_signals.clone(),
             cancel_remote_on_local_win: self.dynamic.cancel_remote_branch_on_local_win,
         });
+        let local_lockfree =
+            self.dynamic.local_lockfree_output || outer_hooks.local_lockfree_output;
         let hooks_for = |b: Branch| {
-            let race = race.clone();
+            let race_lock = race.clone();
+            let outer_lock = outer_hooks.lock_outputs.clone();
+            let stream_out = if b == Branch::Local {
+                outer_hooks.stream_out.as_ref().map(|cb| {
+                    let cb = cb.clone();
+                    let race_stream = race.clone();
+                    let wrapped: zel_sandbox::StreamOutHook = Arc::new(move |chunk: &[u8]| {
+                        if !race_stream.is_cancelled(Branch::Local) {
+                            cb(chunk);
+                        }
+                    });
+                    wrapped
+                })
+            } else {
+                None
+            };
             zel_sandbox::ExecHooks {
                 cancel: (b == Branch::Local).then(|| race.local_cancel.clone()),
-                lock_outputs: Some(Arc::new(move |code| race.lock(b, code))),
-                ..Default::default()
+                lock_outputs: Some(Arc::new(move |code| {
+                    race_lock.lock_with_outer(b, code, outer_lock.as_deref(), false)
+                })),
+                runfiles_updater: outer_hooks.runfiles_updater.clone(),
+                local_lockfree_output: b == Branch::Local && local_lockfree,
+                stream_out,
             }
         };
         // Remote branch: detached (an in-flight RPC cannot be interrupted).
@@ -576,6 +745,29 @@ impl ExecRuntime {
             });
         }
         std::thread::scope(|scope| {
+            let scope_done = Arc::new(AtomicBool::new(false));
+            if let Some(outer_c) = outer_hooks.cancel.clone() {
+                let race_watch = race.clone();
+                let done_watch = scope_done.clone();
+                scope.spawn(move || {
+                    let mut guard = race_watch.outcome.lock().unwrap();
+                    while !done_watch.load(Ordering::SeqCst)
+                        && guard.result.is_none()
+                        && guard.finished < 2
+                    {
+                        if outer_c.is_cancelled() {
+                            drop(guard);
+                            race_watch.cancel_all();
+                            break;
+                        }
+                        let (next_guard, _) = race_watch
+                            .changed
+                            .wait_timeout(guard, std::time::Duration::from_millis(5))
+                            .unwrap();
+                        guard = next_guard;
+                    }
+                });
+            }
             let hooks = hooks_for(Branch::Local);
             let race2 = race.clone();
             scope.spawn(move || {
@@ -607,13 +799,32 @@ impl ExecRuntime {
                 race2.deliver(Branch::Local, r);
             });
             let mut o = race.outcome.lock().unwrap();
-            while o.result.is_none() && o.finished < 2 {
+            while o.result.is_none()
+                && o.finished < 2
+                && (!outer_hooks.is_cancelled() || o.remote_publishing)
+            {
                 o = race.changed.wait(o).unwrap();
             }
-            match o.result.take() {
+            if outer_hooks.is_cancelled() {
+                drop(o);
+                race.cancel_all();
+                let mut o = race.outcome.lock().unwrap();
+                while o.remote_publishing {
+                    o = race.changed.wait(o).unwrap();
+                }
+                drop(o);
+                scope_done.store(true, Ordering::SeqCst);
+                race.changed.notify_all();
+                return Ok(Err(zel_sandbox::cancelled_error()));
+            }
+            let res = match o.result.take() {
                 Some((_, r)) => Ok(r),
                 None => Err(format!("Neither branch of {} completed.", spawn.mnemonic)),
-            }
+            };
+            drop(o);
+            scope_done.store(true, Ordering::SeqCst);
+            race.changed.notify_all();
+            res
         })
     }
 
@@ -686,6 +897,10 @@ pub struct ExecOptions {
     pub experimental_use_validation_aspect: bool,
     /// Pre-configured tool runfiles trees, keyed by tool executable exec path.
     pub tool_runfiles: BTreeMap<String, ToolRunfilesSpec>,
+    /// Salt mixed into action cache keys (`ExecutorBuilder.setActionExecutionSalt`).
+    pub action_execution_salt: String,
+    /// Per-build source / non-derived input metadata cache (`SingleBuildFileCache`).
+    pub file_cache: Option<Arc<file_cache::SingleBuildFileCache<'static>>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1050,7 +1265,8 @@ pub fn execute_action_with(
     let started = std::time::Instant::now();
     let abs = |p: &PathFragment| execroot.get_relative(p);
 
-    let parts = action_key_parts(action);
+    let mut parts = action_key_parts(action);
+    parts.action_execution_salt = opts.action_execution_salt.clone();
     let action_key = action_cache.compute_action_key(&parts);
     // `ActionCacheChecker.computeEffectiveEnvironment`: the values of the inherited variables
     // that exist in the client environment.
@@ -1076,10 +1292,38 @@ pub fn execute_action_with(
             }
         }
     }
+    let action_inputs = action.inputs();
+    let source_by_exec: std::collections::HashMap<&str, &Artifact> = action_inputs
+        .iter()
+        .filter(|a| a.is_source && !a.is_tree_artifact && !a.is_unresolved_symlink)
+        .map(|a| (a.exec_path.path_string(), a))
+        .collect();
     let md_digest_of = |discovered: &[String]| -> String {
         let mut all: Vec<(String, Option<String>)> = Vec::new();
         for p in declared_inputs.iter().chain(discovered.iter()) {
-            let d = path_digest(digest, fs, &execroot.get_relative_str(p));
+            let d = if let Some(fc) = &opts.file_cache {
+                if let Some(src_art) = source_by_exec.get(p.as_str()) {
+                    match fc.get_artifact_metadata(src_art) {
+                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                        Err(file_cache::FileCacheError::Directory(_)) => {
+                            path_digest(digest, fs, &execroot.get_relative_str(p))
+                        }
+                        Err(_) => None,
+                    }
+                } else if !p.starts_with("bazel-out/") {
+                    match fc.get_input_metadata(&PathFragment::create(p)) {
+                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                        Err(file_cache::FileCacheError::Directory(_)) => {
+                            path_digest(digest, fs, &execroot.get_relative_str(p))
+                        }
+                        Err(_) => None,
+                    }
+                } else {
+                    path_digest(digest, fs, &execroot.get_relative_str(p))
+                }
+            } else {
+                path_digest(digest, fs, &execroot.get_relative_str(p))
+            };
             all.push((p.clone(), d));
         }
         all.extend(tool_rf_entries.iter().cloned());
@@ -1195,6 +1439,7 @@ pub fn execute_action_with(
             failure: Some(ActionFailure {
                 messages,
                 exit_code: 1,
+                catastrophic: false,
             }),
             wall_time_ms: 0,
             runner: None,
@@ -1206,12 +1451,12 @@ pub fn execute_action_with(
     let loc = build_file_location(opts.workspace_dir.as_ref(), owner);
     let mut outcome = ActionExecutionOutcome::ok(false);
 
-    // Fail helper
-    let fail = |messages: Vec<String>,
-                code: i32,
-                stdout: Vec<u8>,
-                stderr: Vec<u8>,
-                runner: Option<String>| {
+    let fail_ext = |messages: Vec<String>,
+                    code: i32,
+                    stdout: Vec<u8>,
+                    stderr: Vec<u8>,
+                    runner: Option<String>,
+                    catastrophic: bool| {
         // Bazel removes outputs of failed actions and forgets their cache entries.
         for o in &outputs {
             let _ = fs.delete(&execroot.get_relative(&o.exec_path));
@@ -1227,11 +1472,19 @@ pub fn execute_action_with(
             failure: Some(ActionFailure {
                 messages,
                 exit_code: code,
+                catastrophic,
             }),
             wall_time_ms: started.elapsed().as_millis() as u64,
             runner,
             progress: String::new(),
         }
+    };
+    let fail = |messages: Vec<String>,
+                code: i32,
+                stdout: Vec<u8>,
+                stderr: Vec<u8>,
+                runner: Option<String>| {
+        fail_ext(messages, code, stdout, stderr, runner, false)
     };
 
     match action {
@@ -1243,43 +1496,48 @@ pub fn execute_action_with(
         } => {
             let out_path = execroot.get_relative(&output.exec_path);
             if let Some(parent) = out_path.parent_directory() {
-                fs.create_directory_and_parents(&parent)?;
-            }
-            let _ = fs.delete(&out_path);
-            fs.write_file(&out_path, content)?;
-            if *is_executable {
-                let p = std::path::Path::new(out_path.path_string());
-                match std::fs::metadata(p) {
-                    Err(e) if e.kind() == io::ErrorKind::NotFound && fs.exists(&out_path, true) => {
-                        // InMemoryFileSystem: no host inode to chmod.
-                    }
-                    Err(e) => {
-                        return Ok(fail(
-                            vec![format!(
-                                "ERROR: {loc}: Writing file {} failed: {e}",
-                                output.root_relative_path
-                            )],
-                            1,
-                            Vec::new(),
-                            Vec::new(),
-                            None,
-                        ));
-                    }
-                    Ok(_) => {
-                        if let Err(e) = zel_sandbox::set_executable_mode(p) {
-                            return Ok(fail(
-                                vec![format!(
-                                    "ERROR: {loc}: Writing file {} failed: {e}",
-                                    output.root_relative_path
-                                )],
-                                1,
-                                Vec::new(),
-                                Vec::new(),
-                                None,
-                            ));
-                        }
-                    }
+                if let Err(e) = fs.create_directory_and_parents(&parent) {
+                    return Ok(fail_ext(
+                        vec![format!(
+                            "ERROR: {loc}: Writing file {} failed: {e}",
+                            output.root_relative_path
+                        )],
+                        36,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                    ));
                 }
+            }
+            let host_execroot = std::path::Path::new(execroot.path_string());
+            if host_execroot.is_dir() {
+                let p = std::path::Path::new(out_path.path_string());
+                if let Err(e) = file_write_strategy_write(p, content, *is_executable) {
+                    return Ok(fail_ext(
+                        vec![format!(
+                            "ERROR: {loc}: Writing file {} failed: {e}",
+                            output.root_relative_path
+                        )],
+                        36,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                        true,
+                    ));
+                }
+            } else if let Err(e) = fs.write_file(&out_path, content) {
+                return Ok(fail_ext(
+                    vec![format!(
+                        "ERROR: {loc}: Writing file {} failed: {e}",
+                        output.root_relative_path
+                    )],
+                    36,
+                    Vec::new(),
+                    Vec::new(),
+                    None,
+                    true,
+                ));
             }
         }
         ActionAnalysisMetadata::SymlinkAction {
@@ -1397,16 +1655,18 @@ pub fn execute_action_with(
             tools,
             java_compile,
         } => {
-            let resolved_env = xcode_local_env(
-                resolve_spawn_env(env, inherited_env, unset_env, &opts.client_env),
-                execution_info,
-            );
+            let resolved_env = resolve_spawn_env(env, inherited_env, unset_env, &opts.client_env);
             let env = &resolved_env;
+            let strategy_desc = (!progress_message.is_empty()).then_some(progress_message.as_str());
             let progress = if progress_message.is_empty() {
                 format!("{} {}", mnemonic, owner)
             } else {
                 progress_message.clone()
             };
+            // `SkyframeActionExecutor.deleteOutputs`: remove any stale output paths before the action executes.
+            for o in spawn_outputs {
+                let _ = fs.delete(&execroot.get_relative(&o.exec_path));
+            }
             // `add_all(tree_artifact)` placeholders expand to the files of the (now produced)
             // directory (`expand_directories`).
             let argv_expanded = match zel_analysis::expand_tree_artifact_args(argv, &|dir| {
@@ -1601,13 +1861,61 @@ pub fn execute_action_with(
                     client_env: Some(opts.client_env.clone()),
                     ..Default::default()
                 };
+                if let Err(err_msg) = spawn.parse_timeout() {
+                    return Ok(fail(
+                        vec![format!("ERROR: {loc}: {progress} failed: {err_msg}")],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+                let sandbox_debug = opts.runtime.as_ref().is_some_and(|r| r.sandbox_debug);
+                if opts.announce_subcommands && !sandbox_debug {
+                    let runner_name = match &opts.runtime {
+                        Some(rt) => match rt.registry.resolve_opt(&spawn, strategy_desc) {
+                            Ok((strats, _)) => strats
+                                .first()
+                                .map(|s| s.name().to_string())
+                                .unwrap_or_else(|| "local".to_string()),
+                            Err(_) => "local".to_string(),
+                        },
+                        None => "local".to_string(),
+                    };
+                    let cmd_argv = if opts.expand_param_files {
+                        expand_param_file_args(argv, execroot, fs)
+                    } else {
+                        argv.clone()
+                    };
+                    let from_rule = if mnemonic == "Genrule" {
+                        format!("genrule rule target {owner}")
+                    } else {
+                        format!("rule target {owner}")
+                    };
+                    let cfg_hash = config_checksum_of(opts, spawn_outputs);
+                    reporter.handle(Event::subcommand(format!(
+                        "# {from_rule} [action '{progress}', configuration: {cfg_hash}, execution platform: @@platforms//host:host, mnemonic: {mnemonic}]\n{}\n# Configuration: {cfg_hash}\n# Execution platform: @@platforms//host:host\n# Runner: {runner_name}",
+                        if PRETTY_SUBCOMMANDS.load(std::sync::atomic::Ordering::Relaxed) {
+                            describe_command_pretty(&cmd_argv, env, execroot)
+                        } else {
+                            describe_command(&cmd_argv, env, execroot, true)
+                        }
+                    )));
+                }
                 // Resources (`ResourceManager.acquire`) are held for the duration of the spawn.
                 let _held = opts.runtime.as_ref().map(|r| {
                     r.resources
                         .acquire(&resources::ResourceSet::default_action())
                 });
                 let run = match &opts.runtime {
-                    Some(rt) => match rt.execute(&spawn, &progress, execroot, fs, reporter) {
+                    Some(rt) => match rt.execute_opt(
+                        &spawn,
+                        strategy_desc,
+                        Some(&progress),
+                        execroot,
+                        fs,
+                        reporter,
+                    ) {
                         Ok(r) => r,
                         Err(msg) => {
                             return Ok(fail(
@@ -1622,13 +1930,13 @@ pub fn execute_action_with(
                     None => execute_spawn_local(&spawn, execroot, fs),
                 };
                 let res = run?;
-                // Missing inputs fail the action before any command line is announced.
-                if opts.announce_subcommands && !matches!(res.status, SpawnStatus::MissingInputs) {
+                if opts.announce_subcommands
+                    && sandbox_debug
+                    && !matches!(res.status, SpawnStatus::MissingInputs)
+                {
                     let (cmd_argv, cmd_env, cmd_cwd) = match &res.executed_command {
-                        Some(c) if opts.runtime.as_ref().is_some_and(|r| r.sandbox_debug) => {
-                            (c.argv.clone(), c.env.clone(), PathFragment::create(&c.cwd))
-                        }
-                        _ => (argv.clone(), env.clone(), execroot.clone()),
+                        Some(c) => (c.argv.clone(), c.env.clone(), PathFragment::create(&c.cwd)),
+                        None => (argv.clone(), env.clone(), execroot.clone()),
                     };
                     let cmd_argv = if opts.expand_param_files {
                         expand_param_file_args(&cmd_argv, execroot, fs)
@@ -1683,13 +1991,6 @@ pub fn execute_action_with(
                             c.env.clone(),
                             PathFragment::create(&c.cwd),
                             true,
-                        ),
-                        // A sandboxed spawn ran in its sandbox execroot (`<base>/<runner>/<id>/execroot/<ws>`).
-                        (Some(c), _) if res.runner_name.ends_with("-sandbox") => (
-                            argv.clone(),
-                            env.clone(),
-                            PathFragment::create(&c.cwd),
-                            opts.verbose_failures,
                         ),
                         _ => (
                             argv.clone(),
@@ -1784,6 +2085,71 @@ pub fn execute_action_with(
                         // The spawn itself succeeded (exit 0); only its outputs are missing.
                         return Ok(fail(msgs, 0, res.stdout, res.stderr, runner));
                     }
+                    SpawnStatus::InvalidTimeout => {
+                        let msg = res
+                            .failure_message
+                            .unwrap_or_else(|| "Invalid timeout".to_string());
+                        return Ok(fail(
+                            vec![format!("ERROR: {loc}: {progress} failed: {msg}")],
+                            1,
+                            res.stdout,
+                            res.stderr,
+                            runner,
+                        ));
+                    }
+                    SpawnStatus::ExecutionDenied => {
+                        let msg = res.failure_message.unwrap_or_else(|| {
+                            format!("Action type {} is not allowed to run locally", mnemonic)
+                        });
+                        return Ok(fail_ext(
+                            vec![format!("ERROR: {loc}: {progress} failed: {msg}")],
+                            1,
+                            res.stdout,
+                            res.stderr,
+                            runner,
+                            res.catastrophic,
+                        ));
+                    }
+                    SpawnStatus::RemoteCacheEvicted => {
+                        let msg = res.failure_message.unwrap_or_else(|| {
+                            "Lost inputs no longer available remotely".to_string()
+                        });
+                        return Ok(fail_ext(
+                            vec![format!("ERROR: {loc}: {progress} failed: {msg}")],
+                            39,
+                            res.stdout,
+                            res.stderr,
+                            runner,
+                            true,
+                        ));
+                    }
+                    SpawnStatus::OutOfMemory => {
+                        let msg = if let Some(fm) = &res.failure_message {
+                            format!("ERROR: {loc}: {progress} failed: (Out of memory): {fm}")
+                        } else {
+                            let from_rule = if mnemonic == "Genrule" {
+                                format!("(from genrule rule target {owner})")
+                            } else {
+                                format!("(from rule target {owner})")
+                            };
+                            let desc =
+                                describe_command(&fail_argv, &fail_env, &fail_cwd, fail_verbose);
+                            format!(
+                                "ERROR: {loc}: {progress} failed: (Out of memory): {} failed: error executing {mnemonic} command {from_rule}{desc}\nAction was terminated because it exceeded its memory limit.",
+                                argv.first()
+                                    .map(|a| a.rsplit('/').next().unwrap_or(a))
+                                    .unwrap_or("")
+                            )
+                        };
+                        return Ok(fail_ext(
+                            vec![msg],
+                            res.exit_code.max(1),
+                            res.stdout,
+                            res.stderr,
+                            runner,
+                            res.catastrophic,
+                        ));
+                    }
                     SpawnStatus::Timeout => {
                         let from_rule = if mnemonic == "Genrule" {
                             format!("(from genrule rule target {owner})")
@@ -1791,22 +2157,39 @@ pub fn execute_action_with(
                             format!("(from rule target {owner})")
                         };
                         let desc = describe_command(&fail_argv, &fail_env, &fail_cwd, fail_verbose);
+                        let wall_secs = res.wall_time_ms / 1000;
                         let msg = format!(
-                        "ERROR: {loc}: {progress} failed: (Timeout): {} failed: error executing {} command {}{}",
-                        argv.first().map(|a| a.rsplit('/').next().unwrap_or(a)).unwrap_or(""),
-                        mnemonic,
-                        from_rule,
-                        desc,
-                    );
-                        return Ok(fail(
+                            "ERROR: {loc}: {progress} failed: (Timeout): {} failed: error executing {} command {}{} (timed out after {} seconds)",
+                            argv.first().map(|a| a.rsplit('/').next().unwrap_or(a)).unwrap_or(""),
+                            mnemonic,
+                            from_rule,
+                            desc,
+                            wall_secs,
+                        );
+                        return Ok(fail_ext(
                             vec![msg],
                             res.exit_code,
                             res.stdout,
                             res.stderr,
                             runner,
+                            res.catastrophic,
                         ));
                     }
                     SpawnStatus::NonZeroExit | SpawnStatus::ExecutionFailed => {
+                        if res.status == SpawnStatus::ExecutionFailed {
+                            if let Some(fm) =
+                                res.failure_message.as_deref().filter(|s| !s.is_empty())
+                            {
+                                return Ok(fail_ext(
+                                    vec![format!("ERROR: {loc}: {progress} failed: {fm}")],
+                                    res.exit_code,
+                                    res.stdout,
+                                    res.stderr,
+                                    runner,
+                                    res.catastrophic,
+                                ));
+                            }
+                        }
                         let tool = fail_argv
                             .first()
                             .map(|a| a.rsplit('/').next().unwrap_or(a).to_string())
@@ -1841,7 +2224,14 @@ pub fn execute_action_with(
                         {
                             msgs.push("Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging".to_string());
                         }
-                        return Ok(fail(msgs, res.exit_code, res.stdout, res.stderr, runner));
+                        return Ok(fail_ext(
+                            msgs,
+                            res.exit_code,
+                            res.stdout,
+                            res.stderr,
+                            runner,
+                            res.catastrophic,
+                        ));
                     }
                 }
                 if let Some(spec) = jc {
@@ -1965,18 +2355,27 @@ pub fn execute_action_with(
     Ok(outcome)
 }
 
-/// `XcodeLocalEnvProvider.rewriteLocalEnv`: actions that use Xcode (`requires-darwin` or the
-/// `XCODE_VERSION_OVERRIDE` / `APPLE_SDK_PLATFORM` variables) get `DEVELOPER_DIR` and `SDKROOT`
-/// while preserving those override keys.
-fn xcode_local_env(
-    env: BTreeMap<String, String>,
-    execution_info: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    zel_sandbox::sandbox::rewrite_local_env_preserving_tmpdir(
-        &env,
-        &BTreeMap::new(),
-        execution_info,
-    )
+/// `FileWriteStrategy.beginWrite`: opens `out_path` with truncate (without creating parent
+/// directories or unlinking first), writes all bytes, flushes, and ORs executable bits when
+/// `is_executable` is set.
+pub fn file_write_strategy_write(
+    out_path: &std::path::Path,
+    content: &[u8],
+    is_executable: bool,
+) -> io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(out_path)?;
+    f.write_all(content)?;
+    f.flush()?;
+    drop(f);
+    if is_executable {
+        zel_sandbox::set_executable_mode(out_path)?;
+    }
+    Ok(())
 }
 
 fn expand_param_file_args(

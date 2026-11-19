@@ -97,6 +97,21 @@ pub fn signal_process_group(pgid: u32, sig: i32) {
 }
 
 static GLOBAL_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static WRAPPER_SIGNAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Records an incoming `SIGINT` / `SIGTERM` received by the standalone `process-wrapper` binary.
+pub fn record_wrapper_signal(sig: i32) {
+    let _ = WRAPPER_SIGNAL.compare_exchange(
+        0,
+        sig,
+        std::sync::atomic::Ordering::SeqCst,
+        std::sync::atomic::Ordering::SeqCst,
+    );
+}
+
+pub fn take_wrapper_signal() -> i32 {
+    WRAPPER_SIGNAL.swap(0, std::sync::atomic::Ordering::SeqCst)
+}
 
 /// Server-wide cancellation (`Cancel` RPC / client SIGINT): every spawn that is running gets its process
 /// group killed and no new one starts until [`clear_global_cancel`] (at the start of the next command).
@@ -134,6 +149,22 @@ impl PartialEq for CancelFlag {
     }
 }
 
+/// Live output chunk callback invoked while the wrapped process writes to stdout/stderr.
+#[derive(Clone)]
+pub struct StreamOutCallback(pub crate::StreamOutHook);
+
+impl std::fmt::Debug for StreamOutCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StreamOutCallback(..)")
+    }
+}
+
+impl PartialEq for StreamOutCallback {
+    fn eq(&self, o: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &o.0)
+    }
+}
+
 /// Parsed `process-wrapper` command line (`struct Options` in `process-wrapper-options.h`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessWrapperOptions {
@@ -150,6 +181,8 @@ pub struct ProcessWrapperOptions {
     pub cancel: Option<CancelFlag>,
     /// Close child stdin (`/dev/null`) instead of inheriting the parent's stdin (`LocalSpawnRunner`).
     pub close_stdin: bool,
+    /// Optional live output sink receiving stdout/stderr chunks while the child is running.
+    pub stream_out: Option<StreamOutCallback>,
 }
 
 impl Default for ProcessWrapperOptions {
@@ -165,6 +198,7 @@ impl Default for ProcessWrapperOptions {
             args: Vec::new(),
             cancel: None,
             close_stdin: false,
+            stream_out: None,
         }
     }
 }
@@ -457,17 +491,23 @@ impl ResourceUsage {
         }
     }
 
+    fn normalize_timeval(sec: i64, usec: i64) -> Duration {
+        let total_us = (sec as i128)
+            .saturating_mul(1_000_000)
+            .saturating_add(usec as i128);
+        if total_us <= 0 {
+            return Duration::ZERO;
+        }
+        let secs = u64::try_from(total_us / 1_000_000).unwrap_or(u64::MAX);
+        let nanos = ((total_us % 1_000_000) as u32) * 1000;
+        Duration::new(secs, nanos)
+    }
+
     pub fn user_time(&self) -> Duration {
-        Duration::new(
-            self.utime_sec.max(0) as u64,
-            (self.utime_usec.max(0) as u32) * 1000,
-        )
+        Self::normalize_timeval(self.utime_sec, self.utime_usec)
     }
     pub fn system_time(&self) -> Duration {
-        Duration::new(
-            self.stime_sec.max(0) as u64,
-            (self.stime_usec.max(0) as u32) * 1000,
-        )
+        Self::normalize_timeval(self.stime_sec, self.stime_usec)
     }
 
     /// Serialized `ExecutionStatistics { resource_usage = 1 }` (proto3: zero fields omitted).
@@ -648,17 +688,37 @@ pub fn run(
         let mut v = Vec::new();
         if capture_out {
             let mut p = child.stdout.take().unwrap();
+            let stream_cb = opt.stream_out.clone();
             v.push(std::thread::spawn(move || {
                 let mut b = Vec::new();
-                let _ = p.read_to_end(&mut b);
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = p.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    b.extend_from_slice(&chunk[..n]);
+                    if let Some(cb) = &stream_cb {
+                        (cb.0)(&chunk[..n]);
+                    }
+                }
                 b
             }));
         }
         if capture_err {
             let mut p = child.stderr.take().unwrap();
+            let stream_cb = opt.stream_out.clone();
             v.push(std::thread::spawn(move || {
                 let mut b = Vec::new();
-                let _ = p.read_to_end(&mut b);
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = p.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    b.extend_from_slice(&chunk[..n]);
+                    if let Some(cb) = &stream_cb {
+                        (cb.0)(&chunk[..n]);
+                    }
+                }
                 b
             }));
         }
@@ -696,14 +756,20 @@ pub fn run(
                     term_sent = Some(Instant::now());
                 }
             }
-            if !killed && global_cancel_requested() {
-                cancelled = true;
-                signal_process_group(pid as u32, SIGKILL);
-                killed = true;
-            }
-            if let Some(c) = &opt.cancel {
-                if !killed && c.is_cancelled() {
+            let ext_sig = WRAPPER_SIGNAL.load(std::sync::atomic::Ordering::SeqCst);
+            let cancel_now = global_cancel_requested()
+                || opt.cancel.as_ref().is_some_and(|c| c.is_cancelled())
+                || ext_sig != 0;
+            if !killed && cancel_now {
+                if ext_sig == 0 {
                     cancelled = true;
+                }
+                if opt.graceful_sigterm {
+                    if term_sent.is_none() {
+                        signal_process_group(pid as u32, SIGTERM);
+                        term_sent = Some(Instant::now());
+                    }
+                } else {
                     signal_process_group(pid as u32, SIGKILL);
                     killed = true;
                 }
@@ -718,10 +784,13 @@ pub fn run(
         }
         // The child is done for, but may have grandchildren that we still have to kill.
         signal_process_group(pid as u32, SIGKILL);
+        let received_sig = take_wrapper_signal();
         let usage = ResourceUsage::from_rusage(&ru);
         // Decode the wait status (WIFEXITED / WTERMSIG).
         let termination = if timed_out {
             Termination::Signaled(SIGALRM)
+        } else if received_sig != 0 {
+            Termination::Signaled(received_sig)
         } else if status & 0x7f == 0 {
             Termination::Exited((status >> 8) & 0xff)
         } else {

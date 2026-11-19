@@ -583,7 +583,13 @@ pub fn link_manifest(input_manifest: &Path, output_manifest: &Path) -> io::Resul
     }
     #[cfg(unix)]
     std::os::unix::fs::symlink(input_manifest, output_manifest)?;
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_file(input_manifest, output_manifest).is_err() {
+            std::fs::copy(input_manifest, output_manifest)?;
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     std::fs::copy(input_manifest, output_manifest)?;
     Ok(())
 }
@@ -644,26 +650,36 @@ pub fn sync_symlink_tree(
         #[cfg(not(unix))]
         {
             let src = Path::new(target.path_string());
-            if src.is_file() {
-                std::fs::copy(src, link)?;
-            } else if src.is_dir() {
-                fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
-                    std::fs::create_dir_all(dst)?;
-                    for entry in std::fs::read_dir(src)? {
-                        let entry = entry?;
-                        let p = entry.path();
-                        let d = dst.join(entry.file_name());
-                        if p.is_dir() {
-                            copy_dir(&p, &d)?;
-                        } else {
-                            std::fs::copy(&p, &d)?;
-                        }
-                    }
-                    Ok(())
-                }
-                copy_dir(src, link)?;
+            #[cfg(windows)]
+            let linked = if src.is_dir() {
+                std::os::windows::fs::symlink_dir(src, link).is_ok()
             } else {
-                std::fs::write(link, b"")?;
+                std::os::windows::fs::symlink_file(src, link).is_ok()
+            };
+            #[cfg(not(windows))]
+            let linked = false;
+            if !linked {
+                if src.is_file() {
+                    std::fs::copy(src, link)?;
+                } else if src.is_dir() {
+                    fn copy_dir(src: &Path, dst: &Path) -> io::Result<()> {
+                        std::fs::create_dir_all(dst)?;
+                        for entry in std::fs::read_dir(src)? {
+                            let entry = entry?;
+                            let p = entry.path();
+                            let d = dst.join(entry.file_name());
+                            if p.is_dir() {
+                                copy_dir(&p, &d)?;
+                            } else {
+                                std::fs::copy(&p, &d)?;
+                            }
+                        }
+                        Ok(())
+                    }
+                    copy_dir(src, link)?;
+                } else {
+                    std::fs::write(link, b"")?;
+                }
             }
         }
         Ok(())
@@ -839,12 +855,37 @@ impl Spawn {
             .filter(move |o| !self.optional_outputs.contains(o))
     }
 
-    /// The `timeout` execution requirement in seconds (`Spawn.getTimeout`).
+    /// Parses the `timeout` execution requirement using Java `Integer.parseInt` semantics
+    /// (`Spawns.getTimeout`): absent or `0` means no timeout (`Ok(None)`), negative values are
+    /// returned as `Ok(Some(neg))` (triggering immediate timeout), and non-integers/overflows
+    /// return `Err(...)` (`UserExecException` / `INVALID_TIMEOUT`).
+    pub fn parse_timeout(&self) -> Result<Option<i32>, String> {
+        let Some(raw) = self.execution_info.get("timeout") else {
+            return Ok(None);
+        };
+        let digits = raw
+            .strip_prefix('+')
+            .or_else(|| raw.strip_prefix('-'))
+            .unwrap_or(raw.as_str());
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(format!("could not parse timeout: '{raw}'"));
+        }
+        let secs = raw
+            .parse::<i32>()
+            .map_err(|_| format!("could not parse timeout: '{raw}'"))?;
+        if secs == 0 {
+            Ok(None)
+        } else {
+            Ok(Some(secs))
+        }
+    }
+
+    /// Positive `timeout` execution requirement in whole seconds (`Spawn.getTimeout`).
     pub fn timeout_secs(&self) -> Option<f64> {
-        self.execution_info
-            .get("timeout")
-            .and_then(|v| v.trim().parse::<f64>().ok())
-            .filter(|s| *s > 0.0)
+        match self.parse_timeout() {
+            Ok(Some(s)) if s > 0 => Some(s as f64),
+            _ => None,
+        }
     }
 
     pub fn uses_path_mapping(&self) -> bool {
@@ -1035,11 +1076,16 @@ impl Spawn {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SpawnStatus {
+    #[default]
     Success,
     NonZeroExit,
     Timeout,
+    InvalidTimeout,
+    OutOfMemory,
+    ExecutionDenied,
+    RemoteCacheEvicted,
     ExecutionFailed,
     MissingInputs,
     MissingOutputs,
@@ -1055,7 +1101,7 @@ pub struct ExecutedCommand {
     pub debug_output: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SpawnResult {
     pub status: SpawnStatus,
     pub exit_code: i32,
@@ -1067,6 +1113,8 @@ pub struct SpawnResult {
     pub missing: Vec<String>,
     pub usage: Option<ResourceUsage>,
     pub executed_command: Option<ExecutedCommand>,
+    pub failure_message: Option<String>,
+    pub catastrophic: bool,
 }
 
 impl SpawnResult {
@@ -1083,11 +1131,15 @@ pub const DEFAULT_KILL_DELAY_MS: u64 = 15_000;
 /// publishes its outputs into the exec root; returning `false` means this branch lost the race
 /// and must not touch any output (the runner then reports `ErrorKind::Interrupted`). `cancel`
 /// kills the running process.
+pub type StreamOutHook = Arc<dyn Fn(&[u8]) + Send + Sync>;
+
 #[derive(Clone, Default)]
 pub struct ExecHooks {
     pub cancel: Option<process_wrapper::CancelFlag>,
     pub lock_outputs: Option<std::sync::Arc<dyn Fn(i32) -> bool + Send + Sync>>,
     pub runfiles_updater: Option<Arc<RunfilesTreeUpdater>>,
+    pub local_lockfree_output: bool,
+    pub stream_out: Option<StreamOutHook>,
 }
 
 impl ExecHooks {
@@ -1135,9 +1187,20 @@ pub fn execute_spawn_local_with(
         stderr,
         wall_time_ms: clock.current_time_millis().saturating_sub(start_ms),
         runner_name: "local".to_string(),
-        missing: Vec::new(),
-        usage: None,
-        executed_command: None,
+        ..Default::default()
+    };
+    let parsed_timeout = match spawn.parse_timeout() {
+        Ok(t) => t,
+        Err(msg) => {
+            let mut r = mk(
+                SpawnStatus::InvalidTimeout,
+                1,
+                Vec::new(),
+                format!("{msg}\n").into_bytes(),
+            );
+            r.failure_message = Some(msg);
+            return Ok(r);
+        }
     };
     if spawn.argv.is_empty() {
         return Ok(mk(
@@ -1177,40 +1240,44 @@ pub fn execute_spawn_local_with(
         return Ok(r);
     }
 
-    if hooks.is_cancelled() || !hooks.lock(0) {
+    if hooks.is_cancelled() || (!hooks.local_lockfree_output && !hooks.lock(0)) {
         return Err(cancelled_error());
     }
-    // Prepare outputs: delete stale ones, create parent directories.
+    // `LocalSpawnRunner.createActionDirectories`: create parent directories for declared outputs
+    // and ensure output directories exist without deleting pre-existing output files.
     for out in &spawn.outputs {
         let abs_out = execroot.get_relative(out);
-        let p = Path::new(abs_out.path_string());
-        delete_tree(p)?;
         if let Some(parent) = abs_out.parent_directory() {
             fs.create_directory_and_parents(&parent)?;
         }
     }
     for dir in &spawn.output_dirs {
-        fs.create_directory_and_parents(&execroot.get_relative(dir))?;
-    }
-
-    // Environment contract: spawn's variables + optional absolute TMPDIR when unset (plus Darwin Xcode rewrite).
-    let mut env = if let Some(ce) = &spawn.client_env {
-        sandbox::rewrite_local_env_for_current_os(&spawn.env, ce, &spawn.execution_info)
-    } else if cfg!(target_os = "macos") {
-        sandbox::rewrite_local_env_preserving_tmpdir(
-            &spawn.env,
-            &BTreeMap::new(),
-            &spawn.execution_info,
-        )
-    } else {
-        let mut e = spawn.env.clone();
-        if let Some(t) = e.get("TMPDIR").cloned() {
-            if !Path::new(&t).is_absolute() {
-                e.insert("TMPDIR".to_string(), "/tmp".to_string());
+        let abs_dir = execroot.get_relative(dir);
+        let p = Path::new(abs_dir.path_string());
+        if let Ok(md) = std::fs::symlink_metadata(p) {
+            if md.file_type().is_symlink() || !md.is_dir() {
+                delete_tree(p)?;
             }
         }
-        e
-    };
+        fs.create_directory_and_parents(&abs_dir)?;
+    }
+
+    let empty_client_env = BTreeMap::new();
+    let mut env = sandbox::rewrite_local_env_for_current_os(
+        &spawn.env,
+        spawn.client_env.as_ref().unwrap_or(&empty_client_env),
+        &spawn.execution_info,
+    )?;
+
+    if matches!(parsed_timeout, Some(s) if s < 0) {
+        if hooks.local_lockfree_output && !hooks.lock(142) {
+            return Err(cancelled_error());
+        }
+        return Ok(mk(SpawnStatus::Timeout, 142, Vec::new(), Vec::new()));
+    }
+    let timeout_dur = parsed_timeout
+        .filter(|&s| s > 0)
+        .map(|s| Duration::from_secs(s as u64));
 
     let mut args = spawn.argv.clone();
     if let Some(pw) = &spawn.process_wrapper_path {
@@ -1224,7 +1291,7 @@ pub fn execute_spawn_local_with(
         let mut cb = process_wrapper::CommandLineBuilder {
             wrapper: pw.clone(),
             args: args.clone(),
-            timeout: spawn.timeout_secs().map(Duration::from_secs_f64),
+            timeout: timeout_dur,
             kill_delay: Some(kill_delay_dur),
             graceful_sigterm: spawn
                 .execution_info
@@ -1257,18 +1324,25 @@ pub fn execute_spawn_local_with(
         timeout_secs: if using_external_pw {
             0.0
         } else {
-            spawn.timeout_secs().unwrap_or(0.0)
+            timeout_dur.map(|d| d.as_secs_f64()).unwrap_or(0.0)
         },
         kill_delay_secs: kill_delay.as_secs_f64(),
         args,
         cancel: hooks.cancel.clone(),
         close_stdin: true,
+        stream_out: hooks
+            .stream_out
+            .clone()
+            .map(process_wrapper::StreamOutCallback),
         ..Default::default()
     };
     let _ = &mut env;
     let o = match process_wrapper::run(&opt, Some(&env), Some(execroot.path_string())) {
         Ok(o) => o,
         Err(e) => {
+            if hooks.is_cancelled() {
+                return Err(cancelled_error());
+            }
             return Ok(mk(
                 SpawnStatus::ExecutionFailed,
                 127,
@@ -1277,7 +1351,15 @@ pub fn execute_spawn_local_with(
             ));
         }
     };
-    if o.cancelled {
+    if o.cancelled || (hooks.local_lockfree_output && !hooks.lock(o.termination.exit_code())) {
+        if hooks.local_lockfree_output {
+            for out in &spawn.outputs {
+                let _ = delete_tree(Path::new(execroot.get_relative(out).path_string()));
+            }
+            for dir in &spawn.output_dirs {
+                let _ = delete_tree(Path::new(execroot.get_relative(dir).path_string()));
+            }
+        }
         return Err(cancelled_error());
     }
     let usage = o.usage;
@@ -1286,11 +1368,9 @@ pub fn execute_spawn_local_with(
         r.usage = usage;
         r
     };
-    if o.timed_out {
-        let secs = spawn.timeout_secs().unwrap_or(0.0);
-        let mut stderr = o.stderr;
-        stderr.extend_from_slice(format!("Action timed out after {secs:.0}s\n").as_bytes());
-        return Ok(done(SpawnStatus::Timeout, 142, o.stdout, stderr));
+    let post_wall_timeout = timeout_dur.is_some_and(|t| o.wall > t);
+    if o.timed_out || post_wall_timeout {
+        return Ok(done(SpawnStatus::Timeout, 142, o.stdout, o.stderr));
     }
     let code = o.termination.exit_code();
     if code != 0 {
@@ -1340,13 +1420,9 @@ pub fn worker_response_to_spawn_result(resp: &WorkResponse) -> SpawnResult {
             SpawnStatus::NonZeroExit
         },
         exit_code: resp.exit_code,
-        stdout: Vec::new(),
         stderr: resp.output.as_bytes().to_vec(),
-        wall_time_ms: 0,
         runner_name: "worker".to_string(),
-        missing: Vec::new(),
-        usage: None,
-        executed_command: None,
+        ..Default::default()
     }
 }
 
@@ -1425,17 +1501,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn stale_outputs_removed_and_env_is_exact() {
+    fn local_spawn_preserves_existing_outputs_and_rewrites_tmpdir() {
         let root = tmp("env");
         let fs = zel_vfs::LocalFileSystem::default();
-        std::fs::write(format!("{}/o", root), "stale").unwrap();
-        let mut s = sh("test ! -e o && echo \"$FOO:$HOME\" > o", &["o"], &[]);
+        std::fs::write(format!("{}/o", root), "prior").unwrap();
+        let mut s = sh(
+            "prev=$(cat o); echo \"$prev|$FOO|$TMPDIR|$HOME\" > o",
+            &["o"],
+            &[],
+        );
         s.env.insert("FOO".into(), "bar".into());
+        s.env.insert("TMPDIR".into(), "/spawn-tmpdir".into());
         let r = execute_spawn_local(&s, &root, &fs).unwrap();
         assert!(r.is_ok(), "{:?}", r);
         assert_eq!(
             std::fs::read_to_string(format!("{}/o", root)).unwrap(),
-            "bar:\n"
+            "prior|bar|/tmp|\n"
         );
     }
 
@@ -1445,13 +1526,23 @@ mod tests {
         let root = tmp("to");
         let fs = zel_vfs::LocalFileSystem::default();
         let mut s = sh("sleep 30 & sleep 30", &[], &[]);
-        s.execution_info.insert("timeout".into(), "0.2".into());
+        s.execution_info.insert("timeout".into(), "1".into());
         s.execution_info
             .insert("zel-kill-delay-ms".into(), "100".into());
         let t = std::time::Instant::now();
         let r = execute_spawn_local(&s, &root, &fs).unwrap();
         assert_eq!(r.status, SpawnStatus::Timeout);
+        assert!(r.stderr.is_empty(), "{:?}", r.stderr);
         assert!(t.elapsed().as_secs() < 5);
+
+        // Non-integer timeout is rejected without running the subprocess.
+        let mut bad = sh("echo ran > should_not_exist", &["should_not_exist"], &[]);
+        bad.execution_info.insert("timeout".into(), "0.2".into());
+        let r_bad = execute_spawn_local(&bad, &root, &fs).unwrap();
+        assert_eq!(r_bad.status, SpawnStatus::InvalidTimeout);
+        assert!(!Path::new(root.path_string())
+            .join("should_not_exist")
+            .exists());
     }
 
     #[cfg(unix)]

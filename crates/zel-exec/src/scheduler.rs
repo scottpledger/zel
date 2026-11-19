@@ -76,6 +76,7 @@ struct State {
     finished_at: Vec<u64>,
     running: usize,
     stop: bool,
+    catastrophic_stop: bool,
     completion: Vec<usize>,
     done_or_dead: usize,
 }
@@ -158,6 +159,7 @@ pub fn execute_actions(
         finished_at: vec![0; n],
         running: 0,
         stop: false,
+        catastrophic_stop: false,
         completion: Vec::new(),
         done_or_dead: 0,
     });
@@ -170,12 +172,9 @@ pub fn execute_actions(
                 let idx = {
                     let mut st = state.lock().unwrap();
                     loop {
-                        if st.stop && !keep_going {
+                        if st.catastrophic_stop || (st.stop && !keep_going) {
                             // No new actions; wake others.
                             cv.notify_all();
-                            if st.running == 0 || st.ready.is_empty() {
-                                return;
-                            }
                             return;
                         }
                         if let Some(i) = st.ready.pop_front() {
@@ -201,9 +200,12 @@ pub fn execute_actions(
                 }
                 let mut st = state.lock().unwrap();
                 st.running -= 1;
-                let (ok, outcome, err) = match res {
-                    Ok(o) => (o.succeeded(), Some(o), None),
-                    Err(e) => (false, None, Some(e.to_string())),
+                let (ok, catastrophic, outcome, err) = match res {
+                    Ok(o) => {
+                        let cat = o.failure.as_ref().is_some_and(|f| f.catastrophic);
+                        (o.succeeded(), cat, Some(o), None)
+                    }
+                    Err(e) => (false, true, None, Some(e.to_string())),
                 };
                 st.results[idx] = outcome;
                 st.io_errors[idx] = err;
@@ -229,7 +231,10 @@ pub fn execute_actions(
                     }
                 } else {
                     st.states[idx] = ActionState::Failed;
-                    if !keep_going {
+                    if catastrophic {
+                        st.catastrophic_stop = true;
+                        st.stop = true;
+                    } else if !keep_going {
                         st.stop = true;
                     }
                 }
@@ -239,35 +244,36 @@ pub fn execute_actions(
     });
 
     let st = state.into_inner().unwrap();
-    let cycle = if st.states.iter().all(|s| *s != ActionState::NotRun) || st.stop {
-        None
-    } else {
-        // Remaining NotRun actions whose deps never failed => cycle among them.
-        let stuck: Vec<usize> = (0..n)
-            .filter(|&i| {
-                st.states[i] == ActionState::NotRun
-                    && deps[i].iter().all(|&d| st.states[d] != ActionState::Failed)
-                    && st.pending_deps[i] > 0
-                    && deps[i].iter().any(|&d| st.states[d] == ActionState::NotRun)
-            })
-            .collect();
-        if stuck.is_empty() {
+    let cycle =
+        if st.states.iter().all(|s| *s != ActionState::NotRun) || st.stop || st.catastrophic_stop {
             None
         } else {
-            Some(
-                stuck
-                    .iter()
-                    .map(|&i| {
-                        uniq[i]
-                            .outputs()
-                            .first()
-                            .map(|o| o.exec_path.path_string().to_string())
-                            .unwrap_or_default()
-                    })
-                    .collect(),
-            )
-        }
-    };
+            // Remaining NotRun actions whose deps never failed => cycle among them.
+            let stuck: Vec<usize> = (0..n)
+                .filter(|&i| {
+                    st.states[i] == ActionState::NotRun
+                        && deps[i].iter().all(|&d| st.states[d] != ActionState::Failed)
+                        && st.pending_deps[i] > 0
+                        && deps[i].iter().any(|&d| st.states[d] == ActionState::NotRun)
+                })
+                .collect();
+            if stuck.is_empty() {
+                None
+            } else {
+                Some(
+                    stuck
+                        .iter()
+                        .map(|&i| {
+                            uniq[i]
+                                .outputs()
+                                .first()
+                                .map(|o| o.exec_path.path_string().to_string())
+                                .unwrap_or_default()
+                        })
+                        .collect(),
+                )
+            }
+        };
     let critical = st.finished_at.iter().copied().max().unwrap_or(0);
     let actions_out = (0..n)
         .map(|i| ActionResult {
