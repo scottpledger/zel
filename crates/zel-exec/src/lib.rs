@@ -1265,40 +1265,60 @@ impl RemoteTreeNode {
     }
 }
 
-fn resolve_symlink_in_execroot(
+/// Canonicalizes `start` by resolving intermediate and leaf symlinks on `fs` (up to 32 hops,
+/// matching `RemoteActionFileSystem.resolveSymbolicLinks`), returning `(execroot_rel,
+/// traversed_symlink)` when the resolved path lies within `execroot/`.
+fn canonicalize_in_execroot(
     fs: &dyn FileSystem,
     execroot: &PathFragment,
     start: &PathFragment,
-) -> Option<String> {
+) -> Option<(String, bool)> {
     let er_prefix = format!("{}/", execroot.path_string());
     let mut cur = start.clone();
-    let mut traversed = 0usize;
-    for _ in 0..32 {
-        let Ok(st) = fs.stat(&cur, false) else {
-            break;
-        };
-        if !st.is_symlink {
-            break;
+    let mut hops = 0usize;
+    loop {
+        let rel = cur.path_string().strip_prefix(&er_prefix)?;
+        let segs: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+        let mut acc = execroot.clone();
+        let mut redirected = None;
+        for (i, seg) in segs.iter().enumerate() {
+            acc = acc.get_relative_str(seg);
+            let Ok(st) = fs.stat(&acc, false) else {
+                break;
+            };
+            if st.is_symlink {
+                hops += 1;
+                if hops > 32 {
+                    return None;
+                }
+                let target = fs.read_symbolic_link(&acc).ok()?;
+                let resolved_head = if target.is_absolute() {
+                    target
+                } else {
+                    let parent = acc.parent_directory()?;
+                    PathFragment::create(&format!(
+                        "{}/{}",
+                        parent.path_string(),
+                        target.path_string()
+                    ))
+                };
+                let tail = segs[i + 1..].join("/");
+                redirected = Some(if tail.is_empty() {
+                    resolved_head
+                } else {
+                    PathFragment::create(&format!("{}/{tail}", resolved_head.path_string()))
+                });
+                break;
+            }
         }
-        let target = fs.read_symbolic_link(&cur).ok()?;
-        traversed += 1;
-        cur = if target.is_absolute() {
-            target
-        } else {
-            let parent = cur.parent_directory()?;
-            PathFragment::create(&format!(
-                "{}/{}",
-                parent.path_string(),
-                target.path_string()
-            ))
-        };
+        match redirected {
+            Some(next) => cur = next,
+            None => {
+                let final_rel = cur.path_string().strip_prefix(&er_prefix)?.to_string();
+                return Some((final_rel, hops > 0));
+            }
+        }
     }
-    if traversed == 0 || fs.stat(&cur, false).is_ok_and(|s| s.is_symlink) {
-        return None;
-    }
-    cur.path_string()
-        .strip_prefix(&er_prefix)
-        .map(str::to_string)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1339,24 +1359,30 @@ fn walk_hybrid_dir(
         if let Some(dirent) = local_entries.get(&name) {
             match fs.stat(&p, true) {
                 Ok(s) if s.is_directory => {
-                    let linked_tree = if dirent.dirent_type == zel_vfs::DirentType::Symlink {
-                        remote
-                            .and_then(|r| {
-                                resolve_symlink_in_execroot(fs, execroot, &p).map(|t| {
-                                    RemoteTreeNode::from_entries(r.remote_tree_entries(&t))
-                                })
+                    let resolved_link = (dirent.dirent_type == zel_vfs::DirentType::Symlink)
+                        .then(|| canonicalize_in_execroot(fs, execroot, &p))
+                        .flatten()
+                        .filter(|(_, traversed)| *traversed);
+                    let next_dir_abs;
+                    let linked_tree;
+                    let (sub_abs, sub_rnode) = if let Some((target_rel, _)) = resolved_link {
+                        next_dir_abs = execroot.get_relative_str(&target_rel);
+                        linked_tree = remote
+                            .map(|r| {
+                                RemoteTreeNode::from_entries(r.remote_tree_entries(&target_rel))
                             })
-                            .filter(|t| !t.is_empty())
+                            .filter(|t| !t.is_empty());
+                        (&next_dir_abs, linked_tree.as_ref())
                     } else {
-                        None
+                        (&p, child_rdir)
                     };
                     walk_hybrid_dir(
                         digest,
                         fs,
                         execroot,
-                        &p,
+                        sub_abs,
                         &child_rel,
-                        child_rdir.or(linked_tree.as_ref()),
+                        sub_rnode,
                         remote,
                         check_ttl,
                         expired,
@@ -1370,8 +1396,8 @@ fn walk_hybrid_dir(
                     }
                 }
                 Err(_) => {
-                    if let (Some(r), Some(target_rel)) =
-                        (remote, resolve_symlink_in_execroot(fs, execroot, &p))
+                    if let (Some(r), Some((target_rel, true))) =
+                        (remote, canonicalize_in_execroot(fs, execroot, &p))
                     {
                         if let Some((hash, valid)) = r.remote_file_entry(&target_rel) {
                             if check_ttl && !valid {
@@ -1430,6 +1456,30 @@ fn walk_hybrid_dir(
     }
 }
 
+/// Checks whether `execroot/rel` exists in the union of `fs` and `remote`
+/// (`RemoteActionFileSystem.exists`).
+fn exists_in_action_fs(
+    fs: &dyn FileSystem,
+    execroot: &PathFragment,
+    rel: &str,
+    follow_symlinks: bool,
+    remote: Option<&zel_remote::spawn_runner::RemoteSpawnRunner>,
+) -> bool {
+    let abs_path = execroot.get_relative_str(rel);
+    if fs.exists(&abs_path, follow_symlinks) {
+        return true;
+    }
+    let Some(r) = remote else {
+        return false;
+    };
+    if r.is_pending_output(rel) {
+        return true;
+    }
+    follow_symlinks
+        && canonicalize_in_execroot(fs, execroot, &abs_path)
+            .is_some_and(|(cr, traversed)| traversed && r.is_pending_output(&cr))
+}
+
 /// Computes the digest of an exec-root-relative artifact path over the union of `fs` (local disk)
 /// and `remote` (unmaterialized BwoB entries), matching `RemoteActionFileSystem` +
 /// `ActionCacheChecker.loadCachedOutputMetadata` (local filesystem entries override remote entries,
@@ -1444,60 +1494,73 @@ fn hybrid_path_digest(
     check_ttl: bool,
 ) -> Option<String> {
     let abs_path = execroot.get_relative_str(rel);
-    let remote_children = remote
-        .map(|r| r.remote_tree_entries(rel))
-        .unwrap_or_default();
+    let Some(r) = remote else {
+        return path_digest(digest, fs, &abs_path);
+    };
 
-    if remote_children.is_empty() {
-        if let Some(d) = path_digest(digest, fs, &abs_path) {
-            return Some(d);
+    let (canon_rel, canon_abs) = match canonicalize_in_execroot(fs, execroot, &abs_path) {
+        Some((cr, true)) => {
+            let ca = execroot.get_relative_str(&cr);
+            (cr, ca)
         }
-        if let Some(r) = remote {
-            if let Some((hash, valid)) = r.remote_file_entry(rel) {
+        _ => (rel.to_string(), abs_path.clone()),
+    };
+
+    let remote_children = r.remote_tree_entries(&canon_rel);
+
+    match fs.stat(&canon_abs, true) {
+        Ok(st) if st.is_directory => {
+            // Even when `canon_rel` has no remaining `lazy` entries of its own (e.g. after
+            // `materialize(&[canon_rel])`), a symlink inside the directory may still target an
+            // unmaterialized remote artifact elsewhere in `execroot`, so keep consulting
+            // `walk_hybrid_dir` whenever any unmaterialized remote outputs exist.
+            if remote_children.is_empty() && r.pending_remote_outputs() == 0 {
+                return path_digest(digest, fs, &canon_abs);
+            }
+            let rtree = RemoteTreeNode::from_entries(remote_children);
+            let mut expired = false;
+            let mut buf = Vec::new();
+            walk_hybrid_dir(
+                digest,
+                fs,
+                execroot,
+                &canon_abs,
+                "",
+                (!rtree.is_empty()).then_some(&rtree),
+                Some(r),
+                check_ttl,
+                &mut expired,
+                &mut buf,
+                0,
+            );
+            (!expired).then(|| digest.hex(&buf))
+        }
+        Ok(_) => path_digest(digest, fs, &canon_abs),
+        Err(_) => {
+            if !remote_children.is_empty() {
+                let rtree = RemoteTreeNode::from_entries(remote_children);
+                let mut expired = false;
+                let mut buf = Vec::new();
+                walk_hybrid_dir(
+                    digest,
+                    fs,
+                    execroot,
+                    &canon_abs,
+                    "",
+                    Some(&rtree),
+                    Some(r),
+                    check_ttl,
+                    &mut expired,
+                    &mut buf,
+                    0,
+                );
+                return (!expired).then(|| digest.hex(&buf));
+            }
+            if let Some((hash, valid)) = r.remote_file_entry(&canon_rel) {
                 return (!check_ttl || valid).then_some(hash);
             }
-            if let Some(target_rel) = resolve_symlink_in_execroot(fs, execroot, &abs_path) {
-                if target_rel != rel {
-                    return hybrid_path_digest(
-                        digest,
-                        fs,
-                        execroot,
-                        &target_rel,
-                        remote,
-                        check_ttl,
-                    );
-                }
-            }
+            None
         }
-        return None;
-    }
-
-    if let Ok(st) = fs.stat(&abs_path, true) {
-        if !st.is_directory {
-            return path_digest(digest, fs, &abs_path);
-        }
-    }
-
-    let rtree = RemoteTreeNode::from_entries(remote_children);
-    let mut expired = false;
-    let mut buf = Vec::new();
-    walk_hybrid_dir(
-        digest,
-        fs,
-        execroot,
-        &abs_path,
-        "",
-        Some(&rtree),
-        remote,
-        check_ttl,
-        &mut expired,
-        &mut buf,
-        0,
-    );
-    if expired {
-        None
-    } else {
-        Some(digest.hex(&buf))
     }
 }
 
@@ -2399,15 +2462,16 @@ pub fn execute_action_with(
                     ))
                 }
             };
-            let builtin_ijar = should_run_builtin_ijar(mnemonic, &argv_expanded, execroot, fs);
+            let builtin_ijar =
+                should_run_builtin_ijar(mnemonic, &argv_expanded, execroot, fs, remote_runner);
             let exe_first = argv_expanded.first().map(String::as_str).unwrap_or("");
             let mut missing_sources = Vec::new();
             for input in inputs {
-                if builtin_ijar && input.exec_path.path_string() == exe_first {
+                let rel = input.exec_path.path_string();
+                if builtin_ijar && rel == exe_first {
                     continue;
                 }
-                let inp_path = execroot.get_relative(&input.exec_path);
-                if !fs.exists(&inp_path, true) {
+                if !exists_in_action_fs(fs, execroot, rel, true, remote_runner) {
                     if input.is_source {
                         let lbl = input.owner_label.canonical_form();
                         missing_sources.push(format!(
@@ -2613,6 +2677,25 @@ pub fn execute_action_with(
                         .acquire(&resources::ResourceSet::default_action())
                 });
                 let run = if builtin_ijar {
+                    if let Some(rr) = remote_runner {
+                        let need_paths: Vec<String> = spawn
+                            .inputs
+                            .iter()
+                            .map(|p| p.path_string().to_string())
+                            .filter(|rel| rel != exe_first)
+                            .collect();
+                        if let Err(msg) = rr
+                            .materialize(&need_paths, std::path::Path::new(execroot.path_string()))
+                        {
+                            return Ok(fail(
+                                vec![format!("ERROR: {loc}: {progress} failed: {msg}")],
+                                1,
+                                Vec::new(),
+                                Vec::new(),
+                                None,
+                            ));
+                        }
+                    }
                     execute_builtin_ijar(&spawn, execroot, fs)
                 } else {
                     match &opts.runtime {
@@ -3015,26 +3098,28 @@ pub fn execute_action_with(
     }
 
     for out_art in &outputs {
-        let out_path = execroot.get_relative(&out_art.exec_path);
         // Outputs of a remote/disk cache hit or remote execution in BwoB mode exist in the
         // remote output table regardless of `--experimental_remote_cache_ttl` (which governs
         // subsequent `ActionCacheChecker` reuse rather than post-execution existence).
-        let pending = opts
-            .runtime
-            .as_ref()
-            .and_then(|r| r.remote.as_ref())
-            .is_some_and(|r| r.is_pending_output(out_art.exec_path.path_string()));
-        if !pending
-            && is_cc_compile
-            && out_art.exec_path.path_string().ends_with(".gcno")
-            && !fs.exists(&out_path, true)
+        let out_path = execroot.get_relative(&out_art.exec_path);
+        let rel = out_art.exec_path.path_string();
+        let pending = remote_runner.is_some_and(|r| r.is_pending_output(rel));
+        if is_cc_compile
+            && rel.ends_with(".gcno")
+            && !exists_in_action_fs(fs, execroot, rel, true, remote_runner)
         {
             if let Some(parent) = out_path.parent_directory() {
                 let _ = fs.create_directory_and_parents(&parent);
             }
             let _ = fs.write_file(&out_path, b"");
         }
-        if !pending && !fs.exists(&out_path, !out_art.is_unresolved_symlink) {
+        if !exists_in_action_fs(
+            fs,
+            execroot,
+            rel,
+            !out_art.is_unresolved_symlink,
+            remote_runner,
+        ) {
             return Ok(fail(
                 vec![
                     format!(
@@ -3348,23 +3433,23 @@ fn should_run_builtin_ijar(
     argv: &[String],
     execroot: &PathFragment,
     fs: &dyn FileSystem,
+    remote: Option<&zel_remote::spawn_runner::RemoteSpawnRunner>,
 ) -> bool {
     let Some(exe) = argv.first().map(String::as_str) else {
         return false;
     };
     if !is_ijar_executable(exe) {
         return false;
-    }
+    };
     if exe == "_bin/ijar" || exe.ends_with("/_bin/ijar") {
         return true;
     }
     let _ = mnemonic;
-    let exe_pf = if std::path::Path::new(exe).is_absolute() {
-        PathFragment::create(exe)
+    if std::path::Path::new(exe).is_absolute() {
+        !fs.exists(&PathFragment::create(exe), true)
     } else {
-        execroot.get_relative_str(exe)
-    };
-    !fs.exists(&exe_pf, true)
+        !exists_in_action_fs(fs, execroot, exe, true, remote)
+    }
 }
 
 fn execute_builtin_ijar(

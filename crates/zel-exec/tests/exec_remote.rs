@@ -1190,3 +1190,271 @@ fn hybrid_tree_artifact_digest_matches_materialized_path_digest_and_invalidates_
         "materializing remaining lazy children must keep downstream consumer md_digest valid"
     );
 }
+
+#[test]
+fn tree_symlink_to_external_lazy_artifact_stays_consistent_across_partial_and_full_materialization()
+{
+    use zel_analysis::{ActionAnalysisMetadata, Artifact};
+    use zel_cmdline::Label;
+    use zel_exec::action_cache::CompactPersistentActionCache;
+    use zel_exec::digest::DigestFunction;
+    use zel_exec::{execute_action_with, path_digest, ExecOptions};
+    use zel_proto::reapi::{Directory, FileNode, Message, OutputDirectory, SymlinkNode, Tree};
+
+    let root = tmp("tree_ext_symlink");
+    let server = FakeReapiServer::new();
+
+    server.set_executor(move |ctx| {
+        let path = ctx
+            .command
+            .output_paths
+            .first()
+            .or(ctx.command.output_directories.first())
+            .or(ctx.command.output_files.first())
+            .expect("declared output")
+            .clone();
+        if path.ends_with("ext_target.bin") {
+            let d = ctx.server.put_blob(b"external-lazy-file-bytes");
+            return Ok(ActionResult {
+                output_files: vec![OutputFile {
+                    path,
+                    digest: Some(d),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        if path.ends_with("ext_tree") {
+            let d_ext_child = ctx.server.put_blob(b"external-lazy-tree-child");
+            let root_dir = Directory {
+                files: vec![FileNode {
+                    name: "ext_child.bin".into(),
+                    digest: Some(d_ext_child),
+                    is_executable: false,
+                    node_properties: None,
+                }],
+                directories: vec![],
+                symlinks: vec![],
+                node_properties: None,
+            };
+            let tree = Tree {
+                root: Some(root_dir),
+                children: vec![],
+            };
+            let td = ctx.server.put_blob(&tree.encode_to_vec());
+            return Ok(ActionResult {
+                output_directories: vec![OutputDirectory {
+                    path,
+                    tree_digest: Some(td),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        // `my_tree` has its own lazy file `own_lazy.bin` plus relative symlinks to sibling
+        // unmaterialized artifacts `../ext_target.bin` and `../ext_tree`.
+        let d_own = ctx.server.put_blob(b"own-lazy-bytes");
+        let root_dir = Directory {
+            files: vec![FileNode {
+                name: "own_lazy.bin".into(),
+                digest: Some(d_own),
+                is_executable: false,
+                node_properties: None,
+            }],
+            directories: vec![],
+            symlinks: vec![
+                SymlinkNode {
+                    name: "link_dir".into(),
+                    target: "../ext_tree".into(),
+                    node_properties: None,
+                },
+                SymlinkNode {
+                    name: "link_file".into(),
+                    target: "../ext_target.bin".into(),
+                    node_properties: None,
+                },
+            ],
+            node_properties: None,
+        };
+        let tree = Tree {
+            root: Some(root_dir),
+            children: vec![],
+        };
+        let td = ctx.server.put_blob(&tree.encode_to_vec());
+        Ok(ActionResult {
+            output_directories: vec![OutputDirectory {
+                path,
+                tree_digest: Some(td),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    });
+
+    let so = StrategyOptions {
+        spawn_strategy: vec!["remote".into()],
+        ..Default::default()
+    };
+    let rt = runtime(
+        &root,
+        &server,
+        true,
+        &[
+            "--remote_download_outputs=minimal",
+            "--experimental_remote_cache_ttl=3h",
+        ],
+        so,
+        DynamicOptions::default(),
+    );
+
+    let owner = Label::parse_canonical("//t:ext_sym").unwrap();
+    let ext_file = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("ext_target.bin"),
+        owner.clone(),
+    );
+    let mut ext_tree = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("ext_tree"),
+        owner.clone(),
+    );
+    ext_tree.is_tree_artifact = true;
+    let mut my_tree = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("my_tree"),
+        owner.clone(),
+    );
+    my_tree.is_tree_artifact = true;
+
+    let act_ext_file = ActionAnalysisMetadata::SpawnAction {
+        owner: owner.clone(),
+        mnemonic: "GenExtFile".into(),
+        progress_message: "Doing GenExtFile //t:ext_sym".into(),
+        argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
+        env: BTreeMap::new(),
+        inherited_env: Default::default(),
+        unset_env: Default::default(),
+        inputs: vec![],
+        outputs: vec![ext_file.clone()],
+        execution_info: BTreeMap::new(),
+        tools: Vec::new(),
+        java_compile: None,
+    };
+    let act_ext_tree = ActionAnalysisMetadata::SpawnAction {
+        owner: owner.clone(),
+        mnemonic: "GenExtTree".into(),
+        progress_message: "Doing GenExtTree //t:ext_sym".into(),
+        argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
+        env: BTreeMap::new(),
+        inherited_env: Default::default(),
+        unset_env: Default::default(),
+        inputs: vec![],
+        outputs: vec![ext_tree.clone()],
+        execution_info: BTreeMap::new(),
+        tools: Vec::new(),
+        java_compile: None,
+    };
+    let act_my_tree = ActionAnalysisMetadata::SpawnAction {
+        owner,
+        mnemonic: "GenMyTree".into(),
+        progress_message: "Doing GenMyTree //t:ext_sym".into(),
+        argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
+        env: BTreeMap::new(),
+        inherited_env: Default::default(),
+        unset_env: Default::default(),
+        inputs: vec![ext_file.clone(), ext_tree.clone()],
+        outputs: vec![my_tree.clone()],
+        execution_info: BTreeMap::new(),
+        tools: Vec::new(),
+        java_compile: None,
+    };
+
+    let fs = LocalFileSystem::default();
+    let er = execroot(&root);
+    let er_disk = root.join("ob/execroot/_main");
+    let ac = CompactPersistentActionCache::new();
+    let exec_opts = ExecOptions {
+        runtime: Some(rt.clone()),
+        ..Default::default()
+    };
+
+    // 1. Produce `ext_target.bin`, `ext_tree`, and `my_tree` in minimal mode (all blobs stay lazy).
+    assert!(
+        execute_action_with(&act_ext_file, &er, &fs, &ac, &Reporter::new(), &exec_opts)
+            .unwrap()
+            .failure
+            .is_none()
+    );
+    assert!(
+        execute_action_with(&act_ext_tree, &er, &fs, &ac, &Reporter::new(), &exec_opts)
+            .unwrap()
+            .failure
+            .is_none()
+    );
+    let r1 =
+        execute_action_with(&act_my_tree, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(r1.failure.is_none(), "{:?}", r1.failure);
+    assert!(!r1.cache_hit);
+
+    let my_tree_rel = my_tree.exec_path.path_string().to_string();
+    let ext_file_rel = ext_file.exec_path.path_string().to_string();
+    let ext_tree_rel = ext_tree.exec_path.path_string().to_string();
+    let recorded_digest = ac.get_entry(&my_tree_rel).unwrap().files[&my_tree_rel].clone();
+    assert!(!recorded_digest.is_empty());
+
+    // 2. Materialize ONLY `my_tree`: `my_tree/own_lazy.bin` is now on disk so `my_tree` has zero
+    //    `lazy` entries of its own, while `ext_target.bin` and `ext_tree/ext_child.bin` remain
+    //    unmaterialized (`my_tree/link_file` still dangles on local disk).
+    let dl_my = rt
+        .remote
+        .as_ref()
+        .unwrap()
+        .materialize(std::slice::from_ref(&my_tree_rel), &er_disk)
+        .unwrap();
+    assert_eq!(dl_my, 1);
+    assert!(rt
+        .remote
+        .as_ref()
+        .unwrap()
+        .remote_tree_entries(&my_tree_rel)
+        .is_empty());
+    assert!(!er_disk.join(&ext_file_rel).exists());
+    assert!(!er_disk.join(&ext_tree_rel).join("ext_child.bin").exists());
+
+    let r2 =
+        execute_action_with(&act_my_tree, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(
+        r2.cache_hit,
+        "materializing `my_tree` while external symlink targets remain lazy must not dirty `my_tree`"
+    );
+
+    // 3. Now materialize `ext_target.bin` and `ext_tree` too: all symlinks resolve on local disk,
+    //    `pending_remote_outputs() == 0`, `path_digest` must equal `recorded_digest`, and the
+    //    action cache must remain `UpToDate`.
+    let dl_ext = rt
+        .remote
+        .as_ref()
+        .unwrap()
+        .materialize(&[ext_file_rel, ext_tree_rel], &er_disk)
+        .unwrap();
+    assert_eq!(dl_ext, 2);
+    assert_eq!(rt.remote.as_ref().unwrap().pending_remote_outputs(), 0);
+
+    let full_disk_digest = path_digest(
+        DigestFunction::default(),
+        &fs,
+        &er.get_relative(&my_tree.exec_path),
+    )
+    .expect("fully materialized path_digest");
+    assert_eq!(
+        full_disk_digest, recorded_digest,
+        "fully materialized `path_digest` must match initial hybrid digest"
+    );
+
+    let r3 =
+        execute_action_with(&act_my_tree, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(
+        r3.cache_hit,
+        "action cache must remain UpToDate once external symlink targets are materialized"
+    );
+}
