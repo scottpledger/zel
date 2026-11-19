@@ -2023,10 +2023,7 @@ impl Resolution {
             else {
                 continue;
             };
-            if best
-                .as_ref()
-                .map_or(true, |(len, _, _)| unique.len() > *len)
-            {
+            if best.as_ref().is_none_or(|(len, _, _)| unique.len() > *len) {
                 best = Some((unique.len(), id, rest));
             }
         }

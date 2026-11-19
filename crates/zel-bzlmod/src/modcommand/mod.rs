@@ -507,7 +507,7 @@ fn repo_definition(
         };
         if best_ext
             .as_ref()
-            .map_or(true, |(len, _, _)| unique.len() > *len)
+            .is_none_or(|(len, _, _)| unique.len() > *len)
         {
             best_ext = Some((unique.len(), id, rest));
         }
