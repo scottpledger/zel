@@ -781,6 +781,7 @@ pub(crate) fn run_build_actions(
                 actions: Vec::new(),
                 completion_order: Vec::new(),
                 critical_path_ms: 0,
+                critical_path: Vec::new(),
                 cycle: None,
             },
             elapsed: started.elapsed(),
@@ -4484,13 +4485,6 @@ fn post_test_bep_events(reporter: &Reporter, label: &str, overall: &str, r: &Tes
         attempt_count = attempt_count.max(atts.len() as i32);
         for (i, a) in atts.iter().enumerate() {
             let last = i + 1 == atts.len();
-            let st = if a.timed_out {
-                "TIMEOUT"
-            } else if a.exit_code == 0 {
-                "PASSED"
-            } else {
-                "FAILED"
-            };
             let mut outputs = Vec::new();
             let (log, xml) = if atts.len() > 1 && !last {
                 (
@@ -4500,15 +4494,83 @@ fn post_test_bep_events(reporter: &Reporter, label: &str, overall: &str, r: &Tes
             } else {
                 (ud.join("test.log"), ud.join("test.xml"))
             };
-            outputs.push(("test.log".to_string(), uri(&log)));
+            let log_exists = log.exists();
+            let st = if a.timed_out {
+                "TIMEOUT"
+            } else if a.exit_code == 0 && !log_exists {
+                "INCOMPLETE"
+            } else if a.exit_code == 0 {
+                "PASSED"
+            } else {
+                "FAILED"
+            };
+            if log_exists {
+                outputs.push(("test.log".to_string(), uri(&log)));
+            }
             if xml.exists() {
                 outputs.push(("test.xml".to_string(), uri(&xml)));
+            }
+            if last {
+                let cov = ud.join("coverage.dat");
+                let lcov = ud.join("test.lcov");
+                if cov.exists() {
+                    outputs.push(("test.lcov".to_string(), uri(&cov)));
+                } else if lcov.exists() {
+                    outputs.push(("test.lcov".to_string(), uri(&lcov)));
+                }
+                let zip_out = ud.join("test.outputs/outputs.zip");
+                let manifest_out = ud.join("test.outputs/MANIFEST");
+                if zip_out.exists() {
+                    outputs.push(("test.outputs__outputs.zip".to_string(), uri(&zip_out)));
+                    if manifest_out.exists() {
+                        outputs.push((
+                            "test.outputs_manifest__MANIFEST".to_string(),
+                            uri(&manifest_out),
+                        ));
+                    }
+                } else {
+                    let outputs_dir = ud.join("test.outputs");
+                    if outputs_dir.is_dir() {
+                        fn walk_undeclared(
+                            base: &std::path::Path,
+                            cur: &std::path::Path,
+                            uri_fn: &dyn Fn(&std::path::Path) -> String,
+                            out: &mut Vec<(String, String)>,
+                        ) {
+                            let Ok(rd) = std::fs::read_dir(cur) else {
+                                return;
+                            };
+                            let mut entries: Vec<_> = rd.filter_map(Result::ok).collect();
+                            entries.sort_by_key(|e| e.file_name());
+                            for ent in entries {
+                                let p = ent.path();
+                                if p.is_dir() {
+                                    walk_undeclared(base, &p, uri_fn, out);
+                                } else if let Ok(rel) = p.strip_prefix(base) {
+                                    let rel_s = rel.to_string_lossy().replace('\\', "/");
+                                    out.push((format!("test.outputs__{rel_s}"), uri_fn(&p)));
+                                }
+                            }
+                        }
+                        walk_undeclared(&outputs_dir, &outputs_dir, &uri, &mut outputs);
+                    }
+                }
+                for extra_name in [
+                    "test.warnings",
+                    "test.unused_runfiles_log",
+                    "test.infrastructure_failure",
+                ] {
+                    let ep = ud.join(extra_name);
+                    if ep.exists() {
+                        outputs.push((extra_name.to_string(), uri(&ep)));
+                    }
+                }
             }
             let node = BepBuilder::test_result(
                 label,
                 &cfg,
-                *run as i32 + 1,
-                *shard as i32 + 1,
+                *run as i32,
+                *shard as i32,
                 a.attempt as i32,
                 st,
                 r.cached,
@@ -4526,7 +4588,7 @@ fn post_test_bep_events(reporter: &Reporter, label: &str, overall: &str, r: &Tes
             reporter.post_bep_node(node);
         }
         let last = atts.last().unwrap();
-        let entry = (String::new(), uri(&ud.join("test.log")));
+        let entry = ("test.log".to_string(), uri(&ud.join("test.log")));
         if last.exit_code == 0 && !last.timed_out {
             passed.push(entry)
         } else {

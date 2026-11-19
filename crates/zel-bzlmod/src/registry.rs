@@ -151,9 +151,17 @@ static URL_CACHE: std::sync::Mutex<
     Option<std::collections::HashMap<String, Result<Option<Vec<u8>>, String>>>,
 > = std::sync::Mutex::new(None);
 
+static RECORDED_FETCHES: std::sync::Mutex<Vec<(String, bool)>> = std::sync::Mutex::new(Vec::new());
+
+/// Drains HTTP/HTTPS download outcomes recorded since the last call, for BEP `Fetch` reporting.
+pub fn take_recorded_fetches() -> Vec<(String, bool)> {
+    std::mem::take(&mut *RECORDED_FETCHES.lock().unwrap())
+}
+
 /// Fetches raw bytes from `url`; `Ok(None)` means "not found".
 pub fn fetch_url(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, String> {
-    let auth_hdrs = if url.starts_with("http://") || url.starts_with("https://") {
+    let is_http = url.starts_with("http://") || url.starts_with("https://");
+    let auth_hdrs = if is_http {
         let ctx = REGISTRY_AUTH.with(|c| c.borrow().clone());
         crate::netrc::resolve_auth_headers(url, &ctx.helpers, &ctx.client_env).unwrap_or_default()
     } else {
@@ -172,6 +180,12 @@ pub fn fetch_url(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, String
         }
     }
     let res = fetch_url_uncached(url, timeout_secs, &auth_hdrs);
+    if is_http {
+        RECORDED_FETCHES
+            .lock()
+            .unwrap()
+            .push((url.to_string(), matches!(res, Ok(Some(_)))));
+    }
     if res.is_ok() {
         let mut guard = URL_CACHE.lock().unwrap();
         let cache = guard.get_or_insert_with(std::collections::HashMap::new);

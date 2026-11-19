@@ -647,12 +647,7 @@ impl ExecRuntime {
                 .map(|p| p.to_string())
         });
         if let Some(p) = progress {
-            reporter.handle(Event {
-                kind: zel_events::EventKind::Progress,
-                location: None,
-                message: p,
-                tag: None,
-            });
+            reporter.handle(Event::progress(p));
         }
         let chosen = strategies.remove(0);
         if chosen == strategy::StrategyKind::Dynamic {
@@ -2359,9 +2354,16 @@ pub fn execute_action_with(
         );
     }
     if let Some(filter) = &opts.output_filter {
-        if !action.owner().to_string().contains(filter) {
-            outcome.stdout.clear();
-            outcome.stderr.clear();
+        if action.mnemonic() != "TestRunner" {
+            let owner_str = action.owner().to_string();
+            let shown = match zel_events::OutputFilter::from_regex(filter) {
+                Ok(of) => of.show_output(&owner_str),
+                Err(_) => owner_str.contains(filter),
+            };
+            if !shown {
+                outcome.stdout.clear();
+                outcome.stderr.clear();
+            }
         }
     }
     outcome.wall_time_ms = started.elapsed().as_millis() as u64;

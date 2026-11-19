@@ -1862,7 +1862,7 @@ impl UiEventHandler {
         let mut t = self.term();
         match event.kind {
             EventKind::Stdout | EventKind::Stderr => {
-                let bytes = event.message.as_bytes();
+                let bytes = event.raw_bytes();
                 if !st.build_running {
                     if event.kind == EventKind::Stdout {
                         self.s.out.out(bytes);
@@ -1903,10 +1903,11 @@ impl UiEventHandler {
                 if let Some(loc) = &event.location {
                     t.raw(&format!("{loc}: "));
                 }
+                let raw = event.raw_bytes();
                 let mut incomplete = true;
-                if !event.message.is_empty() || event.location.is_none() {
-                    t.raw(&event.message);
-                    incomplete = !event.message.ends_with('\n');
+                if !raw.is_empty() || event.location.is_none() {
+                    t.buf.extend_from_slice(raw);
+                    incomplete = !raw.ends_with(b"\n");
                 }
                 if incomplete {
                     t.nl();
@@ -2352,6 +2353,7 @@ pub fn events_from_console_text(text: &str) -> Vec<Event> {
                 kind: k,
                 location: None,
                 message: rest.to_string(),
+                message_bytes: None,
                 tag: None,
             }),
             _ => out.push(Event::stderr(line)),

@@ -117,7 +117,39 @@ pub struct Location {
 
 impl fmt::Display for Location {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}", self.file, self.line, self.column)
+        f.write_str(&self.file)?;
+        if self.line != 0 {
+            write!(f, ":{}", self.line)?;
+            if self.column != 0 {
+                write!(f, ":{}", self.column)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Regex-based filter for `--output_filter` (`OutputFilter.java`).
+#[derive(Debug, Clone, Default)]
+pub enum OutputFilter {
+    #[default]
+    OutputEverything,
+    OutputNothing,
+    Regex(zel_util::java_regex::Regex),
+}
+
+impl OutputFilter {
+    /// Compiles a Java regex with `DOTALL` (`(?s)`), matching `RegexOutputFilter.forPattern`.
+    pub fn from_regex(pattern: &str) -> Result<Self, zel_util::java_regex::RegexError> {
+        let re = zel_util::java_regex::Regex::new(&format!("(?s){pattern}"))?;
+        Ok(Self::Regex(re))
+    }
+
+    pub fn show_output(&self, tag: &str) -> bool {
+        match self {
+            Self::OutputEverything => true,
+            Self::OutputNothing => false,
+            Self::Regex(re) => re.find(tag).is_some(),
+        }
     }
 }
 
@@ -126,6 +158,7 @@ pub struct Event {
     pub kind: EventKind,
     pub location: Option<Location>,
     pub message: String,
+    pub message_bytes: Option<Vec<u8>>,
     pub tag: Option<String>,
 }
 
@@ -142,8 +175,32 @@ impl Event {
             kind,
             location,
             message: message.into(),
+            message_bytes: None,
             tag: None,
         }
+    }
+
+    pub fn of_bytes(kind: EventKind, location: Option<Location>, bytes: impl Into<Vec<u8>>) -> Self {
+        let raw = bytes.into();
+        let message = String::from_utf8_lossy(&raw).into_owned();
+        Self {
+            kind,
+            location,
+            message,
+            message_bytes: Some(raw),
+            tag: None,
+        }
+    }
+
+    pub fn with_tag(mut self, tag: impl Into<String>) -> Self {
+        self.tag = Some(tag.into());
+        self
+    }
+
+    pub fn raw_bytes(&self) -> &[u8] {
+        self.message_bytes
+            .as_deref()
+            .unwrap_or_else(|| self.message.as_bytes())
     }
 
     pub fn error(location: Option<Location>, message: impl Into<String>) -> Self {
@@ -158,8 +215,16 @@ impl Event {
         Self::of(EventKind::Info, None, message)
     }
 
+    pub fn info_with_location(location: Option<Location>, message: impl Into<String>) -> Self {
+        Self::of(EventKind::Info, location, message)
+    }
+
     pub fn debug(message: impl Into<String>) -> Self {
         Self::of(EventKind::Debug, None, message)
+    }
+
+    pub fn debug_with_location(location: Option<Location>, message: impl Into<String>) -> Self {
+        Self::of(EventKind::Debug, location, message)
     }
 
     pub fn fail(location: Option<Location>, message: impl Into<String>) -> Self {
@@ -182,8 +247,16 @@ impl Event {
         Self::of(EventKind::Stdout, None, message)
     }
 
+    pub fn stdout_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Self::of_bytes(EventKind::Stdout, None, bytes)
+    }
+
     pub fn stderr(message: impl Into<String>) -> Self {
         Self::of(EventKind::Stderr, None, message)
+    }
+
+    pub fn stderr_bytes(bytes: impl Into<Vec<u8>>) -> Self {
+        Self::of_bytes(EventKind::Stderr, None, bytes)
     }
 
     pub fn format_console_line(&self) -> String {
@@ -250,6 +323,7 @@ struct BepState {
 pub struct Reporter {
     events: Mutex<Vec<Event>>,
     handlers: Mutex<Vec<Arc<dyn EventHandler>>>,
+    output_filter: Mutex<OutputFilter>,
     bep: Mutex<BepState>,
     invocation_id: Mutex<String>,
     config_id: Mutex<String>,
@@ -263,6 +337,7 @@ impl Default for Reporter {
         Self {
             events: Mutex::new(Vec::new()),
             handlers: Mutex::new(Vec::new()),
+            output_filter: Mutex::new(OutputFilter::OutputEverything),
             bep: Mutex::new(BepState {
                 streamer: None,
                 history: Arc::new(MemoryTransport::default()),
@@ -350,6 +425,15 @@ impl Reporter {
         self.config_id.lock().unwrap().clone()
     }
 
+    /// Installs the `--output_filter` applied to tagged non-ERROR, non-DEBUG events.
+    pub fn set_output_filter(&self, filter: OutputFilter) {
+        *self.output_filter.lock().unwrap() = filter;
+    }
+
+    pub fn show_output(&self, tag: &str) -> bool {
+        self.output_filter.lock().unwrap().show_output(tag)
+    }
+
     /// Registers a handler that receives every subsequently reported event immediately.
     pub fn add_handler(&self, h: Arc<dyn EventHandler>) {
         self.handlers.lock().unwrap().push(h);
@@ -357,6 +441,13 @@ impl Reporter {
 
     /// Reports an event: records it and streams it to all handlers right away.
     pub fn handle(&self, event: Event) {
+        if event.kind != EventKind::Error && event.kind != EventKind::Debug {
+            if let Some(tag) = &event.tag {
+                if !self.show_output(tag) {
+                    return;
+                }
+            }
+        }
         let handlers: Vec<Arc<dyn EventHandler>> = self.handlers.lock().unwrap().clone();
         for h in &handlers {
             h.handle(&event);
@@ -530,8 +621,8 @@ impl Reporter {
                 s.post(BepBuilder::test_result(
                     &label,
                     &cfg,
-                    1,
-                    1,
+                    0,
+                    0,
                     1,
                     &st,
                     false,
@@ -599,17 +690,32 @@ impl Reporter {
         fs.write_file(path, out.as_bytes())
     }
 
-    /// Writes BEP JSON lines regardless of deferral (after the stream has been finalized).
+    /// Writes BEP lines regardless of deferral (after the stream has been finalized).
     pub fn force_write_bep_file(
         &self,
         fs: &dyn FileSystem,
         path: &PathFragment,
         format: bep::BepFormat,
     ) -> io::Result<()> {
+        self.force_write_bep_file_with_conversion(fs, path, format, true)
+    }
+
+    /// Writes BEP lines regardless of deferral, honoring `path_conversion`.
+    pub fn force_write_bep_file_with_conversion(
+        &self,
+        fs: &dyn FileSystem,
+        path: &PathFragment,
+        format: bep::BepFormat,
+        path_conversion: bool,
+    ) -> io::Result<()> {
         self.finish_bep();
         let mut out = Vec::new();
         for ev in self.bep_history() {
-            out.extend(bep::serialize_event(format, &ev));
+            out.extend(bep::serialize_event_with_conversion(
+                format,
+                &ev,
+                path_conversion,
+            ));
         }
         fs.write_file(path, &out)
     }
@@ -770,5 +876,46 @@ mod tests {
             .to_string(),
             "ERROR: a:1:2: m"
         );
+        assert_eq!(
+            Location {
+                file: "pkg/BUILD".into(),
+                line: 0,
+                column: 0,
+            }
+            .to_string(),
+            "pkg/BUILD"
+        );
+        assert_eq!(
+            Location {
+                file: "pkg/BUILD".into(),
+                line: 12,
+                column: 0,
+            }
+            .to_string(),
+            "pkg/BUILD:12"
+        );
+
+        // Raw non-UTF8 bytes pass verbatim to stdout/stderr, and OutputFilter drops non-matching
+        // tagged warnings/output while keeping errors and debug events.
+        let out = Arc::new(ui::BufferOutErr::default());
+        let ui_h = ui::UiEventHandler::new(
+            out.clone(),
+            ui::UiOptions {
+                color: ui::TriState::No,
+                curses: ui::TriState::No,
+                ..Default::default()
+            },
+        );
+        let r = Reporter::new();
+        r.add_handler(Arc::new(ui_h));
+        r.set_output_filter(OutputFilter::from_regex("//keep/.*").unwrap());
+        r.handle(Event::stdout_bytes(vec![0xff, 0xfe, b'\n']).with_tag("//keep/pkg:t"));
+        r.handle(Event::warning(None, "drop me").with_tag("//drop/pkg:t"));
+        r.handle(Event::warning(None, "keep me").with_tag("//keep/pkg:t"));
+        r.handle(Event::error(None, "err always kept").with_tag("//drop/pkg:t"));
+        assert_eq!(out.take_out(), vec![0xff, 0xfe, b'\n']);
+        let err_s = out.err_string();
+        assert!(!err_s.contains("drop me"), "{err_s}");
+        assert!(err_s.contains("keep me") && err_s.contains("err always kept"), "{err_s}");
     }
 }
