@@ -70,6 +70,135 @@ fn name_within_macro_namespace(name: &str, macro_name: &str) -> bool {
     false
 }
 
+static REGISTERED_TRANSITIONS: Mutex<Vec<Value>> = Mutex::new(Vec::new());
+
+fn register_transition_struct(mut fields: BTreeMap<String, Value>) -> Value {
+    let mut reg = REGISTERED_TRANSITIONS.lock().unwrap();
+    let idx = reg.len();
+    fields.insert(
+        "and_then".into(),
+        Value::BuiltinFunction(format!("host:transition_and_then:{idx}")),
+    );
+    let val = Value::Struct(Arc::new(StructValue::new(fields)));
+    reg.push(val.clone());
+    val
+}
+
+fn is_transition_value(v: &Value) -> bool {
+    match v {
+        Value::Struct(s) => {
+            s.fields.contains_key("_transition")
+                || s.fields.contains_key("_analysis_test_transition")
+                || s.fields.contains_key("_composed_transitions")
+                || matches!(
+                    s.fields.get("_build_setting"),
+                    Some(Value::String(k)) if matches!(k.as_str(), "exec" | "target" | "none")
+                )
+        }
+        _ => false,
+    }
+}
+
+fn flatten_transition_chain(v: &Value) -> Vec<Value> {
+    if let Value::Struct(s) = v {
+        if let Some(Value::List(l)) = s.fields.get("_composed_transitions") {
+            return l.lock().unwrap().elements.clone();
+        }
+    }
+    vec![v.clone()]
+}
+
+fn validate_transition_option_key(
+    key: &str,
+    cctx: &ConvertCtx<'_>,
+    allow_experimental: bool,
+    disabled_on: &[String],
+) -> Result<String, String> {
+    if let Some(opt) = key.strip_prefix("//command_line_option:") {
+        if opt.is_empty() || opt.contains(':') || opt.contains('/') {
+            return Err(format!(
+                "invalid transition option '{key}': invalid command line option name '{opt}'"
+            ));
+        }
+        if disabled_on.iter().any(|d| d == opt) {
+            return Err(format!(
+                "cannot transition on --{opt}: disabled by --incompatible_disable_transitions_on"
+            ));
+        }
+        if !allow_experimental
+            && (opt.starts_with("experimental_") || opt.starts_with("incompatible_"))
+            && opt != "incompatible_enable_cc_toolchain_resolution"
+            && opt != "incompatible_enable_apple_toolchain_resolution"
+        {
+            return Err(format!(
+                "Invalid transition input/output '{key}'. Cannot transition on --experimental_* or --incompatible_* options"
+            ));
+        }
+        Ok(format!("//command_line_option:{opt}"))
+    } else {
+        let lbl = convert_label(key, cctx)
+            .map_err(|e| format!("invalid transition setting '{key}': {e}"))?;
+        if lbl.package_name() == "command_line_option" && lbl.repository().is_main() {
+            return validate_transition_option_key(
+                &format!("//command_line_option:{}", lbl.name()),
+                cctx,
+                allow_experimental,
+                disabled_on,
+            );
+        }
+        Ok(lbl.canonical_form())
+    }
+}
+
+fn is_valid_configuration_field(fragment: &str, name: &str) -> bool {
+    let valid_fields: Option<&[&str]> = match fragment {
+        "apple" => Some(&["xcode_config_label"]),
+        "bazel_py" | "py" => Some(&["python_top", "native_rules_allowlist"]),
+        "coverage" => Some(&["output_generator"]),
+        "cpp" => Some(&[
+            "cc_toolchain",
+            "crosstool_top",
+            "custom_malloc",
+            "malloc",
+            "stl",
+            "libc_top",
+            "fdo_optimize",
+            "fdo_profile",
+            "cs_fdo_profile",
+            "fdo_prefetch_hints",
+            "propeller_optimize",
+            "xbinary_fdo",
+            "memprof_profile",
+            "proto_profile_path",
+            "zipper",
+            "lcov_merger",
+        ]),
+        "java" => Some(&[
+            "java_runtime",
+            "java_toolchain",
+            "launcher",
+            "java_plugins",
+            "plugin",
+            "bytecode_optimizer",
+            "java_toolchain_bytecode_optimizer",
+            "local_java_optimization_configuration",
+            "split_bytecode_optimization_pass",
+        ]),
+        "j2objc" => Some(&["jre_deps"]),
+        "objc" => Some(&["signing_certificate_name", "xcode_config_label"]),
+        "proto" => Some(&[
+            "proto_compiler",
+            "proto_toolchain_for_java",
+            "proto_toolchain_for_java_lite",
+            "proto_toolchain_for_javalite",
+            "proto_toolchain_for_cc",
+        ]),
+        "android" => Some(&["android_sdk_label"]),
+        _ => None,
+    };
+    valid_fields.is_some_and(|fields| fields.contains(&name))
+}
+
 /// `StarlarkNativeModule.starlarkifyValue` for `existing_rule(s)`.
 fn starlarkify(v: &AttrValue, pkg: &PackageIdentifier) -> Option<Value> {
     fn lab(l: &Label, pkg: &PackageIdentifier) -> Value {
@@ -77,25 +206,70 @@ fn starlarkify(v: &AttrValue, pkg: &PackageIdentifier) -> Option<Value> {
             Value::String(format!(":{}", l.name()))
         } else if l.repository() == pkg.repository() {
             Value::String(format!("//{}:{}", l.package_name(), l.name()))
+        } else if l.repository().is_main() {
+            Value::String(format!("@@//{}:{}", l.package_name(), l.name()))
         } else {
             Value::String(l.canonical_form())
         }
     }
-    Some(match v {
-        AttrValue::Label(Some(l)) | AttrValue::Output(Some(l)) => lab(l, pkg),
-        AttrValue::Label(None) | AttrValue::Output(None) => return None,
-        AttrValue::LabelList(l) | AttrValue::OutputList(l) => {
-            Value::Tuple(l.iter().map(|x| lab(x, pkg)).collect())
-        }
-        AttrValue::StrList(l) => Value::Tuple(l.iter().map(|s| Value::String(s.clone())).collect()),
-        AttrValue::LabelKeyedStrDict(d) => mk_dict(
-            d.iter()
-                .map(|(k, v)| (lab(k, pkg), Value::String(v.clone())))
-                .collect(),
-        ),
-        AttrValue::Tristate(t) => int(i64::from(*t)),
-        other => other.to_value(),
-    })
+    fn inner(v: &AttrValue, pkg: &PackageIdentifier) -> Option<Value> {
+        Some(match v {
+            AttrValue::Label(Some(l)) | AttrValue::Output(Some(l)) => lab(l, pkg),
+            AttrValue::Label(None) | AttrValue::Output(None) => return None,
+            AttrValue::LabelList(l) | AttrValue::OutputList(l) => {
+                Value::Tuple(l.iter().map(|x| lab(x, pkg)).collect())
+            }
+            AttrValue::StrList(l) => {
+                Value::Tuple(l.iter().map(|s| Value::String(s.clone())).collect())
+            }
+            AttrValue::IntList(l) => Value::Tuple(l.iter().map(|i| int(*i)).collect()),
+            AttrValue::LabelKeyedStrDict(d) => mk_dict(
+                d.iter()
+                    .map(|(k, v)| (lab(k, pkg), Value::String(v.clone())))
+                    .collect(),
+            ),
+            AttrValue::StrKeyedLabelDict(d) => mk_dict(
+                d.iter()
+                    .map(|(k, v)| (Value::String(k.clone()), lab(v, pkg)))
+                    .collect(),
+            ),
+            AttrValue::LabelListDict(d) => mk_dict(
+                d.iter()
+                    .map(|(k, v)| {
+                        (
+                            Value::String(k.clone()),
+                            Value::Tuple(v.iter().map(|x| lab(x, pkg)).collect()),
+                        )
+                    })
+                    .collect(),
+            ),
+            AttrValue::Select(parts) => {
+                let mut elems = Vec::with_capacity(parts.len());
+                for p in parts {
+                    match p {
+                        SelectPart::Plain(pv) => {
+                            if let Some(sv) = inner(pv, pkg) {
+                                elems.push(zel_starlark::SelectorElement::Native(sv));
+                            }
+                        }
+                        SelectPart::Select { entries, .. } => {
+                            let map = entries
+                                .iter()
+                                .map(|(cond, ev)| {
+                                    (cond.canonical_form(), inner(ev, pkg).unwrap_or(Value::None))
+                                })
+                                .collect();
+                            elems.push(zel_starlark::SelectorElement::Select(map));
+                        }
+                    }
+                }
+                Value::SelectorList(zel_starlark::SelectorList { elements: elems })
+            }
+            AttrValue::Tristate(t) => int(i64::from(*t)),
+            other => other.to_value(),
+        })
+    }
+    inner(v, pkg)
 }
 
 impl PackageLoader {
@@ -158,6 +332,80 @@ impl PackageLoader {
             }
             return Ok(Value::None);
         }
+        if let Some(id_str) = name.strip_prefix("pkg_spec_contains:") {
+            if pos.len() + kw.len() != 1 {
+                return Err(herr(
+                    ctx,
+                    "PackageSpecificationInfo.contains() requires exactly 1 argument (target)",
+                ));
+            }
+            let arg_val = pos
+                .first()
+                .or_else(|| kw.get("target"))
+                .ok_or_else(|| herr(ctx, "PackageSpecificationInfo.contains() missing argument 'target'"))?;
+            let (pkg, mapping) = match ctx.current_label_ctx() {
+                Some((p, m)) => (p, m),
+                None => (owner.clone(), self.cfg.lookup.resolver.mapping(owner.repository())),
+            };
+            let cctx = ConvertCtx {
+                pkg: &pkg,
+                mapping: &mapping,
+                rule_class: "PackageSpecificationInfo.contains",
+            };
+            let target_lbl = match arg_val {
+                Value::Label(l) => l.clone(),
+                Value::String(s) => convert_label(s, &cctx).map_err(|e| herr(ctx, e))?,
+                Value::Struct(st) => match st.fields.get("label") {
+                    Some(Value::Label(l)) => l.clone(),
+                    _ => {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch("target", arg_val, "Label, string, or Target", "contains"),
+                        ))
+                    }
+                },
+                _ => {
+                    return Err(herr(
+                        ctx,
+                        type_mismatch("target", arg_val, "Label, string, or Target", "contains"),
+                    ))
+                }
+            };
+            let ok = crate::pkg_spec::package_spec_groups_contain(
+                id_str,
+                target_lbl.package_identifier(),
+            );
+            return Ok(Value::Bool(ok));
+        }
+        if let Some(idx_str) = name.strip_prefix("transition_and_then:") {
+            if !kw.is_empty() || pos.len() != 1 {
+                return Err(herr(
+                    ctx,
+                    "and_then() accepts exactly 1 positional argument",
+                ));
+            }
+            let idx: usize = idx_str.parse().unwrap_or(usize::MAX);
+            let first = REGISTERED_TRANSITIONS
+                .lock()
+                .unwrap()
+                .get(idx)
+                .cloned()
+                .ok_or_else(|| herr(ctx, "invalid transition handle"))?;
+            let second = &pos[0];
+            if !is_transition_value(second) {
+                return Err(herr(
+                    ctx,
+                    type_mismatch("transition", second, "transition", "and_then"),
+                ));
+            }
+            let mut chain = flatten_transition_chain(&first);
+            chain.extend(flatten_transition_chain(second));
+            let mut f = BTreeMap::new();
+            f.insert("_composed_transitions".into(), mk_list(chain));
+            f.insert("_transition".into(), Value::Bool(true));
+            f.insert("location".into(), Value::String(fmt_loc(&ctx.last_call_loc)));
+            return Ok(register_transition_struct(f));
+        }
         if name == "visibility" {
             return self.set_bzl_visibility(ctx, state, bzl_init, owner, pos, kw);
         }
@@ -187,58 +435,49 @@ impl PackageLoader {
                 if is_exec_tr && pkg.repository().name() != "_builtins" {
                     return Err(herr(
                         ctx,
-                        "exec_transition() can only be used in @_builtins",
+                        format!("file '{}' cannot use private @_builtins API", ctx.file_name),
+                    ));
+                }
+                if pos.len() > 1 {
+                    return Err(herr(
+                        ctx,
+                        format!("{name}() accepts no more than 1 positional argument but got {}", pos.len()),
+                    ));
+                }
+                if !pos.is_empty() && kw.contains_key("implementation") {
+                    return Err(herr(
+                        ctx,
+                        format!("{name}() got multiple values for argument 'implementation'"),
                     ));
                 }
                 check_kwargs(name, &kw, &["implementation", "inputs", "outputs"])
                     .map_err(|e| herr(ctx, e))?;
-                let imp = arg(&pos, &kw, 0, "implementation").cloned().ok_or_else(|| {
-                    herr(
-                        ctx,
-                        format!("{name}() missing 1 required positional argument: implementation"),
-                    )
+                let implementation = arg(&pos, &kw, 0, "implementation").cloned().ok_or_else(|| {
+                    herr(ctx, format!("{name}() missing 1 required positional argument: implementation"))
                 })?;
-                let inputs_val = arg(&pos, &kw, 1, "inputs").cloned().ok_or_else(|| {
-                    herr(
+                if !matches!(implementation, Value::UserFunction(_) | Value::BuiltinFunction(_)) {
+                    return Err(herr(
                         ctx,
-                        format!("{name}() missing 1 required keyword-only argument: inputs"),
-                    )
+                        type_mismatch("implementation", &implementation, "function", name),
+                    ));
+                }
+                let inputs_val = kw.get("inputs").cloned().ok_or_else(|| {
+                    herr(ctx, format!("{name}() missing 1 required named argument: inputs"))
                 })?;
-                let outputs_val = arg(&pos, &kw, 2, "outputs").cloned().ok_or_else(|| {
-                    herr(
-                        ctx,
-                        format!("{name}() missing 1 required keyword-only argument: outputs"),
-                    )
+                let outputs_val = kw.get("outputs").cloned().ok_or_else(|| {
+                    herr(ctx, format!("{name}() missing 1 required named argument: outputs"))
                 })?;
-                let inputs_list = sl_values(&inputs_val)
-                    .map_err(|e| herr(ctx, format!("in call to {name}(), parameter 'inputs' {e}")))?;
-                let outputs_list = sl_values(&outputs_val)
-                    .map_err(|e| herr(ctx, format!("in call to {name}(), parameter 'outputs' {e}")))?;
-                let validate_keys = |keys: &[String], kind_label: &str| -> Result<(), zel_starlark::StarlarkError> {
-                    let mut seen = std::collections::HashSet::new();
-                    for raw in keys {
-                        if !seen.insert(raw.as_str()) {
-                            return Err(herr(
-                                ctx,
-                                format!("duplicate transition {kind_label} '{raw}'"),
-                            ));
-                        }
-                        if let Some(opt) = raw.strip_prefix("//command_line_option:") {
-                            if !is_exec_tr
-                                && (opt.starts_with("experimental_") || opt.starts_with("incompatible_"))
-                                && opt != "incompatible_enable_cc_toolchain_resolution"
-                                && opt != "incompatible_enable_apple_toolchain_resolution"
-                            {
-                                return Err(herr(
-                                    ctx,
-                                    format!(
-                                        "Invalid transition {kind_label} '{raw}'. Cannot transition on --experimental_* or --incompatible_* options"
-                                    ),
-                                ));
-                            }
-                        } else {
-                            let lbl = Label::parse_with_package_context(raw, &pkg, &mapping)
-                                .map_err(|e| herr(ctx, format!("invalid transition {kind_label} '{raw}': {e}")))?;
+                let raw_inputs = str_list_arg(&inputs_val, "'inputs'").map_err(|e| herr(ctx, e))?;
+                let raw_outputs =
+                    str_list_arg(&outputs_val, "'outputs'").map_err(|e| herr(ctx, e))?;
+                let cctx = ConvertCtx {
+                    pkg: &pkg,
+                    mapping: &mapping,
+                    rule_class: name,
+                };
+                let check_repo_visible = |raw: &str, kind_label: &str| -> Result<(), zel_starlark::StarlarkError> {
+                    if !raw.starts_with("//command_line_option:") {
+                        if let Ok(lbl) = Label::parse_with_package_context(raw, &pkg, &mapping) {
                             if raw.starts_with('@')
                                 && !raw.starts_with("@@")
                                 && !raw.starts_with("@//")
@@ -260,10 +499,42 @@ impl PackageLoader {
                     }
                     Ok(())
                 };
-                validate_keys(&inputs_list, "input")?;
-                validate_keys(&outputs_list, "output")?;
+                let mut seen_in = BTreeSet::new();
+                for inp in &raw_inputs {
+                    check_repo_visible(inp, "input")?;
+                    let canon = validate_transition_option_key(
+                        inp,
+                        &cctx,
+                        is_exec_tr,
+                        &self.cfg.incompatible_disable_transitions_on,
+                    )
+                    .map_err(|e| herr(ctx, e))?;
+                    if !seen_in.insert(canon) {
+                        return Err(herr(
+                            ctx,
+                            format!("duplicate transition input '{inp}'"),
+                        ));
+                    }
+                }
+                let mut seen_out = BTreeSet::new();
+                for out in &raw_outputs {
+                    check_repo_visible(out, "output")?;
+                    let canon = validate_transition_option_key(
+                        out,
+                        &cctx,
+                        is_exec_tr,
+                        &self.cfg.incompatible_disable_transitions_on,
+                    )
+                    .map_err(|e| herr(ctx, e))?;
+                    if !seen_out.insert(canon) {
+                        return Err(herr(
+                            ctx,
+                            format!("duplicate transition output '{out}'"),
+                        ));
+                    }
+                }
                 let mut f: BTreeMap<String, Value> = BTreeMap::new();
-                f.insert("implementation".into(), imp);
+                f.insert("implementation".into(), implementation);
                 f.insert("inputs".into(), inputs_val);
                 f.insert("outputs".into(), outputs_val);
                 f.insert("_defining_pkg".into(), Value::String(pkg.canonical_form()));
@@ -278,7 +549,7 @@ impl PackageLoader {
                 }
                 // `StarlarkDefinedConfigTransition.getLocation()` (printed by `cquery --transitions`).
                 f.insert("location".into(), Value::String(fmt_loc(&ctx.last_call_loc)));
-                return Ok(Value::Struct(Arc::new(StructValue::new(f))));
+                return Ok(register_transition_struct(f));
             }
             "config_common.config_feature_flag_transition" => {
                 check_kwargs("config_feature_flag_transition", &kw, &["attribute"])
@@ -433,16 +704,60 @@ impl PackageLoader {
                 return self.instantiate_rule(ctx, st, &rc_arc, &[], inst_kw);
             }
             "analysis_test_transition" => {
-                let settings = arg(&pos, &kw, 0, "settings").cloned().ok_or_else(|| {
-                    herr(ctx, "analysis_test_transition() missing 1 required positional argument: settings")
-                })?;
-                if !matches!(settings, Value::Dict(_)) {
-                    return Err(herr(ctx, type_mismatch("settings", &settings, "dict", "analysis_test_transition")));
+                if !pos.is_empty() {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "analysis_test_transition() accepts no positional arguments (got {})",
+                            pos.len()
+                        ),
+                    ));
                 }
+                check_kwargs("analysis_test_transition", &kw, &["settings"])
+                    .map_err(|e| herr(ctx, e))?;
+                let settings = kw.get("settings").cloned().ok_or_else(|| {
+                    herr(
+                        ctx,
+                        "analysis_test_transition() missing 1 required named argument: settings",
+                    )
+                })?;
+                let Value::Dict(sd) = &settings else {
+                    return Err(herr(
+                        ctx,
+                        type_mismatch("settings", &settings, "dict", "analysis_test_transition"),
+                    ));
+                };
                 let (pkg, mapping) = match ctx.current_label_ctx() {
                     Some((p, m)) => (p, m),
                     None => (owner.clone(), self.cfg.lookup.resolver.mapping(owner.repository())),
                 };
+                let cctx = ConvertCtx {
+                    pkg: &pkg,
+                    mapping: &mapping,
+                    rule_class: "analysis_test_transition",
+                };
+                let mut seen = BTreeSet::new();
+                for (k, _) in sd.lock().unwrap().items() {
+                    let Value::String(ks) = k else {
+                        return Err(herr(
+                            ctx,
+                            "analysis_test_transition settings keys must be strings",
+                        ));
+                    };
+                    let canon = validate_transition_option_key(
+                        &ks,
+                        &cctx,
+                        false,
+                        &self.cfg.incompatible_disable_transitions_on,
+                    )
+                    .map_err(|e| herr(ctx, e))?;
+                    if !seen.insert(canon) {
+                        return Err(herr(
+                            ctx,
+                            format!("duplicate analysis_test_transition setting '{ks}'"),
+                        ));
+                    }
+                }
                 let mut f: BTreeMap<String, Value> = BTreeMap::new();
                 f.insert("settings".into(), settings);
                 f.insert("_defining_pkg".into(), Value::String(pkg.canonical_form()));
@@ -452,13 +767,57 @@ impl PackageLoader {
                 }
                 f.insert("_repo_map".into(), Value::Dict(Arc::new(Mutex::new(rm))));
                 f.insert("_analysis_test_transition".into(), Value::Bool(true));
-                return Ok(Value::Struct(Arc::new(StructValue::new(f))));
+                return Ok(register_transition_struct(f));
+            }
+            "config_common.config_feature_flag_transition" => {
+                let attr_name = arg(&pos, &kw, 0, "attribute")
+                    .cloned()
+                    .ok_or_else(|| {
+                        herr(
+                            ctx,
+                            "config_feature_flag_transition() missing 1 required argument: attribute",
+                        )
+                    })?;
+                let Value::String(attr_str) = attr_name else {
+                    return Err(herr(
+                        ctx,
+                        type_mismatch(
+                            "attribute",
+                            &attr_name,
+                            "string",
+                            "config_feature_flag_transition",
+                        ),
+                    ));
+                };
+                let mut f = BTreeMap::new();
+                f.insert("_feature_flag_transition_attr".into(), Value::String(attr_str));
+                f.insert("_transition".into(), Value::Bool(true));
+                f.insert("location".into(), Value::String(fmt_loc(&ctx.last_call_loc)));
+                return Ok(register_transition_struct(f));
             }
             "configuration_field" => {
+                check_kwargs("configuration_field", &kw, &["fragment", "name"])
+                    .map_err(|e| herr(ctx, e))?;
+                if pos.len() > 2 {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "configuration_field() accepts no more than 2 positional arguments (got {})",
+                            pos.len()
+                        ),
+                    ));
+                }
                 let mut f: BTreeMap<String, Value> = BTreeMap::new();
+                let mut frag_str = String::new();
+                let mut name_str = String::new();
                 for (i, k) in ["fragment", "name"].iter().enumerate() {
                     match arg(&pos, &kw, i, k) {
-                        Some(v @ Value::String(_)) => {
+                        Some(v @ Value::String(s)) => {
+                            if *k == "fragment" {
+                                frag_str = s.clone();
+                            } else {
+                                name_str = s.clone();
+                            }
                             f.insert((*k).to_string(), v.clone());
                         }
                         _ => {
@@ -468,6 +827,14 @@ impl PackageLoader {
                             ))
                         }
                     }
+                }
+                if !is_valid_configuration_field(&frag_str, &name_str) {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "invalid configuration field '{name_str}' on fragment '{frag_str}'"
+                        ),
+                    ));
                 }
                 f.insert("_configuration_field".into(), Value::Bool(true));
                 return Ok(Value::Struct(Arc::new(StructValue::new(f))));
@@ -483,33 +850,28 @@ impl PackageLoader {
             "config_common.toolchain_type" => {
                 check_kwargs("toolchain_type", &kw, &["name", "mandatory"])
                     .map_err(|e| herr(ctx, e))?;
+                if pos.len() > 1 {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "toolchain_type() accepts no more than 1 positional argument but got {}",
+                            pos.len()
+                        ),
+                    ));
+                }
+                if !pos.is_empty() && kw.contains_key("name") {
+                    return Err(herr(
+                        ctx,
+                        "toolchain_type() got multiple values for argument 'name'",
+                    ));
+                }
                 let raw_name = arg(&pos, &kw, 0, "name").ok_or_else(|| {
                     herr(
                         ctx,
                         "toolchain_type() missing 1 required positional argument: name",
                     )
                 })?;
-                let (pkg, mapping) = match ctx.current_label_ctx() {
-                    Some((p, m)) => (p, m),
-                    None => (owner.clone(), self.cfg.lookup.resolver.mapping(owner.repository())),
-                };
-                let tc_lbl = match raw_name {
-                    Value::Label(l) => l.clone(),
-                    Value::String(s) => Label::parse_with_package_context(s, &pkg, &mapping)
-                        .map_err(|e| {
-                            herr(
-                                ctx,
-                                format!("Unable to parse toolchain_type label '{s}': {e}"),
-                            )
-                        })?,
-                    other => {
-                        return Err(herr(
-                            ctx,
-                            type_mismatch("name", other, "string or Label", "toolchain_type"),
-                        ))
-                    }
-                };
-                let mandatory = match arg(&pos, &kw, 1, "mandatory") {
+                let mandatory = match kw.get("mandatory") {
                     None => true,
                     Some(Value::Bool(b)) => *b,
                     Some(other) => {
@@ -519,13 +881,133 @@ impl PackageLoader {
                         ))
                     }
                 };
+                let (pkg, mapping) = match ctx.current_label_ctx() {
+                    Some((p, m)) => (p, m),
+                    None => (owner.clone(), self.cfg.lookup.resolver.mapping(owner.repository())),
+                };
+                let cctx = ConvertCtx {
+                    pkg: &pkg,
+                    mapping: &mapping,
+                    rule_class: "toolchain_type",
+                };
+                let lbl = match raw_name {
+                    Value::Label(l) => l.clone(),
+                    Value::String(s) => convert_label(s, &cctx).map_err(|e| herr(ctx, e))?,
+                    other => {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch("name", other, "Label or string", "toolchain_type"),
+                        ))
+                    }
+                };
                 let mut f: BTreeMap<String, Value> = BTreeMap::new();
-                f.insert("toolchain_type".into(), Value::Label(tc_lbl));
+                f.insert("toolchain_type".into(), Value::Label(lbl.clone()));
+                f.insert("name".into(), Value::Label(lbl));
                 f.insert("mandatory".into(), Value::Bool(mandatory));
+                f.insert("_toolchain_type".into(), Value::Bool(true));
                 return Ok(Value::Struct(Arc::new(StructValue::new(f))));
             }
             n if n.starts_with("config.") => {
                 return self.config_fn(ctx, &n[7..], pos, kw);
+            }
+            "testing.analysis_test" => {
+                let Some(st) = state else {
+                    return Err(herr(
+                        ctx,
+                        "analysis_test() can only be used while evaluating a BUILD file (and macros called from it)",
+                    ));
+                };
+                if !pos.is_empty() {
+                    return Err(herr(
+                        ctx,
+                        "analysis_test() accepts keyword-only arguments",
+                    ));
+                }
+                check_kwargs(
+                    "analysis_test",
+                    &kw,
+                    &[
+                        "name",
+                        "implementation",
+                        "attrs",
+                        "fragments",
+                        "toolchains",
+                        "attr_values",
+                    ],
+                )
+                .map_err(|e| herr(ctx, e))?;
+                let Some(Value::String(tname)) = kw.get("name").cloned() else {
+                    return Err(herr(
+                        ctx,
+                        "analysis_test() missing or non-string required argument 'name'",
+                    ));
+                };
+                let valid_ident = !tname.is_empty()
+                    && tname
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && tname.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid_ident {
+                    return Err(herr(
+                        ctx,
+                        format!("'name' ('{tname}') must be a valid Starlark identifier"),
+                    ));
+                }
+                let mut call_kw = BTreeMap::new();
+                if let Some(av) = kw.get("attr_values") {
+                    let Value::Dict(d) = av else {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch("attr_values", av, "dict", "analysis_test"),
+                        ));
+                    };
+                    for (k, v) in d.lock().unwrap().items() {
+                        let Value::String(ks) = k else {
+                            return Err(herr(ctx, "attr_values keys must be strings"));
+                        };
+                        if ks == "name" {
+                            return Err(herr(
+                                ctx,
+                                "'name' cannot be set or overridden in 'attr_values'",
+                            ));
+                        }
+                        call_kw.insert(ks, v);
+                    }
+                }
+                call_kw.insert("name".into(), Value::String(tname.clone()));
+                let mut rule_kw = BTreeMap::new();
+                if let Some(imp) = kw.get("implementation") {
+                    rule_kw.insert("implementation".into(), imp.clone());
+                } else {
+                    return Err(herr(
+                        ctx,
+                        "analysis_test() missing 1 required named argument: implementation",
+                    ));
+                }
+                if let Some(a) = kw.get("attrs") {
+                    rule_kw.insert("attrs".into(), a.clone());
+                }
+                if let Some(fr) = kw.get("fragments") {
+                    rule_kw.insert("fragments".into(), fr.clone());
+                }
+                if let Some(tc) = kw.get("toolchains") {
+                    rule_kw.insert("toolchains".into(), tc.clone());
+                }
+                rule_kw.insert("analysis_test".into(), Value::Bool(true));
+                rule_kw.insert("test".into(), Value::Bool(true));
+                let rule_val = self.define_rule(ctx, owner, Vec::new(), rule_kw)?;
+                let rc_name = if tname.ends_with("_test") {
+                    tname.clone()
+                } else {
+                    format!("{tname}_test")
+                };
+                let bzl_lbl = Label::create(owner.clone(), "BUILD").unwrap_or_else(|_| {
+                    Label::parse_canonical("//:BUILD").unwrap()
+                });
+                self.export_bzl_symbol(&rc_name, &rule_val, &bzl_lbl, None)
+                    .map_err(|e| herr(ctx, e))?;
+                return self.call_starlark_rule(ctx, Some(st), vec![rule_val], call_kw);
             }
             "call:provider" => return crate::provider::call_provider(ctx, false, pos, kw),
             "call:provider_raw" => return crate::provider::call_provider(ctx, true, pos, kw),
@@ -788,6 +1270,12 @@ impl PackageLoader {
                 }
                 let flag = bool_arg(Some(0), "flag")?;
                 let allow_multiple = bool_arg(None, "allow_multiple")?;
+                if allow_multiple && !flag {
+                    return Err(herr(
+                        ctx,
+                        "'allow_multiple' can only be set if 'flag' is also set",
+                    ));
+                }
                 f.insert("flag".into(), Value::Bool(flag));
                 f.insert("allow_multiple".into(), Value::Bool(allow_multiple));
             }
@@ -831,7 +1319,9 @@ impl PackageLoader {
                     ));
                 }
                 match pos.first().or_else(|| kw.get("exec_group")) {
-                    None | Some(Value::None) => {}
+                    None | Some(Value::None) => {
+                        f.insert("exec_group".into(), Value::None);
+                    }
                     Some(Value::String(s)) => {
                         f.insert("exec_group".into(), Value::String(s.clone()));
                     }
@@ -842,12 +1332,14 @@ impl PackageLoader {
                         ))
                     }
                 }
+                return Ok(register_transition_struct(f));
             }
             "target" | "none" => {
                 check_kwargs(&fname, &kw, &[]).map_err(|e| herr(ctx, e))?;
                 if !pos.is_empty() {
                     return Err(herr(ctx, format!("{fname}() accepts no positional arguments")));
                 }
+                return Ok(register_transition_struct(f));
             }
             other => return Err(herr(ctx, format!("unknown config function 'config.{other}'"))),
         }
@@ -1529,6 +2021,13 @@ impl PackageLoader {
             }
         }
         for n in ordered_names {
+            if !r.extra.attr_values.contains_key(&n) {
+                if let Some(attr) = rc.and_then(|c| c.attr(&n)) {
+                    if attr.computed_default.is_some() || attr.late_bound.is_some() {
+                        continue;
+                    }
+                }
+            }
             let Some(v) = r.attr_or_default(&n) else { continue };
             if let Some(val) = starlarkify(&v, &s.id) {
                 items.push((Value::String(n), val));
@@ -1547,7 +2046,7 @@ impl PackageLoader {
         st: &Arc<Mutex<PackageState>>,
         rc: &Arc<RuleClass>,
         pos: &[Value],
-        kw: BTreeMap<String, Value>,
+        mut kw: BTreeMap<String, Value>,
     ) -> HostResult {
         if !pos.is_empty() {
             return Err(herr(ctx, format!("{}() accepts no positional arguments", rc.name)));
@@ -1559,35 +2058,6 @@ impl PackageLoader {
                     ctx,
                     "environment() cannot be instantiated inside a symbolic macro",
                 ));
-            }
-        }
-        let mut kw = kw;
-        if let Some(spec) = &rc.starlark {
-            for init_fn in &spec.initializers {
-                let init_res = ctx.call_value(init_fn.clone(), Vec::new(), kw.clone())?;
-                match init_res {
-                    Value::None => {}
-                    Value::Dict(d) => {
-                        for (k, v) in d.lock().unwrap().items() {
-                            let Value::String(k) = k else {
-                                return Err(herr(
-                                    ctx,
-                                    "initializer return value must be a dict with string keys",
-                                ));
-                            };
-                            kw.insert(k, v);
-                        }
-                    }
-                    other => {
-                        return Err(herr(
-                            ctx,
-                            format!(
-                                "got {} for 'initializer return value', want dict or NoneType",
-                                other.type_name()
-                            ),
-                        ))
-                    }
-                }
             }
         }
         let loc = fmt_loc(&ctx.last_call_loc);
@@ -2213,26 +2683,200 @@ impl PackageLoader {
         pos: Vec<Value>,
         kw: BTreeMap<String, Value>,
     ) -> HostResult {
+        if (kind == "dormant_label" || kind == "dormant_label_list")
+            && !self.cfg.experimental_dormant_deps
+        {
+            return Err(herr(
+                ctx,
+                format!("attr.{kind}() requires --experimental_dormant_deps"),
+            ));
+        }
+        if kind == "license" && self.cfg.incompatible_no_attr_license {
+            return Err(herr(
+                ctx,
+                "attr.license() is disabled by --incompatible_no_attr_license",
+            ));
+        }
         let allowed: &[&str] = match kind {
-            "int" | "string" | "bool" => &["default", "doc", "mandatory", "values", "configurable"],
-            "string_list" | "int_list" => &["mandatory", "allow_empty", "default", "doc", "configurable"],
-            "string_dict" | "string_list_dict" => &["allow_empty", "mandatory", "default", "doc", "configurable"],
+            "int" | "string" => &["default", "doc", "mandatory", "values", "configurable"],
+            "bool" | "license" => &["default", "doc", "mandatory", "configurable"],
+            "string_list" | "int_list" => &[
+                "mandatory",
+                "allow_empty",
+                "default",
+                "doc",
+                "configurable",
+            ],
+            "string_dict" | "string_list_dict" => &[
+                "allow_empty",
+                "mandatory",
+                "default",
+                "doc",
+                "configurable",
+            ],
             "label" => &[
-                "default", "doc", "executable", "allow_files", "allow_single_file", "mandatory",
-                "providers", "allow_rules", "cfg", "aspects", "flags", "configurable",
+                "default",
+                "doc",
+                "executable",
+                "allow_files",
+                "allow_single_file",
+                "mandatory",
+                "providers",
+                "allow_rules",
+                "cfg",
+                "aspects",
+                "flags",
+                "configurable",
+                "skip_validations",
+                "materializer",
+                "for_dependency_resolution",
             ],
-            "label_list" | "label_keyed_string_dict" | "string_keyed_label_dict" => &[
-                "allow_empty", "default", "doc", "allow_files", "allow_rules", "providers", "flags",
-                "mandatory", "cfg", "aspects", "configurable",
+            "label_list" => &[
+                "allow_empty",
+                "default",
+                "doc",
+                "allow_files",
+                "allow_rules",
+                "providers",
+                "flags",
+                "mandatory",
+                "cfg",
+                "aspects",
+                "configurable",
+                "skip_validations",
+                "materializer",
+                "for_dependency_resolution",
             ],
-            "output" => &["doc", "mandatory", "configurable"],
-            "output_list" => &["allow_empty", "doc", "mandatory", "configurable"],
+            "label_keyed_string_dict" => &[
+                "allow_empty",
+                "default",
+                "doc",
+                "allow_files",
+                "allow_rules",
+                "providers",
+                "flags",
+                "mandatory",
+                "cfg",
+                "aspects",
+                "configurable",
+                "skip_validations",
+                "for_dependency_resolution",
+            ],
+            "string_keyed_label_dict" | "label_list_dict" => &[
+                "allow_empty",
+                "default",
+                "doc",
+                "allow_files",
+                "allow_rules",
+                "providers",
+                "flags",
+                "mandatory",
+                "cfg",
+                "aspects",
+                "configurable",
+                "for_dependency_resolution",
+            ],
+            "dormant_label" => &["default", "doc", "mandatory", "configurable"],
+            "dormant_label_list" => &["allow_empty", "default", "doc", "mandatory", "configurable"],
+            "output" => &["doc", "mandatory"],
+            "output_list" => &["allow_empty", "doc", "mandatory"],
             other => {
-                return Err(herr(ctx, format!("attr.{other}() is not supported by this loader")))
+                return Err(herr(
+                    ctx,
+                    format!("attr.{other}() is not supported by this loader"),
+                ))
             }
         };
         let fname = format!("attr.{kind}");
         check_kwargs(&fname, &kw, allowed).map_err(|e| herr(ctx, e))?;
+        if !pos.is_empty() && (!allowed.contains(&"default") || pos.len() > 1) {
+            return Err(herr(
+                ctx,
+                format!("{fname}() got unexpected positional argument"),
+            ));
+        }
+        for bkey in ["mandatory", "allow_empty", "executable", "skip_validations"] {
+            if let Some(v) = kw.get(bkey) {
+                if !matches!(v, Value::Bool(_)) {
+                    return Err(herr(ctx, type_mismatch(bkey, v, "bool", &fname)));
+                }
+            }
+        }
+        if let Some(v) = kw.get("configurable") {
+            if !matches!(v, Value::Bool(_) | Value::None) {
+                return Err(herr(ctx, type_mismatch("configurable", v, "bool", &fname)));
+            }
+        }
+        if let Some(v) = kw.get("doc") {
+            if !matches!(v, Value::String(_) | Value::None) {
+                return Err(herr(ctx, type_mismatch("doc", v, "string or NoneType", &fname)));
+            }
+        }
+        if matches!(kw.get("executable"), Some(Value::Bool(true))) && !kw.contains_key("cfg") {
+            return Err(herr(
+                ctx,
+                "cfg parameter is mandatory when executable=True is provided.",
+            ));
+        }
+        if kw.get("allow_files").is_some_and(|v| !matches!(v, Value::None))
+            && kw
+                .get("allow_single_file")
+                .is_some_and(|v| !matches!(v, Value::None | Value::Bool(false)))
+        {
+            return Err(herr(
+                ctx,
+                "Cannot specify both allow_files and allow_single_file",
+            ));
+        }
+        for skey in ["allow_files", "allow_single_file"] {
+            if let Some(v) = kw.get(skey) {
+                match v {
+                    Value::Bool(_) | Value::None => {}
+                    Value::List(_) | Value::Tuple(_) => {
+                        sl_values(v).map_err(|_| {
+                            herr(
+                                ctx,
+                                type_mismatch(skey, v, "bool or sequence of strings", &fname),
+                            )
+                        })?;
+                    }
+                    other => {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch(skey, other, "bool or sequence of strings", &fname),
+                        ))
+                    }
+                }
+            }
+        }
+        if let Some(v) = kw.get("allow_rules") {
+            if !matches!(v, Value::None) {
+                sl_values(v).map_err(|_| {
+                    herr(ctx, type_mismatch("allow_rules", v, "sequence of strings", &fname))
+                })?;
+            }
+        }
+        if let Some(v) = kw.get("values") {
+            let items = zel_starlark::eval::builtins::value_to_sequence(v)
+                .map_err(|_| herr(ctx, type_mismatch("values", v, "sequence", &fname)))?;
+            for item in &items {
+                match kind {
+                    "string" if !matches!(item, Value::String(_)) => {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch("values", v, "sequence of strings", &fname),
+                        ));
+                    }
+                    "int" if !matches!(item, Value::Int(_)) => {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch("values", v, "sequence of ints", &fname),
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
         let mut fields: BTreeMap<String, Value> = BTreeMap::new();
         fields.insert("_attr_type".into(), Value::String(kind.to_string()));
         if let Some(d) = pos.first() {
@@ -2243,20 +2887,54 @@ impl PackageLoader {
         for (k, v) in kw {
             fields.insert(k, v);
         }
-        Ok(Value::Struct(Arc::new(StructValue::new(fields))))
+        Ok(Value::Host(
+            "attribute".to_string(),
+            serde_attr_id(fields),
+        ))
     }
+}
 
+static ATTR_DEFS: Mutex<Vec<Arc<StructValue>>> = Mutex::new(Vec::new());
+
+fn serde_attr_id(fields: BTreeMap<String, Value>) -> String {
+    let mut reg = ATTR_DEFS.lock().unwrap();
+    let idx = reg.len();
+    reg.push(Arc::new(StructValue::new(fields)));
+    idx.to_string()
+}
+
+fn resolve_attr_struct(v: &Value) -> Result<Arc<StructValue>, Option<&'static str>> {
+    match v {
+        Value::Host(kind, id) if kind == "attribute" => {
+            let idx: usize = id.parse().map_err(|_| None)?;
+            ATTR_DEFS.lock().unwrap().get(idx).cloned().ok_or(None)
+        }
+        Value::Struct(s) if s.fields.contains_key("_attr_type") => Ok(Arc::clone(s)),
+        Value::Struct(_) => Err(Some("struct")),
+        _ => Err(None),
+    }
+}
+
+impl PackageLoader {
     fn attr_from_value(
         &self,
         name: &str,
         v: &Value,
         pkg: &PackageIdentifier,
     ) -> Result<Attribute, String> {
-        let Value::Struct(s) = v else {
-            return Err(format!(
-                "got {} for dictionary value of attrs entry '{name}', want Attribute",
-                v.type_name()
-            ));
+        let s = match resolve_attr_struct(v) {
+            Ok(s) => s,
+            Err(Some("struct")) => {
+                return Err(format!(
+                    "got struct for dictionary value of attrs entry '{name}', want Attribute"
+                ));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "got {} for dictionary value of attrs entry '{name}', want Attribute",
+                    v.type_name()
+                ));
+            }
         };
         let Some(Value::String(kind)) = s.fields.get("_attr_type") else {
             return Err(format!(
@@ -2267,11 +2945,13 @@ impl PackageLoader {
             "int" => AttrType::Int,
             "string" => AttrType::String,
             "bool" => AttrType::Bool,
+            "license" => AttrType::StringList,
             "string_list" => AttrType::StringList,
             "string_dict" => AttrType::StringDict,
             "string_list_dict" => AttrType::StringListDict,
-            "label" => AttrType::Label,
-            "label_list" => AttrType::LabelList,
+            "label_list_dict" => AttrType::LabelListDict,
+            "label" | "dormant_label" => AttrType::Label,
+            "label_list" | "dormant_label_list" => AttrType::LabelList,
             "label_keyed_string_dict" => AttrType::LabelKeyedStringDict,
             "string_keyed_label_dict" => AttrType::StringKeyedLabelDict,
             "int_list" => AttrType::IntList,
@@ -2280,6 +2960,9 @@ impl PackageLoader {
             other => return Err(format!("unsupported attribute type attr.{other}")),
         };
         let mut a = Attribute::new(name, ty);
+        if let Some(Value::String(doc_str)) = s.fields.get("doc") {
+            a.doc = doc_str.clone();
+        }
         if let Some(Value::Bool(true)) = s.fields.get("mandatory") {
             a.mandatory = true;
         }
@@ -2288,10 +2971,18 @@ impl PackageLoader {
         {
             if !matches!(
                 ty,
-                AttrType::StringList | AttrType::IntList | AttrType::LabelList | AttrType::OutputList
+                AttrType::StringList
+                    | AttrType::IntList
+                    | AttrType::LabelList
+                    | AttrType::OutputList
+                    | AttrType::StringDict
+                    | AttrType::StringListDict
+                    | AttrType::LabelListDict
+                    | AttrType::LabelKeyedStringDict
+                    | AttrType::StringKeyedLabelDict
             ) {
                 return Err(format!(
-                    "attribute '{name}' cannot be non-empty because it is not a list"
+                    "attribute '{name}' cannot be non-empty because it is not a list or dict"
                 ));
             }
             a.non_empty = true;
@@ -2325,13 +3016,20 @@ impl PackageLoader {
             Some(Value::String(c)) if c == "exec" || c == "host" => a.cfg_exec = true,
             Some(Value::String(_)) | Some(Value::None) | None => {}
             // `config.exec()` / `config.exec(exec_group = ...)`, `config.target()`, `config.none()`.
-            Some(Value::Struct(cs)) if cs.fields.contains_key("_build_setting") && !cs.fields.contains_key("implementation") => {
+            Some(Value::Struct(cs))
+                if cs.fields.contains_key("_build_setting")
+                    && !cs.fields.contains_key("implementation")
+                    && !cs.fields.contains_key("_composed_transitions") =>
+            {
                 match cs.fields.get("_build_setting") {
                     Some(Value::String(k)) if k == "exec" => {
                         a.cfg_exec = true;
                         if let Some(Value::String(g)) = cs.fields.get("exec_group") {
                             a.cfg_exec_group = Some(g.clone());
                         }
+                    }
+                    Some(Value::String(k)) if k == "none" => {
+                        a.cfg_transition = Some(Value::Struct(Arc::clone(cs)));
                     }
                     _ => {}
                 }
@@ -2384,8 +3082,14 @@ impl PackageLoader {
         if matches!(a.ty, AttrType::Output | AttrType::OutputList) {
             a.configurable = false;
         }
-        if matches!(a.ty, AttrType::Label | AttrType::LabelList)
-            && matches!(s.fields.get("allow_files"), None | Some(Value::None))
+        if matches!(
+            a.ty,
+            AttrType::Label
+                | AttrType::LabelList
+                | AttrType::LabelKeyedStringDict
+                | AttrType::StringKeyedLabelDict
+                | AttrType::LabelListDict
+        ) && matches!(s.fields.get("allow_files"), None | Some(Value::None))
             && matches!(s.fields.get("allow_single_file"), None | Some(Value::None))
         {
             a.files_unspecified = true;
@@ -2451,7 +3155,7 @@ impl PackageLoader {
         Ok(a)
     }
 
-    /// `subrule(implementation, attrs, toolchains, fragments)`.
+    /// `subrule(implementation, attrs, toolchains, fragments, subrules)`.
     fn define_subrule(
         &self,
         ctx: &mut EvalContext,
@@ -2459,36 +3163,82 @@ impl PackageLoader {
         pos: Vec<Value>,
         kw: BTreeMap<String, Value>,
     ) -> HostResult {
-        check_kwargs("subrule", &kw, &["implementation", "attrs", "toolchains", "fragments", "subrules"])
-            .map_err(|e| herr(ctx, e))?;
-        let implementation = arg(&pos, &kw, 0, "implementation")
+        if !pos.is_empty() {
+            return Err(herr(ctx, "subrule() accepts keyword-only arguments"));
+        }
+        check_kwargs(
+            "subrule",
+            &kw,
+            &["implementation", "attrs", "toolchains", "fragments", "subrules"],
+        )
+        .map_err(|e| herr(ctx, e))?;
+        let implementation = kw
+            .get("implementation")
             .cloned()
-            .ok_or_else(|| herr(ctx, "subrule() missing 1 required positional argument: implementation"))?;
+            .ok_or_else(|| herr(ctx, "subrule() missing 1 required named argument: implementation"))?;
         let mut attrs = Vec::new();
         if let Some(a) = kw.get("attrs") {
             let Value::Dict(d) = a else {
                 return Err(herr(ctx, type_mismatch("attrs", a, "dict", "subrule")));
             };
             for (k, v) in d.lock().unwrap().items() {
-                let Value::String(k) = k else { return Err(herr(ctx, "attrs keys must be strings")) };
+                let Value::String(k) = k else {
+                    return Err(herr(ctx, "attrs keys must be strings"));
+                };
                 if !k.starts_with('_') {
                     return Err(herr(
                         ctx,
-                        format!("illegal attribute name '{k}': subrule attributes must be implicit (start with '_')"),
+                        format!(
+                            "illegal attribute name '{k}': subrule attributes must be implicit (start with '_')"
+                        ),
                     ));
                 }
-                attrs.push(self.attr_from_value(&k, &v, owner).map_err(|e| herr(ctx, e))?);
+                let attr = self.attr_from_value(&k, &v, owner).map_err(|e| herr(ctx, e))?;
+                if !matches!(attr.ty, AttrType::Label | AttrType::LabelList) {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "bad type for attribute '{k}': subrule attributes may only be label or list of labels"
+                        ),
+                    ));
+                }
+                attrs.push(attr);
             }
         }
-        let seq = |k: &str| match kw.get(k) {
-            None | Some(Value::None) => Vec::new(),
-            Some(v) => zel_starlark::eval::builtins::value_to_sequence(v).unwrap_or_default(),
+        let seq = |k: &str| -> Result<Vec<Value>, StarlarkError> {
+            match kw.get(k) {
+                None | Some(Value::None) => Ok(Vec::new()),
+                Some(v) => zel_starlark::eval::builtins::value_to_sequence(v)
+                    .map_err(|_| herr(ctx, type_mismatch(k, v, "sequence", "subrule"))),
+            }
         };
+        let toolchains = seq("toolchains")?;
+        let raw_fragments = seq("fragments")?;
+        let mut fragments = Vec::with_capacity(raw_fragments.len());
+        for fv in raw_fragments {
+            let Value::String(fs) = fv else {
+                return Err(herr(
+                    ctx,
+                    type_mismatch("fragments", &fv, "sequence of strings", "subrule"),
+                ));
+            };
+            fragments.push(fs);
+        }
+        let subrules = seq("subrules")?;
+        for sr in &subrules {
+            if crate::aspect::subrule_of(sr).is_none() {
+                return Err(herr(
+                    ctx,
+                    type_mismatch("subrules", sr, "sequence of subrules", "subrule"),
+                ));
+            }
+        }
         Ok(crate::aspect::register_subrule(crate::aspect::SubruleDef {
             implementation,
             attrs,
-            toolchains: seq("toolchains"),
-            fragments: seq("fragments").iter().filter_map(|v| v.as_str().map(str::to_string)).collect(),
+            toolchains,
+            fragments,
+            subrules,
         }))
     }
 
@@ -2680,22 +3430,157 @@ impl PackageLoader {
         pos: Vec<Value>,
         kw: BTreeMap<String, Value>,
     ) -> HostResult {
+        if pos.len() > 1 || (pos.len() == 1 && kw.contains_key("implementation")) {
+            return Err(herr(
+                ctx,
+                format!("rule() accepts at most 1 positional argument (got {})", pos.len()),
+            ));
+        }
         check_kwargs(
             "rule",
             &kw,
             &[
-                "implementation", "test", "attrs", "outputs", "executable", "build_setting", "cfg",
-                "fragments", "host_fragments", "toolchains", "doc", "provides", "exec_compatible_with",
-                "analysis_test", "output_to_genfiles", "exec_groups", "compile_one_filetype",
-                "name", "initializer", "parent", "extendable", "subrules", "_skylark_testable",
+                "implementation",
+                "test",
+                "attrs",
+                "outputs",
+                "executable",
+                "build_setting",
+                "cfg",
+                "fragments",
+                "host_fragments",
+                "toolchains",
+                "doc",
+                "provides",
+                "exec_compatible_with",
+                "analysis_test",
+                "output_to_genfiles",
+                "exec_groups",
+                "compile_one_filetype",
+                "name",
+                "initializer",
+                "parent",
+                "extendable",
+                "subrules",
+                "_skylark_testable",
+                "dependency_resolution_rule",
             ],
         )
         .map_err(|e| herr(ctx, e))?;
         let implementation = arg(&pos, &kw, 0, "implementation")
             .cloned()
             .ok_or_else(|| herr(ctx, "rule() missing 1 required positional argument: implementation"))?;
+        let bool_kw = |k: &str| -> Result<bool, StarlarkError> {
+            match kw.get(k) {
+                None | Some(Value::None) => Ok(false),
+                Some(Value::Bool(b)) => Ok(*b),
+                Some(other) => Err(herr(ctx, type_mismatch(k, other, "bool", "rule"))),
+            }
+        };
+        let analysis_test = bool_kw("analysis_test")?;
+        let own_test = bool_kw("test")? || analysis_test;
+        let own_exec = bool_kw("executable")?;
+        let output_to_genfiles = bool_kw("output_to_genfiles")?;
+        let skylark_testable = bool_kw("_skylark_testable")?;
+        let _ = bool_kw("dependency_resolution_rule")?;
+        let raw_extendable = match kw.get("extendable") {
+            None | Some(Value::None) => None,
+            Some(Value::Bool(b)) => Some(*b),
+            Some(Value::Label(_)) | Some(Value::String(_)) => Some(true),
+            Some(other) => {
+                return Err(herr(
+                    ctx,
+                    type_mismatch("extendable", other, "bool or Label", "rule"),
+                ))
+            }
+        };
+        let explicit_name = match kw.get("name") {
+            None | Some(Value::None) => None,
+            Some(Value::String(s)) => Some(s.clone()),
+            Some(other) => return Err(herr(ctx, type_mismatch("name", other, "string", "rule"))),
+        };
+        let mut initializers: Vec<Value> = Vec::new();
+        let mut parent_attrs: Vec<Attribute> = Vec::new();
+        let mut parent_test = false;
+        let mut parent_exec = false;
+        let mut outputs: Vec<(String, String)> = Vec::new();
+        let mut outputs_fn: Option<Value> = None;
+        let mut parent_kwargs: BTreeMap<String, Value> = BTreeMap::new();
+        if let Some(p) = kw.get("parent") {
+            if !matches!(p, Value::None) {
+                let Value::Host(kind, pid) = p else {
+                    return Err(herr(
+                        ctx,
+                        type_mismatch("parent", p, "RuleFunction or NoneType", "rule"),
+                    ));
+                };
+                if kind != "rule" {
+                    return Err(herr(
+                        ctx,
+                        type_mismatch("parent", p, "RuleFunction or NoneType", "rule"),
+                    ));
+                }
+                let pidx: usize = pid.parse().unwrap_or(usize::MAX);
+                let reg = self.registry.lock().unwrap();
+                let Some(pr) = reg.rules.get(pidx) else {
+                    return Err(herr(ctx, "unknown parent rule"));
+                };
+                if !pr.extendable {
+                    return Err(herr(
+                        ctx,
+                        "Cannot inherit from a rule that is not marked extendable = True",
+                    ));
+                }
+                if pr.test && !own_test && kw.contains_key("test") {
+                    return Err(herr(
+                        ctx,
+                        "Cannot set test = False when extending a test rule",
+                    ));
+                }
+                parent_attrs = pr.attrs.clone();
+                parent_test = pr.test;
+                parent_exec = pr.executable;
+                initializers.extend(pr.initializers.iter().cloned());
+                outputs.extend(pr.outputs.clone());
+                outputs_fn = pr.outputs_fn.clone();
+                parent_kwargs = pr.kwargs.clone();
+            }
+        }
+        if let Some(init) = kw.get("initializer") {
+            if !matches!(init, Value::None) {
+                if !matches!(init, Value::UserFunction(_) | Value::BuiltinFunction(_)) {
+                    return Err(herr(
+                        ctx,
+                        type_mismatch("initializer", init, "function or NoneType", "rule"),
+                    ));
+                }
+                initializers.push(init.clone());
+            }
+        }
         let mut rest_kwargs = kw.clone();
         rest_kwargs.remove("implementation");
+        for list_key in ["toolchains", "fragments", "provides", "exec_compatible_with", "subrules"] {
+            if let Some(pv) = parent_kwargs.get(list_key) {
+                let mut merged =
+                    zel_starlark::eval::builtins::value_to_sequence(pv).unwrap_or_default();
+                if let Some(cv) = rest_kwargs.get(list_key) {
+                    merged.extend(
+                        zel_starlark::eval::builtins::value_to_sequence(cv).unwrap_or_default(),
+                    );
+                }
+                rest_kwargs.insert(list_key.to_string(), mk_list(merged));
+            }
+        }
+        if let Some(Value::Dict(pd)) = parent_kwargs.get("exec_groups") {
+            let mut merged = pd.lock().unwrap().items();
+            if let Some(Value::Dict(cd)) = rest_kwargs.get("exec_groups") {
+                for (gk, gv) in cd.lock().unwrap().items() {
+                    merged.retain(|(ek, _)| ek != &gk);
+                    merged.push((gk, gv));
+                }
+            }
+            rest_kwargs.insert("exec_groups".to_string(), mk_dict(merged));
+        }
         {
             let mapping = self.cfg.lookup.resolver.mapping(owner.repository());
             let cctx = crate::attr::ConvertCtx {
@@ -2779,100 +3664,9 @@ impl PackageLoader {
                 rest_kwargs.insert("exec_groups".to_string(), mk_dict(new_entries));
             }
         }
-        let flag = |k: &str| matches!(kw.get(k), Some(Value::Bool(true)));
-        let analysis_test = flag("analysis_test");
-        let skylark_testable = flag("_skylark_testable");
-        let output_to_genfiles = flag("output_to_genfiles");
-        let mut test = flag("test") || analysis_test;
-        let mut executable = flag("executable") || test;
-        let mut attrs: Vec<Attribute> = Vec::new();
-        let mut initializers: Vec<Value> = Vec::new();
-        let mut outputs: Vec<(String, String)> = Vec::new();
-        let mut outputs_fn: Option<Value> = None;
-
-        // `parent = <rule>`: inherit attributes, toolchains, fragments, exec_groups, provides, subrules, initializers.
-        if let Some(parent_v) = kw.get("parent") {
-            if !matches!(parent_v, Value::None) {
-                let parent_def = match parent_v {
-                    Value::Host(k, pid) if k == "rule" => {
-                        let reg = self.registry.lock().unwrap();
-                        pid.parse::<usize>()
-                            .ok()
-                            .and_then(|i| reg.rules.get(i).cloned())
-                    }
-                    _ => None,
-                };
-                let Some(parent) = parent_def else {
-                    return Err(herr(
-                        ctx,
-                        type_mismatch("parent", parent_v, "RuleFunction or NoneType", "rule"),
-                    ));
-                };
-                if !parent.extendable {
-                    return Err(herr(
-                        ctx,
-                        format!(
-                            "The rule '{}' is not extendable",
-                            parent.name.as_deref().unwrap_or("<unexported rule>")
-                        ),
-                    ));
-                }
-                if parent.test && !flag("test") && kw.contains_key("test") {
-                    return Err(herr(
-                        ctx,
-                        "Cannot set test = False when extending a test rule",
-                    ));
-                }
-                test |= parent.test;
-                executable |= parent.executable;
-                attrs.extend(parent.attrs.clone());
-                initializers.extend(parent.initializers.clone());
-                outputs.extend(parent.outputs.clone());
-                if outputs_fn.is_none() {
-                    outputs_fn = parent.outputs_fn.clone();
-                }
-                // Merge list-valued kwargs (parent first, then child) and dict-valued `exec_groups`.
-                for list_key in ["toolchains", "fragments", "provides", "exec_compatible_with", "subrules"] {
-                    if let Some(pv) = parent.kwargs.get(list_key) {
-                        let mut merged =
-                            zel_starlark::eval::builtins::value_to_sequence(pv).unwrap_or_default();
-                        if let Some(cv) = rest_kwargs.get(list_key) {
-                            for item in zel_starlark::eval::builtins::value_to_sequence(cv).unwrap_or_default() {
-                                if !merged.contains(&item) {
-                                    merged.push(item);
-                                }
-                            }
-                        }
-                        rest_kwargs.insert(list_key.to_string(), mk_list(merged));
-                    }
-                }
-                if let Some(Value::Dict(pd)) = parent.kwargs.get("exec_groups") {
-                    let mut entries = pd.lock().unwrap().items();
-                    if let Some(Value::Dict(cd)) = rest_kwargs.get("exec_groups") {
-                        for (ck, cv) in cd.lock().unwrap().items() {
-                            if let Some(pos) = entries.iter().position(|(ek, _)| *ek == ck) {
-                                entries[pos].1 = cv;
-                            } else {
-                                entries.push((ck, cv));
-                            }
-                        }
-                    }
-                    rest_kwargs.insert("exec_groups".to_string(), mk_dict(entries));
-                }
-            }
-        }
-        if let Some(init_v) = kw.get("initializer") {
-            match init_v {
-                Value::None => {}
-                Value::UserFunction(_) => initializers.push(init_v.clone()),
-                other => {
-                    return Err(herr(
-                        ctx,
-                        type_mismatch("initializer", other, "function or NoneType", "rule"),
-                    ))
-                }
-            }
-        }
+        let test = own_test || parent_test;
+        let executable = own_exec || parent_exec || test;
+        let mut attrs = parent_attrs;
         if let Some(a) = kw.get("attrs") {
             let Value::Dict(d) = a else {
                 return Err(herr(ctx, type_mismatch("attrs", a, "dict", "rule")));
@@ -2881,6 +3675,16 @@ impl PackageLoader {
                 let Value::String(k) = k else {
                     return Err(herr(ctx, "attrs keys must be strings"));
                 };
+                if let Ok(s) = resolve_attr_struct(&v) {
+                    if s.fields.contains_key("configurable") {
+                        return Err(herr(
+                            ctx,
+                            format!(
+                                "attribute '{k}' has the 'configurable' argument set, which is not allowed in rule definitions"
+                            ),
+                        ));
+                    }
+                }
                 let parsed = self.attr_from_value(&k, &v, owner).map_err(|e| herr(ctx, e))?;
                 if let Some(pos) = attrs.iter().position(|existing| existing.name == k) {
                     attrs[pos] = parsed;
@@ -2951,9 +3755,9 @@ impl PackageLoader {
             attrs.push(Attribute::new("help", AttrType::String).nonconfigurable());
         }
         let can_extend = !build_setting && !analysis_test && !skylark_testable && !output_to_genfiles;
-        let extendable = match kw.get("extendable") {
-            None | Some(Value::None) => can_extend,
-            Some(Value::Bool(true)) => {
+        let extendable = match raw_extendable {
+            None => false,
+            Some(true) => {
                 if !can_extend {
                     return Err(herr(
                         ctx,
@@ -2962,8 +3766,7 @@ impl PackageLoader {
                 }
                 true
             }
-            Some(Value::Bool(false)) => false,
-            Some(_) => true,
+            Some(false) => false,
         };
         let mut definition_stack = Vec::new();
         if ctx.thread.frames.is_empty() {
@@ -2979,6 +3782,7 @@ impl PackageLoader {
         let mut reg = self.registry.lock().unwrap();
         reg.rules.push(RuleDef {
             name: None,
+            explicit_name,
             attrs,
             executable,
             test,
@@ -3001,16 +3805,19 @@ impl PackageLoader {
         ctx: &mut EvalContext,
         state: Option<&Arc<Mutex<PackageState>>>,
         mut pos: Vec<Value>,
-        kw: BTreeMap<String, Value>,
+        mut kw: BTreeMap<String, Value>,
     ) -> HostResult {
         let Some(Value::Host(_, id)) = pos.first().cloned() else {
             return Err(herr(ctx, "internal error: rule call without receiver"));
         };
         pos.remove(0);
         let idx: usize = id.parse().unwrap_or(usize::MAX);
-        let class = {
+        let (class, initializers) = {
             let reg = self.registry.lock().unwrap();
-            reg.rules.get(idx).and_then(|r| r.class.clone())
+            match reg.rules.get(idx) {
+                Some(r) => (r.class.clone(), r.initializers.clone()),
+                None => (None, Vec::new()),
+            }
         };
         let Some(rc) = class else {
             return Err(herr(
@@ -3036,6 +3843,31 @@ impl PackageLoader {
                 ),
             ));
         }
+        if !initializers.is_empty() && pos.is_empty() {
+            for init_fn in initializers.into_iter().rev() {
+                let res = ctx.call_value(init_fn, Vec::new(), kw.clone())?;
+                match res {
+                    Value::None => {}
+                    Value::Dict(d) => {
+                        for (rk, rv) in d.lock().unwrap().items() {
+                            let Value::String(rk) = rk else {
+                                return Err(herr(ctx, "initializer return dict keys must be strings"));
+                            };
+                            kw.insert(rk, rv);
+                        }
+                    }
+                    other => {
+                        return Err(herr(
+                            ctx,
+                            format!(
+                                "got {} for 'initializer return value', want dict or NoneType",
+                                other.type_name()
+                            ),
+                        ))
+                    }
+                }
+            }
+        }
         self.instantiate_rule(ctx, st, &rc, &pos, kw)
     }
 
@@ -3059,109 +3891,126 @@ impl PackageLoader {
             .get("implementation")
             .cloned()
             .ok_or_else(|| herr(ctx, "macro() missing 1 required named argument: implementation"))?;
-        if !matches!(imp, Value::UserFunction(_)) {
+        let Value::UserFunction(imp_fn) = &imp else {
             return Err(herr(ctx, type_mismatch("implementation", &imp, "function", "macro")));
-        }
+        };
         let finalizer = match kw.get("finalizer") {
-            None => false,
+            None | Some(Value::None) => false,
             Some(Value::Bool(b)) => *b,
-            Some(other) => {
-                return Err(herr(
-                    ctx,
-                    type_mismatch("finalizer", other, "bool", "macro"),
-                ))
-            }
+            Some(other) => return Err(herr(ctx, type_mismatch("finalizer", other, "bool", "macro"))),
         };
         let mut attrs = vec![
             Attribute::new("name", AttrType::String).mandatory().nonconfigurable(),
             Attribute::new("visibility", AttrType::LabelList).nonconfigurable(),
         ];
         if let Some(ia) = kw.get("inherit_attrs") {
-            let copy_inherited = |src_attrs: &[Attribute], dst: &mut Vec<Attribute>| {
-                for a in src_attrs {
-                    if a.name != "name"
-                        && a.name != "visibility"
-                        && !a.name.starts_with('_')
-                        && !a.name.starts_with('$')
-                        && !a.name.starts_with(':')
-                        && !a.name.starts_with("generator_")
-                    {
-                        let mut c = a.clone();
-                        c.mandatory = false;
-                        c.default = None;
-                        dst.push(c);
-                    }
-                }
-            };
-            match ia {
-                Value::None => {}
-                Value::String(s) if s == "common" => {
-                    let base = crate::rule_class::starlark_rule_class(
-                        "_common",
-                        Vec::new(),
-                        false,
-                        false,
-                        Vec::new(),
-                        false,
-                    );
-                    let ordered: Vec<Attribute> = base
-                        .attr_order
-                        .iter()
-                        .filter_map(|n| base.attrs.get(n).cloned())
-                        .collect();
-                    copy_inherited(&ordered, &mut attrs);
-                }
-                Value::BuiltinFunction(bf) if bf.starts_with("host:rule.") => {
-                    let rn = &bf["host:rule.".len()..];
-                    let Some(rc) = self.rule_classes.get(rn) else {
-                        return Err(herr(ctx, format!("unknown rule class '{rn}' in inherit_attrs")));
-                    };
-                    let ordered: Vec<Attribute> = rc
-                        .attr_order
-                        .iter()
-                        .filter_map(|n| rc.attrs.get(n).cloned())
-                        .collect();
-                    copy_inherited(&ordered, &mut attrs);
-                }
-                Value::Host(k, id) if k == "rule" => {
-                    let reg = self.registry.lock().unwrap();
-                    if let Ok(idx) = id.parse::<usize>() {
-                        if let Some(r) = reg.rules.get(idx) {
-                            let rc = r.class.clone().unwrap_or_else(|| {
-                                Arc::new(crate::rule_class::starlark_rule_class(
-                                    r.name.as_deref().unwrap_or("_"),
-                                    r.attrs.clone(),
-                                    r.executable,
-                                    r.test,
-                                    vec![],
-                                    r.build_setting,
-                                ))
-                            });
-                            let ordered: Vec<Attribute> = rc
-                                .attr_order
-                                .iter()
-                                .filter_map(|n| rc.attrs.get(n).cloned())
-                                .collect();
-                            copy_inherited(&ordered, &mut attrs);
-                        }
-                    }
-                }
-                Value::Host(k, id) if k == "macro" => {
-                    let reg = self.registry.lock().unwrap();
-                    if let Ok(idx) = id.parse::<usize>() {
-                        if let Some(m) = reg.macros.get(idx) {
-                            copy_inherited(&m.attrs, &mut attrs);
-                        }
-                    }
-                }
-                other => {
+            if !matches!(ia, Value::None) {
+                if !imp_fn.params.iter().any(|p| p.is_kwargs) {
                     return Err(herr(
                         ctx,
-                        format!(
-                            "Invalid 'inherit_attrs' value {}: want a rule, macro, or \"common\"",
-                            other.repr()
-                        ),
-                    ))
+                        "If inherit_attrs is set, implementation function must accept **kwargs",
+                    ));
+                }
+                let copy_inherited = |src_attrs: &[Attribute], dst: &mut Vec<Attribute>| {
+                    for a in src_attrs {
+                        if a.name != "name"
+                            && a.name != "visibility"
+                            && !a.name.starts_with('_')
+                            && !a.name.starts_with('$')
+                            && !a.name.starts_with(':')
+                            && !a.name.starts_with("generator_")
+                        {
+                            let mut c = a.clone();
+                            c.mandatory = false;
+                            c.default = None;
+                            dst.retain(|x| x.name != c.name);
+                            dst.push(c);
+                        }
+                    }
+                };
+                match ia {
+                    Value::String(s) if s == "common" => {
+                        let base = crate::rule_class::starlark_rule_class(
+                            "_common",
+                            Vec::new(),
+                            false,
+                            false,
+                            Vec::new(),
+                            false,
+                        );
+                        let ordered: Vec<Attribute> = base
+                            .attr_order
+                            .iter()
+                            .filter_map(|n| base.attrs.get(n).cloned())
+                            .collect();
+                        copy_inherited(&ordered, &mut attrs);
+                    }
+                    Value::BuiltinFunction(bf) if bf.starts_with("host:rule.") => {
+                        let rn = &bf["host:rule.".len()..];
+                        let Some(rc) = self.rule_classes.get(rn) else {
+                            return Err(herr(ctx, format!("unknown rule class '{rn}' in inherit_attrs")));
+                        };
+                        let ordered: Vec<Attribute> = rc
+                            .attr_order
+                            .iter()
+                            .filter_map(|n| rc.attrs.get(n).cloned())
+                            .collect();
+                        copy_inherited(&ordered, &mut attrs);
+                    }
+                    Value::RuleCallable { rule_class, .. } => {
+                        let Some(rc) = self.rule_classes.get(rule_class) else {
+                            return Err(herr(
+                                ctx,
+                                format!("unknown native rule '{rule_class}' in inherit_attrs"),
+                            ));
+                        };
+                        let ordered: Vec<Attribute> = rc
+                            .attr_order
+                            .iter()
+                            .filter_map(|n| rc.attrs.get(n).cloned())
+                            .collect();
+                        copy_inherited(&ordered, &mut attrs);
+                    }
+                    Value::Host(k, id) if k == "rule" => {
+                        let reg = self.registry.lock().unwrap();
+                        if let Ok(idx) = id.parse::<usize>() {
+                            if let Some(r) = reg.rules.get(idx) {
+                                let rc = r.class.clone().unwrap_or_else(|| {
+                                    Arc::new(crate::rule_class::starlark_rule_class(
+                                        r.name.as_deref().unwrap_or("_"),
+                                        r.attrs.clone(),
+                                        r.executable,
+                                        r.test,
+                                        vec![],
+                                        r.build_setting,
+                                    ))
+                                });
+                                let ordered: Vec<Attribute> = rc
+                                    .attr_order
+                                    .iter()
+                                    .filter_map(|n| rc.attrs.get(n).cloned())
+                                    .collect();
+                                copy_inherited(&ordered, &mut attrs);
+                            }
+                        }
+                    }
+                    Value::Host(k, id) if k == "macro" => {
+                        let reg = self.registry.lock().unwrap();
+                        if let Ok(idx) = id.parse::<usize>() {
+                            if let Some(m) = reg.macros.get(idx) {
+                                copy_inherited(&m.attrs, &mut attrs);
+                            }
+                        }
+                    }
+                    other => {
+                        return Err(herr(
+                            ctx,
+                            format!(
+                                "Invalid 'inherit_attrs' value {}: want a rule, macro, or \"common\"",
+                                other.repr()
+                            ),
+                        ))
+                    }
                 }
             }
         }

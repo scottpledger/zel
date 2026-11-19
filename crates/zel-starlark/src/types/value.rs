@@ -211,6 +211,7 @@ impl Value {
                 "cc_module_map" => "CcModuleMap",
                 "linker_input" => "LinkerInput",
                 "lto_compilation_context" => "LtoCompilationContext",
+                "attribute" => "Attribute",
                 _ => "host_object",
             },
         }
@@ -224,9 +225,11 @@ impl Value {
             | Self::Float(_)
             | Self::String(_)
             | Self::Label(_)
+            | Self::Range(_)
             | Self::Depset(_)
             | Self::SelectorList(_)
             | Self::UserFunction(_)
+            | Self::BuiltinFunction(_)
             | Self::Provider { .. }
             | Self::RuleCallable { .. } => true,
             Self::List(l) => l.lock().unwrap().is_frozen(),
@@ -236,7 +239,6 @@ impl Value {
             Self::Struct(s) => s.fields.values().all(|x| x.is_immutable()),
             Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_immutable()),
             Self::Host(k, id) => HOST_IS_IMMUTABLE.get().map(|f| f(k, id)).unwrap_or(true),
-            Self::Range(_) | Self::BuiltinFunction(_) => false,
         }
     }
 
@@ -250,6 +252,7 @@ impl Value {
             | Self::Label(_)
             | Self::Depset(_)
             | Self::UserFunction(_)
+            | Self::BuiltinFunction(_)
             | Self::Provider { .. }
             | Self::RuleCallable { .. } => true,
             Self::Tuple(items) => items.iter().all(|x| x.is_hashable()),
@@ -260,7 +263,6 @@ impl Value {
             | Self::Dict(_)
             | Self::Set(_)
             | Self::Range(_)
-            | Self::BuiltinFunction(_)
             | Self::SelectorList(_) => false,
         }
     }
@@ -635,7 +637,32 @@ impl Value {
             }
             Self::Range(r) => out.push_str(&r.to_string()),
             Self::Depset(d) => out.push_str(&d.to_string()),
-            Self::SelectorList(s) => out.push_str(&format!("select({:?})", s.elements)),
+            Self::SelectorList(s) => {
+                for (idx, elem) in s.elements.iter().enumerate() {
+                    if idx > 0 {
+                        out.push_str(" + ");
+                    }
+                    match elem {
+                        SelectorElement::Native(v) => v.repr_into(out, stack),
+                        SelectorElement::Select(entries) => {
+                            out.push_str("select({");
+                            for (i, (k, v)) in entries.iter().enumerate() {
+                                if i > 0 {
+                                    out.push_str(", ");
+                                }
+                                if let Ok(lbl) = zel_cmdline::Label::parse_canonical(k) {
+                                    Value::Label(lbl).repr_into(out, stack);
+                                } else {
+                                    Value::String(k.clone()).repr_into(out, stack);
+                                }
+                                out.push_str(": ");
+                                v.repr_into(out, stack);
+                            }
+                            out.push_str("})");
+                        }
+                    }
+                }
+            }
             Self::Struct(s) => {
                 let ptr = Arc::as_ptr(s) as usize;
                 if stack.contains(&ptr) {
@@ -830,9 +857,17 @@ impl PartialEq for Value {
             (Self::Struct(a), Self::Struct(b)) => a.fields == b.fields,
             (Self::SelectorList(a), Self::SelectorList(b)) => a == b,
             (
-                Self::RuleCallable { rule_class: r1, .. },
-                Self::RuleCallable { rule_class: r2, .. },
-            ) => r1 == r2,
+                Self::RuleCallable {
+                    rule_class: r1,
+                    executable: e1,
+                    test: t1,
+                },
+                Self::RuleCallable {
+                    rule_class: r2,
+                    executable: e2,
+                    test: t2,
+                },
+            ) => r1 == r2 && e1 == e2 && t1 == t2,
             (Self::Provider { name: n1 }, Self::Provider { name: n2 }) => n1 == n2,
             (
                 Self::ProviderInstance {

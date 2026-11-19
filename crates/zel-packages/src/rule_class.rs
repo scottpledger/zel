@@ -93,7 +93,7 @@ fn ll() -> AttrType {
     AttrType::LabelList
 }
 
-fn common_attrs() -> Vec<Attribute> {
+pub(crate) fn common_attrs() -> Vec<Attribute> {
     vec![
         Attribute::new("name", AttrType::String)
             .mandatory()

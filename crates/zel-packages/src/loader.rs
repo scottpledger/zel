@@ -43,19 +43,25 @@ pub struct LoaderConfig {
     pub package_cache: Option<Arc<dyn PackageCache>>,
     /// Default of `glob(allow_empty = ...)` (`!--incompatible_disallow_empty_glob`).
     pub allow_empty_glob: bool,
+    /// Whether `--incompatible_use_cc_configure_from_rules_cc` is enabled.
+    pub incompatible_use_cc_configure_from_rules_cc: bool,
+    /// Whether `--experimental_dormant_deps` is enabled.
+    pub experimental_dormant_deps: bool,
+    /// Whether `--incompatible_no_attr_license` is enabled (default true).
+    pub incompatible_no_attr_license: bool,
     /// `--experimental_bzl_visibility` (default `true`): enables `visibility()` in `.bzl` files.
     pub experimental_bzl_visibility: bool,
     /// `--check_bzl_visibility` (default `true`): when `false`, demotes `.bzl` load visibility
     /// violations to warnings.
     pub check_bzl_visibility: bool,
+    /// Options listed in `--incompatible_disable_transitions_on`.
+    pub incompatible_disable_transitions_on: Vec<String>,
     /// Whether to apply `//tools/build_rules:prelude_bazel` (main repo only).
     pub use_prelude: bool,
     /// `--experimental_sibling_repository_layout`: when `false`, `//...` skips top-level `external/`.
     pub sibling_repository_layout: bool,
     /// `--experimental_enable_scl_dialect` (default `true` in Bazel 9).
     pub experimental_enable_scl_dialect: bool,
-    /// `--incompatible_use_cc_configure_from_rules_cc` (default `false` in Bazel 9).
-    pub incompatible_use_cc_configure_from_rules_cc: bool,
     /// Handler for host calls that belong to an embedding runtime (Bzlmod repository rules and
     /// `repository_ctx`/`module_ctx` methods called from helper `.bzl` files evaluated here).
     /// Consulted first for names accepted by [`is_external_host_call`].
@@ -97,12 +103,15 @@ impl LoaderConfig {
             },
             package_cache: None,
             allow_empty_glob: true,
+            incompatible_use_cc_configure_from_rules_cc: false,
+            experimental_dormant_deps: false,
+            incompatible_no_attr_license: true,
             experimental_bzl_visibility: true,
             check_bzl_visibility: true,
+            incompatible_disable_transitions_on: Vec::new(),
             use_prelude: true,
             sibling_repository_layout: false,
             experimental_enable_scl_dialect: true,
-            incompatible_use_cc_configure_from_rules_cc: false,
             external_host: None,
             bzl_override: None,
         }
@@ -146,7 +155,9 @@ impl BzlVisibility {
         defining_pkg: &PackageIdentifier,
         demanding_pkg: &PackageIdentifier,
     ) -> bool {
-        if defining_pkg == demanding_pkg {
+        if defining_pkg == demanding_pkg
+            || demanding_pkg.repository().name() == crate::builtins::BUILTINS_REPO
+        {
             return true;
         }
         match self {
@@ -186,6 +197,7 @@ type BzlResult = Result<Arc<BzlModule>, BzlError>;
 #[derive(Clone)]
 struct RuleDef {
     name: Option<String>,
+    explicit_name: Option<String>,
     attrs: Vec<Attribute>,
     executable: bool,
     test: bool,
@@ -321,6 +333,8 @@ const ANALYSIS_ONLY_GLOBALS: &[&str] = &[
     "RunEnvironmentInfo",
     "InstrumentedFilesInfo",
     "CcInfo",
+    "CcToolchainConfigInfo",
+    "IncompatiblePlatformProvider",
     "JavaInfo",
     "PyInfo",
     "ProtoInfo",
@@ -618,8 +632,8 @@ impl PackageLoader {
         let lookup = self.cfg.lookup.lookup(id);
         match lookup {
             PackageLookup::Found { build_file } => {
-                let source = match self.fs().read_file(&build_file) {
-                    Ok(b) => String::from_utf8_lossy(&b).to_string(),
+                let bytes = match self.fs().read_file(&build_file) {
+                    Ok(b) => b,
                     Err(e) => {
                         return Err(PackageLoadError {
                             message: format!(
@@ -631,7 +645,9 @@ impl PackageLoader {
                         })
                     }
                 };
-                let (pkg, fatal) = self.evaluate_source_impl(id, &build_file, &source);
+                let source = zel_starlark::source_from_bytes(&bytes);
+                let (pkg, fatal) =
+                    self.evaluate_source_impl(id, &build_file, &source, Some(&bytes));
                 match fatal {
                     None => Ok(pkg),
                     Some(msg) => Err(PackageLoadError {
@@ -686,7 +702,7 @@ impl PackageLoader {
         build_file: &PathFragment,
         source: &str,
     ) -> Package {
-        let (mut pkg, fatal) = self.evaluate_source_impl(id, build_file, source);
+        let (mut pkg, fatal) = self.evaluate_source_impl(id, build_file, source, None);
         if let Some(msg) = fatal {
             pkg.contains_errors = true;
             pkg.events.push(PackageEvent::error(
@@ -705,6 +721,7 @@ impl PackageLoader {
         id: &PackageIdentifier,
         build_file: &PathFragment,
         source: &str,
+        raw_bytes: Option<&[u8]>,
     ) -> (Package, Option<String>) {
         let repo_root = self
             .cfg
@@ -866,7 +883,10 @@ impl PackageLoader {
         }
 
         let result = if prelude_errors.is_empty() {
-            Some(ctx.eval_file_checked(source, Some(("BUILD files", true))))
+            Some(match raw_bytes {
+                Some(b) => ctx.eval_bytes_checked(b, Some(("BUILD files", true))),
+                None => ctx.eval_file_checked(source, Some(("BUILD files", true))),
+            })
         } else {
             None
         };
@@ -1078,6 +1098,9 @@ impl PackageLoader {
         }
         let mut attr = BTreeMap::new();
         for t in ATTR_FUNCTIONS {
+            if *t == "license" && self.cfg.incompatible_no_attr_license {
+                continue;
+            }
             attr.insert(
                 (*t).to_string(),
                 Value::BuiltinFunction(format!("host:attr.{t}")),
@@ -1146,8 +1169,6 @@ impl PackageLoader {
         ctx.globals
             .entry("exec_transition".to_string())
             .or_insert_with(|| Value::BuiltinFunction("host:exec_transition".to_string()));
-        // `visibility([...])` in .bzl files restricts who may load the file; load visibility is not
-        // enforced yet, the call itself is valid (and returns None).
         ctx.globals.insert(
             "visibility".to_string(),
             Value::BuiltinFunction("host:visibility".to_string()),
@@ -1773,7 +1794,13 @@ impl PackageLoader {
                     name.as_str()
                 };
                 if is_build {
-                    ctx.globals.insert(n.to_string(), v.clone());
+                    if matches!(v, Value::None) {
+                        ctx.globals.remove(n);
+                    } else {
+                        ctx.globals.insert(n.to_string(), v.clone());
+                    }
+                } else if matches!(v, Value::None) {
+                    fields.remove(n);
                 } else {
                     fields.insert(n.to_string(), v.clone());
                 }
@@ -1832,7 +1859,6 @@ impl PackageLoader {
             },
         })?;
         let own_hash = zel_util::sha256::digest(&bytes);
-        let source = String::from_utf8_lossy(&bytes).to_string();
         let mut ctx = EvalContext::new(
             path.parent_directory().unwrap_or_else(PathFragment::empty),
             Some(Arc::clone(&self.cfg.lookup.fs)),
@@ -1885,6 +1911,27 @@ impl PackageLoader {
             Some(Arc::clone(&bzl_init)),
             label.package_identifier().clone(),
         );
+        let post_assign_err: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        if !is_scl {
+            let this_export = Arc::clone(self);
+            let export_label = label.clone();
+            let err_slot = Arc::clone(&post_assign_err);
+            ctx.post_assign_hook = Some(Arc::new(move |hook_ctx, k, v| {
+                match this_export.export_bzl_symbol(k, v, &export_label, None) {
+                    Ok(Some(shared)) => {
+                        hook_ctx.globals.insert(k.to_string(), shared);
+                    }
+                    Ok(None) => {}
+                    Err(msg) => {
+                        let mut slot = err_slot.lock().unwrap();
+                        if slot.is_none() {
+                            *slot = Some(msg);
+                        }
+                    }
+                }
+                Ok(())
+            }));
+        }
         let sink: Arc<Mutex<Vec<PackageEvent>>> = Arc::new(Mutex::new(Vec::new()));
         let fatal_override: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
         #[allow(clippy::type_complexity)]
@@ -1915,7 +1962,7 @@ impl PackageLoader {
             Arc::clone(&child_digests),
             bzl_vis_failed,
         );
-        let res = ctx.eval_file_checked(&source, None);
+        let res = ctx.eval_bytes_checked(&bytes, None);
         bzl_init.lock().unwrap().initializing = false;
         let recorded_visibility = bzl_init
             .lock()
@@ -1976,6 +2023,17 @@ impl PackageLoader {
                     .collect(),
             });
         }
+        if let Some(message) = post_assign_err.lock().unwrap().take() {
+            events.push(PackageEvent::error(None, message.clone()));
+            return Err(BzlError {
+                events,
+                message,
+                observed_files: observed_files
+                    .into_iter()
+                    .map(|(p, h)| (p, Some(h)))
+                    .collect(),
+            });
+        }
         let module_digest = {
             // `ConfiguredRuleClassProvider.BundledFileSystem`: the digest of a bundled builtins file is
             // the hash of its full virtual path, not of its contents.
@@ -2005,194 +2063,21 @@ impl PackageLoader {
             }
             zel_util::sha256::digest(&fp)
         };
-        // Export rules/macros: assign names by variable.
+        // Export any remaining rules/macros and finalize rule definition digests.
         let mut provider_replacements: Vec<(String, Value)> = Vec::new();
-        {
-            let mut reg = self.registry.lock().unwrap();
-            for (k, v) in &ctx.globals {
-                if let Value::Host(kind, id) = v {
-                    let idx: usize = id.parse().unwrap_or(usize::MAX);
-                    match kind.as_str() {
-                        "rule" => {
-                            if let Some(r) = reg.rules.get_mut(idx) {
-                                if r.name.is_none() {
-                                    if !crate::rule_class::is_valid_rule_class_name(k)
-                                        || (r.test != k.ends_with("_test"))
-                                    {
-                                        return Err(BzlError {
-                                            events,
-                                            message: format!(
-                                                "Invalid rule class name '{k}'{}",
-                                                if !r.test && k.ends_with("_test") {
-                                                    ", non-test rule class names must not end with '_test'"
-                                                } else if r.test && !k.ends_with("_test") {
-                                                    ", test rule class names must end with '_test'"
-                                                } else {
-                                                    ""
-                                                }
-                                            ),
-                                            observed_files: observed_files
-                                                .into_iter()
-                                                .map(|(p, h)| (p, Some(h)))
-                                                .collect(),
-                                        });
-                                    }
-                                    r.name = Some(k.clone());
-                                    let rc = starlark_rule_class(
-                                        k,
-                                        r.attrs.clone(),
-                                        r.executable,
-                                        r.test,
-                                        r.outputs.clone(),
-                                        r.build_setting,
-                                    );
-                                    let mut rc = rc;
-                                    rc.outputs_fn = r.outputs_fn.clone();
-                                    // Toolchain types / exec constraints given as strings are labels
-                                    // relative to the defining .bzl (and its repository mapping).
-                                    let mut kwargs = r.kwargs.clone();
-                                    {
-                                        let mapping = self
-                                            .cfg
-                                            .lookup
-                                            .resolver
-                                            .mapping(label.package_identifier().repository());
-                                        let cctx = crate::attr::ConvertCtx {
-                                            pkg: label.package_identifier(),
-                                            mapping: &mapping,
-                                            rule_class: "rule",
-                                        };
-                                        let conv = |v: &Value| -> Value {
-                                            match v {
-                                                Value::String(s) => {
-                                                    crate::attr::convert_label(s, &cctx)
-                                                        .map(Value::Label)
-                                                        .unwrap_or_else(|_| v.clone())
-                                                }
-                                                Value::Struct(st)
-                                                    if st.fields.contains_key("toolchain_type")
-                                                        || st
-                                                            .fields
-                                                            .contains_key("_toolchain_type") =>
-                                                {
-                                                    let mut f = st.fields.clone();
-                                                    for fnm in ["toolchain_type", "name"] {
-                                                        if let Some(Value::String(n)) =
-                                                            f.get(fnm).cloned()
-                                                        {
-                                                            if let Ok(l) =
-                                                                crate::attr::convert_label(
-                                                                    &n, &cctx,
-                                                                )
-                                                            {
-                                                                f.insert(
-                                                                    fnm.into(),
-                                                                    Value::Label(l),
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                    Value::Struct(Arc::new(
-                                                        zel_starlark::StructValue::new(f),
-                                                    ))
-                                                }
-                                                o => o.clone(),
-                                            }
-                                        };
-                                        for key in ["toolchains", "exec_compatible_with"] {
-                                            if let Some(v) = kwargs.get(key).cloned() {
-                                                if let Ok(items) =
-                                                    zel_starlark::eval::builtins::value_to_sequence(
-                                                        &v,
-                                                    )
-                                                {
-                                                    let out: Vec<Value> =
-                                                        items.iter().map(&conv).collect();
-                                                    kwargs.insert(
-                                                        key.to_string(),
-                                                        Value::List(Arc::new(Mutex::new(
-                                                            zel_starlark::StarlarkList::new(out),
-                                                        ))),
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        if let Some(Value::Dict(d)) =
-                                            kwargs.get("exec_groups").cloned()
-                                        {
-                                            let mut next_eg = zel_starlark::StarlarkDict::new();
-                                            for (gk, gv) in d.lock().unwrap().items() {
-                                                let next_gv = if let Value::Struct(gs) = gv {
-                                                    let mut gf = gs.fields.clone();
-                                                    for key in
-                                                        ["toolchains", "exec_compatible_with"]
-                                                    {
-                                                        if let Some(v) = gf.get(key).cloned() {
-                                                            if let Ok(items) = zel_starlark::eval::builtins::value_to_sequence(&v) {
-                                                                let out: Vec<Value> = items.iter().map(&conv).collect();
-                                                                gf.insert(
-                                                                    key.to_string(),
-                                                                    Value::List(Arc::new(Mutex::new(zel_starlark::StarlarkList::new(out)))),
-                                                                );
-                                                            }
-                                                        }
-                                                    }
-                                                    Value::Struct(Arc::new(
-                                                        zel_starlark::StructValue::new(gf),
-                                                    ))
-                                                } else {
-                                                    gv
-                                                };
-                                                let _ = next_eg.insert(gk, next_gv);
-                                            }
-                                            kwargs.insert(
-                                                "exec_groups".to_string(),
-                                                Value::Dict(Arc::new(Mutex::new(next_eg))),
-                                            );
-                                        }
-                                    }
-                                    rc.starlark =
-                                        Some(Arc::new(crate::rule_class::StarlarkRuleSpec {
-                                            implementation: r.implementation.clone(),
-                                            kwargs,
-                                            defined_in: label.canonical_form(),
-                                            definition_digest: {
-                                                use std::fmt::Write as _;
-                                                let mut hex =
-                                                    String::with_capacity(module_digest.len() * 2);
-                                                for b in &module_digest {
-                                                    let _ = write!(hex, "{b:02x}");
-                                                }
-                                                hex
-                                            },
-                                            definition_stack: r.definition_stack.clone(),
-                                            initializers: r.initializers.clone(),
-                                            build_setting_flag: r.build_setting_flag,
-                                        }));
-                                    r.class = Some(Arc::new(rc));
-                                }
-                            }
-                        }
-                        "macro" => {
-                            if let Some(m) = reg.macros.get_mut(idx) {
-                                if m.name.is_none() {
-                                    m.name = Some(k.clone());
-                                    m.bzl_label = Some(label.clone());
-                                }
-                            }
-                        }
-                        "provider" => {
-                            if let Some(shared) =
-                                crate::provider::export_provider(idx, k, &label.canonical_form())
-                            {
-                                provider_replacements.push((k.clone(), shared));
-                            }
-                        }
-                        "aspect" => {
-                            crate::aspect::export_aspect(idx, k, &label.canonical_form());
-                        }
-                        _ => {}
-                    }
+        for (k, v) in &ctx.globals {
+            match self.export_bzl_symbol(k, v, label, Some(&module_digest)) {
+                Ok(Some(shared)) => provider_replacements.push((k.clone(), shared)),
+                Ok(None) => {}
+                Err(message) => {
+                    return Err(BzlError {
+                        events,
+                        message,
+                        observed_files: observed_files
+                            .into_iter()
+                            .map(|(p, h)| (p, Some(h)))
+                            .collect(),
+                    });
                 }
             }
         }
@@ -2214,6 +2099,200 @@ impl PackageLoader {
             }),
             ctx.globals,
         ))
+    }
+
+    fn export_bzl_symbol(
+        &self,
+        k: &str,
+        v: &Value,
+        label: &Label,
+        final_digest: Option<&[u8; 32]>,
+    ) -> Result<Option<Value>, String> {
+        let Value::Host(kind, id) = v else {
+            return Ok(None);
+        };
+        let idx: usize = id.parse().unwrap_or(usize::MAX);
+        match kind.as_str() {
+            "rule" => {
+                let mut reg = self.registry.lock().unwrap();
+                if let Some(r) = reg.rules.get_mut(idx) {
+                    if r.name.is_none() {
+                        let eff_name = r.explicit_name.clone().unwrap_or_else(|| k.to_string());
+                        if !crate::rule_class::is_valid_rule_class_name(&eff_name)
+                            || (!r.test && eff_name.ends_with("_test"))
+                            || (r.test && !eff_name.ends_with("_test"))
+                        {
+                            return Err(format!(
+                                "Invalid rule class name '{eff_name}'{}",
+                                if !r.test && eff_name.ends_with("_test") {
+                                    ", non-test rule class names must not end with '_test'"
+                                } else if r.test && !eff_name.ends_with("_test") {
+                                    ", test rule class names must end with '_test'"
+                                } else {
+                                    ""
+                                }
+                            ));
+                        }
+                        r.name = Some(eff_name.clone());
+                        let mut rc = starlark_rule_class(
+                            &eff_name,
+                            r.attrs.clone(),
+                            r.executable,
+                            r.test,
+                            r.outputs.clone(),
+                            r.build_setting,
+                        );
+                        rc.outputs_fn = r.outputs_fn.clone();
+                        let mut kwargs = r.kwargs.clone();
+                        {
+                            let mapping = self
+                                .cfg
+                                .lookup
+                                .resolver
+                                .mapping(label.package_identifier().repository());
+                            let cctx = crate::attr::ConvertCtx {
+                                pkg: label.package_identifier(),
+                                mapping: &mapping,
+                                rule_class: "rule",
+                            };
+                            let conv = |v: &Value| -> Value {
+                                match v {
+                                    Value::String(s) => crate::attr::convert_label(s, &cctx)
+                                        .map(Value::Label)
+                                        .unwrap_or_else(|_| v.clone()),
+                                    Value::Struct(st)
+                                        if st.fields.contains_key("toolchain_type")
+                                            || st.fields.contains_key("_toolchain_type") =>
+                                    {
+                                        let mut f = st.fields.clone();
+                                        for fnm in ["toolchain_type", "name"] {
+                                            if let Some(Value::String(n)) = f.get(fnm).cloned() {
+                                                if let Ok(l) =
+                                                    crate::attr::convert_label(&n, &cctx)
+                                                {
+                                                    f.insert(fnm.into(), Value::Label(l));
+                                                }
+                                            }
+                                        }
+                                        Value::Struct(Arc::new(zel_starlark::StructValue::new(f)))
+                                    }
+                                    o => o.clone(),
+                                }
+                            };
+                            for key in ["toolchains", "exec_compatible_with"] {
+                                if let Some(v) = kwargs.get(key).cloned() {
+                                    if let Ok(items) =
+                                        zel_starlark::eval::builtins::value_to_sequence(&v)
+                                    {
+                                        let out: Vec<Value> = items.iter().map(&conv).collect();
+                                        kwargs.insert(
+                                            key.to_string(),
+                                            Value::List(Arc::new(Mutex::new(
+                                                zel_starlark::StarlarkList::new(out),
+                                            ))),
+                                        );
+                                    }
+                                }
+                            }
+                            if let Some(Value::Dict(d)) = kwargs.get("exec_groups").cloned() {
+                                let mut next_eg = zel_starlark::StarlarkDict::new();
+                                for (gk, gv) in d.lock().unwrap().items() {
+                                    let next_gv = if let Value::Struct(gs) = gv {
+                                        let mut gf = gs.fields.clone();
+                                        for key in ["toolchains", "exec_compatible_with"] {
+                                            if let Some(v) = gf.get(key).cloned() {
+                                                if let Ok(items) =
+                                                    zel_starlark::eval::builtins::value_to_sequence(
+                                                        &v,
+                                                    )
+                                                {
+                                                    let out: Vec<Value> =
+                                                        items.iter().map(&conv).collect();
+                                                    gf.insert(
+                                                        key.to_string(),
+                                                        Value::List(Arc::new(Mutex::new(
+                                                            zel_starlark::StarlarkList::new(out),
+                                                        ))),
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        Value::Struct(Arc::new(zel_starlark::StructValue::new(gf)))
+                                    } else {
+                                        gv
+                                    };
+                                    let _ = next_eg.insert(gk, next_gv);
+                                }
+                                kwargs.insert(
+                                    "exec_groups".to_string(),
+                                    Value::Dict(Arc::new(Mutex::new(next_eg))),
+                                );
+                            }
+                        }
+                        let digest_hex = match final_digest {
+                            Some(md) => {
+                                use std::fmt::Write as _;
+                                let mut hex = String::with_capacity(md.len() * 2);
+                                for b in md {
+                                    let _ = write!(hex, "{b:02x}");
+                                }
+                                hex
+                            }
+                            None => String::new(),
+                        };
+                        rc.starlark = Some(Arc::new(crate::rule_class::StarlarkRuleSpec {
+                            implementation: r.implementation.clone(),
+                            kwargs,
+                            defined_in: label.canonical_form(),
+                            definition_digest: digest_hex,
+                            definition_stack: r.definition_stack.clone(),
+                            initializers: r.initializers.clone(),
+                            build_setting_flag: r.build_setting_flag,
+                        }));
+                        r.class = Some(Arc::new(rc));
+                    }
+                    if let (Some(md), Some(existing_rc)) = (final_digest, r.class.as_ref()) {
+                        if let Some(st) = &existing_rc.starlark {
+                            if st.definition_digest.is_empty()
+                                && st.defined_in == label.canonical_form()
+                            {
+                                use std::fmt::Write as _;
+                                let mut hex = String::with_capacity(md.len() * 2);
+                                for b in md {
+                                    let _ = write!(hex, "{b:02x}");
+                                }
+                                let mut updated_rc = (**existing_rc).clone();
+                                let mut updated_st = (**st).clone();
+                                updated_st.definition_digest = hex;
+                                updated_rc.starlark = Some(Arc::new(updated_st));
+                                r.class = Some(Arc::new(updated_rc));
+                            }
+                        }
+                    }
+                }
+            }
+            "macro" => {
+                let mut reg = self.registry.lock().unwrap();
+                if let Some(m) = reg.macros.get_mut(idx) {
+                    if m.name.is_none() {
+                        m.name = Some(k.to_string());
+                        m.bzl_label = Some(label.clone());
+                    }
+                }
+            }
+            "provider" => {
+                return Ok(crate::provider::export_provider(
+                    idx,
+                    k,
+                    &label.canonical_form(),
+                ));
+            }
+            "aspect" => {
+                crate::aspect::export_aspect(idx, k, &label.canonical_form());
+            }
+            _ => {}
+        }
+        Ok(None)
     }
 }
 
@@ -2244,6 +2323,7 @@ const ATTR_FUNCTIONS: &[&str] = &[
     "string_list",
     "string_dict",
     "string_list_dict",
+    "label_list_dict",
     "label",
     "label_list",
     "label_keyed_string_dict",
@@ -2251,6 +2331,9 @@ const ATTR_FUNCTIONS: &[&str] = &[
     "int_list",
     "output",
     "output_list",
+    "dormant_label",
+    "dormant_label_list",
+    "license",
 ];
 
 fn split_location(line: &str) -> (Option<String>, String) {
@@ -2342,7 +2425,6 @@ fn eval_repo_file_checked(
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(format!("error reading REPO.bazel file at {path}: {e}")),
     };
-    let src = String::from_utf8_lossy(&bytes).to_string();
     #[derive(Default, Clone)]
     struct RepoEvalState {
         file: RepoFile,
@@ -2451,7 +2533,7 @@ fn eval_repo_file_checked(
             "unknown REPO.bazel function {other}"
         ))),
     }));
-    if let Err(errs) = ctx.eval_file_checked(&src, Some(("REPO.bazel files", false))) {
+    if let Err(errs) = ctx.eval_bytes_checked(&bytes, Some(("REPO.bazel files", false))) {
         return Err(errs.join("\n"));
     }
     let g = out.lock().unwrap().clone();

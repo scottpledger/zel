@@ -702,6 +702,7 @@ pub(crate) fn constraint_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
         }
         _ => mk_list(vec![]),
     };
+    let has_default = !matches!(default, Value::None);
     let mut ct = base(n);
     ct.providers.insert(
         "ConstraintSettingInfo".into(),
@@ -710,6 +711,7 @@ pub(crate) fn constraint_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
             vec![
                 ("label", lbl(&n.rule.label)),
                 ("default_constraint_value", default),
+                ("has_default_constraint_value", Value::Bool(has_default)),
                 ("refines_constraint_values", refines),
             ],
         ),

@@ -973,3 +973,195 @@ fn recursive_traversal_sentinel_external_execroot_and_bazelignore_warning() {
         ig_neg_child.events
     );
 }
+
+#[test]
+fn bzl_load_visibility_and_finalizer_macros() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(&fs, &root, "priv/BUILD", "");
+    write(
+        &fs,
+        &root,
+        "priv/secret.bzl",
+        "visibility('//allowed/...')\nSECRET = 42\n",
+    );
+    write(
+        &fs,
+        &root,
+        "allowed/sub/BUILD",
+        "load('//priv:secret.bzl', 'SECRET')\nfilegroup(name = 'fg_' + str(SECRET))\n",
+    );
+    write(
+        &fs,
+        &root,
+        "denied/BUILD",
+        "load('//priv:secret.bzl', 'SECRET')\nfilegroup(name = 'bad')\n",
+    );
+
+    let resolver = SimpleRepoResolver::new(root.clone());
+    let mut cfg = LoaderConfig::new(fs.clone(), Arc::new(resolver));
+    cfg.use_prelude = false;
+    let loader = PackageLoader::new(cfg);
+
+    let ok_pkg = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("allowed/sub").unwrap())
+        .unwrap();
+    assert!(!ok_pkg.contains_errors, "{:?}", ok_pkg.events);
+    assert!(ok_pkg.targets.contains_key("fg_42"));
+
+    let bad_err = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("denied").unwrap())
+        .unwrap_err();
+    assert!(
+        bad_err
+            .message
+            .contains("contains .bzl load visibility violations")
+            && bad_err
+                .events
+                .iter()
+                .any(|e| e.message.contains("is not visible for loading from")),
+        "{bad_err}: {:?}",
+        bad_err.events
+    );
+
+    // Finalizer macro sees rules declared later in BUILD, and inherit_attrs = "common" works.
+    write(
+        &fs,
+        &root,
+        "fin/defs.bzl",
+        r#"
+def _fin_impl(name, visibility, **kwargs):
+    names = sorted(native.existing_rules().keys())
+    native.filegroup(name = name + "_" + "_".join(names), visibility = visibility)
+
+fin_macro = macro(
+    implementation = _fin_impl,
+    finalizer = True,
+    inherit_attrs = "common",
+    attrs = {"testonly": None},
+)
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "fin/BUILD",
+        r#"
+load(":defs.bzl", "fin_macro")
+fin_macro(name = "summary")
+filegroup(name = "alpha")
+filegroup(name = "beta")
+"#,
+    );
+    let fin_pkg = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("fin").unwrap())
+        .unwrap();
+    assert!(!fin_pkg.contains_errors, "{:?}", fin_pkg.events);
+    assert!(
+        fin_pkg.targets.contains_key("summary_alpha_beta"),
+        "{:?}",
+        fin_pkg.targets.keys().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn rule_inheritance_initializers_transitions_and_attr_types() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(
+        &fs,
+        &root,
+        "pkg/defs.bzl",
+        r#"
+def _base_init(**kwargs):
+    out = dict(kwargs)
+    out["msg"] = (out.get("msg") or "") + "[base]"
+    return out
+
+def _child_init(**kwargs):
+    out = dict(kwargs)
+    out["msg"] = (out.get("msg") or "") + "[child]"
+    return out
+
+def _impl(ctx):
+    return [DefaultInfo()]
+
+base_rule = rule(
+    implementation = _impl,
+    extendable = True,
+    initializer = _base_init,
+    attrs = {
+        "msg": attr.string(default = "hi"),
+        "mapping": attr.label_list_dict(),
+    },
+)
+
+child_rule = rule(
+    implementation = _impl,
+    parent = base_rule,
+    initializer = _child_init,
+    attrs = {
+        "extra": attr.int(values = [1, 2]),
+    },
+)
+
+if type(attr.string()) != "Attribute":
+    fail("expected Attribute type, got " + type(attr.string()))
+
+tt = config_common.toolchain_type("//pkg:my_tc", mandatory = False)
+if str(tt.toolchain_type) != "@@//pkg:my_tc" or tt.mandatory != False:
+    fail("unexpected toolchain_type struct: " + repr(tt))
+
+def _t1(settings, attr):
+    return {"//command_line_option:cpu": "k8"}
+
+def _t2(settings, attr):
+    return {"//command_line_option:compilation_mode": "opt"}
+
+t1 = transition(implementation = _t1, inputs = [], outputs = ["//command_line_option:cpu"])
+t2 = transition(implementation = _t2, inputs = [], outputs = ["//command_line_option:compilation_mode"])
+composed = t1.and_then(t2)
+
+s_flag = rule(
+    implementation = _impl,
+    build_setting = config.string_set(flag = True, repeatable = True),
+)
+
+def make_analysis_test(name, dep):
+    testing.analysis_test(
+        name = name,
+        implementation = _impl,
+        attrs = {"dep": attr.label()},
+        attr_values = {"dep": dep},
+    )
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "pkg/BUILD",
+        r#"
+load(":defs.bzl", "child_rule", "make_analysis_test", "s_flag")
+child_rule(name = "c", msg = "start", extra = 2)
+s_flag(name = "sf", build_setting_default = ["a", "b"])
+make_analysis_test(name = "my_check", dep = ":c")
+"#,
+    );
+
+    let resolver = SimpleRepoResolver::new(root.clone());
+    let mut cfg = LoaderConfig::new(fs.clone(), Arc::new(resolver));
+    cfg.use_prelude = false;
+    let loader = PackageLoader::new(cfg);
+    let pkg = loader
+        .load_package(&PackageIdentifier::create_in_main_repo("pkg").unwrap())
+        .unwrap();
+    assert!(!pkg.contains_errors, "{:?}", pkg.events);
+    let Some(zel_packages::Target::Rule(r)) = pkg.targets.get("c") else {
+        panic!("missing rule c");
+    };
+    assert_eq!(
+        r.attrs.get("msg"),
+        Some(&Value::String("start[child][base]".into()))
+    );
+    assert!(pkg.targets.contains_key("my_check"));
+}

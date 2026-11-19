@@ -101,6 +101,7 @@ pub struct SubruleDef {
     pub attrs: Vec<Attribute>,
     pub toolchains: Vec<Value>,
     pub fragments: Vec<String>,
+    pub subrules: Vec<Value>,
 }
 
 static SUBRULES: Mutex<Vec<Arc<SubruleDef>>> = Mutex::new(Vec::new());

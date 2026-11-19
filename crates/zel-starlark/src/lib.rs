@@ -3582,7 +3582,8 @@ impl EvalContext {
             }
             Value::BuiltinFunction(bf) if bf.starts_with("host:") && self.host.is_some() => {
                 if let Some(d) = &pending_dup {
-                    let fn_name = &bf["host:".len()..];
+                    let raw_name = &bf["host:".len()..];
+                    let fn_name = raw_name.rsplit(['.', ':']).next().unwrap_or(raw_name);
                     return Err(StarlarkError(format!(
                         "{loc}: {fn_name}() got multiple values for argument '{d}'"
                     )));
@@ -3645,6 +3646,11 @@ impl EvalContext {
                 }
             }
             Value::Provider { name } => {
+                if let Some(d) = &pending_dup {
+                    return Err(StarlarkError(format!(
+                        "{loc}: {name}() got multiple values for argument '{d}'"
+                    )));
+                }
                 if name == "OutputGroupInfo" {
                     if !eval_pos.is_empty() {
                         return Err(StarlarkError(format!(
@@ -3746,6 +3752,35 @@ impl EvalContext {
         kw_args: &BTreeMap<String, Value>,
         loc: &Location,
     ) -> Result<Value, StarlarkError> {
+        let delegates_to_callable = match &recv {
+            Value::Struct(s) => match s.fields.get(method) {
+                Some(Value::BuiltinFunction(_)) => false,
+                Some(
+                    Value::Provider { .. }
+                    | Value::UserFunction(_)
+                    | Value::Host(..)
+                    | Value::RuleCallable { .. },
+                ) => true,
+                _ => false,
+            },
+            Value::ProviderInstance { fields, .. } => matches!(
+                fields.get(method),
+                Some(
+                    Value::UserFunction(_)
+                        | Value::BuiltinFunction(_)
+                        | Value::Provider { .. }
+                        | Value::Host(..)
+                )
+            ),
+            _ => false,
+        };
+        if !delegates_to_callable {
+            if let Some(dup) = self.pending_dup_kw.take() {
+                return Err(StarlarkError(format!(
+                    "{loc}: {method}() got multiple values for argument '{dup}'"
+                )));
+            }
+        }
         match recv {
             Value::String(s) => eval::builtins::eval_string_method_in(
                 &s,
@@ -5371,6 +5406,149 @@ fn construct_native_provider(
             out.insert("inherited_environment".to_string(), inh);
             Ok(out)
         }
+        "DefaultInfo" => {
+            if !eval_pos.is_empty() {
+                return Err(StarlarkError(
+                    "DefaultInfo() accepts no positional arguments".to_string(),
+                ));
+            }
+            for k in eval_kw.keys() {
+                if !matches!(
+                    k.as_str(),
+                    "files" | "runfiles" | "data_runfiles" | "default_runfiles" | "executable"
+                ) {
+                    return Err(StarlarkError(format!(
+                        "DefaultInfo() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            let mut out = BTreeMap::new();
+            if let Some(v) = eval_kw.remove("files") {
+                match v {
+                    Value::None => {}
+                    Value::Depset(_) => {
+                        out.insert("files".to_string(), v);
+                    }
+                    other => {
+                        return Err(StarlarkError(format!(
+                            "in call to DefaultInfo(), parameter 'files' got value of type '{}', want 'depset or NoneType'",
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            for k in ["runfiles", "data_runfiles", "default_runfiles"] {
+                if let Some(v) = eval_kw.remove(k) {
+                    match v {
+                        Value::None => {}
+                        Value::Host(ref kind, _) if kind == "runfiles" => {
+                            out.insert(k.to_string(), v);
+                        }
+                        other => {
+                            return Err(StarlarkError(format!(
+                                "in call to DefaultInfo(), parameter '{k}' got value of type '{}', want 'runfiles or NoneType'",
+                                other.type_name()
+                            )));
+                        }
+                    }
+                }
+            }
+            if out.contains_key("runfiles")
+                && (out.contains_key("data_runfiles") || out.contains_key("default_runfiles"))
+            {
+                return Err(StarlarkError(
+                    "Cannot specify the provider 'runfiles' together with 'data_runfiles' or 'default_runfiles'"
+                        .to_string(),
+                ));
+            }
+            if let Some(v) = eval_kw.remove("executable") {
+                match v {
+                    Value::None => {}
+                    Value::Host(ref kind, _) if kind == "file" => {
+                        out.insert("executable".to_string(), v);
+                    }
+                    other => {
+                        return Err(StarlarkError(format!(
+                            "in call to DefaultInfo(), parameter 'executable' got value of type '{}', want 'File or NoneType'",
+                            other.type_name()
+                        )));
+                    }
+                }
+            }
+            Ok(out)
+        }
+        "DebugPackageInfo" => {
+            if !eval_pos.is_empty() {
+                return Err(StarlarkError(
+                    "DebugPackageInfo() accepts no positional arguments".to_string(),
+                ));
+            }
+            for k in eval_kw.keys() {
+                if !matches!(
+                    k.as_str(),
+                    "target_label" | "stripped_file" | "unstripped_file" | "dwp_file"
+                ) {
+                    return Err(StarlarkError(format!(
+                        "DebugPackageInfo() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            let target_label = match eval_kw.remove("target_label") {
+                Some(v @ Value::Label(_)) => v,
+                Some(other) => {
+                    return Err(StarlarkError(format!(
+                        "in call to DebugPackageInfo(), parameter 'target_label' got value of type '{}', want 'Label'",
+                        other.type_name()
+                    )));
+                }
+                None => {
+                    return Err(StarlarkError(
+                        "DebugPackageInfo() missing 1 required named argument: target_label"
+                            .to_string(),
+                    ));
+                }
+            };
+            let check_file = |v: Value,
+                              param: &str,
+                              nullable: bool|
+             -> Result<Value, StarlarkError> {
+                match v {
+                    Value::None if nullable => Ok(Value::None),
+                    Value::Host(ref k, _) if k == "file" => Ok(v),
+                    other => Err(StarlarkError(format!(
+                        "in call to DebugPackageInfo(), parameter '{param}' got value of type '{}', want '{}'",
+                        other.type_name(),
+                        if nullable { "File or NoneType" } else { "File" }
+                    ))),
+                }
+            };
+            let unstripped_file = match eval_kw.remove("unstripped_file") {
+                Some(v) => check_file(v, "unstripped_file", false)?,
+                None => {
+                    return Err(StarlarkError(
+                        "DebugPackageInfo() missing 1 required named argument: unstripped_file"
+                            .to_string(),
+                    ));
+                }
+            };
+            let stripped_file = match eval_kw.remove("stripped_file") {
+                Some(v) => check_file(v, "stripped_file", true)?,
+                None => Value::None,
+            };
+            let dwp_file = match eval_kw.remove("dwp_file") {
+                Some(v) => check_file(v, "dwp_file", true)?,
+                None => Value::None,
+            };
+            let mut out = BTreeMap::new();
+            out.insert("target_label".to_string(), target_label);
+            out.insert("stripped_file".to_string(), stripped_file);
+            out.insert("unstripped_file".to_string(), unstripped_file);
+            out.insert("dwp_file".to_string(), dwp_file);
+            Ok(out)
+        }
+        "IncompatiblePlatformProvider" => Err(StarlarkError(
+            "'IncompatiblePlatformProvider' object is not callable".to_string(),
+        )),
         _ => Ok(eval_kw),
     }
 }

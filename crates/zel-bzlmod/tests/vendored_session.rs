@@ -61,6 +61,7 @@ fn fetch_all_repos_from_vendored_registry() {
         experimental_repository_ctx_execute_wasm: false,
         experimental_sibling_repository_layout: false,
         incompatible_no_implicit_watch_label: true,
+        incompatible_use_cc_configure_from_rules_cc: false,
         isolated_extension_usages: false,
         main_mapping_errors: false,
         nofetch: false,

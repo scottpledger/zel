@@ -92,9 +92,25 @@ fn stubs(ns: &str, names: &[&str]) -> Value {
 /// The `_builtins` module visible to builtins files: `internal` natives, `toplevel` (the
 /// predeclared symbols before overriding) and `native`.
 pub(crate) fn builtins_module(predeclared: &BTreeMap<String, Value>) -> Value {
+    let mut cc_common_fields: BTreeMap<String, Value> = CC_COMMON_NATIVES
+        .iter()
+        .map(|n| {
+            (
+                (*n).to_string(),
+                Value::BuiltinFunction(format!("host:builtins.cc_common.{n}")),
+            )
+        })
+        .collect();
+    cc_common_fields.insert(
+        "do_not_use_tools_cpp_compiler_present".to_string(),
+        Value::None,
+    );
     let internal = mk_struct(vec![
         ("cc_internal", zel_builtins::cc_internal::internal_struct()),
-        ("cc_common", stubs("cc_common", CC_COMMON_NATIVES)),
+        (
+            "cc_common",
+            Value::Struct(Arc::new(StructValue::new(cc_common_fields))),
+        ),
         (
             "apple_common",
             mk_struct(vec![
