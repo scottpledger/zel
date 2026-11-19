@@ -1689,7 +1689,7 @@ impl<'a> TargetEnv<'a> {
         vis: &[Label],
         owner: &PackageIdentifier,
         from: &PackageIdentifier,
-    ) -> Result<bool, (Label, String)> {
+    ) -> Result<bool, Box<(Label, String)>> {
         let mut allowed = Self::same_package_or_javatests(owner, from);
         for l in vis {
             let n = l.name();
@@ -1717,7 +1717,7 @@ impl<'a> TargetEnv<'a> {
             } else {
                 let g = self
                     .group_contents_checked(l)
-                    .map_err(|msg| (l.clone(), msg))?;
+                    .map_err(|msg| Box::new((l.clone(), msg)))?;
                 if g.contains(from) {
                     allowed = true;
                 }
@@ -2535,7 +2535,8 @@ impl QueryEnv for TargetEnv<'_> {
         let to_pkg = Self::label_package_id(&to.label);
         match self.spec_contains_checked(&vis, &owner, &to_pkg) {
             Ok(allowed) => Ok(allowed),
-            Err((bad_label, msg)) => {
+            Err(err) => {
+                let (bad_label, msg) = *err;
                 diag.handle_error(
                     expr,
                     format!(
