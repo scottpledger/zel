@@ -1582,14 +1582,13 @@ sh_test(name = "flk", srcs = ["flk.sh"])
 sh_test(name = "tmpcheck", srcs = ["tmpcheck.sh"])
 "#,
     );
-    let marker = w.ws.join("flk_once");
+    // Inspect `$XML_OUTPUT_FILE` rather than touching a file in the workspace so the test stays
+    // hermetic under `darwin-sandbox` / `linux-sandbox` (`(deny file-write*)` outside writable dirs):
+    // - single-attempt run (`max_attempts == 1`): `.../attempt/test.xml` -> fails
+    // - multi-attempt run (`max_attempts >= 2`): `...attempt_1.tmp/test.xml` fails, `attempt_2.tmp` passes!
     w.write(
         "pkg/flk.sh",
-        &format!(
-            "#!/bin/sh\nif [ -f '{}' ]; then echo PASS_ATTEMPT; exit 0; fi\ntouch '{}'\necho FAIL_ATTEMPT_ONE\nexit 1\n",
-            marker.display(),
-            marker.display()
-        ),
+        "#!/bin/sh\ncase \"$XML_OUTPUT_FILE\" in\n  */attempt/test.xml|*attempt_1.tmp*)\n    echo FAIL_ATTEMPT_ONE\n    exit 1\n    ;;\n  *)\n    echo PASS_ATTEMPT\n    exit 0\n    ;;\nesac\n",
     );
     w.write(
         "pkg/tmpcheck.sh",
@@ -1607,7 +1606,6 @@ sh_test(name = "tmpcheck", srcs = ["tmpcheck.sh"])
 
     // Now reverse order: default first, then //pkg:flk@2 -> 2 attempts -> FLAKY!
     // Under --test_output=errors, FAIL_ATTEMPT_ONE must be printed even when overall status is FLAKY.
-    let _ = std::fs::remove_file(&marker);
     let r_flaky = w.run(&[
         "test",
         "--flaky_test_attempts=default",
