@@ -1,0 +1,44 @@
+action 'Executing genrule //a:gg'
+  Mnemonic: Genrule
+  Target: //a:gg
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: efb257e0353d4c7aac216fe391aa37dd298024cb3045911ff7162b8d43f0682d
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+action 'Cat @@//a:lib'
+  Mnemonic: CatIt
+  Target: //a:lib
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6
+
+action 'Cat @@//a:lib'
+  Mnemonic: CatIt
+  Target: //a:lib
+  Configuration: k8-opt
+  Execution platform: @@platforms//host:host
+  ActionKey: c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012
+
+action 'Cat @@//a:lib2'
+  Mnemonic: CatIt
+  Target: //a:lib2
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87
+
+action 'Executing genrule //a:lm'
+  Mnemonic: Genrule
+  Target: //a:lm
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: f592d9be7cd07e33df9119a083dca794b732141767337da8ffb3107f9f112eaa
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+action 'Cat @@//a:sm_cat'
+  Mnemonic: CatIt
+  Target: //a:sm_cat
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 528a9290a4550ab3dbb0f137142ffa734f640c7270bfd127baeb7b29a44f1f2a
+

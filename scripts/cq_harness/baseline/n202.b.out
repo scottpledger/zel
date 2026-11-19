@@ -1,0 +1,10 @@
+# @OB@/external/ext+/lib/BUILD:2:8
+genrule(
+  name = "gen",
+  visibility = ["//visibility:public"],
+  outs = ["@ext//lib:g.out"],
+  cmd = "echo ext > $@",
+)
+# Rule gen instantiated at (most recent call last):
+#   @OB@/external/ext+/lib/BUILD:2:8 in <toplevel>
+

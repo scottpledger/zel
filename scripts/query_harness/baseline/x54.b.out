@@ -1,0 +1,3 @@
+@WS@/BUILD:4:11: test_suite rule //:all_tests
+@WS@/BUILD:5:11: test_suite rule //:tagged
+@WS@/BUILD:3:6: alias rule //:top_alias

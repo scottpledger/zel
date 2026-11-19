@@ -1,0 +1,8 @@
+action 'Executing genrule //a:gg'
+  Mnemonic: Genrule
+  Target: //a:gg
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: efb257e0353d4c7aac216fe391aa37dd298024cb3045911ff7162b8d43f0682d
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+

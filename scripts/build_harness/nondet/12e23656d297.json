@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "12e23656d297",
+ "classified_as": "ORDERLESS",
+ "cmd": "test --run_under=//:tool --test_output=all //:t_pass //:s_all",
+ "distinct": 4,
+ "harness": "build",
+ "hashes": [
+  "c113d79202458018",
+  "21a5f2514a3cada6",
+  "4d2392b6cd509fc1",
+  "863bfe5d8ce73fc3",
+  "21a5f2514a3cada6",
+  "21a5f2514a3cada6"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: From Testing //:t_fail:\nINFO: From Testing //:t_pass:\nINFO: From Testing //:t_out:\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 20 processes: 17 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 20 total actions",
+   "out": "==================== Test output for //:t_fail:\ntool-out\n================================================================================\n==================== Test output for //:t_pass:\ntool-out\n================================================================================\n==================== Test output for //:t_out:\ntool-out\n================================================================================\n//:t_fail                                                                PASSED in Ns\n//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\nExecuted 3 out of 3 tests: 3 tests pass.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: From Testing //:t_pass:\nINFO: From Testing //:t_fail:\nINFO: From Testing //:t_out:\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 20 processes: 17 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 20 total actions",
+   "out": "==================== Test output for //:t_pass:\ntool-out\n================================================================================\n==================== Test output for //:t_fail:\ntool-out\n================================================================================\n==================== Test output for //:t_out:\ntool-out\n================================================================================\n//:t_fail                                                                PASSED in Ns\n//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\nExecuted 3 out of 3 tests: 3 tests pass.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: From Testing //:t_out:\nINFO: From Testing //:t_fail:\nINFO: From Testing //:t_pass:\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 20 processes: 17 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 20 total actions",
+   "out": "==================== Test output for //:t_out:\ntool-out\n================================================================================\n==================== Test output for //:t_fail:\ntool-out\n================================================================================\n==================== Test output for //:t_pass:\ntool-out\n================================================================================\n//:t_fail                                                                PASSED in Ns\n//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\nExecuted 3 out of 3 tests: 3 tests pass.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: From Testing //:t_out:\nINFO: From Testing //:t_pass:\nINFO: From Testing //:t_fail:\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 20 processes: 17 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 20 total actions",
+   "out": "==================== Test output for //:t_out:\ntool-out\n================================================================================\n==================== Test output for //:t_pass:\ntool-out\n================================================================================\n==================== Test output for //:t_fail:\ntool-out\n================================================================================\n//:t_fail                                                                PASSED in Ns\n//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\nExecuted 3 out of 3 tests: 3 tests pass.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: From Testing //:t_pass:\nINFO: From Testing //:t_fail:\nINFO: From Testing //:t_out:\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 20 processes: 17 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 20 total actions",
+   "out": "==================== Test output for //:t_pass:\ntool-out\n================================================================================\n==================== Test output for //:t_fail:\ntool-out\n================================================================================\n==================== Test output for //:t_out:\ntool-out\n================================================================================\n//:t_fail                                                                PASSED in Ns\n//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\nExecuted 3 out of 3 tests: 3 tests pass.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: From Testing //:t_pass:\nINFO: From Testing //:t_fail:\nINFO: From Testing //:t_out:\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 20 processes: 17 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 20 total actions",
+   "out": "==================== Test output for //:t_pass:\ntool-out\n================================================================================\n==================== Test output for //:t_fail:\ntool-out\n================================================================================\n==================== Test output for //:t_out:\ntool-out\n================================================================================\n//:t_fail                                                                PASSED in Ns\n//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\nExecuted 3 out of 3 tests: 3 tests pass.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

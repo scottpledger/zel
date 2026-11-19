@@ -1,0 +1,116 @@
+test //:crash
+test //:multi
+test --test_output=all //:crash
+test --test_output=all //:multi
+test --test_summary=detailed //:multi
+test --test_summary=testcase //:multi
+test --check_tests_up_to_date //:pass
+test --check_tests_up_to_date //:pass //:fail
+test --notest_keep_going //:fail
+test --notest_keep_going //:fail //:flaky //:pass
+test --test_output=streamed --notest_keep_going //:fail //:pass
+test --cache_test_results=auto //:pass //:pass
+test --test_env=A --test_env=B=2 --test_output=all //:envt
+test --test_arg=--foo --test_output=all //:envt
+test --test_tmpdir=/tmp/vb4/ttmp --test_output=all //:envt
+test --test_timeout=1 --test_output=all //:slow
+test --test_timeout=1 //:slow //:pass
+test --test_verbose_timeout_warnings //:slow
+test --test_output=errors //:slow --test_timeout=1
+test --runs_per_test=2 --test_output=all //:envt
+test --runs_per_test=2 --test_summary=detailed //:pass
+test --runs_per_test=2 --notest_keep_going //:fail
+test --flaky_test_attempts=3 //:fail
+test --flaky_test_attempts=3 --test_output=all //:flaky
+test --test_filter=a --test_output=all //:envt
+test --test_sharding_strategy=forced=2 --test_output=all //:envt
+test --nocache_test_results //:pass
+test //:large --test_output=all
+test //:small_t //:large //:pass --test_verbose_timeout_warnings
+test --test_tag_filters=tagA,-manual //:small_t //:man
+test --test_tag_filters=-tagA //:all
+test --test_size_filters=small //:all
+test --test_lang_filters=sh //:all
+test --build_tests_only //:all
+test --build_tests_only //:suite //:gen
+test --keep_going //:fail //:bad
+test --nokeep_going //:fail //:bad
+test //:bad
+test //:gen
+test //:bin
+test //:nonexist
+test //:fail //:nonexist
+test --keep_going //:fail //:nonexist
+test //:fail //:nonexist --nokeep_going
+test --output_groups=compilation_outputs //:pass
+test --output_groups=default //:pass
+test --nobuild //:fail
+test --nobuild //:gen
+test --nobuild //:nonexist
+test --check_up_to_date //:fail
+test --symlink_prefix=foo- --test_output=all //:fail
+test --symlink_prefix=out/ //:pass
+test --experimental_convenience_symlinks=ignore //:fail
+test --noexperimental_convenience_symlinks //:fail
+test --jobs=2 //:pass //:fail //:envt
+test --local_test_jobs=1 //:pass //:fail //:envt
+test --test_summary=short --test_output=errors //:pass //:fail
+test --show_result=0 //:fail
+test --show_result=1 //:pass //:fail
+test --verbose_failures //:bad
+test --explain=/tmp/vb4/ex5.txt //:fail
+test --run_under='echo UNDER' --test_output=all //:pass
+test --run_under=/bin/true //:fail
+test --run_under=//:bin //:pass --test_output=all
+test --test_strategy=local //:pass
+test --test_strategy=bogus //:pass
+test --test_strategy=standalone //:pass
+test --test_strategy=exclusive //:pass //:fail
+test --test_summary=short_uncached //:pass //:fail
+test --test_summary=detailed_uncached //:pass //:fail
+test //:pass //:pass
+test //:pass --runs_per_test=2 --test_summary=terse
+test --test_output=all --max_test_output_bytes=5 //:fail
+test --test_output=streamed --max_test_output_bytes=5 //:fail
+test --ram_utilization_factor=50 //:pass
+test --test_cpu=1 //:pass
+test --test_keep_going=false //:fail //:pass
+test --test_result_expiration=1 //:pass
+test --experimental_ui_max_stdouterr_bytes=5 --test_output=all //:fail
+test --cache_test_results=no --runs_per_test=2 //:pass
+test --test_env=FOO //:envt --test_output=all
+test --incompatible_check_sharding_support=false //:shard
+test --noincompatible_check_sharding_support //:shard --test_output=all
+test --test_sharding_strategy=disabled //:shard --test_output=all
+test --test_arg=x --test_arg=y //:shard --noincompatible_check_sharding_support --test_output=all
+test --color=yes //:fail //:pass
+test --curses=yes --color=yes //:pass
+test --noshow_progress //:fail
+test --progress_in_terminal_title //:pass
+test --experimental_extra_action_filter=x //:pass
+test --nobuild_tests_only //:pass
+test --compilation_mode=opt //:pass
+test --test_verbose_timeout_warnings --test_timeout=500 //:pass
+test --test_output=errors --test_summary=none //:fail
+test --test_output=summary --test_summary=terse //:fail
+build //:pass //:fail
+build --build_tests_only //:pass //:gen
+build //:suite
+build --test_tag_filters=-manual //:all
+build --build_tag_filters=manual //:all
+build --build_tag_filters=-manual //:man
+build --build_manual_tests //:man
+build --compile_one_dependency pass.sh
+build --compile_one_dependency g.txt
+build --keep_going //:all
+coverage //:pass
+coverage //:pass //:fail
+coverage --test_output=all //:pass
+coverage --combined_report=lcov //:pass
+coverage --combined_report=none //:pass
+coverage --instrumentation_filter=//:lib //:pass
+coverage --nocombined_report //:pass
+coverage //:lib
+coverage //:fail
+coverage --nobuild //:pass
+coverage //:envt --test_output=all

@@ -1,0 +1,4 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:lib2 (a7a71fd)\n//a:tr (a7a71fd)"
+}

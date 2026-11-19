@@ -1,0 +1,6 @@
+	Tab
+gamma 1
+}
+PERTURBED
+	Tab 0
+beta 2

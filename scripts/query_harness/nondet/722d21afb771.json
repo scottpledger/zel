@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "722d21afb771",
+ "classified_as": "ORDERLESS",
+ "cmd": "query 'deps(//a:lib2)' --output=location --noorder_results --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "b2dc05f279ebeb5a",
+  "354c9b59248234c1",
+  "d2347fbecac8c485",
+  "0f553da3c3432f15",
+  "028e6722f9e7707b",
+  "b7eab81fe9849792"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "@WS@/a/BUILD:4:8: catrule rule //a:lib\n@WS@/a/BUILD:3:10: filegroup rule //a:srcs_fg\n@WS@/a/z.txt:1:1: source file //a:z.txt\n@WS@/a/BUILD:5:8: catrule rule //a:lib2\n@WS@/a/x.txt:1:1: source file //a:x.txt\n@WS@/a/y.txt:1:1: source file //a:y.txt\n@OB@/external/ext+/lib/d.txt:1:1: source file @ext//lib:d.txt\n@OB@/external/ext+/lib/BUILD:1:10: filegroup rule @ext//lib:data\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "@OB@/external/ext+/lib/d.txt:1:1: source file @ext//lib:d.txt\n@WS@/a/BUILD:4:8: catrule rule //a:lib\n@WS@/a/x.txt:1:1: source file //a:x.txt\n@WS@/a/BUILD:3:10: filegroup rule //a:srcs_fg\n@WS@/a/z.txt:1:1: source file //a:z.txt\n@OB@/external/ext+/lib/BUILD:1:10: filegroup rule @ext//lib:data\n@WS@/a/BUILD:5:8: catrule rule //a:lib2\n@WS@/a/y.txt:1:1: source file //a:y.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "@WS@/a/x.txt:1:1: source file //a:x.txt\n@WS@/a/y.txt:1:1: source file //a:y.txt\n@WS@/a/BUILD:3:10: filegroup rule //a:srcs_fg\n@WS@/a/z.txt:1:1: source file //a:z.txt\n@WS@/a/BUILD:4:8: catrule rule //a:lib\n@OB@/external/ext+/lib/BUILD:1:10: filegroup rule @ext//lib:data\n@WS@/a/BUILD:5:8: catrule rule //a:lib2\n@OB@/external/ext+/lib/d.txt:1:1: source file @ext//lib:d.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "@WS@/a/BUILD:5:8: catrule rule //a:lib2\n@WS@/a/z.txt:1:1: source file //a:z.txt\n@WS@/a/BUILD:4:8: catrule rule //a:lib\n@WS@/a/x.txt:1:1: source file //a:x.txt\n@OB@/external/ext+/lib/BUILD:1:10: filegroup rule @ext//lib:data\n@OB@/external/ext+/lib/d.txt:1:1: source file @ext//lib:d.txt\n@WS@/a/y.txt:1:1: source file //a:y.txt\n@WS@/a/BUILD:3:10: filegroup rule //a:srcs_fg\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "@WS@/a/BUILD:4:8: catrule rule //a:lib\n@WS@/a/BUILD:5:8: catrule rule //a:lib2\n@WS@/a/x.txt:1:1: source file //a:x.txt\n@WS@/a/y.txt:1:1: source file //a:y.txt\n@WS@/a/BUILD:3:10: filegroup rule //a:srcs_fg\n@OB@/external/ext+/lib/d.txt:1:1: source file @ext//lib:d.txt\n@WS@/a/z.txt:1:1: source file //a:z.txt\n@OB@/external/ext+/lib/BUILD:1:10: filegroup rule @ext//lib:data\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "@WS@/a/BUILD:3:10: filegroup rule //a:srcs_fg\n@WS@/a/z.txt:1:1: source file //a:z.txt\n@WS@/a/x.txt:1:1: source file //a:x.txt\n@WS@/a/BUILD:4:8: catrule rule //a:lib\n@OB@/external/ext+/lib/BUILD:1:10: filegroup rule @ext//lib:data\n@OB@/external/ext+/lib/d.txt:1:1: source file @ext//lib:d.txt\n@WS@/a/BUILD:5:8: catrule rule //a:lib2\n@WS@/a/y.txt:1:1: source file //a:y.txt\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

@@ -1,0 +1,4 @@
+xlib rule //b:shlib
+filegroup rule //c:cdata
+filegroup rule //d:ok
+filegroup rule //pg:viol

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "958ba7a0d139",
+ "classified_as": "UNCLASSIFIED",
+ "cmd": "coverage --instrumentation_filter=//:foo //:t_pass",
+ "distinct": 3,
+ "harness": "build",
+ "hashes": [
+  "32aa2f95393749ed",
+  "32aa2f95393749ed",
+  "c356bcf238eef967",
+  "32aa2f95393749ed",
+  "32aa2f95393749ed",
+  "0c332d8ae581c708"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:t_pass (N packages loaded).\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_pass (N packages loaded).\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_pass (N packages loaded).\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_pass (N packages loaded).\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_pass (N packages loaded).\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_pass (N packages loaded).\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 1 test target...\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 26 processes: 19 internal, 7 darwin-sandbox, 1 worker.\nINFO: Build completed successfully, 26 total actions",
+   "out": "//:t_pass                                                                PASSED in Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

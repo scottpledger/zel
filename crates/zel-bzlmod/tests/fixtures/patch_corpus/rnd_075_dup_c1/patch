@@ -1,0 +1,16 @@
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+-  indent
++NEW   indent
+ gamma 1
+@@ -11,2 +11,4 @@
+ 
++{
++	Tab 2
+ } 2
+@@ -21,4 +23,2 @@
+ 	Tab 3
+-}
+-  indent
+ x

@@ -1,0 +1,5 @@
+--- a/f.txt
++++ b/f.txt
+@@ -6,2 +6 @@
+ gamma 0
+-	Tab 2

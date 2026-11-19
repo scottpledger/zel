@@ -1,0 +1,134 @@
+build //:gen
+build //:gen2
+build //:gen3
+build //:bad
+build //:noout
+build //:missingin
+build //conf:c1
+build //conf:c2
+build //conf:all
+build //:cyc1
+build //:anerr
+build //:privuse
+build //:nonexist
+build //nonexist:x
+build //:bin
+build //:lib
+build //:suite
+build //:all
+build //...
+build //:gen //:bad
+build //:bad //:gen
+build //:pass
+build //:man
+build bazel-bin/g.txt
+build g.txt
+build //:bin.sh
+build //:gen //:gen
+build -- //:all -//:bad -//:cyc1 -//:cyc2 -//:anerr -//:privuse -//:missingin -//:noout
+build //:gen+//:gen2
+build //:g*
+build //
+build //:
+build ...
+build //:gen)
+build --keep_going //:bad //:gen
+build --nokeep_going //:bad //:gen
+build --keep_going //:gen //:bad
+build --nokeep_going //:gen //:bad
+build --keep_going //:missingin //:gen
+build --nokeep_going //:missingin //:gen
+build --keep_going //:noout //:gen
+build --nokeep_going //:noout //:gen
+build --keep_going //:cyc1 //:gen
+build --nokeep_going //:cyc1 //:gen
+build --keep_going //:bad //:missingin //:gen
+build --nokeep_going //:bad //:missingin //:gen
+build --verbose_failures //:bad
+build -s //:gen
+build -s //:bad
+build --subcommands=pretty_print //:gen
+build --subcommands=true //:gen //:gen2
+build --output_groups=default //:gen
+build --output_groups=+default //:gen
+build --output_groups=nonexistent //:gen
+build --output_groups=_hidden_top_level_INTERNAL_ //:gen
+build --output_groups=compilation_outputs //:bin
+build --output_groups=-default //:gen
+build --show_result=0 //:gen
+build --show_result=1 //:gen //:gen2
+build --show_result=100 //:gen //:gen2
+build --jobs=1 //:gen //:gen2
+build --jobs=-1 //:gen
+build --jobs=x //:gen
+build --explain=/tmp/vb4/ex2.txt //:gen
+build --explain=/tmp/vb4/ex2.txt --verbose_explanations //:gen
+build --verbose_explanations //:gen
+build --check_up_to_date //:gen
+build //:gen --check_up_to_date
+build --discard_analysis_cache //:gen
+build --progress_in_terminal_title //:gen
+build --noshow_progress //:gen
+build --show_progress_rate_limit=1 //:gen
+build --noshow_timestamps //:gen
+build --show_timestamps //:gen
+build --announce //:gen
+build --color=yes //:gen
+build --color=no //:bad
+build --curses=no //:gen
+build --nostamp //:gen
+build --stamp //:gen
+build --compilation_mode=opt //:gen
+build -c dbg //:gen
+build -c bogus //:gen
+build --platforms=//:x //:gen
+build --host_platform=//:x //:gen
+build --cpu=k8 //:gen
+build --test_output=all //:gen
+build --bogus_flag //:gen
+build --nobogus //:gen
+build --jobs //:gen
+build --keep_going=maybe //:gen
+build --output_filter=xx //:bad
+build --output_filter= //:gen
+build --genrule_strategy=local //:gen
+build --spawn_strategy=local //:gen
+build --spawn_strategy=bogus //:gen
+build --strategy=Genrule=standalone //:gen
+build --strategy=Genrule=bogus //:gen
+build --noremote_accept_cached //:gen
+build --action_env=FOO=bar //:gen
+build --sandbox_debug //:bad
+build --sandbox_base=/tmp/vb4/sb //:gen
+build --nosandbox_fake_hostname //:gen
+build --incompatible_strict_action_env //:gen
+build --noincompatible_strict_action_env --verbose_failures //:bad
+build --features=foo //:gen
+build --define=a=b //:gen
+build --copt=-O2 //:gen
+build --workspace_status_command=/bin/true //:gen
+build --build_event_text_file=/tmp/vb4/bep.txt //:gen
+build --build_event_json_file=/tmp/vb4/bep.json //:gen
+build --profile=/tmp/vb4/prof.gz //:gen
+build --execution_log_json_file=/tmp/vb4/el.json //:gen
+build --materialize_param_files //:gen
+build --experimental_execution_log_file=/tmp/vb4/el.bin //:gen
+build --remote_timeout=1 //:gen
+build --max_config_changes_to_show=1 //:gen
+build --keep_state_after_build //:gen
+build --noexperimental_check_output_files //:gen
+build --use_action_cache=false //:gen
+build --nouse_action_cache //:gen
+build --incompatible_remove_old_python_migration_stuff //:gen
+build --loading_phase_threads=1 //:gen
+build --noallow_analysis_failures //:gen
+build --analysis_testing_deps_limit=1 //:gen
+build --experimental_skyframe_cpu_heavy_skykeys_thread_pool_size=2 //:gen
+build --incompatible_enable_cc_toolchain_resolution //:gen
+build --toolchain_resolution_debug=.* //:gen
+build --nobuild //:bad
+build --nobuild //:cyc1
+build --nobuild --keep_going //:gen
+build --experimental_show_artifacts //:gen
+build --experimental_show_artifacts //:gen2
+build --print_relative_test_log_paths //:gen

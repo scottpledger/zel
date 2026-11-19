@@ -1,0 +1,16 @@
+--- a/a.txt
++++ b/a.txt
+@@ -1,5 +1,4 @@
+ y 1
+-x 1
+ beta
+-beta
++eps
+   indent 0
+--- a/b.txt
++++ b/b.txt
+@@ -21,3 +21,3 @@
+ x
+ 	Tab
+-beta 2
++NEW beta 2

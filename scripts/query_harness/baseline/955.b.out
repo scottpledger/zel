@@ -1,0 +1,15 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="filegroup" location="@WS@/d/BUILD:1:10" name="//d:bad">
+        <string name="name" value="bad"/>
+        <list name="srcs">
+            <label value="//nonexistent:foo"/>
+            <label value="//d:missing.txt"/>
+        </list>
+        <rule-input name="//d:missing.txt"/>
+        <rule-input name="//nonexistent:foo"/>
+    </rule>
+    <source-file location="@WS@/d/missing.txt:1:1" name="//d:missing.txt">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+</query>

@@ -1,0 +1,5 @@
+bazel-out/k8-fastbuild/bin/a/lib2.txt
+bazel-out/k8-fastbuild/bin/a/lib.txt
+a/y.txt
+a/x.txt
+a/z.txt

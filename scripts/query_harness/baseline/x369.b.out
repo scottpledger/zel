@@ -1,0 +1,11 @@
+# @WS@/a/BUILD:12:8
+genrule(
+  name = "gg",
+  srcs = ["@@//a:sel", "@@ext+//lib:data"],
+  tools = ["@@//b:tool"],
+  outs = ["@@//a:gg.out"],
+  cmd = "cat $(SRCS) > $@ ; echo $(location :sel) >> $@",
+)
+# Rule gg instantiated at (most recent call last):
+#   @WS@/a/BUILD:12:8 in <toplevel>
+

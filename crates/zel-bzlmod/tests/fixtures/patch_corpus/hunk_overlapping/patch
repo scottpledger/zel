@@ -1,0 +1,12 @@
+--- a/a.txt
++++ b/a.txt
+@@ -2,3 +2,3 @@
+ line 2
+-line 3
++THREE
+ line 4
+@@ -3,3 +3,3 @@
+ THREE
+-line 4
++FOUR
+ line 5

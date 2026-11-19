@@ -1,0 +1,32 @@
+:genrule:
+x_test//b:mk//b:t1:xbin//b:tool*Vk8-fastbuildk8"@e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409aB	bazel-outBk8-fastbuildB	binBbBt1
+q@8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8"	FileWrite(Jhr@@platforms//host:host�*Vk8-fastbuildk8"@a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18B
+tool
+q@8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8"	FileWrite(Jhr@@platforms//host:host�BexternalB
+bazel_toolsB	tools
+Bgenrule	Bgenrule-setup.sh
+"Bmk.txt
+�@803dfa13a502ba5658d4ec952883b1954b6fc48e5265afba1860eca457331543"Genrule(2	/bin/bash2-c2isource external/bazel_tools/tools/genrule/genrule-setup.sh; echo hi > bazel-out/k8-fastbuild/bin/b/mk.txt:$
+PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:hostBtool.repo_mapping
+x@61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3"RepoMappingManifest(Jhr@@platforms//host:hostBt1.repo_mapping
+x@6d4676cfc8cc9f2031a6a30402bfbe451f4d33cd46a92272cddb17441af265da"RepoMappingManifest(Jhr@@platforms//host:hostBtool.runfiles_manifestBt1.runfiles_manifest
+
+z@23941fd4e6093d3ee7bc18e2ae73db2a79f007db9c7fa6c90977fc47de7ecccd"SourceSymlinkManifest(Jhr@@platforms//host:hostz@fa612f3420bc9a9f396725824b7025c5bce959ee5459337d257e28af7303d3e9"SourceSymlinkManifest(Jhr@@platforms//host:host""Bt1.runfilesBMANIFEST
+	Btool.runfiless@5e2d081693a0cdca35fe93c28f1f347a104fc427e6073326245ce128e6f0541f"SymlinkTree(BJ	h	r@@platforms//host:hostBMANIFEST
+
+s@b4383eb49e620ed4369432971c7220f133f5f750c1ffc573d2c133419df8ad0e"SymlinkTree(BJ
+h
+r@@platforms//host:host"
+
+t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:hostBaBlib2.txt
+""		
+t@64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"RunfilesTree(BJhr@@platforms//host:hostB
+test	Btest-setup.sh
+Bgenerate-xml.sh
+"BtestlogsBbBt1Btest.log
+Btest.xml
+Btest.cache_status
+B test.outputs
+ �@6ff7a6d9e8ae0f0d2e54c37977421c903806c134117396c1e00b1968a500b478"
+TestRunner(2-external/bazel_tools/tools/test/test-setup.sh2b/t1:$
+PATH/bin:/usr/bin:/usr/local/binBJhr@@platforms//host:host

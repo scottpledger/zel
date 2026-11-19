@@ -1,0 +1,15 @@
+10 total actions.
+
+Mnemonics:
+  SymlinkTree: 2
+  SourceSymlinkManifest: 2
+  RepoMappingManifest: 2
+  FileWrite: 2
+  RunfilesTree: 2
+
+Configurations:
+  k8-fastbuild: 5
+  k8-opt-exec: 5
+
+Execution Platforms:
+  @@platforms//host:host: 10

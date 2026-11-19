@@ -1,0 +1,4 @@
+source file //a:x.txt (null)
+filegroup rule //a:srcs_fg (bf3a44e)
+catrule rule //a:lib (bf3a44e)
+trule rule //a:tr (a7a71fd)

@@ -1,0 +1,10 @@
+beta 1
+}
+	Tab
+alpha 3
+ 1
+beta 2
+{
+x 1
+} 0
+}

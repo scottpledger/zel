@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "5541ed65ecf4",
+ "classified_as": "STRICT",
+ "cmd": "run --run_under=//:hello //:hello",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "67f0ba8bb1fafd1a",
+  "67f0ba8bb1fafd1a",
+  "67f0ba8bb1fafd1a",
+  "67f0ba8bb1fafd1a",
+  "67f0ba8bb1fafd1a",
+  "67f0ba8bb1fafd1a"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:hello (N packages loaded).\nINFO: Found 1 target...\nTarget //:hello up-to-date:\n  bazel-bin/hello\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 6 processes: 6 internal.\nINFO: Build completed successfully, 6 total actions\nINFO: Running command line: bazel-bin/hello bazel-bin/hello",
+   "out": "hello args=OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/hello RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:hello (N packages loaded).\nINFO: Found 1 target...\nTarget //:hello up-to-date:\n  bazel-bin/hello\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 6 processes: 6 internal.\nINFO: Build completed successfully, 6 total actions\nINFO: Running command line: bazel-bin/hello bazel-bin/hello",
+   "out": "hello args=OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/hello RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:hello (N packages loaded).\nINFO: Found 1 target...\nTarget //:hello up-to-date:\n  bazel-bin/hello\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 6 processes: 6 internal.\nINFO: Build completed successfully, 6 total actions\nINFO: Running command line: bazel-bin/hello bazel-bin/hello",
+   "out": "hello args=OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/hello RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:hello (N packages loaded).\nINFO: Found 1 target...\nTarget //:hello up-to-date:\n  bazel-bin/hello\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 6 processes: 6 internal.\nINFO: Build completed successfully, 6 total actions\nINFO: Running command line: bazel-bin/hello bazel-bin/hello",
+   "out": "hello args=OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/hello RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:hello (N packages loaded).\nINFO: Found 1 target...\nTarget //:hello up-to-date:\n  bazel-bin/hello\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 6 processes: 6 internal.\nINFO: Build completed successfully, 6 total actions\nINFO: Running command line: bazel-bin/hello bazel-bin/hello",
+   "out": "hello args=OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/hello RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:hello (N packages loaded).\nINFO: Found 1 target...\nTarget //:hello up-to-date:\n  bazel-bin/hello\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 6 processes: 6 internal.\nINFO: Build completed successfully, 6 total actions\nINFO: Running command line: bazel-bin/hello bazel-bin/hello",
+   "out": "hello args=OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/bin/hello RULE= pwd-base=_main",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws3"
+}

@@ -1,0 +1,70 @@
+test --test_filter=foo //:pass
+test --test_arg=a --test_arg=b --test_output=all //:envt
+test --test_env=FOO=bar --test_output=all //:envt
+test --test_env=HOME --test_output=all //:envt
+test --test_timeout=1 //:slow
+test --test_timeout=1,2,3,4 //:slow
+test --test_timeout=bad //:pass
+test --test_tag_filters=tagA //:pass //:small_t
+test --test_tag_filters=-tagA //:pass //:small_t
+test --test_tag_filters=manual //:man
+test --test_tag_filters=-manual //:man //:pass
+test --test_size_filters=small //:pass //:small_t
+test --test_size_filters=-small //:pass //:small_t
+test --test_size_filters=large,enormous //:pass //:large
+test --test_size_filters=bogus //:pass
+test --test_lang_filters=sh //:pass
+test --test_lang_filters=-sh //:pass
+test --test_lang_filters=cc //:pass
+test --test_sharding_strategy=disabled //:shard --test_output=all
+test --test_sharding_strategy=explicit //:shard
+test --test_sharding_strategy=forced=3 //:pass
+test --test_sharding_strategy=forced=0 //:pass
+test --test_sharding_strategy=bogus //:pass
+test --cache_test_results=no //:pass
+test --cache_test_results=yes //:pass
+test --nocache_test_results //:pass
+test --jobs=1 //:pass //:fail
+test --jobs=auto //:pass
+test --jobs=HOST_CPUS*0.5 //:pass
+test --jobs=0 //:pass
+test --keep_going //:pass //:fail
+test --nokeep_going //:pass //:fail
+test --notest_keep_going //:fail //:pass
+test --notest_keep_going //:pass //:fail //:flaky
+test --verbose_failures //:fail
+test -s //:pass
+test --show_result=0 //:pass
+test --show_result=10 //:pass //:fail
+test --nobuild //:pass
+build --nobuild //:pass
+build --nobuild //:gen
+test --check_up_to_date //:pass
+build --check_up_to_date //:gen
+test --symlink_prefix=foo- //:pass
+build --symlink_prefix=foo- //:gen
+build --symlink_prefix=/ //:gen
+test --experimental_convenience_symlinks=ignore //:pass
+build --experimental_convenience_symlinks=clean //:gen
+build --experimental_convenience_symlinks=normal //:gen
+build --noexperimental_convenience_symlinks //:gen
+build --build_tests_only //:pass //:gen //:bin
+test --build_tests_only //:pass //:gen
+build --build_tests_only //:suite
+test --run_under=echo //:pass --test_output=all
+test --run_under='echo X' //:pass --test_output=all
+test --test_tmpdir=/tmp/vb4/tt --test_output=all //:envt
+test --max_test_output_bytes=10 --test_output=all //:fail
+test --max_test_output_bytes=0 --test_output=all //:fail
+test --test_verbose_timeout_warnings //:pass
+test --test_verbose_timeout_warnings //:pass //:large
+test //:large
+test --explain=/tmp/vb4/ex.txt //:pass
+test --explain=/tmp/vb4/ex.txt --verbose_explanations //:pass
+test //:suite
+test --test_output=errors //:suite
+test //...
+test //:all
+test -- //:all -//:fail
+test //:suite //:fail
+test //:suite //:pass

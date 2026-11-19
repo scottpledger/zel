@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "8030bd3a0b7d",
+ "classified_as": "STRICT",
+ "cmd": "build --profile=/nonexistent/x //:ga",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "a5f23734a67ee96b",
+  "a5f23734a67ee96b",
+  "a5f23734a67ee96b",
+  "a5f23734a67ee96b",
+  "a5f23734a67ee96b",
+  "a5f23734a67ee96b"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: Error while creating profile file: /nonexistent/x (No such file or directory)\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "ERROR: Error while creating profile file: /nonexistent/x (No such file or directory)\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "ERROR: Error while creating profile file: /nonexistent/x (No such file or directory)\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "ERROR: Error while creating profile file: /nonexistent/x (No such file or directory)\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "ERROR: Error while creating profile file: /nonexistent/x (No such file or directory)\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "ERROR: Error while creating profile file: /nonexistent/x (No such file or directory)\nINFO: Analyzed target //:ga (N packages loaded).\nINFO: Found 1 target...\nTarget //:ga up-to-date:\n  bazel-bin/ga.txt\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nINFO: Build completed successfully, 2 total actions",
+   "out": "",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws3"
+}

@@ -1,0 +1,10 @@
+--- a/f.txt
++++ b/f.txt
+@@ -1,6 +1,6 @@
+ { 2
+ return 0;
+-  indent
++NEW   indent
+  0
+  2
+ 

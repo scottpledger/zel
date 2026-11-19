@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "fc5f16b62da3",
+ "classified_as": "ORDERLESS",
+ "cmd": "query 'deps(//a:lib2)' --output=maxrank --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "9ff093fb0f72aba5",
+  "d2f4bb5fb438172a",
+  "1e355426393a872a",
+  "f099287b30ff383f",
+  "998bb80221063548",
+  "d84c9c815e0369b0"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "0 //a:lib2\n1 //a:lib\n2 //a:srcs_fg\n2 @ext//lib:data\n3 //a:z.txt\n3 //a:x.txt\n3 //a:y.txt\n3 @ext//lib:d.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:lib2\n1 //a:lib\n2 @ext//lib:data\n2 //a:srcs_fg\n3 //a:y.txt\n3 @ext//lib:d.txt\n3 //a:z.txt\n3 //a:x.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:lib2\n1 //a:lib\n2 @ext//lib:data\n2 //a:srcs_fg\n3 //a:z.txt\n3 //a:x.txt\n3 @ext//lib:d.txt\n3 //a:y.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:lib2\n1 //a:lib\n2 @ext//lib:data\n2 //a:srcs_fg\n3 //a:z.txt\n3 //a:y.txt\n3 //a:x.txt\n3 @ext//lib:d.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:lib2\n1 //a:lib\n2 @ext//lib:data\n2 //a:srcs_fg\n3 //a:y.txt\n3 //a:x.txt\n3 @ext//lib:d.txt\n3 //a:z.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:lib2\n1 //a:lib\n2 @ext//lib:data\n2 //a:srcs_fg\n3 //a:x.txt\n3 //a:y.txt\n3 @ext//lib:d.txt\n3 //a:z.txt\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

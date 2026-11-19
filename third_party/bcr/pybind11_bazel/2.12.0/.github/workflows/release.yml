@@ -1,0 +1,31 @@
+name: Release
+on:
+  push:
+    tags: ['v**']
+permissions:
+  contents: read
+jobs:
+  create:
+    permissions:
+      # Required to create the release
+      # and upload the release assets.
+      contents: write
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@v4.1.1
+      - run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --generate-notes --latest --verify-tag \
+            --repo "${GITHUB_REPOSITORY}"
+          gh release download "${GITHUB_REF_NAME}" \
+            --archive tar.gz \
+            --repo "${GITHUB_REPOSITORY}"
+          gh release download "${GITHUB_REF_NAME}" \
+            --archive zip \
+            --repo "${GITHUB_REPOSITORY}"
+          gh release upload "${GITHUB_REF_NAME}" \
+            *.tar.gz *.zip \
+            --repo "${GITHUB_REPOSITORY}"
+        shell: bash

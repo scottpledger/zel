@@ -1,0 +1,145 @@
+NoTransition -> //b:t1 (e722a21)
+  $test_wrapper#@bazel_tools//tools/test:test_wrapper#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $xml_writer#@bazel_tools//tools/test:xml_writer#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $test_runtime#@bazel_tools//tools/test:runtime#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $test_setup_script#@bazel_tools//tools/test:test_setup#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $xml_generator_script#@bazel_tools//tools/test:test_xml_generator#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  $collect_coverage_script#@bazel_tools//tools/test:collect_coverage#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  :coverage_support#@bazel_tools//tools/test:coverage_support#(exec + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 04bf134
+    platforms:[@@bazel_tools//tools:host_platform] -> [[@@platforms//host:host]]
+    compilation_mode:fastbuild -> [opt]
+    is exec configuration:false -> [true]
+    platform_suffix:null -> [exec]
+    copt:[] -> [[-g0]]
+    cxxopt:[] -> [[-g0]]
+    strip:sometimes -> [always]
+    java_runtime_version:local_jdk -> [remotejdk_11]
+    jvmopt:[] -> [[-XX:ErrorFile=/dev/stderr]]
+  srcs#//b:t.cc#(null transition) -> 
+  data#//a:lib2#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> a7a71fd
+  [toolchain dependency: test]#@bazel_tools//tools/test:empty_toolchain#(TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition) -> a7a71fd
+NoTransition -> @bazel_tools//tools/test:xml_writer (04bf134)
+  srcs#@bazel_tools//tools/test:dummy.sh#(null transition) -> 
+NoTransition -> @bazel_tools//tools/test:test_xml_generator (04bf134)
+  srcs#@bazel_tools//tools/test:generate-xml.sh#(null transition) -> 
+NoTransition -> @bazel_tools//tools/test:test_setup (04bf134)
+  srcs#@bazel_tools//tools/test:test-setup.sh#(null transition) -> 
+NoTransition -> @bazel_tools//tools/test:runtime (04bf134)
+  srcs#@bazel_tools//tools/test:test-setup.sh#(null transition) -> 
+NoTransition -> @bazel_tools//tools/test:default_test_toolchain_type (a7a71fd)
+NoTransition -> @bazel_tools//tools/test:coverage_support (04bf134)
+  srcs#@bazel_tools//tools/test:collect_coverage.sh#(null transition) -> 
+NoTransition -> @bazel_tools//tools:host_platform (3030ed4)
+NoTransition -> @bazel_tools//tools/test:empty_toolchain (a7a71fd)
+NoTransition -> //a:lib2 (a7a71fd)
+  srcs#//a:lib#NoTransition -> 
+  srcs#//a:y.txt#(null transition) -> 
+NoTransition -> @bazel_tools//tools/test:collect_coverage (04bf134)
+  srcs#@bazel_tools//tools/test:collect_coverage.sh#(null transition) -> 
+  $runfiles_dep#@@rules_shell+//shell/runfiles:runfiles#NoTransition -> 
+  $windows_constraint#@@platforms//os:windows#(NoConfigTransition + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 3030ed4
+    compilation_mode:opt -> [fastbuild]
+    flag_alias:[build_python_zip=@@rules_python+//python/config_settings:build_python_zip, experimental_python_import_all_repositories=@@rules_python+//python/config_settings:experimental_python_import_all_repositories, incompatible_default_to_explicit_init_py=@@rules_python+//python/config_settings:incompatible_default_to_explicit_init_py, python_path=@@rules_python+//python/config_settings:python_path] -> [[]]
+    is exec configuration:true -> [false]
+    platform_suffix:exec -> [null]
+  [toolchain dependency]#@@rules_shell++sh_configure+local_config_shell//:linux_sh#NoTransition -> 
+NoTransition -> @@platforms//host:host (3030ed4)
+  constraint_values#@@platforms//cpu:x86_64#NoTransition -> 
+  constraint_values#@@platforms//os:linux#NoTransition -> 
+NoTransition -> @bazel_tools//tools/test:test_wrapper (04bf134)
+  srcs#@bazel_tools//tools/test:dummy.sh#(null transition) -> 
+//b:t.cc (null)
+NoConfigTransition -> @@platforms//os:linux (3030ed4)
+  constraint_setting#@@platforms//os:os#NoTransition -> 
+@bazel_tools//tools/test:test-setup.sh (null)
+@bazel_tools//tools/test:generate-xml.sh (null)
+@bazel_tools//tools/test:collect_coverage.sh (null)
+@bazel_tools//tools/test:dummy.sh (null)
+NoTransition -> //a:lib (a7a71fd)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:srcs_fg#NoTransition -> 
+  srcs#@ext//lib:data#NoTransition -> 
+NoConfigTransition -> @@platforms//cpu:x86_64 (3030ed4)
+  constraint_setting#@@platforms//cpu:cpu#NoTransition -> 
+NoTransition -> @@rules_shell+//shell/runfiles:runfiles (04bf134)
+NoTransition -> @@rules_shell+//shell:toolchain_type (04bf134)
+NoTransition -> @bazel_tools//src/conditions:windows (04bf134)
+  constraint_values#@@platforms//os:windows#(NoConfigTransition + (TestTrimmingTransition + ConfigFeatureFlagTaggedTrimmingTransition)) -> 3030ed4
+    compilation_mode:opt -> [fastbuild]
+    flag_alias:[build_python_zip=@@rules_python+//python/config_settings:build_python_zip, experimental_python_import_all_repositories=@@rules_python+//python/config_settings:experimental_python_import_all_repositories, incompatible_default_to_explicit_init_py=@@rules_python+//python/config_settings:incompatible_default_to_explicit_init_py, python_path=@@rules_python+//python/config_settings:python_path] -> [[]]
+    is exec configuration:true -> [false]
+    platform_suffix:exec -> [null]
+//a:y.txt (null)
+NoTransition -> @@rules_shell++sh_configure+local_config_shell//:linux_sh (04bf134)
+NoConfigTransition -> @@platforms//os:windows (3030ed4)
+  constraint_setting#@@platforms//os:os#NoTransition -> 
+NoTransition -> //a:srcs_fg (a7a71fd)
+  srcs#//a:x.txt#(null transition) -> 
+  srcs#//a:y.txt#(null transition) -> 
+  srcs#//a:z.txt#(null transition) -> 
+//a:x.txt (null)
+NoConfigTransition -> @@platforms//cpu:cpu (3030ed4)
+NoTransition -> @@rules_shell+//shell/runfiles:runfiles_impl (04bf134)
+  data#@@rules_shell+//shell/runfiles:runfiles_at_legacy_location#NoTransition -> 
+NoConfigTransition -> @@platforms//os:os (3030ed4)
+NoTransition -> @ext//lib:data (a7a71fd)
+  srcs#@ext//lib:d.txt#(null transition) -> 
+NoTransition -> @@rules_shell+//shell/runfiles:runfiles_at_legacy_location (04bf134)
+  root_symlinks#@@rules_shell+//shell/runfiles:runfiles.bash#(null transition) -> 
+//a:z.txt (null)
+@ext//lib:d.txt (null)
+@@rules_shell+//shell/runfiles:runfiles.bash (null)

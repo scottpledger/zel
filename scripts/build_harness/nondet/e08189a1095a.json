@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "e08189a1095a",
+ "classified_as": "ORDERLESS",
+ "cmd": "test --runs_per_test=2 --notest_keep_going //:t_fail",
+ "distinct": 5,
+ "harness": "build",
+ "hashes": [
+  "fbb365e8ff19f4b7",
+  "6265259a8b11d845",
+  "f53af755f2aaae37",
+  "fff0f4985079ccef",
+  "225e47b72e8811d0",
+  "fff0f4985079ccef"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 2 of 2) failed: Test failed, aborting\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 1 of 2) failed: Test failed, aborting\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 8 internal.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 1 of 2) failed: Test failed, aborting\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 2 of 2) failed: Test failed, aborting\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 8 internal.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 1 of 2) failed: Test failed, aborting\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 2 of 2) failed: Test failed, aborting\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 8 internal.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 1 of 2) failed: Test failed, aborting\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 2 of 2) failed: Test failed, aborting\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 8 internal.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 2 of 2) failed: Test failed, aborting\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 1 of 2) failed: Test failed, aborting\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 8 internal.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_fail (N packages loaded).\nFAIL: //:t_fail (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log)\nFAIL: //:t_fail (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log)\nFAILED: //:t_fail (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 1 of 2) failed: Test failed, aborting\nERROR: WS/BUILD:36:8: Testing //:t_fail (run 2 of 2) failed: Test failed, aborting\nTarget //:t_fail up-to-date:\n  bazel-bin/t_fail\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 8 internal.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_fail                                                                FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_2_of_2/test.log\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/run_1_of_2/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  }
+ ],
+ "workspace": "ws1"
+}

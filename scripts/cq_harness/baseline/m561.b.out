@@ -1,0 +1,8 @@
+a/x.txt
+a/y.txt
+a/z.txt
+bazel-out/k8-fastbuild/bin/a/lib.txt
+bazel-out/k8-opt/bin/a/lib.txt
+bazel-out/k8-fastbuild/bin/a/sm_cat.txt
+bazel-out/k8-fastbuild/bin/a/lib2.txt
+bazel-out/k8-fastbuild/bin/b/t1

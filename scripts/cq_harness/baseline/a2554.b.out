@@ -1,0 +1,16 @@
+18 total actions.
+
+Mnemonics:
+  Genrule: 2
+  CatIt: 4
+  FileWrite: 12
+
+Configurations:
+  k8-opt: 1
+  k8-fastbuild: 17
+
+Execution Platforms:
+  @@platforms//host:host: 18
+
+Aspects:
+  //:defs.bzl%asp: 12

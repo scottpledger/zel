@@ -1,0 +1,12 @@
+--- a/f.txt
++++ b/f.txt
+@@ -7,3 +7,3 @@
+ } 2
+-gamma 0
++NEW gamma 0
+ eps 0
+@@ -12,3 +12,3 @@
+ delta 1
+-y 3
++NEW y 3
+ 	Tab 3

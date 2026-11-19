@@ -1,0 +1,63 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="genrule" location="@WS@/a/BUILD:12:8" name="//a:gg">
+        <string name="name" value="gg"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="toolchains"/>
+        <list name="srcs">
+            <label value="//a:sel"/>
+            <label value="@ext//lib:data"/>
+        </list>
+        <list name="tools">
+            <label value="//b:tool"/>
+        </list>
+        <list name="outs">
+            <output value="//a:gg.out"/>
+        </list>
+        <string name="cmd" value="cat $(SRCS) &gt; $@ ; echo $(location :sel) &gt;&gt; $@"/>
+        <string name="cmd_bash" value=""/>
+        <string name="cmd_bat" value=""/>
+        <string name="cmd_ps" value=""/>
+        <boolean name="output_to_bindir" value="false"/>
+        <boolean name="local" value="false"/>
+        <string name="message" value=""/>
+        <list name="output_licenses"/>
+        <boolean name="executable" value="false"/>
+        <boolean name="$is_executable" value="false"/>
+        <boolean name="heuristic_label_expansion" value="false"/>
+        <label name="$genrule_setup" value="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <tristate name="stamp" value="NO"/>
+        <rule-input name="//a:sel"/>
+        <rule-input name="//b:tool"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-input name="@ext//lib:data"/>
+        <rule-output name="//a:gg.out"/>
+    </rule>
+</query>

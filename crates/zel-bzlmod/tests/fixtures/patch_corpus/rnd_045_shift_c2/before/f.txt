@@ -1,0 +1,9 @@
+  indent
+ 0
+
+beta 2
+x 1
+	Tab
+}
+delta
+  indent 0

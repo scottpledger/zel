@@ -1,0 +1,10 @@
+--- a/f.txt
++++ b/f.txt
+@@ -30,6 +30,6 @@
+ 
+   indent
+ gamma 1
+-eps 0
++NEW eps 0
+ return 0;
+ gamma 1

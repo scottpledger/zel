@@ -1,0 +1,4 @@
+delta 1
+alpha
+eps 0
+delta 0

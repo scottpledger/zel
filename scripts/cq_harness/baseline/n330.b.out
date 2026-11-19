@@ -1,0 +1,9 @@
+action 'Cat @@//a:lib'
+  Mnemonic: CatIt
+  Target: //a:lib
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: d8773cd6a3a0b3f5392923a04141f6a66a702e8cb12ea72399ba6520f2a8a0e6
+  Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/lib.txt]
+

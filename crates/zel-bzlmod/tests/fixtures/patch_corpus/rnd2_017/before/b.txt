@@ -1,0 +1,9 @@
+	Tab
+gamma 0
+x
+{ 0
+beta 0
+delta
+}
+gamma
+	Tab 2

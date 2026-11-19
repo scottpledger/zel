@@ -1,0 +1,16 @@
+--- a/a.txt
++++ b/a.txt
+@@ -11,3 +11,2 @@
+ alpha 2
+-beta 1
+ {
+@@ -15,2 +14 @@
+ return 0; 3
+-alpha
+--- a/b.txt
++++ b/b.txt
+@@ -7,4 +7,2 @@
+ gamma
+-  indent
+-x 1
+ }

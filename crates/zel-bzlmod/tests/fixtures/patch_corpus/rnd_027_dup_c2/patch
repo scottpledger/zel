@@ -1,0 +1,9 @@
+--- a/f.txt
++++ b/f.txt
+@@ -24,4 +24,6 @@
+   indent
+  2
++y
++	Tab 1
+ eps 3
+ alpha 0

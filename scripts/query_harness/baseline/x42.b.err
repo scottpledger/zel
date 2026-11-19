@@ -1,0 +1,4 @@
+Loading: 0 packages loaded
+ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead
+ERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline
+ERROR: no such target '//e:e': target 'e' not declared in package 'e' defined by @WS@/e/BUILD

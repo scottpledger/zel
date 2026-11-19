@@ -1,0 +1,53 @@
+test --test_output=summary //:pass
+test --test_output=summary //:fail
+test --test_output=summary //:pass //:fail
+test --test_output=summary //:crash
+test --test_output=summary //:multi
+test --test_output=errors //:pass
+test --test_output=errors //:fail
+test --test_output=errors //:pass //:fail
+test --test_output=errors //:crash
+test --test_output=errors //:multi
+test --test_output=all //:pass
+test --test_output=all //:fail
+test --test_output=all //:pass //:fail
+test --test_output=all //:crash
+test --test_output=all //:multi
+test --test_output=streamed //:pass
+test --test_output=streamed //:fail
+test --test_output=streamed //:pass //:fail
+test --test_output=streamed //:crash
+test --test_output=streamed //:multi
+test --test_summary=short //:pass //:fail
+test --test_summary=short //:flaky
+test --test_summary=terse //:pass //:fail
+test --test_summary=terse //:flaky
+test --test_summary=detailed //:pass //:fail
+test --test_summary=detailed //:flaky
+test --test_summary=none //:pass //:fail
+test --test_summary=none //:flaky
+test --test_summary=testcase //:pass //:fail
+test --test_summary=testcase //:flaky
+test --test_summary=full //:pass //:fail
+test --test_summary=full //:flaky
+test //:pass
+test //:fail
+test //:pass //:fail
+test //:flaky
+test //:slow
+test //:crash
+test //:multi
+test //:shard
+test --runs_per_test=2 //:pass
+test --runs_per_test=2 //:fail
+test --runs_per_test=2 --runs_per_test_detects_flakes //:flaky
+test --runs_per_test=3 //:pass
+test --runs_per_test=3 //:fail
+test --runs_per_test=3 --runs_per_test_detects_flakes //:flaky
+test --runs_per_test=3 //:flaky
+test --runs_per_test=3 --runs_per_test_detects_flakes //:fail
+test --flaky_test_attempts=1 //:flaky
+test --flaky_test_attempts=5 //:flaky
+test --flaky_test_attempts=2 //:fail
+test --flaky_test_attempts=default //:flaky
+test --runs_per_test=//:pass@2 //:pass //:fail

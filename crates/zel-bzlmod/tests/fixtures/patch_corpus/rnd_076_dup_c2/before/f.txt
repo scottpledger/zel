@@ -1,0 +1,46 @@
+eps
+} 3
+beta
+return 0; 0
+ 3
+
+  indent 2
+
+{
+}
+delta 1
+return 0; 2
+x 3
+gamma 2
+y 3
+alpha 1
+gamma 0
+beta 1
+beta 0
+gamma
+alpha
+{
+eps 3
+eps
+} 3
+beta
+return 0; 0
+ 3
+
+  indent 2
+
+{
+}
+delta 1
+return 0; 2
+x 3
+gamma 2
+y 3
+alpha 1
+gamma 0
+beta 1
+beta 0
+gamma
+alpha
+{
+eps 3

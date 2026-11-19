@@ -1,0 +1,35 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="test_suite" location="@WS@/BUILD:5:11" name="//:tagged">
+        <string name="name" value="tagged"/>
+        <list name="visibility">
+            <label value="//visibility:private"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="true"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <list name="tests"/>
+        <list name="$implicit_tests"/>
+    </rule>
+</query>

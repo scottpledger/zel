@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "07fb66623f4f",
+ "classified_as": "ORDERLESS",
+ "cmd": "query '//a:all' --output=graph --nograph:factored --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "0cab75470e7692d5",
+  "5f5e11a6a50abc68",
+  "03b4e51becf9c04f",
+  "8c141478841682a4",
+  "8b82a01f61efa6af",
+  "85f5dcb688b4d18c"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:tr\"\n  \"//a:tr\" -> \"//a:lib\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:sm_fg\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:lm\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\"\n  \"//a:sel\" -> \"//a:opt_cs\"\n  \"//a:opt_cs\"\n  \"//a:def_cs\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n  \"//a:cl2\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\"\n  \"//a:sel\" -> \"//a:opt_cs\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:opt_cs\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:lm\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:def_cs\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:cl2\"\n  \"//a:tr\"\n  \"//a:tr\" -> \"//a:lib\"\n  \"//a:sm_fg\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:cl2\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\"\n  \"//a:sel\" -> \"//a:opt_cs\"\n  \"//a:tr\"\n  \"//a:tr\" -> \"//a:lib\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:def_cs\"\n  \"//a:lm\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:sm_fg\"\n  \"//a:opt_cs\"\n  \"//a:srcs_fg\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\"\n  \"//a:sel\" -> \"//a:opt_cs\"\n  \"//a:def_cs\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:cl2\"\n  \"//a:opt_cs\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:lm\"\n  \"//a:tr\"\n  \"//a:tr\" -> \"//a:lib\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:sm_fg\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:sm_fg\"\n  \"//a:cl2\"\n  \"//a:tr\"\n  \"//a:tr\" -> \"//a:lib\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:lm\"\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\"\n  \"//a:sel\" -> \"//a:opt_cs\"\n  \"//a:opt_cs\"\n  \"//a:def_cs\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:gg\"\n  \"//a:gg\" -> \"//a:sel\"\n  \"//a:lm_grp\"\n  \"//a:lm_grp\" -> \"//a:lm\"\n  \"//a:lm\"\n  \"//a:sel\"\n  \"//a:sel\" -> \"//a:def_cs\"\n  \"//a:sel\" -> \"//a:opt_cs\"\n  \"//a:def_cs\"\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:opt_cs\"\n  \"//a:tr\"\n  \"//a:tr\" -> \"//a:lib\"\n  \"//a:cl\"\n  \"//a:cl\" -> \"//a:cl2\"\n  \"//a:cl2\"\n  \"//a:sm_cat\"\n  \"//a:sm_cat\" -> \"//a:sm_fg\"\n  \"//a:sm_fg\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:srcs_fg\"\n}\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "820430a0e353",
+ "classified_as": "ANYERR",
+ "cmd": "build --remote_executor=grpc://localhost:1 //:ga",
+ "distinct": 2,
+ "harness": "build",
+ "hashes": [
+  "19aab05ba0e9b693",
+  "eec00e07e1e51ad8",
+  "eec00e07e1e51ad8",
+  "eec00e07e1e51ad8",
+  "eec00e07e1e51ad8",
+  "eec00e07e1e51ad8"
+ ],
+ "history": [],
+ "mode": "ANYERR",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Invocation ID: UUID\nINFO: Analyzed target //:ga (N packages loaded).\nERROR: WS/BUILD:4:8: Executing genrule //:ga failed: Failed to query remote execution capabilities: Connection refused: localhost/[0:0:0:0:0:0:0:1]:1\nTarget //:ga failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 34
+  },
+  {
+   "err": "INFO: Invocation ID: UUID\nINFO: Analyzed target //:ga (N packages loaded).\nERROR: WS/BUILD:4:8: Executing genrule //:ga failed: Failed to query remote execution capabilities: Connection refused: localhost/127.0.0.1:1\nTarget //:ga failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 34
+  },
+  {
+   "err": "INFO: Invocation ID: UUID\nINFO: Analyzed target //:ga (N packages loaded).\nERROR: WS/BUILD:4:8: Executing genrule //:ga failed: Failed to query remote execution capabilities: Connection refused: localhost/127.0.0.1:1\nTarget //:ga failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 34
+  },
+  {
+   "err": "INFO: Invocation ID: UUID\nINFO: Analyzed target //:ga (N packages loaded).\nERROR: WS/BUILD:4:8: Executing genrule //:ga failed: Failed to query remote execution capabilities: Connection refused: localhost/127.0.0.1:1\nTarget //:ga failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 34
+  },
+  {
+   "err": "INFO: Invocation ID: UUID\nINFO: Analyzed target //:ga (N packages loaded).\nERROR: WS/BUILD:4:8: Executing genrule //:ga failed: Failed to query remote execution capabilities: Connection refused: localhost/127.0.0.1:1\nTarget //:ga failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 34
+  },
+  {
+   "err": "INFO: Invocation ID: UUID\nINFO: Analyzed target //:ga (N packages loaded).\nERROR: WS/BUILD:4:8: Executing genrule //:ga failed: Failed to query remote execution capabilities: Connection refused: localhost/127.0.0.1:1\nTarget //:ga failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 34
+  }
+ ],
+ "workspace": "ws3"
+}

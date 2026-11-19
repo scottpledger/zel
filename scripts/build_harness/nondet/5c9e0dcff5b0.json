@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "5c9e0dcff5b0",
+ "classified_as": "STRICT",
+ "cmd": "build --nokeep_going //:gbadloc //:g1",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "fb73a51493706475",
+  "fb73a51493706475",
+  "fb73a51493706475",
+  "fb73a51493706475",
+  "fb73a51493706475",
+  "fb73a51493706475"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

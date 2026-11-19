@@ -14,7 +14,7 @@
 
 use std::io;
 use std::sync::Arc;
-use zel_client::execute_cli;
+use zel_client::{execute_cli_with_exec, perform_exec_request};
 use zel_vfs::{LocalFileSystem, PathFragment};
 
 fn main() {
@@ -27,6 +27,16 @@ fn main() {
 
     let mut stdout = io::stdout();
     let mut stderr = io::stderr();
-    let exit_code = execute_cli(&args, &cwd, fs, &mut stdout, &mut stderr);
+    let mut pending = None;
+    let mut exit_code =
+        execute_cli_with_exec(&args, &cwd, fs, &mut stdout, &mut stderr, &mut pending);
+    if exit_code == 0 {
+        if let Some(p) = pending {
+            use std::io::Write;
+            let _ = stdout.flush();
+            let _ = stderr.flush();
+            exit_code = perform_exec_request(&p);
+        }
+    }
     std::process::exit(exit_code);
 }

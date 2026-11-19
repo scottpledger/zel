@@ -1,0 +1,22 @@
+return 0;
+gamma 3
+	Tab
+	Tab
+beta
+  indent
+eps 1
+}
+  indent 3
+beta 3
+alpha 2
+gamma 1
+{
+y 1
+delta
+x 2
+	Tab 2
+ 2
+alpha
+x 0
+gamma 2
+	Tab

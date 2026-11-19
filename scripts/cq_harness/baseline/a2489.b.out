@@ -1,0 +1,24 @@
+{
+  "actions": [{
+    "targetId": 1,
+    "actionKey": "a89dd88b2bab56e905120c0b699faf326bfd8af0abe5909b94486772a4ba0d87",
+    "mnemonic": "CatIt",
+    "configurationId": 1,
+    "executionPlatform": "@@platforms//host:host"
+  }],
+  "targets": [{
+    "id": 1,
+    "label": "//a:lib2",
+    "ruleClassId": 1
+  }],
+  "configuration": [{
+    "id": 1,
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+  }],
+  "ruleClasses": [{
+    "id": 1,
+    "name": "catrule"
+  }]
+}

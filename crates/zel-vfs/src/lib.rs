@@ -15,11 +15,14 @@
 //! Bazel Virtual File System (`PathFragment`, `Path`, `Root`, `RootedPath`, `FileSystem`).
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
-use std::path::{Path as StdPath, PathBuf as StdPathBuf};
+#[cfg(unix)]
+use std::path::Path as StdPath;
+use std::path::PathBuf as StdPathBuf;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
 use std::time::UNIX_EPOCH;
 use zel_util::{md5, sha256};
@@ -46,10 +49,16 @@ impl PathFragment {
         if raw.is_empty() {
             return Self::empty();
         }
-        let replaced: String = raw
+        let mut replaced: String = raw
             .chars()
             .map(|c| if c == '\\' { '/' } else { c })
             .collect();
+        if let Some(rest) = replaced.strip_prefix("//?/") {
+            let rb = rest.as_bytes();
+            if rb.len() >= 2 && rb[0].is_ascii_alphabetic() && rb[1] == b':' {
+                replaced = rest.to_string();
+            }
+        }
         let bytes = replaced.as_bytes();
 
         let (prefix, drive_str_len, rest) = if bytes.len() >= 2
@@ -157,9 +166,22 @@ impl PathFragment {
         self.segments().into_iter().nth(index)
     }
 
+    pub fn get_segment_checked(&self, index: usize) -> Result<&str, String> {
+        self.segments()
+            .into_iter()
+            .nth(index)
+            .ok_or_else(|| format!("Illegal segment index: {index}"))
+    }
+
     pub fn sub_fragment(&self, begin_index: usize) -> Self {
         let segs = self.segments();
-        if begin_index >= segs.len() {
+        if begin_index > segs.len() {
+            panic!("path: {}, beginIndex: {}", self, begin_index);
+        }
+        if begin_index == 0 {
+            return self.clone();
+        }
+        if begin_index == segs.len() {
             return Self::empty();
         }
         Self::create_already_normalized(segs[begin_index..].join("/"))
@@ -167,19 +189,21 @@ impl PathFragment {
 
     pub fn sub_fragment_range(&self, begin_index: usize, end_index: usize) -> Self {
         let segs = self.segments();
-        if begin_index >= end_index || begin_index >= segs.len() {
-            return Self::empty();
+        if begin_index > end_index || end_index > segs.len() {
+            panic!(
+                "path: {}, beginIndex: {} endIndex: {}",
+                self, begin_index, end_index
+            );
         }
-        let clamped_end = end_index.min(segs.len());
         if begin_index == 0 && self.is_absolute() {
             let prefix = &self.normalized[..self.drive_str_length()];
             Self::create_already_normalized(format!(
                 "{}{}",
                 prefix,
-                segs[begin_index..clamped_end].join("/")
+                segs[begin_index..end_index].join("/")
             ))
         } else {
-            Self::create_already_normalized(segs[begin_index..clamped_end].join("/"))
+            Self::create_already_normalized(segs[begin_index..end_index].join("/"))
         }
     }
 
@@ -432,6 +456,17 @@ impl FileSystem for LocalFileSystem {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
+        let node_id = {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                meta.ino() ^ meta.dev().rotate_left(32)
+            }
+            #[cfg(not(unix))]
+            {
+                0
+            }
+        };
         Ok(FileStatus {
             is_file: ft.is_file(),
             is_directory: ft.is_dir(),
@@ -439,7 +474,7 @@ impl FileSystem for LocalFileSystem {
             is_special_file: !ft.is_file() && !ft.is_dir() && !ft.is_symlink(),
             size: meta.len(),
             last_modified_time_ms: mtime,
-            node_id: 0,
+            node_id,
         })
     }
 
@@ -535,9 +570,20 @@ impl FileSystem for LocalFileSystem {
 
 #[derive(Debug, Clone)]
 enum InMemoryNode {
-    File { content: Vec<u8>, mtime_ms: u64 },
-    Directory { mtime_ms: u64 },
-    Symlink { target: PathFragment, mtime_ms: u64 },
+    File {
+        content: Vec<u8>,
+        mtime_ms: u64,
+        node_id: u64,
+    },
+    Directory {
+        mtime_ms: u64,
+        node_id: u64,
+    },
+    Symlink {
+        target: PathFragment,
+        mtime_ms: u64,
+        node_id: u64,
+    },
 }
 
 /// Thread-safe in-memory VFS matching `com.google.devtools.build.lib.vfs.inmemoryfs.InMemoryFileSystem`.
@@ -545,6 +591,7 @@ enum InMemoryNode {
 pub struct InMemoryFileSystem {
     hash_function: DigestHashFunction,
     nodes: Arc<RwLock<BTreeMap<PathFragment, InMemoryNode>>>,
+    next_node_id: Arc<AtomicU64>,
 }
 
 impl Default for InMemoryFileSystem {
@@ -558,12 +605,20 @@ impl InMemoryFileSystem {
         let mut map = BTreeMap::new();
         map.insert(
             PathFragment::create("/"),
-            InMemoryNode::Directory { mtime_ms: 0 },
+            InMemoryNode::Directory {
+                mtime_ms: 0,
+                node_id: 1,
+            },
         );
         Self {
             hash_function,
             nodes: Arc::new(RwLock::new(map)),
+            next_node_id: Arc::new(AtomicU64::new(2)),
         }
+    }
+
+    fn alloc_id(&self) -> u64 {
+        self.next_node_id.fetch_add(1, AtomicOrdering::Relaxed)
     }
 
     fn resolve_path(
@@ -571,33 +626,49 @@ impl InMemoryFileSystem {
         path: &PathFragment,
         follow_symlinks: bool,
     ) -> io::Result<PathFragment> {
+        let mut depth = 0usize;
+        Self::resolve_path_depth(map, path, follow_symlinks, &mut depth)
+    }
+
+    fn resolve_path_depth(
+        map: &BTreeMap<PathFragment, InMemoryNode>,
+        path: &PathFragment,
+        follow_last: bool,
+        depth: &mut usize,
+    ) -> io::Result<PathFragment> {
         if !path.is_absolute() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!("path must be absolute: {path}"),
             ));
         }
-        let mut current = path.clone();
-        if follow_symlinks {
-            for _ in 0..40 {
-                if let Some(InMemoryNode::Symlink { target, .. }) = map.get(&current) {
-                    current = if target.is_absolute() {
+        let segs = path.segments();
+        let prefix = &path.path_string()[..path.drive_str_length()];
+        let mut cur = PathFragment::create_already_normalized(prefix);
+        for (idx, seg) in segs.iter().enumerate() {
+            let is_last = idx + 1 == segs.len();
+            cur = cur.get_relative_str(seg);
+            if !is_last || follow_last {
+                while let Some(InMemoryNode::Symlink { target, .. }) = map.get(&cur) {
+                    *depth += 1;
+                    if *depth > 40 {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "too many levels of symbolic links",
+                        ));
+                    }
+                    let next = if target.is_absolute() {
                         target.clone()
-                    } else if let Some(parent) = current.parent_directory() {
+                    } else if let Some(parent) = cur.parent_directory() {
                         parent.get_relative(target)
                     } else {
-                        target.clone()
+                        cur.get_relative(target)
                     };
-                } else {
-                    return Ok(current);
+                    cur = Self::resolve_path_depth(map, &next, true, depth)?;
                 }
             }
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "too many levels of symbolic links",
-            ));
         }
-        Ok(current)
+        Ok(cur)
     }
 }
 
@@ -610,32 +681,40 @@ impl FileSystem for InMemoryFileSystem {
         let map = self.nodes.read().unwrap();
         let resolved = Self::resolve_path(&map, path, follow_symlinks)?;
         match map.get(&resolved) {
-            Some(InMemoryNode::File { content, mtime_ms }) => Ok(FileStatus {
+            Some(InMemoryNode::File {
+                content,
+                mtime_ms,
+                node_id,
+            }) => Ok(FileStatus {
                 is_file: true,
                 is_directory: false,
                 is_symlink: false,
                 is_special_file: false,
                 size: content.len() as u64,
                 last_modified_time_ms: *mtime_ms,
-                node_id: 1,
+                node_id: *node_id,
             }),
-            Some(InMemoryNode::Directory { mtime_ms }) => Ok(FileStatus {
+            Some(InMemoryNode::Directory { mtime_ms, node_id }) => Ok(FileStatus {
                 is_file: false,
                 is_directory: true,
                 is_symlink: false,
                 is_special_file: false,
                 size: 0,
                 last_modified_time_ms: *mtime_ms,
-                node_id: 2,
+                node_id: *node_id,
             }),
-            Some(InMemoryNode::Symlink { target, mtime_ms }) => Ok(FileStatus {
+            Some(InMemoryNode::Symlink {
+                target,
+                mtime_ms,
+                node_id,
+            }) => Ok(FileStatus {
                 is_file: false,
                 is_directory: false,
                 is_symlink: true,
                 is_special_file: false,
                 size: target.path_string().len() as u64,
                 last_modified_time_ms: *mtime_ms,
-                node_id: 3,
+                node_id: *node_id,
             }),
             None => Err(io::Error::new(
                 io::ErrorKind::NotFound,
@@ -661,9 +740,11 @@ impl FileSystem for InMemoryFileSystem {
     }
 
     fn write_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
+        let id = self.alloc_id();
         let mut map = self.nodes.write().unwrap();
         if let Some(parent) = path.parent_directory() {
-            if !map.contains_key(&parent) {
+            let resolved_parent = Self::resolve_path(&map, &parent, true)?;
+            if !map.contains_key(&resolved_parent) {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("Parent directory does not exist: {parent}"),
@@ -675,12 +756,14 @@ impl FileSystem for InMemoryFileSystem {
             InMemoryNode::File {
                 content: content.to_vec(),
                 mtime_ms: 0,
+                node_id: id,
             },
         );
         Ok(())
     }
 
     fn create_directory(&self, path: &PathFragment) -> io::Result<bool> {
+        let id = self.alloc_id();
         let mut map = self.nodes.write().unwrap();
         if let Some(node) = map.get(path) {
             return match node {
@@ -692,14 +775,21 @@ impl FileSystem for InMemoryFileSystem {
             };
         }
         if let Some(parent) = path.parent_directory() {
-            if !map.contains_key(&parent) {
+            let resolved_parent = Self::resolve_path(&map, &parent, true)?;
+            if !map.contains_key(&resolved_parent) {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("Parent directory does not exist: {parent}"),
                 ));
             }
         }
-        map.insert(path.clone(), InMemoryNode::Directory { mtime_ms: 0 });
+        map.insert(
+            path.clone(),
+            InMemoryNode::Directory {
+                mtime_ms: 0,
+                node_id: id,
+            },
+        );
         Ok(true)
     }
 
@@ -770,12 +860,14 @@ impl FileSystem for InMemoryFileSystem {
         link_path: &PathFragment,
         target_fragment: &PathFragment,
     ) -> io::Result<()> {
+        let id = self.alloc_id();
         let mut map = self.nodes.write().unwrap();
         map.insert(
             link_path.clone(),
             InMemoryNode::Symlink {
                 target: target_fragment.clone(),
                 mtime_ms: 0,
+                node_id: id,
             },
         );
         Ok(())
@@ -783,7 +875,8 @@ impl FileSystem for InMemoryFileSystem {
 
     fn read_symbolic_link(&self, link_path: &PathFragment) -> io::Result<PathFragment> {
         let map = self.nodes.read().unwrap();
-        match map.get(link_path) {
+        let resolved = Self::resolve_path(&map, link_path, false)?;
+        match map.get(&resolved) {
             Some(InMemoryNode::Symlink { target, .. }) => Ok(target.clone()),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -952,6 +1045,225 @@ fn segment_wildcard_match(pat: &[u8], text: &[u8]) -> bool {
     }
 }
 
+/// Symlink-resolution error matching Bazel's `FileSymlinkCycleException` /
+/// `FileSymlinkInfiniteExpansionException` / `IOException`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SymlinkError {
+    Cycle { chain: Vec<PathFragment> },
+    InfiniteExpansion { chain: Vec<PathFragment> },
+    Io(String),
+}
+
+impl fmt::Display for SymlinkError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Cycle { chain } => {
+                let s: Vec<&str> = chain.iter().map(|p| p.path_string()).collect();
+                write!(f, "Symlink cycle: {}", s.join("- > "))
+            }
+            Self::InfiniteExpansion { chain } => {
+                let s: Vec<&str> = chain.iter().map(|p| p.path_string()).collect();
+                write!(f, "Infinite symlink expansion: {}", s.join("- > "))
+            }
+            Self::Io(m) => f.write_str(m),
+        }
+    }
+}
+
+/// Result of resolving `path` with full Bazel `FileFunction` symlink cycle and ancestor/descendant
+/// infinite-expansion tracking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SymlinkResolution {
+    /// `None` if the resolved target does not exist (e.g. a dangling symlink or missing path).
+    pub status: Option<FileStatus>,
+    /// Real path after following symlinks (when resolvable).
+    pub real_path: PathFragment,
+    /// `true` if the original path itself was a symlink (`stat(..., false).is_symlink`).
+    pub is_symlink: bool,
+    /// Non-empty if resolution encountered a symlink pointing to an ancestor of a previously
+    /// visited path in the chain (`unboundedAncestorSymlinkExpansionChain`).
+    pub unbounded_ancestor_chain: Option<Vec<PathFragment>>,
+}
+
+struct SymlinkResolutionState {
+    logical_chain: Vec<PathFragment>,
+    sorted_logical_chain: BTreeSet<PathFragment>,
+    unbounded_ancestor_chain: Option<Vec<PathFragment>>,
+}
+
+impl SymlinkResolutionState {
+    fn new() -> Self {
+        Self {
+            logical_chain: Vec::new(),
+            sorted_logical_chain: BTreeSet::new(),
+            unbounded_ancestor_chain: None,
+        }
+    }
+
+    fn check_path(&mut self, path: &PathFragment, note: bool) -> Result<(), SymlinkError> {
+        if self.sorted_logical_chain.contains(path) {
+            let pos = self
+                .logical_chain
+                .iter()
+                .position(|p| p == path)
+                .unwrap_or(0);
+            return Err(SymlinkError::Cycle {
+                chain: self.logical_chain[pos..].to_vec(),
+            });
+        }
+        if let Some(floor) = self.sorted_logical_chain.range(..path.clone()).next_back() {
+            if path.starts_with(floor) {
+                let pos = self
+                    .logical_chain
+                    .iter()
+                    .position(|p| p == floor)
+                    .unwrap_or(0);
+                let mut chain = self.logical_chain[pos..].to_vec();
+                chain.push(path.clone());
+                return Err(SymlinkError::InfiniteExpansion { chain });
+            }
+        }
+        if let Some(ceil) = self.sorted_logical_chain.range(path.clone()..).next() {
+            if ceil.starts_with(path) && self.unbounded_ancestor_chain.is_none() {
+                let pos = self
+                    .logical_chain
+                    .iter()
+                    .position(|p| p == ceil)
+                    .unwrap_or(0);
+                let mut chain = self.logical_chain[pos..].to_vec();
+                chain.push(path.clone());
+                self.unbounded_ancestor_chain = Some(chain);
+            }
+        }
+        if note {
+            self.sorted_logical_chain.insert(path.clone());
+            self.logical_chain.push(path.clone());
+        }
+        Ok(())
+    }
+}
+
+struct PartialFileValue {
+    real_path: PathFragment,
+    status: Option<FileStatus>,
+    is_symlink: bool,
+    logical_chain_during_resolution: Vec<PathFragment>,
+}
+
+fn resolve_symlink_inner(
+    fs: &dyn FileSystem,
+    path: &PathFragment,
+    state: &mut SymlinkResolutionState,
+    depth: usize,
+) -> Result<PartialFileValue, SymlinkError> {
+    if depth > 64 {
+        return Err(SymlinkError::Io(
+            "too many levels of symbolic links".to_string(),
+        ));
+    }
+    let (mut cur_path, mut cur_status, parent_chain) = match path.parent_directory() {
+        Some(parent) => {
+            let mut parent_state = SymlinkResolutionState::new();
+            let parent_val = resolve_symlink_inner(fs, &parent, &mut parent_state, depth + 1)?;
+            if state.unbounded_ancestor_chain.is_none() {
+                state.unbounded_ancestor_chain = parent_state.unbounded_ancestor_chain;
+            }
+            let base = path.base_name();
+            let from_ancestors = parent_val.real_path.get_relative_str(base);
+            if !parent_val
+                .status
+                .as_ref()
+                .map(|s| s.is_directory)
+                .unwrap_or(false)
+            {
+                return Ok(PartialFileValue {
+                    real_path: from_ancestors,
+                    status: None,
+                    is_symlink: false,
+                    logical_chain_during_resolution: Vec::new(),
+                });
+            }
+            for p in &parent_val.logical_chain_during_resolution {
+                state.check_path(&p.get_relative_str(base), true)?;
+            }
+            let st = match fs.stat(&from_ancestors, false) {
+                Ok(s) => Some(s),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(SymlinkError::Io(e.to_string())),
+            };
+            let chain: Vec<PathFragment> = parent_val
+                .logical_chain_during_resolution
+                .into_iter()
+                .map(|p| p.get_relative_str(base))
+                .collect();
+            (from_ancestors, st, chain)
+        }
+        None => {
+            state.check_path(path, true)?;
+            let st = match fs.stat(path, false) {
+                Ok(s) => Some(s),
+                Err(e) if e.kind() == io::ErrorKind::NotFound => None,
+                Err(e) => return Err(SymlinkError::Io(e.to_string())),
+            };
+            (path.clone(), st, vec![path.clone()])
+        }
+    };
+
+    let mut is_symlink = false;
+    let mut chain_accum = parent_chain;
+    let mut cur_depth = depth;
+    while let Some(st) = &cur_status {
+        if !st.is_symlink {
+            break;
+        }
+        is_symlink = true;
+        cur_depth += 1;
+        if cur_depth > 64 {
+            return Err(SymlinkError::Io(
+                "too many levels of symbolic links".to_string(),
+            ));
+        }
+        let target = fs
+            .read_symbolic_link(&cur_path)
+            .map_err(|e| SymlinkError::Io(e.to_string()))?;
+        let next = if target.is_absolute() {
+            target
+        } else if let Some(parent) = cur_path.parent_directory() {
+            parent.get_relative(&target)
+        } else {
+            cur_path.get_relative(&target)
+        };
+        state.check_path(&next, false)?;
+        let resolved_next = resolve_symlink_inner(fs, &next, state, cur_depth)?;
+        cur_path = resolved_next.real_path;
+        cur_status = resolved_next.status;
+        chain_accum.extend(resolved_next.logical_chain_during_resolution);
+    }
+
+    Ok(PartialFileValue {
+        real_path: cur_path,
+        status: cur_status,
+        is_symlink,
+        logical_chain_during_resolution: chain_accum,
+    })
+}
+
+/// Resolves `path` in `fs` following Bazel's `FileFunction` symlink cycle and ancestor/descendant
+/// infinite-expansion detection.
+pub fn resolve_symlink_chain(
+    fs: &dyn FileSystem,
+    path: &PathFragment,
+) -> Result<SymlinkResolution, SymlinkError> {
+    let mut state = SymlinkResolutionState::new();
+    let v = resolve_symlink_inner(fs, path, &mut state, 0)?;
+    Ok(SymlinkResolution {
+        status: v.status,
+        real_path: v.real_path,
+        is_symlink: v.is_symlink,
+        unbounded_ancestor_chain: state.unbounded_ancestor_chain,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,6 +1303,28 @@ mod tests {
                 .path_string(),
             "src/main/java"
         );
+        // sub_fragment(0) preserves absolute drive, (0, 0) on abs is root
+        assert_eq!(p.sub_fragment(0).path_string(), "/workspace/src/main/java");
+        assert_eq!(p.sub_fragment(1).path_string(), "src/main/java");
+        assert_eq!(p.sub_fragment(4).path_string(), "");
+        assert_eq!(PathFragment::create("/").sub_fragment(0).path_string(), "/");
+        assert_eq!(p.sub_fragment_range(0, 0).path_string(), "/");
+        assert_eq!(p.sub_fragment_range(0, 2).path_string(), "/workspace/src");
+        assert_eq!(p.sub_fragment_range(1, 3).path_string(), "src/main");
+        assert_eq!(
+            PathFragment::create("C:/a/b")
+                .sub_fragment_range(0, 0)
+                .path_string(),
+            "C:/"
+        );
+        assert!(p.get_segment_checked(5).is_err());
+    }
+
+    #[test]
+    #[should_panic(expected = "endIndex")]
+    fn test_sub_fragment_range_oob_panics() {
+        let p = PathFragment::create("/a/b");
+        let _ = p.sub_fragment_range(0, 5);
     }
 
     #[test]
@@ -1016,5 +1350,53 @@ mod tests {
         let entries = fs.readdir(&dir).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, "BUILD");
+        // Distinct node_ids for distinct directories/files.
+        let dir2 = PathFragment::create("/workspace/pkg2");
+        fs.create_directory_and_parents(&dir2).unwrap();
+        assert_ne!(
+            fs.stat(&dir, true).unwrap().node_id,
+            fs.stat(&dir2, true).unwrap().node_id
+        );
+    }
+
+    #[test]
+    fn test_resolve_symlink_chain_detects_cycle_descendant_and_ancestor() {
+        let fs = InMemoryFileSystem::default();
+        fs.create_directory_and_parents(&PathFragment::create("/ws/pkg"))
+            .unwrap();
+        // Cycle: a -> b, b -> a
+        fs.create_symbolic_link(
+            &PathFragment::create("/ws/pkg/a"),
+            &PathFragment::create("b"),
+        )
+        .unwrap();
+        fs.create_symbolic_link(
+            &PathFragment::create("/ws/pkg/b"),
+            &PathFragment::create("a"),
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_symlink_chain(&fs, &PathFragment::create("/ws/pkg/a")),
+            Err(SymlinkError::Cycle { .. })
+        ));
+        // Descendant: desc -> /ws/pkg/desc/sub
+        fs.create_symbolic_link(
+            &PathFragment::create("/ws/pkg/desc"),
+            &PathFragment::create("/ws/pkg/desc/sub"),
+        )
+        .unwrap();
+        assert!(matches!(
+            resolve_symlink_chain(&fs, &PathFragment::create("/ws/pkg/desc")),
+            Err(SymlinkError::InfiniteExpansion { .. })
+        ));
+        // Ancestor: anc -> ..
+        fs.create_symbolic_link(
+            &PathFragment::create("/ws/pkg/anc"),
+            &PathFragment::create(".."),
+        )
+        .unwrap();
+        let res = resolve_symlink_chain(&fs, &PathFragment::create("/ws/pkg/anc")).unwrap();
+        assert!(res.status.unwrap().is_directory);
+        assert!(res.unbounded_ancestor_chain.is_some());
     }
 }

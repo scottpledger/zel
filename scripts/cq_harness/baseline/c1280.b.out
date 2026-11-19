@@ -1,0 +1,8 @@
+# @WS@/a/BUILD:11:10
+filegroup(
+  name = "sel",
+  srcs = ["//a:z.txt"],
+)
+# Rule sel instantiated at (most recent call last):
+#   @WS@/a/BUILD:11:10 in <toplevel>
+

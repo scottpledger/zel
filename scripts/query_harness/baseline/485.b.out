@@ -1,0 +1,3 @@
+filegroup rule //a:srcs_fg
+source file //a:x.txt
+filegroup rule @ext//lib:data

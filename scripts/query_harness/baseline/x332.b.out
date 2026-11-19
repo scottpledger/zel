@@ -1,0 +1,11 @@
+//a:def_cs
+//a:gg
+//a:opt_cs
+//a:sel
+//a:x.txt
+//a:y.txt
+//a:z.txt
+//b:tool
+//b:tool.cc
+@ext//lib:d.txt
+@ext//lib:data

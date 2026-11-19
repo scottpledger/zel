@@ -1,0 +1,8 @@
+# @WS@/d/BUILD:1:10
+filegroup(
+  name = "bad",
+  srcs = ["//nonexistent:foo", "//d:missing.txt"],
+)
+# Rule bad instantiated at (most recent call last):
+#   @WS@/d/BUILD:1:10 in <toplevel>
+

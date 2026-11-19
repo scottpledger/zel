@@ -1,0 +1,6 @@
+@WS@/BUILD:4:11: test_suite rule //:all_tests
+@WS@/BUILD:3:6: alias rule //:top_alias
+@WS@/a/BUILD:4:8: catrule rule //a:lib
+@WS@/a/BUILD:5:8: catrule rule //a:lib2
+@WS@/a/BUILD:8:6: trule rule //a:tr
+@WS@/b/BUILD:3:7: x_test rule //b:t1

@@ -1,0 +1,5 @@
+y 1
+x 1
+beta
+NEW beta
+  indent 0

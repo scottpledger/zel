@@ -1,0 +1,6 @@
+module(name="root", version="1.0")
+ext = use_extension("//:ext.bzl", "ex")
+ext.mk(name = "a")
+use_repo(ext, "a")
+r = use_repo_rule("//:ext.bzl", "r")
+r(name = "innate", v = "1")

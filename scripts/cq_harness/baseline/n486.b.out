@@ -1,0 +1,9 @@
+action 'Cat @@//a:sm_cat'
+  Mnemonic: CatIt
+  Target: //a:sm_cat
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 528a9290a4550ab3dbb0f137142ffa734f640c7270bfd127baeb7b29a44f1f2a
+  Inputs: [a/x.txt, a/y.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/sm_cat.txt]
+

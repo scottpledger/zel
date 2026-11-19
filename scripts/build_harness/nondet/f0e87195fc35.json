@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "f0e87195fc35",
+ "classified_as": "ORDERLESS",
+ "cmd": "build ...",
+ "distinct": 2,
+ "harness": "build",
+ "hashes": [
+  "444a28e10ec172a5",
+  "444a28e10ec172a5",
+  "d998cccd4d998d86",
+  "444a28e10ec172a5",
+  "444a28e10ec172a5",
+  "444a28e10ec172a5"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: package contains errors: pkg\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nWARNING: Target pattern parsing failed.\nERROR: Skipping '...': Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nERROR: Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: package contains errors: pkg\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nWARNING: Target pattern parsing failed.\nERROR: Skipping '...': Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nERROR: Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: package contains errors: conf2\nERROR: package contains errors: pkg\nWARNING: Target pattern parsing failed.\nERROR: Skipping '...': Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nERROR: Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: package contains errors: pkg\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nWARNING: Target pattern parsing failed.\nERROR: Skipping '...': Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nERROR: Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: package contains errors: pkg\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nWARNING: Target pattern parsing failed.\nERROR: Skipping '...': Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nERROR: Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: package contains errors: pkg\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nWARNING: Target pattern parsing failed.\nERROR: Skipping '...': Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nERROR: Error evaluating '...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

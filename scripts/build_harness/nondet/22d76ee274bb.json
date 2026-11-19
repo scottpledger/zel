@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "22d76ee274bb",
+ "classified_as": "ORDERLESS",
+ "cmd": "test --runs_per_test=2 --test_summary=detailed //:t_xml",
+ "distinct": 3,
+ "harness": "build",
+ "hashes": [
+  "c9ab9189fcdd4063",
+  "c9ab9189fcdd4063",
+  "c9ab9189fcdd4063",
+  "cd4d27622018bf55",
+  "a051c2a5e5dcaf18",
+  "c9ab9189fcdd4063"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:t_xml (N packages loaded).\nFAIL: //:t_xml (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log)\nFAIL: //:t_xml (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log)\nFAILED: //:t_xml (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log\nINFO: Found 1 test target...\nTarget //:t_xml up-to-date:\n  bazel-bin/t_xml\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_xml                                                                 FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n    PASSED  .a\n    PASSED  .a\n    FAILED  .b\n    FAILED  .b\nTest cases: finished with 2 passing, 0 skipped and 2 failing out of 4 test cases\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_xml (N packages loaded).\nFAIL: //:t_xml (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log)\nFAIL: //:t_xml (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log)\nFAILED: //:t_xml (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log\nINFO: Found 1 test target...\nTarget //:t_xml up-to-date:\n  bazel-bin/t_xml\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_xml                                                                 FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n    PASSED  .a\n    PASSED  .a\n    FAILED  .b\n    FAILED  .b\nTest cases: finished with 2 passing, 0 skipped and 2 failing out of 4 test cases\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_xml (N packages loaded).\nFAIL: //:t_xml (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log)\nFAIL: //:t_xml (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log)\nFAILED: //:t_xml (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log\nINFO: Found 1 test target...\nTarget //:t_xml up-to-date:\n  bazel-bin/t_xml\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_xml                                                                 FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n    PASSED  .a\n    PASSED  .a\n    FAILED  .b\n    FAILED  .b\nTest cases: finished with 2 passing, 0 skipped and 2 failing out of 4 test cases\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_xml (N packages loaded).\nFAIL: //:t_xml (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log)\nFAIL: //:t_xml (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log)\nFAILED: //:t_xml (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log\nINFO: Found 1 test target...\nTarget //:t_xml up-to-date:\n  bazel-bin/t_xml\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_xml                                                                 FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n    PASSED  .a\n    PASSED  .a\n    FAILED  .b\n    FAILED  .b\nTest cases: finished with 2 passing, 0 skipped and 2 failing out of 4 test cases\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_xml (N packages loaded).\nFAIL: //:t_xml (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log)\nFAIL: //:t_xml (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log)\nFAILED: //:t_xml (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log\nINFO: Found 1 test target...\nTarget //:t_xml up-to-date:\n  bazel-bin/t_xml\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_xml                                                                 FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n    PASSED  .a\n    PASSED  .a\n    FAILED  .b\n    FAILED  .b\nTest cases: finished with 2 passing, 0 skipped and 2 failing out of 4 test cases\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:t_xml (N packages loaded).\nFAIL: //:t_xml (run 2 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log)\nFAIL: //:t_xml (run 1 of 2) (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log)\nFAILED: //:t_xml (Summary)\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_2_of_2/test.log\n      OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_xml/run_1_of_2/test.log\nINFO: Found 1 test target...\nTarget //:t_xml up-to-date:\n  bazel-bin/t_xml\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:t_xml                                                                 FAILED in 2 out of 2 in Ns\n  Stats over 2 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\n    PASSED  .a\n    PASSED  .a\n    FAILED  .b\n    FAILED  .b\nTest cases: finished with 2 passing, 0 skipped and 2 failing out of 4 test cases\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  }
+ ],
+ "workspace": "ws1"
+}

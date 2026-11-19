@@ -1,0 +1,1 @@
+module(name="rules_android", version="0.8.0", compatibility_level=1)

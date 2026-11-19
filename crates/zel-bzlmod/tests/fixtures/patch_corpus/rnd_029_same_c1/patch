@@ -1,0 +1,6 @@
+--- a/f.txt
++++ b/f.txt
+@@ -7,2 +7,3 @@
+ gamma
++eps 3
+ return 0; 0

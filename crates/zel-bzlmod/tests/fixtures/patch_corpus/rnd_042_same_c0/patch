@@ -1,0 +1,8 @@
+--- a/f.txt
++++ b/f.txt
+@@ -4,2 +3,0 @@
+-  indent
+-  indent 0
+@@ -11 +9 @@
+-eps
++NEW eps

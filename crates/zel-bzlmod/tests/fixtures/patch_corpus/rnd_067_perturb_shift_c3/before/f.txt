@@ -1,0 +1,20 @@
+return 0; 2
+alpha
+x
+{
+  indent
+x 2
+}
+  indent 2
+  indent 1
+alpha
+PERTURBED10
+x 0
+beta
+
+alpha
+delta
+  indent
+  indent 3
+  indent 1
+delta

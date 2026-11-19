@@ -1,0 +1,1 @@
+ERROR: While parsing option --transitions=bogus: Not a valid transition verbosity: 'bogus' (should be full, lite or none)

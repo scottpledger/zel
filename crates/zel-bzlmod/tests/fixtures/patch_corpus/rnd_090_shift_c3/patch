@@ -1,0 +1,21 @@
+--- a/f.txt
++++ b/f.txt
+@@ -1,10 +1,10 @@
+ 	Tab
+ x 1
+-{
++NEW {
+ gamma 3
+ x 2
+ delta 0
+-gamma 0
++NEW gamma 0
+ 	Tab 0
+ alpha
+ alpha 2
+@@ -32,5 +32,4 @@
+ }
+ return 0; 3
+ }
+-return 0;
+ eps 1

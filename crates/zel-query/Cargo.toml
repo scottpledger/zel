@@ -5,8 +5,11 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+zel-analysis = { workspace = true }
 zel-cmdline = { workspace = true }
 zel-packages = { workspace = true }
+zel-rules = { workspace = true }
+zel-starlark = { workspace = true }
 zel-util = { workspace = true }
 zel-vfs = { workspace = true }
 

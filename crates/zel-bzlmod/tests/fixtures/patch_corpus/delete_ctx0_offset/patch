@@ -1,0 +1,6 @@
+--- a/f.txt
++++ b/f.txt
+@@ -6,3 +5,0 @@
+-line 6
+-line 7
+-line 8

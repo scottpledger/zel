@@ -1,0 +1,10 @@
+--- a/f.txt
++++ b/f.txt
+@@ -4,6 +4,7 @@
+ x
+ {
+   indent
++NEW y
+ x 2
+ }
+   indent 2

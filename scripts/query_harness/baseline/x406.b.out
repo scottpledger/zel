@@ -1,0 +1,13 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="xbin" location="@WS@/b/BUILD" name="//b:tool">
+        <string name="name" value="tool"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="//b:tool.cc"/>
+        </list>
+        <rule-input name="//b:tool.cc"/>
+    </rule>
+</query>

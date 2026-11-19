@@ -1,0 +1,19 @@
+x 3
+	Tab 2
+x 2
+{ 0
+gamma 2
+ 1
+	Tab
+beta
+delta
+gamma 2
+delta
+y 0
+gamma 3
+{ 2
+return 0;
+{ 1
+	Tab 0
+y 1
+y 1

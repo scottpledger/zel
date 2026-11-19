@@ -1,0 +1,32 @@
+gamma
+eps 1
+{
+	Tab
+  indent 3
+	Tab
+
+eps 2
+PERTURBED
+	Tab 0
+x
+{
+beta
+x 3
+y
+} 2
+x
+PERTURBED
+{ 2
+  indent 0
+return 0;
+	Tab
+eps
+ 1
+
+  indent
+gamma 2
+  indent 0
+gamma 0
+delta 3
+  indent 0
+	Tab 2

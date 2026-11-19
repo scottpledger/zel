@@ -1,0 +1,5 @@
+filegroup(name = "bad_src", srcs = ["missing.txt", "//nonexist:foo", "//lib:nope"])
+filegroup(name = "good", srcs = ["g.txt"])
+filegroup(name = "dep_bad", srcs = [":bad_src", ":good"])
+filegroup(name = "dup", srcs = [])
+filegroup(name = "dup", srcs = [])

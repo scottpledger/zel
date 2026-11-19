@@ -1,0 +1,14 @@
+} 1
+} 1
+  indent 3
+x
+y 3
+y
+
+beta
+x 0
+x 2
+return 0;
+y 3
+	Tab
+delta 0

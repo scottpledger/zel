@@ -1,0 +1,1 @@
+module(name="abseil-cpp", version="20250814.1", compatibility_level=1)

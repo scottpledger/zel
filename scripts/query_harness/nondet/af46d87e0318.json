@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "af46d87e0318",
+ "classified_as": "ORDERLESS",
+ "cmd": "query 'deps(//a:lib2)' --output=label --noorder_results --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "71da732a56e76b15",
+  "b2165761cc112a64",
+  "2b386f617f6ed53a",
+  "e4f965f35c5d8463",
+  "dbc20dd12ff6533e",
+  "23690d6b70f85642"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:lib2\n@ext//lib:d.txt\n@ext//lib:data\n//a:srcs_fg\n//a:x.txt\n//a:y.txt\n//a:z.txt\n//a:lib\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "@ext//lib:d.txt\n//a:lib2\n//a:x.txt\n@ext//lib:data\n//a:z.txt\n//a:lib\n//a:srcs_fg\n//a:y.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:lib2\n@ext//lib:data\n//a:srcs_fg\n//a:z.txt\n//a:lib\n@ext//lib:d.txt\n//a:x.txt\n//a:y.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:lib2\n//a:x.txt\n//a:srcs_fg\n@ext//lib:d.txt\n//a:y.txt\n//a:z.txt\n//a:lib\n@ext//lib:data\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:x.txt\n//a:y.txt\n//a:z.txt\n//a:lib2\n//a:srcs_fg\n@ext//lib:data\n@ext//lib:d.txt\n//a:lib\n",
+   "rc": 0
+  },
+  {
+   "err": "WARNING: Option 'noorder_results' is deprecated: Please use --order_output=no or --order_output=auto instead of this flag\n",
+   "out": "//a:y.txt\n@ext//lib:d.txt\n@ext//lib:data\n//a:lib\n//a:x.txt\n//a:lib2\n//a:srcs_fg\n//a:z.txt\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

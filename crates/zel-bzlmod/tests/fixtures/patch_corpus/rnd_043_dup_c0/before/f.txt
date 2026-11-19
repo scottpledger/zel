@@ -1,0 +1,66 @@
+	Tab
+gamma 0
+y 0
+alpha
+x 2
+ 0
+eps
+
+gamma 1
+} 2
+} 0
+}
+	Tab 0
+beta
+
+ 2
+delta 3
+y
+	Tab 1
+	Tab 0
+	Tab 0
+x 2
+	Tab
+ 3
+delta
+  indent 1
+	Tab 3
+eps
+y 1
+alpha 1
+} 3
+alpha
+x
+	Tab
+gamma 0
+y 0
+alpha
+x 2
+ 0
+eps
+
+gamma 1
+} 2
+} 0
+}
+	Tab 0
+beta
+
+ 2
+delta 3
+y
+	Tab 1
+	Tab 0
+	Tab 0
+x 2
+	Tab
+ 3
+delta
+  indent 1
+	Tab 3
+eps
+y 1
+alpha 1
+} 3
+alpha
+x

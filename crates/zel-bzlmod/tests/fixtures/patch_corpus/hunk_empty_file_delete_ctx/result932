@@ -1,0 +1,1 @@
+ERR PatchFailedException: in patch applied to $OUT/a.txt: Index 0 out of bounds for length 0, error applying change near line 1

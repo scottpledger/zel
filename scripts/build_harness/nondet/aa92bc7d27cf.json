@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "aa92bc7d27cf",
+ "classified_as": "STRICT",
+ "cmd": "build -k //:gbadsrc",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "0d1ab1531526968f",
+  "0d1ab1531526968f",
+  "0d1ab1531526968f",
+  "0d1ab1531526968f",
+  "0d1ab1531526968f",
+  "0d1ab1531526968f"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope\nERROR: WS/BUILD:17:8: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope and referenced by '//:gbadsrc'\nINFO: Analyzed target //:gbadsrc (N packages loaded).\nWARNING: errors encountered while analyzing target '//:gbadsrc', it will not be built.\nAnalysis failed\nINFO: Found 0 targets...\nERROR: command succeeded, but not all targets were analyzed\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope\nERROR: WS/BUILD:17:8: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope and referenced by '//:gbadsrc'\nINFO: Analyzed target //:gbadsrc (N packages loaded).\nWARNING: errors encountered while analyzing target '//:gbadsrc', it will not be built.\nAnalysis failed\nINFO: Found 0 targets...\nERROR: command succeeded, but not all targets were analyzed\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope\nERROR: WS/BUILD:17:8: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope and referenced by '//:gbadsrc'\nINFO: Analyzed target //:gbadsrc (N packages loaded).\nWARNING: errors encountered while analyzing target '//:gbadsrc', it will not be built.\nAnalysis failed\nINFO: Found 0 targets...\nERROR: command succeeded, but not all targets were analyzed\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope\nERROR: WS/BUILD:17:8: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope and referenced by '//:gbadsrc'\nINFO: Analyzed target //:gbadsrc (N packages loaded).\nWARNING: errors encountered while analyzing target '//:gbadsrc', it will not be built.\nAnalysis failed\nINFO: Found 0 targets...\nERROR: command succeeded, but not all targets were analyzed\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope\nERROR: WS/BUILD:17:8: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope and referenced by '//:gbadsrc'\nINFO: Analyzed target //:gbadsrc (N packages loaded).\nWARNING: errors encountered while analyzing target '//:gbadsrc', it will not be built.\nAnalysis failed\nINFO: Found 0 targets...\nERROR: command succeeded, but not all targets were analyzed\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope\nERROR: WS/BUILD:17:8: no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope and referenced by '//:gbadsrc'\nINFO: Analyzed target //:gbadsrc (N packages loaded).\nWARNING: errors encountered while analyzing target '//:gbadsrc', it will not be built.\nAnalysis failed\nINFO: Found 0 targets...\nERROR: command succeeded, but not all targets were analyzed\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws3"
+}

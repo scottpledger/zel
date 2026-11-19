@@ -1,0 +1,10 @@
+--- a/f.txt
++++ b/f.txt
+@@ -19,6 +19,7 @@
+ return 0; 3
+ 	Tab
+ y
++	Tab 3
+ x 2
+   indent 0
+ 

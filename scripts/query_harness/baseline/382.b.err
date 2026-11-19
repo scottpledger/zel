@@ -1,0 +1,2 @@
+ERROR: Invalid options syntax: -//a:lib
+Note: Negative target patterns can only appear after the end of options marker ('--'). Flags corresponding to Starlark-defined build settings always start with '--', not '-'.

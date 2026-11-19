@@ -1,0 +1,2 @@
+Loading: 0 packages loaded
+ERROR: no such package '@@bazel_tools//platforms': BUILD file not found in directory 'platforms' of external repository @@bazel_tools. Add a BUILD file to a directory to mark it as a package.

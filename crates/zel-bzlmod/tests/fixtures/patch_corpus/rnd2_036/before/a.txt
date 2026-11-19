@@ -1,0 +1,16 @@
+return 0; 2
+delta 0
+alpha 3
+{
+  indent 3
+	Tab 0
+{ 3
+{ 0
+y
+alpha
+alpha 2
+beta 1
+{
+ 0
+return 0; 3
+alpha

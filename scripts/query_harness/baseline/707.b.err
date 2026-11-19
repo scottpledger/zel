@@ -1,0 +1,1 @@
+ERROR: While parsing option --order_output=bogus: Not a valid Order output setting: 'bogus' (should be no, deps, auto or full)

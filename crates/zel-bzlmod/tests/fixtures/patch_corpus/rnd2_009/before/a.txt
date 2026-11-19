@@ -1,0 +1,11 @@
+ 3
+  indent 1
+{ 0
+eps
+} 2
+beta 0
+	Tab 2
+	Tab 3
+x
+alpha 1
+  indent

@@ -1,0 +1,18 @@
+delta 0
+ 2
+return 0;
+
+x 3
+	Tab
+PERTURBED6
+
+beta 2
+delta 1
+x 3
+	Tab 2
+} 3
+  indent 3
+PERTURBED
+{ 1
+beta
+PERTURBED

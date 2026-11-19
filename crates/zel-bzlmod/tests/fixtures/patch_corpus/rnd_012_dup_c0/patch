@@ -1,0 +1,11 @@
+--- a/f.txt
++++ b/f.txt
+@@ -16,2 +15,0 @@
+-beta 0
+-x 1
+@@ -26,0 +25,2 @@
++beta
++  indent
+@@ -35 +35 @@
+-return 0; 1
++NEW return 0; 1

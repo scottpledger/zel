@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "dcd4524ea7e9",
+ "classified_as": "STRICT",
+ "cmd": "build --nokeep_going //:gcyc_a //:g1",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "2bcdfd8a8fbeebcd",
+  "2bcdfd8a8fbeebcd",
+  "2bcdfd8a8fbeebcd",
+  "2bcdfd8a8fbeebcd",
+  "2bcdfd8a8fbeebcd",
+  "2bcdfd8a8fbeebcd"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: WS/BUILD:17:8: in genrule rule //:gcyc_a: cycle in dependency graph:\n    //:gcyc_a (HASH)\n.-> //:gcyc_a (HASH)\n|   //:gcyc_b (HASH)\n|   //:gcyc_c (HASH)\n`-- //:gcyc_a (HASH)\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nERROR: Analysis of target '//:gcyc_a' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:17:8: in genrule rule //:gcyc_a: cycle in dependency graph:\n    //:gcyc_a (HASH)\n.-> //:gcyc_a (HASH)\n|   //:gcyc_b (HASH)\n|   //:gcyc_c (HASH)\n`-- //:gcyc_a (HASH)\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nERROR: Analysis of target '//:gcyc_a' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:17:8: in genrule rule //:gcyc_a: cycle in dependency graph:\n    //:gcyc_a (HASH)\n.-> //:gcyc_a (HASH)\n|   //:gcyc_b (HASH)\n|   //:gcyc_c (HASH)\n`-- //:gcyc_a (HASH)\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nERROR: Analysis of target '//:gcyc_a' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:17:8: in genrule rule //:gcyc_a: cycle in dependency graph:\n    //:gcyc_a (HASH)\n.-> //:gcyc_a (HASH)\n|   //:gcyc_b (HASH)\n|   //:gcyc_c (HASH)\n`-- //:gcyc_a (HASH)\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nERROR: Analysis of target '//:gcyc_a' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:17:8: in genrule rule //:gcyc_a: cycle in dependency graph:\n    //:gcyc_a (HASH)\n.-> //:gcyc_a (HASH)\n|   //:gcyc_b (HASH)\n|   //:gcyc_c (HASH)\n`-- //:gcyc_a (HASH)\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nERROR: Analysis of target '//:gcyc_a' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/BUILD:17:8: in genrule rule //:gcyc_a: cycle in dependency graph:\n    //:gcyc_a (HASH)\n.-> //:gcyc_a (HASH)\n|   //:gcyc_b (HASH)\n|   //:gcyc_c (HASH)\n`-- //:gcyc_a (HASH)\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nERROR: Analysis of target '//:gcyc_a' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 1 internal, 1 darwin-sandbox.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

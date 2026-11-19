@@ -1,0 +1,21 @@
+--- a/a.txt
++++ b/a.txt
+@@ -12,5 +12,6 @@
+ y 1
+ 
+ eps 2
++eps 3
+ delta 0
+ eps 0
+--- a/b.txt
++++ b/b.txt
+@@ -3,8 +3,5 @@
+ gamma
+-eps
++NEW eps
+ beta 2
+  1
+-} 1
+ { 2
+-eps 1
+-gamma

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "ee133b72db09",
+ "classified_as": "ORDERLESS",
+ "cmd": "query 'deps(//a:gg)' --output=label_kind --order_output=deps --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "bd49e2d61c8a9c47",
+  "87867f4ae9d22d86",
+  "b528b7b9a722993c",
+  "a7c25ac28ad06d7d",
+  "a00b41482c80c8f2",
+  "6eacc28beede9023"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "genrule rule //a:gg\nsource file @bazel_tools//tools/genrule:genrule-setup.sh\nfilegroup rule @ext//lib:data\nsource file @ext//lib:d.txt\nxbin rule //b:tool\nsource file //b:tool.cc\nfilegroup rule //a:sel\nsource file //a:z.txt\nsource file //a:y.txt\nsource file //a:x.txt\nconfig_setting rule //a:def_cs\nconfig_setting rule //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "genrule rule //a:gg\nxbin rule //b:tool\nsource file //b:tool.cc\nfilegroup rule @ext//lib:data\nsource file @ext//lib:d.txt\nsource file @bazel_tools//tools/genrule:genrule-setup.sh\nfilegroup rule //a:sel\nsource file //a:z.txt\nsource file //a:y.txt\nsource file //a:x.txt\nconfig_setting rule //a:def_cs\nconfig_setting rule //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "genrule rule //a:gg\nfilegroup rule @ext//lib:data\nxbin rule //b:tool\nsource file //b:tool.cc\nsource file @ext//lib:d.txt\nsource file @bazel_tools//tools/genrule:genrule-setup.sh\nfilegroup rule //a:sel\nsource file //a:z.txt\nsource file //a:y.txt\nsource file //a:x.txt\nconfig_setting rule //a:def_cs\nconfig_setting rule //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "genrule rule //a:gg\nxbin rule //b:tool\nsource file //b:tool.cc\nfilegroup rule //a:sel\nsource file //a:x.txt\nconfig_setting rule //a:def_cs\nconfig_setting rule //a:opt_cs\nsource file //a:z.txt\nsource file //a:y.txt\nsource file @bazel_tools//tools/genrule:genrule-setup.sh\nfilegroup rule @ext//lib:data\nsource file @ext//lib:d.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "genrule rule //a:gg\nxbin rule //b:tool\nsource file //b:tool.cc\nsource file @bazel_tools//tools/genrule:genrule-setup.sh\nfilegroup rule @ext//lib:data\nsource file @ext//lib:d.txt\nfilegroup rule //a:sel\nsource file //a:z.txt\nsource file //a:y.txt\nsource file //a:x.txt\nconfig_setting rule //a:def_cs\nconfig_setting rule //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "genrule rule //a:gg\nsource file @bazel_tools//tools/genrule:genrule-setup.sh\nfilegroup rule @ext//lib:data\nfilegroup rule //a:sel\nsource file //a:z.txt\nsource file //a:y.txt\nconfig_setting rule //a:def_cs\nsource file @ext//lib:d.txt\nconfig_setting rule //a:opt_cs\nxbin rule //b:tool\nsource file //b:tool.cc\nsource file //a:x.txt\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

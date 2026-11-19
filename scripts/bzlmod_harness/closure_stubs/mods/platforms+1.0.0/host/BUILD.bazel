@@ -1,0 +1,9 @@
+load(":constraints.bzl", "HOST_CONSTRAINTS")
+
+exports_files(["constraints.bzl"])
+
+platform(
+    name = "host",
+    constraint_values = HOST_CONSTRAINTS,
+    visibility = ["//visibility:public"],
+)

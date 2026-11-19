@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "84309ca007d1",
+ "classified_as": "STRICT",
+ "cmd": "query 'loadfiles(//a:all)' --keep_going --output=xml",
+ "distinct": 1,
+ "harness": "query",
+ "hashes": [
+  "5bab519c0942e0a6",
+  "5bab519c0942e0a6",
+  "5bab519c0942e0a6",
+  "5bab519c0942e0a6",
+  "5bab519c0942e0a6",
+  "5bab519c0942e0a6"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n</query>\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n</query>\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n</query>\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n</query>\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n</query>\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n</query>\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "wsbroken"
+}

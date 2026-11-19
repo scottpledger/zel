@@ -1,0 +1,18 @@
+build --check_direct_dependencies=off //:hello
+test --check_direct_dependencies=off //:cct
+test --check_direct_dependencies=off --test_output=all //:cct
+build --check_direct_dependencies=off --compilation_mode=opt //:hello
+run --check_direct_dependencies=off //:hello
+coverage --check_direct_dependencies=off //:cct
+coverage --check_direct_dependencies=off --combined_report=lcov //:cct
+test --check_direct_dependencies=off --test_lang_filters=cc //:cct //:pass
+test --check_direct_dependencies=off --test_lang_filters=-cc //:cct //:pass
+test --check_direct_dependencies=off --test_size_filters=small //:cct
+test --check_direct_dependencies=off --runs_per_test=2 //:cct
+test --check_direct_dependencies=off --test_filter=x //:cct
+build --check_direct_dependencies=off --nobuild //:hello
+build --check_direct_dependencies=off -s //:hello
+build --check_direct_dependencies=off --output_groups=compilation_outputs //:hello
+test --check_direct_dependencies=off //:cct //:pass
+build --check_direct_dependencies=off //:hello
+build //:hello

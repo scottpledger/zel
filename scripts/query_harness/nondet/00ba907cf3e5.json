@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "00ba907cf3e5",
+ "classified_as": "STRICT",
+ "cmd": "query //a:lib --universe_scope=bad::",
+ "distinct": 1,
+ "harness": "query",
+ "hashes": [
+  "a33050646303f1c3",
+  "a33050646303f1c3",
+  "a33050646303f1c3",
+  "a33050646303f1c3",
+  "a33050646303f1c3",
+  "a33050646303f1c3"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Skipping 'bad::': invalid target name ':': target names may not contain ':'\nERROR: Evaluation of query \"//a:lib\" failed: no such package 'a': BUILD file not found on package path\n",
+   "out": "",
+   "rc": 7
+  }
+ ],
+ "workspace": "ws"
+}

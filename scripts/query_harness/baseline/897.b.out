@@ -1,0 +1,4 @@
+@WS@/a/BUILD:4:8: catrule rule //a:lib
+@WS@/a/BUILD:5:8: catrule rule //a:lib2
+@WS@/a/BUILD:3:10: filegroup rule //a:srcs_fg
+@WS@/a/x.txt:1:1: source file //a:x.txt

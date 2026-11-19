@@ -1,0 +1,8 @@
+bazel-out/k8-opt/bin/a/gg.out
+bazel-out/k8-opt/bin/a/lib.txt
+bazel-out/k8-opt/bin/a/lib2.txt
+bazel-out/k8-opt/bin/a/lm.o
+a/x.txt
+bazel-out/k8-opt/bin/a/sm_cat.txt
+a/y.txt
+a/z.txt

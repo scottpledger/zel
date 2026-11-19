@@ -1,0 +1,5 @@
+--- a/f.txt
++++ b/f.txt
+@@ -9 +9 @@
+-line 3
++THREE

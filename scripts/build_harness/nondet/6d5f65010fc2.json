@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "6d5f65010fc2",
+ "classified_as": "ANYERR",
+ "cmd": "build --keep_going --target_pattern_file=/tmp/vb5-tpf.txt",
+ "distinct": 6,
+ "harness": "build",
+ "hashes": [
+  "7b6b2c8056e0a4a9",
+  "e48528ab3275ef93",
+  "910d2bf0261e4fd6",
+  "12ef14b58a609e98",
+  "68a4fd3880dd27cd",
+  "5a39c93d9b85dafa"
+ ],
+ "history": [],
+ "mode": "ANYERR",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: I/O error reading from /tmp/vb5-pnd59159-0-tpf.txt: [unix_jni.cc:382] /tmp/vb5-pnd59159-0-tpf.txt (No such file or directory)",
+   "out": "",
+   "rc": 2
+  },
+  {
+   "err": "ERROR: I/O error reading from /tmp/vb5-pnd59159-1-tpf.txt: [unix_jni.cc:382] /tmp/vb5-pnd59159-1-tpf.txt (No such file or directory)",
+   "out": "",
+   "rc": 2
+  },
+  {
+   "err": "ERROR: I/O error reading from /tmp/vb5-pnd59159-2-tpf.txt: [unix_jni.cc:382] /tmp/vb5-pnd59159-2-tpf.txt (No such file or directory)",
+   "out": "",
+   "rc": 2
+  },
+  {
+   "err": "ERROR: I/O error reading from /tmp/vb5-pnd59159-3-tpf.txt: [unix_jni.cc:382] /tmp/vb5-pnd59159-3-tpf.txt (No such file or directory)",
+   "out": "",
+   "rc": 2
+  },
+  {
+   "err": "ERROR: I/O error reading from /tmp/vb5-pnd59159-4-tpf.txt: [unix_jni.cc:382] /tmp/vb5-pnd59159-4-tpf.txt (No such file or directory)",
+   "out": "",
+   "rc": 2
+  },
+  {
+   "err": "ERROR: I/O error reading from /tmp/vb5-pnd59159-5-tpf.txt: [unix_jni.cc:382] /tmp/vb5-pnd59159-5-tpf.txt (No such file or directory)",
+   "out": "",
+   "rc": 2
+  }
+ ],
+ "workspace": "ws1"
+}

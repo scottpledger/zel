@@ -1,0 +1,8 @@
+# @WS@/BUILD:4:11
+test_suite(
+  name = "all_tests",
+  tests = ["@@//b:t1", "@@//b:t2"],
+)
+# Rule all_tests instantiated at (most recent call last):
+#   @WS@/BUILD:4:11 in <toplevel>
+

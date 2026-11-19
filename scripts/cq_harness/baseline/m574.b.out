@@ -1,0 +1,30 @@
+action 'Creating runfiles tree bazel-out/k8-fastbuild/bin/b/t1.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //b:t1
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 5e2d081693a0cdca35fe93c28f1f347a104fc427e6073326245ce128e6f0541f
+  Inputs: [bazel-out/k8-fastbuild/bin/b/t1.runfiles_manifest]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t1.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+action 'Creating runfiles tree bazel-out/k8-opt-exec/bin/b/tool.runfiles [for tool]'
+  Mnemonic: SymlinkTree
+  Target: //b:tool
+  Configuration: k8-opt-exec
+  Execution platform: @@platforms//host:host
+  ActionKey: 9f18d61fe318c622b23edd15c2b9b185a8dc0e972d9c1498add946aeb8c125c7
+  Inputs: [bazel-out/k8-opt-exec/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/k8-opt-exec/bin/b/tool.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+
+action 'Creating runfiles tree bazel-out/k8-fastbuild/bin/b/tool.runfiles'
+  Mnemonic: SymlinkTree
+  Target: //b:tool
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: b4383eb49e620ed4369432971c7220f133f5f750c1ffc573d2c133419df8ad0e
+  Inputs: [bazel-out/k8-fastbuild/bin/b/tool.runfiles_manifest]
+  Outputs: [bazel-out/k8-fastbuild/bin/b/tool.runfiles/MANIFEST]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+

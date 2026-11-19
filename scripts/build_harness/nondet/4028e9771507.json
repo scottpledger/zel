@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "4028e9771507",
+ "classified_as": "ANYERR",
+ "cmd": "test //:t_crash",
+ "distinct": 2,
+ "harness": "build",
+ "hashes": [
+  "138d4582c2f12d18",
+  "138d4582c2f12d18",
+  "86b6a98bb2354eb8",
+  "86b6a98bb2354eb8",
+  "138d4582c2f12d18",
+  "86b6a98bb2354eb8"
+ ],
+ "history": [],
+ "mode": "ANYERR",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: no such target '//:t_crash': target 't_crash' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such target '//:t_crash': target 't_crash' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: Skipping '//:t_crash': no such target '//:t_crash': target 't_crash' not declared in package '' defined by WS/BUILD\nERROR: no such target '//:t_crash': target 't_crash' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: Skipping '//:t_crash': no such target '//:t_crash': target 't_crash' not declared in package '' defined by WS/BUILD\nERROR: no such target '//:t_crash': target 't_crash' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such target '//:t_crash': target 't_crash' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: Skipping '//:t_crash': no such target '//:t_crash': target 't_crash' not declared in package '' defined by WS/BUILD\nERROR: no such target '//:t_crash': target 't_crash' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws3"
+}

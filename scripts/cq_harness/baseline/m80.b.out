@@ -1,0 +1,10 @@
+action 'Executing genrule //a:gg'
+  Mnemonic: Genrule
+  Target: //a:gg
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: efb257e0353d4c7aac216fe391aa37dd298024cb3045911ff7162b8d43f0682d
+  Inputs: [a/z.txt, bazel-out/k8-opt-exec/bin/b/tool, bazel-out/k8-opt-exec/bin/b/tool.runfiles, external/bazel_tools/tools/genrule/genrule-setup.sh, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/k8-fastbuild/bin/a/gg.out]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+

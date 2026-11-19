@@ -1,0 +1,23 @@
+delta
+return 0; 2
+ 2
+}
+
+beta
+  indent 2
+alpha
+gamma 1
+alpha 2
+eps
+return 0;
+ 3
+  indent
+	Tab
+eps 1
+	Tab
+
+return 0; 0
+  indent
+}
+ 3
+return 0; 1

@@ -1,0 +1,11 @@
+Loading: 0 packages loaded
+ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead
+ERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline
+ERROR: package contains errors: e
+ERROR: package contains errors: e: 'is' not supported, use '==' instead
+ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent and referenced by '//d:bad'
+ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.
+ - nonexistent and referenced by '//d:bad'
+ERROR: Evaluation of query "rdeps(//..., //a:x.txt)" failed: errors were encountered while computing transitive closure
+WARNING: --keep_going specified, ignoring errors. Results may be inaccurate

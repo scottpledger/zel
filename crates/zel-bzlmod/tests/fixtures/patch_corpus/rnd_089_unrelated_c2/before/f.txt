@@ -1,0 +1,8 @@
+ 0
+{ 3
+
+beta 2
+beta
+delta
+delta 2
+gamma 1

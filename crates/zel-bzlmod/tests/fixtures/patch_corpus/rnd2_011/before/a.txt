@@ -1,0 +1,10 @@
+gamma
+	Tab 3
+return 0; 2
+  indent
+gamma 0
+return 0;
+	Tab
+gamma 1
+y 1
+y 1

@@ -1,0 +1,29 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="filegroup" location="@WS@/d/BUILD:3:10" name="//d:dep_bad">
+        <string name="name" value="dep_bad"/>
+        <list name="srcs">
+            <label value="//d:bad"/>
+            <label value="//d:ok"/>
+        </list>
+        <rule-input name="//d:bad"/>
+        <rule-input name="//d:ok"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/d/BUILD:2:10" name="//d:ok">
+        <string name="name" value="ok"/>
+        <list name="srcs">
+            <label value="//c:cdata"/>
+        </list>
+        <rule-input name="//c:cdata"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/c/BUILD:1:10" name="//c:cdata">
+        <string name="name" value="cdata"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="//c:d.txt"/>
+        </list>
+        <rule-input name="//c:d.txt"/>
+    </rule>
+</query>

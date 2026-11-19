@@ -1,0 +1,10 @@
+--- a/f.txt
++++ b/f.txt
+@@ -11,6 +11,5 @@
+ beta
+ eps
+ alpha 3
+-y
+-	Tab 0
++NEW y
+ delta

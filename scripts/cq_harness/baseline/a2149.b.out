@@ -1,0 +1,10 @@
+1 total action.
+
+Mnemonics:
+  CatIt: 1
+
+Configurations:
+  k8-fastbuild: 1
+
+Execution Platforms:
+  @@platforms//host:host: 1

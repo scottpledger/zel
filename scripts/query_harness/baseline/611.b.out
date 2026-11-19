@@ -1,0 +1,345 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="catrule" location="@WS@/a/BUILD:4:8" name="@@//a:lib">
+        <string name="name" value="lib"/>
+        <list name="tags">
+            <string value="fast"/>
+            <string value="manual"/>
+        </list>
+        <list name="srcs">
+            <label value="@@//a:x.txt"/>
+            <label value="@@//a:srcs_fg"/>
+            <label value="@@ext+//lib:data"/>
+        </list>
+        <string name="tag_x" value="lib"/>
+        <rule-input name="@@//a:srcs_fg"/>
+        <rule-input name="@@//a:x.txt"/>
+        <rule-input name="@@ext+//lib:data"/>
+    </rule>
+    <rule class="catrule" location="@WS@/a/BUILD:5:8" name="@@//a:lib2">
+        <string name="name" value="lib2"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <list name="srcs">
+            <label value="@@//a:lib"/>
+            <label value="@@//a:y.txt"/>
+        </list>
+        <rule-input name="@@//a:lib"/>
+        <rule-input name="@@//a:y.txt"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/a/BUILD:3:10" name="@@//a:srcs_fg">
+        <string name="name" value="srcs_fg"/>
+        <list name="srcs">
+            <label value="@@//a:x.txt"/>
+            <label value="@@//a:y.txt"/>
+            <label value="@@//a:z.txt"/>
+        </list>
+        <rule-input name="@@//a:x.txt"/>
+        <rule-input name="@@//a:y.txt"/>
+        <rule-input name="@@//a:z.txt"/>
+    </rule>
+    <source-file location="@WS@/a/x.txt:1:1" name="@@//a:x.txt">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/y.txt:1:1" name="@@//a:y.txt">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/a/z.txt:1:1" name="@@//a:z.txt">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/b/t.cc:1:1" name="@@//b:t.cc">
+        <visibility-label name="@@//visibility:private"/>
+    </source-file>
+    <rule class="x_test" location="@WS@/b/BUILD:3:7" name="@@//b:t1">
+        <string name="name" value="t1"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="size" value="small"/>
+        <list name="srcs">
+            <label value="@@//b:t.cc"/>
+        </list>
+        <list name="data">
+            <label value="@@//a:lib2"/>
+        </list>
+        <rule-input name="@@//a:lib2"/>
+        <rule-input name="@@//b:t.cc"/>
+        <rule-input name="@@bazel_tools//tools/test:collect_coverage"/>
+        <rule-input name="@@bazel_tools//tools/test:coverage_report_generator"/>
+        <rule-input name="@@bazel_tools//tools/test:coverage_support"/>
+        <rule-input name="@@bazel_tools//tools/test:runtime"/>
+        <rule-input name="@@bazel_tools//tools/test:test_setup"/>
+        <rule-input name="@@bazel_tools//tools/test:test_wrapper"/>
+        <rule-input name="@@bazel_tools//tools/test:test_xml_generator"/>
+        <rule-input name="@@bazel_tools//tools/test:xml_writer"/>
+    </rule>
+    <rule class="config_setting" location="@OB@/external/bazel_tools/src/conditions/BUILD:115:15" name="@@bazel_tools//src/conditions:windows">
+        <string name="name" value="windows"/>
+        <list name="visibility">
+            <label value="@@//visibility:public"/>
+        </list>
+        <list name="constraint_values">
+            <label value="@@platforms//os:windows"/>
+        </list>
+        <rule-input name="@@platforms//os:windows"/>
+    </rule>
+    <rule class="bazel_java_build_info" location="@OB@/external/bazel_tools/tools/build_defs/build_info/BUILD:24:22" name="@@bazel_tools//tools/build_defs/build_info:java_build_info">
+        <string name="name" value="java_build_info"/>
+        <rule-input name="@@bazel_tools//tools/build_defs/build_info/templates:non_volatile_file.properties.template"/>
+        <rule-input name="@@bazel_tools//tools/build_defs/build_info/templates:redacted_file.properties.template"/>
+        <rule-input name="@@bazel_tools//tools/build_defs/build_info/templates:volatile_file.properties.template"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/build_defs/build_info/templates/non_volatile_file.properties.template:1:1" name="@@bazel_tools//tools/build_defs/build_info/templates:non_volatile_file.properties.template">
+        <visibility-label name="@@bazel_tools//tools/build_defs/build_info:__pkg__"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/build_defs/build_info/templates/redacted_file.properties.template:1:1" name="@@bazel_tools//tools/build_defs/build_info/templates:redacted_file.properties.template">
+        <visibility-label name="@@bazel_tools//tools/build_defs/build_info:__pkg__"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/build_defs/build_info/templates/volatile_file.properties.template:1:1" name="@@bazel_tools//tools/build_defs/build_info/templates:volatile_file.properties.template">
+        <visibility-label name="@@bazel_tools//tools/build_defs/build_info:__pkg__"/>
+    </source-file>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/cpp/BUILD:21:15" name="@@bazel_tools//tools/cpp:toolchain_type">
+        <string name="name" value="toolchain_type"/>
+    </rule>
+    <rule class="alias" location="@OB@/external/bazel_tools/tools/jdk/BUILD:191:10" name="@@bazel_tools//tools/jdk:current_java_toolchain">
+        <string name="name" value="current_java_toolchain"/>
+        <label name="actual" value="@@rules_java+//toolchains:current_java_toolchain"/>
+        <rule-input name="@@rules_java+//toolchains:current_java_toolchain"/>
+    </rule>
+    <rule class="java_plugins_flag_alias" location="@OB@/external/bazel_tools/tools/jdk/BUILD:48:24" name="@@bazel_tools//tools/jdk:java_plugins_flag_alias">
+        <string name="name" value="java_plugins_flag_alias"/>
+    </rule>
+    <rule class="launcher_flag_alias" location="@OB@/external/bazel_tools/tools/jdk/BUILD:201:20" name="@@bazel_tools//tools/jdk:launcher_flag_alias">
+        <string name="name" value="launcher_flag_alias"/>
+        <list name="visibility">
+            <label value="@@//visibility:public"/>
+        </list>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/jdk/BUILD:34:15" name="@@bazel_tools//tools/jdk:runtime_toolchain_type">
+        <string name="name" value="runtime_toolchain_type"/>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/jdk/BUILD:23:15" name="@@bazel_tools//tools/jdk:toolchain_type">
+        <string name="name" value="toolchain_type"/>
+    </rule>
+    <rule class="current_launcher_binary" location="@OB@/external/bazel_tools/tools/launcher/BUILD:15:24" name="@@bazel_tools//tools/launcher:launcher">
+        <string name="name" value="launcher"/>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/launcher/BUILD:36:15" name="@@bazel_tools//tools/launcher:launcher_maker_toolchain_type">
+        <string name="name" value="launcher_maker_toolchain_type"/>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/bazel_tools/tools/launcher/BUILD:34:15" name="@@bazel_tools//tools/launcher:launcher_toolchain_type">
+        <string name="name" value="launcher_toolchain_type"/>
+    </rule>
+    <rule class="sh_binary" location="@OB@/external/bazel_tools/tools/test/BUILD:111:10" name="@@bazel_tools//tools/test:collect_coverage">
+        <string name="name" value="collect_coverage"/>
+        <list name="srcs">
+            <label value="@@bazel_tools//tools/test:collect_coverage.sh"/>
+        </list>
+        <rule-input name="@@bazel_tools//tools/test:collect_coverage.sh"/>
+        <rule-input name="@@platforms//os:windows"/>
+        <rule-input name="@@rules_shell+//shell/runfiles:runfiles"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/test/collect_coverage.sh:1:1" name="@@bazel_tools//tools/test:collect_coverage.sh">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <rule class="alias" location="@OB@/external/bazel_tools/tools/test/BUILD:126:6" name="@@bazel_tools//tools/test:coverage_report_generator">
+        <string name="name" value="coverage_report_generator"/>
+        <label name="actual" value="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:coverage_report_generator"/>
+        <rule-input name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:coverage_report_generator"/>
+    </rule>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:121:10" name="@@bazel_tools//tools/test:coverage_support">
+        <string name="name" value="coverage_support"/>
+        <list name="srcs">
+            <label value="@@bazel_tools//tools/test:collect_coverage.sh"/>
+        </list>
+        <rule-input name="@@bazel_tools//tools/test:collect_coverage.sh"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/test/dummy.sh:1:1" name="@@bazel_tools//tools/test:dummy.sh">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/test/generate-xml.sh:1:1" name="@@bazel_tools//tools/test:generate-xml.sh">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:96:10" name="@@bazel_tools//tools/test:runtime">
+        <string name="name" value="runtime"/>
+        <list name="srcs">
+            <label value="@@bazel_tools//tools/test:test-setup.sh"/>
+        </list>
+        <rule-input name="@@bazel_tools//tools/test:test-setup.sh"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/test/test-setup.sh:1:1" name="@@bazel_tools//tools/test:test-setup.sh">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:101:10" name="@@bazel_tools//tools/test:test_setup">
+        <string name="name" value="test_setup"/>
+        <list name="srcs">
+            <label value="@@bazel_tools//tools/test:test-setup.sh"/>
+        </list>
+        <rule-input name="@@bazel_tools//tools/test:test-setup.sh"/>
+    </rule>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:136:10" name="@@bazel_tools//tools/test:test_wrapper">
+        <string name="name" value="test_wrapper"/>
+        <list name="srcs">
+            <label value="@@bazel_tools//tools/test:tw.exe"/>
+            <label value="@@bazel_tools//tools/test:dummy.sh"/>
+        </list>
+        <rule-input name="@@bazel_tools//src/conditions:windows"/>
+        <rule-input name="@@bazel_tools//tools/test:dummy.sh"/>
+        <rule-input name="@@bazel_tools//tools/test:tw.exe"/>
+    </rule>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:106:10" name="@@bazel_tools//tools/test:test_xml_generator">
+        <string name="name" value="test_xml_generator"/>
+        <list name="srcs">
+            <label value="@@bazel_tools//tools/test:generate-xml.sh"/>
+        </list>
+        <rule-input name="@@bazel_tools//tools/test:generate-xml.sh"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools/tools/test/tw.exe:1:1" name="@@bazel_tools//tools/test:tw.exe">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <source-file location="@OB@/external/bazel_tools/tools/test/xml.exe:1:1" name="@@bazel_tools//tools/test:xml.exe">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/bazel_tools/tools/test/BUILD:148:10" name="@@bazel_tools//tools/test:xml_writer">
+        <string name="name" value="xml_writer"/>
+        <list name="srcs">
+            <label value="@@bazel_tools//tools/test:xml.exe"/>
+            <label value="@@bazel_tools//tools/test:dummy.sh"/>
+        </list>
+        <rule-input name="@@bazel_tools//src/conditions:windows"/>
+        <rule-input name="@@bazel_tools//tools/test:dummy.sh"/>
+        <rule-input name="@@bazel_tools//tools/test:xml.exe"/>
+    </rule>
+    <rule class="java_binary" location="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:11:12" name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main">
+        <string name="name" value="Main"/>
+        <string name="generator_name" value="Main"/>
+        <string name="generator_function" value="java_binary"/>
+        <string name="generator_location" value="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:11:12"/>
+        <list name="runtime_deps">
+            <label value="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_lib"/>
+        </list>
+        <label name="launcher" value="@@bazel_tools//tools/jdk:launcher_flag_alias"/>
+        <string name="main_class" value="com.google.devtools.coverageoutputgenerator.Main"/>
+        <boolean name="create_executable" value="true"/>
+        <rule-input name="@@bazel_tools//tools/build_defs/build_info:java_build_info"/>
+        <rule-input name="@@bazel_tools//tools/jdk:current_java_toolchain"/>
+        <rule-input name="@@bazel_tools//tools/jdk:java_plugins_flag_alias"/>
+        <rule-input name="@@bazel_tools//tools/jdk:launcher_flag_alias"/>
+        <rule-input name="@@bazel_tools//tools/jdk:toolchain_type"/>
+        <rule-input name="@@bazel_tools//tools/launcher:launcher"/>
+        <rule-input name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_lib"/>
+        <rule-input name="@@platforms//os:windows"/>
+        <rule-input name="@@rules_java+//java/bazel/rules:java_stub_template.txt"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main.jar"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main-src.jar"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main_deploy-src.jar"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main_deploy.jar"/>
+        <rule-output name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main_deploy.jar.unstripped"/>
+    </rule>
+    <rule class="java_import" location="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:6:12" name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_lib">
+        <string name="name" value="all_lcov_merger_lib"/>
+        <string name="generator_name" value="all_lcov_merger_lib"/>
+        <string name="generator_function" value="java_import"/>
+        <string name="generator_location" value="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:6:12"/>
+        <list name="jars">
+            <label value="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_tools_deploy.jar"/>
+        </list>
+        <rule-input name="@@bazel_tools//tools/jdk:toolchain_type"/>
+        <rule-input name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_tools_deploy.jar"/>
+    </rule>
+    <source-file location="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/all_lcov_merger_tools_deploy.jar:1:1" name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:all_lcov_merger_tools_deploy.jar">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <rule class="alias" location="@OB@/external/bazel_tools+remote_coverage_tools_extension+remote_coverage_tools/BUILD:23:6" name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:coverage_report_generator">
+        <string name="name" value="coverage_report_generator"/>
+        <label name="actual" value="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main"/>
+        <rule-input name="@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//:Main"/>
+    </rule>
+    <source-file location="@OB@/external/ext+/lib/d.txt:1:1" name="@@ext+//lib:d.txt">
+        <visibility-label name="@@//visibility:private"/>
+    </source-file>
+    <rule class="filegroup" location="@OB@/external/ext+/lib/BUILD:1:10" name="@@ext+//lib:data">
+        <string name="name" value="data"/>
+        <list name="visibility">
+            <label value="@@//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="@@ext+//lib:d.txt"/>
+        </list>
+        <rule-input name="@@ext+//lib:d.txt"/>
+    </rule>
+    <rule class="constraint_setting" location="@OB@/external/platforms/os/BUILD:14:19" name="@@platforms//os:os">
+        <string name="name" value="os"/>
+    </rule>
+    <rule class="constraint_value" location="@OB@/external/platforms/os/BUILD:46:17" name="@@platforms//os:windows">
+        <string name="name" value="windows"/>
+        <label name="constraint_setting" value="@@platforms//os:os"/>
+        <rule-input name="@@platforms//os:os"/>
+    </rule>
+    <source-file location="@OB@/external/rules_java+/LICENSE:1:1" name="@@rules_java+//:LICENSE">
+        <visibility-label name="@@//visibility:public"/>
+    </source-file>
+    <rule class="_license" location="@OB@/external/rules_java+/BUILD:26:8" name="@@rules_java+//:license">
+        <string name="name" value="license"/>
+        <list name="visibility">
+            <label value="@@//visibility:public"/>
+        </list>
+        <list name="tags"/>
+        <string name="generator_name" value="license"/>
+        <string name="generator_function" value="license"/>
+        <string name="generator_location" value="@OB@/external/rules_java+/BUILD:26:8"/>
+        <boolean name="testonly" value="false"/>
+        <list name="package_metadata"/>
+        <label name="license_text" value="@@rules_java+//:LICENSE"/>
+        <string name="package_name" value="rules_java"/>
+        <rule-input name="@@rules_java+//:LICENSE"/>
+    </rule>
+    <source-file location="@OB@/external/rules_java+/java/bazel/rules/java_stub_template.txt:1:1" name="@@rules_java+//java/bazel/rules:java_stub_template.txt">
+        <visibility-label name="@@bazel_tools//tools/java:__pkg__"/>
+    </source-file>
+    <rule class="java_toolchain_alias" location="@OB@/external/rules_java+/toolchains/BUILD:97:21" name="@@rules_java+//toolchains:current_java_toolchain">
+        <string name="name" value="current_java_toolchain"/>
+        <rule-input name="@@rules_java+//:license"/>
+    </rule>
+    <rule class="toolchain_type" location="@OB@/external/rules_shell+/shell/BUILD:15:15" name="@@rules_shell+//shell:toolchain_type">
+        <string name="name" value="toolchain_type"/>
+        <list name="visibility">
+            <label value="@@//visibility:public"/>
+        </list>
+    </rule>
+    <rule class="alias" location="@OB@/external/rules_shell+/shell/runfiles/BUILD:4:6" name="@@rules_shell+//shell/runfiles:runfiles">
+        <string name="name" value="runfiles"/>
+        <list name="visibility">
+            <label value="@@//visibility:public"/>
+        </list>
+        <label name="actual" value="@@rules_shell+//shell/runfiles:runfiles_impl"/>
+        <rule-input name="@@rules_shell+//shell/runfiles:runfiles_impl"/>
+    </rule>
+    <source-file location="@OB@/external/rules_shell+/shell/runfiles/runfiles.bash:1:1" name="@@rules_shell+//shell/runfiles:runfiles.bash">
+        <visibility-label name="@@rules_shell+//tests/runfiles:__pkg__"/>
+    </source-file>
+    <rule class="root_symlinks" location="@OB@/external/rules_shell+/shell/runfiles/BUILD:16:14" name="@@rules_shell+//shell/runfiles:runfiles_at_legacy_location">
+        <string name="name" value="runfiles_at_legacy_location"/>
+        <list name="tags">
+            <string value="manual"/>
+        </list>
+        <dict name="root_symlinks">
+            <pair>
+                <label value="@@rules_shell+//shell/runfiles:runfiles.bash"/>
+                <string value="bazel_tools/tools/bash/runfiles/runfiles.bash"/>
+            </pair>
+        </dict>
+        <rule-input name="@@rules_shell+//shell/runfiles:runfiles.bash"/>
+    </rule>
+    <rule class="sh_library" location="@OB@/external/rules_shell+/shell/runfiles/BUILD:10:11" name="@@rules_shell+//shell/runfiles:runfiles_impl">
+        <string name="name" value="runfiles_impl"/>
+        <list name="tags">
+            <string value="manual"/>
+        </list>
+        <list name="data">
+            <label value="@@rules_shell+//shell/runfiles:runfiles_at_legacy_location"/>
+        </list>
+        <rule-input name="@@rules_shell+//shell/runfiles:runfiles_at_legacy_location"/>
+    </rule>
+</query>

@@ -1,0 +1,25 @@
+	Tab 1
+{ 1
+beta 2
+  indent
+y 0
+} 3
+{
+alpha 1
+{ 0
+x
+{ 0
+  indent 0
+eps 1
+
+PERTURBED
+gamma
+eps
+beta 0
+eps
+eps
+return 0; 2
+eps
+gamma 3
+alpha
+delta 0

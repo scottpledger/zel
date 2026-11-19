@@ -1,0 +1,30 @@
+delta
+PERTURBED1
+  indent
+return 0; 1
+beta
+eps 1
+}
+y 2
+{
+}
+{
+eps 1
+alpha 0
+} 3
+x 0
+ 1
+	Tab 1
+y 3
+ 3
+x 0
+beta 1
+ 0
+  indent
+{ 2
+	Tab 3
+y 0
+y
+return 0;
+beta
+	Tab

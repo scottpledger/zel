@@ -1,0 +1,141 @@
+--//:f=y
+--//:f=x
+--//:f=z --//:b=true
+--//:b=true
+--//:b=false
+--//:i=5
+--//:i=3
+--//:l=a
+--//:l=a --//:l=b
+--//:f=y -c opt
+--//:f=y --cpu=k8
+--//:f=y --stamp
+--//:f=y --define=a=b
+--collect_code_coverage
+--collect_code_coverage --instrument_test_targets
+--collect_code_coverage -c opt
+--instrumentation_filter=//...
+--instrument_test_targets
+--experimental_collect_code_coverage_for_generated_files
+--combined_report=lcov
+--coverage_report_generator=@bazel_tools//tools/test:coverage_report_generator
+--host_platform=//:p
+--extra_execution_platforms=//:p
+--platforms=//:p
+--platforms=//:p2
+--extra_toolchains=//:nope_x
+--host_cpu=k8
+--host_compilation_mode=dbg
+--host_copt=-O3
+--host_cxxopt=-O3
+--host_conlyopt=-O3
+--host_linkopt=-x
+--host_features=foo
+--features=foo
+--features=foo --features=-bar
+--noincompatible_strict_action_env
+--incompatible_strict_action_env
+--action_env=FOO=1
+--action_env=FOO
+--repo_env=FOO=1
+--host_action_env=FOO=1
+--test_env=FOO=1
+--test_env=FOO
+--test_arg=a
+--test_timeout=10
+--test_timeout=1,2,3,4
+--test_output=all
+--test_filter=x
+--test_sharding_strategy=disabled
+--test_strategy=local
+--test_tag_filters=a
+--build_tag_filters=a
+--test_size_filters=small
+--test_lang_filters=cc
+--runs_per_test=2
+--flaky_test_attempts=3
+--cache_test_results=no
+--nocache_test_results
+--run_under=//:tool
+--run_under=echo
+--jobs=3
+--keep_going
+--nokeep_going
+--show_progress
+--verbose_failures
+--sandbox_debug
+--spawn_strategy=local
+--genrule_strategy=local
+--strategy=Genrule=local
+--worker_max_instances=3
+--compilation_mode=dbg
+--compilation_mode=fastbuild
+-c opt --cpu=k8
+-c dbg --stamp
+--stamp
+--nostamp
+--copt=-O2 --stamp
+--define=a=b --define=c=d
+--define=c=d --define=a=b
+--define=a=b --define=a=c
+--cpu=darwin_arm64
+--cpu=darwin_x86_64 -c opt
+--cpu=armeabi-v7a
+--cpu=x64_windows
+--noexperimental_enable_runfiles
+--legacy_external_runfiles
+--nolegacy_external_runfiles
+--build_runfile_links
+--nobuild_runfile_links
+--experimental_inprocess_symlink_creation
+--enable_runfiles
+--noenable_runfiles
+--incompatible_enable_cc_toolchain_resolution
+--incompatible_use_toolchain_resolution_for_java_rules
+--java_runtime_version=17
+--javacopt=-Xlint
+--java_language_version=11
+--tool_java_language_version=11
+--proto_compiler=//:tool
+--strip=always
+--strip=never
+--fission=yes
+--linkopt=-s --strip=always
+--dynamic_mode=off
+--cc_output_directory_tag=x
+--platform_suffix=x
+--minimum_os_version=11.0
+--macos_minimum_os=11.0
+--ios_minimum_os=11.0
+--objc_debug_with_GLIBCXX
+--apple_platform_type=ios
+--apple_crosstool_top=//:tool
+--xcode_version=1
+--python_version=PY3
+--python_path=/usr/bin/python3
+--build_python_zip
+--experimental_output_paths=strip
+--output_filter=x
+--experimental_remote_cache_compression
+--remote_cache=
+--incompatible_merge_genfiles_directory
+--noincompatible_merge_genfiles_directory
+--is_exec_configuration
+--target_environment=//:p
+--check_visibility=false
+--check_licenses
+--distinct_host_configuration
+--nodistinct_host_configuration
+--experimental_exec_configuration_distinguisher=legacy
+--experimental_output_directory_naming_scheme=diff_against_dynamic_baseline
+--experimental_platform_in_output_dir
+--noexperimental_platform_in_output_dir
+--use_target_platform_for_tests
+--noincompatible_modify_execution_info_additive
+--incompatible_modify_execution_info_additive
+--modify_execution_info=Genrule=+x
+--allow_analysis_failures
+--analysis_testing_deps_limit=5
+--incompatible_prefer_depending_configuration_runfiles
+--override_platform_cpu_name=//:p=foo
+--experimental_override_platform_cpu_name=//:p=foo

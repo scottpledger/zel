@@ -8,7 +8,9 @@ members = [
     "crates/zel-cmdline",
     "crates/zel-options",
     "crates/zel-starlark",
+    "crates/zel-builtins",
     "crates/zel-packages",
+    "crates/zel-bazel-tools",
     "crates/zel-bzlmod",
     "crates/zel-query",
     "crates/zel-analysis",
@@ -36,7 +38,9 @@ zel-events = { path = "crates/zel-events" }
 zel-cmdline = { path = "crates/zel-cmdline" }
 zel-options = { path = "crates/zel-options" }
 zel-starlark = { path = "crates/zel-starlark" }
+zel-builtins = { path = "crates/zel-builtins" }
 zel-packages = { path = "crates/zel-packages" }
+zel-bazel-tools = { path = "crates/zel-bazel-tools" }
 zel-bzlmod = { path = "crates/zel-bzlmod" }
 zel-query = { path = "crates/zel-query" }
 zel-analysis = { path = "crates/zel-analysis" }
@@ -48,3 +52,29 @@ zel-skyframe = { path = "crates/zel-skyframe" }
 zel-server = { path = "crates/zel-server" }
 zel-client = { path = "crates/zel-client" }
 zel-ffi-bridge = { path = "crates/zel-ffi-bridge" }
+
+# Optimize pure-Rust codecs, hashing, Starlark, Bzlmod, package loading, and analysis in dev/test
+# builds while preserving debug assertions and overflow checks from `profile.dev`.
+[profile.dev.package.zel-util]
+opt-level = 2
+
+[profile.dev.package.zel-starlark]
+opt-level = 2
+
+[profile.dev.package.zel-bzlmod]
+opt-level = 2
+
+[profile.dev.package.zel-packages]
+opt-level = 2
+
+[profile.dev.package.zel-analysis]
+opt-level = 2
+
+[profile.dev.package.zel-rules]
+opt-level = 2
+
+[profile.dev.package.zel-skyframe]
+opt-level = 2
+
+[profile.dev.package.zel-exec]
+opt-level = 2

@@ -1,0 +1,10 @@
+//a:lib2
+//b:t1
+@bazel_tools//tools/test:collect_coverage
+@bazel_tools//tools/test:coverage_report_generator
+@bazel_tools//tools/test:coverage_support
+@bazel_tools//tools/test:runtime
+@bazel_tools//tools/test:test_setup
+@bazel_tools//tools/test:test_wrapper
+@bazel_tools//tools/test:test_xml_generator
+@bazel_tools//tools/test:xml_writer

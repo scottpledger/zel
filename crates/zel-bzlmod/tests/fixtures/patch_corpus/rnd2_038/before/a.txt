@@ -1,0 +1,13 @@
+	Tab 0
+x
+ 2
+beta
+delta
+	Tab 2
+beta
+  indent 0
+alpha 3
+
+return 0;
+	Tab
+alpha 2

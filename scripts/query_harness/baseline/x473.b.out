@@ -1,0 +1,10 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="test_suite" location="@WS@/BUILD:5:11" name="//:tagged">
+        <string name="name" value="tagged"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <list name="$implicit_tests"/>
+    </rule>
+</query>

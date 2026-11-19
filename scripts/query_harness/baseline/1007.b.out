@@ -1,0 +1,33 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="test_suite" location="@WS@/BUILD:4:11" name="//:all_tests">
+        <string name="name" value="all_tests"/>
+        <list name="tests">
+            <label value="//b:t1"/>
+            <label value="//b:t2"/>
+        </list>
+        <rule-input name="//b:t1"/>
+        <rule-input name="//b:t2"/>
+    </rule>
+    <rule class="test_suite" location="@WS@/BUILD:5:11" name="//:tagged">
+        <string name="name" value="tagged"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <list name="$implicit_tests"/>
+    </rule>
+    <rule class="alias" location="@WS@/BUILD:3:6" name="//:top_alias">
+        <string name="name" value="top_alias"/>
+        <label name="actual" value="//a:lib"/>
+        <rule-input name="//a:lib"/>
+    </rule>
+    <rule class="filegroup" location="@WS@/d/BUILD:1:10" name="//d:bad">
+        <string name="name" value="bad"/>
+        <list name="srcs">
+            <label value="//nonexistent:foo"/>
+            <label value="//d:missing.txt"/>
+        </list>
+        <rule-input name="//d:missing.txt"/>
+        <rule-input name="//nonexistent:foo"/>
+    </rule>
+</query>

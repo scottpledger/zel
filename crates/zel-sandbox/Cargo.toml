@@ -9,3 +9,11 @@ zel-proto = { workspace = true }
 zel-util = { workspace = true }
 zel-vfs = { workspace = true }
 
+
+[[bin]]
+name = "zel-test-worker"
+path = "src/bin/zel-test-worker.rs"
+
+[[bin]]
+name = "zel-process-wrapper"
+path = "src/bin/zel-process-wrapper.rs"

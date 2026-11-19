@@ -1,0 +1,2 @@
+//b:mk
+@bazel_tools//tools/genrule:genrule-setup.sh

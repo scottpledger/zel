@@ -1,0 +1,7 @@
+source file //:BUILD
+source file //:defs.bzl
+source file //a:BUILD
+source file //b:BUILD
+source file //c:BUILD
+source file //d:BUILD
+source file //pg:BUILD

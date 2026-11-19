@@ -1,0 +1,11 @@
+# @WS@/b/BUILD:2:5
+xbin(
+  name = "tool",
+  visibility = ["//visibility:public"],
+  srcs = ["//b:tool.cc"],
+)
+# Rule tool instantiated at (most recent call last):
+#   @WS@/b/BUILD:2:5 in <toplevel>
+# Rule xbin defined at (most recent call last):
+#   @WS@/defs.bzl:34:12 in <toplevel>
+

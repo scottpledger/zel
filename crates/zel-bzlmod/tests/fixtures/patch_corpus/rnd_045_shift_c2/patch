@@ -1,0 +1,9 @@
+--- a/f.txt
++++ b/f.txt
+@@ -7,5 +7,5 @@
+ beta 2
+ x 1
+-	Tab
++NEW 	Tab
+ }
+ delta

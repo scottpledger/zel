@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "c36f15315beb",
+ "classified_as": "ORDERLESS",
+ "cmd": "query '//a:all' --output=label_kind --order_output=deps --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "fc7a0d886189b938",
+  "a9cd5a5daddb6734",
+  "4a7547e5a93f14c2",
+  "a113b2e31f674f35",
+  "9dd5aea76b8742eb",
+  "d9618dd2eb719a08"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "genrule rule //a:gg\nfilegroup rule //a:lm_grp\ngenrule rule //a:lm\nfilegroup rule //a:sel\nconfig_setting rule //a:opt_cs\nconfig_setting rule //a:def_cs\ncatrule rule //a:lib2\nxlib rule //a:cl\nxlib rule //a:cl2\ntrule rule //a:tr\ncatrule rule //a:lib\nfilegroup rule //a:srcs_fg\ncatrule rule //a:sm_cat\nfilegroup rule //a:sm_fg\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "catrule rule //a:lib2\ngenrule rule //a:gg\ncatrule rule //a:sm_cat\nfilegroup rule //a:sm_fg\nxlib rule //a:cl\nxlib rule //a:cl2\nfilegroup rule //a:sel\nconfig_setting rule //a:def_cs\nfilegroup rule //a:lm_grp\ngenrule rule //a:lm\ntrule rule //a:tr\ncatrule rule //a:lib\nfilegroup rule //a:srcs_fg\nconfig_setting rule //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "xlib rule //a:cl\ncatrule rule //a:lib2\nxlib rule //a:cl2\ntrule rule //a:tr\ncatrule rule //a:lib\nfilegroup rule //a:lm_grp\ngenrule rule //a:lm\nfilegroup rule //a:srcs_fg\ncatrule rule //a:sm_cat\nfilegroup rule //a:sm_fg\ngenrule rule //a:gg\nfilegroup rule //a:sel\nconfig_setting rule //a:opt_cs\nconfig_setting rule //a:def_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "filegroup rule //a:lm_grp\ncatrule rule //a:sm_cat\nfilegroup rule //a:sm_fg\nxlib rule //a:cl\ngenrule rule //a:lm\ncatrule rule //a:lib2\nxlib rule //a:cl2\ngenrule rule //a:gg\nfilegroup rule //a:sel\nconfig_setting rule //a:opt_cs\nconfig_setting rule //a:def_cs\ntrule rule //a:tr\ncatrule rule //a:lib\nfilegroup rule //a:srcs_fg\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "genrule rule //a:gg\ncatrule rule //a:lib2\nfilegroup rule //a:lm_grp\ngenrule rule //a:lm\nxlib rule //a:cl\nxlib rule //a:cl2\nfilegroup rule //a:sel\nconfig_setting rule //a:opt_cs\nconfig_setting rule //a:def_cs\ntrule rule //a:tr\ncatrule rule //a:lib\ncatrule rule //a:sm_cat\nfilegroup rule //a:sm_fg\nfilegroup rule //a:srcs_fg\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "catrule rule //a:sm_cat\nfilegroup rule //a:sm_fg\ntrule rule //a:tr\nfilegroup rule //a:lm_grp\ngenrule rule //a:lm\ngenrule rule //a:gg\nfilegroup rule //a:sel\nconfig_setting rule //a:opt_cs\nconfig_setting rule //a:def_cs\ncatrule rule //a:lib2\ncatrule rule //a:lib\nxlib rule //a:cl\nxlib rule //a:cl2\nfilegroup rule //a:srcs_fg\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

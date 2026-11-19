@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "8824fd8e7401",
+ "classified_as": "STRICT",
+ "cmd": "run --ui_event_filters=-info //:hello",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "27761a3773099394",
+  "27761a3773099394",
+  "27761a3773099394",
+  "27761a3773099394",
+  "27761a3773099394",
+  "27761a3773099394"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "Target //:hello up-to-date:\n  bazel-bin/hello",
+   "out": "hello args= RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "Target //:hello up-to-date:\n  bazel-bin/hello",
+   "out": "hello args= RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "Target //:hello up-to-date:\n  bazel-bin/hello",
+   "out": "hello args= RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "Target //:hello up-to-date:\n  bazel-bin/hello",
+   "out": "hello args= RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "Target //:hello up-to-date:\n  bazel-bin/hello",
+   "out": "hello args= RULE= pwd-base=_main",
+   "rc": 1
+  },
+  {
+   "err": "Target //:hello up-to-date:\n  bazel-bin/hello",
+   "out": "hello args= RULE= pwd-base=_main",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws3"
+}

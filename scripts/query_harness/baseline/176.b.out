@@ -1,0 +1,12 @@
+//a:y.txt
+//b:tool.cc
+@ext//lib:data
+//a:opt_cs
+//a:x.txt
+//b:tool
+//a:def_cs
+//a:sel
+@ext//lib:d.txt
+@bazel_tools//tools/genrule:genrule-setup.sh
+//a:z.txt
+//a:gg

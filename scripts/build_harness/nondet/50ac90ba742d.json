@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "50ac90ba742d",
+ "classified_as": "STRICT",
+ "cmd": "test --test_summary=terse //:t_flaky_pass",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "e52dcbc4e5ed8c97",
+  "e52dcbc4e5ed8c97",
+  "e52dcbc4e5ed8c97",
+  "e52dcbc4e5ed8c97",
+  "e52dcbc4e5ed8c97",
+  "e52dcbc4e5ed8c97"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "rm -f /tmp/vb5-flaky-*",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 7 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed successfully, 7 total actions",
+   "out": "Executed 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 7 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed successfully, 7 total actions",
+   "out": "Executed 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 7 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed successfully, 7 total actions",
+   "out": "Executed 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 7 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed successfully, 7 total actions",
+   "out": "Executed 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 7 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed successfully, 7 total actions",
+   "out": "Executed 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 7 processes: 6 internal, 2 darwin-sandbox.\nINFO: Build completed successfully, 7 total actions",
+   "out": "Executed 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

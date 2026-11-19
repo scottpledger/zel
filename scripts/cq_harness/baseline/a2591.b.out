@@ -1,0 +1,73 @@
+{
+  "artifacts": [{
+    "id": 1,
+    "pathFragmentId": 1
+  }, {
+    "id": 2,
+    "pathFragmentId": 6
+  }, {
+    "id": 3,
+    "pathFragmentId": 8
+  }],
+  "actions": [{
+    "targetId": 1,
+    "actionKey": "e7d6a94890779fa4c58596dcaad36967fcca4ca9c483b53513ceb0f8b03848ce",
+    "mnemonic": "CatIt",
+    "configurationId": 1,
+    "arguments": ["/bin/bash", "-c", "cat bazel-out/k8-dbg/bin/a/lib.txt a/y.txt \u003e bazel-out/k8-dbg/bin/a/lib2.txt"],
+    "inputDepSetIds": [1],
+    "outputIds": [3],
+    "primaryOutputId": 3,
+    "executionPlatform": "@@platforms//host:host"
+  }],
+  "targets": [{
+    "id": 1,
+    "label": "//a:lib2",
+    "ruleClassId": 1
+  }],
+  "depSetOfFiles": [{
+    "id": 1,
+    "directArtifactIds": [1, 2]
+  }],
+  "configuration": [{
+    "id": 1,
+    "mnemonic": "k8-dbg",
+    "platformName": "k8",
+    "checksum": "70ad46f0e930d4921a16f2065d932ae9a89595182dca24bf7c85f4d2aef3b5a9"
+  }],
+  "ruleClasses": [{
+    "id": 1,
+    "name": "catrule"
+  }],
+  "pathFragments": [{
+    "id": 5,
+    "label": "bazel-out"
+  }, {
+    "id": 4,
+    "label": "k8-dbg",
+    "parentId": 5
+  }, {
+    "id": 3,
+    "label": "bin",
+    "parentId": 4
+  }, {
+    "id": 2,
+    "label": "a",
+    "parentId": 3
+  }, {
+    "id": 1,
+    "label": "lib.txt",
+    "parentId": 2
+  }, {
+    "id": 7,
+    "label": "a"
+  }, {
+    "id": 6,
+    "label": "y.txt",
+    "parentId": 7
+  }, {
+    "id": 8,
+    "label": "lib2.txt",
+    "parentId": 2
+  }]
+}

@@ -1,0 +1,27 @@
+ 3
+gamma 1
+{ 2
+alpha 3
+beta 2
+y
+delta
+eps
+gamma 2
+x 1
+beta 3
+delta
+	Tab 0
+x 3
+	Tab 0
+gamma 3
+beta
+alpha 0
+eps 2
+ 3
+y 3
+x 1
+alpha
+beta 1
+	Tab 3
+alpha
+  indent 0

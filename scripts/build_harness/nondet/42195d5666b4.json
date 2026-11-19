@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "42195d5666b4",
+ "classified_as": "STRICT",
+ "cmd": "coverage --experimental_split_coverage_postprocessing //:t_pass",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "c18ad7678584559e",
+  "c18ad7678584559e",
+  "c18ad7678584559e",
+  "c18ad7678584559e",
+  "c18ad7678584559e",
+  "c18ad7678584559e"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_pass (N packages loaded).\nERROR: WS/BUILD:35:8: Testing //:t_pass failed: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nERROR: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 22 processes: 18 internal, 3 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 22 total actions",
+   "out": "//:t_pass                                                       FAILED TO BUILD\nExecuted 1 out of 1 test: 1 fails to build.",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_pass (N packages loaded).\nERROR: WS/BUILD:35:8: Testing //:t_pass failed: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nERROR: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 22 processes: 18 internal, 3 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 22 total actions",
+   "out": "//:t_pass                                                       FAILED TO BUILD\nExecuted 1 out of 1 test: 1 fails to build.",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_pass (N packages loaded).\nERROR: WS/BUILD:35:8: Testing //:t_pass failed: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nERROR: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 22 processes: 18 internal, 3 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 22 total actions",
+   "out": "//:t_pass                                                       FAILED TO BUILD\nExecuted 1 out of 1 test: 1 fails to build.",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_pass (N packages loaded).\nERROR: WS/BUILD:35:8: Testing //:t_pass failed: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nERROR: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 22 processes: 18 internal, 3 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 22 total actions",
+   "out": "//:t_pass                                                       FAILED TO BUILD\nExecuted 1 out of 1 test: 1 fails to build.",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_pass (N packages loaded).\nERROR: WS/BUILD:35:8: Testing //:t_pass failed: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nERROR: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 22 processes: 18 internal, 3 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 22 total actions",
+   "out": "//:t_pass                                                       FAILED TO BUILD\nExecuted 1 out of 1 test: 1 fails to build.",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed target //:t_pass (N packages loaded).\nERROR: WS/BUILD:35:8: Testing //:t_pass failed: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nTarget //:t_pass up-to-date:\n  bazel-bin/t_pass\nERROR: coverageDirectoryTreeArtifact is null: --experimental_split_coverage_postprocessing depends on --experimental_fetch_all_coverage_outputs being enabled\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 22 processes: 18 internal, 3 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 22 total actions",
+   "out": "//:t_pass                                                       FAILED TO BUILD\nExecuted 1 out of 1 test: 1 fails to build.",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

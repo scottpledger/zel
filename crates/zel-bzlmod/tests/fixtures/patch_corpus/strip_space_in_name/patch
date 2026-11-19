@@ -1,0 +1,5 @@
+--- a/a b.txt
++++ b/a b.txt
+@@ -3 +3 @@
+-line 3
++THREE

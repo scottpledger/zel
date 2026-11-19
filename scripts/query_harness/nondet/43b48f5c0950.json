@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "43b48f5c0950",
+ "classified_as": "STRICT",
+ "cmd": "query 'allpaths(//d:dep_bad,//c:cdata)' --nokeep_going --output=xml",
+ "distinct": 1,
+ "harness": "query",
+ "hashes": [
+  "75adb38bb83b9f6b",
+  "75adb38bb83b9f6b",
+  "75adb38bb83b9f6b",
+  "75adb38bb83b9f6b",
+  "75adb38bb83b9f6b",
+  "75adb38bb83b9f6b"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent and referenced by '//d:bad'\nERROR: Evaluation of query \"allpaths(//d:dep_bad, //c:cdata)\" failed: preloading transitive closure failed: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent and referenced by '//d:bad'\nERROR: Evaluation of query \"allpaths(//d:dep_bad, //c:cdata)\" failed: preloading transitive closure failed: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent and referenced by '//d:bad'\nERROR: Evaluation of query \"allpaths(//d:dep_bad, //c:cdata)\" failed: preloading transitive closure failed: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent and referenced by '//d:bad'\nERROR: Evaluation of query \"allpaths(//d:dep_bad, //c:cdata)\" failed: preloading transitive closure failed: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent and referenced by '//d:bad'\nERROR: Evaluation of query \"allpaths(//d:dep_bad, //c:cdata)\" failed: preloading transitive closure failed: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\n",
+   "out": "",
+   "rc": 7
+  },
+  {
+   "err": "ERROR: @WS@/d/BUILD:1:10: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent and referenced by '//d:bad'\nERROR: Evaluation of query \"allpaths(//d:dep_bad, //c:cdata)\" failed: preloading transitive closure failed: no such package 'nonexistent': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nonexistent\n",
+   "out": "",
+   "rc": 7
+  }
+ ],
+ "workspace": "ws"
+}

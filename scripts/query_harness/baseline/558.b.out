@@ -1,0 +1,10 @@
+//a:lib
+//a:lib2
+//a:srcs_fg
+//a:x.txt
+//a:y.txt
+//a:z.txt
+//b:t.cc
+//b:t1
+@ext//lib:d.txt
+@ext//lib:data

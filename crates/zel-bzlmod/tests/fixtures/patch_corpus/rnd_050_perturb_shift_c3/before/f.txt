@@ -1,0 +1,23 @@
+  indent
+x 2
+	Tab 2
+	Tab
+alpha
+x
+return 0; 1
+x 0
+PERTURBED8
+{ 1
+eps 2
+beta 1
+y
+return 0;
+eps
+{ 3
+delta 0
+PERTURBED
+PERTURBED
+eps 3
+{ 3
+delta 0
+y 1

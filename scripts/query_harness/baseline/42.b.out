@@ -1,0 +1,4 @@
+digraph mygraph {
+  node [shape=box];
+  "//:tagged\n//:top_alias\n//:all_tests"
+}

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "5d673b316f17",
+ "classified_as": "STRICT",
+ "cmd": "build --keep_going //:gfail",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "a5d9580bf34f7477",
+  "a5d9580bf34f7477",
+  "a5d9580bf34f7477",
+  "a5d9580bf34f7477",
+  "a5d9580bf34f7477",
+  "a5d9580bf34f7477"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nINFO: Found 1 target...\nTarget //:gfail failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nINFO: Found 1 target...\nTarget //:gfail failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nINFO: Found 1 target...\nTarget //:gfail failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nINFO: Found 1 target...\nTarget //:gfail failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nINFO: Found 1 target...\nTarget //:gfail failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "INFO: Analyzed target //:gfail (N packages loaded).\nERROR: WS/BUILD:7:8: Executing genrule //:gfail failed: (Exit 9): bash failed: error executing Genrule command (from genrule rule target //:gfail) /bin/bash -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo oops >&2; exit 9'\nUse --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging\noops\nINFO: Found 1 target...\nTarget //:gfail failed to build\nUse --verbose_failures to see the command lines of failed build steps.\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 2 processes: 2 internal.\nERROR: Build did NOT complete successfully",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws3"
+}

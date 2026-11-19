@@ -1,0 +1,32 @@
+gamma 0
+return 0; 2
+{ 3
+alpha 0
+y
+
+ 1
+gamma 0
+delta 3
+	Tab 3
+	Tab
+return 0;
+{ 2
+	Tab
+x
+eps
+ 0
+gamma 0
+gamma
+{ 0
+x
+x
+	Tab 2
+alpha
+gamma 3
+beta 1
+return 0; 1
+eps
+gamma 0
+{ 2
+ 3
+y 1

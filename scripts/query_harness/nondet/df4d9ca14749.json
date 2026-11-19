@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "df4d9ca14749",
+ "classified_as": "STRICT",
+ "cmd": "query 'buildfiles(//...)' --keep_going --output=xml",
+ "distinct": 1,
+ "harness": "query",
+ "hashes": [
+  "e25bd42532b09f8a",
+  "e25bd42532b09f8a",
+  "e25bd42532b09f8a",
+  "e25bd42532b09f8a",
+  "e25bd42532b09f8a",
+  "e25bd42532b09f8a"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:BUILD\"/>\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n    <source-file location=\"@WS@/a/BUILD:1:1\" name=\"//a:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:public\"/>\n    </source-file>\n    <source-file location=\"@WS@/b/BUILD:1:1\" name=\"//b:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/c/BUILD:1:1\" name=\"//c:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/d/BUILD:1:1\" name=\"//d:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/pg/BUILD:1:1\" name=\"//pg:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n</query>\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:BUILD\"/>\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n    <source-file location=\"@WS@/a/BUILD:1:1\" name=\"//a:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:public\"/>\n    </source-file>\n    <source-file location=\"@WS@/b/BUILD:1:1\" name=\"//b:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/c/BUILD:1:1\" name=\"//c:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/d/BUILD:1:1\" name=\"//d:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/pg/BUILD:1:1\" name=\"//pg:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n</query>\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:BUILD\"/>\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n    <source-file location=\"@WS@/a/BUILD:1:1\" name=\"//a:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:public\"/>\n    </source-file>\n    <source-file location=\"@WS@/b/BUILD:1:1\" name=\"//b:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/c/BUILD:1:1\" name=\"//c:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/d/BUILD:1:1\" name=\"//d:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/pg/BUILD:1:1\" name=\"//pg:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n</query>\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:BUILD\"/>\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n    <source-file location=\"@WS@/a/BUILD:1:1\" name=\"//a:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:public\"/>\n    </source-file>\n    <source-file location=\"@WS@/b/BUILD:1:1\" name=\"//b:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/c/BUILD:1:1\" name=\"//c:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/d/BUILD:1:1\" name=\"//d:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/pg/BUILD:1:1\" name=\"//pg:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n</query>\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:BUILD\"/>\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n    <source-file location=\"@WS@/a/BUILD:1:1\" name=\"//a:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:public\"/>\n    </source-file>\n    <source-file location=\"@WS@/b/BUILD:1:1\" name=\"//b:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/c/BUILD:1:1\" name=\"//c:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/d/BUILD:1:1\" name=\"//d:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/pg/BUILD:1:1\" name=\"//pg:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n</query>\n",
+   "rc": 3
+  },
+  {
+   "err": "ERROR: @WS@/e/BUILD:1:6: 'is' not supported, use '==' instead\nERROR: @WS@/e/BUILD:1:6: syntax error at 'is': expected newline\nERROR: package contains errors: e\nERROR: package contains errors: e: 'is' not supported, use '==' instead\nWARNING: --keep_going specified, ignoring errors. Results may be inaccurate\n",
+   "out": "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:BUILD\"/>\n    <source-file location=\"@WS@/a/BUILD\" name=\"//:defs.bzl\"/>\n    <source-file location=\"@WS@/a/BUILD:1:1\" name=\"//a:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:public\"/>\n    </source-file>\n    <source-file location=\"@WS@/b/BUILD:1:1\" name=\"//b:BUILD\" package_contains_errors=\"false\">\n        <load name=\"//:defs.bzl\"/>\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/c/BUILD:1:1\" name=\"//c:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/d/BUILD:1:1\" name=\"//d:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n    <source-file location=\"@WS@/pg/BUILD:1:1\" name=\"//pg:BUILD\" package_contains_errors=\"false\">\n        <visibility-label name=\"//visibility:private\"/>\n    </source-file>\n</query>\n",
+   "rc": 3
+  }
+ ],
+ "workspace": "wsbroken"
+}

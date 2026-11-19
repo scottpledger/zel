@@ -1,0 +1,12 @@
+--- a/a.txt
++++ b/a.txt
+@@ -7,7 +7,7 @@
+ line 7
+ line 8
+ line 9
+-line 10
++TEN
+ line 11
+ line 12
+ line 13
+random trailing text

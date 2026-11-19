@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "4b74a340c836",
+ "classified_as": "STRICT",
+ "cmd": "test --run_under=//:exit5 //:tstd",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "aa2f240d638fdce2",
+  "aa2f240d638fdce2",
+  "aa2f240d638fdce2",
+  "aa2f240d638fdce2",
+  "aa2f240d638fdce2",
+  "aa2f240d638fdce2"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:tstd (N packages loaded).\nFAIL: //:tstd (Exit 5) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log)\nINFO: Found 1 test target...\nTarget //:tstd up-to-date:\n  bazel-bin/tstd\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 7 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:tstd                                                                  FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:tstd (N packages loaded).\nFAIL: //:tstd (Exit 5) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log)\nINFO: Found 1 test target...\nTarget //:tstd up-to-date:\n  bazel-bin/tstd\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 7 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:tstd                                                                  FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:tstd (N packages loaded).\nFAIL: //:tstd (Exit 5) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log)\nINFO: Found 1 test target...\nTarget //:tstd up-to-date:\n  bazel-bin/tstd\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 7 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:tstd                                                                  FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:tstd (N packages loaded).\nFAIL: //:tstd (Exit 5) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log)\nINFO: Found 1 test target...\nTarget //:tstd up-to-date:\n  bazel-bin/tstd\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 7 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:tstd                                                                  FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:tstd (N packages loaded).\nFAIL: //:tstd (Exit 5) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log)\nINFO: Found 1 test target...\nTarget //:tstd up-to-date:\n  bazel-bin/tstd\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 7 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:tstd                                                                  FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed target //:tstd (N packages loaded).\nFAIL: //:tstd (Exit 5) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log)\nINFO: Found 1 test target...\nTarget //:tstd up-to-date:\n  bazel-bin/tstd\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 8 processes: 7 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 8 total actions",
+   "out": "//:tstd                                                                  FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/tstd/test.log\nExecuted 1 out of 1 test: 1 fails locally.",
+   "rc": 3
+  }
+ ],
+ "workspace": "ws3"
+}

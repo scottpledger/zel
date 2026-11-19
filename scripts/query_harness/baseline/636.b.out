@@ -1,0 +1,17 @@
+@@bazel_tools+remote_coverage_tools_extension+remote_coverage_tools//
+@@platforms//os
+@@rules_java+//
+@@rules_java+//java/bazel/rules
+@@rules_java+//toolchains
+@@rules_shell+//shell
+@@rules_shell+//shell/runfiles
+@bazel_tools//src/conditions
+@bazel_tools//tools/build_defs/build_info
+@bazel_tools//tools/build_defs/build_info/templates
+@bazel_tools//tools/cpp
+@bazel_tools//tools/jdk
+@bazel_tools//tools/launcher
+@bazel_tools//tools/test
+@ext//lib
+a
+b

@@ -1,0 +1,5 @@
+target
+crates/zel-bazel-tools/resources
+crates/zel-bazel-tools/builtins
+crates/zel-bzlmod/tests/fixtures
+crates/zel-server/tests/fixtures

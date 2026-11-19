@@ -1,0 +1,10 @@
+alpha 2
+} 0
+NEW delta
+}
+x 1
+eps
+ 0
+return 0; 0
+ 2
+delta

@@ -1,0 +1,11 @@
+# @WS@/a/BUILD:13:5
+xlib(
+  name = "cl",
+  srcs = ["//a:c.cc", "//a:c.h"],
+  deps = ["//a:cl2"],
+)
+# Rule cl instantiated at (most recent call last):
+#   @WS@/a/BUILD:13:5 in <toplevel>
+# Rule xlib defined at (most recent call last):
+#   @WS@/defs.bzl:36:12 in <toplevel>
+

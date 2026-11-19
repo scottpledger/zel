@@ -1,0 +1,13 @@
+ 0
+return 0; 1
+delta
+{ 2
+return 0; 2
+return 0; 1
+y 3
+beta 1
+	Tab 0
+eps 3
+y 3
+{ 1
+gamma 2

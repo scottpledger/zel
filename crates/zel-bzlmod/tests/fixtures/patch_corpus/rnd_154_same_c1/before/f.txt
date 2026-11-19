@@ -1,0 +1,26 @@
+	Tab 3
+y 3
+beta 1
+}
+}
+eps 3
+delta 0
+{ 0
+alpha
+ 2
+beta 3
+y
+y 1
+	Tab 1
+  indent 3
+eps
+}
+ 1
+{
+delta 3
+	Tab 0
+
+beta
+alpha
+x
+} 0

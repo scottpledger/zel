@@ -1,0 +1,98 @@
+{
+  "artifacts": [{
+    "id": 1,
+    "pathFragmentId": 1
+  }, {
+    "id": 2,
+    "pathFragmentId": 3
+  }, {
+    "id": 3,
+    "pathFragmentId": 4
+  }, {
+    "id": 4,
+    "pathFragmentId": 5
+  }, {
+    "id": 5,
+    "pathFragmentId": 9
+  }],
+  "actions": [{
+    "targetId": 1,
+    "actionKey": "c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012",
+    "mnemonic": "CatIt",
+    "configurationId": 1,
+    "arguments": ["/bin/bash", "-c", "cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-opt/bin/a/lib.txt"],
+    "inputDepSetIds": [1],
+    "outputIds": [5],
+    "primaryOutputId": 5,
+    "executionPlatform": "@@platforms//host:host"
+  }],
+  "targets": [{
+    "id": 1,
+    "label": "//a:lib",
+    "ruleClassId": 1
+  }],
+  "depSetOfFiles": [{
+    "id": 1,
+    "directArtifactIds": [1, 2, 3, 4]
+  }],
+  "configuration": [{
+    "id": 1,
+    "mnemonic": "k8-opt",
+    "platformName": "k8",
+    "checksum": "bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc"
+  }],
+  "ruleClasses": [{
+    "id": 1,
+    "name": "catrule"
+  }],
+  "pathFragments": [{
+    "id": 2,
+    "label": "a"
+  }, {
+    "id": 1,
+    "label": "x.txt",
+    "parentId": 2
+  }, {
+    "id": 3,
+    "label": "y.txt",
+    "parentId": 2
+  }, {
+    "id": 4,
+    "label": "z.txt",
+    "parentId": 2
+  }, {
+    "id": 8,
+    "label": "external"
+  }, {
+    "id": 7,
+    "label": "ext+",
+    "parentId": 8
+  }, {
+    "id": 6,
+    "label": "lib",
+    "parentId": 7
+  }, {
+    "id": 5,
+    "label": "d.txt",
+    "parentId": 6
+  }, {
+    "id": 13,
+    "label": "bazel-out"
+  }, {
+    "id": 12,
+    "label": "k8-opt",
+    "parentId": 13
+  }, {
+    "id": 11,
+    "label": "bin",
+    "parentId": 12
+  }, {
+    "id": 10,
+    "label": "a",
+    "parentId": 11
+  }, {
+    "id": 9,
+    "label": "lib.txt",
+    "parentId": 10
+  }]
+}

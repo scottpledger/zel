@@ -1,0 +1,7 @@
+--- a/f.txt
++++ b/f.txt
+@@ -9,3 +9,3 @@
+ line 9
+-line 10
++TEN
+ line 11

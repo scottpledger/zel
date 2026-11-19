@@ -1,0 +1,22 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <source-file location="@WS@/a/BUILD" name="//:BUILD"/>
+    <source-file location="@WS@/a/BUILD" name="//:defs.bzl"/>
+    <source-file location="@WS@/a/BUILD:1:1" name="//a:BUILD" package_contains_errors="false">
+        <load name="//:defs.bzl"/>
+        <visibility-label name="//visibility:public"/>
+    </source-file>
+    <source-file location="@WS@/b/BUILD:1:1" name="//b:BUILD" package_contains_errors="false">
+        <load name="//:defs.bzl"/>
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <source-file location="@WS@/c/BUILD:1:1" name="//c:BUILD" package_contains_errors="false">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <source-file location="@WS@/d/BUILD:1:1" name="//d:BUILD" package_contains_errors="false">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+    <source-file location="@WS@/pg/BUILD:1:1" name="//pg:BUILD" package_contains_errors="false">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+</query>

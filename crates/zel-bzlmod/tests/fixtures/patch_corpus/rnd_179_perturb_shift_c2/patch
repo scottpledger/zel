@@ -1,0 +1,7 @@
+--- a/f.txt
++++ b/f.txt
+@@ -38,2 +38,4 @@
+ return 0;
+ x 0
++
++gamma

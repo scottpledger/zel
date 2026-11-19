@@ -1,0 +1,5 @@
+{
+gamma
+eps 2
+alpha 0
+gamma 2

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "f14d1df91e20",
+ "classified_as": "UNCLASSIFIED",
+ "cmd": "coverage //:s_all",
+ "distinct": 4,
+ "harness": "build",
+ "hashes": [
+  "526603ddc0a2391e",
+  "27ba11054ca4c527",
+  "27ba11054ca4c527",
+  "64d2c67e566444c6",
+  "f63d341143e4a8d9",
+  "64d2c67e566444c6"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 40 processes: 31 internal, 11 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 40 total actions",
+   "out": "//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 3 out of 3 tests: 2 tests pass and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 40 processes: 31 internal, 11 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 40 total actions",
+   "out": "//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 3 out of 3 tests: 2 tests pass and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 40 processes: 31 internal, 11 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 40 total actions",
+   "out": "//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 3 out of 3 tests: 2 tests pass and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 40 processes: 31 internal, 11 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 40 total actions",
+   "out": "//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 3 out of 3 tests: 2 tests pass and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 40 processes: 31 internal, 11 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 40 total actions",
+   "out": "//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 3 out of 3 tests: 2 tests pass and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Using default value for --instrumentation_filter: \"^//\".\nINFO: Override the above default with --instrumentation_filter\nINFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_coverage_report.dat\n and execpath is bazel-out/_coverage/_coverage_report.dat\nINFO: LCOV coverage report is located at OB/execroot/_main/bazel-out/_coverage/_baseline_report.dat\n and execpath is bazel-out/_coverage/_baseline_report.dat\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: From Coverage report generation:\nJAVALOG com.google.devtools.coverageoutputgenerator.Main runWithArgs\nWARNING: There was no coverage found.\nINFO: Found 3 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 40 processes: 31 internal, 11 darwin-sandbox, 1 worker.\nINFO: Build completed, 1 test FAILED, 40 total actions",
+   "out": "//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 3 out of 3 tests: 2 tests pass and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  }
+ ],
+ "workspace": "ws1"
+}

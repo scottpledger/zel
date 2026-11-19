@@ -1,0 +1,8 @@
+gamma 3
+alpha
+delta 0
+delta 2
+gamma 3
+alpha
+delta 0
+delta 2

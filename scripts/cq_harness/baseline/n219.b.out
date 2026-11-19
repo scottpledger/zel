@@ -1,0 +1,4 @@
+a/x.txt
+a/y.txt
+a/z.txt
+bazel-out/k8-opt/bin/a/lib.txt

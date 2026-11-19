@@ -1,0 +1,254 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="genrule" location="@WS@/b/BUILD:6:8" name="//b:mk">
+        <string name="name" value="mk"/>
+        <list name="visibility">
+            <label value="//visibility:private"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <license name="licenses">
+            <list name="exceptions"/>
+            <list name="license-types">
+                <string value="NONE"/>
+            </list>
+        </license>
+        <list name="distribs"/>
+        <list name="target_compatible_with"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="toolchains"/>
+        <list name="srcs"/>
+        <list name="tools"/>
+        <list name="outs">
+            <output value="//b:mk.txt"/>
+        </list>
+        <string name="cmd" value="echo hi &gt; $@"/>
+        <string name="cmd_bash" value=""/>
+        <string name="cmd_bat" value=""/>
+        <string name="cmd_ps" value=""/>
+        <boolean name="output_to_bindir" value="false"/>
+        <boolean name="local" value="false"/>
+        <string name="message" value=""/>
+        <list name="output_licenses"/>
+        <boolean name="executable" value="false"/>
+        <boolean name="$is_executable" value="false"/>
+        <boolean name="heuristic_label_expansion" value="false"/>
+        <label name="$genrule_setup" value="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <tristate name="stamp" value="NO"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-output name="//b:mk.txt"/>
+    </rule>
+    <rule class="xlib" location="@WS@/b/BUILD:5:5" name="//b:shlib">
+        <string name="name" value="shlib"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//c:__pkg__"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="deps"/>
+        <list name="data">
+            <label value="//c:cdata"/>
+        </list>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="//c:cdata"/>
+    </rule>
+    <rule class="x_test" location="@WS@/b/BUILD:3:7" name="//b:t1">
+        <string name="name" value="t1"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:private"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="true"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <string name="size" value="small"/>
+        <string name="timeout" value="short"/>
+        <boolean name="flaky" value="false"/>
+        <int name="shard_count" value="-1"/>
+        <boolean name="local" value="false"/>
+        <list name="args"/>
+        <label name="$test_wrapper" value="@bazel_tools//tools/test:test_wrapper"/>
+        <label name="$xml_writer" value="@bazel_tools//tools/test:xml_writer"/>
+        <list name="$test_runtime">
+            <label value="@bazel_tools//tools/test:runtime"/>
+        </list>
+        <label name="$test_setup_script" value="@bazel_tools//tools/test:test_setup"/>
+        <label name="$xml_generator_script" value="@bazel_tools//tools/test:test_xml_generator"/>
+        <label name="$collect_coverage_script" value="@bazel_tools//tools/test:collect_coverage"/>
+        <label name=":coverage_support" value="@bazel_tools//tools/test:coverage_support"/>
+        <label name=":coverage_report_generator" value="@bazel_tools//tools/test:coverage_report_generator"/>
+        <label name=":run_under_exec_config"/>
+        <label name=":run_under_target_config"/>
+        <boolean name="$is_executable" value="true"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="deps"/>
+        <list name="data">
+            <label value="//a:lib2"/>
+        </list>
+        <rule-input name="//a:lib2"/>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="@bazel_tools//tools/test:collect_coverage"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_report_generator"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_support"/>
+        <rule-input name="@bazel_tools//tools/test:runtime"/>
+        <rule-input name="@bazel_tools//tools/test:test_setup"/>
+        <rule-input name="@bazel_tools//tools/test:test_wrapper"/>
+        <rule-input name="@bazel_tools//tools/test:test_xml_generator"/>
+        <rule-input name="@bazel_tools//tools/test:xml_writer"/>
+    </rule>
+    <rule class="x_test" location="@WS@/b/BUILD:4:7" name="//b:t2">
+        <string name="name" value="t2"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:private"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags">
+            <string value="manual"/>
+            <string value="slow"/>
+        </list>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="true"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <string name="size" value="medium"/>
+        <string name="timeout" value="long"/>
+        <boolean name="flaky" value="false"/>
+        <int name="shard_count" value="-1"/>
+        <boolean name="local" value="false"/>
+        <list name="args"/>
+        <label name="$test_wrapper" value="@bazel_tools//tools/test:test_wrapper"/>
+        <label name="$xml_writer" value="@bazel_tools//tools/test:xml_writer"/>
+        <list name="$test_runtime">
+            <label value="@bazel_tools//tools/test:runtime"/>
+        </list>
+        <label name="$test_setup_script" value="@bazel_tools//tools/test:test_setup"/>
+        <label name="$xml_generator_script" value="@bazel_tools//tools/test:test_xml_generator"/>
+        <label name="$collect_coverage_script" value="@bazel_tools//tools/test:collect_coverage"/>
+        <label name=":coverage_support" value="@bazel_tools//tools/test:coverage_support"/>
+        <label name=":coverage_report_generator" value="@bazel_tools//tools/test:coverage_report_generator"/>
+        <label name=":run_under_exec_config"/>
+        <label name=":run_under_target_config"/>
+        <boolean name="$is_executable" value="true"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="deps">
+            <label value="//b:shlib"/>
+        </list>
+        <list name="data"/>
+        <rule-input name="//b:shlib"/>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="@bazel_tools//tools/test:collect_coverage"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_report_generator"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_support"/>
+        <rule-input name="@bazel_tools//tools/test:runtime"/>
+        <rule-input name="@bazel_tools//tools/test:test_setup"/>
+        <rule-input name="@bazel_tools//tools/test:test_wrapper"/>
+        <rule-input name="@bazel_tools//tools/test:test_xml_generator"/>
+        <rule-input name="@bazel_tools//tools/test:xml_writer"/>
+    </rule>
+    <rule class="xbin" location="@WS@/b/BUILD:2:5" name="//b:tool">
+        <string name="name" value="tool"/>
+        <string name="expect_failure" value=""/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="transitive_configs"/>
+        <string name="deprecation"/>
+        <list name="tags"/>
+        <string name="generator_name" value=""/>
+        <string name="generator_function" value=""/>
+        <string name="generator_location" value=""/>
+        <boolean name="testonly" value="false"/>
+        <list name="features"/>
+        <list name=":action_listener"/>
+        <list name="compatible_with"/>
+        <list name="restricted_to"/>
+        <list name="$config_dependencies"/>
+        <list name="package_metadata"/>
+        <list name="aspect_hints"/>
+        <list name="toolchains"/>
+        <dict name="exec_properties"/>
+        <list name="exec_compatible_with"/>
+        <dict name="exec_group_compatible_with"/>
+        <list name="target_compatible_with"/>
+        <list name="args"/>
+        <list name="output_licenses"/>
+        <boolean name="$is_executable" value="true"/>
+        <list name="srcs">
+            <label value="//b:tool.cc"/>
+        </list>
+        <list name="deps"/>
+        <list name="data"/>
+        <rule-input name="//b:tool.cc"/>
+    </rule>
+</query>

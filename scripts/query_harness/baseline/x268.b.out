@@ -1,0 +1,86 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="genrule" location="@WS@/b/BUILD" name="//b:mk">
+        <string name="name" value="mk"/>
+        <list name="visibility">
+            <label value="//visibility:private"/>
+        </list>
+        <list name="outs">
+            <output value="//b:mk.txt"/>
+        </list>
+        <string name="cmd" value="echo hi &gt; $@"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-output name="//b:mk.txt"/>
+    </rule>
+    <rule class="xlib" location="@WS@/b/BUILD" name="//b:shlib">
+        <string name="name" value="shlib"/>
+        <list name="visibility">
+            <label value="//c:__pkg__"/>
+        </list>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="data">
+            <label value="//c:cdata"/>
+        </list>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="//c:cdata"/>
+    </rule>
+    <rule class="x_test" location="@WS@/b/BUILD" name="//b:t1">
+        <string name="name" value="t1"/>
+        <list name="tags">
+            <string value="fast"/>
+        </list>
+        <string name="size" value="small"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="data">
+            <label value="//a:lib2"/>
+        </list>
+        <rule-input name="//a:lib2"/>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="@bazel_tools//tools/test:collect_coverage"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_report_generator"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_support"/>
+        <rule-input name="@bazel_tools//tools/test:runtime"/>
+        <rule-input name="@bazel_tools//tools/test:test_setup"/>
+        <rule-input name="@bazel_tools//tools/test:test_wrapper"/>
+        <rule-input name="@bazel_tools//tools/test:test_xml_generator"/>
+        <rule-input name="@bazel_tools//tools/test:xml_writer"/>
+    </rule>
+    <rule class="x_test" location="@WS@/b/BUILD" name="//b:t2">
+        <string name="name" value="t2"/>
+        <list name="tags">
+            <string value="manual"/>
+            <string value="slow"/>
+        </list>
+        <string name="timeout" value="long"/>
+        <list name="srcs">
+            <label value="//b:t.cc"/>
+        </list>
+        <list name="deps">
+            <label value="//b:shlib"/>
+        </list>
+        <rule-input name="//b:shlib"/>
+        <rule-input name="//b:t.cc"/>
+        <rule-input name="@bazel_tools//tools/test:collect_coverage"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_report_generator"/>
+        <rule-input name="@bazel_tools//tools/test:coverage_support"/>
+        <rule-input name="@bazel_tools//tools/test:runtime"/>
+        <rule-input name="@bazel_tools//tools/test:test_setup"/>
+        <rule-input name="@bazel_tools//tools/test:test_wrapper"/>
+        <rule-input name="@bazel_tools//tools/test:test_xml_generator"/>
+        <rule-input name="@bazel_tools//tools/test:xml_writer"/>
+    </rule>
+    <rule class="xbin" location="@WS@/b/BUILD" name="//b:tool">
+        <string name="name" value="tool"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="//b:tool.cc"/>
+        </list>
+        <rule-input name="//b:tool.cc"/>
+    </rule>
+</query>

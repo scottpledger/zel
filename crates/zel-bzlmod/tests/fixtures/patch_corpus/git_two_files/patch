@@ -1,0 +1,40 @@
+diff --git a/a.txt b/a.txt
+index 1..2 100644
+--- a/a.txt
++++ b/a.txt
+@@ -7,7 +7,7 @@
+ line 7
+ line 8
+ line 9
+-line 10
++TEN
+ line 11
+ line 12
+ line 13
+diff --git a/b.txt b/b.txt
+index 1..2 100644
+--- a/b.txt
++++ b/b.txt
+@@ -1,5 +1,5 @@
+ line 1
+-line 2
++TWO
+ line 3
+ line 4
+ line 5
+@@ -7,7 +7,7 @@
+ line 7
+ line 8
+ line 9
+-line 10
++TEN
+ line 11
+ line 12
+ line 13
+@@ -16,5 +16,5 @@
+ line 16
+ line 17
+ line 18
+-line 19
++NINETEEN
+ line 20

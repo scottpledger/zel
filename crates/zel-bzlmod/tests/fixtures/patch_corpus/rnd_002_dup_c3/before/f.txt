@@ -1,0 +1,52 @@
+x 0
+beta 0
+eps 1
+alpha 2
+gamma 1
+eps
+y
+} 2
+} 3
+eps 3
+ 2
+delta 2
+{ 0
+	Tab 2
+beta 1
+x 0
+{ 1
+return 0; 3
+return 0; 3
+
+}
+gamma
+eps 2
+x
+beta
+eps
+x 0
+beta 0
+eps 1
+alpha 2
+gamma 1
+eps
+y
+} 2
+} 3
+eps 3
+ 2
+delta 2
+{ 0
+	Tab 2
+beta 1
+x 0
+{ 1
+return 0; 3
+return 0; 3
+
+}
+gamma
+eps 2
+x
+beta
+eps

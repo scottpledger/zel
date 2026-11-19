@@ -1,0 +1,22 @@
+}
+gamma
+gamma 0
+eps
+x
+x
+gamma
+  indent
+x 1
+}
+eps 3
+beta 0
+alpha 0
+	Tab
+  indent
+  indent 0
+eps 2
+delta
+eps 1
+x 3
+	Tab 1
+x

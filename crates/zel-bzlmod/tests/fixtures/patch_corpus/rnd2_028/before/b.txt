@@ -1,0 +1,28 @@
+{ 2
+beta 0
+	Tab 0
+ 1
+alpha
+ 0
+return 0;
+	Tab
+{
+{ 0
+gamma 3
+NEW  2
+alpha 3
+return 0;
+beta 2
+eps 3
+beta 3
+}
+delta 2
+x
+x
+ 1
+gamma
+  indent
+return 0; 2
+delta
+delta 0
+alpha

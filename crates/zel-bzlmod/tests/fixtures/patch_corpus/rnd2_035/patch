@@ -1,0 +1,16 @@
+--- a/a.txt
++++ b/a.txt
+@@ -5,4 +5,3 @@
+ gamma
+ {
+-x 1
+ delta
+--- a/b.txt
++++ b/b.txt
+@@ -21,6 +21,4 @@
+ eps 0
+ y 2
+-eps
+-return 0; 3
+ eps 2
+ }

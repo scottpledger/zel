@@ -1,0 +1,6 @@
+module(name="root", version="1.0")
+bazel_dep(name="m1", version="1.0")
+local_path_override(module_name="m1", path="m1")
+ext = use_extension("@m1//:ext.bzl", "ex")
+ext.mk(name = "a")
+use_repo(ext, "a")

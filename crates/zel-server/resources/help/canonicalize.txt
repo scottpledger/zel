@@ -1,0 +1,2 @@
+This command canonicalizes a list of %{product} options. Don't forget to prepend  '--' to end option parsing before the flags to canonicalize. This command doesn't support the strategy policies under --invocation_policy flag.
+%{options}

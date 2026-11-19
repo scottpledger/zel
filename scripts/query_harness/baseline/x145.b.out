@@ -1,0 +1,6 @@
+//:all_tests
+//:top_alias
+//a:lib
+//a:lib2
+//a:tr
+//b:t1

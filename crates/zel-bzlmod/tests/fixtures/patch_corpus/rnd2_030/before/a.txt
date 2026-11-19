@@ -1,0 +1,9 @@
+{ 1
+	Tab
+eps
+{
+	Tab
+gamma 0
+x 1
+{ 2
+} 0

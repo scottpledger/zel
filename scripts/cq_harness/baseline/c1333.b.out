@@ -1,0 +1,5 @@
+filegroup rule //c:cdata (a7a71fd)
+filegroup rule //pg:viol (a7a71fd)
+xlib rule //b:shlib (a7a71fd)
+filegroup rule //d:ok (a7a71fd)
+x_test rule //b:t2 (e722a21)

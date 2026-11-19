@@ -1,0 +1,1859 @@
+1	query '//lib:all' --keep_going
+2	query '//lib:*' --keep_going
+3	query '//lib/...' --keep_going
+4	query '//app/...' --keep_going
+5	query '//...' --keep_going
+6	query '//data/...:all' --keep_going
+7	query '//tools:all' --keep_going
+8	query '//cfg:all' --keep_going
+9	query '//pkgs:all' --keep_going
+10	query 'deps(//app:bin)' --keep_going
+11	query 'deps(//app:bin,1)' --keep_going
+12	query 'deps(//app:bin,0)' --keep_going
+13	query 'deps(//app:app_test,2)' --keep_going
+14	query 'deps(//lib:l3)' --keep_going
+15	query 'deps(//app:sel)' --keep_going
+16	query 'deps(//app:al)' --keep_going
+17	query 'deps(//app:tc)' --keep_going
+18	query 'rdeps(//...,//lib:l1)' --keep_going
+19	query 'rdeps(//...,//lib:l1,1)' --keep_going
+20	query 'rdeps(//app/...,//data:d)' --keep_going
+21	query 'rdeps(//lib:l3,//lib:l1)' --keep_going
+22	query 'allrdeps(//lib:l1)' --keep_going
+23	query 'allrdeps(//lib:l1,1)' --keep_going
+24	query 'somepath(//app:bin,//data:d)' --keep_going
+25	query 'somepath(//app:app_test,//lib:l1)' --keep_going
+26	query 'allpaths(//app:app_test,//lib:l1)' --keep_going
+27	query 'allpaths(//app:bin,//data:d)' --keep_going
+28	query 'kind(cat,//...)' --keep_going
+29	query 'kind('^sh_',//...)' --keep_going
+30	query 'kind('rule',//lib:all)' --keep_going
+31	query 'kind('source file',deps(//app:bin))' --keep_going
+32	query 'kind('generated file',//lib:all)' --keep_going
+33	query 'kind(filegroup,//app:all)' --keep_going
+34	query 'filter('l[0-9]$',//lib:all)' --keep_going
+35	query 'filter('^//app',deps(//app:app_test))' --keep_going
+36	query 'filter('\.txt$',deps(//app:bin))' --keep_going
+37	query 'attr(tags,t2,//...)' --keep_going
+38	query 'attr(tags,'\[.*t1.*\]',//lib:all)' --keep_going
+39	query 'attr(k,one,//...)' --keep_going
+40	query 'attr(n,7,//lib:all)' --keep_going
+41	query 'attr(flag,1,//lib:all)' --keep_going
+42	query 'attr(flag,0,//lib:all)' --keep_going
+43	query 'attr(opts,z,//lib:all)' --keep_going
+44	query 'attr(testonly,1,//lib:all)' --keep_going
+45	query 'attr(size,small,//tools:all)' --keep_going
+46	query 'attr(flaky,1,//tools:all)' --keep_going
+47	query 'attr(timeout,long,//tools:all)' --keep_going
+48	query 'attr(m,'x',//lib:all)' --keep_going
+49	query 'visible(//app:bin,//lib:all)' --keep_going
+50	query 'visible(//app:uses_priv,//lib:all)' --keep_going
+51	query 'visible(//lib:l1,//app:all)' --keep_going
+52	query 'visible(//data:d,//...)' --keep_going
+53	query 'labels(srcs,//lib:l2)' --keep_going
+54	query 'labels(srcs,//lib:all)' --keep_going
+55	query 'labels(data,//app:bin)' --keep_going
+56	query 'labels(tool,//lib:l3)' --keep_going
+57	query 'labels(deps,//tools:all)' --keep_going
+58	query 'labels(outs,//lib:gr)' --keep_going
+59	query 'labels(tools,//lib:gr)' --keep_going
+60	query 'tests(//tools:ts)' --keep_going
+61	query 'tests(//tools:ts_fast)' --keep_going
+62	query 'tests(//tools:ts_nested)' --keep_going
+63	query 'tests(//tools:ts_all)' --keep_going
+64	query 'tests(//tools:all)' --keep_going
+65	query 'tests(//...)' --keep_going
+66	query 'buildfiles(//app:bin)' --keep_going
+67	query 'buildfiles(deps(//app:app_test))' --keep_going
+68	query 'buildfiles(//lib:l1)' --keep_going
+69	query 'rbuildfiles(//rules.bzl)' --keep_going
+70	query 'rbuildfiles(//rules.bzl,//BUILD)' --keep_going
+71	query 'rbuildfiles(//lib:BUILD)' --keep_going
+72	query 'loadfiles(//app:bin)' --keep_going
+73	query 'loadfiles(//lib:l1)' --keep_going
+74	query 'loadfiles(deps(//app:td))' --keep_going
+75	query 'siblings(//lib:l1)' --keep_going
+76	query 'siblings(//lib:a.txt)' --keep_going
+77	query 'same_pkg_direct_rdeps(//lib:a.txt)' --keep_going
+78	query 'same_pkg_direct_rdeps(//lib:l1)' --keep_going
+79	query 'some(//lib:all)' --keep_going
+80	query 'some(//nonexist:all)' --keep_going
+81	query 'some(//lib:l1 + //lib:l2)' --keep_going
+82	query '//lib:l1 + //lib:l2' --keep_going
+83	query '//lib:all - //lib:l1' --keep_going
+84	query '//lib:all except //lib:l2' --keep_going
+85	query '//lib:all intersect //lib:l1 + //lib:l2' --keep_going
+86	query '//lib:l1 ^ //lib:all' --keep_going
+87	query 'set(//lib:l1 //lib:l2)' --keep_going
+88	query 'set()' --keep_going
+89	query '//lib:l1 union //lib:l2' --keep_going
+90	query 'let x = //lib:l1 in deps($x)' --keep_going
+91	query 'let x = //lib:l1 in $x + $x' --keep_going
+92	query 'let x = //lib:all in let y = //lib:l2 in $x - $y' --keep_going
+93	query '//lib:l1+//lib:l2' --keep_going
+94	query '//lib:l1 -//lib:l2' --keep_going
+95	query '//lib:a.txt' --keep_going
+96	query '//lib:gr.out' --keep_going
+97	query '//lib:gr2.out' --keep_going
+98	query '//lib:l1.out' --keep_going
+99	query '//lib:w1_dir' --keep_going
+100	query '//lib:w1.txt' --keep_going
+101	query '//lib:grl.out' --keep_going
+102	query '//lib:mac_l' --keep_going
+103	query '//lib:mac_l_0' --keep_going
+104	query '//lib:smac_fg' --keep_going
+105	query '//lib:smac_cat' --keep_going
+106	query '//lib:mac_l_2' --keep_going
+107	query '//lib:smac' --keep_going
+108	query '//lib:nonexist' --keep_going
+109	query '//nonexist:foo' --keep_going
+110	query '//nonexist/...' --keep_going
+111	query '//lib:' --keep_going
+112	query '//lib:a.txt:b' --keep_going
+113	query '@platforms//:incompatible' --keep_going
+114	query '@platforms//cpu:x86_64' --keep_going
+115	query '@@platforms//os:linux' --keep_going
+116	query '@nonexist//:x' --keep_going
+117	query '@@nonexist//:x' --keep_going
+118	query '//:everything' --keep_going
+119	query '//:al' --keep_going
+120	query '//:al2' --keep_going
+121	query 'deps(//:al2)' --keep_going
+122	query '//data/sub:inner' --keep_going
+123	query '//data/sub:d2.txt' --keep_going
+124	query '//data/sub:x.txt' --keep_going
+125	query '//data:d2.txt' --keep_going
+126	query '//deep/...' --keep_going
+127	query '//deep/x/...' --keep_going
+128	query 'deps(//deep/x:x)' --keep_going
+129	query 'rdeps(//deep/...,//deep/x/y:f)' --keep_going
+130	query '//deep/x/y:f' --keep_going
+131	query '//pkgs:gq' --keep_going
+132	query '//pkgs:gq2' --keep_going
+133	query 'deps(//pkgs:gq)' --keep_going
+134	query 'deps(//pkgs:gq2)' --keep_going
+135	query '//pkgs:ea' --keep_going
+136	query '//pkgs:al' --keep_going
+137	query 'deps(//pkgs:al)' --keep_going
+138	query '//pkgs:envs' --keep_going
+139	query '//pkgs:env_a' --keep_going
+140	query '//pkgs:restr' --keep_going
+141	query '//pkgs:incl' --keep_going
+142	query 'deps(//pkgs:incl)' --keep_going
+143	query 'deps(//pkgs:restr)' --keep_going
+144	query 'deps(//pkgs:envs)' --keep_going
+145	query '//data:pg' --keep_going
+146	query '//data:pg2' --keep_going
+147	query 'deps(//data:pg)' --keep_going
+148	query 'labels(packages,//data:pg)' --keep_going
+149	query 'visible(//lib:l1,//data:pg)' --keep_going
+150	query 'deps(//cfg:lf)' --keep_going
+151	query 'deps(//cfg:strv)' --keep_going
+152	query '//cfg:lf' --keep_going
+153	query '//cfg:str' --keep_going
+154	query '//cfg:num' --keep_going
+155	query 'deps(//app:sel_deps)' --keep_going
+156	query 'deps(//app:tc_ok)' --keep_going
+157	query '//broken:all' --keep_going
+158	query 'deps(//broken:dep_bad)' --keep_going
+159	query '//broken/...' --keep_going
+160	query '//broken:good' --keep_going
+161	query '//broken:dup' --keep_going
+162	query '//broken/syn:s' --keep_going
+163	query '//broken/loadfail:all' --keep_going
+164	query '//broken:bad_src' --keep_going
+165	query 'rdeps(//broken/...,//broken:g.txt)' --keep_going
+166	query '//app:bin //lib:l1' --keep_going
+167	query '//app:bin + ' --keep_going
+168	query '(//app:bin' --keep_going
+169	query 'deps(' --keep_going
+170	query 'deps()' --keep_going
+171	query 'deps(//app:bin,x)' --keep_going
+172	query 'deps(//app:bin,-1)' --keep_going
+173	query 'foo(//app:bin)' --keep_going
+174	query 'kind(//app:bin)' --keep_going
+175	query 'kind('(',//app:bin)' --keep_going
+176	query 'filter('[',//lib:all)' --keep_going
+177	query 'attr(a,b)' --keep_going
+178	query 'attr(tags,x,//lib:all,y)' --keep_going
+179	query 'some()' --keep_going
+180	query 'let x = //app:bin' --keep_going
+181	query 'let x = //app:bin in $y' --keep_going
+182	query '//app:bin in' --keep_going
+183	query ''//app:bin'' --keep_going
+184	query '"//app:bin"' --keep_going
+185	query '//app:bin//lib' --keep_going
+186	query '//app:bin;' --keep_going
+187	query 'deps(//app:bin) +' --keep_going
+188	query 'deps(//app:bin)) ' --keep_going
+189	query '' --keep_going
+190	query ' ' --keep_going
+191	query '//' --keep_going
+192	query '//...:all' --keep_going
+193	query '//:all' --keep_going
+194	query '//lib:all-targets' --keep_going
+195	query '//lib:all-rules' --keep_going
+196	query '//lib/...:all-targets' --keep_going
+197	query '//lib/...:*' --keep_going
+198	query '//lib/... - //lib:l1' --keep_going
+199	query '//lib:l1 - //lib/...' --keep_going
+200	query '@//lib:l1' --keep_going
+201	query '@@//lib:l1' --keep_going
+202	query '//lib/' --keep_going
+203	query '//lib//' --keep_going
+204	query '//lib:l1/' --keep_going
+205	query '//app/../lib:l1' --keep_going
+206	query '/lib:l1' --keep_going
+207	query 'lib:l1' --keep_going
+208	query '//lib:l1:x' --keep_going
+209	query '//.:x' --keep_going
+210	query '//./lib:l1' --keep_going
+211	query '//lib/.:l1' --keep_going
+212	query 'deps(//app:app_test) intersect //lib:all' --keep_going
+213	query 'deps(//app:app_test) - deps(//app:bin)' --keep_going
+214	query 'deps(//app:bin) ^ deps(//app:app_test)' --keep_going
+215	query 'kind(cat,deps(//app:td))' --keep_going
+216	query 'filter('t$',kind(rule,//lib:all))' --keep_going
+217	query '//lib:all' --output=label
+218	query '//lib:all' --output=label_kind
+219	query '//lib:all' --output=location
+220	query '//lib:all' --output=package
+221	query '//lib:all' --output=build
+222	query '//lib:all' --output=minrank
+223	query '//lib:all' --output=maxrank
+224	query '//lib:all' --output=graph
+225	query '//lib:all' --output=xml
+226	query '//lib:all' --output=proto
+227	query '//lib:all' --output=streamed_proto
+228	query '//lib:all' --output=streamed_jsonproto
+229	query '//lib:all' --output=jsonproto
+230	query '//lib:all' --output=textproto
+231	query 'deps(//app:app_test)' --output=label
+232	query 'deps(//app:app_test)' --output=label_kind
+233	query 'deps(//app:app_test)' --output=location
+234	query 'deps(//app:app_test)' --output=package
+235	query 'deps(//app:app_test)' --output=build
+236	query 'deps(//app:app_test)' --output=minrank
+237	query 'deps(//app:app_test)' --output=maxrank
+238	query 'deps(//app:app_test)' --output=graph
+239	query 'deps(//app:app_test)' --output=xml
+240	query 'deps(//app:app_test)' --output=proto
+241	query 'deps(//app:app_test)' --output=streamed_proto
+242	query 'deps(//app:app_test)' --output=streamed_jsonproto
+243	query 'deps(//app:app_test)' --output=jsonproto
+244	query 'deps(//app:app_test)' --output=textproto
+245	query '//tools:all' --output=label
+246	query '//tools:all' --output=label_kind
+247	query '//tools:all' --output=location
+248	query '//tools:all' --output=package
+249	query '//tools:all' --output=build
+250	query '//tools:all' --output=minrank
+251	query '//tools:all' --output=maxrank
+252	query '//tools:all' --output=graph
+253	query '//tools:all' --output=xml
+254	query '//tools:all' --output=proto
+255	query '//tools:all' --output=streamed_proto
+256	query '//tools:all' --output=streamed_jsonproto
+257	query '//tools:all' --output=jsonproto
+258	query '//tools:all' --output=textproto
+259	query '//app:sel' --output=label
+260	query '//app:sel' --output=label_kind
+261	query '//app:sel' --output=location
+262	query '//app:sel' --output=package
+263	query '//app:sel' --output=build
+264	query '//app:sel' --output=minrank
+265	query '//app:sel' --output=maxrank
+266	query '//app:sel' --output=graph
+267	query '//app:sel' --output=xml
+268	query '//app:sel' --output=proto
+269	query '//app:sel' --output=streamed_proto
+270	query '//app:sel' --output=streamed_jsonproto
+271	query '//app:sel' --output=jsonproto
+272	query '//app:sel' --output=textproto
+273	query '//cfg:all' --output=label
+274	query '//cfg:all' --output=label_kind
+275	query '//cfg:all' --output=location
+276	query '//cfg:all' --output=package
+277	query '//cfg:all' --output=build
+278	query '//cfg:all' --output=minrank
+279	query '//cfg:all' --output=maxrank
+280	query '//cfg:all' --output=graph
+281	query '//cfg:all' --output=xml
+282	query '//cfg:all' --output=proto
+283	query '//cfg:all' --output=streamed_proto
+284	query '//cfg:all' --output=streamed_jsonproto
+285	query '//cfg:all' --output=jsonproto
+286	query '//cfg:all' --output=textproto
+287	query '//pkgs:all' --output=label
+288	query '//pkgs:all' --output=label_kind
+289	query '//pkgs:all' --output=location
+290	query '//pkgs:all' --output=package
+291	query '//pkgs:all' --output=build
+292	query '//pkgs:all' --output=minrank
+293	query '//pkgs:all' --output=maxrank
+294	query '//pkgs:all' --output=graph
+295	query '//pkgs:all' --output=xml
+296	query '//pkgs:all' --output=proto
+297	query '//pkgs:all' --output=streamed_proto
+298	query '//pkgs:all' --output=streamed_jsonproto
+299	query '//pkgs:all' --output=jsonproto
+300	query '//pkgs:all' --output=textproto
+301	query '//data:all + //data/sub:all' --output=label
+302	query '//data:all + //data/sub:all' --output=label_kind
+303	query '//data:all + //data/sub:all' --output=location
+304	query '//data:all + //data/sub:all' --output=package
+305	query '//data:all + //data/sub:all' --output=build
+306	query '//data:all + //data/sub:all' --output=minrank
+307	query '//data:all + //data/sub:all' --output=maxrank
+308	query '//data:all + //data/sub:all' --output=graph
+309	query '//data:all + //data/sub:all' --output=xml
+310	query '//data:all + //data/sub:all' --output=proto
+311	query '//data:all + //data/sub:all' --output=streamed_proto
+312	query '//data:all + //data/sub:all' --output=streamed_jsonproto
+313	query '//data:all + //data/sub:all' --output=jsonproto
+314	query '//data:all + //data/sub:all' --output=textproto
+315	query '//lib:a.txt + //lib:gr.out' --output=label
+316	query '//lib:a.txt + //lib:gr.out' --output=label_kind
+317	query '//lib:a.txt + //lib:gr.out' --output=location
+318	query '//lib:a.txt + //lib:gr.out' --output=package
+319	query '//lib:a.txt + //lib:gr.out' --output=build
+320	query '//lib:a.txt + //lib:gr.out' --output=minrank
+321	query '//lib:a.txt + //lib:gr.out' --output=maxrank
+322	query '//lib:a.txt + //lib:gr.out' --output=graph
+323	query '//lib:a.txt + //lib:gr.out' --output=xml
+324	query '//lib:a.txt + //lib:gr.out' --output=proto
+325	query '//lib:a.txt + //lib:gr.out' --output=streamed_proto
+326	query '//lib:a.txt + //lib:gr.out' --output=streamed_jsonproto
+327	query '//lib:a.txt + //lib:gr.out' --output=jsonproto
+328	query '//lib:a.txt + //lib:gr.out' --output=textproto
+329	query '//app:td + //app:sd' --output=label
+330	query '//app:td + //app:sd' --output=label_kind
+331	query '//app:td + //app:sd' --output=location
+332	query '//app:td + //app:sd' --output=package
+333	query '//app:td + //app:sd' --output=build
+334	query '//app:td + //app:sd' --output=minrank
+335	query '//app:td + //app:sd' --output=maxrank
+336	query '//app:td + //app:sd' --output=graph
+337	query '//app:td + //app:sd' --output=xml
+338	query '//app:td + //app:sd' --output=proto
+339	query '//app:td + //app:sd' --output=streamed_proto
+340	query '//app:td + //app:sd' --output=streamed_jsonproto
+341	query '//app:td + //app:sd' --output=jsonproto
+342	query '//app:td + //app:sd' --output=textproto
+343	query '//lib:smac + //lib:mac_l_1' --output=label
+344	query '//lib:smac + //lib:mac_l_1' --output=label_kind
+345	query '//lib:smac + //lib:mac_l_1' --output=location
+346	query '//lib:smac + //lib:mac_l_1' --output=package
+347	query '//lib:smac + //lib:mac_l_1' --output=build
+348	query '//lib:smac + //lib:mac_l_1' --output=minrank
+349	query '//lib:smac + //lib:mac_l_1' --output=maxrank
+350	query '//lib:smac + //lib:mac_l_1' --output=graph
+351	query '//lib:smac + //lib:mac_l_1' --output=xml
+352	query '//lib:smac + //lib:mac_l_1' --output=proto
+353	query '//lib:smac + //lib:mac_l_1' --output=streamed_proto
+354	query '//lib:smac + //lib:mac_l_1' --output=streamed_jsonproto
+355	query '//lib:smac + //lib:mac_l_1' --output=jsonproto
+356	query '//lib:smac + //lib:mac_l_1' --output=textproto
+357	query 'deps(//app:app_test)' --noimplicit_deps
+358	query 'deps(//app:app_test)' --nohost_deps
+359	query 'deps(//app:app_test)' --notool_deps
+360	query 'deps(//app:app_test)' --noimplicit_deps --nohost_deps --notool_deps
+361	query 'deps(//app:app_test)' --nonodep_deps
+362	query 'deps(//app:app_test)' --noimplicit_deps --output=graph
+363	query 'deps(//app:app_test)' --noimplicit_deps --output=build
+364	query 'deps(//app:app_test)' --order_output=full
+365	query 'deps(//app:app_test)' --order_output=no
+366	query 'deps(//app:app_test)' --order_output=deps
+367	query 'deps(//app:app_test)' --order_output=auto
+368	query 'deps(//app:app_test)' --output=label --order_output=full
+369	query 'deps(//app:app_test)' --relative_locations
+370	query 'deps(//app:app_test)' --output=location --relative_locations
+371	query 'deps(//app:app_test)' --output=location --noimplicit_deps
+372	query 'deps(//app:app_test)' --output=label_kind --order_output=no
+373	query 'deps(//app:app_test)' --output=graph --nograph:factored
+374	query 'deps(//app:app_test)' --output=graph --graph:node_limit=3
+375	query 'deps(//app:app_test)' --output=graph --graph:node_limit=-1
+376	query 'deps(//app:app_test)' --output=graph --graph:factored
+377	query 'deps(//app:app_test)' --output=build --noproto:locations
+378	query 'deps(//app:app_test)' --output=proto --noproto:locations
+379	query 'deps(//app:app_test)' --output=proto --proto:output_rule_attrs=srcs,k
+380	query 'deps(//app:app_test)' --output=proto --proto:output_rule_attrs=
+381	query 'deps(//app:app_test)' --output=proto --noproto:rule_inputs_and_outputs
+382	query 'deps(//app:app_test)' --output=proto --noproto:default_values
+383	query 'deps(//app:app_test)' --output=proto --proto:include_synthetic_attribute_hash
+384	query 'deps(//app:app_test)' --output=proto --proto:flatten_selects
+385	query 'deps(//app:app_test)' --output=proto --noproto:flatten_selects
+386	query 'deps(//app:app_test)' --output=xml --noxml:line_numbers
+387	query 'deps(//app:app_test)' --output=xml --noxml:default_values
+388	query 'deps(//app:app_test)' --output=xml --xml:default_values
+389	query 'deps(//app:app_test)' --output=xml --xml:line_numbers
+390	query 'deps(//app:app_test)' --output=jsonproto --proto:output_rule_attrs=srcs
+391	query 'deps(//app:app_test)' --output=proto --consistent_labels
+392	query 'deps(//app:app_test)' --output=label --consistent_labels
+393	query 'deps(//app:app_test)' --output=label_kind --consistent_labels
+394	query 'deps(//app:app_test)' --output=build --consistent_labels
+395	query 'deps(//app:app_test)' --output=xml --consistent_labels
+396	query 'deps(//app:app_test)' --output=graph --consistent_labels
+397	query 'deps(//app:app_test)' --output=location --consistent_labels
+398	query 'deps(//app:app_test)' --output=proto --proto:instantiation_stack
+399	query 'deps(//app:app_test)' --output=build --proto:instantiation_stack
+400	query 'deps(//app:app_test)' --output=label --line_terminator_null
+401	query 'deps(//app:app_test)' --output=label --null
+402	query 'deps(//app:app_test)' --infer_universe_scope
+403	query 'deps(//app:app_test)' --universe_scope=//lib/...
+404	query 'deps(//app:app_test)' --universe_scope=//lib/... --output=label
+405	query 'deps(//app:app_test)' --universe_scope=//app/...,//lib/... --output=label
+406	query 'deps(//app:app_test)' --universe_scope=//nonexist/...
+407	query 'deps(//app:app_test)' --strict_test_suite
+408	query 'deps(//app:app_test)' --nostrict_test_suite
+409	query 'deps(//app:app_test)' --tool_deps
+410	query 'deps(//app:app_test)' --host_deps
+411	query 'deps(//app:app_test)' --implicit_deps
+412	query 'deps(//app:app_test)' --include_aspects
+413	query 'deps(//app:app_test)' --noinclude_aspects
+414	query 'deps(//app:app_test)' --include_aspects --output=proto
+415	query 'deps(//app:app_test)' --include_commandline=false --output=proto
+416	query 'deps(//app:app_test)' --include_artifacts
+417	query 'deps(//app:app_test)' --noinclude_artifacts
+418	query 'deps(//app:app_test)' --output=proto --noinclude_artifacts
+419	query 'deps(//app:app_test)' --output=proto --include_artifacts
+420	query 'deps(//app:app_test)' --query_file=/dev/null
+421	query 'deps(//app:app_test)' --keep_going
+422	query 'deps(//app:app_test)' --nokeep_going
+423	query 'deps(//app:app_test)' --show_progress
+424	query 'deps(//app:app_test)' --noshow_progress
+425	query 'deps(//app:app_test)' --output=label --noshow_loading_progress
+426	query 'deps(//app:app_test)' --bad_flag
+427	query 'deps(//app:app_test)' --output=bogus
+428	query 'deps(//app:app_test)' --order_output=bogus
+429	query 'deps(//app:app_test)' --output=label --output=build
+430	query '//lib:all' --noimplicit_deps
+431	query '//lib:all' --nohost_deps
+432	query '//lib:all' --notool_deps
+433	query '//lib:all' --noimplicit_deps --nohost_deps --notool_deps
+434	query '//lib:all' --nonodep_deps
+435	query '//lib:all' --noimplicit_deps --output=graph
+436	query '//lib:all' --noimplicit_deps --output=build
+437	query '//lib:all' --order_output=full
+438	query '//lib:all' --order_output=no
+439	query '//lib:all' --order_output=deps
+440	query '//lib:all' --order_output=auto
+441	query '//lib:all' --output=label --order_output=full
+442	query '//lib:all' --relative_locations
+443	query '//lib:all' --output=location --relative_locations
+444	query '//lib:all' --output=location --noimplicit_deps
+445	query '//lib:all' --output=label_kind --order_output=no
+446	query '//lib:all' --output=graph --nograph:factored
+447	query '//lib:all' --output=graph --graph:node_limit=3
+448	query '//lib:all' --output=graph --graph:node_limit=-1
+449	query '//lib:all' --output=graph --graph:factored
+450	query '//lib:all' --output=build --noproto:locations
+451	query '//lib:all' --output=proto --noproto:locations
+452	query '//lib:all' --output=proto --proto:output_rule_attrs=srcs,k
+453	query '//lib:all' --output=proto --proto:output_rule_attrs=
+454	query '//lib:all' --output=proto --noproto:rule_inputs_and_outputs
+455	query '//lib:all' --output=proto --noproto:default_values
+456	query '//lib:all' --output=proto --proto:include_synthetic_attribute_hash
+457	query '//lib:all' --output=proto --proto:flatten_selects
+458	query '//lib:all' --output=proto --noproto:flatten_selects
+459	query '//lib:all' --output=xml --noxml:line_numbers
+460	query '//lib:all' --output=xml --noxml:default_values
+461	query '//lib:all' --output=xml --xml:default_values
+462	query '//lib:all' --output=xml --xml:line_numbers
+463	query '//lib:all' --output=jsonproto --proto:output_rule_attrs=srcs
+464	query '//lib:all' --output=proto --consistent_labels
+465	query '//lib:all' --output=label --consistent_labels
+466	query '//lib:all' --output=label_kind --consistent_labels
+467	query '//lib:all' --output=build --consistent_labels
+468	query '//lib:all' --output=xml --consistent_labels
+469	query '//lib:all' --output=graph --consistent_labels
+470	query '//lib:all' --output=location --consistent_labels
+471	query '//lib:all' --output=proto --proto:instantiation_stack
+472	query '//lib:all' --output=build --proto:instantiation_stack
+473	query '//lib:all' --output=label --line_terminator_null
+474	query '//lib:all' --output=label --null
+475	query '//lib:all' --infer_universe_scope
+476	query '//lib:all' --universe_scope=//lib/...
+477	query '//lib:all' --universe_scope=//lib/... --output=label
+478	query '//lib:all' --universe_scope=//app/...,//lib/... --output=label
+479	query '//lib:all' --universe_scope=//nonexist/...
+480	query '//lib:all' --strict_test_suite
+481	query '//lib:all' --nostrict_test_suite
+482	query '//lib:all' --tool_deps
+483	query '//lib:all' --host_deps
+484	query '//lib:all' --implicit_deps
+485	query '//lib:all' --include_aspects
+486	query '//lib:all' --noinclude_aspects
+487	query '//lib:all' --include_aspects --output=proto
+488	query '//lib:all' --include_commandline=false --output=proto
+489	query '//lib:all' --include_artifacts
+490	query '//lib:all' --noinclude_artifacts
+491	query '//lib:all' --output=proto --noinclude_artifacts
+492	query '//lib:all' --output=proto --include_artifacts
+493	query '//lib:all' --query_file=/dev/null
+494	query '//lib:all' --nokeep_going
+495	query '//lib:all' --show_progress
+496	query '//lib:all' --noshow_progress
+497	query '//lib:all' --output=label --noshow_loading_progress
+498	query '//lib:all' --bad_flag
+499	query '//lib:all' --output=bogus
+500	query '//lib:all' --order_output=bogus
+501	query '//lib:all' --output=label --output=build
+502	query '//app:sel_deps' --noimplicit_deps
+503	query '//app:sel_deps' --nohost_deps
+504	query '//app:sel_deps' --notool_deps
+505	query '//app:sel_deps' --noimplicit_deps --nohost_deps --notool_deps
+506	query '//app:sel_deps' --nonodep_deps
+507	query '//app:sel_deps' --noimplicit_deps --output=graph
+508	query '//app:sel_deps' --noimplicit_deps --output=build
+509	query '//app:sel_deps' --order_output=full
+510	query '//app:sel_deps' --order_output=no
+511	query '//app:sel_deps' --order_output=deps
+512	query '//app:sel_deps' --order_output=auto
+513	query '//app:sel_deps' --output=label --order_output=full
+514	query '//app:sel_deps' --relative_locations
+515	query '//app:sel_deps' --output=location --relative_locations
+516	query '//app:sel_deps' --output=location --noimplicit_deps
+517	query '//app:sel_deps' --output=label_kind --order_output=no
+518	query '//app:sel_deps' --output=graph --nograph:factored
+519	query '//app:sel_deps' --output=graph --graph:node_limit=3
+520	query '//app:sel_deps' --output=graph --graph:node_limit=-1
+521	query '//app:sel_deps' --output=graph --graph:factored
+522	query '//app:sel_deps' --output=build --noproto:locations
+523	query '//app:sel_deps' --output=proto --noproto:locations
+524	query '//app:sel_deps' --output=proto --proto:output_rule_attrs=srcs,k
+525	query '//app:sel_deps' --output=proto --proto:output_rule_attrs=
+526	query '//app:sel_deps' --output=proto --noproto:rule_inputs_and_outputs
+527	query '//app:sel_deps' --output=proto --noproto:default_values
+528	query '//app:sel_deps' --output=proto --proto:include_synthetic_attribute_hash
+529	query '//app:sel_deps' --output=proto --proto:flatten_selects
+530	query '//app:sel_deps' --output=proto --noproto:flatten_selects
+531	query '//app:sel_deps' --output=xml --noxml:line_numbers
+532	query '//app:sel_deps' --output=xml --noxml:default_values
+533	query '//app:sel_deps' --output=xml --xml:default_values
+534	query '//app:sel_deps' --output=xml --xml:line_numbers
+535	query '//app:sel_deps' --output=jsonproto --proto:output_rule_attrs=srcs
+536	query '//app:sel_deps' --output=proto --consistent_labels
+537	query '//app:sel_deps' --output=label --consistent_labels
+538	query '//app:sel_deps' --output=label_kind --consistent_labels
+539	query '//app:sel_deps' --output=build --consistent_labels
+540	query '//app:sel_deps' --output=xml --consistent_labels
+541	query '//app:sel_deps' --output=graph --consistent_labels
+542	query '//app:sel_deps' --output=location --consistent_labels
+543	query '//app:sel_deps' --output=proto --proto:instantiation_stack
+544	query '//app:sel_deps' --output=build --proto:instantiation_stack
+545	query '//app:sel_deps' --output=label --line_terminator_null
+546	query '//app:sel_deps' --output=label --null
+547	query '//app:sel_deps' --infer_universe_scope
+548	query '//app:sel_deps' --universe_scope=//lib/...
+549	query '//app:sel_deps' --universe_scope=//lib/... --output=label
+550	query '//app:sel_deps' --universe_scope=//app/...,//lib/... --output=label
+551	query '//app:sel_deps' --universe_scope=//nonexist/...
+552	query '//app:sel_deps' --strict_test_suite
+553	query '//app:sel_deps' --nostrict_test_suite
+554	query '//app:sel_deps' --tool_deps
+555	query '//app:sel_deps' --host_deps
+556	query '//app:sel_deps' --implicit_deps
+557	query '//app:sel_deps' --include_aspects
+558	query '//app:sel_deps' --noinclude_aspects
+559	query '//app:sel_deps' --include_aspects --output=proto
+560	query '//app:sel_deps' --include_commandline=false --output=proto
+561	query '//app:sel_deps' --include_artifacts
+562	query '//app:sel_deps' --noinclude_artifacts
+563	query '//app:sel_deps' --output=proto --noinclude_artifacts
+564	query '//app:sel_deps' --output=proto --include_artifacts
+565	query '//app:sel_deps' --query_file=/dev/null
+566	query '//app:sel_deps' --keep_going
+567	query '//app:sel_deps' --nokeep_going
+568	query '//app:sel_deps' --show_progress
+569	query '//app:sel_deps' --noshow_progress
+570	query '//app:sel_deps' --output=label --noshow_loading_progress
+571	query '//app:sel_deps' --bad_flag
+572	query '//app:sel_deps' --output=bogus
+573	query '//app:sel_deps' --order_output=bogus
+574	query '//app:sel_deps' --output=label --output=build
+575	query --query_file=/tmp/r7v/q1.txt
+576	query '//lib:l1' --query_file=/tmp/r7v/q1.txt
+577	query
+578	query --output=label
+579	query //lib:l1 //lib:l2
+580	query 'deps(//app:bin)' --output=label --keep_going --noimplicit_deps
+581	query //lib:l1 --universe_scope=//lib:l2
+582	query 'allrdeps(//lib:a.txt)' --universe_scope=//lib:all
+583	query 'rdeps(//lib:l1,//lib:a.txt)' --universe_scope=//lib:all --order_output=full
+584	query 'rdeps(//lib:l3,//lib:l1)' --universe_scope=//lib:l3 --output=label
+585	query '//lib:l1' -k --output=label
+586	query '//nonexist:x' -k
+587	query '//nonexist:x'
+588	query '//nonexist/...'
+589	query '//nonexist/...' -k
+590	query '//broken:all'
+591	query '//broken:all' -k
+592	query '//broken/...' -k --output=label
+593	query '//broken/...'
+594	query 'deps(//broken:dep_bad)' --output=label
+595	query 'deps(//broken:dep_bad)' -k --output=label
+596	query '//broken:good'
+597	query '//broken:bad_src' --output=build
+598	query '//broken:bad_src' --output=proto
+599	query 'deps(//broken:dep_bad)' -k --output=proto
+600	query 'deps(//broken:dep_bad)' -k --output=xml
+601	query 'deps(//broken:dep_bad)' -k --output=graph
+602	query 'deps(//broken:dep_bad)' -k --output=minrank
+603	query 'rdeps(//broken/..., //broken:g.txt)' -k
+604	query '//broken/loadfail:all' -k --output=label
+605	query '//broken/syn:all' -k --output=label
+606	query '//broken/syn:s' --output=build
+607	query '//:al' --output=build
+608	query '//:al' --output=proto
+609	query '//:al' --output=xml
+610	query '//:al' --output=label_kind --output=location
+611	query '//:al' --output=jsonproto
+612	query '//:al2' --output=build
+613	query '//:al2' --output=proto
+614	query '//:al2' --output=xml
+615	query '//:al2' --output=label_kind --output=location
+616	query '//:al2' --output=jsonproto
+617	query '//app:al' --output=build
+618	query '//app:al' --output=proto
+619	query '//app:al' --output=xml
+620	query '//app:al' --output=label_kind --output=location
+621	query '//app:al' --output=jsonproto
+622	query '//lib:smac_cat' --output=build
+623	query '//lib:smac_cat' --output=proto
+624	query '//lib:smac_cat' --output=xml
+625	query '//lib:smac_cat' --output=label_kind --output=location
+626	query '//lib:smac_cat' --output=jsonproto
+627	query '//lib:mac_l' --output=build
+628	query '//lib:mac_l' --output=proto
+629	query '//lib:mac_l' --output=xml
+630	query '//lib:mac_l' --output=label_kind --output=location
+631	query '//lib:mac_l' --output=jsonproto
+632	query '//lib:mac_l_0' --output=build
+633	query '//lib:mac_l_0' --output=proto
+634	query '//lib:mac_l_0' --output=xml
+635	query '//lib:mac_l_0' --output=label_kind --output=location
+636	query '//lib:mac_l_0' --output=jsonproto
+637	query '//lib:gr' --output=build
+638	query '//lib:gr' --output=proto
+639	query '//lib:gr' --output=xml
+640	query '//lib:gr' --output=label_kind --output=location
+641	query '//lib:gr' --output=jsonproto
+642	query '//lib:l1' --output=build
+643	query '//lib:l1' --output=proto
+644	query '//lib:l1' --output=xml
+645	query '//lib:l1' --output=label_kind --output=location
+646	query '//lib:l1' --output=jsonproto
+647	query '//lib:l2' --output=build
+648	query '//lib:l2' --output=proto
+649	query '//lib:l2' --output=xml
+650	query '//lib:l2' --output=label_kind --output=location
+651	query '//lib:l2' --output=jsonproto
+652	query '//app:uses_data' --output=build
+653	query '//app:uses_data' --output=proto
+654	query '//app:uses_data' --output=xml
+655	query '//app:uses_data' --output=label_kind --output=location
+656	query '//app:uses_data' --output=jsonproto
+657	query '//tools:t' --output=build
+658	query '//tools:t' --output=proto
+659	query '//tools:t' --output=xml
+660	query '//tools:t' --output=label_kind --output=location
+661	query '//tools:t' --output=jsonproto
+662	query '//tools:t_test' --output=build
+663	query '//tools:t_test' --output=proto
+664	query '//tools:t_test' --output=xml
+665	query '//tools:t_test' --output=label_kind --output=location
+666	query '//tools:t_test' --output=jsonproto
+667	query '//tools:t_test2' --output=build
+668	query '//tools:t_test2' --output=proto
+669	query '//tools:t_test2' --output=xml
+670	query '//tools:t_test2' --output=label_kind --output=location
+671	query '//tools:t_test2' --output=jsonproto
+672	query '//tools:ts' --output=build
+673	query '//tools:ts' --output=proto
+674	query '//tools:ts' --output=xml
+675	query '//tools:ts' --output=label_kind --output=location
+676	query '//tools:ts' --output=jsonproto
+677	query '//tools:ts_fast' --output=build
+678	query '//tools:ts_fast' --output=proto
+679	query '//tools:ts_fast' --output=xml
+680	query '//tools:ts_fast' --output=label_kind --output=location
+681	query '//tools:ts_fast' --output=jsonproto
+682	query '//tools:ts_nested' --output=build
+683	query '//tools:ts_nested' --output=proto
+684	query '//tools:ts_nested' --output=xml
+685	query '//tools:ts_nested' --output=label_kind --output=location
+686	query '//tools:ts_nested' --output=jsonproto
+687	query '//pkgs:gq' --output=build
+688	query '//pkgs:gq' --output=proto
+689	query '//pkgs:gq' --output=xml
+690	query '//pkgs:gq' --output=label_kind --output=location
+691	query '//pkgs:gq' --output=jsonproto
+692	query '//pkgs:ea' --output=build
+693	query '//pkgs:ea' --output=proto
+694	query '//pkgs:ea' --output=xml
+695	query '//pkgs:ea' --output=label_kind --output=location
+696	query '//pkgs:ea' --output=jsonproto
+697	query '//pkgs:al' --output=build
+698	query '//pkgs:al' --output=proto
+699	query '//pkgs:al' --output=xml
+700	query '//pkgs:al' --output=label_kind --output=location
+701	query '//pkgs:al' --output=jsonproto
+702	query '//pkgs:envs' --output=build
+703	query '//pkgs:envs' --output=proto
+704	query '//pkgs:envs' --output=xml
+705	query '//pkgs:envs' --output=label_kind --output=location
+706	query '//pkgs:envs' --output=jsonproto
+707	query '//pkgs:env_a' --output=build
+708	query '//pkgs:env_a' --output=proto
+709	query '//pkgs:env_a' --output=xml
+710	query '//pkgs:env_a' --output=label_kind --output=location
+711	query '//pkgs:env_a' --output=jsonproto
+712	query '//pkgs:restr' --output=build
+713	query '//pkgs:restr' --output=proto
+714	query '//pkgs:restr' --output=xml
+715	query '//pkgs:restr' --output=label_kind --output=location
+716	query '//pkgs:restr' --output=jsonproto
+717	query '//data:pg' --output=build
+718	query '//data:pg' --output=proto
+719	query '//data:pg' --output=xml
+720	query '//data:pg' --output=label_kind --output=location
+721	query '//data:pg' --output=jsonproto
+722	query '//cfg:lf' --output=build
+723	query '//cfg:lf' --output=proto
+724	query '//cfg:lf' --output=xml
+725	query '//cfg:lf' --output=label_kind --output=location
+726	query '//cfg:lf' --output=jsonproto
+727	query '//cfg:str' --output=build
+728	query '//cfg:str' --output=proto
+729	query '//cfg:str' --output=xml
+730	query '//cfg:str' --output=label_kind --output=location
+731	query '//cfg:str' --output=jsonproto
+732	query '//cfg:opt' --output=build
+733	query '//cfg:opt' --output=proto
+734	query '//cfg:opt' --output=xml
+735	query '//cfg:opt' --output=label_kind --output=location
+736	query '//cfg:opt' --output=jsonproto
+737	query '//cfg:strv' --output=build
+738	query '//cfg:strv' --output=proto
+739	query '//cfg:strv' --output=xml
+740	query '//cfg:strv' --output=label_kind --output=location
+741	query '//cfg:strv' --output=jsonproto
+742	query '//cfg:plat_always' --output=build
+743	query '//cfg:plat_always' --output=proto
+744	query '//cfg:plat_always' --output=xml
+745	query '//cfg:plat_always' --output=label_kind --output=location
+746	query '//cfg:plat_always' --output=jsonproto
+747	query '//cfg:csr' --output=build
+748	query '//cfg:csr' --output=proto
+749	query '//cfg:csr' --output=xml
+750	query '//cfg:csr' --output=label_kind --output=location
+751	query '//cfg:csr' --output=jsonproto
+752	query '//cfg:always' --output=build
+753	query '//cfg:always' --output=proto
+754	query '//cfg:always' --output=xml
+755	query '//cfg:always' --output=label_kind --output=location
+756	query '//cfg:always' --output=jsonproto
+757	query '//app:sel' --output=label_kind --output=location
+758	query '//app:tc' --output=build
+759	query '//app:tc' --output=proto
+760	query '//app:tc' --output=xml
+761	query '//app:tc' --output=label_kind --output=location
+762	query '//app:tc' --output=jsonproto
+763	query '//app:td' --output=build
+764	query '//app:td' --output=proto
+765	query '//app:td' --output=xml
+766	query '//app:td' --output=label_kind --output=location
+767	query '//app:td' --output=jsonproto
+768	query '//app:sd' --output=build
+769	query '//app:sd' --output=proto
+770	query '//app:sd' --output=xml
+771	query '//app:sd' --output=label_kind --output=location
+772	query '//app:sd' --output=jsonproto
+773	query '//lib:w1' --output=build
+774	query '//lib:w1' --output=proto
+775	query '//lib:w1' --output=xml
+776	query '//lib:w1' --output=label_kind --output=location
+777	query '//lib:w1' --output=jsonproto
+778	query '//lib:a.txt' --output=build
+779	query '//lib:a.txt' --output=proto
+780	query '//lib:a.txt' --output=xml
+781	query '//lib:a.txt' --output=label_kind --output=location
+782	query '//lib:a.txt' --output=jsonproto
+783	query '//lib:gr.out' --output=build
+784	query '//lib:gr.out' --output=proto
+785	query '//lib:gr.out' --output=xml
+786	query '//lib:gr.out' --output=label_kind --output=location
+787	query '//lib:gr.out' --output=jsonproto
+788	query '//lib:fg' --output=build
+789	query '//lib:fg' --output=proto
+790	query '//lib:fg' --output=xml
+791	query '//lib:fg' --output=label_kind --output=location
+792	query '//lib:fg' --output=jsonproto
+793	query '//app:sel' --output=build --noproto:locations
+794	query '//app:sel' --output=xml --noxml:default_values
+795	query '//app:sel' --output=build --proto:instantiation_stack
+796	query '//app:al' --output=build --noproto:locations
+797	query '//app:al' --output=xml --noxml:default_values
+798	query '//app:al' --output=build --proto:instantiation_stack
+799	query '//app:tc' --output=build --noproto:locations
+800	query '//app:tc' --output=xml --noxml:default_values
+801	query '//app:tc' --output=build --proto:instantiation_stack
+802	query '//lib:l1' --output=build --noproto:locations
+803	query '//lib:l1' --output=xml --noxml:default_values
+804	query '//lib:l1' --output=build --proto:instantiation_stack
+805	query '//pkgs:gq' --output=build --noproto:locations
+806	query '//pkgs:gq' --output=xml --noxml:default_values
+807	query '//pkgs:gq' --output=build --proto:instantiation_stack
+808	cquery '//lib:all' --keep_going
+809	cquery '//app:all' --keep_going
+810	cquery '//tools:all' --keep_going
+811	cquery '//app:bin' --keep_going
+812	cquery 'deps(//app:bin)' --keep_going
+813	cquery 'deps(//app:app_test)' --keep_going
+814	cquery 'deps(//app:td)' --keep_going
+815	cquery 'deps(//app:sd)' --keep_going
+816	cquery '//app:sel' --keep_going
+817	cquery 'deps(//app:sel_deps)' --keep_going
+818	cquery '//app:al' --keep_going
+819	cquery '//app:tc' --keep_going
+820	cquery '//app:tc_ok' --keep_going
+821	cquery 'deps(//app:tc)' --keep_going
+822	cquery '//cfg:all' --keep_going
+823	cquery '//pkgs:all' --keep_going
+824	cquery '//lib:gr' --keep_going
+825	cquery 'deps(//lib:gr)' --keep_going
+826	cquery '//lib:l1 + //lib:l2' --keep_going
+827	cquery '//lib:a.txt' --keep_going
+828	cquery '//lib:gr.out' --keep_going
+829	cquery '//lib:mac_l' --keep_going
+830	cquery '//lib:smac' --keep_going
+831	cquery '//lib:smac_cat' --keep_going
+832	cquery '//tools:ts' --keep_going
+833	cquery 'tests(//tools:ts)' --keep_going
+834	cquery '//tools:ts_all' --keep_going
+835	cquery '//tools:ts_fast' --keep_going
+836	cquery '//app:vis_bad' --keep_going
+837	cquery '//app:fg_empty' --keep_going
+838	cquery '//app:cfg_gen' --keep_going
+839	cquery '//app:uses_priv' --keep_going
+840	cquery '//app:uses_data' --keep_going
+841	cquery '//lib:w1' --keep_going
+842	cquery '//pkgs:gq' --keep_going
+843	cquery '//pkgs:gq2' --keep_going
+844	cquery '//pkgs:gq_bad' --keep_going
+845	cquery '//pkgs:ea' --keep_going
+846	cquery '//pkgs:envs' --keep_going
+847	cquery '//pkgs:incl' --keep_going
+848	cquery '//pkgs:restr' --keep_going
+849	cquery '//data:all' --keep_going
+850	cquery '//data:pg' --keep_going
+851	cquery '//cfg:lf' --keep_going
+852	cquery 'deps(//cfg:lf)' --keep_going
+853	cquery 'rdeps(//...,//lib:l1)' --keep_going
+854	cquery 'rdeps(//app:app_test,//lib:l1)' --keep_going
+855	cquery 'somepath(//app:app_test,//lib:l1)' --keep_going
+856	cquery 'allpaths(//app:app_test,//lib:l1)' --keep_going
+857	cquery 'kind(cat,//...)' --keep_going
+858	cquery 'filter('l',//lib:all)' --keep_going
+859	cquery 'attr(n,7,//lib:all)' --keep_going
+860	cquery '//...' --keep_going
+861	cquery '//lib/...' --keep_going
+862	cquery '//nonexist:foo' --keep_going
+863	cquery '//broken:all' --keep_going
+864	cquery '//broken:good' --keep_going
+865	cquery '//broken/...' --keep_going
+866	cquery '//deep/...' --keep_going
+867	cquery 'deps(//deep/x:x)' --keep_going
+868	cquery '//:everything' --keep_going
+869	cquery '//:al2' --keep_going
+870	cquery '//app:bin + //lib:l1' --keep_going
+871	cquery 'somepath(//app:bin,//data:d)' --keep_going
+872	cquery 'labels(srcs,//lib:l2)' --keep_going
+873	cquery 'tests(//tools:all)' --keep_going
+874	cquery 'buildfiles(//app:bin)' --keep_going
+875	cquery 'let x = //lib:l1 in deps($x)' --keep_going
+876	cquery 'same_pkg_direct_rdeps(//lib:a.txt)' --keep_going
+877	cquery 'siblings(//lib:l1)' --keep_going
+878	cquery 'visible(//app:bin,//lib:all)' --keep_going
+879	cquery 'loadfiles(//lib:l1)' --keep_going
+880	cquery 'rbuildfiles(//rules.bzl)' --keep_going
+881	cquery '//lib:l1 - //lib:l1' --keep_going
+882	cquery 'deps(//app:bin,1)' --keep_going
+883	cquery 'some(//lib:all)' --keep_going
+884	cquery 'set()' --keep_going
+885	cquery 'foo(//x)' --keep_going
+886	cquery 'deps(' --keep_going
+887	cquery '//lib:nonexist' --keep_going
+888	cquery '//app:bin //lib:l1' --keep_going
+889	cquery '//app:bin' --output=label
+890	cquery '//lib:l3' --output=label
+891	cquery '//app:td' --output=label
+892	cquery '//app:sel' --output=label
+893	cquery 'deps(//app:app_test)' --output=label
+894	cquery '//app:bin' --output=label_kind
+895	cquery '//lib:l3' --output=label_kind
+896	cquery '//app:td' --output=label_kind
+897	cquery '//app:sel' --output=label_kind
+898	cquery 'deps(//app:app_test)' --output=label_kind
+899	cquery '//app:bin' --output=build
+900	cquery '//lib:l3' --output=build
+901	cquery '//app:td' --output=build
+902	cquery '//app:sel' --output=build
+903	cquery 'deps(//app:app_test)' --output=build
+904	cquery '//app:bin' --output=proto
+905	cquery '//lib:l3' --output=proto
+906	cquery '//app:td' --output=proto
+907	cquery '//app:sel' --output=proto
+908	cquery 'deps(//app:app_test)' --output=proto
+909	cquery '//app:bin' --output=textproto
+910	cquery '//lib:l3' --output=textproto
+911	cquery '//app:td' --output=textproto
+912	cquery '//app:sel' --output=textproto
+913	cquery 'deps(//app:app_test)' --output=textproto
+914	cquery '//app:bin' --output=jsonproto
+915	cquery '//lib:l3' --output=jsonproto
+916	cquery '//app:td' --output=jsonproto
+917	cquery '//app:sel' --output=jsonproto
+918	cquery 'deps(//app:app_test)' --output=jsonproto
+919	cquery '//app:bin' --output=transitions=lite
+920	cquery '//lib:l3' --output=transitions=lite
+921	cquery '//app:td' --output=transitions=lite
+922	cquery '//app:sel' --output=transitions=lite
+923	cquery 'deps(//app:app_test)' --output=transitions=lite
+924	cquery '//app:bin' --output=transitions=full
+925	cquery '//lib:l3' --output=transitions=full
+926	cquery '//app:td' --output=transitions=full
+927	cquery '//app:sel' --output=transitions=full
+928	cquery 'deps(//app:app_test)' --output=transitions=full
+929	cquery '//app:bin' --output=files
+930	cquery '//lib:l3' --output=files
+931	cquery '//app:td' --output=files
+932	cquery '//app:sel' --output=files
+933	cquery 'deps(//app:app_test)' --output=files
+934	cquery '//app:bin' --output=graph
+935	cquery '//lib:l3' --output=graph
+936	cquery '//app:td' --output=graph
+937	cquery '//app:sel' --output=graph
+938	cquery 'deps(//app:app_test)' --output=graph
+939	cquery '//app:bin' --output=minrank
+940	cquery '//lib:l3' --output=minrank
+941	cquery '//app:td' --output=minrank
+942	cquery '//app:sel' --output=minrank
+943	cquery 'deps(//app:app_test)' --output=minrank
+944	cquery '//app:bin' --output=maxrank
+945	cquery '//lib:l3' --output=maxrank
+946	cquery '//app:td' --output=maxrank
+947	cquery '//app:sel' --output=maxrank
+948	cquery 'deps(//app:app_test)' --output=maxrank
+949	cquery '//app:bin' --output=location
+950	cquery '//lib:l3' --output=location
+951	cquery '//app:td' --output=location
+952	cquery '//app:sel' --output=location
+953	cquery 'deps(//app:app_test)' --output=location
+954	cquery '//app:bin' --output=summary
+955	cquery '//lib:l3' --output=summary
+956	cquery '//app:td' --output=summary
+957	cquery '//app:sel' --output=summary
+958	cquery 'deps(//app:app_test)' --output=summary
+959	cquery '//app:bin' --output=starlark --starlark:expr=target.label
+960	cquery '//lib:l3' --output=starlark --starlark:expr=target.label
+961	cquery '//app:td' --output=starlark --starlark:expr=target.label
+962	cquery '//app:sel' --output=starlark --starlark:expr=target.label
+963	cquery 'deps(//app:app_test)' --output=starlark --starlark:expr=target.label
+964	cquery '//app:bin' --output=starlark --starlark:expr='str(target.label)+" "+str(providers(target).keys())'
+965	cquery '//lib:l3' --output=starlark --starlark:expr='str(target.label)+" "+str(providers(target).keys())'
+966	cquery '//app:td' --output=starlark --starlark:expr='str(target.label)+" "+str(providers(target).keys())'
+967	cquery '//app:sel' --output=starlark --starlark:expr='str(target.label)+" "+str(providers(target).keys())'
+968	cquery 'deps(//app:app_test)' --output=starlark --starlark:expr='str(target.label)+" "+str(providers(target).keys())'
+969	cquery '//app:bin' --output=starlark --starlark:expr='[f.path for f in target.files.to_list()]'
+970	cquery '//lib:l3' --output=starlark --starlark:expr='[f.path for f in target.files.to_list()]'
+971	cquery '//app:td' --output=starlark --starlark:expr='[f.path for f in target.files.to_list()]'
+972	cquery '//app:sel' --output=starlark --starlark:expr='[f.path for f in target.files.to_list()]'
+973	cquery 'deps(//app:app_test)' --output=starlark --starlark:expr='[f.path for f in target.files.to_list()]'
+974	cquery '//app:bin' --output=starlark --starlark:expr='str(build_options(target))'
+975	cquery '//lib:l3' --output=starlark --starlark:expr='str(build_options(target))'
+976	cquery '//app:td' --output=starlark --starlark:expr='str(build_options(target))'
+977	cquery '//app:sel' --output=starlark --starlark:expr='str(build_options(target))'
+978	cquery 'deps(//app:app_test)' --output=starlark --starlark:expr='str(build_options(target))'
+979	cquery '//app:bin' --output=starlark --starlark:expr="str(providers(target))"
+980	cquery '//lib:l3' --output=starlark --starlark:expr="str(providers(target))"
+981	cquery '//app:td' --output=starlark --starlark:expr="str(providers(target))"
+982	cquery '//app:sel' --output=starlark --starlark:expr="str(providers(target))"
+983	cquery 'deps(//app:app_test)' --output=starlark --starlark:expr="str(providers(target))"
+984	cquery '//app:bin' --output=xml
+985	cquery '//lib:l3' --output=xml
+986	cquery '//app:td' --output=xml
+987	cquery '//app:sel' --output=xml
+988	cquery 'deps(//app:app_test)' --output=xml
+989	cquery '//app:bin' --output=bogus
+990	cquery '//lib:l3' --output=bogus
+991	cquery '//app:td' --output=bogus
+992	cquery '//app:sel' --output=bogus
+993	cquery 'deps(//app:app_test)' --output=bogus
+994	cquery '//app:sel'  --output=label_kind
+995	cquery '//lib:all'  --output=label_kind
+996	cquery '//lib:all'  --output=files
+997	cquery 'deps(//app:td)'  --output=label_kind
+998	cquery 'deps(//app:td)'  --output=transitions=lite
+999	cquery '//app:sel' -c opt --output=label_kind
+1000	cquery '//lib:all' -c opt --output=label_kind
+1001	cquery '//lib:all' -c opt --output=files
+1002	cquery 'deps(//app:td)' -c opt --output=label_kind
+1003	cquery 'deps(//app:td)' -c opt --output=transitions=lite
+1004	cquery '//app:sel' -c dbg --output=label_kind
+1005	cquery '//lib:all' -c dbg --output=label_kind
+1006	cquery '//lib:all' -c dbg --output=files
+1007	cquery 'deps(//app:td)' -c dbg --output=label_kind
+1008	cquery 'deps(//app:td)' -c dbg --output=transitions=lite
+1009	cquery '//app:sel' -c fastbuild --output=label_kind
+1010	cquery '//lib:all' -c fastbuild --output=label_kind
+1011	cquery '//lib:all' -c fastbuild --output=files
+1012	cquery 'deps(//app:td)' -c fastbuild --output=label_kind
+1013	cquery 'deps(//app:td)' -c fastbuild --output=transitions=lite
+1014	cquery '//app:sel' --cpu=k8 --output=label_kind
+1015	cquery '//lib:all' --cpu=k8 --output=label_kind
+1016	cquery '//lib:all' --cpu=k8 --output=files
+1017	cquery 'deps(//app:td)' --cpu=k8 --output=label_kind
+1018	cquery 'deps(//app:td)' --cpu=k8 --output=transitions=lite
+1019	cquery '//app:sel' --cpu=darwin_arm64 --output=label_kind
+1020	cquery '//lib:all' --cpu=darwin_arm64 --output=label_kind
+1021	cquery '//lib:all' --cpu=darwin_arm64 --output=files
+1022	cquery 'deps(//app:td)' --cpu=darwin_arm64 --output=label_kind
+1023	cquery 'deps(//app:td)' --cpu=darwin_arm64 --output=transitions=lite
+1024	cquery '//app:sel' --define=FOO=bar --output=label_kind
+1025	cquery '//lib:all' --define=FOO=bar --output=label_kind
+1026	cquery '//lib:all' --define=FOO=bar --output=files
+1027	cquery 'deps(//app:td)' --define=FOO=bar --output=label_kind
+1028	cquery 'deps(//app:td)' --define=FOO=bar --output=transitions=lite
+1029	cquery '//app:sel' --define=FOO=baz --output=label_kind
+1030	cquery '//lib:all' --define=FOO=baz --output=label_kind
+1031	cquery '//lib:all' --define=FOO=baz --output=files
+1032	cquery 'deps(//app:td)' --define=FOO=baz --output=label_kind
+1033	cquery 'deps(//app:td)' --define=FOO=baz --output=transitions=lite
+1034	cquery '//app:sel' -c opt --define=FOO=bar --output=label_kind
+1035	cquery '//lib:all' -c opt --define=FOO=bar --output=label_kind
+1036	cquery '//lib:all' -c opt --define=FOO=bar --output=files
+1037	cquery 'deps(//app:td)' -c opt --define=FOO=bar --output=label_kind
+1038	cquery 'deps(//app:td)' -c opt --define=FOO=bar --output=transitions=lite
+1039	cquery '//app:sel' --platforms=//cfg:plat_always --output=label_kind
+1040	cquery '//lib:all' --platforms=//cfg:plat_always --output=label_kind
+1041	cquery '//lib:all' --platforms=//cfg:plat_always --output=files
+1042	cquery 'deps(//app:td)' --platforms=//cfg:plat_always --output=label_kind
+1043	cquery 'deps(//app:td)' --platforms=//cfg:plat_always --output=transitions=lite
+1044	cquery '//app:sel' --platforms=//cfg:plat_never --output=label_kind
+1045	cquery '//lib:all' --platforms=//cfg:plat_never --output=label_kind
+1046	cquery '//lib:all' --platforms=//cfg:plat_never --output=files
+1047	cquery 'deps(//app:td)' --platforms=//cfg:plat_never --output=label_kind
+1048	cquery 'deps(//app:td)' --platforms=//cfg:plat_never --output=transitions=lite
+1049	cquery '//app:sel' --//cfg:str=on --output=label_kind
+1050	cquery '//lib:all' --//cfg:str=on --output=label_kind
+1051	cquery '//lib:all' --//cfg:str=on --output=files
+1052	cquery 'deps(//app:td)' --//cfg:str=on --output=label_kind
+1053	cquery 'deps(//app:td)' --//cfg:str=on --output=transitions=lite
+1054	cquery '//app:sel' --//cfg:num=5 --output=label_kind
+1055	cquery '//lib:all' --//cfg:num=5 --output=label_kind
+1056	cquery '//lib:all' --//cfg:num=5 --output=files
+1057	cquery 'deps(//app:td)' --//cfg:num=5 --output=label_kind
+1058	cquery 'deps(//app:td)' --//cfg:num=5 --output=transitions=lite
+1059	cquery '//app:sel' --copt=-O2 --output=label_kind
+1060	cquery '//lib:all' --copt=-O2 --output=label_kind
+1061	cquery '//lib:all' --copt=-O2 --output=files
+1062	cquery 'deps(//app:td)' --copt=-O2 --output=label_kind
+1063	cquery 'deps(//app:td)' --copt=-O2 --output=transitions=lite
+1064	cquery '//app:sel' --host_cpu=k8 --output=label_kind
+1065	cquery '//lib:all' --host_cpu=k8 --output=label_kind
+1066	cquery '//lib:all' --host_cpu=k8 --output=files
+1067	cquery 'deps(//app:td)' --host_cpu=k8 --output=label_kind
+1068	cquery 'deps(//app:td)' --host_cpu=k8 --output=transitions=lite
+1069	cquery '//app:sel' --experimental_exec_configuration_distinguisher=legacy --output=label_kind
+1070	cquery '//lib:all' --experimental_exec_configuration_distinguisher=legacy --output=label_kind
+1071	cquery '//lib:all' --experimental_exec_configuration_distinguisher=legacy --output=files
+1072	cquery 'deps(//app:td)' --experimental_exec_configuration_distinguisher=legacy --output=label_kind
+1073	cquery 'deps(//app:td)' --experimental_exec_configuration_distinguisher=legacy --output=transitions=lite
+1074	cquery '//app:sel' --noincompatible_auto_exec_groups --output=label_kind
+1075	cquery '//lib:all' --noincompatible_auto_exec_groups --output=label_kind
+1076	cquery '//lib:all' --noincompatible_auto_exec_groups --output=files
+1077	cquery 'deps(//app:td)' --noincompatible_auto_exec_groups --output=label_kind
+1078	cquery 'deps(//app:td)' --noincompatible_auto_exec_groups --output=transitions=lite
+1079	cquery '//app:sel' --features=foo --output=label_kind
+1080	cquery '//lib:all' --features=foo --output=label_kind
+1081	cquery '//lib:all' --features=foo --output=files
+1082	cquery 'deps(//app:td)' --features=foo --output=label_kind
+1083	cquery 'deps(//app:td)' --features=foo --output=transitions=lite
+1084	cquery '//app:sel' --strip=always --output=label_kind
+1085	cquery '//lib:all' --strip=always --output=label_kind
+1086	cquery '//lib:all' --strip=always --output=files
+1087	cquery 'deps(//app:td)' --strip=always --output=label_kind
+1088	cquery 'deps(//app:td)' --strip=always --output=transitions=lite
+1089	cquery '//app:sel' --compilation_mode=opt --cpu=k8 --output=label_kind
+1090	cquery '//lib:all' --compilation_mode=opt --cpu=k8 --output=label_kind
+1091	cquery '//lib:all' --compilation_mode=opt --cpu=k8 --output=files
+1092	cquery 'deps(//app:td)' --compilation_mode=opt --cpu=k8 --output=label_kind
+1093	cquery 'deps(//app:td)' --compilation_mode=opt --cpu=k8 --output=transitions=lite
+1094	cquery '//app:sel' --//cfg:lf=//data:d --output=label_kind
+1095	cquery '//lib:all' --//cfg:lf=//data:d --output=label_kind
+1096	cquery '//lib:all' --//cfg:lf=//data:d --output=files
+1097	cquery 'deps(//app:td)' --//cfg:lf=//data:d --output=label_kind
+1098	cquery 'deps(//app:td)' --//cfg:lf=//data:d --output=transitions=lite
+1099	cquery '//app:sel' --platform_suffix=sfx --output=label_kind
+1100	cquery '//lib:all' --platform_suffix=sfx --output=label_kind
+1101	cquery '//lib:all' --platform_suffix=sfx --output=files
+1102	cquery 'deps(//app:td)' --platform_suffix=sfx --output=label_kind
+1103	cquery 'deps(//app:td)' --platform_suffix=sfx --output=transitions=lite
+1104	cquery '//app:sel' --action_env=A=B --output=label_kind
+1105	cquery '//lib:all' --action_env=A=B --output=label_kind
+1106	cquery '//lib:all' --action_env=A=B --output=files
+1107	cquery 'deps(//app:td)' --action_env=A=B --output=label_kind
+1108	cquery 'deps(//app:td)' --action_env=A=B --output=transitions=lite
+1109	cquery '//app:sel' --test_env=A=B --output=label_kind
+1110	cquery '//lib:all' --test_env=A=B --output=label_kind
+1111	cquery '//lib:all' --test_env=A=B --output=files
+1112	cquery 'deps(//app:td)' --test_env=A=B --output=label_kind
+1113	cquery 'deps(//app:td)' --test_env=A=B --output=transitions=lite
+1114	cquery '//app:sel' --notrim_test_configuration --output=label_kind
+1115	cquery '//lib:all' --notrim_test_configuration --output=label_kind
+1116	cquery '//lib:all' --notrim_test_configuration --output=files
+1117	cquery 'deps(//app:td)' --notrim_test_configuration --output=label_kind
+1118	cquery 'deps(//app:td)' --notrim_test_configuration --output=transitions=lite
+1119	cquery '//app:sel' --nocollect_code_coverage --output=label_kind
+1120	cquery '//lib:all' --nocollect_code_coverage --output=label_kind
+1121	cquery '//lib:all' --nocollect_code_coverage --output=files
+1122	cquery 'deps(//app:td)' --nocollect_code_coverage --output=label_kind
+1123	cquery 'deps(//app:td)' --nocollect_code_coverage --output=transitions=lite
+1124	cquery '//app:sel' --collect_code_coverage --output=label_kind
+1125	cquery '//lib:all' --collect_code_coverage --output=label_kind
+1126	cquery '//lib:all' --collect_code_coverage --output=files
+1127	cquery 'deps(//app:td)' --collect_code_coverage --output=label_kind
+1128	cquery 'deps(//app:td)' --collect_code_coverage --output=transitions=lite
+1129	cquery '//app:sel' --stamp --output=label_kind
+1130	cquery '//lib:all' --stamp --output=label_kind
+1131	cquery '//lib:all' --stamp --output=files
+1132	cquery 'deps(//app:td)' --stamp --output=label_kind
+1133	cquery 'deps(//app:td)' --stamp --output=transitions=lite
+1134	cquery '//app:sel' --nostamp --output=label_kind
+1135	cquery '//lib:all' --nostamp --output=label_kind
+1136	cquery '//lib:all' --nostamp --output=files
+1137	cquery 'deps(//app:td)' --nostamp --output=label_kind
+1138	cquery 'deps(//app:td)' --nostamp --output=transitions=lite
+1139	cquery '//app:sel' --instrument_test_targets --output=label_kind
+1140	cquery '//lib:all' --instrument_test_targets --output=label_kind
+1141	cquery '//lib:all' --instrument_test_targets --output=files
+1142	cquery 'deps(//app:td)' --instrument_test_targets --output=label_kind
+1143	cquery 'deps(//app:td)' --instrument_test_targets --output=transitions=lite
+1144	cquery '//app:sel' --check_visibility=false --output=label_kind
+1145	cquery '//lib:all' --check_visibility=false --output=label_kind
+1146	cquery '//lib:all' --check_visibility=false --output=files
+1147	cquery 'deps(//app:td)' --check_visibility=false --output=label_kind
+1148	cquery 'deps(//app:td)' --check_visibility=false --output=transitions=lite
+1149	cquery '//app:sel' --noimplicit_deps --output=label_kind
+1150	cquery '//lib:all' --noimplicit_deps --output=label_kind
+1151	cquery '//lib:all' --noimplicit_deps --output=files
+1152	cquery 'deps(//app:td)' --noimplicit_deps --output=label_kind
+1153	cquery 'deps(//app:td)' --noimplicit_deps --output=transitions=lite
+1154	cquery '//app:sel' --notool_deps --output=label_kind
+1155	cquery '//lib:all' --notool_deps --output=label_kind
+1156	cquery '//lib:all' --notool_deps --output=files
+1157	cquery 'deps(//app:td)' --notool_deps --output=label_kind
+1158	cquery 'deps(//app:td)' --notool_deps --output=transitions=lite
+1159	cquery '//app:sel' --nohost_deps --output=label_kind
+1160	cquery '//lib:all' --nohost_deps --output=label_kind
+1161	cquery '//lib:all' --nohost_deps --output=files
+1162	cquery 'deps(//app:td)' --nohost_deps --output=label_kind
+1163	cquery 'deps(//app:td)' --nohost_deps --output=transitions=lite
+1164	cquery '//app:sel' --universe_scope=//lib:l3 --nofetch --output=label_kind
+1165	cquery '//lib:all' --universe_scope=//lib:l3 --nofetch --output=label_kind
+1166	cquery '//lib:all' --universe_scope=//lib:l3 --nofetch --output=files
+1167	cquery 'deps(//app:td)' --universe_scope=//lib:l3 --nofetch --output=label_kind
+1168	cquery 'deps(//app:td)' --universe_scope=//lib:l3 --nofetch --output=transitions=lite
+1169	cquery '//app:sel' --output=label --noimplicit_deps --output=label_kind
+1170	cquery '//lib:all' --output=label --noimplicit_deps --output=label_kind
+1171	cquery '//lib:all' --output=label --noimplicit_deps --output=files
+1172	cquery 'deps(//app:td)' --output=label --noimplicit_deps --output=label_kind
+1173	cquery 'deps(//app:td)' --output=label --noimplicit_deps --output=transitions=lite
+1174	cquery 'config(//lib:l1,target)' 
+1175	cquery 'config(//lib:l1,host)' 
+1176	cquery 'config(//lib:l1,exec)' 
+1177	cquery 'config(//lib:l1,null)' 
+1178	cquery 'config(//lib:a.txt,target)' 
+1179	cquery 'config(//lib:a.txt,null)' 
+1180	cquery 'config(//lib:l1,0123456789)' 
+1181	cquery 'config(//lib:l1,)' 
+1182	cquery 'config(//lib:l1,bogus)' 
+1183	cquery 'config(//app:td,target)' 
+1184	cquery 'config(deps(//app:td),target)' 
+1185	cquery 'config(//lib:l1 + //lib:l2,target)' 
+1186	cquery 'config(//app:bin,exec)' 
+1187	cquery 'config(//tools:t,exec)' 
+1188	cquery 'config(//tools:t,target)' 
+1189	cquery 'config(//app:uses_data,exec)' 
+1190	cquery 'config(//lib:l1,target) + //lib:l2' 
+1191	cquery 'config(//lib:l1,target)' -c opt
+1192	cquery 'config(//lib:l1,host)' -c opt
+1193	cquery 'config(//lib:l1,exec)' -c opt
+1194	cquery 'config(//lib:l1,null)' -c opt
+1195	cquery 'config(//lib:a.txt,target)' -c opt
+1196	cquery 'config(//lib:a.txt,null)' -c opt
+1197	cquery 'config(//lib:l1,0123456789)' -c opt
+1198	cquery 'config(//lib:l1,)' -c opt
+1199	cquery 'config(//lib:l1,bogus)' -c opt
+1200	cquery 'config(//app:td,target)' -c opt
+1201	cquery 'config(deps(//app:td),target)' -c opt
+1202	cquery 'config(//lib:l1 + //lib:l2,target)' -c opt
+1203	cquery 'config(//app:bin,exec)' -c opt
+1204	cquery 'config(//tools:t,exec)' -c opt
+1205	cquery 'config(//tools:t,target)' -c opt
+1206	cquery 'config(//app:uses_data,exec)' -c opt
+1207	cquery 'config(//lib:l1,target) + //lib:l2' -c opt
+1208	cquery 'config(//lib:l1,target)' --//cfg:str=on
+1209	cquery 'config(//lib:l1,host)' --//cfg:str=on
+1210	cquery 'config(//lib:l1,exec)' --//cfg:str=on
+1211	cquery 'config(//lib:l1,null)' --//cfg:str=on
+1212	cquery 'config(//lib:a.txt,target)' --//cfg:str=on
+1213	cquery 'config(//lib:a.txt,null)' --//cfg:str=on
+1214	cquery 'config(//lib:l1,0123456789)' --//cfg:str=on
+1215	cquery 'config(//lib:l1,)' --//cfg:str=on
+1216	cquery 'config(//lib:l1,bogus)' --//cfg:str=on
+1217	cquery 'config(//app:td,target)' --//cfg:str=on
+1218	cquery 'config(deps(//app:td),target)' --//cfg:str=on
+1219	cquery 'config(//lib:l1 + //lib:l2,target)' --//cfg:str=on
+1220	cquery 'config(//app:bin,exec)' --//cfg:str=on
+1221	cquery 'config(//tools:t,exec)' --//cfg:str=on
+1222	cquery 'config(//tools:t,target)' --//cfg:str=on
+1223	cquery 'config(//app:uses_data,exec)' --//cfg:str=on
+1224	cquery 'config(//lib:l1,target) + //lib:l2' --//cfg:str=on
+1225	cquery 'config(//lib:l1,target)' --cpu=k8 --define=FOO=bar
+1226	cquery 'config(//lib:l1,host)' --cpu=k8 --define=FOO=bar
+1227	cquery 'config(//lib:l1,exec)' --cpu=k8 --define=FOO=bar
+1228	cquery 'config(//lib:l1,null)' --cpu=k8 --define=FOO=bar
+1229	cquery 'config(//lib:a.txt,target)' --cpu=k8 --define=FOO=bar
+1230	cquery 'config(//lib:a.txt,null)' --cpu=k8 --define=FOO=bar
+1231	cquery 'config(//lib:l1,0123456789)' --cpu=k8 --define=FOO=bar
+1232	cquery 'config(//lib:l1,)' --cpu=k8 --define=FOO=bar
+1233	cquery 'config(//lib:l1,bogus)' --cpu=k8 --define=FOO=bar
+1234	cquery 'config(//app:td,target)' --cpu=k8 --define=FOO=bar
+1235	cquery 'config(deps(//app:td),target)' --cpu=k8 --define=FOO=bar
+1236	cquery 'config(//lib:l1 + //lib:l2,target)' --cpu=k8 --define=FOO=bar
+1237	cquery 'config(//app:bin,exec)' --cpu=k8 --define=FOO=bar
+1238	cquery 'config(//tools:t,exec)' --cpu=k8 --define=FOO=bar
+1239	cquery 'config(//tools:t,target)' --cpu=k8 --define=FOO=bar
+1240	cquery 'config(//app:uses_data,exec)' --cpu=k8 --define=FOO=bar
+1241	cquery 'config(//lib:l1,target) + //lib:l2' --cpu=k8 --define=FOO=bar
+1242	cquery 'deps(//app:app_test)' --output=proto --noproto:include_configurations
+1243	cquery '//app:td' --output=proto --noproto:include_configurations
+1244	cquery 'deps(//app:app_test)' --output=proto --proto:include_configurations
+1245	cquery '//app:td' --output=proto --proto:include_configurations
+1246	cquery 'deps(//app:app_test)' --output=proto --proto:output_rule_attrs=srcs
+1247	cquery '//app:td' --output=proto --proto:output_rule_attrs=srcs
+1248	cquery 'deps(//app:app_test)' --output=proto --noproto:rule_inputs_and_outputs
+1249	cquery '//app:td' --output=proto --noproto:rule_inputs_and_outputs
+1250	cquery 'deps(//app:app_test)' --output=proto --noproto:locations
+1251	cquery '//app:td' --output=proto --noproto:locations
+1252	cquery 'deps(//app:app_test)' --output=proto --proto:include_synthetic_attribute_hash
+1253	cquery '//app:td' --output=proto --proto:include_synthetic_attribute_hash
+1254	cquery 'deps(//app:app_test)' --output=jsonproto --noproto:include_configurations
+1255	cquery '//app:td' --output=jsonproto --noproto:include_configurations
+1256	cquery 'deps(//app:app_test)' --output=textproto --proto:flatten_selects
+1257	cquery '//app:td' --output=textproto --proto:flatten_selects
+1258	cquery 'deps(//app:app_test)' --output=proto --noproto:flatten_selects
+1259	cquery '//app:td' --output=proto --noproto:flatten_selects
+1260	cquery 'deps(//app:app_test)' --output=label --noshow_config_fragments_in_labels
+1261	cquery '//app:td' --output=label --noshow_config_fragments_in_labels
+1262	cquery 'deps(//app:app_test)' --output=label --show_config_fragments=direct
+1263	cquery '//app:td' --output=label --show_config_fragments=direct
+1264	cquery 'deps(//app:app_test)' --output=label --show_config_fragments=transitive
+1265	cquery '//app:td' --output=label --show_config_fragments=transitive
+1266	cquery 'deps(//app:app_test)' --output=label --show_config_fragments=off
+1267	cquery '//app:td' --output=label --show_config_fragments=off
+1268	cquery 'deps(//app:app_test)' --output=label --transitions=lite
+1269	cquery '//app:td' --output=label --transitions=lite
+1270	cquery 'deps(//app:app_test)' --output=label --transitions=full
+1271	cquery '//app:td' --output=label --transitions=full
+1272	cquery 'deps(//app:app_test)' --output=label --transitions=none
+1273	cquery '//app:td' --output=label --transitions=none
+1274	cquery 'deps(//app:app_test)' --output=label --tool_deps
+1275	cquery '//app:td' --output=label --tool_deps
+1276	cquery 'deps(//app:app_test)' --output=label --notool_deps
+1277	cquery '//app:td' --output=label --notool_deps
+1278	cquery 'deps(//app:app_test)' --output=label --noimplicit_deps
+1279	cquery '//app:td' --output=label --noimplicit_deps
+1280	cquery 'deps(//app:app_test)' --output=label --nohost_deps
+1281	cquery '//app:td' --output=label --nohost_deps
+1282	cquery 'deps(//app:app_test)' --output=label --consistent_labels
+1283	cquery '//app:td' --output=label --consistent_labels
+1284	cquery 'deps(//app:app_test)' --output=build --consistent_labels
+1285	cquery '//app:td' --output=build --consistent_labels
+1286	cquery 'deps(//app:app_test)' --output=proto --consistent_labels
+1287	cquery '//app:td' --output=proto --consistent_labels
+1288	cquery 'deps(//app:app_test)' --output=label --order_output=full
+1289	cquery '//app:td' --output=label --order_output=full
+1290	cquery 'deps(//app:app_test)' --output=label --order_output=no
+1291	cquery '//app:td' --output=label --order_output=no
+1292	cquery 'deps(//app:app_test)' --output=label --order_output=auto
+1293	cquery '//app:td' --output=label --order_output=auto
+1294	cquery 'deps(//app:app_test)' --output=label --keep_going
+1295	cquery '//app:td' --output=label --keep_going
+1296	cquery 'deps(//app:app_test)' --output=label --nokeep_going
+1297	cquery '//app:td' --output=label --nokeep_going
+1298	cquery 'deps(//app:app_test)' --output=label --infer_universe_scope
+1299	cquery '//app:td' --output=label --infer_universe_scope
+1300	cquery 'deps(//app:app_test)' --output=label --universe_scope=//lib:l3
+1301	cquery '//app:td' --output=label --universe_scope=//lib:l3
+1302	cquery 'deps(//app:app_test)' --output=label --universe_scope=//app:bin
+1303	cquery '//app:td' --output=label --universe_scope=//app:bin
+1304	cquery 'deps(//app:app_test)' --output=label --incompatible_enable_cc_toolchain_resolution
+1305	cquery '//app:td' --output=label --incompatible_enable_cc_toolchain_resolution
+1306	cquery 'deps(//app:app_test)' --output=label --line_terminator_null
+1307	cquery '//app:td' --output=label --line_terminator_null
+1308	cquery 'deps(//app:app_test)' --output=label --noskip_incompatible_explicit_targets
+1309	cquery '//app:td' --output=label --noskip_incompatible_explicit_targets
+1310	cquery 'deps(//app:app_test)' --output=label --skip_incompatible_explicit_targets
+1311	cquery '//app:td' --output=label --skip_incompatible_explicit_targets
+1312	cquery 'deps(//app:app_test)' --output=label --include_aspects
+1313	cquery '//app:td' --output=label --include_aspects
+1314	cquery 'deps(//app:app_test)' --output=label --aspects=//:rules.bzl%asp
+1315	cquery '//app:td' --output=label --aspects=//:rules.bzl%asp
+1316	cquery 'deps(//app:app_test)' --output=label --aspects=//:rules.bzl%asp --include_aspects
+1317	cquery '//app:td' --output=label --aspects=//:rules.bzl%asp --include_aspects
+1318	cquery 'deps(//app:app_test)' --output=label --aspects=//:rules.bzl%asp --noinclude_aspects
+1319	cquery '//app:td' --output=label --aspects=//:rules.bzl%asp --noinclude_aspects
+1320	cquery 'deps(//app:app_test)' --output=files --aspects=//:rules.bzl%asp --output_groups=aspout
+1321	cquery '//app:td' --output=files --aspects=//:rules.bzl%asp --output_groups=aspout
+1322	cquery 'deps(//app:app_test)' --output=files --output_groups=+aspout
+1323	cquery '//app:td' --output=files --output_groups=+aspout
+1324	cquery 'deps(//app:app_test)' --output=files --output_groups=default
+1325	cquery '//app:td' --output=files --output_groups=default
+1326	cquery 'deps(//app:app_test)' --output=files --output_groups=bogus
+1327	cquery '//app:td' --output=files --output_groups=bogus
+1328	cquery 'deps(//app:app_test)' --output=build --noproto:locations
+1329	cquery '//app:td' --output=build --noproto:locations
+1330	cquery 'deps(//app:app_test)' --output=location --relative_locations
+1331	cquery '//app:td' --output=location --relative_locations
+1332	cquery 'deps(//app:app_test)' --output=build --proto:instantiation_stack
+1333	cquery '//app:td' --output=build --proto:instantiation_stack
+1334	cquery 'deps(//app:app_test)' --output=label --max_config_changes_to_show=0
+1335	cquery '//app:td' --output=label --max_config_changes_to_show=0
+1336	cquery 'deps(//app:app_test)' --output=label --max_config_changes_to_show=2
+1337	cquery '//app:td' --output=label --max_config_changes_to_show=2
+1338	cquery 'deps(//app:app_test)' --output=label --max_config_changes_to_show=-1
+1339	cquery '//app:td' --output=label --max_config_changes_to_show=-1
+1340	cquery 'deps(//app:app_test)' --output=label --nofetch
+1341	cquery '//app:td' --output=label --nofetch
+1342	cquery 'deps(//app:app_test)' --output=label --check_visibility
+1343	cquery '//app:td' --output=label --check_visibility
+1344	cquery 'deps(//app:app_test)' --output=label --nocheck_visibility
+1345	cquery '//app:td' --output=label --nocheck_visibility
+1346	cquery 'deps(//app:app_test)' --output=label --analysis_testing_deps_limit=1
+1347	cquery '//app:td' --output=label --analysis_testing_deps_limit=1
+1348	cquery 'deps(//app:app_test)' --output=label --nolegacy_external_runfiles
+1349	cquery '//app:td' --output=label --nolegacy_external_runfiles
+1350	cquery 'deps(//app:app_test)' --output=label --experimental_bzl_visibility
+1351	cquery '//app:td' --output=label --experimental_bzl_visibility
+1352	cquery 'deps(//app:app_test)' --output=label --experimental_cc_shared_library
+1353	cquery '//app:td' --output=label --experimental_cc_shared_library
+1354	cquery '//app:bin' --output=files -c opt
+1355	cquery '//app:bin' --output=label_kind --cpu=k8
+1356	cquery '//lib:l1' --output=proto
+1357	cquery '//lib:l1' --output=transitions=full
+1358	cquery '//lib:l1' --output=build
+1359	cquery '//lib:l1' --output=files -c opt
+1360	cquery '//lib:l1' --output=label_kind --cpu=k8
+1361	cquery '//lib:l3' --output=files -c opt
+1362	cquery '//lib:l3' --output=label_kind --cpu=k8
+1363	cquery '//app:sel' --output=files -c opt
+1364	cquery '//app:sel' --output=label_kind --cpu=k8
+1365	cquery '//app:td' --output=files -c opt
+1366	cquery '//app:td' --output=label_kind --cpu=k8
+1367	cquery '//app:sd' --output=proto
+1368	cquery '//app:sd' --output=transitions=full
+1369	cquery '//app:sd' --output=build
+1370	cquery '//app:sd' --output=files -c opt
+1371	cquery '//app:sd' --output=label_kind --cpu=k8
+1372	cquery '//app:al' --output=proto
+1373	cquery '//app:al' --output=transitions=full
+1374	cquery '//app:al' --output=build
+1375	cquery '//app:al' --output=files -c opt
+1376	cquery '//app:al' --output=label_kind --cpu=k8
+1377	cquery '//app:tc' --output=proto
+1378	cquery '//app:tc' --output=transitions=full
+1379	cquery '//app:tc' --output=build
+1380	cquery '//app:tc' --output=files -c opt
+1381	cquery '//app:tc' --output=label_kind --cpu=k8
+1382	cquery '//lib:a.txt' --output=proto
+1383	cquery '//lib:a.txt' --output=transitions=full
+1384	cquery '//lib:a.txt' --output=build
+1385	cquery '//lib:a.txt' --output=files -c opt
+1386	cquery '//lib:a.txt' --output=label_kind --cpu=k8
+1387	cquery '//lib:gr.out' --output=proto
+1388	cquery '//lib:gr.out' --output=transitions=full
+1389	cquery '//lib:gr.out' --output=build
+1390	cquery '//lib:gr.out' --output=files -c opt
+1391	cquery '//lib:gr.out' --output=label_kind --cpu=k8
+1392	cquery '//tools:t' --output=proto
+1393	cquery '//tools:t' --output=transitions=full
+1394	cquery '//tools:t' --output=build
+1395	cquery '//tools:t' --output=files -c opt
+1396	cquery '//tools:t' --output=label_kind --cpu=k8
+1397	cquery '//tools:t_test' --output=proto
+1398	cquery '//tools:t_test' --output=transitions=full
+1399	cquery '//tools:t_test' --output=build
+1400	cquery '//tools:t_test' --output=files -c opt
+1401	cquery '//tools:t_test' --output=label_kind --cpu=k8
+1402	cquery '//tools:ts' --output=proto
+1403	cquery '//tools:ts' --output=transitions=full
+1404	cquery '//tools:ts' --output=build
+1405	cquery '//tools:ts' --output=files -c opt
+1406	cquery '//tools:ts' --output=label_kind --cpu=k8
+1407	cquery '//pkgs:gq' --output=proto
+1408	cquery '//pkgs:gq' --output=transitions=full
+1409	cquery '//pkgs:gq' --output=build
+1410	cquery '//pkgs:gq' --output=files -c opt
+1411	cquery '//pkgs:gq' --output=label_kind --cpu=k8
+1412	cquery '//pkgs:ea' --output=proto
+1413	cquery '//pkgs:ea' --output=transitions=full
+1414	cquery '//pkgs:ea' --output=build
+1415	cquery '//pkgs:ea' --output=files -c opt
+1416	cquery '//pkgs:ea' --output=label_kind --cpu=k8
+1417	cquery '//cfg:opt' --output=proto
+1418	cquery '//cfg:opt' --output=transitions=full
+1419	cquery '//cfg:opt' --output=build
+1420	cquery '//cfg:opt' --output=files -c opt
+1421	cquery '//cfg:opt' --output=label_kind --cpu=k8
+1422	cquery '//cfg:str' --output=proto
+1423	cquery '//cfg:str' --output=transitions=full
+1424	cquery '//cfg:str' --output=build
+1425	cquery '//cfg:str' --output=files -c opt
+1426	cquery '//cfg:str' --output=label_kind --cpu=k8
+1427	cquery '//cfg:lf' --output=proto
+1428	cquery '//cfg:lf' --output=transitions=full
+1429	cquery '//cfg:lf' --output=build
+1430	cquery '//cfg:lf' --output=files -c opt
+1431	cquery '//cfg:lf' --output=label_kind --cpu=k8
+1432	cquery '//cfg:plat_always' --output=proto
+1433	cquery '//cfg:plat_always' --output=transitions=full
+1434	cquery '//cfg:plat_always' --output=build
+1435	cquery '//cfg:plat_always' --output=files -c opt
+1436	cquery '//cfg:plat_always' --output=label_kind --cpu=k8
+1437	cquery '//lib:smac_cat' --output=proto
+1438	cquery '//lib:smac_cat' --output=transitions=full
+1439	cquery '//lib:smac_cat' --output=build
+1440	cquery '//lib:smac_cat' --output=files -c opt
+1441	cquery '//lib:smac_cat' --output=label_kind --cpu=k8
+1442	cquery '//lib:mac_l_1' --output=proto
+1443	cquery '//lib:mac_l_1' --output=transitions=full
+1444	cquery '//lib:mac_l_1' --output=build
+1445	cquery '//lib:mac_l_1' --output=files -c opt
+1446	cquery '//lib:mac_l_1' --output=label_kind --cpu=k8
+1447	cquery '//app:cfg_gen' --output=proto
+1448	cquery '//app:cfg_gen' --output=transitions=full
+1449	cquery '//app:cfg_gen' --output=build
+1450	cquery '//app:cfg_gen' --output=files -c opt
+1451	cquery '//app:cfg_gen' --output=label_kind --cpu=k8
+1452	cquery '//lib:w1' --output=proto
+1453	cquery '//lib:w1' --output=transitions=full
+1454	cquery '//lib:w1' --output=build
+1455	cquery '//lib:w1' --output=files -c opt
+1456	cquery '//lib:w1' --output=label_kind --cpu=k8
+1457	aquery '//lib:l1' --keep_going
+1458	aquery '//lib:l3' --keep_going
+1459	aquery '//lib:gr' --keep_going
+1460	aquery '//lib:gr2.out' --keep_going
+1461	aquery '//lib:w1' --keep_going
+1462	aquery '//lib:fg' --keep_going
+1463	aquery '//app:bin' --keep_going
+1464	aquery '//app:app_test' --keep_going
+1465	aquery '//app:td' --keep_going
+1466	aquery '//app:sd' --keep_going
+1467	aquery '//app:sel' --keep_going
+1468	aquery '//app:al' --keep_going
+1469	aquery '//app:tc' --keep_going
+1470	aquery '//app:tc_ok' --keep_going
+1471	aquery '//app:cfg_gen' --keep_going
+1472	aquery '//app:uses_data' --keep_going
+1473	aquery '//tools:t' --keep_going
+1474	aquery '//tools:t_test' --keep_going
+1475	aquery '//tools:ts' --keep_going
+1476	aquery '//lib:smac_cat' --keep_going
+1477	aquery '//lib:mac_l' --keep_going
+1478	aquery '//pkgs:gq' --keep_going
+1479	aquery '//pkgs:ea' --keep_going
+1480	aquery 'deps(//app:bin)' --keep_going
+1481	aquery 'deps(//app:app_test)' --keep_going
+1482	aquery 'deps(//app:td)' --keep_going
+1483	aquery 'deps(//lib:l3)' --keep_going
+1484	aquery '//lib:all' --keep_going
+1485	aquery '//app:all' --keep_going
+1486	aquery '//tools:all' --keep_going
+1487	aquery '//...' --keep_going
+1488	aquery '//lib/...' --keep_going
+1489	aquery '//nonexist:x' --keep_going
+1490	aquery '//broken:good' --keep_going
+1491	aquery '//broken:all' --keep_going
+1492	aquery '//broken/...' --keep_going
+1493	aquery 'rdeps(//...,//lib:l1)' --keep_going
+1494	aquery '//lib:l1 + //lib:l2' --keep_going
+1495	aquery 'deps(//app:sd)' --keep_going
+1496	aquery '//lib:a.txt' --keep_going
+1497	aquery '//lib:l1.out' --keep_going
+1498	aquery '//lib:w1_dir' --keep_going
+1499	aquery '//data:d' --keep_going
+1500	aquery '//lib:gr_loc' --keep_going
+1501	aquery 'deps(//lib:gr_loc)' --keep_going
+1502	aquery '//:everything' --keep_going
+1503	aquery '//:al' --keep_going
+1504	aquery 'somepath(//app:app_test,//lib:l1)' --keep_going
+1505	aquery 'attr(n,7,//lib:all)' --keep_going
+1506	aquery 'kind(cat,//...)' --keep_going
+1507	aquery '//lib:l1 - //lib:l1' --keep_going
+1508	aquery 'some(//lib:all)' --keep_going
+1509	aquery 'foo()' --keep_going
+1510	aquery 'deps(' --keep_going
+1511	aquery '//lib:l1' --output=text
+1512	aquery '//lib:gr' --output=text
+1513	aquery '//lib:w1' --output=text
+1514	aquery '//app:app_test' --output=text
+1515	aquery 'deps(//app:td)' --output=text
+1516	aquery '//app:sel' --output=text
+1517	aquery '//lib:l1' --output=textproto
+1518	aquery '//lib:gr' --output=textproto
+1519	aquery '//lib:w1' --output=textproto
+1520	aquery '//app:app_test' --output=textproto
+1521	aquery 'deps(//app:td)' --output=textproto
+1522	aquery '//app:sel' --output=textproto
+1523	aquery '//lib:l1' --output=proto
+1524	aquery '//lib:gr' --output=proto
+1525	aquery '//lib:w1' --output=proto
+1526	aquery '//app:app_test' --output=proto
+1527	aquery 'deps(//app:td)' --output=proto
+1528	aquery '//app:sel' --output=proto
+1529	aquery '//lib:l1' --output=jsonproto
+1530	aquery '//lib:gr' --output=jsonproto
+1531	aquery '//lib:w1' --output=jsonproto
+1532	aquery '//app:app_test' --output=jsonproto
+1533	aquery 'deps(//app:td)' --output=jsonproto
+1534	aquery '//app:sel' --output=jsonproto
+1535	aquery '//lib:l1' --output=summary
+1536	aquery '//lib:gr' --output=summary
+1537	aquery '//lib:w1' --output=summary
+1538	aquery '//app:app_test' --output=summary
+1539	aquery 'deps(//app:td)' --output=summary
+1540	aquery '//app:sel' --output=summary
+1541	aquery '//lib:l1' --output=bogus
+1542	aquery '//lib:gr' --output=bogus
+1543	aquery '//lib:w1' --output=bogus
+1544	aquery '//app:app_test' --output=bogus
+1545	aquery 'deps(//app:td)' --output=bogus
+1546	aquery '//app:sel' --output=bogus
+1547	aquery '//lib:l1' --include_commandline
+1548	aquery '//lib:w1' --include_commandline
+1549	aquery '//app:td' --include_commandline
+1550	aquery '//lib:l1' --noinclude_commandline
+1551	aquery '//lib:w1' --noinclude_commandline
+1552	aquery '//app:td' --noinclude_commandline
+1553	aquery '//lib:l1' --include_artifacts
+1554	aquery '//lib:w1' --include_artifacts
+1555	aquery '//app:td' --include_artifacts
+1556	aquery '//lib:l1' --noinclude_artifacts
+1557	aquery '//lib:w1' --noinclude_artifacts
+1558	aquery '//app:td' --noinclude_artifacts
+1559	aquery '//lib:l1' --include_param_files
+1560	aquery '//lib:w1' --include_param_files
+1561	aquery '//app:td' --include_param_files
+1562	aquery '//lib:l1' --noinclude_param_files
+1563	aquery '//lib:w1' --noinclude_param_files
+1564	aquery '//app:td' --noinclude_param_files
+1565	aquery '//lib:l1' --include_file_write_contents
+1566	aquery '//lib:w1' --include_file_write_contents
+1567	aquery '//app:td' --include_file_write_contents
+1568	aquery '//lib:l1' --noinclude_file_write_contents
+1569	aquery '//lib:w1' --noinclude_file_write_contents
+1570	aquery '//app:td' --noinclude_file_write_contents
+1571	aquery '//lib:l1' --include_commandline=false --include_artifacts=false
+1572	aquery '//lib:w1' --include_commandline=false --include_artifacts=false
+1573	aquery '//app:td' --include_commandline=false --include_artifacts=false
+1574	aquery '//lib:l1' --include_param_files --output=proto
+1575	aquery '//lib:w1' --include_param_files --output=proto
+1576	aquery '//app:td' --include_param_files --output=proto
+1577	aquery '//lib:l1' --include_param_files --output=text
+1578	aquery '//lib:w1' --include_param_files --output=text
+1579	aquery '//app:td' --include_param_files --output=text
+1580	aquery '//lib:l1' --include_param_files --include_commandline=false
+1581	aquery '//lib:w1' --include_param_files --include_commandline=false
+1582	aquery '//app:td' --include_param_files --include_commandline=false
+1583	aquery '//lib:l1' --include_file_write_contents --output=text
+1584	aquery '//lib:w1' --include_file_write_contents --output=text
+1585	aquery '//app:td' --include_file_write_contents --output=text
+1586	aquery '//lib:l1' --include_file_write_contents --output=proto
+1587	aquery '//lib:w1' --include_file_write_contents --output=proto
+1588	aquery '//app:td' --include_file_write_contents --output=proto
+1589	aquery '//lib:l1' --include_file_write_contents --output=jsonproto
+1590	aquery '//lib:w1' --include_file_write_contents --output=jsonproto
+1591	aquery '//app:td' --include_file_write_contents --output=jsonproto
+1592	aquery '//lib:l1' --include_file_write_contents --output=textproto
+1593	aquery '//lib:w1' --include_file_write_contents --output=textproto
+1594	aquery '//app:td' --include_file_write_contents --output=textproto
+1595	aquery '//lib:l1' --noinclude_commandline --output=proto
+1596	aquery '//lib:w1' --noinclude_commandline --output=proto
+1597	aquery '//app:td' --noinclude_commandline --output=proto
+1598	aquery '//lib:l1' --noinclude_commandline --output=textproto
+1599	aquery '//lib:w1' --noinclude_commandline --output=textproto
+1600	aquery '//app:td' --noinclude_commandline --output=textproto
+1601	aquery '//lib:l1' --noinclude_artifacts --output=proto
+1602	aquery '//lib:w1' --noinclude_artifacts --output=proto
+1603	aquery '//app:td' --noinclude_artifacts --output=proto
+1604	aquery '//lib:l1' --noinclude_artifacts --output=jsonproto
+1605	aquery '//lib:w1' --noinclude_artifacts --output=jsonproto
+1606	aquery '//app:td' --noinclude_artifacts --output=jsonproto
+1607	aquery '//lib:l1' --noinclude_artifacts --output=text
+1608	aquery '//lib:w1' --noinclude_artifacts --output=text
+1609	aquery '//app:td' --noinclude_artifacts --output=text
+1610	aquery '//lib:l1' --noinclude_commandline --noinclude_artifacts --output=text
+1611	aquery '//lib:w1' --noinclude_commandline --noinclude_artifacts --output=text
+1612	aquery '//app:td' --noinclude_commandline --noinclude_artifacts --output=text
+1613	aquery '//lib:l1' --include_aspects
+1614	aquery '//lib:w1' --include_aspects
+1615	aquery '//app:td' --include_aspects
+1616	aquery '//lib:l1' --noinclude_aspects
+1617	aquery '//lib:w1' --noinclude_aspects
+1618	aquery '//app:td' --noinclude_aspects
+1619	aquery '//lib:l1' --aspects=//:rules.bzl%asp
+1620	aquery '//lib:w1' --aspects=//:rules.bzl%asp
+1621	aquery '//app:td' --aspects=//:rules.bzl%asp
+1622	aquery '//lib:l1' --aspects=//:rules.bzl%asp --output=proto
+1623	aquery '//lib:w1' --aspects=//:rules.bzl%asp --output=proto
+1624	aquery '//app:td' --aspects=//:rules.bzl%asp --output=proto
+1625	aquery '//lib:l1' --aspects=//:rules.bzl%asp --output=text
+1626	aquery '//lib:w1' --aspects=//:rules.bzl%asp --output=text
+1627	aquery '//app:td' --aspects=//:rules.bzl%asp --output=text
+1628	aquery '//lib:l1' --aspects=//:rules.bzl%asp --include_aspects=false
+1629	aquery '//lib:w1' --aspects=//:rules.bzl%asp --include_aspects=false
+1630	aquery '//app:td' --aspects=//:rules.bzl%asp --include_aspects=false
+1631	aquery '//lib:l1' --output_groups=aspout --aspects=//:rules.bzl%asp
+1632	aquery '//lib:w1' --output_groups=aspout --aspects=//:rules.bzl%asp
+1633	aquery '//app:td' --output_groups=aspout --aspects=//:rules.bzl%asp
+1634	aquery '//lib:l1' --incompatible_enable_cc_toolchain_resolution
+1635	aquery '//lib:w1' --incompatible_enable_cc_toolchain_resolution
+1636	aquery '//app:td' --incompatible_enable_cc_toolchain_resolution
+1637	aquery '//lib:l1' --tool_deps
+1638	aquery '//lib:w1' --tool_deps
+1639	aquery '//app:td' --tool_deps
+1640	aquery '//lib:l1' --notool_deps
+1641	aquery '//lib:w1' --notool_deps
+1642	aquery '//app:td' --notool_deps
+1643	aquery '//lib:l1' --noimplicit_deps
+1644	aquery '//lib:w1' --noimplicit_deps
+1645	aquery '//app:td' --noimplicit_deps
+1646	aquery '//lib:l1' --nohost_deps
+1647	aquery '//lib:w1' --nohost_deps
+1648	aquery '//app:td' --nohost_deps
+1649	aquery '//lib:l1' --output=proto --consistent_labels
+1650	aquery '//lib:w1' --output=proto --consistent_labels
+1651	aquery '//app:td' --output=proto --consistent_labels
+1652	aquery '//lib:l1' --output=text --consistent_labels
+1653	aquery '//lib:w1' --output=text --consistent_labels
+1654	aquery '//app:td' --output=text --consistent_labels
+1655	aquery '//lib:l1' --output=jsonproto --noinclude_commandline
+1656	aquery '//lib:w1' --output=jsonproto --noinclude_commandline
+1657	aquery '//app:td' --output=jsonproto --noinclude_commandline
+1658	aquery '//lib:l1' --output=textproto --include_param_files
+1659	aquery '//lib:w1' --output=textproto --include_param_files
+1660	aquery '//app:td' --output=textproto --include_param_files
+1661	aquery '//lib:l1' --skyframe_state
+1662	aquery '//lib:w1' --skyframe_state
+1663	aquery '//app:td' --skyframe_state
+1664	aquery '//lib:l1' --output=text --skyframe_state
+1665	aquery '//lib:w1' --output=text --skyframe_state
+1666	aquery '//app:td' --output=text --skyframe_state
+1667	aquery '//lib:l1' --output=bogus --skyframe_state
+1668	aquery '//lib:w1' --output=bogus --skyframe_state
+1669	aquery '//app:td' --output=bogus --skyframe_state
+1670	aquery '//lib:l1' --order_output=full
+1671	aquery '//lib:w1' --order_output=full
+1672	aquery '//app:td' --order_output=full
+1673	aquery '//lib:l1' --order_output=no
+1674	aquery '//lib:w1' --order_output=no
+1675	aquery '//app:td' --order_output=no
+1676	aquery '//lib:l1' --order_output=auto
+1677	aquery '//lib:w1' --order_output=auto
+1678	aquery '//app:td' --order_output=auto
+1679	aquery '//lib:l1' --universe_scope=//lib:l3
+1680	aquery '//lib:w1' --universe_scope=//lib:l3
+1681	aquery '//app:td' --universe_scope=//lib:l3
+1682	aquery '//lib:l1' --infer_universe_scope
+1683	aquery '//lib:w1' --infer_universe_scope
+1684	aquery '//app:td' --infer_universe_scope
+1685	aquery '//lib:l1' --line_terminator_null
+1686	aquery '//lib:w1' --line_terminator_null
+1687	aquery '//app:td' --line_terminator_null
+1688	aquery '//lib:l1' --nokeep_going
+1689	aquery '//lib:w1' --nokeep_going
+1690	aquery '//app:td' --nokeep_going
+1691	aquery '//lib:l1' --relative_locations
+1692	aquery '//lib:w1' --relative_locations
+1693	aquery '//app:td' --relative_locations
+1694	aquery '//lib:l1' --noproto:locations
+1695	aquery '//lib:w1' --noproto:locations
+1696	aquery '//app:td' --noproto:locations
+1697	aquery '//lib:l1' --proto:output_rule_attrs=srcs
+1698	aquery '//lib:w1' --proto:output_rule_attrs=srcs
+1699	aquery '//app:td' --proto:output_rule_attrs=srcs
+1700	aquery '//lib:l1' --include_commandline=maybe
+1701	aquery '//lib:w1' --include_commandline=maybe
+1702	aquery '//app:td' --include_commandline=maybe
+1703	aquery '//lib:l1' --noimplicit_deps --output=proto
+1704	aquery '//lib:w1' --noimplicit_deps --output=proto
+1705	aquery '//app:td' --noimplicit_deps --output=proto
+1706	aquery '//lib:l1' --output=text -c opt
+1707	aquery '//lib:w1' --output=text -c opt
+1708	aquery '//app:td' --output=text -c opt
+1709	aquery '//lib:l1' --output=text --cpu=k8
+1710	aquery '//lib:w1' --output=text --cpu=k8
+1711	aquery '//app:td' --output=text --cpu=k8
+1712	aquery '//lib:l1' --output=text --define=FOO=bar
+1713	aquery '//lib:w1' --output=text --define=FOO=bar
+1714	aquery '//app:td' --output=text --define=FOO=bar
+1715	aquery '//lib:l1' --output=text --platforms=//cfg:plat_always
+1716	aquery '//lib:w1' --output=text --platforms=//cfg:plat_always
+1717	aquery '//app:td' --output=text --platforms=//cfg:plat_always
+1718	aquery '//lib:l1' --output=text --//cfg:str=on
+1719	aquery '//lib:w1' --output=text --//cfg:str=on
+1720	aquery '//app:td' --output=text --//cfg:str=on
+1721	aquery '//lib:l1' --output=text --action_env=A=B
+1722	aquery '//lib:w1' --output=text --action_env=A=B
+1723	aquery '//app:td' --output=text --action_env=A=B
+1724	aquery '//lib:l1' --output=text --features=foo
+1725	aquery '//lib:w1' --output=text --features=foo
+1726	aquery '//app:td' --output=text --features=foo
+1727	aquery '//lib:l1' --output=text --copt=-O2
+1728	aquery '//lib:w1' --output=text --copt=-O2
+1729	aquery '//app:td' --output=text --copt=-O2
+1730	aquery '//lib:l1' --output=text --experimental_exec_configuration_distinguisher=legacy
+1731	aquery '//lib:w1' --output=text --experimental_exec_configuration_distinguisher=legacy
+1732	aquery '//app:td' --output=text --experimental_exec_configuration_distinguisher=legacy
+1733	aquery '//lib:l1' --output=proto -c opt
+1734	aquery '//lib:w1' --output=proto -c opt
+1735	aquery '//app:td' --output=proto -c opt
+1736	aquery '//lib:l1' --output=jsonproto --cpu=k8
+1737	aquery '//lib:w1' --output=jsonproto --cpu=k8
+1738	aquery '//app:td' --output=jsonproto --cpu=k8
+1739	aquery "inputs('.*txt', //lib:l1)" 
+1740	aquery "inputs('.*txt', //lib:l1)" --output=text
+1741	aquery "inputs('.*txt', //lib:l1)" --output=proto
+1742	aquery "inputs('.*txt', //lib:l1)" --output=jsonproto
+1743	aquery "inputs('.*txt', //lib:l1)" --output=summary
+1744	aquery "inputs('a.txt', //lib:l1)" 
+1745	aquery "outputs('.*out', //lib:l1)" 
+1746	aquery "outputs('.*', //lib:gr)" 
+1747	aquery "mnemonic('Cat7', //lib:l1)" 
+1748	aquery "mnemonic('Cat.*', deps(//app:td))" 
+1749	aquery "mnemonic('Genrule', //lib:gr)" 
+1750	aquery "mnemonic('FileWrite', //lib:w1)" 
+1751	aquery "mnemonic('MkDir7', //lib:w1)" 
+1752	aquery "mnemonic('bogus', //lib:l1)" 
+1753	aquery "mnemonic('.*', //lib:w1)" 
+1754	aquery "mnemonic('.*', //lib:w1)" --output=text
+1755	aquery "mnemonic('.*', //lib:w1)" --output=proto
+1756	aquery "mnemonic('.*', //lib:w1)" --output=jsonproto
+1757	aquery "mnemonic('.*', //lib:w1)" --output=summary
+1758	aquery "mnemonic('(', //lib:l1)" 
+1759	aquery "inputs('(', //lib:l1)" 
+1760	aquery "outputs('(', //lib:l1)" 
+1761	aquery "inputs(//lib:l1)" 
+1762	aquery "mnemonic(//lib:l1)" 
+1763	aquery "mnemonic('Cat7')" 
+1764	aquery "inputs('a','b','c')" 
+1765	aquery "outputs('.*',inputs('.*',//lib:l1))" 
+1766	aquery "inputs('.*', //lib:l1) + mnemonic('Cat7', //lib:l1)" 
+1767	aquery "mnemonic('Cat7', //lib:l1) union mnemonic('Genrule', //lib:gr)" 
+1768	aquery "mnemonic('Cat7', //lib:l1) - mnemonic('Cat7', //lib:l1)" 
+1769	aquery "mnemonic('Cat7', deps(//app:td)) intersect //lib:l1" 
+1770	aquery "let x = //lib:l1 in mnemonic('Cat7', $x)" 
+1771	aquery "mnemonic('Cat7', //lib:l1 + //lib:l2)" 
+1772	aquery "mnemonic('^C', //lib:l1)" 
+1773	aquery "mnemonic('Cat7$', //lib:l1)" 
+1774	aquery "mnemonic('', //lib:l1)" 
+1775	aquery "inputs('', //lib:l1)" 
+1776	aquery "outputs('', //lib:l1)" 
+1777	aquery "inputs('.*', //app:app_test)" 
+1778	aquery "outputs('.*', //app:app_test)" 
+1779	aquery "mnemonic('.*', //app:app_test)" 
+1780	aquery "mnemonic('.*', //app:app_test)" --output=text
+1781	aquery "mnemonic('.*', //app:app_test)" --output=proto
+1782	aquery "mnemonic('.*', //app:app_test)" --output=jsonproto
+1783	aquery "mnemonic('.*', //app:app_test)" --output=summary
+1784	aquery "mnemonic('.*', //tools:t_test)" 
+1785	aquery "mnemonic('.*', //tools:t_test)" --output=text
+1786	aquery "mnemonic('.*', //tools:t_test)" --output=proto
+1787	aquery "mnemonic('.*', //tools:t_test)" --output=jsonproto
+1788	aquery "mnemonic('.*', //tools:t_test)" --output=summary
+1789	aquery "mnemonic('.*', //app:bin)" 
+1790	aquery "mnemonic('.*', //app:bin)" --output=text
+1791	aquery "mnemonic('.*', //app:bin)" --output=proto
+1792	aquery "mnemonic('.*', //app:bin)" --output=jsonproto
+1793	aquery "mnemonic('.*', //app:bin)" --output=summary
+1794	aquery "mnemonic('.*', //app:sel)" 
+1795	aquery "mnemonic('.*', //app:sel)" --output=text
+1796	aquery "mnemonic('.*', //app:sel)" --output=proto
+1797	aquery "mnemonic('.*', //app:sel)" --output=jsonproto
+1798	aquery "mnemonic('.*', //app:sel)" --output=summary
+1799	aquery "mnemonic('.*', //app:td)" 
+1800	aquery "mnemonic('.*', //app:td)" --output=text
+1801	aquery "mnemonic('.*', //app:td)" --output=proto
+1802	aquery "mnemonic('.*', //app:td)" --output=jsonproto
+1803	aquery "mnemonic('.*', //app:td)" --output=summary
+1804	aquery "mnemonic('.*', //pkgs:gq)" 
+1805	aquery "mnemonic('.*', //pkgs:gq)" --output=text
+1806	aquery "mnemonic('.*', //pkgs:gq)" --output=proto
+1807	aquery "mnemonic('.*', //pkgs:gq)" --output=jsonproto
+1808	aquery "mnemonic('.*', //pkgs:gq)" --output=summary
+1809	aquery "mnemonic('.*', //pkgs:ea)" 
+1810	aquery "mnemonic('.*', //pkgs:ea)" --output=text
+1811	aquery "mnemonic('.*', //pkgs:ea)" --output=proto
+1812	aquery "mnemonic('.*', //pkgs:ea)" --output=jsonproto
+1813	aquery "mnemonic('.*', //pkgs:ea)" --output=summary
+1814	aquery "mnemonic('.*',//lib:smac_cat)" 
+1815	aquery "mnemonic('.*',//lib:smac_cat)" --output=text
+1816	aquery "mnemonic('.*',//lib:smac_cat)" --output=proto
+1817	aquery "mnemonic('.*',//lib:smac_cat)" --output=jsonproto
+1818	aquery "mnemonic('.*',//lib:smac_cat)" --output=summary
+1819	aquery "mnemonic('.*',//lib:mac_l)" 
+1820	aquery "mnemonic('.*',//lib:mac_l)" --output=text
+1821	aquery "mnemonic('.*',//lib:mac_l)" --output=proto
+1822	aquery "mnemonic('.*',//lib:mac_l)" --output=jsonproto
+1823	aquery "mnemonic('.*',//lib:mac_l)" --output=summary
+1824	aquery "mnemonic('Symlink.*',deps(//app:bin))" 
+1825	aquery "mnemonic('Runfiles.*',//app:bin)" 
+1826	aquery "mnemonic('Source.*',//app:bin)" 
+1827	aquery "mnemonic('.*',//app:cfg_gen)" 
+1828	aquery "mnemonic('.*',//app:cfg_gen)" --output=text
+1829	aquery "mnemonic('.*',//app:cfg_gen)" --output=proto
+1830	aquery "mnemonic('.*',//app:cfg_gen)" --output=jsonproto
+1831	aquery "mnemonic('.*',//app:cfg_gen)" --output=summary
+1832	aquery '//lib:l1' --output=text --cpu=k8 --output=text
+1833	aquery '//lib:l1' --output=text --platforms=//cfg:plat_never
+1834	aquery '//lib:l1' --output=text --noincompatible_auto_exec_groups
+1835	aquery '//lib:l1' --output=text --stamp
+1836	aquery '//lib:w1' --output=text --cpu=k8 --output=text
+1837	aquery '//lib:w1' --output=text --platforms=//cfg:plat_never
+1838	aquery '//lib:w1' --output=text --noincompatible_auto_exec_groups
+1839	aquery '//lib:w1' --output=text --stamp
+1840	aquery '//app:bin' --output=text -c opt
+1841	aquery '//app:bin' --output=text --cpu=k8 --output=text
+1842	aquery '//app:bin' --output=text --platforms=//cfg:plat_never
+1843	aquery '//app:bin' --output=text --noincompatible_auto_exec_groups
+1844	aquery '//app:bin' --output=text --stamp
+1845	aquery '//app:app_test' --output=text -c opt
+1846	aquery '//app:app_test' --output=text --cpu=k8 --output=text
+1847	aquery '//app:app_test' --output=text --platforms=//cfg:plat_never
+1848	aquery '//app:app_test' --output=text --noincompatible_auto_exec_groups
+1849	aquery '//app:app_test' --output=text --stamp
+1850	aquery '//tools:t_test' --output=text -c opt
+1851	aquery '//tools:t_test' --output=text --cpu=k8 --output=text
+1852	aquery '//tools:t_test' --output=text --platforms=//cfg:plat_never
+1853	aquery '//tools:t_test' --output=text --noincompatible_auto_exec_groups
+1854	aquery '//tools:t_test' --output=text --stamp
+1855	aquery '//lib:gr' --output=text -c opt
+1856	aquery '//lib:gr' --output=text --cpu=k8 --output=text
+1857	aquery '//lib:gr' --output=text --platforms=//cfg:plat_never
+1858	aquery '//lib:gr' --output=text --noincompatible_auto_exec_groups
+1859	aquery '//lib:gr' --output=text --stamp

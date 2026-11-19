@@ -1,0 +1,43 @@
+action 'Cat @@//a:lib'
+  Mnemonic: CatIt
+  Target: //a:lib
+  Configuration: k8-opt
+  Execution platform: @@platforms//host:host
+  ActionKey: c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012
+  Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/lib.txt]
+  Command Line: (exec /bin/bash \
+    -c \
+    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txt')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
+# Execution platform: @@platforms//host:host
+
+action 'Cat @@//a:lib2'
+  Mnemonic: CatIt
+  Target: //a:lib2
+  Configuration: k8-opt
+  Execution platform: @@platforms//host:host
+  ActionKey: 04e6b0326b4f531bd3a2cf9cb2dbaef980564408bcfd35d93806c28a37c73205
+  Inputs: [a/y.txt, bazel-out/k8-opt/bin/a/lib.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/lib2.txt]
+  Command Line: (exec /bin/bash \
+    -c \
+    'cat bazel-out/k8-opt/bin/a/lib.txt a/y.txt > bazel-out/k8-opt/bin/a/lib2.txt')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
+# Execution platform: @@platforms//host:host
+
+action 'Executing genrule //a:lm'
+  Mnemonic: Genrule
+  Target: //a:lm
+  Configuration: k8-opt
+  Execution platform: @@platforms//host:host
+  ActionKey: 2eccb33175d1d6505c806638e6071194e18f0a7363bdd9793fb6fa2847362411
+  Inputs: [external/bazel_tools/tools/genrule/genrule-setup.sh]
+  Outputs: [bazel-out/k8-opt/bin/a/lm.o]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec /bin/bash \
+    -c \
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo lm > bazel-out/k8-opt/bin/a/lm.o')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
+# Execution platform: @@platforms//host:host
+

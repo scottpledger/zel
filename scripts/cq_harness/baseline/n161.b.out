@@ -1,0 +1,7 @@
+digraph mygraph {
+  node [shape=box];
+  "//a:lib2 (a7a71fd)"
+  "//a:lib2 (a7a71fd)" -> "//a:lib (a7a71fd)"
+  "//a:lib (bf3a44e)\n//a:lm (a7a71fd)"
+  "//a:lib (a7a71fd)"
+}

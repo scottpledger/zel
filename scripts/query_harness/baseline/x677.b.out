@@ -1,0 +1,10 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <package-group location="@WS@/BUILD:1:14" name="//:pg">
+        <list name="includes"/>
+        <list name="packages">
+            <string value="//b"/>
+            <string value="//a/..."/>
+        </list>
+    </package-group>
+</query>

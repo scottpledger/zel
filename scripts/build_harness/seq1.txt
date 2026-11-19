@@ -1,0 +1,74 @@
+test //:t_args --test_output=all
+test //:t_args --test_output=all
+test //:t_args --test_env=FOO=1
+test //:t_args --test_env=FOO=1
+test //:t_args --test_env=FOO=2
+test //:t_args --test_arg=x
+test //:t_args --test_arg=x
+test //:t_args --test_arg=y
+test //:t_args --test_filter=a
+test //:t_args --test_filter=b
+test //:t_args --test_filter=b
+test //:t_args --runs_per_test=2
+test //:t_args --runs_per_test=2
+test //:t_args --runs_per_test=3
+test //:t_args --nocache_test_results
+test //:t_args
+test //:t_args --test_timeout=5
+test //:t_args --test_timeout=5
+test //:t_args --test_sharding_strategy=disabled
+test //:t_fail
+test //:t_fail
+test //:t_fail --test_output=all
+test //:t_fail --check_tests_up_to_date
+test //:t_pass --check_tests_up_to_date
+test //:t_pass
+test //:t_pass --check_tests_up_to_date
+test //:t_pass //:t_fail --check_tests_up_to_date
+test //:s_all
+test //:s_all
+test //:t_pass //:t_fail //:t_out
+test //:t_pass //:t_fail //:t_out --test_summary=detailed
+test //:t_pass --run_under=echo
+test //:t_pass --run_under=echo
+test //:t_pass
+test //:t_pass --action_env=X=1
+test //:t_pass --action_env=X=1
+test //:t_pass --test_env=X=1
+test //:t_pass -c opt
+test //:t_pass -c opt
+test //:t_pass --stamp
+test //:t_pass --nostamp
+test //:t_pass --incompatible_strict_action_env
+test //:t_pass --cache_test_results=no
+test //:t_pass --cache_test_results=auto
+test //:t_xml
+test //:t_xml
+test //:t_notcached
+test //:t_notcached
+test //:t_local
+test //:t_local
+build //:g2
+build //:g2
+build //:g2 --action_env=A=1
+build //:g2 --action_env=A=1
+build //:g2 --action_env=A=2
+build //:g2 -c dbg
+build //:g2 -c dbg
+build //:g2 -c opt --stamp
+build //:g2 -c fastbuild
+build //:gfail
+build //:gfail
+build //:g3
+build //:g3
+build --check_up_to_date //:g3
+build --check_up_to_date //:g2
+build --check_up_to_date //:g1
+build --nobuild //:g2
+build --nobuild //:g1 -c opt
+build --discard_analysis_cache //:g2
+build --features=foo //:g2
+build --define=A=1 //:g2
+build --define=A=2 //:g2
+build //:gmake --define=A=2
+build //:g2

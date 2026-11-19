@@ -1,0 +1,1 @@
+bazel_features1.50.0

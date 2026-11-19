@@ -1,0 +1,8 @@
+  indent
+alpha 2
+NEW gamma
+beta 2
+beta 3
+} 2
+  indent 2
+gamma

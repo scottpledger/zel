@@ -1,0 +1,10 @@
+beta 0
+{ 0
+{ 3
+delta 1
+alpha 2
+gamma 1
+alpha 3
+alpha 2
+beta
+	Tab 2

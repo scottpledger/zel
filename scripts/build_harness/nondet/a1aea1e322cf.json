@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "a1aea1e322cf",
+ "classified_as": "ANYERR",
+ "cmd": "test //...",
+ "distinct": 5,
+ "harness": "build",
+ "hashes": [
+  "b5887c7dc4425336",
+  "6ea650ac68789a8a",
+  "a6822f18738b512e",
+  "41d4ed04f836e0ad",
+  "72b74bba152141ee",
+  "41d4ed04f836e0ad"
+ ],
+ "history": [],
+ "mode": "ANYERR",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nERROR: package contains errors: pkg\nERROR: Error evaluating '//...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: pkg\nERROR: package contains errors: conf2\nERROR: Error evaluating '//...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nERROR: package contains errors: pkg\nERROR: Skipping '//...': Error evaluating '//...': error loading package 'conf2': Package 'conf2' contains errors\nERROR: Error evaluating '//...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: package contains errors: pkg\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nERROR: Skipping '//...': Error evaluating '//...': error loading package 'conf2': Package 'conf2' contains errors\nERROR: Error evaluating '//...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: package contains errors: pkg\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nERROR: Error evaluating '//...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: WS/pkg/BUILD:2:6: 'is' not supported, use '==' instead\nERROR: WS/pkg/BUILD:2:6: syntax error at 'is': expected newline\nERROR: package contains errors: pkg\nERROR: Traceback (most recent call last):\n\tFile \"WS/conf2/BUILD\", line 2, column 8, in <toplevel>\n\t\tgenrule(name=\"b\", outs=[\"same.txt\"], cmd=\"echo b > $@\")\nError in genrule: generated file 'same.txt' in rule 'b' conflicts with existing generated file from rule 'a', defined at WS/conf2/BUILD:1:8\nERROR: package contains errors: conf2\nERROR: Skipping '//...': Error evaluating '//...': error loading package 'conf2': Package 'conf2' contains errors\nERROR: Error evaluating '//...': error loading package 'conf2': Package 'conf2' contains errors\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

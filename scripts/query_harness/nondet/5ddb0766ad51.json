@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "5ddb0766ad51",
+ "classified_as": "ORDERLESS",
+ "cmd": "query '//a:all' --output=minrank --order_output=auto --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "e129b8969eb4c779",
+  "81fb0f0a7aeb0668",
+  "5f6275eb7e9ed368",
+  "ac245c924ab75763",
+  "16f7e29d28710ce7",
+  "c70901ea56c22c55"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "0 //a:lm_grp\n0 //a:cl\n0 //a:tr\n0 //a:sm_cat\n0 //a:gg\n0 //a:lib2\n1 //a:lm\n1 //a:cl2\n1 //a:lib\n1 //a:sm_fg\n1 //a:sel\n2 //a:srcs_fg\n2 //a:def_cs\n2 //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:tr\n0 //a:sm_cat\n0 //a:lm_grp\n0 //a:gg\n0 //a:cl\n0 //a:lib2\n1 //a:lib\n1 //a:sm_fg\n1 //a:lm\n1 //a:sel\n1 //a:cl2\n2 //a:srcs_fg\n2 //a:def_cs\n2 //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:gg\n0 //a:sm_cat\n0 //a:lm_grp\n0 //a:cl\n0 //a:tr\n0 //a:lib2\n1 //a:sel\n1 //a:sm_fg\n1 //a:lm\n1 //a:cl2\n1 //a:lib\n2 //a:def_cs\n2 //a:opt_cs\n2 //a:srcs_fg\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:lib2\n0 //a:lm_grp\n0 //a:gg\n0 //a:sm_cat\n0 //a:tr\n0 //a:cl\n1 //a:lib\n1 //a:lm\n1 //a:sel\n1 //a:sm_fg\n1 //a:cl2\n2 //a:srcs_fg\n2 //a:def_cs\n2 //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:cl\n0 //a:gg\n0 //a:lm_grp\n0 //a:lib2\n0 //a:tr\n0 //a:sm_cat\n1 //a:cl2\n1 //a:sel\n1 //a:lm\n1 //a:lib\n1 //a:sm_fg\n2 //a:def_cs\n2 //a:opt_cs\n2 //a:srcs_fg\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:cl\n0 //a:tr\n0 //a:lm_grp\n0 //a:sm_cat\n0 //a:gg\n0 //a:lib2\n1 //a:cl2\n1 //a:lib\n1 //a:lm\n1 //a:sm_fg\n1 //a:sel\n2 //a:srcs_fg\n2 //a:def_cs\n2 //a:opt_cs\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

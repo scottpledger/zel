@@ -1,0 +1,11 @@
+--- a/f.txt
++++ b/f.txt
+@@ -1,2 +1,2 @@
+- 3
++NEW  3
+ delta 3
+@@ -5,3 +5,2 @@
+ alpha
+-eps 0
+-delta 0
++NEW eps 0

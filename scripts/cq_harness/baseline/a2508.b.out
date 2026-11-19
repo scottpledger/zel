@@ -1,0 +1,29 @@
+{
+  "actions": [{
+    "targetId": 1,
+    "actionKey": "efb257e0353d4c7aac216fe391aa37dd298024cb3045911ff7162b8d43f0682d",
+    "mnemonic": "Genrule",
+    "configurationId": 1,
+    "arguments": ["/bin/bash", "-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat a/z.txt external/ext+/lib/d.txt \u003e bazel-out/k8-fastbuild/bin/a/gg.out ; echo a/z.txt \u003e\u003e bazel-out/k8-fastbuild/bin/a/gg.out"],
+    "environmentVariables": [{
+      "key": "PATH",
+      "value": "/bin:/usr/bin:/usr/local/bin"
+    }],
+    "executionPlatform": "@@platforms//host:host"
+  }],
+  "targets": [{
+    "id": 1,
+    "label": "//a:gg",
+    "ruleClassId": 1
+  }],
+  "configuration": [{
+    "id": 1,
+    "mnemonic": "k8-fastbuild",
+    "platformName": "k8",
+    "checksum": "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+  }],
+  "ruleClasses": [{
+    "id": 1,
+    "name": "genrule"
+  }]
+}

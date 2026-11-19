@@ -1,0 +1,21 @@
+From abc Mon Sep 17 00:00:00 2001
+Subject: [PATCH] x
+
+---
+ f.txt | 2 +-
+
+diff --git a/f.txt b/f.txt
+index 1..2 100644
+--- a/f.txt
++++ b/f.txt
+@@ -7,7 +7,7 @@
+ line 7
+ line 8
+ line 9
+-line 10
++TEN
+ line 11
+ line 12
+ line 13
+-- 
+2.30.0

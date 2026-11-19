@@ -1,0 +1,8 @@
+--- a/f.txt
++++ b/f.txt
+@@ -4,5 +4,4 @@
+ y
+ 
+ alpha 3
+-alpha 3
+ delta

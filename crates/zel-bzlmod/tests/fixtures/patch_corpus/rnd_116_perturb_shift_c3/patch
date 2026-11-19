@@ -1,0 +1,19 @@
+--- a/f.txt
++++ b/f.txt
+@@ -7,7 +7,7 @@
+ 
+ 	Tab
+ y 3
+-gamma 2
++NEW gamma 2
+ { 2
+ {
+ beta 0
+@@ -25,5 +25,7 @@
+ gamma
+   indent 0
+ return 0;
++x 1
++delta
+ return 0;
+ alpha 3

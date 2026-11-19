@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "8a38887020f1",
+ "classified_as": "ORDERLESS",
+ "cmd": "query '//a:all' --output=maxrank --order_output=no --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "9c268086fe75bb90",
+  "b37b468f71008ad4",
+  "82290d353e5bd326",
+  "67093391d0690ba9",
+  "3043e7e628ac7c09",
+  "b473a6a1880de8eb"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "0 //a:gg\n0 //a:sm_cat\n0 //a:tr\n0 //a:cl\n0 //a:lib2\n0 //a:lm_grp\n1 //a:sel\n1 //a:sm_fg\n1 //a:lm\n1 //a:cl2\n1 //a:lib\n2 //a:srcs_fg\n2 //a:def_cs\n2 //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:gg\n0 //a:tr\n0 //a:lib2\n0 //a:lm_grp\n0 //a:sm_cat\n0 //a:cl\n1 //a:cl2\n1 //a:lib\n1 //a:sel\n1 //a:sm_fg\n1 //a:lm\n2 //a:def_cs\n2 //a:opt_cs\n2 //a:srcs_fg\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:lm_grp\n0 //a:gg\n0 //a:lib2\n0 //a:tr\n0 //a:sm_cat\n0 //a:cl\n1 //a:lm\n1 //a:lib\n1 //a:sel\n1 //a:sm_fg\n1 //a:cl2\n2 //a:def_cs\n2 //a:opt_cs\n2 //a:srcs_fg\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:tr\n0 //a:cl\n0 //a:gg\n0 //a:lib2\n0 //a:sm_cat\n0 //a:lm_grp\n1 //a:lm\n1 //a:cl2\n1 //a:sel\n1 //a:sm_fg\n1 //a:lib\n2 //a:srcs_fg\n2 //a:def_cs\n2 //a:opt_cs\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:lm_grp\n0 //a:sm_cat\n0 //a:gg\n0 //a:lib2\n0 //a:cl\n0 //a:tr\n1 //a:lm\n1 //a:lib\n1 //a:sm_fg\n1 //a:sel\n1 //a:cl2\n2 //a:def_cs\n2 //a:opt_cs\n2 //a:srcs_fg\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //a:cl\n0 //a:gg\n0 //a:sm_cat\n0 //a:tr\n0 //a:lib2\n0 //a:lm_grp\n1 //a:sm_fg\n1 //a:lm\n1 //a:sel\n1 //a:cl2\n1 //a:lib\n2 //a:srcs_fg\n2 //a:opt_cs\n2 //a:def_cs\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

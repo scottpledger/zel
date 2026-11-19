@@ -1,0 +1,2 @@
+Loading: 0 packages loaded
+ERROR: Error while parsing 'deps(//a:lib, -1)': syntax error at '- 1 )'

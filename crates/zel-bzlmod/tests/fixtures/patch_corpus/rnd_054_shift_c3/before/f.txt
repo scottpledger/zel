@@ -1,0 +1,19 @@
+{ 3
+delta 3
+{ 2
+return 0;
+beta
+x 3
+{ 1
+
+	Tab
+y
+{ 3
+gamma 3
+y 1
+{ 1
+gamma 3
+gamma 0
+}
+} 0
+} 2

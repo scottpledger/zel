@@ -1,0 +1,20 @@
+--- a/f.txt
++++ b/f.txt
+@@ -15,8 +15,6 @@
+ alpha
+ eps
+ alpha
+-	Tab
+-alpha
+ y 0
+ eps 1
+ eps
+@@ -31,6 +29,8 @@
+ 	Tab 2
+ 	Tab
+ { 2
++	Tab 0
++eps
+ x 3
+ return 0;
+ return 0; 2

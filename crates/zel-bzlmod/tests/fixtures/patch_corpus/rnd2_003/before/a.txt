@@ -1,0 +1,16 @@
+beta 0
+alpha 1
+
+x 0
+delta 3
+NEW beta
+y
+return 0; 1
+	Tab 2
+  indent
+y 0
+y 1
+
+eps 2
+delta 0
+eps 0

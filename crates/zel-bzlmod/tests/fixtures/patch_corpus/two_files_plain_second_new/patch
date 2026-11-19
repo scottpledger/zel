@@ -1,0 +1,15 @@
+--- a/a.txt
++++ b/a.txt
+@@ -7,7 +7,7 @@
+ line 7
+ line 8
+ line 9
+-line 10
++TEN
+ line 11
+ line 12
+ line 13
+--- /dev/null
++++ b/b.txt
+@@ -0,0 +1 @@
++hi

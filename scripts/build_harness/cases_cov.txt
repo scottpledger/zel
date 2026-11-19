@@ -1,0 +1,26 @@
+coverage //:tp
+coverage //:tf
+coverage //:tcov
+coverage //:tcov2
+coverage //:ga
+coverage //:hello
+coverage --build_tests_only //:ga
+coverage --test_output=all //:tenv
+coverage --combined_report=lcov //:tp
+coverage --combined_report=none //:tp
+coverage --combined_report=bogus //:tp
+coverage --instrumentation_filter=//:foo //:tp
+coverage --nobuild //:tp
+coverage --collect_code_coverage //:tp
+coverage --experimental_fetch_all_coverage_outputs //:tp
+coverage --experimental_split_coverage_postprocessing //:tp
+coverage --coverage_report_generator=//:hello //:tp
+coverage --coverage_support=//:hello //:tp
+coverage --coverage_report_generator=//:nope //:tp
+coverage //:tshard
+coverage //:tflaky
+coverage --runs_per_test=2 //:tp
+coverage //:tp //:tf
+coverage //:suite_ok
+test --collect_code_coverage //:tcov
+build --collect_code_coverage //:ga

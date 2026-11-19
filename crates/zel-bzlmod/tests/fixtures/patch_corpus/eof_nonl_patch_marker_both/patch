@@ -1,0 +1,8 @@
+--- a/f.txt
++++ b/f.txt
+@@ -19,2 +19,2 @@
+ line 19
+-line 20
+\ No newline at end of file
++LAST
+\ No newline at end of file

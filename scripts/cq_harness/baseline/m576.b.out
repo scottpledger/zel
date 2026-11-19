@@ -1,0 +1,30 @@
+action 'Writing repo mapping manifest for //b:t1'
+  Mnemonic: RepoMappingManifest
+  Target: //b:t1
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 6d4676cfc8cc9f2031a6a30402bfbe451f4d33cd46a92272cddb17441af265da
+  Inputs: []
+  Outputs: [bazel-out/k8-fastbuild/bin/b/t1.repo_mapping]
+  IsExecutable: false
+
+action 'Writing repo mapping manifest for //b:tool [for tool]'
+  Mnemonic: RepoMappingManifest
+  Target: //b:tool
+  Configuration: k8-opt-exec
+  Execution platform: @@platforms//host:host
+  ActionKey: 61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3
+  Inputs: []
+  Outputs: [bazel-out/k8-opt-exec/bin/b/tool.repo_mapping]
+  IsExecutable: false
+
+action 'Writing repo mapping manifest for //b:tool'
+  Mnemonic: RepoMappingManifest
+  Target: //b:tool
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3
+  Inputs: []
+  Outputs: [bazel-out/k8-fastbuild/bin/b/tool.repo_mapping]
+  IsExecutable: false
+

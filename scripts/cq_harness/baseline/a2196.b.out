@@ -1,0 +1,566 @@
+rule_classes {
+id: 1
+name: "genrule"
+}
+targets {
+id: 1
+label: "//b:mk"
+rule_class_id: 1
+}
+rule_classes {
+id: 2
+name: "x_test"
+}
+targets {
+id: 2
+label: "//b:t1"
+rule_class_id: 2
+}
+configuration {
+id: 1
+mnemonic: "k8-fastbuild"
+platform_name: "k8"
+checksum: "e722a217ced723dfeb49874b2007895ae0dc9a9d49d004d95320b88c609c409a"
+}
+path_fragments {
+id: 5
+label: "bazel-out"
+}
+path_fragments {
+id: 4
+label: "k8-fastbuild"
+parent_id: 5
+}
+path_fragments {
+id: 3
+label: "bin"
+parent_id: 4
+}
+path_fragments {
+id: 2
+label: "b"
+parent_id: 3
+}
+path_fragments {
+id: 1
+label: "t1"
+parent_id: 2
+}
+configuration {
+id: 2
+mnemonic: "k8-fastbuild"
+platform_name: "k8"
+checksum: "a7a71fd16b14112464272f754633480c74c664f2488224c592ebf2dfc7a06b18"
+}
+rule_classes {
+id: 3
+name: "xbin"
+}
+artifacts {
+id: 1
+path_fragment_id: 1
+}
+targets {
+id: 3
+label: "//b:tool"
+rule_class_id: 3
+}
+configuration {
+id: 3
+mnemonic: "k8-opt-exec"
+platform_name: "k8"
+checksum: "04bf134dfa57115b01daa56bd3a30421a6e74b1819e002496a26c94ed0087067"
+is_tool: true
+}
+path_fragments {
+id: 14
+label: "k8-opt-exec"
+parent_id: 5
+}
+path_fragments {
+id: 10
+label: "external"
+}
+path_fragments {
+id: 9
+label: "bazel_tools"
+parent_id: 10
+}
+path_fragments {
+id: 13
+label: "bin"
+parent_id: 14
+}
+path_fragments {
+id: 12
+label: "b"
+parent_id: 13
+}
+path_fragments {
+id: 8
+label: "tools"
+parent_id: 9
+}
+path_fragments {
+id: 11
+label: "tool"
+parent_id: 12
+}
+actions {
+target_id: 2
+action_key: "8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8"
+mnemonic: "FileWrite"
+configuration_id: 1
+output_ids: 1
+primary_output_id: 1
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+path_fragments {
+id: 15
+label: "t1.repo_mapping"
+parent_id: 2
+}
+artifacts {
+id: 4
+path_fragment_id: 15
+}
+actions {
+target_id: 2
+action_key: "6d4676cfc8cc9f2031a6a30402bfbe451f4d33cd46a92272cddb17441af265da"
+mnemonic: "RepoMappingManifest"
+configuration_id: 1
+output_ids: 4
+primary_output_id: 4
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 16
+label: "t1.runfiles_manifest"
+parent_id: 2
+}
+artifacts {
+id: 5
+path_fragment_id: 16
+}
+actions {
+target_id: 2
+action_key: "23941fd4e6093d3ee7bc18e2ae73db2a79f007db9c7fa6c90977fc47de7ecccd"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 1
+output_ids: 5
+primary_output_id: 5
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 2
+direct_artifact_ids: 5
+}
+path_fragments {
+id: 18
+label: "t1.runfiles"
+parent_id: 2
+}
+path_fragments {
+id: 7
+label: "genrule"
+parent_id: 8
+}
+path_fragments {
+id: 6
+label: "genrule-setup.sh"
+parent_id: 7
+}
+path_fragments {
+id: 17
+label: "MANIFEST"
+parent_id: 18
+}
+artifacts {
+id: 2
+path_fragment_id: 6
+}
+dep_set_of_files {
+id: 1
+direct_artifact_ids: 2
+}
+path_fragments {
+id: 19
+label: "mk.txt"
+parent_id: 2
+}
+artifacts {
+id: 7
+path_fragment_id: 19
+}
+actions {
+target_id: 1
+action_key: "803dfa13a502ba5658d4ec952883b1954b6fc48e5265afba1860eca457331543"
+mnemonic: "Genrule"
+configuration_id: 2
+arguments: "/bin/bash"
+arguments: "-c"
+arguments: "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo hi > bazel-out/k8-fastbuild/bin/b/mk.txt"
+environment_variables {
+  key: "PATH"
+  value: "/bin:/usr/bin:/usr/local/bin"
+}
+input_dep_set_ids: 1
+output_ids: 7
+primary_output_id: 7
+execution_platform: "@@platforms//host:host"
+}
+artifacts {
+id: 3
+path_fragment_id: 11
+}
+actions {
+target_id: 3
+action_key: "8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8"
+mnemonic: "FileWrite"
+configuration_id: 3
+output_ids: 3
+primary_output_id: 3
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+path_fragments {
+id: 20
+label: "tool.repo_mapping"
+parent_id: 12
+}
+artifacts {
+id: 8
+path_fragment_id: 20
+}
+actions {
+target_id: 3
+action_key: "61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3"
+mnemonic: "RepoMappingManifest"
+configuration_id: 3
+output_ids: 8
+primary_output_id: 8
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 21
+label: "tool.runfiles_manifest"
+parent_id: 12
+}
+artifacts {
+id: 9
+path_fragment_id: 21
+}
+actions {
+target_id: 3
+action_key: "278c5f46d0d07301d3cf8edaf39aecdca38dc722cc58edda142aa04e824d5e20"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 3
+output_ids: 9
+primary_output_id: 9
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 3
+direct_artifact_ids: 9
+}
+path_fragments {
+id: 23
+label: "tool.runfiles"
+parent_id: 12
+}
+artifacts {
+id: 6
+path_fragment_id: 17
+}
+actions {
+target_id: 2
+action_key: "5e2d081693a0cdca35fe93c28f1f347a104fc427e6073326245ce128e6f0541f"
+mnemonic: "SymlinkTree"
+configuration_id: 1
+input_dep_set_ids: 2
+output_ids: 6
+primary_output_id: 6
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 25
+label: "a"
+parent_id: 3
+}
+path_fragments {
+id: 24
+label: "lib2.txt"
+parent_id: 25
+}
+artifacts {
+id: 11
+path_fragment_id: 24
+}
+dep_set_of_files {
+id: 5
+direct_artifact_ids: 11
+direct_artifact_ids: 1
+}
+dep_set_of_files {
+id: 4
+transitive_dep_set_ids: 5
+direct_artifact_ids: 6
+direct_artifact_ids: 4
+}
+artifacts {
+id: 12
+path_fragment_id: 18
+}
+actions {
+target_id: 2
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 1
+input_dep_set_ids: 4
+output_ids: 12
+primary_output_id: 12
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 27
+label: "test"
+parent_id: 8
+}
+path_fragments {
+id: 26
+label: "test-setup.sh"
+parent_id: 27
+}
+artifacts {
+id: 13
+path_fragment_id: 26
+}
+path_fragments {
+id: 28
+label: "generate-xml.sh"
+parent_id: 27
+}
+artifacts {
+id: 14
+path_fragment_id: 28
+}
+dep_set_of_files {
+id: 6
+direct_artifact_ids: 12
+direct_artifact_ids: 13
+direct_artifact_ids: 14
+}
+path_fragments {
+id: 32
+label: "testlogs"
+parent_id: 4
+}
+path_fragments {
+id: 31
+label: "b"
+parent_id: 32
+}
+path_fragments {
+id: 22
+label: "MANIFEST"
+parent_id: 23
+}
+artifacts {
+id: 10
+path_fragment_id: 22
+}
+path_fragments {
+id: 30
+label: "t1"
+parent_id: 31
+}
+path_fragments {
+id: 29
+label: "test.log"
+parent_id: 30
+}
+artifacts {
+id: 15
+path_fragment_id: 29
+}
+path_fragments {
+id: 33
+label: "test.xml"
+parent_id: 30
+}
+artifacts {
+id: 16
+path_fragment_id: 33
+}
+path_fragments {
+id: 34
+label: "test.cache_status"
+parent_id: 30
+}
+artifacts {
+id: 17
+path_fragment_id: 34
+}
+actions {
+target_id: 3
+action_key: "9f18d61fe318c622b23edd15c2b9b185a8dc0e972d9c1498add946aeb8c125c7"
+mnemonic: "SymlinkTree"
+configuration_id: 3
+input_dep_set_ids: 3
+output_ids: 10
+primary_output_id: 10
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 7
+direct_artifact_ids: 3
+direct_artifact_ids: 10
+direct_artifact_ids: 8
+}
+artifacts {
+id: 20
+path_fragment_id: 23
+}
+actions {
+target_id: 3
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 3
+input_dep_set_ids: 7
+output_ids: 20
+primary_output_id: 20
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 35
+label: "tool"
+parent_id: 2
+}
+artifacts {
+id: 18
+path_fragment_id: 35
+}
+path_fragments {
+id: 36
+label: "test.outputs"
+parent_id: 30
+}
+actions {
+target_id: 3
+action_key: "8758dd733791fb6331f0fb31c024d9b0263a8a9c1589f263337f30d6437c2ba8"
+mnemonic: "FileWrite"
+configuration_id: 2
+output_ids: 18
+primary_output_id: 18
+execution_platform: "@@platforms//host:host"
+is_executable: true
+}
+artifacts {
+id: 19
+path_fragment_id: 36
+is_tree_artifact: true
+}
+actions {
+target_id: 2
+action_key: "6ff7a6d9e8ae0f0d2e54c37977421c903806c134117396c1e00b1968a500b478"
+mnemonic: "TestRunner"
+configuration_id: 1
+arguments: "external/bazel_tools/tools/test/test-setup.sh"
+arguments: "b/t1"
+environment_variables {
+  key: "PATH"
+  value: "/bin:/usr/bin:/usr/local/bin"
+}
+input_dep_set_ids: 6
+output_ids: 15
+output_ids: 16
+output_ids: 17
+output_ids: 19
+primary_output_id: 15
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 37
+label: "tool.repo_mapping"
+parent_id: 2
+}
+artifacts {
+id: 21
+path_fragment_id: 37
+}
+actions {
+target_id: 3
+action_key: "61bbfefac65918acf28c9921dfe72e713ddcd4a24e9e0c5862c16e6308d804f3"
+mnemonic: "RepoMappingManifest"
+configuration_id: 2
+output_ids: 21
+primary_output_id: 21
+execution_platform: "@@platforms//host:host"
+}
+path_fragments {
+id: 38
+label: "tool.runfiles_manifest"
+parent_id: 2
+}
+artifacts {
+id: 22
+path_fragment_id: 38
+}
+actions {
+target_id: 3
+action_key: "fa612f3420bc9a9f396725824b7025c5bce959ee5459337d257e28af7303d3e9"
+mnemonic: "SourceSymlinkManifest"
+configuration_id: 2
+output_ids: 22
+primary_output_id: 22
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 8
+direct_artifact_ids: 22
+}
+path_fragments {
+id: 40
+label: "tool.runfiles"
+parent_id: 2
+}
+path_fragments {
+id: 39
+label: "MANIFEST"
+parent_id: 40
+}
+artifacts {
+id: 23
+path_fragment_id: 39
+}
+actions {
+target_id: 3
+action_key: "b4383eb49e620ed4369432971c7220f133f5f750c1ffc573d2c133419df8ad0e"
+mnemonic: "SymlinkTree"
+configuration_id: 2
+input_dep_set_ids: 8
+output_ids: 23
+primary_output_id: 23
+execution_platform: "@@platforms//host:host"
+}
+dep_set_of_files {
+id: 9
+direct_artifact_ids: 18
+direct_artifact_ids: 23
+direct_artifact_ids: 21
+}
+artifacts {
+id: 24
+path_fragment_id: 40
+}
+actions {
+target_id: 3
+action_key: "64524680ae352918974e5de22f89166472d4f41ef8c12369e8c62a2141413139"
+mnemonic: "RunfilesTree"
+configuration_id: 2
+input_dep_set_ids: 9
+output_ids: 24
+primary_output_id: 24
+execution_platform: "@@platforms//host:host"
+}

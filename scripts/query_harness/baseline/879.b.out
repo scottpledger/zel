@@ -1,0 +1,29 @@
+# @WS@/a/BUILD:4:8
+catrule(
+  name = "lib",
+  tags = ["fast", "manual"],
+  srcs = ["//a:x.txt", "//a:srcs_fg", "@ext//lib:data"],
+  tag_x = "lib",
+)
+# Rule lib instantiated at (most recent call last):
+#   @WS@/a/BUILD:4:8 in <toplevel>
+# Rule catrule defined at (most recent call last):
+#   @WS@/defs.bzl:6:15 in <toplevel>
+
+# @WS@/a/BUILD:3:10
+filegroup(
+  name = "srcs_fg",
+  srcs = ["//a:x.txt", "//a:y.txt", "//a:z.txt"],
+)
+# Rule srcs_fg instantiated at (most recent call last):
+#   @WS@/a/BUILD:3:10 in <toplevel>
+
+# @OB@/external/ext+/lib/BUILD:1:10
+filegroup(
+  name = "data",
+  visibility = ["//visibility:public"],
+  srcs = ["@ext//lib:d.txt"],
+)
+# Rule data instantiated at (most recent call last):
+#   @OB@/external/ext+/lib/BUILD:1:10 in <toplevel>
+

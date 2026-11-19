@@ -1,0 +1,9 @@
+genrule rule //a:gg
+catrule rule //a:lib
+catrule rule //a:lib2
+filegroup rule //a:sel
+catrule rule //a:sm_cat
+filegroup rule //a:sm_fg
+filegroup rule //a:srcs_fg
+trule rule //a:tr
+source file //a:x.txt

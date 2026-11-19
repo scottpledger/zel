@@ -5,6 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+zel-cmdline = { workspace = true }
 zel-proto = { workspace = true }
 zel-util = { workspace = true }
 zel-vfs = { workspace = true }

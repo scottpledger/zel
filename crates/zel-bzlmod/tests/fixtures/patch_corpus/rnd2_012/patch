@@ -1,0 +1,22 @@
+--- a/a.txt
++++ b/a.txt
+@@ -3,3 +3,3 @@
+   indent
+ eps
+-	Tab
++NEW 	Tab
+--- a/b.txt
++++ b/b.txt
+@@ -1,2 +1 @@
+-gamma
+ y 1
+@@ -4,4 +3,2 @@
+ eps 0
+-gamma
+-}
+ delta 0
+@@ -11,2 +8,4 @@
+ 	Tab
++gamma
++x
+ { 1

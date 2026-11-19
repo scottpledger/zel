@@ -1,0 +1,18 @@
+x 0
+ 0
+x
+} 1
+ 2
+return 0; 1
+delta
+gamma 0
+delta 3
+ 3
+alpha 1
+  indent 0
+beta
+gamma 3
+beta 2
+eps
+delta 3
+x 2

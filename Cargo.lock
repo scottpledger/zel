@@ -6,6 +6,7 @@ version = 4
 name = "zel-analysis"
 version = "0.0.1"
 dependencies = [
+ "zel-builtins",
  "zel-cmdline",
  "zel-packages",
  "zel-starlark",
@@ -14,10 +15,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "zel-bazel-tools"
+version = "0.0.1"
+
+[[package]]
+name = "zel-builtins"
+version = "0.0.1"
+dependencies = [
+ "zel-starlark",
+ "zel-util",
+]
+
+[[package]]
 name = "zel-bzlmod"
 version = "0.0.1"
 dependencies = [
+ "zel-analysis",
+ "zel-bazel-tools",
  "zel-cmdline",
+ "zel-options",
+ "zel-packages",
+ "zel-proto",
+ "zel-rules",
  "zel-starlark",
  "zel-util",
  "zel-vfs",
@@ -30,6 +49,7 @@ dependencies = [
  "zel-cmdline",
  "zel-options",
  "zel-proto",
+ "zel-remote",
  "zel-server",
  "zel-util",
  "zel-vfs",
@@ -48,6 +68,7 @@ name = "zel-events"
 version = "0.0.1"
 dependencies = [
  "zel-proto",
+ "zel-remote",
  "zel-util",
  "zel-vfs",
 ]
@@ -57,8 +78,10 @@ name = "zel-exec"
 version = "0.0.1"
 dependencies = [
  "zel-analysis",
+ "zel-bzlmod",
  "zel-cmdline",
  "zel-events",
+ "zel-proto",
  "zel-remote",
  "zel-sandbox",
  "zel-util",
@@ -79,6 +102,7 @@ dependencies = [
 name = "zel-options"
 version = "0.0.1"
 dependencies = [
+ "zel-cmdline",
  "zel-proto",
  "zel-util",
  "zel-vfs",
@@ -88,6 +112,8 @@ dependencies = [
 name = "zel-packages"
 version = "0.0.1"
 dependencies = [
+ "zel-bazel-tools",
+ "zel-builtins",
  "zel-cmdline",
  "zel-starlark",
  "zel-util",
@@ -102,8 +128,11 @@ version = "0.0.1"
 name = "zel-query"
 version = "0.0.1"
 dependencies = [
+ "zel-analysis",
  "zel-cmdline",
  "zel-packages",
+ "zel-rules",
+ "zel-starlark",
  "zel-util",
  "zel-vfs",
 ]
@@ -113,6 +142,7 @@ name = "zel-remote"
 version = "0.0.1"
 dependencies = [
  "zel-proto",
+ "zel-sandbox",
  "zel-util",
  "zel-vfs",
 ]
@@ -123,6 +153,7 @@ version = "0.0.1"
 dependencies = [
  "zel-analysis",
  "zel-cmdline",
+ "zel-options",
  "zel-packages",
  "zel-starlark",
  "zel-util",
@@ -143,6 +174,7 @@ name = "zel-server"
 version = "0.0.1"
 dependencies = [
  "zel-analysis",
+ "zel-bazel-tools",
  "zel-bzlmod",
  "zel-cmdline",
  "zel-events",

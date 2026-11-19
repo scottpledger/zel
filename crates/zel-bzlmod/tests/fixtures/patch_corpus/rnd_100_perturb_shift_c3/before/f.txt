@@ -1,0 +1,18 @@
+y 2
+alpha 2
+eps
+{ 3
+eps 0
+	Tab 1
+PERTURBED6
+}
+beta
+gamma
+  indent 3
+eps 3
+x
+beta
+gamma 1
+  indent
+delta 1
+} 1

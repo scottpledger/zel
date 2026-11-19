@@ -1,0 +1,5 @@
+genrule rule //b:mk (a7a71fd)
+xlib rule //b:shlib (a7a71fd)
+x_test rule //b:t1 (e722a21)
+x_test rule //b:t2 (e722a21)
+xbin rule //b:tool (a7a71fd)

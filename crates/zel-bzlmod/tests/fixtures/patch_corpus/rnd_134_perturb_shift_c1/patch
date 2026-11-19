@@ -1,0 +1,5 @@
+--- a/f.txt
++++ b/f.txt
+@@ -32 +32,2 @@
+ beta
++delta

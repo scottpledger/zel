@@ -1,0 +1,11 @@
+gamma
+y 0
+{ 0
+  indent
+  indent 0
+alpha 2
+return 0;
+gamma 2
+gamma 2
+alpha
+eps

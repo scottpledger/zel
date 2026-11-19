@@ -1,0 +1,3 @@
+module(name="m1", version="1.0")
+ext = use_extension("//:ext.bzl", "ex")
+ext.mk(name = "fromm1")

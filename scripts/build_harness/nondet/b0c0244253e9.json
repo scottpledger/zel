@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "b0c0244253e9",
+ "classified_as": "ANYERR",
+ "cmd": "test //:t_pass //:nonexist",
+ "distinct": 2,
+ "harness": "build",
+ "hashes": [
+  "324a38ae799b59e7",
+  "324a38ae799b59e7",
+  "2813e6e4688557f5",
+  "324a38ae799b59e7",
+  "2813e6e4688557f5",
+  "2813e6e4688557f5"
+ ],
+ "history": [],
+ "mode": "ANYERR",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "ERROR: Skipping '//:nonexist': no such target '//:nonexist': target 'nonexist' not declared in package '' defined by WS/BUILD\nERROR: no such target '//:nonexist': target 'nonexist' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: Skipping '//:nonexist': no such target '//:nonexist': target 'nonexist' not declared in package '' defined by WS/BUILD\nERROR: no such target '//:nonexist': target 'nonexist' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such target '//:nonexist': target 'nonexist' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: Skipping '//:nonexist': no such target '//:nonexist': target 'nonexist' not declared in package '' defined by WS/BUILD\nERROR: no such target '//:nonexist': target 'nonexist' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such target '//:nonexist': target 'nonexist' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "ERROR: no such target '//:nonexist': target 'nonexist' not declared in package '' defined by WS/BUILD\nINFO: Elapsed time: Ns\nINFO: 0 processes.\nERROR: Build did NOT complete successfully\nERROR: Couldn't start the build. Unable to run tests",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

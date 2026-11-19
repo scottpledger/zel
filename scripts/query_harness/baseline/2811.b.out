@@ -1,0 +1,17 @@
+@bazel_tools//tools/build_defs:bzl_srcs
+@bazel_tools//tools/build_defs:embedded_tools
+@bazel_tools//tools/build_defs:srcs
+@bazel_tools//tools/build_defs/build_info:bzl_srcs
+@bazel_tools//tools/build_defs/build_info:cc_build_info
+@bazel_tools//tools/build_defs/build_info:java_build_info
+@bazel_tools//tools/build_defs/cc:action_names
+@bazel_tools//tools/build_defs/cc:action_names_test_files
+@bazel_tools//tools/build_defs/cc:bazel_osx_p4deps
+@bazel_tools//tools/build_defs/cc:srcs
+@bazel_tools//tools/build_defs/cc/whitelists/parse_headers_and_layering_check:srcs
+@bazel_tools//tools/build_defs/cc/whitelists/starlark_hdrs_check:srcs
+@bazel_tools//tools/build_defs/hash:sha256
+@bazel_tools//tools/build_defs/pkg:archive
+@bazel_tools//tools/build_defs/pkg:build_tar
+@bazel_tools//tools/build_defs/pkg:bzl_srcs
+@bazel_tools//tools/build_defs/repo:bzl_srcs

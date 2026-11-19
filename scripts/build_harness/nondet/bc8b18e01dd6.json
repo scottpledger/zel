@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "bc8b18e01dd6",
+ "classified_as": "UNCLASSIFIED",
+ "cmd": "test --runs_per_test=3 --test_output=all //:t_flaky_pass",
+ "distinct": 6,
+ "harness": "build",
+ "hashes": [
+  "b0fe773ae44425da",
+  "05ee17b005bac6b9",
+  "69c01999df7c6c8b",
+  "0e46a90db8a5d47b",
+  "77d4f29c230acc80",
+  "ab99e5d08f195ef5"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "rm -f /tmp/vb5-flaky-*",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: From Testing //:t_flaky_pass (run 1 of 3):\nINFO: From Testing //:t_flaky_pass (run 3 of 3):\nINFO: From Testing //:t_flaky_pass (run 2 of 3):\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_flaky_pass (run 1 of 3):\nrun count 27\n================================================================================\n==================== Test output for //:t_flaky_pass (run 3 of 3):\nrun count 27\n================================================================================\n==================== Test output for //:t_flaky_pass (run 2 of 3):\nrun count 27\n================================================================================\n//:t_flaky_pass                                                          PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: From Testing //:t_flaky_pass (run 2 of 3):\nINFO: From Testing //:t_flaky_pass (run 1 of 3):\nINFO: From Testing //:t_flaky_pass (run 3 of 3):\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_flaky_pass (run 2 of 3):\nrun count 28\n================================================================================\n==================== Test output for //:t_flaky_pass (run 1 of 3):\nrun count 28\n================================================================================\n==================== Test output for //:t_flaky_pass (run 3 of 3):\nrun count 28\n================================================================================\n//:t_flaky_pass                                                          PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: From Testing //:t_flaky_pass (run 1 of 3):\nINFO: From Testing //:t_flaky_pass (run 3 of 3):\nINFO: From Testing //:t_flaky_pass (run 2 of 3):\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_flaky_pass (run 1 of 3):\nrun count 29\n================================================================================\n==================== Test output for //:t_flaky_pass (run 3 of 3):\nrun count 29\n================================================================================\n==================== Test output for //:t_flaky_pass (run 2 of 3):\nrun count 30\n================================================================================\n//:t_flaky_pass                                                          PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: From Testing //:t_flaky_pass (run 1 of 3):\nINFO: From Testing //:t_flaky_pass (run 2 of 3):\nINFO: From Testing //:t_flaky_pass (run 3 of 3):\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_flaky_pass (run 1 of 3):\nrun count 31\n================================================================================\n==================== Test output for //:t_flaky_pass (run 2 of 3):\nrun count 31\n================================================================================\n==================== Test output for //:t_flaky_pass (run 3 of 3):\nrun count 31\n================================================================================\n//:t_flaky_pass                                                          PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: From Testing //:t_flaky_pass (run 3 of 3):\nINFO: From Testing //:t_flaky_pass (run 2 of 3):\nINFO: From Testing //:t_flaky_pass (run 1 of 3):\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_flaky_pass (run 3 of 3):\nrun count 32\n================================================================================\n==================== Test output for //:t_flaky_pass (run 2 of 3):\nrun count 32\n================================================================================\n==================== Test output for //:t_flaky_pass (run 1 of 3):\nrun count 32\n================================================================================\n//:t_flaky_pass                                                          PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_flaky_pass (N packages loaded).\nINFO: From Testing //:t_flaky_pass (run 2 of 3):\nINFO: From Testing //:t_flaky_pass (run 3 of 3):\nINFO: From Testing //:t_flaky_pass (run 1 of 3):\nINFO: Found 1 test target...\nTarget //:t_flaky_pass up-to-date:\n  bazel-bin/t_flaky_pass\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_flaky_pass (run 2 of 3):\nrun count 33\n================================================================================\n==================== Test output for //:t_flaky_pass (run 3 of 3):\nrun count 33\n================================================================================\n==================== Test output for //:t_flaky_pass (run 1 of 3):\nrun count 33\n================================================================================\n//:t_flaky_pass                                                          PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

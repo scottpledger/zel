@@ -1,0 +1,9 @@
+[package]
+name = "zel-builtins"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zel-starlark = { workspace = true }
+zel-util = { workspace = true }

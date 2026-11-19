@@ -1,0 +1,11 @@
+# @WS@/a/BUILD:5:8
+catrule(
+  name = "lib2",
+  tags = ["fast"],
+  srcs = ["//a:lib", "//a:y.txt"],
+)
+# Rule lib2 instantiated at (most recent call last):
+#   @WS@/a/BUILD:5:8 in <toplevel>
+# Rule catrule defined at (most recent call last):
+#   @WS@/defs.bzl:6:15 in <toplevel>
+

@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "036ab86b6abc",
+ "classified_as": "STRICT",
+ "cmd": "coverage --build_tests_only //:ga",
+ "distinct": 1,
+ "harness": "build",
+ "hashes": [
+  "13118d60f60c06f3",
+  "13118d60f60c06f3",
+  "13118d60f60c06f3",
+  "13118d60f60c06f3",
+  "13118d60f60c06f3",
+  "13118d60f60c06f3"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Found 0 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 4
+  },
+  {
+   "err": "INFO: Found 0 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 4
+  },
+  {
+   "err": "INFO: Found 0 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 4
+  },
+  {
+   "err": "INFO: Found 0 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 4
+  },
+  {
+   "err": "INFO: Found 0 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 4
+  },
+  {
+   "err": "INFO: Found 0 test targets...\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nINFO: Build completed successfully, 1 total action\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 4
+  }
+ ],
+ "workspace": "ws3"
+}

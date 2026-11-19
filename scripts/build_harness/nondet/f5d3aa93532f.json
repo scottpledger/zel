@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "f5d3aa93532f",
+ "classified_as": "ORDERLESS",
+ "cmd": "build --show_result=10 //:g1 //:g2 //:g3",
+ "distinct": 4,
+ "harness": "build",
+ "hashes": [
+  "bd1fca45678a101e",
+  "eca26f5e5dde7e16",
+  "eca26f5e5dde7e16",
+  "eca26f5e5dde7e16",
+  "caa9ecfb926c8ab3",
+  "c07375d401e705f5"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: Found 3 targets...\nTarget //:g2 up-to-date:\n  bazel-bin/g2.out\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nTarget //:g3 up-to-date:\n  bazel-bin/g3.out\n  bazel-bin/g3b.out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 1 internal, 3 darwin-sandbox.\nINFO: Build completed successfully, 4 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: Found 3 targets...\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nTarget //:g2 up-to-date:\n  bazel-bin/g2.out\nTarget //:g3 up-to-date:\n  bazel-bin/g3.out\n  bazel-bin/g3b.out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 1 internal, 3 darwin-sandbox.\nINFO: Build completed successfully, 4 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: Found 3 targets...\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nTarget //:g2 up-to-date:\n  bazel-bin/g2.out\nTarget //:g3 up-to-date:\n  bazel-bin/g3.out\n  bazel-bin/g3b.out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 1 internal, 3 darwin-sandbox.\nINFO: Build completed successfully, 4 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: Found 3 targets...\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nTarget //:g2 up-to-date:\n  bazel-bin/g2.out\nTarget //:g3 up-to-date:\n  bazel-bin/g3.out\n  bazel-bin/g3b.out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 1 internal, 3 darwin-sandbox.\nINFO: Build completed successfully, 4 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: Found 3 targets...\nTarget //:g2 up-to-date:\n  bazel-bin/g2.out\nTarget //:g3 up-to-date:\n  bazel-bin/g3.out\n  bazel-bin/g3b.out\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 1 internal, 3 darwin-sandbox.\nINFO: Build completed successfully, 4 total actions",
+   "out": "",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nINFO: Found 3 targets...\nTarget //:g1 up-to-date:\n  bazel-bin/g1.out\nTarget //:g3 up-to-date:\n  bazel-bin/g3.out\n  bazel-bin/g3b.out\nTarget //:g2 up-to-date:\n  bazel-bin/g2.out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 4 processes: 1 internal, 3 darwin-sandbox.\nINFO: Build completed successfully, 4 total actions",
+   "out": "",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

@@ -1,0 +1,14 @@
+action 'Cat @@//a:lib'
+  Mnemonic: CatIt
+  Target: //a:lib
+  Configuration: k8-opt
+  Execution platform: @@platforms//host:host
+  ActionKey: c58e71794bc2980a340b8cf1b054cf8e45441ca4f5c4973f8efa3338db262012
+  Inputs: [a/x.txt, a/y.txt, a/z.txt, external/ext+/lib/d.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/lib.txt]
+  Command Line: (exec /bin/bash \
+    -c \
+    'cat a/x.txt a/x.txt a/y.txt a/z.txt external/ext+/lib/d.txt > bazel-out/k8-opt/bin/a/lib.txt')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
+# Execution platform: @@platforms//host:host
+

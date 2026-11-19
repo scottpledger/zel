@@ -1,0 +1,6 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <source-file location="@WS@/e/BUILD:1:1" name="//e:BUILD" package_contains_errors="true">
+        <visibility-label name="//visibility:private"/>
+    </source-file>
+</query>

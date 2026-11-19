@@ -1,0 +1,7 @@
+--- a/f.txt
++++ b/f.txt
+@@ -18,3 +18,4 @@
+ line 18
+ line 19
+ line 20
++NEND

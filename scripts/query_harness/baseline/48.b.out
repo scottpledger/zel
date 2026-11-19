@@ -1,0 +1,25 @@
+<?xml version="1.1" encoding="UTF-8" standalone="no"?>
+<query version="2">
+    <rule class="filegroup" location="@OB@/external/ext+/lib/BUILD:1:10" name="@ext//lib:data">
+        <string name="name" value="data"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="srcs">
+            <label value="@ext//lib:d.txt"/>
+        </list>
+        <rule-input name="@ext//lib:d.txt"/>
+    </rule>
+    <rule class="genrule" location="@OB@/external/ext+/lib/BUILD:2:8" name="@ext//lib:gen">
+        <string name="name" value="gen"/>
+        <list name="visibility">
+            <label value="//visibility:public"/>
+        </list>
+        <list name="outs">
+            <output value="@ext//lib:g.out"/>
+        </list>
+        <string name="cmd" value="echo ext &gt; $@"/>
+        <rule-input name="@bazel_tools//tools/genrule:genrule-setup.sh"/>
+        <rule-output name="@ext//lib:g.out"/>
+    </rule>
+</query>

@@ -1,0 +1,2 @@
+bazel-out/k8-fastbuild/bin/external/ext+/lib/g.out
+external/bazel_tools/tools/genrule/genrule-setup.sh

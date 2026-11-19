@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "6578a8e84aca",
+ "classified_as": "ORDERLESS",
+ "cmd": "query '//:all' --output=minrank --keep_going",
+ "distinct": 4,
+ "harness": "query",
+ "hashes": [
+  "e48821e0a13d69de",
+  "d3953c5dce8099bf",
+  "d3953c5dce8099bf",
+  "fd3dc7c3ce877683",
+  "fd3dc7c3ce877683",
+  "7255e41157e79459"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "0 //:all_tests\n0 //:top_alias\n0 //:tagged\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //:top_alias\n0 //:tagged\n0 //:all_tests\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //:top_alias\n0 //:tagged\n0 //:all_tests\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //:tagged\n0 //:top_alias\n0 //:all_tests\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //:tagged\n0 //:top_alias\n0 //:all_tests\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 //:all_tests\n0 //:tagged\n0 //:top_alias\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

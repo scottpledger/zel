@@ -1,0 +1,9 @@
+--- a/f.txt
++++ b/f.txt
+@@ -8,5 +8,5 @@
+ y
+ eps
+-alpha
++NEW alpha
+ alpha 1
+ 	Tab

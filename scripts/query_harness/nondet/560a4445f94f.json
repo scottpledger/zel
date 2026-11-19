@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "560a4445f94f",
+ "classified_as": "STRICT",
+ "cmd": "query //a:lib --experimental_ui_debug_all_events",
+ "distinct": 1,
+ "harness": "query",
+ "hashes": [
+  "14f3d63dde4cad09",
+  "14f3d63dde4cad09",
+  "14f3d63dde4cad09",
+  "14f3d63dde4cad09",
+  "14f3d63dde4cad09",
+  "14f3d63dde4cad09"
+ ],
+ "history": [],
+ "mode": "STRICT",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "INFO <no location>: Transports announced:\nPROGRESS <no location>: Loading package: a\nSTDOUT <no location>: //a:lib\n\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "INFO <no location>: Transports announced:\nPROGRESS <no location>: Loading package: a\nSTDOUT <no location>: //a:lib\n\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "INFO <no location>: Transports announced:\nPROGRESS <no location>: Loading package: a\nSTDOUT <no location>: //a:lib\n\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "INFO <no location>: Transports announced:\nPROGRESS <no location>: Loading package: a\nSTDOUT <no location>: //a:lib\n\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "INFO <no location>: Transports announced:\nPROGRESS <no location>: Loading package: a\nSTDOUT <no location>: //a:lib\n\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "INFO <no location>: Transports announced:\nPROGRESS <no location>: Loading package: a\nSTDOUT <no location>: //a:lib\n\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

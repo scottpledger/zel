@@ -1,0 +1,3 @@
+sub D
+sub/dir D
+sub/dir/new.txt F 0o600 610a

@@ -1,0 +1,5 @@
+digraph mygraph {
+  node [shape=box];
+  "@ext//lib:data"
+  "@ext//lib:gen"
+}

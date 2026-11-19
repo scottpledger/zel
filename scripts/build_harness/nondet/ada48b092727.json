@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "ada48b092727",
+ "classified_as": "ANYERR",
+ "cmd": "test --test_lang_filters=cc,java //:all",
+ "distinct": 4,
+ "harness": "build",
+ "hashes": [
+  "290baad75a397037",
+  "290baad75a397037",
+  "726041b66327ce31",
+  "6d6e55a1434fb20e",
+  "c316e8ea97e580c5",
+  "726041b66327ce31"
+ ],
+ "history": [],
+ "mode": "ANYERR",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "WARNING: All specified test targets were excluded by filters\nERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "WARNING: All specified test targets were excluded by filters\nERROR: WS/BUILD:15:8: in cmd attribute of genrule rule //:gbadloc: label '//:nosuch' in $(location) expression is not a declared prerequisite of this rule\nERROR: WS/BUILD:15:8: Analysis of target '//:gbadloc' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadloc' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "WARNING: All specified test targets were excluded by filters\nERROR: WS/BUILD:14:8: in cmd attribute of genrule rule //:gbadvar: $(NOSUCHVAR) not defined\nERROR: WS/BUILD:14:8: Analysis of target '//:gbadvar' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadvar' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "WARNING: All specified test targets were excluded by filters\nERROR: WS/BUILD:14:8: in cmd attribute of genrule rule //:gbadvar: $(NOSUCHVAR) not defined\nERROR: WS/BUILD:14:8: Analysis of target '//:gbadvar' (config: 2d89340) failed\nUse --verbose_failures to see the command lines of failed build steps.\nERROR: Analysis of target '//:gbadvar' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "WARNING: All specified test targets were excluded by filters\nERROR: WS/BUILD:12:8: in cmd attribute of genrule rule //:gstamp: $(INFO_FILE) not defined\nERROR: WS/BUILD:12:8: Analysis of target '//:gstamp' (config: 2d89340) failed\nERROR: Analysis of target '//:gstamp' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  },
+  {
+   "err": "WARNING: All specified test targets were excluded by filters\nERROR: WS/BUILD:14:8: in cmd attribute of genrule rule //:gbadvar: $(NOSUCHVAR) not defined\nERROR: WS/BUILD:14:8: Analysis of target '//:gbadvar' (config: 2d89340) failed\nERROR: Analysis of target '//:gbadvar' failed; build aborted\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 1 process: 1 internal.\nERROR: Build did NOT complete successfully\nERROR: No test targets were found, yet testing was requested",
+   "out": "",
+   "rc": 1
+  }
+ ],
+ "workspace": "ws1"
+}

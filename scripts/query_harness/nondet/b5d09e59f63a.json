@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "b5d09e59f63a",
+ "classified_as": "ORDERLESS",
+ "cmd": "query '@ext//lib:all' --output=maxrank --keep_going",
+ "distinct": 2,
+ "harness": "query",
+ "hashes": [
+  "be955d02c0416703",
+  "be955d02c0416703",
+  "0fef0a056422594a",
+  "0fef0a056422594a",
+  "be955d02c0416703",
+  "0fef0a056422594a"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "0 @ext//lib:data\n0 @ext//lib:gen\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 @ext//lib:data\n0 @ext//lib:gen\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 @ext//lib:gen\n0 @ext//lib:data\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 @ext//lib:gen\n0 @ext//lib:data\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 @ext//lib:data\n0 @ext//lib:gen\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "0 @ext//lib:gen\n0 @ext//lib:data\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

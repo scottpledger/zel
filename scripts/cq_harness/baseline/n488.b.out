@@ -1,0 +1,14 @@
+action 'Cat @@//a:sm_cat'
+  Mnemonic: CatIt
+  Target: //a:sm_cat
+  Configuration: k8-opt
+  Execution platform: @@platforms//host:host
+  ActionKey: 1245f5ca2b51a09b1ffd3ffa59818d03c55cbd7e308b0af8fcf634f81baa9d34
+  Inputs: [a/x.txt, a/y.txt]
+  Outputs: [bazel-out/k8-opt/bin/a/sm_cat.txt]
+  Command Line: (exec /bin/bash \
+    -c \
+    'cat a/x.txt a/y.txt > bazel-out/k8-opt/bin/a/sm_cat.txt')
+# Configuration: bf3a44eb59a38421358926558b1f02de09809e935f67c7349f4148d5d8c644dc
+# Execution platform: @@platforms//host:host
+

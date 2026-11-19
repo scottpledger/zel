@@ -1,0 +1,8 @@
+# @WS@/d/BUILD:2:10
+filegroup(
+  name = "ok",
+  srcs = ["//c:cdata"],
+)
+# Rule ok instantiated at (most recent call last):
+#   @WS@/d/BUILD:2:10 in <toplevel>
+

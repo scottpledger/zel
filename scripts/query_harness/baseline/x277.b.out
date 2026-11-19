@@ -1,0 +1,59 @@
+# @WS@/b/BUILD:6:8
+genrule(
+  name = "mk",
+  visibility = ["@@//visibility:private"],
+  outs = ["@@//b:mk.txt"],
+  cmd = "echo hi > $@",
+)
+# Rule mk instantiated at (most recent call last):
+#   @WS@/b/BUILD:6:8 in <toplevel>
+
+# @WS@/b/BUILD:5:5
+xlib(
+  name = "shlib",
+  visibility = ["@@//c:__pkg__"],
+  srcs = ["@@//b:t.cc"],
+  data = ["@@//c:cdata"],
+)
+# Rule shlib instantiated at (most recent call last):
+#   @WS@/b/BUILD:5:5 in <toplevel>
+# Rule xlib defined at (most recent call last):
+#   @WS@/defs.bzl:36:12 in <toplevel>
+
+# @WS@/b/BUILD:3:7
+x_test(
+  name = "t1",
+  tags = ["fast"],
+  size = "small",
+  srcs = ["@@//b:t.cc"],
+  data = ["@@//a:lib2"],
+)
+# Rule t1 instantiated at (most recent call last):
+#   @WS@/b/BUILD:3:7 in <toplevel>
+# Rule x_test defined at (most recent call last):
+#   @WS@/defs.bzl:35:14 in <toplevel>
+
+# @WS@/b/BUILD:4:7
+x_test(
+  name = "t2",
+  tags = ["manual", "slow"],
+  timeout = "long",
+  srcs = ["@@//b:t.cc"],
+  deps = ["@@//b:shlib"],
+)
+# Rule t2 instantiated at (most recent call last):
+#   @WS@/b/BUILD:4:7 in <toplevel>
+# Rule x_test defined at (most recent call last):
+#   @WS@/defs.bzl:35:14 in <toplevel>
+
+# @WS@/b/BUILD:2:5
+xbin(
+  name = "tool",
+  visibility = ["@@//visibility:public"],
+  srcs = ["@@//b:tool.cc"],
+)
+# Rule tool instantiated at (most recent call last):
+#   @WS@/b/BUILD:2:5 in <toplevel>
+# Rule xbin defined at (most recent call last):
+#   @WS@/defs.bzl:34:12 in <toplevel>
+

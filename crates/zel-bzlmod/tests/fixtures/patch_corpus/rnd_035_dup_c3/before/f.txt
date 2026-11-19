@@ -1,0 +1,62 @@
+y
+  indent
+gamma
+{ 1
+y 3
+gamma
+gamma 2
+x
+{ 1
+alpha
+alpha
+alpha 3
+gamma 0
+ 1
+  indent 3
+{ 0
+} 3
+  indent 2
+beta
+y 2
+{ 1
+eps 2
+  indent
+} 1
+delta 3
+eps 2
+alpha
+} 0
+  indent 3
+eps 0
+beta
+y
+  indent
+gamma
+{ 1
+y 3
+gamma
+gamma 2
+x
+{ 1
+alpha
+alpha
+alpha 3
+gamma 0
+ 1
+  indent 3
+{ 0
+} 3
+  indent 2
+beta
+y 2
+{ 1
+eps 2
+  indent
+} 1
+delta 3
+eps 2
+alpha
+} 0
+  indent 3
+eps 0
+beta

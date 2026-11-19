@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "83833411cbc8",
+ "classified_as": "ORDERLESS",
+ "cmd": "query 'deps(//a:lib2)' --output=label --order_output=no --keep_going",
+ "distinct": 6,
+ "harness": "query",
+ "hashes": [
+  "fa8cca866964689e",
+  "8ef02234d56e3a65",
+  "4a05e85665706f71",
+  "c4674378a6513e06",
+  "0e36cfcdc061d4a1",
+  "98244397ca884ad8"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "@ext//lib:d.txt\n//a:y.txt\n//a:lib\n//a:srcs_fg\n//a:x.txt\n//a:z.txt\n//a:lib2\n@ext//lib:data\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:lib2\n//a:y.txt\n@ext//lib:d.txt\n@ext//lib:data\n//a:x.txt\n//a:srcs_fg\n//a:lib\n//a:z.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:lib\n//a:lib2\n//a:x.txt\n@ext//lib:data\n//a:y.txt\n//a:srcs_fg\n@ext//lib:d.txt\n//a:z.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:x.txt\n//a:z.txt\n@ext//lib:d.txt\n//a:lib2\n@ext//lib:data\n//a:lib\n//a:srcs_fg\n//a:y.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "//a:srcs_fg\n@ext//lib:d.txt\n//a:lib2\n@ext//lib:data\n//a:lib\n//a:y.txt\n//a:x.txt\n//a:z.txt\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "@ext//lib:data\n//a:lib\n//a:srcs_fg\n//a:lib2\n//a:z.txt\n//a:x.txt\n@ext//lib:d.txt\n//a:y.txt\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

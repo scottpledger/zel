@@ -10,6 +10,7 @@ path = "src/main.rs"
 
 [dependencies]
 zel-analysis = { workspace = true }
+zel-bazel-tools = { workspace = true }
 zel-bzlmod = { workspace = true }
 zel-cmdline = { workspace = true }
 zel-events = { workspace = true }

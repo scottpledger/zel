@@ -1,0 +1,29 @@
+} 2
+x 1
+delta
+  indent
+y 3
+delta
+delta 2
+eps 1
+} 2
+y
+gamma 2
+} 3
+x 1
+beta 1
+{
+delta 1
+alpha
+alpha 1
+PERTURBED18
+  indent 2
+}
+	Tab
+x 2
+y
+	Tab
+PERTURBED25
+y
+alpha 0
+alpha 1

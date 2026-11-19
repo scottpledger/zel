@@ -1,0 +1,1 @@
+module(name="buildozer", version="8.5.1", compatibility_level=1)

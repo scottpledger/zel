@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "5eec8ae82971",
+ "classified_as": "ANYERR",
+ "cmd": "test --notest_keep_going //:t_fail //:t_pass //:t_out",
+ "distinct": 3,
+ "harness": "build",
+ "hashes": [
+  "471bfae6eb35ffab",
+  "c30ca5bb0b91a87a",
+  "dc91c43bc8195679",
+  "c30ca5bb0b91a87a",
+  "dc91c43bc8195679",
+  "dc91c43bc8195679"
+ ],
+ "history": [],
+ "mode": "ANYERR",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 19 processes: 19 internal.\nINFO: Build completed, 1 test FAILED, 19 total actions",
+   "out": "//:t_out                                                              NO STATUS\n//:t_pass                                                             NO STATUS\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 1 out of 3 tests: 1 fails locally and 2 were skipped.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 19 processes: 18 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 19 total actions",
+   "out": "//:t_pass                                                             NO STATUS\n//:t_out                                                                 PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 2 out of 3 tests: 1 test passes, 1 fails locally, and 1 was skipped.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 19 processes: 17 internal, 4 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 19 total actions",
+   "out": "//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 3 out of 3 tests: 2 tests pass and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 19 processes: 18 internal, 2 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 19 total actions",
+   "out": "//:t_pass                                                             NO STATUS\n//:t_out                                                                 PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 2 out of 3 tests: 1 test passes, 1 fails locally, and 1 was skipped.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 19 processes: 17 internal, 4 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 19 total actions",
+   "out": "//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 3 out of 3 tests: 2 tests pass and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  },
+  {
+   "err": "INFO: Analyzed 3 targets (N packages loaded).\nFAIL: //:t_fail (Exit 1) (see OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log)\nERROR: WS/BUILD:36:8: Testing //:t_fail failed: Test failed, aborting\nERROR: Test failed, aborting\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 19 processes: 17 internal, 4 darwin-sandbox.\nINFO: Build completed, 1 test FAILED, 19 total actions",
+   "out": "//:t_out                                                                 PASSED in Ns\n//:t_pass                                                                PASSED in Ns\n//:t_fail                                                                FAILED in Ns\n  OB/execroot/_main/bazel-out/darwin_arm64-fastbuild/testlogs/t_fail/test.log\nExecuted 3 out of 3 tests: 2 tests pass and 1 fails locally.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 3
+  }
+ ],
+ "workspace": "ws1"
+}

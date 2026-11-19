@@ -1,0 +1,14 @@
+delta 1
+alpha 3
+beta 3
+beta 0
+{
+alpha
+beta 1
+} 2
+alpha 1
+x 0
+beta 2
+  indent
+return 0; 2
+alpha 1

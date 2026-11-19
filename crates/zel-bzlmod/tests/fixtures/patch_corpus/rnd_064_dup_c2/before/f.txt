@@ -1,0 +1,12 @@
+delta
+	Tab 0
+
+alpha 3
+  indent
+	Tab 1
+delta
+	Tab 0
+
+alpha 3
+  indent
+	Tab 1

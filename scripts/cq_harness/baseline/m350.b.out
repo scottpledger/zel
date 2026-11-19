@@ -1,0 +1,15 @@
+action 'Executing genrule @@ext+//lib:gen'
+  Mnemonic: Genrule
+  Target: @ext//lib:gen
+  Configuration: k8-fastbuild
+  Execution platform: @@platforms//host:host
+  ActionKey: 437af1919ec9321eeb32f63be830af377946257f87823bd5ae149fe94b74e213
+  Inputs: [external/bazel_tools/tools/genrule/genrule-setup.sh]
+  Outputs: [bazel-out/k8-fastbuild/bin/external/ext+/lib/g.out]
+  Environment: [PATH=/bin:/usr/bin:/usr/local/bin]
+  Command Line: (exec /bin/bash \
+    -c \
+    'source external/bazel_tools/tools/genrule/genrule-setup.sh; echo ext > bazel-out/k8-fastbuild/bin/external/ext+/lib/g.out')
+# Configuration: 96207f06d47ffc21662377a41573a1bf78c7e8dea043a07af89602b8f13c8f36
+# Execution platform: @@platforms//host:host
+

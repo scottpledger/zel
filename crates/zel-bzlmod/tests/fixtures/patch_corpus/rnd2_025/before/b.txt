@@ -1,0 +1,11 @@
+gamma
+NEW alpha
+return 0;
+y
+  indent
+gamma 0
+ 1
+	Tab 1
+	Tab 2
+alpha 1
+}

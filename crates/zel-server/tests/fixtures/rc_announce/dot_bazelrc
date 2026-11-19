@@ -1,0 +1,5 @@
+common --isatty=0
+build --jobs=3
+build:foo --copt=-O2
+startup --max_idle_secs=100
+info --show_make_env

@@ -1,0 +1,8 @@
+	Tab 2
+gamma 1
+alpha
+	Tab 0
+  indent 1
+return 0; 2
+	Tab
+alpha

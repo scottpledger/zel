@@ -1,0 +1,9 @@
+# @WS@/pg/BUILD:2:10
+filegroup(
+  name = "viol",
+  visibility = ["//a:__pkg__"],
+  srcs = ["//c:cdata"],
+)
+# Rule viol instantiated at (most recent call last):
+#   @WS@/pg/BUILD:2:10 in <toplevel>
+

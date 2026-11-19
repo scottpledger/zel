@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "7c88eb6e4870",
+ "classified_as": "ORDERLESS",
+ "cmd": "test --runs_per_test=3 --test_output=all //:t_out",
+ "distinct": 4,
+ "harness": "build",
+ "hashes": [
+  "c71e746647364045",
+  "c71e746647364045",
+  "c5a1e16f1acc457c",
+  "fcbcb050cda9272e",
+  "fcbcb050cda9272e",
+  "83cc02cc718253be"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "rm -f /tmp/vb5-flaky-*",
+ "runs": [
+  {
+   "err": "INFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out (run 3 of 3):\nINFO: From Testing //:t_out (run 1 of 3):\nINFO: From Testing //:t_out (run 2 of 3):\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_out (run 3 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 1 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 2 of 3):\nline1\nline2\nline3\n================================================================================\n//:t_out                                                                 PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out (run 3 of 3):\nINFO: From Testing //:t_out (run 1 of 3):\nINFO: From Testing //:t_out (run 2 of 3):\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_out (run 3 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 1 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 2 of 3):\nline1\nline2\nline3\n================================================================================\n//:t_out                                                                 PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out (run 1 of 3):\nINFO: From Testing //:t_out (run 2 of 3):\nINFO: From Testing //:t_out (run 3 of 3):\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_out (run 1 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 2 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 3 of 3):\nline1\nline2\nline3\n================================================================================\n//:t_out                                                                 PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out (run 2 of 3):\nINFO: From Testing //:t_out (run 3 of 3):\nINFO: From Testing //:t_out (run 1 of 3):\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_out (run 2 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 3 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 1 of 3):\nline1\nline2\nline3\n================================================================================\n//:t_out                                                                 PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out (run 2 of 3):\nINFO: From Testing //:t_out (run 3 of 3):\nINFO: From Testing //:t_out (run 1 of 3):\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_out (run 2 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 3 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 1 of 3):\nline1\nline2\nline3\n================================================================================\n//:t_out                                                                 PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  },
+  {
+   "err": "INFO: Analyzed target //:t_out (N packages loaded).\nINFO: From Testing //:t_out (run 1 of 3):\nINFO: From Testing //:t_out (run 3 of 3):\nINFO: From Testing //:t_out (run 2 of 3):\nINFO: Found 1 test target...\nTarget //:t_out up-to-date:\n  bazel-bin/t_out\nINFO: Elapsed time: Ns, Critical Path: T\nINFO: 9 processes: 6 internal, 6 darwin-sandbox.\nINFO: Build completed successfully, 9 total actions",
+   "out": "==================== Test output for //:t_out (run 1 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 3 of 3):\nline1\nline2\nline3\n================================================================================\n==================== Test output for //:t_out (run 2 of 3):\nline1\nline2\nline3\n================================================================================\n//:t_out                                                                 PASSED in Ns\n  Stats over 3 runs: max = Ns, min = Ns, avg = Ns, dev = Ns\nExecuted 1 out of 1 test: 1 test passes.\nThere were tests whose specified size is too big. Use the --test_verbose_timeout_warnings command line option to see which ones these are.",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws1"
+}

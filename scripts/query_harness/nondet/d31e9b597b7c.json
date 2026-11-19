@@ -1,0 +1,53 @@
+{
+ "bazel": "/tmp/bazel-9.3.2",
+ "case_id": "d31e9b597b7c",
+ "classified_as": "ORDERLESS",
+ "cmd": "query 'deps(//a:lib2)' --output=graph --order_output=no --keep_going",
+ "distinct": 5,
+ "harness": "query",
+ "hashes": [
+  "6777e974fd04587b",
+  "7a99ffbfe6935804",
+  "76e2fb0e3c0612f4",
+  "92440c41fe369abd",
+  "76e2fb0e3c0612f4",
+  "b3d6a1908cb3a6b0"
+ ],
+ "history": [],
+ "mode": "ORDERLESS",
+ "n_runs": 6,
+ "pre": "",
+ "runs": [
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib2\" -> \"//a:y.txt\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:x.txt\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:lib\" -> \"@ext//lib:data\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"//a:srcs_fg\"\n  \"//a:srcs_fg\" -> \"//a:x.txt\"\n  \"//a:srcs_fg\" -> \"//a:y.txt\"\n  \"//a:srcs_fg\" -> \"//a:z.txt\"\n  \"//a:z.txt\"\n  \"//a:y.txt\"\n  \"//a:x.txt\"\n  \"@ext//lib:d.txt\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib2\" -> \"//a:y.txt\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:x.txt\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:lib\" -> \"@ext//lib:data\"\n  \"//a:srcs_fg\"\n  \"//a:srcs_fg\" -> \"//a:x.txt\"\n  \"//a:srcs_fg\" -> \"//a:y.txt\"\n  \"//a:srcs_fg\" -> \"//a:z.txt\"\n  \"//a:z.txt\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"//a:x.txt\"\n  \"//a:y.txt\"\n  \"@ext//lib:d.txt\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib2\" -> \"//a:y.txt\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:x.txt\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:lib\" -> \"@ext//lib:data\"\n  \"//a:srcs_fg\"\n  \"//a:srcs_fg\" -> \"//a:x.txt\"\n  \"//a:srcs_fg\" -> \"//a:y.txt\"\n  \"//a:srcs_fg\" -> \"//a:z.txt\"\n  \"//a:z.txt\"\n  \"//a:y.txt\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:x.txt\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib2\" -> \"//a:y.txt\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:x.txt\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:lib\" -> \"@ext//lib:data\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:srcs_fg\"\n  \"//a:srcs_fg\" -> \"//a:x.txt\"\n  \"//a:srcs_fg\" -> \"//a:y.txt\"\n  \"//a:srcs_fg\" -> \"//a:z.txt\"\n  \"//a:z.txt\"\n  \"//a:x.txt\"\n  \"//a:y.txt\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib2\" -> \"//a:y.txt\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:x.txt\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:lib\" -> \"@ext//lib:data\"\n  \"//a:srcs_fg\"\n  \"//a:srcs_fg\" -> \"//a:x.txt\"\n  \"//a:srcs_fg\" -> \"//a:y.txt\"\n  \"//a:srcs_fg\" -> \"//a:z.txt\"\n  \"//a:z.txt\"\n  \"//a:y.txt\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:x.txt\"\n}\n",
+   "rc": 0
+  },
+  {
+   "err": "",
+   "out": "digraph mygraph {\n  node [shape=box];\n  \"//a:lib2\"\n  \"//a:lib2\" -> \"//a:lib\"\n  \"//a:lib2\" -> \"//a:y.txt\"\n  \"//a:lib\"\n  \"//a:lib\" -> \"//a:x.txt\"\n  \"//a:lib\" -> \"//a:srcs_fg\"\n  \"//a:lib\" -> \"@ext//lib:data\"\n  \"@ext//lib:data\"\n  \"@ext//lib:data\" -> \"@ext//lib:d.txt\"\n  \"//a:srcs_fg\"\n  \"//a:srcs_fg\" -> \"//a:x.txt\"\n  \"//a:srcs_fg\" -> \"//a:y.txt\"\n  \"//a:srcs_fg\" -> \"//a:z.txt\"\n  \"//a:x.txt\"\n  \"//a:z.txt\"\n  \"@ext//lib:d.txt\"\n  \"//a:y.txt\"\n}\n",
+   "rc": 0
+  }
+ ],
+ "workspace": "ws"
+}

@@ -1,0 +1,700 @@
+x1	wsbroken:query '//...' --keep_going
+x2	wsbroken:query '//...' --nokeep_going
+x3	wsbroken:query '//...' --keep_going --output=label_kind
+x4	wsbroken:query '//...' --keep_going --output=build
+x5	wsbroken:query '//...' --keep_going --output=xml
+x6	wsbroken:query '//...' --keep_going --output=location
+x7	wsbroken:query '//...' --keep_going --output=package
+x8	wsbroken:query '//...' --keep_going --order_output=full
+x9	wsbroken:query '//a/...' --keep_going
+x10	wsbroken:query '//a/...' --nokeep_going
+x11	wsbroken:query '//a/...' --keep_going --output=label_kind
+x12	wsbroken:query '//a/...' --keep_going --output=build
+x13	wsbroken:query '//a/...' --keep_going --output=xml
+x14	wsbroken:query '//a/...' --keep_going --output=location
+x15	wsbroken:query '//a/...' --keep_going --output=package
+x16	wsbroken:query '//a/...' --keep_going --order_output=full
+x17	wsbroken:query '//e:all' --keep_going
+x18	wsbroken:query '//e:all' --nokeep_going
+x19	wsbroken:query '//e:all' --keep_going --output=label_kind
+x20	wsbroken:query '//e:all' --keep_going --output=build
+x21	wsbroken:query '//e:all' --keep_going --output=xml
+x22	wsbroken:query '//e:all' --keep_going --output=location
+x23	wsbroken:query '//e:all' --keep_going --output=package
+x24	wsbroken:query '//e:all' --keep_going --order_output=full
+x25	wsbroken:query '//e/...' --keep_going
+x26	wsbroken:query '//e/...' --nokeep_going
+x27	wsbroken:query '//e/...' --keep_going --output=label_kind
+x28	wsbroken:query '//e/...' --keep_going --output=build
+x29	wsbroken:query '//e/...' --keep_going --output=xml
+x30	wsbroken:query '//e/...' --keep_going --output=location
+x31	wsbroken:query '//e/...' --keep_going --output=package
+x32	wsbroken:query '//e/...' --keep_going --order_output=full
+x33	wsbroken:query '//e:x' --keep_going
+x34	wsbroken:query '//e:x' --nokeep_going
+x35	wsbroken:query '//e:x' --keep_going --output=label_kind
+x36	wsbroken:query '//e:x' --keep_going --output=build
+x37	wsbroken:query '//e:x' --keep_going --output=xml
+x38	wsbroken:query '//e:x' --keep_going --output=location
+x39	wsbroken:query '//e:x' --keep_going --output=package
+x40	wsbroken:query '//e:x' --keep_going --order_output=full
+x41	wsbroken:query '//e' --keep_going
+x42	wsbroken:query '//e' --nokeep_going
+x43	wsbroken:query '//e' --keep_going --output=label_kind
+x44	wsbroken:query '//e' --keep_going --output=build
+x45	wsbroken:query '//e' --keep_going --output=xml
+x46	wsbroken:query '//e' --keep_going --output=location
+x47	wsbroken:query '//e' --keep_going --output=package
+x48	wsbroken:query '//e' --keep_going --order_output=full
+x49	wsbroken:query '//:all' --keep_going
+x50	wsbroken:query '//:all' --nokeep_going
+x51	wsbroken:query '//:all' --keep_going --output=label_kind
+x52	wsbroken:query '//:all' --keep_going --output=build
+x53	wsbroken:query '//:all' --keep_going --output=xml
+x54	wsbroken:query '//:all' --keep_going --output=location
+x55	wsbroken:query '//:all' --keep_going --output=package
+x56	wsbroken:query '//:all' --keep_going --order_output=full
+x57	wsbroken:query '//a:all' --keep_going
+x58	wsbroken:query '//a:all' --nokeep_going
+x59	wsbroken:query '//a:all' --keep_going --output=label_kind
+x60	wsbroken:query '//a:all' --keep_going --output=build
+x61	wsbroken:query '//a:all' --keep_going --output=xml
+x62	wsbroken:query '//a:all' --keep_going --output=location
+x63	wsbroken:query '//a:all' --keep_going --output=package
+x64	wsbroken:query '//a:all' --keep_going --order_output=full
+x65	wsbroken:query 'deps(//...)' --keep_going
+x66	wsbroken:query 'deps(//...)' --nokeep_going
+x67	wsbroken:query 'deps(//...)' --keep_going --output=label_kind
+x68	wsbroken:query 'deps(//...)' --keep_going --output=build
+x69	wsbroken:query 'deps(//...)' --keep_going --output=xml
+x70	wsbroken:query 'deps(//...)' --keep_going --output=location
+x71	wsbroken:query 'deps(//...)' --keep_going --output=package
+x72	wsbroken:query 'deps(//...)' --keep_going --order_output=full
+x73	wsbroken:query 'rdeps(//...,//a:x.txt)' --keep_going
+x74	wsbroken:query 'rdeps(//...,//a:x.txt)' --nokeep_going
+x75	wsbroken:query 'rdeps(//...,//a:x.txt)' --keep_going --output=label_kind
+x76	wsbroken:query 'rdeps(//...,//a:x.txt)' --keep_going --output=build
+x77	wsbroken:query 'rdeps(//...,//a:x.txt)' --keep_going --output=xml
+x78	wsbroken:query 'rdeps(//...,//a:x.txt)' --keep_going --output=location
+x79	wsbroken:query 'rdeps(//...,//a:x.txt)' --keep_going --output=package
+x80	wsbroken:query 'rdeps(//...,//a:x.txt)' --keep_going --order_output=full
+x81	wsbroken:query '//d:all' --keep_going
+x82	wsbroken:query '//d:all' --nokeep_going
+x83	wsbroken:query '//d:all' --keep_going --output=label_kind
+x84	wsbroken:query '//d:all' --keep_going --output=build
+x85	wsbroken:query '//d:all' --keep_going --output=xml
+x86	wsbroken:query '//d:all' --keep_going --output=location
+x87	wsbroken:query '//d:all' --keep_going --output=package
+x88	wsbroken:query '//d:all' --keep_going --order_output=full
+x89	wsbroken:query '//... - //e/...' --keep_going
+x90	wsbroken:query '//... - //e/...' --nokeep_going
+x91	wsbroken:query '//... - //e/...' --keep_going --output=label_kind
+x92	wsbroken:query '//... - //e/...' --keep_going --output=build
+x93	wsbroken:query '//... - //e/...' --keep_going --output=xml
+x94	wsbroken:query '//... - //e/...' --keep_going --output=location
+x95	wsbroken:query '//... - //e/...' --keep_going --output=package
+x96	wsbroken:query '//... - //e/...' --keep_going --order_output=full
+x97	wsbroken:query '//e:all + //a:all' --keep_going
+x98	wsbroken:query '//e:all + //a:all' --nokeep_going
+x99	wsbroken:query '//e:all + //a:all' --keep_going --output=label_kind
+x100	wsbroken:query '//e:all + //a:all' --keep_going --output=build
+x101	wsbroken:query '//e:all + //a:all' --keep_going --output=xml
+x102	wsbroken:query '//e:all + //a:all' --keep_going --output=location
+x103	wsbroken:query '//e:all + //a:all' --keep_going --output=package
+x104	wsbroken:query '//e:all + //a:all' --keep_going --order_output=full
+x105	wsbroken:query 'kind(rule,//...)' --keep_going
+x106	wsbroken:query 'kind(rule,//...)' --nokeep_going
+x107	wsbroken:query 'kind(rule,//...)' --keep_going --output=label_kind
+x108	wsbroken:query 'kind(rule,//...)' --keep_going --output=build
+x109	wsbroken:query 'kind(rule,//...)' --keep_going --output=xml
+x110	wsbroken:query 'kind(rule,//...)' --keep_going --output=location
+x111	wsbroken:query 'kind(rule,//...)' --keep_going --output=package
+x112	wsbroken:query 'kind(rule,//...)' --keep_going --order_output=full
+x113	wsbroken:query 'labels(srcs,//a:all)' --keep_going
+x114	wsbroken:query 'labels(srcs,//a:all)' --nokeep_going
+x115	wsbroken:query 'labels(srcs,//a:all)' --keep_going --output=label_kind
+x116	wsbroken:query 'labels(srcs,//a:all)' --keep_going --output=build
+x117	wsbroken:query 'labels(srcs,//a:all)' --keep_going --output=xml
+x118	wsbroken:query 'labels(srcs,//a:all)' --keep_going --output=location
+x119	wsbroken:query 'labels(srcs,//a:all)' --keep_going --output=package
+x120	wsbroken:query 'labels(srcs,//a:all)' --keep_going --order_output=full
+x121	wsbroken:query 'buildfiles(//...)' --keep_going
+x122	wsbroken:query 'buildfiles(//...)' --nokeep_going
+x123	wsbroken:query 'buildfiles(//...)' --keep_going --output=label_kind
+x124	wsbroken:query 'buildfiles(//...)' --keep_going --output=build
+x125	wsbroken:query 'buildfiles(//...)' --keep_going --output=xml
+x126	wsbroken:query 'buildfiles(//...)' --keep_going --output=location
+x127	wsbroken:query 'buildfiles(//...)' --keep_going --output=package
+x128	wsbroken:query 'buildfiles(//...)' --keep_going --order_output=full
+x129	wsbroken:query 'loadfiles(//a:all)' --keep_going
+x130	wsbroken:query 'loadfiles(//a:all)' --nokeep_going
+x131	wsbroken:query 'loadfiles(//a:all)' --keep_going --output=label_kind
+x132	wsbroken:query 'loadfiles(//a:all)' --keep_going --output=build
+x133	wsbroken:query 'loadfiles(//a:all)' --keep_going --output=xml
+x134	wsbroken:query 'loadfiles(//a:all)' --keep_going --output=location
+x135	wsbroken:query 'loadfiles(//a:all)' --keep_going --output=package
+x136	wsbroken:query 'loadfiles(//a:all)' --keep_going --order_output=full
+x137	wsbroken:query 'somepath(//a:lib,//a:lib2)' --keep_going
+x138	wsbroken:query 'somepath(//a:lib,//a:lib2)' --nokeep_going
+x139	wsbroken:query 'somepath(//a:lib,//a:lib2)' --keep_going --output=label_kind
+x140	wsbroken:query 'somepath(//a:lib,//a:lib2)' --keep_going --output=build
+x141	wsbroken:query 'somepath(//a:lib,//a:lib2)' --keep_going --output=xml
+x142	wsbroken:query 'somepath(//a:lib,//a:lib2)' --keep_going --output=location
+x143	wsbroken:query 'somepath(//a:lib,//a:lib2)' --keep_going --output=package
+x144	wsbroken:query 'somepath(//a:lib,//a:lib2)' --keep_going --order_output=full
+x145	wsbroken:query 'allpaths(//...,//a:lib)' --keep_going
+x146	wsbroken:query 'allpaths(//...,//a:lib)' --nokeep_going
+x147	wsbroken:query 'allpaths(//...,//a:lib)' --keep_going --output=label_kind
+x148	wsbroken:query 'allpaths(//...,//a:lib)' --keep_going --output=build
+x149	wsbroken:query 'allpaths(//...,//a:lib)' --keep_going --output=xml
+x150	wsbroken:query 'allpaths(//...,//a:lib)' --keep_going --output=location
+x151	wsbroken:query 'allpaths(//...,//a:lib)' --keep_going --output=package
+x152	wsbroken:query 'allpaths(//...,//a:lib)' --keep_going --order_output=full
+x153	wsbroken:query 'tests(//...)' --keep_going
+x154	wsbroken:query 'tests(//...)' --nokeep_going
+x155	wsbroken:query 'tests(//...)' --keep_going --output=label_kind
+x156	wsbroken:query 'tests(//...)' --keep_going --output=build
+x157	wsbroken:query 'tests(//...)' --keep_going --output=xml
+x158	wsbroken:query 'tests(//...)' --keep_going --output=location
+x159	wsbroken:query 'tests(//...)' --keep_going --output=package
+x160	wsbroken:query 'tests(//...)' --keep_going --order_output=full
+x161	wsbroken:query 'attr(tags,fast,//...)' --keep_going
+x162	wsbroken:query 'attr(tags,fast,//...)' --nokeep_going
+x163	wsbroken:query 'attr(tags,fast,//...)' --keep_going --output=label_kind
+x164	wsbroken:query 'attr(tags,fast,//...)' --keep_going --output=build
+x165	wsbroken:query 'attr(tags,fast,//...)' --keep_going --output=xml
+x166	wsbroken:query 'attr(tags,fast,//...)' --keep_going --output=location
+x167	wsbroken:query 'attr(tags,fast,//...)' --keep_going --output=package
+x168	wsbroken:query 'attr(tags,fast,//...)' --keep_going --order_output=full
+x169	wsbroken:query 'filter('^//a',//...)' --keep_going
+x170	wsbroken:query 'filter('^//a',//...)' --nokeep_going
+x171	wsbroken:query 'filter('^//a',//...)' --keep_going --output=label_kind
+x172	wsbroken:query 'filter('^//a',//...)' --keep_going --output=build
+x173	wsbroken:query 'filter('^//a',//...)' --keep_going --output=xml
+x174	wsbroken:query 'filter('^//a',//...)' --keep_going --output=location
+x175	wsbroken:query 'filter('^//a',//...)' --keep_going --output=package
+x176	wsbroken:query 'filter('^//a',//...)' --keep_going --order_output=full
+x177	wsbroken:query '//e:*' --keep_going
+x178	wsbroken:query '//e:*' --nokeep_going
+x179	wsbroken:query '//e:*' --keep_going --output=label_kind
+x180	wsbroken:query '//e:*' --keep_going --output=build
+x181	wsbroken:query '//e:*' --keep_going --output=xml
+x182	wsbroken:query '//e:*' --keep_going --output=location
+x183	wsbroken:query '//e:*' --keep_going --output=package
+x184	wsbroken:query '//e:*' --keep_going --order_output=full
+x185	wsbroken:query '//e:BUILD' --keep_going
+x186	wsbroken:query '//e:BUILD' --nokeep_going
+x187	wsbroken:query '//e:BUILD' --keep_going --output=label_kind
+x188	wsbroken:query '//e:BUILD' --keep_going --output=build
+x189	wsbroken:query '//e:BUILD' --keep_going --output=xml
+x190	wsbroken:query '//e:BUILD' --keep_going --output=location
+x191	wsbroken:query '//e:BUILD' --keep_going --output=package
+x192	wsbroken:query '//e:BUILD' --keep_going --order_output=full
+x193	wsbroken:query 'visible(//a:lib,//...)' --keep_going
+x194	wsbroken:query 'visible(//a:lib,//...)' --nokeep_going
+x195	wsbroken:query 'visible(//a:lib,//...)' --keep_going --output=label_kind
+x196	wsbroken:query 'visible(//a:lib,//...)' --keep_going --output=build
+x197	wsbroken:query 'visible(//a:lib,//...)' --keep_going --output=xml
+x198	wsbroken:query 'visible(//a:lib,//...)' --keep_going --output=location
+x199	wsbroken:query 'visible(//a:lib,//...)' --keep_going --output=package
+x200	wsbroken:query 'visible(//a:lib,//...)' --keep_going --order_output=full
+x201	wsbroken:query 'siblings(//e:x)' --keep_going
+x202	wsbroken:query 'siblings(//e:x)' --nokeep_going
+x203	wsbroken:query 'siblings(//e:x)' --keep_going --output=label_kind
+x204	wsbroken:query 'siblings(//e:x)' --keep_going --output=build
+x205	wsbroken:query 'siblings(//e:x)' --keep_going --output=xml
+x206	wsbroken:query 'siblings(//e:x)' --keep_going --output=location
+x207	wsbroken:query 'siblings(//e:x)' --keep_going --output=package
+x208	wsbroken:query 'siblings(//e:x)' --keep_going --order_output=full
+x209	wsbroken:query 'same_pkg_direct_rdeps(//a:lib)' --keep_going
+x210	wsbroken:query 'same_pkg_direct_rdeps(//a:lib)' --nokeep_going
+x211	wsbroken:query 'same_pkg_direct_rdeps(//a:lib)' --keep_going --output=label_kind
+x212	wsbroken:query 'same_pkg_direct_rdeps(//a:lib)' --keep_going --output=build
+x213	wsbroken:query 'same_pkg_direct_rdeps(//a:lib)' --keep_going --output=xml
+x214	wsbroken:query 'same_pkg_direct_rdeps(//a:lib)' --keep_going --output=location
+x215	wsbroken:query 'same_pkg_direct_rdeps(//a:lib)' --keep_going --output=package
+x216	wsbroken:query 'same_pkg_direct_rdeps(//a:lib)' --keep_going --order_output=full
+x217	query '//a:lib' --noimplicit_deps --keep_going
+x218	query '//a:lib' --notool_deps --keep_going
+x219	query '//a:lib' --nonodep_deps --keep_going
+x220	query '//a:lib' --noimplicit_deps --output=xml --keep_going
+x221	query '//a:lib' --output=xml --xml:default_values --keep_going
+x222	query '//a:lib' --output=xml --noxml:line_numbers --keep_going
+x223	query '//a:lib' --output=build --noimplicit_deps --keep_going
+x224	query '//a:lib' --output=proto --proto:default_values=false --keep_going
+x225	query '//a:lib' --output=proto --noproto:locations --keep_going
+x226	query '//a:lib' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x227	query '//a:lib' --output=jsonproto --proto:rule_classes --keep_going
+x228	query '//a:lib' --output=textproto --proto:flatten_selects=false --keep_going
+x229	query '//a:lib' --output=label_kind --relative_locations --keep_going
+x230	query '//a:lib' --output=location --relative_locations --keep_going
+x231	query '//a:lib' --output=build --consistent_labels --keep_going
+x232	query '//a:lib' --output=label --line_terminator_null --keep_going
+x233	query '//a:lib' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x234	query '//a:lib' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x235	query '//a:lib' --order_output=full --output=label_kind --keep_going
+x236	query '//a:lib' --output=graph --nograph:factored --keep_going
+x237	query '//a:lib' --output=graph --graph:node_limit=20 --keep_going
+x238	query '//a:lib' --output=minrank --order_output=full --keep_going
+x239	query '//a:lib' --output=maxrank --order_output=full --keep_going
+x240	query '//a:all' --noimplicit_deps --keep_going
+x241	query '//a:all' --notool_deps --keep_going
+x242	query '//a:all' --nonodep_deps --keep_going
+x243	query '//a:all' --noimplicit_deps --output=xml --keep_going
+x244	query '//a:all' --output=xml --xml:default_values --keep_going
+x245	query '//a:all' --output=xml --noxml:line_numbers --keep_going
+x246	query '//a:all' --output=build --noimplicit_deps --keep_going
+x247	query '//a:all' --output=proto --proto:default_values=false --keep_going
+x248	query '//a:all' --output=proto --noproto:locations --keep_going
+x249	query '//a:all' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x250	query '//a:all' --output=jsonproto --proto:rule_classes --keep_going
+x251	query '//a:all' --output=textproto --proto:flatten_selects=false --keep_going
+x252	query '//a:all' --output=label_kind --relative_locations --keep_going
+x253	query '//a:all' --output=location --relative_locations --keep_going
+x254	query '//a:all' --output=build --consistent_labels --keep_going
+x255	query '//a:all' --output=label --line_terminator_null --keep_going
+x256	query '//a:all' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x257	query '//a:all' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x258	query '//a:all' --order_output=full --output=label_kind --keep_going
+x259	query '//a:all' --output=graph --nograph:factored --keep_going
+x260	query '//a:all' --output=graph --graph:node_limit=20 --keep_going
+x261	query '//a:all' --output=minrank --order_output=full --keep_going
+x262	query '//a:all' --output=maxrank --order_output=full --keep_going
+x263	query '//b:all' --noimplicit_deps --keep_going
+x264	query '//b:all' --notool_deps --keep_going
+x265	query '//b:all' --nonodep_deps --keep_going
+x266	query '//b:all' --noimplicit_deps --output=xml --keep_going
+x267	query '//b:all' --output=xml --xml:default_values --keep_going
+x268	query '//b:all' --output=xml --noxml:line_numbers --keep_going
+x269	query '//b:all' --output=build --noimplicit_deps --keep_going
+x270	query '//b:all' --output=proto --proto:default_values=false --keep_going
+x271	query '//b:all' --output=proto --noproto:locations --keep_going
+x272	query '//b:all' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x273	query '//b:all' --output=jsonproto --proto:rule_classes --keep_going
+x274	query '//b:all' --output=textproto --proto:flatten_selects=false --keep_going
+x275	query '//b:all' --output=label_kind --relative_locations --keep_going
+x276	query '//b:all' --output=location --relative_locations --keep_going
+x277	query '//b:all' --output=build --consistent_labels --keep_going
+x278	query '//b:all' --output=label --line_terminator_null --keep_going
+x279	query '//b:all' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x280	query '//b:all' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x281	query '//b:all' --order_output=full --output=label_kind --keep_going
+x282	query '//b:all' --output=graph --nograph:factored --keep_going
+x283	query '//b:all' --output=graph --graph:node_limit=20 --keep_going
+x284	query '//b:all' --output=minrank --order_output=full --keep_going
+x285	query '//b:all' --output=maxrank --order_output=full --keep_going
+x286	query '//...' --noimplicit_deps --keep_going
+x287	query '//...' --notool_deps --keep_going
+x288	query '//...' --nonodep_deps --keep_going
+x289	query '//...' --noimplicit_deps --output=xml --keep_going
+x290	query '//...' --output=xml --xml:default_values --keep_going
+x291	query '//...' --output=xml --noxml:line_numbers --keep_going
+x292	query '//...' --output=build --noimplicit_deps --keep_going
+x293	query '//...' --output=proto --proto:default_values=false --keep_going
+x294	query '//...' --output=proto --noproto:locations --keep_going
+x295	query '//...' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x296	query '//...' --output=jsonproto --proto:rule_classes --keep_going
+x297	query '//...' --output=textproto --proto:flatten_selects=false --keep_going
+x298	query '//...' --output=label_kind --relative_locations --keep_going
+x299	query '//...' --output=location --relative_locations --keep_going
+x300	query '//...' --output=build --consistent_labels --keep_going
+x301	query '//...' --output=label --line_terminator_null --keep_going
+x302	query '//...' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x303	query '//...' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x304	query '//...' --order_output=full --output=label_kind --keep_going
+x305	query '//...' --output=graph --nograph:factored --keep_going
+x306	query '//...' --output=graph --graph:node_limit=20 --keep_going
+x307	query '//...' --output=minrank --order_output=full --keep_going
+x308	query '//...' --output=maxrank --order_output=full --keep_going
+x309	query 'deps(//b:t1)' --noimplicit_deps --keep_going
+x310	query 'deps(//b:t1)' --notool_deps --keep_going
+x311	query 'deps(//b:t1)' --nonodep_deps --keep_going
+x312	query 'deps(//b:t1)' --noimplicit_deps --output=xml --keep_going
+x313	query 'deps(//b:t1)' --output=xml --xml:default_values --keep_going
+x314	query 'deps(//b:t1)' --output=xml --noxml:line_numbers --keep_going
+x315	query 'deps(//b:t1)' --output=build --noimplicit_deps --keep_going
+x316	query 'deps(//b:t1)' --output=proto --proto:default_values=false --keep_going
+x317	query 'deps(//b:t1)' --output=proto --noproto:locations --keep_going
+x318	query 'deps(//b:t1)' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x319	query 'deps(//b:t1)' --output=jsonproto --proto:rule_classes --keep_going
+x320	query 'deps(//b:t1)' --output=textproto --proto:flatten_selects=false --keep_going
+x321	query 'deps(//b:t1)' --output=label_kind --relative_locations --keep_going
+x322	query 'deps(//b:t1)' --output=location --relative_locations --keep_going
+x323	query 'deps(//b:t1)' --output=build --consistent_labels --keep_going
+x324	query 'deps(//b:t1)' --output=label --line_terminator_null --keep_going
+x325	query 'deps(//b:t1)' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x326	query 'deps(//b:t1)' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x327	query 'deps(//b:t1)' --order_output=full --output=label_kind --keep_going
+x328	query 'deps(//b:t1)' --output=graph --nograph:factored --keep_going
+x329	query 'deps(//b:t1)' --output=graph --graph:node_limit=20 --keep_going
+x330	query 'deps(//b:t1)' --output=minrank --order_output=full --keep_going
+x331	query 'deps(//b:t1)' --output=maxrank --order_output=full --keep_going
+x332	query 'deps(//a:gg)' --noimplicit_deps --keep_going
+x333	query 'deps(//a:gg)' --notool_deps --keep_going
+x334	query 'deps(//a:gg)' --nonodep_deps --keep_going
+x335	query 'deps(//a:gg)' --noimplicit_deps --output=xml --keep_going
+x336	query 'deps(//a:gg)' --output=xml --xml:default_values --keep_going
+x337	query 'deps(//a:gg)' --output=xml --noxml:line_numbers --keep_going
+x338	query 'deps(//a:gg)' --output=build --noimplicit_deps --keep_going
+x339	query 'deps(//a:gg)' --output=proto --proto:default_values=false --keep_going
+x340	query 'deps(//a:gg)' --output=proto --noproto:locations --keep_going
+x341	query 'deps(//a:gg)' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x342	query 'deps(//a:gg)' --output=jsonproto --proto:rule_classes --keep_going
+x343	query 'deps(//a:gg)' --output=textproto --proto:flatten_selects=false --keep_going
+x344	query 'deps(//a:gg)' --output=label_kind --relative_locations --keep_going
+x345	query 'deps(//a:gg)' --output=location --relative_locations --keep_going
+x346	query 'deps(//a:gg)' --output=build --consistent_labels --keep_going
+x347	query 'deps(//a:gg)' --output=label --line_terminator_null --keep_going
+x348	query 'deps(//a:gg)' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x349	query 'deps(//a:gg)' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x350	query 'deps(//a:gg)' --order_output=full --output=label_kind --keep_going
+x351	query 'deps(//a:gg)' --output=graph --nograph:factored --keep_going
+x352	query 'deps(//a:gg)' --output=graph --graph:node_limit=20 --keep_going
+x353	query 'deps(//a:gg)' --output=minrank --order_output=full --keep_going
+x354	query 'deps(//a:gg)' --output=maxrank --order_output=full --keep_going
+x355	query '//a:gg' --noimplicit_deps --keep_going
+x356	query '//a:gg' --notool_deps --keep_going
+x357	query '//a:gg' --nonodep_deps --keep_going
+x358	query '//a:gg' --noimplicit_deps --output=xml --keep_going
+x359	query '//a:gg' --output=xml --xml:default_values --keep_going
+x360	query '//a:gg' --output=xml --noxml:line_numbers --keep_going
+x361	query '//a:gg' --output=build --noimplicit_deps --keep_going
+x362	query '//a:gg' --output=proto --proto:default_values=false --keep_going
+x363	query '//a:gg' --output=proto --noproto:locations --keep_going
+x364	query '//a:gg' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x365	query '//a:gg' --output=jsonproto --proto:rule_classes --keep_going
+x366	query '//a:gg' --output=textproto --proto:flatten_selects=false --keep_going
+x367	query '//a:gg' --output=label_kind --relative_locations --keep_going
+x368	query '//a:gg' --output=location --relative_locations --keep_going
+x369	query '//a:gg' --output=build --consistent_labels --keep_going
+x370	query '//a:gg' --output=label --line_terminator_null --keep_going
+x371	query '//a:gg' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x372	query '//a:gg' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x373	query '//a:gg' --order_output=full --output=label_kind --keep_going
+x374	query '//a:gg' --output=graph --nograph:factored --keep_going
+x375	query '//a:gg' --output=graph --graph:node_limit=20 --keep_going
+x376	query '//a:gg' --output=minrank --order_output=full --keep_going
+x377	query '//a:gg' --output=maxrank --order_output=full --keep_going
+x378	query '//b:t1' --noimplicit_deps --keep_going
+x379	query '//b:t1' --notool_deps --keep_going
+x380	query '//b:t1' --nonodep_deps --keep_going
+x381	query '//b:t1' --noimplicit_deps --output=xml --keep_going
+x382	query '//b:t1' --output=xml --xml:default_values --keep_going
+x383	query '//b:t1' --output=xml --noxml:line_numbers --keep_going
+x384	query '//b:t1' --output=build --noimplicit_deps --keep_going
+x385	query '//b:t1' --output=proto --proto:default_values=false --keep_going
+x386	query '//b:t1' --output=proto --noproto:locations --keep_going
+x387	query '//b:t1' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x388	query '//b:t1' --output=jsonproto --proto:rule_classes --keep_going
+x389	query '//b:t1' --output=textproto --proto:flatten_selects=false --keep_going
+x390	query '//b:t1' --output=label_kind --relative_locations --keep_going
+x391	query '//b:t1' --output=location --relative_locations --keep_going
+x392	query '//b:t1' --output=build --consistent_labels --keep_going
+x393	query '//b:t1' --output=label --line_terminator_null --keep_going
+x394	query '//b:t1' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x395	query '//b:t1' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x396	query '//b:t1' --order_output=full --output=label_kind --keep_going
+x397	query '//b:t1' --output=graph --nograph:factored --keep_going
+x398	query '//b:t1' --output=graph --graph:node_limit=20 --keep_going
+x399	query '//b:t1' --output=minrank --order_output=full --keep_going
+x400	query '//b:t1' --output=maxrank --order_output=full --keep_going
+x401	query '//b:tool' --noimplicit_deps --keep_going
+x402	query '//b:tool' --notool_deps --keep_going
+x403	query '//b:tool' --nonodep_deps --keep_going
+x404	query '//b:tool' --noimplicit_deps --output=xml --keep_going
+x405	query '//b:tool' --output=xml --xml:default_values --keep_going
+x406	query '//b:tool' --output=xml --noxml:line_numbers --keep_going
+x407	query '//b:tool' --output=build --noimplicit_deps --keep_going
+x408	query '//b:tool' --output=proto --proto:default_values=false --keep_going
+x409	query '//b:tool' --output=proto --noproto:locations --keep_going
+x410	query '//b:tool' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x411	query '//b:tool' --output=jsonproto --proto:rule_classes --keep_going
+x412	query '//b:tool' --output=textproto --proto:flatten_selects=false --keep_going
+x413	query '//b:tool' --output=label_kind --relative_locations --keep_going
+x414	query '//b:tool' --output=location --relative_locations --keep_going
+x415	query '//b:tool' --output=build --consistent_labels --keep_going
+x416	query '//b:tool' --output=label --line_terminator_null --keep_going
+x417	query '//b:tool' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x418	query '//b:tool' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x419	query '//b:tool' --order_output=full --output=label_kind --keep_going
+x420	query '//b:tool' --output=graph --nograph:factored --keep_going
+x421	query '//b:tool' --output=graph --graph:node_limit=20 --keep_going
+x422	query '//b:tool' --output=minrank --order_output=full --keep_going
+x423	query '//b:tool' --output=maxrank --order_output=full --keep_going
+x424	query '@ext//lib:all' --noimplicit_deps --keep_going
+x425	query '@ext//lib:all' --notool_deps --keep_going
+x426	query '@ext//lib:all' --nonodep_deps --keep_going
+x427	query '@ext//lib:all' --noimplicit_deps --output=xml --keep_going
+x428	query '@ext//lib:all' --output=xml --xml:default_values --keep_going
+x429	query '@ext//lib:all' --output=xml --noxml:line_numbers --keep_going
+x430	query '@ext//lib:all' --output=build --noimplicit_deps --keep_going
+x431	query '@ext//lib:all' --output=proto --proto:default_values=false --keep_going
+x432	query '@ext//lib:all' --output=proto --noproto:locations --keep_going
+x433	query '@ext//lib:all' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x434	query '@ext//lib:all' --output=jsonproto --proto:rule_classes --keep_going
+x435	query '@ext//lib:all' --output=textproto --proto:flatten_selects=false --keep_going
+x436	query '@ext//lib:all' --output=label_kind --relative_locations --keep_going
+x437	query '@ext//lib:all' --output=location --relative_locations --keep_going
+x438	query '@ext//lib:all' --output=build --consistent_labels --keep_going
+x439	query '@ext//lib:all' --output=label --line_terminator_null --keep_going
+x440	query '@ext//lib:all' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x441	query '@ext//lib:all' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x442	query '@ext//lib:all' --order_output=full --output=label_kind --keep_going
+x443	query '@ext//lib:all' --output=graph --nograph:factored --keep_going
+x444	query '@ext//lib:all' --output=graph --graph:node_limit=20 --keep_going
+x445	query '@ext//lib:all' --output=minrank --order_output=full --keep_going
+x446	query '@ext//lib:all' --output=maxrank --order_output=full --keep_going
+x447	query '//:all_tests' --noimplicit_deps --keep_going
+x448	query '//:all_tests' --notool_deps --keep_going
+x449	query '//:all_tests' --nonodep_deps --keep_going
+x450	query '//:all_tests' --noimplicit_deps --output=xml --keep_going
+x451	query '//:all_tests' --output=xml --xml:default_values --keep_going
+x452	query '//:all_tests' --output=xml --noxml:line_numbers --keep_going
+x453	query '//:all_tests' --output=build --noimplicit_deps --keep_going
+x454	query '//:all_tests' --output=proto --proto:default_values=false --keep_going
+x455	query '//:all_tests' --output=proto --noproto:locations --keep_going
+x456	query '//:all_tests' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x457	query '//:all_tests' --output=jsonproto --proto:rule_classes --keep_going
+x458	query '//:all_tests' --output=textproto --proto:flatten_selects=false --keep_going
+x459	query '//:all_tests' --output=label_kind --relative_locations --keep_going
+x460	query '//:all_tests' --output=location --relative_locations --keep_going
+x461	query '//:all_tests' --output=build --consistent_labels --keep_going
+x462	query '//:all_tests' --output=label --line_terminator_null --keep_going
+x463	query '//:all_tests' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x464	query '//:all_tests' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x465	query '//:all_tests' --order_output=full --output=label_kind --keep_going
+x466	query '//:all_tests' --output=graph --nograph:factored --keep_going
+x467	query '//:all_tests' --output=graph --graph:node_limit=20 --keep_going
+x468	query '//:all_tests' --output=minrank --order_output=full --keep_going
+x469	query '//:all_tests' --output=maxrank --order_output=full --keep_going
+x470	query '//:tagged' --noimplicit_deps --keep_going
+x471	query '//:tagged' --notool_deps --keep_going
+x472	query '//:tagged' --nonodep_deps --keep_going
+x473	query '//:tagged' --noimplicit_deps --output=xml --keep_going
+x474	query '//:tagged' --output=xml --xml:default_values --keep_going
+x475	query '//:tagged' --output=xml --noxml:line_numbers --keep_going
+x476	query '//:tagged' --output=build --noimplicit_deps --keep_going
+x477	query '//:tagged' --output=proto --proto:default_values=false --keep_going
+x478	query '//:tagged' --output=proto --noproto:locations --keep_going
+x479	query '//:tagged' --output=proto --proto:output_rule_attrs=srcs,deps --keep_going
+x480	query '//:tagged' --output=jsonproto --proto:rule_classes --keep_going
+x481	query '//:tagged' --output=textproto --proto:flatten_selects=false --keep_going
+x482	query '//:tagged' --output=label_kind --relative_locations --keep_going
+x483	query '//:tagged' --output=location --relative_locations --keep_going
+x484	query '//:tagged' --output=build --consistent_labels --keep_going
+x485	query '//:tagged' --output=label --line_terminator_null --keep_going
+x486	query '//:tagged' --output=streamed_proto --proto:rule_inputs_and_outputs=false --keep_going
+x487	query '//:tagged' --output=proto --proto:include_synthetic_attribute_hash --keep_going
+x488	query '//:tagged' --order_output=full --output=label_kind --keep_going
+x489	query '//:tagged' --output=graph --nograph:factored --keep_going
+x490	query '//:tagged' --output=graph --graph:node_limit=20 --keep_going
+x491	query '//:tagged' --output=minrank --order_output=full --keep_going
+x492	query '//:tagged' --output=maxrank --order_output=full --keep_going
+x493	query 'attr(tags,'fast',//...)' --keep_going
+x494	query 'attr(tags,'fast',//...)' --nokeep_going
+x495	query 'attr(visibility,'public',//...)' --keep_going
+x496	query 'attr(visibility,'public',//...)' --nokeep_going
+x497	query 'attr(srcs,'x.txt',//a:all)' --keep_going
+x498	query 'attr(srcs,'x.txt',//a:all)' --nokeep_going
+x499	query 'kind('rule',//a:*)' --keep_going
+x500	query 'kind('rule',//a:*)' --nokeep_going
+x501	query 'kind('source file',//a:*)' --keep_going
+x502	query 'kind('source file',//a:*)' --nokeep_going
+x503	query 'kind('generated file',//a:*)' --keep_going
+x504	query 'kind('generated file',//a:*)' --nokeep_going
+x505	query 'filter('lib',//a:all)' --keep_going
+x506	query 'filter('lib',//a:all)' --nokeep_going
+x507	query 'labels(outs,//a:gg)' --keep_going
+x508	query 'labels(outs,//a:gg)' --nokeep_going
+x509	query 'labels(srcs,//a:lib)' --keep_going
+x510	query 'labels(srcs,//a:lib)' --nokeep_going
+x511	query 'labels(deps,//a:cl)' --keep_going
+x512	query 'labels(deps,//a:cl)' --nokeep_going
+x513	query 'labels(data,//b:t1)' --keep_going
+x514	query 'labels(data,//b:t1)' --nokeep_going
+x515	query 'tests(//:all_tests)' --keep_going
+x516	query 'tests(//:all_tests)' --nokeep_going
+x517	query 'tests(//...)' --keep_going
+x518	query 'tests(//...)' --nokeep_going
+x519	query 'tests(//:tagged)' --keep_going
+x520	query 'tests(//:tagged)' --nokeep_going
+x521	query 'rdeps(//...,//a:x.txt,2)' --keep_going
+x522	query 'rdeps(//...,//a:x.txt,2)' --nokeep_going
+x523	query 'deps(//a:lib2,1)' --keep_going
+x524	query 'deps(//a:lib2,1)' --nokeep_going
+x525	query 'deps(//...,0)' --keep_going
+x526	query 'deps(//...,0)' --nokeep_going
+x527	query 'some(//a:all)' --keep_going
+x528	query 'some(//a:all)' --nokeep_going
+x529	query 'some(//nonexist:x)' --keep_going
+x530	query 'some(//nonexist:x)' --nokeep_going
+x531	query 'somepath(//a:cl,//a:cl2)' --keep_going
+x532	query 'somepath(//a:cl,//a:cl2)' --nokeep_going
+x533	query 'allpaths(//a:cl,//a:cl2)' --keep_going
+x534	query 'allpaths(//a:cl,//a:cl2)' --nokeep_going
+x535	query 'buildfiles(//a:lib)' --keep_going
+x536	query 'buildfiles(//a:lib)' --nokeep_going
+x537	query 'loadfiles(//a:lib)' --keep_going
+x538	query 'loadfiles(//a:lib)' --nokeep_going
+x539	query 'rbuildfiles(defs.bzl)' --keep_going
+x540	query 'rbuildfiles(defs.bzl)' --nokeep_going
+x541	query 'rbuildfiles(a/BUILD)' --keep_going
+x542	query 'rbuildfiles(a/BUILD)' --nokeep_going
+x543	query 'visible(//b:shlib,//a:all)' --keep_going
+x544	query 'visible(//b:shlib,//a:all)' --nokeep_going
+x545	query 'visible(//a:lib,//b:all)' --keep_going
+x546	query 'visible(//a:lib,//b:all)' --nokeep_going
+x547	query 'same_pkg_direct_rdeps(//a:x.txt)' --keep_going
+x548	query 'same_pkg_direct_rdeps(//a:x.txt)' --nokeep_going
+x549	query 'siblings(//a:lib)' --keep_going
+x550	query 'siblings(//a:lib)' --nokeep_going
+x551	query '//a:lib +' --keep_going
+x552	query '//a:lib +' --nokeep_going
+x553	query '//a:lib ^ //a:lib2' --keep_going
+x554	query '//a:lib ^ //a:lib2' --nokeep_going
+x555	query 'let x = //a:all in $x - //a:lib' --keep_going
+x556	query 'let x = //a:all in $x - //a:lib' --nokeep_going
+x557	query 'let x = //a:all in $y' --keep_going
+x558	query 'let x = //a:all in $y' --nokeep_going
+x559	query 'deps(//a:lib, -1)' --keep_going
+x560	query 'deps(//a:lib, -1)' --nokeep_going
+x561	query 'deps(//a:lib, x)' --keep_going
+x562	query 'deps(//a:lib, x)' --nokeep_going
+x563	query 'filter(//a:lib)' --keep_going
+x564	query 'filter(//a:lib)' --nokeep_going
+x565	query 'deps()' --keep_going
+x566	query 'deps()' --nokeep_going
+x567	query 'kind(//a:lib,//a:lib)' --keep_going
+x568	query 'kind(//a:lib,//a:lib)' --nokeep_going
+x569	query 'attr(tags)' --keep_going
+x570	query 'attr(tags)' --nokeep_going
+x571	query 'bogus(//a:lib)' --keep_going
+x572	query 'bogus(//a:lib)' --nokeep_going
+x573	query '//a:lib:' --keep_going
+x574	query '//a:lib:' --nokeep_going
+x575	query '//a:lib//' --keep_going
+x576	query '//a:lib//' --nokeep_going
+x577	query '@@ext+//lib:all' --keep_going
+x578	query '@@ext+//lib:all' --nokeep_going
+x579	query '@@//a:lib' --keep_going
+x580	query '@@//a:lib' --nokeep_going
+x581	query '@ext//lib:gen' --keep_going
+x582	query '@ext//lib:gen' --nokeep_going
+x583	query '@ext//lib:*' --keep_going
+x584	query '@ext//lib:*' --nokeep_going
+x585	query '@nonexist//x:y' --keep_going
+x586	query '@nonexist//x:y' --nokeep_going
+x587	query '//external:all' --keep_going
+x588	query '//external:all' --nokeep_going
+x589	query '@bazel_tools//platforms:all' --keep_going
+x590	query '@bazel_tools//platforms:all' --nokeep_going
+x591	query '//a:nope' --keep_going
+x592	query '//a:nope' --nokeep_going
+x593	query '//nonexistent:all' --keep_going
+x594	query '//nonexistent:all' --nokeep_going
+x595	query '//nonexistent/...' --keep_going
+x596	query '//nonexistent/...' --nokeep_going
+x597	query '//a/...' --keep_going
+x598	query '//a/...' --nokeep_going
+x599	query '//a/... - //a:lib' --keep_going
+x600	query '//a/... - //a:lib' --nokeep_going
+x601	query '//a:*' --keep_going
+x602	query '//a:*' --nokeep_going
+x603	query '//a:BUILD' --keep_going
+x604	query '//a:BUILD' --nokeep_going
+x605	query '//a:x.txt' --keep_going
+x606	query '//a:x.txt' --nokeep_going
+x607	query '//a:gg.out' --keep_going
+x608	query '//a:gg.out' --nokeep_going
+x609	query '//b:mk.txt' --keep_going
+x610	query '//b:mk.txt' --nokeep_going
+x611	query '//:top.txt' --keep_going
+x612	query '//:top.txt' --nokeep_going
+x613	query '//c:d.txt' --keep_going
+x614	query '//c:d.txt' --nokeep_going
+x615	query '//d:missing.txt' --keep_going
+x616	query '//d:missing.txt' --nokeep_going
+x617	query 'deps(//d:bad)' --keep_going
+x618	query 'deps(//d:bad)' --nokeep_going
+x619	query 'labels(srcs,//d:bad)' --keep_going
+x620	query 'labels(srcs,//d:bad)' --nokeep_going
+x621	query 'rdeps(//d:all,//c:cdata)' --keep_going
+x622	query 'rdeps(//d:all,//c:cdata)' --nokeep_going
+x623	query '//pg:all' --keep_going
+x624	query '//pg:all' --nokeep_going
+x625	query '//:pg' --keep_going
+x626	query '//:pg' --nokeep_going
+x627	query 'visible(//b:shlib,//c:cdata)' --keep_going
+x628	query 'visible(//b:shlib,//c:cdata)' --nokeep_going
+x629	query 'tests(//b:t1)' --keep_going
+x630	query 'tests(//b:t1)' --nokeep_going
+x631	query 'tests(//b:t1 + //b:t2)' --keep_going
+x632	query 'tests(//b:t1 + //b:t2)' --nokeep_going
+x633	query '//a:lib - //a:lib' --keep_going
+x634	query '//a:lib - //a:lib' --nokeep_going
+x635	query 'set(//a:lib //a:lib2)' --keep_going
+x636	query 'set(//a:lib //a:lib2)' --nokeep_going
+x637	query 'set()' --keep_going
+x638	query 'set()' --nokeep_going
+x639	query '//a:lib /* c */' --keep_going
+x640	query '//a:lib /* c */' --nokeep_going
+x641	query 'deps(//b:all) except //b:t1' --keep_going
+x642	query 'deps(//b:all) except //b:t1' --nokeep_going
+x643	query 'deps(//a:cl) intersect deps(//a:cl2)' --keep_going
+x644	query 'deps(//a:cl) intersect deps(//a:cl2)' --nokeep_going
+x645	query '//a:lib union //a:lib2' --keep_going
+x646	query '//a:lib union //a:lib2' --nokeep_going
+x647	query //a:lib --output=bogus
+x648	query //a:lib --order_output=bogus
+x649	query //a:lib --noorder_results
+x650	query //a:lib --order_results
+x651	query //a:lib --nohost_deps
+x652	query //a:lib --host_deps
+x653	query //a:lib --tool_deps=false
+x654	query //a:lib --universe_scope=//...
+x655	query //a:lib --universe_scope=//a:all --infer_universe_scope
+x656	query //a:lib --universe_scope=//b:all
+x657	query //b:t1 --universe_scope=//a:all
+x658	query 'deps(//b:t1)' --universe_scope=//b:all --order_output=no
+x659	query //a:lib --output_file=/nonexistent/x/y
+x660	query //a:lib --query_file=/dev/null
+x661	query --query_file=/nonexistent/q
+x662	query
+x663	query ''
+x664	query ' '
+x665	query //a:lib //a:lib2
+x666	query //a:lib + //a:lib2
+x667	query //a:lib -k
+x668	query -k //a:lib
+x669	query -k
+x670	query --keep_going=0 //a:lib
+x671	query //a:lib --nofetch
+x672	query //a:lib --noblock_for_lock
+x673	query //a:lib --graph:node_limit=x
+x674	query //a:lib --output=graph --graph:node_limit=-1
+x675	query //a:lib --incompatible_package_group_includes_double_slash=false --output=build
+x676	query '//pg:all' --output=build --incompatible_package_group_build_output
+x677	query //:pg --output=xml
+x678	query //:pg --output=proto
+x679	query --experimental_graphless_query=true //a:lib
+x680	query --experimental_graphless_query=true //a:lib --order_output=full
+x681	query --noexperimental_graphless_query //a:lib
+x682	query --output=label_kind --order_output=no //a:all
+x683	query //a:all --order_output=no
+x684	query //a:all --order_output=deps
+x685	query //a:all --order_output=full
+x686	query --noshow_progress //a:lib
+x687	query --show_progress //a:lib
+x688	query --noprogress_in_terminal_title //a:lib
+x689	query //a:lib --color=yes
+x690	query //a:lib --curses=no
+x691	query //a:lib --verbose_failures
+x692	query //a:lib --incompatible_foo
+x693	query //a:lib --nonexistent_flag
+x694	query //a:lib --output
+x695	query //a:lib --output=
+x696	query //a:lib --proto:output_rule_attrs=bogus --output=proto
+x697	query --noimplicit_deps 'deps(//a:gg)' --output=label
+x698	query --consistent_labels 'deps(@ext//lib:gen)'
+x699	query --consistent_labels //a:lib --output=label_kind
+x700	query --consistent_labels @ext//lib:all --output=build
