@@ -771,65 +771,31 @@ impl RemoteSpawnRunner {
         lazy.keys().any(|k| k.starts_with(&prefix))
     }
 
-    /// Whether any unmaterialized remote children exist under tree directory `path/`.
-    pub fn has_pending_tree_entries(&self, path: &str) -> bool {
+    /// Returns `(digest_hash, ttl_valid)` for an unmaterialized regular-file output at `path`
+    /// (`RemoteActionFileSystem.statIfFound` + `RemoteOutputChecker.shouldTrustMetadata`).
+    pub fn remote_file_entry(&self, path: &str) -> Option<(String, bool)> {
+        let now = Instant::now();
+        self.lazy
+            .lock()
+            .unwrap()
+            .get(path)
+            .map(|o| (o.digest.hash.clone(), now < o.expires_at))
+    }
+
+    /// Returns `(tree_relative_path, digest_hash, ttl_valid)` for all unmaterialized remote files
+    /// nested under directory `path/` (`RemoteActionFileSystem.getDirectoryContents`).
+    pub fn remote_tree_entries(&self, path: &str) -> Vec<(String, String, bool)> {
+        let now = Instant::now();
         let prefix = format!("{path}/");
         self.lazy
             .lock()
             .unwrap()
-            .keys()
-            .any(|k| k.starts_with(&prefix))
-    }
-
-    /// Whether a remote output entry is present and its `--experimental_remote_cache_ttl` has not
-    /// expired (`RemoteOutputChecker.shouldTrustMetadata`).
-    pub fn is_remote_output_valid(&self, path: &str) -> bool {
-        self.pending_output_digest(path).is_some()
-    }
-
-    /// Returns the digest hash of an unmaterialized remote output (or remote tree children under
-    /// `path/`) without filtering by TTL (`RemoteActionFileSystem.getDigest` /
-    /// `ActionCacheChecker.updateActionCache`).
-    pub fn remote_output_digest(&self, path: &str) -> Option<String> {
-        self.lookup_remote_digest(path, false)
-    }
-
-    /// Returns the digest hash of a valid (unexpired) unmaterialized remote output (or remote
-    /// tree children under `path/` when all remote children are unexpired), matching
-    /// `ActionCacheChecker.isUpToDate` -> `RemoteOutputChecker.shouldTrustMetadata`.
-    pub fn pending_output_digest(&self, path: &str) -> Option<String> {
-        self.lookup_remote_digest(path, true)
-    }
-
-    fn lookup_remote_digest(&self, path: &str, check_ttl: bool) -> Option<String> {
-        let now = Instant::now();
-        let lazy = self.lazy.lock().unwrap();
-        if let Some(o) = lazy.get(path) {
-            if check_ttl && now >= o.expires_at {
-                return None;
-            }
-            return Some(o.digest.hash.clone());
-        }
-        let prefix = format!("{path}/");
-        let mut children: Vec<(&str, &RemoteOutput)> = lazy
             .iter()
-            .filter_map(|(k, v)| k.strip_prefix(&prefix).map(|rel| (rel, v)))
-            .collect();
-        if children.is_empty() {
-            return None;
-        }
-        if check_ttl && children.iter().any(|(_, v)| now >= v.expires_at) {
-            return None;
-        }
-        children.sort_by(|a, b| a.0.cmp(b.0));
-        let mut buf = Vec::new();
-        for (rel, v) in children {
-            buf.extend_from_slice(rel.as_bytes());
-            buf.push(0);
-            buf.extend_from_slice(v.digest.hash.as_bytes());
-            buf.push(0);
-        }
-        Some(self.opts.digest_fn.digest(&buf).hash)
+            .filter_map(|(k, o)| {
+                k.strip_prefix(&prefix)
+                    .map(|rel| (rel.to_string(), o.digest.hash.clone(), now < o.expires_at))
+            })
+            .collect()
     }
 
     /// Number of outputs currently known only by digest (not downloaded).

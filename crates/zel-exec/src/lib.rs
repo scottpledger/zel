@@ -1237,6 +1237,270 @@ pub fn normalize_discovered_header(dep: &str, execroot_str: &str) -> Option<Stri
     Some(norm.to_string())
 }
 
+#[derive(Default)]
+struct RemoteTreeNode {
+    files: BTreeMap<String, (String, bool)>,
+    dirs: BTreeMap<String, RemoteTreeNode>,
+}
+
+impl RemoteTreeNode {
+    fn from_entries(entries: Vec<(String, String, bool)>) -> Self {
+        let mut root = Self::default();
+        for (rel, hash, valid) in entries {
+            let segs: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+            let Some((name, parents)) = segs.split_last() else {
+                continue;
+            };
+            let mut cur = &mut root;
+            for p in parents {
+                cur = cur.dirs.entry((*p).to_string()).or_default();
+            }
+            cur.files.insert((*name).to_string(), (hash, valid));
+        }
+        root
+    }
+
+    fn is_empty(&self) -> bool {
+        self.files.is_empty() && self.dirs.is_empty()
+    }
+}
+
+fn resolve_symlink_in_execroot(
+    fs: &dyn FileSystem,
+    execroot: &PathFragment,
+    start: &PathFragment,
+) -> Option<String> {
+    let er_prefix = format!("{}/", execroot.path_string());
+    let mut cur = start.clone();
+    let mut traversed = 0usize;
+    for _ in 0..32 {
+        let Ok(st) = fs.stat(&cur, false) else {
+            break;
+        };
+        if !st.is_symlink {
+            break;
+        }
+        let target = fs.read_symbolic_link(&cur).ok()?;
+        traversed += 1;
+        cur = if target.is_absolute() {
+            target
+        } else {
+            let parent = cur.parent_directory()?;
+            PathFragment::create(&format!(
+                "{}/{}",
+                parent.path_string(),
+                target.path_string()
+            ))
+        };
+    }
+    if traversed == 0 || fs.stat(&cur, false).is_ok_and(|s| s.is_symlink) {
+        return None;
+    }
+    cur.path_string()
+        .strip_prefix(&er_prefix)
+        .map(str::to_string)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn walk_hybrid_dir(
+    digest: DigestFunction,
+    fs: &dyn FileSystem,
+    execroot: &PathFragment,
+    dir_abs: &PathFragment,
+    rel_prefix: &str,
+    rnode: Option<&RemoteTreeNode>,
+    remote: Option<&zel_remote::spawn_runner::RemoteSpawnRunner>,
+    check_ttl: bool,
+    expired: &mut bool,
+    out: &mut Vec<u8>,
+    depth: usize,
+) {
+    if *expired || depth > 256 {
+        return;
+    }
+    let local_entries: BTreeMap<String, zel_vfs::Dirent> = fs
+        .readdir(dir_abs)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|e| (e.name.clone(), e))
+        .collect();
+    let mut names: std::collections::BTreeSet<String> = local_entries.keys().cloned().collect();
+    if let Some(rn) = rnode {
+        names.extend(rn.files.keys().cloned());
+        names.extend(rn.dirs.keys().cloned());
+    }
+    for name in names {
+        let p = dir_abs.get_relative_str(&name);
+        let child_rel = format!("{rel_prefix}/{name}");
+        out.extend_from_slice(child_rel.as_bytes());
+        out.push(0);
+        let child_rdir = rnode.and_then(|rn| rn.dirs.get(&name));
+        let child_rfile = rnode.and_then(|rn| rn.files.get(&name));
+        if let Some(dirent) = local_entries.get(&name) {
+            match fs.stat(&p, true) {
+                Ok(s) if s.is_directory => {
+                    let linked_tree = if dirent.dirent_type == zel_vfs::DirentType::Symlink {
+                        remote
+                            .and_then(|r| {
+                                resolve_symlink_in_execroot(fs, execroot, &p).map(|t| {
+                                    RemoteTreeNode::from_entries(r.remote_tree_entries(&t))
+                                })
+                            })
+                            .filter(|t| !t.is_empty())
+                    } else {
+                        None
+                    };
+                    walk_hybrid_dir(
+                        digest,
+                        fs,
+                        execroot,
+                        &p,
+                        &child_rel,
+                        child_rdir.or(linked_tree.as_ref()),
+                        remote,
+                        check_ttl,
+                        expired,
+                        out,
+                        depth + 1,
+                    );
+                }
+                Ok(_) => {
+                    if let Ok(b) = fs.read_file(&p) {
+                        out.extend_from_slice(digest.hex(&b).as_bytes());
+                    }
+                }
+                Err(_) => {
+                    if let (Some(r), Some(target_rel)) =
+                        (remote, resolve_symlink_in_execroot(fs, execroot, &p))
+                    {
+                        if let Some((hash, valid)) = r.remote_file_entry(&target_rel) {
+                            if check_ttl && !valid {
+                                *expired = true;
+                                return;
+                            }
+                            out.extend_from_slice(hash.as_bytes());
+                        } else {
+                            let target_tree =
+                                RemoteTreeNode::from_entries(r.remote_tree_entries(&target_rel));
+                            if !target_tree.is_empty() {
+                                let target_abs = execroot.get_relative_str(&target_rel);
+                                walk_hybrid_dir(
+                                    digest,
+                                    fs,
+                                    execroot,
+                                    &target_abs,
+                                    &child_rel,
+                                    Some(&target_tree),
+                                    remote,
+                                    check_ttl,
+                                    expired,
+                                    out,
+                                    depth + 1,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        } else if let Some(sub_rdir) = child_rdir {
+            walk_hybrid_dir(
+                digest,
+                fs,
+                execroot,
+                &p,
+                &child_rel,
+                Some(sub_rdir),
+                remote,
+                check_ttl,
+                expired,
+                out,
+                depth + 1,
+            );
+        } else if let Some((hash, valid)) = child_rfile {
+            if check_ttl && !*valid {
+                *expired = true;
+                return;
+            }
+            out.extend_from_slice(hash.as_bytes());
+        }
+        if *expired {
+            return;
+        }
+        out.push(0);
+    }
+}
+
+/// Computes the digest of an exec-root-relative artifact path over the union of `fs` (local disk)
+/// and `remote` (unmaterialized BwoB entries), matching `RemoteActionFileSystem` +
+/// `ActionCacheChecker.loadCachedOutputMetadata` (local filesystem entries override remote entries,
+/// and both local and remote tree children participate in canonical sorted order so the digest
+/// matches [`path_digest`] once fully materialized).
+fn hybrid_path_digest(
+    digest: DigestFunction,
+    fs: &dyn FileSystem,
+    execroot: &PathFragment,
+    rel: &str,
+    remote: Option<&zel_remote::spawn_runner::RemoteSpawnRunner>,
+    check_ttl: bool,
+) -> Option<String> {
+    let abs_path = execroot.get_relative_str(rel);
+    let remote_children = remote
+        .map(|r| r.remote_tree_entries(rel))
+        .unwrap_or_default();
+
+    if remote_children.is_empty() {
+        if let Some(d) = path_digest(digest, fs, &abs_path) {
+            return Some(d);
+        }
+        if let Some(r) = remote {
+            if let Some((hash, valid)) = r.remote_file_entry(rel) {
+                return (!check_ttl || valid).then_some(hash);
+            }
+            if let Some(target_rel) = resolve_symlink_in_execroot(fs, execroot, &abs_path) {
+                if target_rel != rel {
+                    return hybrid_path_digest(
+                        digest,
+                        fs,
+                        execroot,
+                        &target_rel,
+                        remote,
+                        check_ttl,
+                    );
+                }
+            }
+        }
+        return None;
+    }
+
+    if let Ok(st) = fs.stat(&abs_path, true) {
+        if !st.is_directory {
+            return path_digest(digest, fs, &abs_path);
+        }
+    }
+
+    let rtree = RemoteTreeNode::from_entries(remote_children);
+    let mut expired = false;
+    let mut buf = Vec::new();
+    walk_hybrid_dir(
+        digest,
+        fs,
+        execroot,
+        &abs_path,
+        "",
+        Some(&rtree),
+        remote,
+        check_ttl,
+        &mut expired,
+        &mut buf,
+        0,
+    );
+    if expired {
+        None
+    } else {
+        Some(digest.hex(&buf))
+    }
+}
+
 /// Parses a Makefile-style dependency file (`.d`, as written by `gcc -MD`) into the prerequisite
 /// paths (`CppCompileAction.discoverInputsFromDotdFiles`): the target before the first
 /// unescaped `:` is dropped, `\\`-newline continuations and `\\ ` escapes are handled.
@@ -1504,33 +1768,10 @@ pub fn execute_action_with(
         .filter(|a| a.is_source && !a.is_tree_artifact && !a.is_unresolved_symlink)
         .map(|a| (a.exec_path.path_string(), a))
         .collect();
-    let lookup_remote = |rel: &str, check_ttl: bool| -> Option<String> {
-        opts.runtime
-            .as_ref()
-            .and_then(|rt| rt.remote.as_ref())
-            .and_then(|r| {
-                if check_ttl {
-                    r.pending_output_digest(rel)
-                } else {
-                    r.remote_output_digest(rel)
-                }
-            })
-    };
-    let has_remote_tree = |rel: &str| -> bool {
-        opts.runtime
-            .as_ref()
-            .and_then(|rt| rt.remote.as_ref())
-            .is_some_and(|r| r.has_pending_tree_entries(rel))
-    };
+    let remote_runner = opts.runtime.as_ref().and_then(|rt| rt.remote.as_deref());
     let input_digest_with = |p: &str, check_ttl: bool| -> Option<String> {
-        let lookup_derived = || {
-            if has_remote_tree(p) {
-                lookup_remote(p, check_ttl)
-            } else {
-                path_digest(digest, fs, &execroot.get_relative_str(p))
-                    .or_else(|| lookup_remote(p, check_ttl))
-            }
-        };
+        let lookup_hybrid =
+            || hybrid_path_digest(digest, fs, execroot, p, remote_runner, check_ttl);
         if constant_metadata_paths.contains(p) || p == "bazel-out/volatile-status.txt" {
             let target = execroot.get_relative_str(p);
             fs.exists(&target, true)
@@ -1539,20 +1780,21 @@ pub fn execute_action_with(
             if let Some(src_art) = source_by_exec.get(p) {
                 match fc.get_artifact_metadata(src_art) {
                     Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                    Err(file_cache::FileCacheError::Directory(_)) => lookup_derived(),
+                    Err(file_cache::FileCacheError::Directory(_)) => lookup_hybrid(),
                     Err(_) => None,
                 }
             } else if !p.starts_with("bazel-out/") {
                 match fc.get_input_metadata(&PathFragment::create(p)) {
                     Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                    Err(file_cache::FileCacheError::Directory(_)) => lookup_derived(),
+                    Err(file_cache::FileCacheError::Directory(_)) => lookup_hybrid(),
+                    Err(_) if remote_runner.is_some() => lookup_hybrid(),
                     Err(_) => None,
                 }
             } else {
-                lookup_derived()
+                lookup_hybrid()
             }
         } else {
-            lookup_derived()
+            lookup_hybrid()
         }
     };
     let md_digest_with = |discovered: &[String], check_ttl: bool| -> String {
@@ -1593,10 +1835,8 @@ pub fn execute_action_with(
             fs.read_symbolic_link(&p)
                 .ok()
                 .map(|t| digest.hex(t.path_string().as_bytes()))
-        } else if has_remote_tree(rel) {
-            lookup_remote(rel, check_ttl)
         } else {
-            path_digest(digest, fs, &p).or_else(|| lookup_remote(rel, check_ttl))
+            hybrid_path_digest(digest, fs, execroot, rel, remote_runner, check_ttl)
         }
     };
     let out_digest = |o: &Artifact| -> Option<String> { out_digest_with(o, true) };

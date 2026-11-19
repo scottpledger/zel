@@ -897,3 +897,296 @@ fn bwob_zero_remote_cache_ttl_succeeds_post_execution_and_reexecutes_next_invoca
         "unexpired remote metadata must hit local action cache"
     );
 }
+
+#[test]
+fn hybrid_tree_artifact_digest_matches_materialized_path_digest_and_invalidates_on_local_edits() {
+    use zel_analysis::{ActionAnalysisMetadata, Artifact};
+    use zel_cmdline::Label;
+    use zel_exec::action_cache::CompactPersistentActionCache;
+    use zel_exec::digest::DigestFunction;
+    use zel_exec::{execute_action_with, path_digest, ExecOptions};
+    use zel_proto::reapi::{Directory, DirectoryNode, FileNode, Message, OutputDirectory, Tree};
+
+    let root = tmp("hybrid_tree");
+    let server = FakeReapiServer::new();
+
+    // Remote executor produces a tree artifact `out_tree` containing:
+    // - `empty.txt` (size 0 -> materialized locally on disk)
+    // - `matched.log` (matches `--remote_download_regex` -> materialized locally on disk)
+    // - `remote_top.bin` (unmaterialized -> tracked in `lazy`)
+    // - `sub/empty_sub` (empty directory -> created locally on disk)
+    // - `sub/remote_nested.bin` (unmaterialized -> tracked in `lazy`)
+    server.set_executor(move |ctx| {
+        let path = ctx
+            .command
+            .output_paths
+            .first()
+            .or(ctx.command.output_directories.first())
+            .or(ctx.command.output_files.first())
+            .expect("declared output")
+            .clone();
+        if path.ends_with("consumer_done.txt") {
+            let d_done = ctx.server.put_blob(b"ok\n");
+            return Ok(ActionResult {
+                output_files: vec![OutputFile {
+                    path,
+                    digest: Some(d_done),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+        }
+        let d_empty = ctx.server.put_blob(b"");
+        let d_matched = ctx.server.put_blob(b"matched-log-bytes");
+        let d_remote_top = ctx.server.put_blob(b"remote-top-payload");
+        let d_remote_nested = ctx.server.put_blob(b"remote-nested-payload");
+
+        let empty_sub = Directory::default();
+        let d_empty_sub = ctx.server.put_blob(&empty_sub.encode_to_vec());
+        let sub_dir = Directory {
+            files: vec![FileNode {
+                name: "remote_nested.bin".into(),
+                digest: Some(d_remote_nested),
+                is_executable: false,
+                node_properties: None,
+            }],
+            directories: vec![DirectoryNode {
+                name: "empty_sub".into(),
+                digest: Some(d_empty_sub),
+            }],
+            symlinks: vec![],
+            node_properties: None,
+        };
+        let d_sub_dir = ctx.server.put_blob(&sub_dir.encode_to_vec());
+        let root_dir = Directory {
+            files: vec![
+                FileNode {
+                    name: "empty.txt".into(),
+                    digest: Some(d_empty),
+                    is_executable: false,
+                    node_properties: None,
+                },
+                FileNode {
+                    name: "matched.log".into(),
+                    digest: Some(d_matched),
+                    is_executable: false,
+                    node_properties: None,
+                },
+                FileNode {
+                    name: "remote_top.bin".into(),
+                    digest: Some(d_remote_top),
+                    is_executable: false,
+                    node_properties: None,
+                },
+            ],
+            directories: vec![DirectoryNode {
+                name: "sub".into(),
+                digest: Some(d_sub_dir),
+            }],
+            symlinks: vec![],
+            node_properties: None,
+        };
+        let tree = Tree {
+            root: Some(root_dir),
+            children: vec![sub_dir, empty_sub],
+        };
+        let tree_digest = ctx.server.put_blob(&tree.encode_to_vec());
+        Ok(ActionResult {
+            output_directories: vec![OutputDirectory {
+                path,
+                tree_digest: Some(tree_digest),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    });
+
+    let so = StrategyOptions {
+        spawn_strategy: vec!["remote".into()],
+        ..Default::default()
+    };
+    let rt = runtime(
+        &root,
+        &server,
+        true,
+        &[
+            "--remote_download_outputs=minimal",
+            "--remote_download_regex=.*\\.log$",
+            "--experimental_remote_cache_ttl=3h",
+        ],
+        so,
+        DynamicOptions::default(),
+    );
+
+    let owner = Label::parse_canonical("//t:tree").unwrap();
+    let mut tree_art = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("out_tree"),
+        owner.clone(),
+    );
+    tree_art.is_tree_artifact = true;
+    let tree_rel = tree_art.exec_path.path_string().to_string();
+    let tree_disk = root.join("ob/execroot/_main").join(&tree_rel);
+
+    let action = ActionAnalysisMetadata::SpawnAction {
+        owner: owner.clone(),
+        mnemonic: "GenTree".into(),
+        progress_message: "Doing GenTree //t:tree".into(),
+        argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
+        env: BTreeMap::new(),
+        inherited_env: Default::default(),
+        unset_env: Default::default(),
+        inputs: vec![],
+        outputs: vec![tree_art.clone()],
+        execution_info: BTreeMap::new(),
+        tools: Vec::new(),
+        java_compile: None,
+    };
+
+    // Downstream consumer action taking `tree_art` as input, to verify `md_digest_with` too.
+    let consumer_out = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("consumer_done.txt"),
+        owner.clone(),
+    );
+    let consumer = ActionAnalysisMetadata::SpawnAction {
+        owner,
+        mnemonic: "ConsumeTree".into(),
+        progress_message: "Doing ConsumeTree //t:tree".into(),
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!("echo ok > {}", consumer_out.exec_path),
+        ],
+        env: BTreeMap::new(),
+        inherited_env: Default::default(),
+        unset_env: Default::default(),
+        inputs: vec![tree_art.clone()],
+        outputs: vec![consumer_out],
+        execution_info: BTreeMap::new(),
+        tools: Vec::new(),
+        java_compile: None,
+    };
+
+    let fs = LocalFileSystem::default();
+    let er = execroot(&root);
+    let ac = CompactPersistentActionCache::new();
+    let exec_opts = ExecOptions {
+        runtime: Some(rt.clone()),
+        ..Default::default()
+    };
+
+    // 1. Initial execution: hybrid state on disk (`empty.txt`, `matched.log`, `sub/empty_sub` on
+    //    local disk; `remote_top.bin` and `sub/remote_nested.bin` unmaterialized in `lazy`).
+    let run1 = execute_action_with(&action, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(run1.failure.is_none(), "{:?}", run1.failure);
+    assert!(!run1.cache_hit);
+    assert!(tree_disk.join("empty.txt").exists());
+    assert_eq!(
+        std::fs::read(tree_disk.join("matched.log")).unwrap(),
+        b"matched-log-bytes"
+    );
+    assert!(tree_disk.join("sub/empty_sub").is_dir());
+    assert!(!tree_disk.join("remote_top.bin").exists());
+    assert!(!tree_disk.join("sub/remote_nested.bin").exists());
+    assert_eq!(rt.remote.as_ref().unwrap().pending_remote_outputs(), 2);
+
+    let recorded_hybrid_digest = ac.get_entry(&tree_rel).unwrap().files[&tree_rel].clone();
+    assert!(!recorded_hybrid_digest.is_empty());
+
+    let c1 = execute_action_with(&consumer, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(c1.failure.is_none(), "{:?}", c1.failure);
+    assert!(!c1.cache_hit);
+    // `consumer` ran remotely, so `out_tree`'s 2 remote files + `consumer_done.txt` are lazy.
+    assert!(!tree_disk.join("remote_top.bin").exists());
+    assert!(!tree_disk.join("sub/remote_nested.bin").exists());
+
+    // 2. Unchanged hybrid tree hits the local action cache for both producer and consumer.
+    let run2 = execute_action_with(&action, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(run2.cache_hit, "unchanged hybrid tree must be UpToDate");
+    let c2 = execute_action_with(&consumer, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(
+        c2.cache_hit,
+        "unchanged hybrid input tree must keep consumer UpToDate"
+    );
+
+    // 3. Modifying a locally materialized child (`matched.log`) invalidates both the consumer's
+    //    `md_digest` and the producer's output digest check, triggering re-execution.
+    std::fs::write(tree_disk.join("matched.log"), b"tampered-local-bytes").unwrap();
+    let c_tampered =
+        execute_action_with(&consumer, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(
+        !c_tampered.cache_hit,
+        "modifying a local child of a hybrid input tree must invalidate consumer md_digest"
+    );
+    let run3 = execute_action_with(&action, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(
+        !run3.cache_hit,
+        "modifying a local child of a hybrid tree must invalidate mustExecute"
+    );
+    assert_eq!(
+        std::fs::read(tree_disk.join("matched.log")).unwrap(),
+        b"matched-log-bytes"
+    );
+
+    // 4. Deleting a locally materialized size-0 child (`empty.txt`) also invalidates the cache.
+    std::fs::remove_file(tree_disk.join("empty.txt")).unwrap();
+    let run4 = execute_action_with(&action, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(
+        !run4.cache_hit,
+        "deleting a local size-0 child of a hybrid tree must invalidate mustExecute"
+    );
+    assert!(tree_disk.join("empty.txt").exists());
+    // Refresh `consumer`'s cache entry against the restored hybrid tree before materialization.
+    let _ = execute_action_with(&consumer, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+
+    // 5. Materialize all remaining remote children of `out_tree` to disk: `path_digest` on the
+    //    fully materialized directory must match `recorded_hybrid_digest` byte-for-byte, and both
+    //    the producer and consumer actions must remain `UpToDate` without re-executing!
+    let dl = rt
+        .remote
+        .as_ref()
+        .unwrap()
+        .materialize(
+            std::slice::from_ref(&tree_rel),
+            &root.join("ob/execroot/_main"),
+        )
+        .unwrap();
+    assert_eq!(dl, 2);
+    assert!(rt
+        .remote
+        .as_ref()
+        .unwrap()
+        .remote_tree_entries(&tree_rel)
+        .is_empty());
+    assert_eq!(
+        std::fs::read(tree_disk.join("remote_top.bin")).unwrap(),
+        b"remote-top-payload"
+    );
+    assert_eq!(
+        std::fs::read(tree_disk.join("sub/remote_nested.bin")).unwrap(),
+        b"remote-nested-payload"
+    );
+
+    let full_disk_digest = path_digest(
+        DigestFunction::default(),
+        &fs,
+        &er.get_relative(&tree_art.exec_path),
+    )
+    .expect("materialized tree path_digest");
+    assert_eq!(
+        full_disk_digest, recorded_hybrid_digest,
+        "hybrid tree digest must match fully materialized path_digest"
+    );
+
+    let run5 = execute_action_with(&action, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(
+        run5.cache_hit,
+        "materializing remaining lazy children must keep producer action cache valid"
+    );
+    let c3 = execute_action_with(&consumer, &er, &fs, &ac, &Reporter::new(), &exec_opts).unwrap();
+    assert!(
+        c3.cache_hit,
+        "materializing remaining lazy children must keep downstream consumer md_digest valid"
+    );
+}
