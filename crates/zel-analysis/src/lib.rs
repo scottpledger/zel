@@ -170,10 +170,21 @@ impl BuildConfigurationKey {
     /// Returns the string rendering of option `name` from `options`, `native`, or the default in
     /// `build_options_table`.
     pub fn option_str(&self, name: &str) -> Option<String> {
+        let null_default = build_options::find_option(name)
+            .map(|(_, o)| o.default == "null")
+            .unwrap_or(false);
         if let Some(v) = self.options.get(name) {
+            if null_default && (v == "null" || v == NULL_VALUE) {
+                return None;
+            }
             return Some(v.clone());
         }
-        if let Some(n) = self.native.get(name) {
+        let native_name = if self.is_exec && name == "java_launcher" {
+            "host_java_launcher"
+        } else {
+            name
+        };
+        if let Some(n) = self.native.get(native_name) {
             return match &n.value {
                 build_options::ConfigValue::Null => None,
                 other => Some(other.display()),
@@ -283,15 +294,13 @@ impl BuildConfigurationKey {
         // JavaOptions.getExec: --plugin is not propagated to the exec configuration (avoids cycles),
         // while `java_launcher` in the exec configuration comes from `host_java_launcher`.
         out.options.remove("plugin");
-        if let Some(hl) = native("host_java_launcher")
-            .filter(|s| !s.is_empty() && s != "null")
-            .or_else(|| {
-                self.options
-                    .get("host_java_launcher")
-                    .cloned()
-                    .filter(|s| !s.is_empty())
-            })
-        {
+        let host_launcher = self
+            .options
+            .get("host_java_launcher")
+            .cloned()
+            .or_else(|| native("host_java_launcher"))
+            .filter(|s| !s.is_empty() && s != "null" && s != NULL_VALUE);
+        if let Some(hl) = host_launcher {
             out.options.insert("java_launcher".to_string(), hl);
         } else {
             out.options.remove("java_launcher");
@@ -523,9 +532,20 @@ impl BuildConfigurationKey {
                 continue;
             }
             if let Some((_, opt)) = find_option(name) {
-                let raws: Vec<String> = if opt.java_type.starts_with("List<")
-                    || opt.java_type.starts_with("ImmutableList<")
-                {
+                let is_list = opt.java_type.starts_with("List<")
+                    || opt.java_type.starts_with("ImmutableList<");
+                if opt.default == "null" && (raw == "null" || raw == NULL_VALUE) {
+                    o.set(
+                        name,
+                        if is_list {
+                            ConfigValue::List(vec![])
+                        } else {
+                            ConfigValue::Null
+                        },
+                    );
+                    continue;
+                }
+                let raws: Vec<String> = if is_list {
                     raw.split(',')
                         .filter(|p| !p.is_empty())
                         .map(str::to_string)
@@ -1612,6 +1632,61 @@ mod tests {
         assert_eq!(
             parse_workspace_status_file(b"DUP_KEY a\nDUP_KEY b\n", &mut bad),
             Err("DUP_KEY is duplicated in the file.".to_string())
+        );
+    }
+
+    #[test]
+    fn exec_transition_treats_null_host_java_launcher_as_unset() {
+        let host_cpu = build_options::auto_host_cpu();
+        let baseline_exec = BuildConfigurationKey::target(host_cpu, "fastbuild").to_exec();
+
+        let mut cfg = BuildConfigurationKey::target(host_cpu, "fastbuild");
+        cfg.options
+            .insert("java_launcher".into(), "@@//pkg:target_launcher".into());
+        cfg.native.insert(
+            "java_launcher".into(),
+            NativeSetting {
+                raw: "//pkg:target_launcher".into(),
+                value: build_options::ConfigValue::Scalar("@@//pkg:target_launcher".into()),
+            },
+        );
+        cfg.options
+            .insert("host_java_launcher".into(), "null".into());
+        cfg.native.insert(
+            "host_java_launcher".into(),
+            NativeSetting {
+                raw: String::new(),
+                value: build_options::ConfigValue::Null,
+            },
+        );
+
+        let exec_cfg = cfg.to_exec();
+        assert!(
+            !exec_cfg.options.contains_key("java_launcher"),
+            "exec options should omit unset java_launcher: {:?}",
+            exec_cfg.options
+        );
+        assert_eq!(exec_cfg.option_str("java_launcher"), None);
+        assert_eq!(
+            fragments::late_bound_label("java", "launcher", &exec_cfg),
+            None
+        );
+        assert_eq!(
+            exec_cfg.build_options().get("java_launcher"),
+            Some(&build_options::ConfigValue::Null)
+        );
+        assert_eq!(exec_cfg.checksum(), baseline_exec.checksum());
+
+        cfg.options
+            .insert("host_java_launcher".into(), "@@//pkg:host_launcher".into());
+        let exec_with_host = cfg.to_exec();
+        assert_eq!(
+            exec_with_host.option_str("java_launcher").as_deref(),
+            Some("@@//pkg:host_launcher")
+        );
+        assert_eq!(
+            fragments::late_bound_label("java", "launcher", &exec_with_host),
+            Some(Label::parse_canonical("@@//pkg:host_launcher").unwrap())
         );
     }
 }
