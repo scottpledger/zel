@@ -196,6 +196,32 @@ impl BuildConfigurationKey {
             .map(str::to_string)
     }
 
+    /// Resolves a `--flag_alias=<alias>=<label>` target label in this configuration, if any.
+    pub fn flag_alias_target(&self, alias: &str) -> Option<String> {
+        let mut found: Option<String> = None;
+        if let Some(n) = self.native.get("flag_alias") {
+            if let build_options::ConfigValue::List(entries) = &n.value {
+                for entry in entries {
+                    if let Some((k, v)) = entry.split_once('=') {
+                        if k == alias && !v.is_empty() {
+                            found = Some(v.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(raw) = self.options.get("flag_alias") {
+            for entry in raw.split(',').filter(|s| !s.is_empty()) {
+                if let Some((k, v)) = entry.split_once('=') {
+                    if k == alias && !v.is_empty() {
+                        found = Some(v.to_string());
+                    }
+                }
+            }
+        }
+        found
+    }
+
     /// Reads a boolean option (`options` / `native` / default).
     pub fn bool_option(&self, name: &str, default: bool) -> bool {
         let val = self.option_str(name);
@@ -292,8 +318,10 @@ impl BuildConfigurationKey {
             .or_else(|| self.options.get("host_cpu").cloned())
             .unwrap_or_else(|| build_options::auto_host_cpu().to_string());
         // JavaOptions.getExec: --plugin is not propagated to the exec configuration (avoids cycles),
-        // while `java_launcher` in the exec configuration comes from `host_java_launcher`.
+        // `java_launcher` comes from `host_java_launcher`, and
+        // `--tool_java_{language,runtime}_version` become `--java_{language,runtime}_version`.
         out.options.remove("plugin");
+        out.native.remove("plugin");
         let host_launcher = self
             .options
             .get("host_java_launcher")
@@ -301,9 +329,38 @@ impl BuildConfigurationKey {
             .or_else(|| native("host_java_launcher"))
             .filter(|s| !s.is_empty() && s != "null" && s != NULL_VALUE);
         if let Some(hl) = host_launcher {
-            out.options.insert("java_launcher".to_string(), hl);
+            out.options.insert("java_launcher".to_string(), hl.clone());
+            out.native.insert(
+                "java_launcher".to_string(),
+                NativeSetting {
+                    raw: hl.clone(),
+                    value: build_options::ConfigValue::Scalar(hl),
+                },
+            );
         } else {
             out.options.remove("java_launcher");
+            out.native.remove("java_launcher");
+        }
+        for (tool_k, target_k) in [
+            ("tool_java_language_version", "java_language_version"),
+            ("tool_java_runtime_version", "java_runtime_version"),
+        ] {
+            let v = self
+                .options
+                .get(tool_k)
+                .cloned()
+                .or_else(|| native(tool_k))
+                .filter(|s| !s.is_empty());
+            if let Some(val) = v {
+                out.options.insert(target_k.to_string(), val.clone());
+                out.native.insert(
+                    target_k.to_string(),
+                    NativeSetting {
+                        raw: val.clone(),
+                        value: build_options::ConfigValue::Scalar(val),
+                    },
+                );
+            }
         }
         const KEY: &str = "//command_line_option:platforms";
         // `SkyframeExecutor.setBaselineConfiguration`: BASELINE_EXEC_CONFIGURATION is the exec

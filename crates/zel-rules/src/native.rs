@@ -194,8 +194,14 @@ fn finish(
     }
     ct.output_groups = OutputGroupInfo { groups };
     // `SpawnAction.createActionEnvironment` against the owner's configuration.
+    let allow_tags = n
+        .cfg
+        .bool_option("incompatible_allow_tags_propagation", true);
     let mut actions = actions;
     for a in &mut actions {
+        if allow_tags && matches!(a.kind, ActionKind::Spawn { .. }) {
+            zel_analysis::action::propagate_rule_tags(n.rule, &mut a.execution_requirements);
+        }
         a.apply_configuration_env(n.cfg);
     }
     for a in &actions {
@@ -274,13 +280,19 @@ pub(crate) fn genquery(n: &Nctx) -> Result<ConfiguredTarget, String> {
     let Some(hook) = crate::genquery_hook() else {
         return Err(n.err("expression", "genquery: no query engine is available"));
     };
+    let compressed = n.boolean("compressed_output")?;
     let bytes =
         hook(&loader, &expression, &scope, strict, &opts).map_err(|e| n.err("expression", &e))?;
+    let payload = if compressed {
+        zel_util::deflate::gzip(&bytes)
+    } else {
+        bytes
+    };
     let mut a = Action::new(
         n.rule.label.clone(),
         "FileWrite",
         ActionKind::FileWrite {
-            content: FileContent::Literal(String::from_utf8_lossy(&bytes).into_owned()),
+            content: FileContent::Bytes(payload),
             is_executable: false,
         },
     );
@@ -656,8 +668,9 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
             toolchain_tools.push(ct.clone());
         }
     }
-    if !tc_types.is_empty() {
-        let ecw = n.labels("exec_compatible_with")?;
+    let ecw = n.labels("exec_compatible_with")?;
+    let mut selected_exec_platform = n.acfg.default_exec_platform();
+    if !tc_types.is_empty() || !ecw.is_empty() {
         let tc = crate::resolve_ctx_toolchains(
             &n.rule.label,
             &tc_types,
@@ -667,14 +680,26 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
             n.resolver,
         )?;
         for d in &tc.deps {
-            let _ = n.resolver.check_dependency(n.rule, "$toolchains", d);
+            n.resolver.check_dependency(n.rule, "$toolchains", d)?;
         }
+        selected_exec_platform = tc.exec_platform;
         tc_make_vars.extend(tc.make_variables);
         toolchain_tools.extend(tc.resolved_targets);
     }
 
-    let mut tools = n.deps("tools", true)?;
-    tools.extend(n.deps("exec_tools", true)?);
+    let exec_cfg = n.cfg.to_exec_for(&selected_exec_platform);
+    let deps_in_exec = |attr_name: &str| -> Result<Vec<Arc<ConfiguredTarget>>, String> {
+        n.labels(attr_name)?
+            .iter()
+            .map(|l| {
+                let ct = n.resolver.configured_target(l, &exec_cfg)?;
+                n.resolver.check_dependency(n.rule, attr_name, &ct)?;
+                Ok(ct)
+            })
+            .collect()
+    };
+    let mut tools = deps_in_exec("tools")?;
+    tools.extend(deps_in_exec("exec_tools")?);
     tools.extend(toolchain_tools);
     let mut label_map: BTreeMap<Label, Vec<Artifact>> = BTreeMap::new();
     for (l, out_art) in out_labels.iter().zip(&outs) {
@@ -919,10 +944,33 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
     let mut inputs = resolved_srcs.clone();
     inputs.push(setup_art);
     inputs.extend(dedup(tool_inputs.clone()));
+    let should_stamp = match n.value("stamp")? {
+        Some(AttrValue::Bool(b)) => b,
+        Some(AttrValue::Tristate(1)) | Some(AttrValue::Int(1)) => true,
+        Some(AttrValue::Tristate(0)) | Some(AttrValue::Int(0)) => false,
+        Some(AttrValue::Tristate(-1)) | Some(AttrValue::Int(-1)) => {
+            !n.cfg.is_exec && n.cfg.bool_option("stamp", false)
+        }
+        _ => false,
+    };
+    if should_stamp {
+        for status_file in ["stable-status.txt", "volatile-status.txt"] {
+            inputs.push(Artifact {
+                is_source: false,
+                is_tree_artifact: false,
+                root: ArtifactRoot::Bin,
+                is_unresolved_symlink: false,
+                exec_path: PathFragment::create(&format!("bazel-out/{status_file}")),
+                root_relative_path: PathFragment::create(status_file),
+                owner_label: label.clone(),
+            });
+        }
+    }
     action.inputs = dedup(inputs);
     action.tools = dedup(tool_inputs);
     action.outputs = outs.clone();
     action.owner_kind = "genrule".to_string();
+    action.exec_platform = Some(selected_exec_platform);
     action.use_default_shell_env = true;
     action.owner_config = n.cfg.short_hash();
 

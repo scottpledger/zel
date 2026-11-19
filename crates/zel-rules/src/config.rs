@@ -60,20 +60,33 @@ fn option_values(cfg: &zel_analysis::BuildConfigurationKey, name: &str) -> Optio
         "compilation_mode" => Some(vec![cfg.compilation_mode.clone()]),
         "cpu" => Some(vec![cfg.cpu.clone()]),
         "platforms" => Some(cfg.platforms.clone()),
-        other => match cfg.options.get(other) {
-            Some(v) => Some(v.split(',').map(str::to_string).collect()),
-            // An option that was not set has its declared default value
-            // (ConfigSetting compares against the fully-parsed BuildOptions.)
-            None => option_default(other).or_else(|| {
-                zel_analysis::build_options::find_option(other).and_then(|(_, opt)| {
-                    if opt.default == "null" || opt.default.is_empty() {
-                        None
-                    } else {
-                        Some(vec![opt.default.to_string()])
-                    }
-                })
-            }),
-        },
+        other => {
+            if let Some(n) = cfg.native.get(other) {
+                if cfg.options.get(other).map_or(true, |raw| raw == &n.raw) {
+                    return match &n.value {
+                        zel_analysis::build_options::ConfigValue::List(l) => Some(l.clone()),
+                        zel_analysis::build_options::ConfigValue::Scalar(s) => {
+                            Some(vec![s.clone()])
+                        }
+                        zel_analysis::build_options::ConfigValue::Null => None,
+                    };
+                }
+            }
+            match cfg.options.get(other) {
+                Some(v) => Some(v.split(',').map(str::to_string).collect()),
+                // An option that was not set has its declared default value
+                // (ConfigSetting compares against the fully-parsed BuildOptions.)
+                None => option_default(other).or_else(|| {
+                    zel_analysis::build_options::find_option(other).and_then(|(_, opt)| {
+                        if opt.default == "null" || opt.default.is_empty() {
+                            None
+                        } else {
+                            Some(vec![opt.default.to_string()])
+                        }
+                    })
+                }),
+            }
+        }
     }
 }
 
@@ -97,44 +110,107 @@ fn option_default(name: &str) -> Option<Vec<String>> {
     }
 }
 
+fn parse_bool_str(s: &str) -> Option<bool> {
+    match s.to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "t" | "y" => Some(true),
+        "false" | "0" | "no" | "f" | "n" => Some(false),
+        _ => None,
+    }
+}
+
 pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
     let mut settings: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut matches = true;
+    let mut seen_flag_expectations: BTreeMap<String, String> = BTreeMap::new();
 
     if let Some(AttrValue::StrDict(values)) = n.value("values")? {
         for (k, v) in values {
             let key = k.trim_start_matches("--").to_string();
-            settings.push(format!("values:{key}={v}"));
             if key == "define" {
                 let (dk, dv) = v.split_once('=').unwrap_or((v.as_str(), ""));
+                settings.push(format!("define:{dk}={dv}"));
                 if n.cfg.user_defines.get(dk).map(|x| x.as_str()) != Some(dv) {
                     matches = false;
                 }
                 continue;
             }
+            if let Some(alias_target) = n.cfg.flag_alias_target(&key) {
+                let l = Label::parse_canonical(&alias_target).map_err(|e| e.to_string())?;
+                let ct = n.resolver.configured_target(&l, n.cfg)?;
+                let resolved_label = ct.alias_targets.last().unwrap_or(&l).canonical_form();
+                seen_flag_expectations.insert(resolved_label.clone(), v.clone());
+                settings.push(format!("flag:{resolved_label}={v}"));
+                let actual = match ct
+                    .providers
+                    .get("BuildSettingProvider")
+                    .or_else(|| ct.providers.get("FeatureFlagInfo"))
+                {
+                    Some(Value::ProviderInstance { fields, .. }) => fields.get("value").cloned(),
+                    _ => None,
+                };
+                match actual {
+                    Some(act) => {
+                        if !flag_value_matches(&act, &v) {
+                            matches = false;
+                        }
+                    }
+                    None => {
+                        errors.push(format!(
+                            "{} does not have mandatory providers: 'BuildSettingProvider'",
+                            l.canonical_form()
+                        ));
+                        matches = false;
+                    }
+                }
+                continue;
+            }
+            let canonical_key = if key == "c" {
+                "compilation_mode"
+            } else {
+                key.as_str()
+            };
+            let opt_meta = zel_analysis::build_options::find_option(canonical_key);
+            let norm_v =
+                if opt_meta.is_some_and(|(_, o)| matches!(o.java_type, "boolean" | "Boolean")) {
+                    parse_bool_str(&v)
+                        .map(|b| b.to_string())
+                        .unwrap_or_else(|| v.clone())
+                } else {
+                    v.clone()
+                };
+            settings.push(format!("values:{key}={norm_v}"));
             match option_values(n.cfg, &key) {
                 Some(vals) => {
-                    let norm_v = if vals.len() == 1 && matches!(vals[0].as_str(), "true" | "false")
-                    {
-                        parse_bazel_bool(&v)
-                            .map(|b| b.to_string())
-                            .unwrap_or_else(|| v.clone())
+                    let is_bool_opt =
+                        opt_meta.is_some_and(|(_, o)| matches!(o.java_type, "boolean" | "Boolean"))
+                            || (vals.len() == 1 && matches!(vals[0].as_str(), "true" | "false"));
+                    let is_comma_list = opt_meta.is_some_and(|(_, o)| {
+                        o.converter.contains("CommaSeparated")
+                            || o.converter.ends_with("LabelListConverter")
+                            || o.converter.ends_with("LabelOrderedSetConverter")
+                    });
+                    let ok = if is_bool_opt {
+                        match (
+                            vals.first().and_then(|s| parse_bazel_bool(s)),
+                            parse_bazel_bool(&v),
+                        ) {
+                            (Some(a), Some(b)) => a == b,
+                            _ => vals.contains(&v),
+                        }
+                    } else if is_comma_list && v.contains(',') {
+                        v.split(',')
+                            .filter(|p| !p.is_empty())
+                            .all(|p| vals.iter().any(|x| x == p))
                     } else {
-                        v.clone()
+                        vals.contains(&v)
                     };
-                    if !vals.contains(&norm_v) {
+                    if !ok {
                         matches = false;
                     }
                 }
                 None => {
-                    let known = KNOWN_OPTIONS.contains(&key.as_str())
-                        || zel_analysis::build_options::find_option(if key == "c" {
-                            "compilation_mode"
-                        } else {
-                            key.as_str()
-                        })
-                        .is_some();
+                    let known = KNOWN_OPTIONS.contains(&key.as_str()) || opt_meta.is_some();
                     if !known {
                         errors.push(format!("unknown option: '{key}'"));
                     }
@@ -202,10 +278,18 @@ pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
                 }
                 _ => expected.clone(),
             };
-            settings.push(format!(
-                "flag:{}={norm_expected}",
-                resolved_label.canonical_form()
-            ));
+            let flag_canon = resolved_label.canonical_form();
+            if let Some(prev) = seen_flag_expectations.get(&flag_canon) {
+                if prev != &norm_expected {
+                    errors.push(format!(
+                        "Conflicting flag value expectations for '{flag_canon}': '{prev}' and '{norm_expected}'"
+                    ));
+                    matches = false;
+                }
+            } else {
+                seen_flag_expectations.insert(flag_canon.clone(), norm_expected.clone());
+            }
+            settings.push(format!("flag:{flag_canon}={norm_expected}"));
             if !flag_value_matches(&actual, &norm_expected) {
                 matches = false;
             }
@@ -444,6 +528,7 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
     // setting label -> value label
     let mut constraints: BTreeMap<String, (Label, Label)> = BTreeMap::new();
     let mut exec_properties: BTreeMap<String, String> = BTreeMap::new();
+    let mut flags: Vec<String> = Vec::new();
     let mut parent_remote_props: Option<String> = None;
     let core_cfg =
         zel_analysis::BuildConfigurationKey::target(&n.cfg.cpu, "fastbuild").to_core_only();
@@ -475,6 +560,13 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
             for (k, v) in d.lock().unwrap().items() {
                 if let (Value::String(k), Value::String(v)) = (k, v) {
                     exec_properties.insert(k, v);
+                }
+            }
+        }
+        if let Some(Value::List(parent_flags)) = fields.get("flags") {
+            for elem in &parent_flags.lock().unwrap().elements {
+                if let Value::String(s) = elem {
+                    flags.push(s.clone());
                 }
             }
         }
@@ -552,6 +644,7 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
             }
         }
     }
+    flags.extend(n.strings("flags")?);
     let mut ct = base(n);
     ct.providers.insert(
         "PlatformInfo".into(),
@@ -578,8 +671,64 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
                     ),
                 ),
                 ("remote_execution_properties", Value::String(remote_props)),
+                (
+                    "flags",
+                    mk_list(flags.into_iter().map(Value::String).collect()),
+                ),
             ],
         ),
+    );
+    Ok(ct)
+}
+
+pub(crate) fn config_feature_flag(n: &Nctx) -> Result<ConfiguredTarget, String> {
+    let allowed = n.strings("allowed_values")?;
+    if allowed.is_empty() {
+        return Err(format!(
+            "in allowed_values attribute of config_feature_flag rule {}: attribute must be non empty",
+            n.rule.label.canonical_form()
+        ));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for v in &allowed {
+        if !seen.insert(v.clone()) {
+            return Err(format!(
+                "in allowed_values attribute of config_feature_flag rule {}: cannot contain duplicates, but contained multiple of \"{v}\"",
+                n.rule.label.canonical_form()
+            ));
+        }
+    }
+    let has_default = n.explicit("default_value");
+    let default_value = n.string("default_value")?;
+    if has_default && !allowed.contains(&default_value) {
+        return Err(format!(
+            "in default_value attribute of config_feature_flag rule {}: cannot be default value of feature flag, which only allows {:?}, got \"{default_value}\"",
+            n.rule.label.canonical_form(),
+            allowed
+        ));
+    }
+    let key = n.rule.label.canonical_form();
+    let value = match n.cfg.flag_values.get(&key) {
+        Some(configured) => {
+            if !allowed.contains(configured) {
+                return Err(format!(
+                    "in config_feature_flag rule {}: value must be one of {:?}, but was \"{configured}\"",
+                    key, allowed
+                ));
+            }
+            configured.clone()
+        }
+        None if has_default => default_value,
+        None => {
+            return Err(format!(
+                "in config_feature_flag rule {key}: feature flag {key} was accessed in a configuration without a value present"
+            ));
+        }
+    };
+    let mut ct = base(n);
+    ct.providers.insert(
+        "FeatureFlagInfo".into(),
+        provider_instance("FeatureFlagInfo", vec![("value", Value::String(value))]),
     );
     Ok(ct)
 }
@@ -638,6 +787,10 @@ pub(crate) fn toolchain(n: &Nctx) -> Result<ConfiguredTarget, String> {
     let use_target_exec = n.boolean("use_target_platform_constraints")?;
     let core_cfg =
         zel_analysis::BuildConfigurationKey::target(&n.cfg.cpu, "fastbuild").to_core_only();
+    if let Ok(tt_ct) = n.resolver.configured_target(&ty, &core_cfg) {
+        n.resolver
+            .check_dependency(n.rule, "toolchain_type", &tt_ct)?;
+    }
     let check_dups = |attr_name: &str, labels: &[Label]| -> Result<(), String> {
         let mut seen: BTreeMap<String, Label> = BTreeMap::new();
         for raw in labels {

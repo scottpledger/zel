@@ -2125,6 +2125,15 @@ impl PackageLoader {
             }
             _ => {}
         }
+        match s.fields.get("allow_single_file") {
+            Some(Value::Bool(false)) => a.allowed_files = crate::attr::FileTypes::NoFiles,
+            Some(Value::List(_)) | Some(Value::Tuple(_)) => {
+                if let Ok(l) = sl_values(s.fields.get("allow_single_file").unwrap()) {
+                    a.allowed_files = crate::attr::FileTypes::Extensions(l);
+                }
+            }
+            _ => {}
+        }
         if let Some(Value::Struct(cf)) = s.fields.get("default") {
             if cf.fields.contains_key("_configuration_field") {
                 if let (Some(Value::String(frag)), Some(Value::String(n))) =

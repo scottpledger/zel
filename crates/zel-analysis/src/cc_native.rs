@@ -53,9 +53,35 @@ fn cc_native(
         "check_toplevel" => Ok(Value::None),
         "is_tree_artifact" => cc_is_tree_artifact(pos, kw),
         "expand_and_tokenize" => cc_expand_and_tokenize(st, pos, kw),
-        "per_file_copts" | "collect_per_file_lto_backend_opts" => Ok(mk_list(vec![])),
+        "per_file_copts" => cc_per_file_copts(st, pos, kw),
+        "collect_per_file_lto_backend_opts" => Ok(mk_list(vec![])),
         _ => return None,
     })
+}
+
+fn cc_per_file_copts(
+    st: &Arc<CtxState>,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+) -> HostResult {
+    let source = cc_kw(pos, kw, 1, "source_file").and_then(artifact_of);
+    let label = match cc_kw(pos, kw, 2, "label") {
+        Some(Value::Label(l)) => Some(l.clone()),
+        _ => None,
+    };
+    let Some(source) = source else {
+        return Ok(mk_list(vec![]));
+    };
+    let entries = match st.cfg.build_options().get("per_file_copt") {
+        Some(crate::build_options::ConfigValue::List(l)) => l.clone(),
+        _ => Vec::new(),
+    };
+    if entries.is_empty() {
+        return Ok(mk_list(vec![]));
+    }
+    let exec_path = source.exec_path.path_string();
+    let copts = crate::build_options::match_per_label_options(&entries, label.as_ref(), exec_path);
+    Ok(mk_list(copts.into_iter().map(Value::String).collect()))
 }
 
 fn cc_declare_compile_output(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
@@ -184,7 +210,7 @@ fn cc_create_compile_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Str
     a.inputs = inputs;
     a.tools = dedup(tools);
     a.outputs = outputs;
-    a.use_default_shell_env = true;
+    a.use_default_shell_env = false;
     st.register(a)?;
     Ok(Value::None)
 }
@@ -226,7 +252,13 @@ fn cc_get_link_args(pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
             "WINDOWS" => ParamFileFormat::Windows,
             _ => ParamFileFormat::Shell,
         };
-        builder.param_file = Some(crate::action::ParamFileInfo { flag_format, format, use_always: true, leading_args: 0, flag_groups: Vec::new() });
+        builder.param_file = Some(crate::action::ParamFileInfo {
+            flag_format,
+            format,
+            use_always: true,
+            leading_args: 0,
+            flag_groups: Vec::new(),
+        });
         builder.format = Some(format);
     }
     builder.args = argv;

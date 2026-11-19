@@ -180,6 +180,7 @@ pub fn analyze_target_with(
             groups.insert("default".to_string(), vec![art]);
             ct.output_groups = OutputGroupInfo { groups };
             ct.testonly = gen.testonly;
+            ct.visibility = gen.visibility.clone();
             Ok(ct)
         }
         Target::PackageGroup { label, packages } => {
@@ -406,13 +407,10 @@ pub(crate) fn resolve_ctx_toolchains(
                 _ => t.toolchain_type.clone(),
             },
             _ => {
-                if t.mandatory {
-                    return Err(format!(
-                        "Target {} was referenced as a toolchain type, but does not provide ToolchainTypeInfo",
-                        t.toolchain_type.canonical_form()
-                    ));
-                }
-                continue;
+                return Err(format!(
+                    "Target {} was referenced as a toolchain type, but does not provide ToolchainTypeInfo",
+                    t.toolchain_type.canonical_form()
+                ));
             }
         };
         resolved_requests.push(ToolchainTypeRequest {
@@ -638,11 +636,8 @@ fn analyze_rule(
             || resolver
                 .package_loader()
                 .is_some_and(|l| l.config().sibling_repository_layout);
-        inputs.allow_tags_propagation = cfg
-            .options
-            .get("incompatible_allow_tags_propagation")
-            .map(|v| v != "false")
-            .unwrap_or(true);
+        inputs.allow_tags_propagation =
+            cfg.bool_option("incompatible_allow_tags_propagation", true);
         inputs.exec_platform = Some(acfg.default_exec_platform());
         if let Ok(Some(plat_ct)) = toolchain::target_platform(&cfg, &resolver, acfg) {
             let _ = resolver.check_dependency(rule, "$target_platform", &plat_ct);
@@ -659,21 +654,17 @@ fn analyze_rule(
         {
             rule_ecw.extend(l.iter().cloned());
         }
-        if !types.is_empty() {
+        if !types.is_empty() || !rule_ecw.is_empty() {
             let tc = resolve_ctx_toolchains(&rule.label, &types, &rule_ecw, &cfg, acfg, &resolver)?;
             for d in &tc.deps {
-                let _ = resolver.check_dependency(rule, "$toolchains", d);
+                resolver.check_dependency(rule, "$toolchains", d)?;
             }
             inputs.exec_platform = Some(tc.exec_platform.clone());
             inputs.extra_make_variables.extend(tc.make_variables);
             inputs.toolchains.extend(tc.toolchains.clone());
             // `--incompatible_auto_exec_groups`: automatically creates an exec group keyed by
             // each requested toolchain type's canonical label.
-            let auto_eg = cfg
-                .options
-                .get("incompatible_auto_exec_groups")
-                .map(|v| v == "true")
-                .unwrap_or(false);
+            let auto_eg = cfg.bool_option("incompatible_auto_exec_groups", false);
             if auto_eg {
                 for t in &types {
                     let gname = t.toolchain_type.canonical_form();
@@ -714,7 +705,7 @@ fn analyze_rule(
                 let tc =
                     resolve_ctx_toolchains(&rule.label, &gtypes, &gecw, &cfg, acfg, &resolver)?;
                 for d in &tc.deps {
-                    let _ = resolver.check_dependency(rule, "$toolchains", d);
+                    resolver.check_dependency(rule, "$toolchains", d)?;
                 }
                 inputs
                     .exec_group_platforms
@@ -771,6 +762,7 @@ fn analyze_rule(
         "label_flag" => native::label_flag(&n)?,
         "label_setting" => native::label_setting(&n)?,
         "config_setting" => config::config_setting(&n)?,
+        "config_feature_flag" => config::config_feature_flag(&n)?,
         "constraint_setting" => config::constraint_setting(&n)?,
         "constraint_value" => config::constraint_value(&n)?,
         "platform" => config::platform(&n)?,

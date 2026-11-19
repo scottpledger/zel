@@ -879,3 +879,600 @@ builtin_cc_common_dll(
 
     let _ = std::fs::remove_dir_all(&tmp_base);
 }
+
+#[test]
+fn param_file_formats_flag_per_line_groups_and_tree_inputs() {
+    use zel_analysis::action::{
+        gcc_escape, render_param_file, windows_param_escape, ActionKind, ParamFileFormat,
+    };
+
+    assert_eq!(gcc_escape(""), "''");
+    assert_eq!(gcc_escape("quote\".cc"), "quote\\\".cc");
+    assert_eq!(gcc_escape("space .cc"), "space\\ .cc");
+    assert_eq!(windows_param_escape(""), "\"\"");
+    assert_eq!(windows_param_escape("plain"), "plain");
+    assert_eq!(windows_param_escape("foo bar"), "\"foo bar\"");
+    assert_eq!(windows_param_escape("a\\\"b"), "a\\\\\\\"b");
+    assert_eq!(
+        render_param_file(&["foo bar".into(), "".into()], ParamFileFormat::GccQuoted),
+        "foo\\ bar\n''\n"
+    );
+    assert_eq!(
+        render_param_file(&["foo bar".into(), "".into()], ParamFileFormat::Windows),
+        "\"foo bar\"\n\"\"\n"
+    );
+
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(
+        &fs,
+        &root,
+        "defs.bzl",
+        r##"
+def _impl(ctx):
+    tree = ctx.actions.declare_directory("my_tree")
+    ctx.actions.run_shell(outputs = [tree], command = "mkdir -p " + tree.path)
+
+    written = ctx.actions.declare_file("written.params")
+    wargs = ctx.actions.args()
+    wargs.set_param_file_format("flag_per_line")
+    wargs.add_joined("--a", ["b", "c"], join_with = ",")
+    wargs.add("--nod")
+    wargs.add_all(["pos1", "pos2"])
+    wargs.add_all("--foo", ["bar1", "bar2"])
+    wargs.add_all("", ["--raw", "x", "y"])
+    wargs.add_all([tree])
+    ctx.actions.write(written, wargs)
+
+    spilled_out = ctx.actions.declare_file("spilled.out")
+    tool = ctx.actions.declare_file("tool.sh")
+    ctx.actions.write(tool, "#!/bin/sh\n", is_executable = True)
+    sargs = ctx.actions.args()
+    sargs.set_param_file_format("flag_per_line")
+    sargs.use_param_file("%s", use_always = True)
+    sargs.add("--foo", "bar")
+    sargs.add("pos1")
+    sargs.add_joined("--joined", ["a", "b", "c"], join_with = ",")
+    sargs.add("pos2")
+    ctx.actions.run(executable = tool, outputs = [spilled_out], arguments = [sargs])
+    return [DefaultInfo(files = depset([written, spilled_out]))]
+
+my_rule = rule(implementation = _impl)
+"##,
+    );
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        "load(':defs.bzl', 'my_rule')\nmy_rule(name = 't')\n",
+    );
+
+    let r = resolver_for(fs, root);
+    let ct = r
+        .analyze(
+            &Label::parse_canonical("//:t").unwrap(),
+            &BuildConfigurationKey::target("k8", "fastbuild"),
+        )
+        .unwrap();
+
+    let write_act = ct
+        .typed_actions
+        .iter()
+        .find(|a| {
+            a.outputs
+                .iter()
+                .any(|o| o.exec_path.path_string().ends_with("/written.params"))
+        })
+        .expect("write action");
+    assert!(
+        write_act.inputs.iter().any(|i| i.is_tree_artifact),
+        "FileWrite with Args must retain tree-artifact inputs"
+    );
+    if let ActionKind::FileWrite { content, .. } = &write_act.kind {
+        let body = String::from_utf8(content.render()).unwrap();
+        assert!(body.contains("--a=b,c\n--nod\npos1\npos2\n--foo=bar1 bar2\n--raw x y\n"));
+    } else {
+        panic!("expected FileWrite");
+    }
+
+    let spawn_act = ct
+        .typed_actions
+        .iter()
+        .find(|a| {
+            a.outputs
+                .iter()
+                .any(|o| o.exec_path.path_string().ends_with("/spilled.out"))
+        })
+        .expect("spawn action");
+    let (argv, params) = spawn_act.command_line();
+    assert_eq!(params.len(), 1);
+    assert_eq!(
+        String::from_utf8(params[0].1.clone()).unwrap(),
+        "--foo=bar\n--joined=a,b,c\n"
+    );
+    assert!(argv[1].ends_with(".params"));
+    assert_eq!(&argv[2..], &["pos1", "pos2"]);
+}
+
+#[test]
+fn config_feature_flag_platform_flags_flag_alias_transition_and_fragments() {
+    use zel_analysis::build_options::{
+        convert_raws, find_option, match_per_label_options, ConfigValue,
+    };
+    use zel_analysis::NativeSetting;
+
+    // `--flag_alias` List<Map.Entry<String,Label>> conversion.
+    let (_, fa_opt) = find_option("flag_alias").unwrap();
+    let converted = convert_raws(
+        fa_opt,
+        &["my_alias=//pkg:flag_a".into(), "other=//pkg:flag_b".into()],
+        &|s| Ok(format!("@@{s}")),
+        "k8",
+    )
+    .unwrap();
+    assert_eq!(
+        converted,
+        ConfigValue::List(vec![
+            "my_alias=@@//pkg:flag_a".into(),
+            "other=@@//pkg:flag_b".into()
+        ])
+    );
+
+    // `--per_file_copt` RegexFilter + Options matching.
+    let (_, pfc_opt) = find_option("per_file_copt").unwrap();
+    let ConfigValue::List(pfc_entries) = convert_raws(
+        pfc_opt,
+        &["foo/.*\\.cc,-foo/skip\\.cc@-O3,-DFAST".into()],
+        &|s| Ok(s.to_string()),
+        "k8",
+    )
+    .unwrap() else {
+        panic!("expected list");
+    };
+    assert_eq!(
+        match_per_label_options(
+            &pfc_entries,
+            Some(&Label::parse_canonical("//foo:lib").unwrap()),
+            "foo/keep.cc"
+        ),
+        vec!["-O3", "-DFAST"]
+    );
+    assert!(match_per_label_options(
+        &pfc_entries,
+        Some(&Label::parse_canonical("//foo:lib").unwrap()),
+        "foo/skip.cc"
+    )
+    .is_empty());
+
+    // `to_exec_for` propagates `tool_java_{language,runtime}_version` -> `java_{language,runtime}_version`.
+    let mut base_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    base_cfg
+        .options
+        .insert("tool_java_language_version".into(), "21".into());
+    base_cfg
+        .options
+        .insert("tool_java_runtime_version".into(), "remotejdk_21".into());
+    base_cfg.native.insert(
+        "java_launcher".into(),
+        NativeSetting {
+            raw: "@@//tools:custom_launcher".into(),
+            value: ConfigValue::Scalar("@@//tools:custom_launcher".into()),
+        },
+    );
+    base_cfg.native.insert(
+        "ios_sdk_version".into(),
+        NativeSetting {
+            raw: "17.2".into(),
+            value: ConfigValue::Scalar("17.2".into()),
+        },
+    );
+    let exec_cfg = base_cfg.to_exec_for("@@platforms//host:host");
+    assert_eq!(
+        exec_cfg
+            .options
+            .get("java_language_version")
+            .map(String::as_str),
+        Some("21")
+    );
+    assert_eq!(
+        exec_cfg
+            .options
+            .get("java_runtime_version")
+            .map(String::as_str),
+        Some("remotejdk_21")
+    );
+    assert_eq!(
+        zel_analysis::fragments::late_bound_label("java", "launcher", &base_cfg),
+        Some(Label::parse_canonical("@@//tools:custom_launcher").unwrap())
+    );
+    let Value::Struct(apple_frag) = zel_analysis::fragments::fragment("apple", &base_cfg).unwrap()
+    else {
+        panic!("expected apple struct");
+    };
+    assert_eq!(
+        apple_frag
+            .fields
+            .get("ios_sdk_version_flag")
+            .and_then(|v| v.as_str()),
+        Some("17.2")
+    );
+
+    // `config_feature_flag`, `PlatformInfo.flags`, `--flag_alias` transition, and `ctx.build_file_path` guard.
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(
+        &fs,
+        &root,
+        "defs.bzl",
+        r#"
+BSI = provider(fields = ["value"])
+def _flag_impl(ctx):
+    return [BSI(value = ctx.build_setting_value)]
+str_flag = rule(implementation = _flag_impl, build_setting = config.string(flag = True))
+
+def _tr_impl(settings, attr):
+    return {
+        "//command_line_option:aliased_opt": "transitioned " + settings["//command_line_option:aliased_opt"],
+        "//:ff": "configured",
+        "//:ls": ":other_target",
+    }
+tr = transition(
+    implementation = _tr_impl,
+    inputs = ["//command_line_option:aliased_opt"],
+    outputs = ["//command_line_option:aliased_opt", "//:ff", "//:ls"],
+)
+
+Info = provider(fields = ["flag_val", "ff_val", "ls_files"])
+def _leaf_impl(ctx):
+    return [Info(
+        flag_val = ctx.attr._f[BSI].value,
+        ff_val = ctx.attr.ff[config_common.FeatureFlagInfo].value,
+        ls_files = [f.short_path for f in ctx.attr._ls[DefaultInfo].files.to_list()],
+    )]
+leaf = rule(
+    implementation = _leaf_impl,
+    attrs = {
+        "_f": attr.label(default = "//:foo_starlark"),
+        "ff": attr.label(),
+        "_ls": attr.label(default = "//:ls"),
+    },
+)
+
+def _top_impl(ctx):
+    return [ctx.attr.dep[Info]]
+top = rule(implementation = _top_impl, attrs = {"dep": attr.label(cfg = tr)})
+
+def _bfp_impl(ctx):
+    _ = ctx.build_file_path
+    return []
+bfp_rule = rule(implementation = _bfp_impl)
+"#,
+    );
+    write(&fs, &root, "other.txt", "ok");
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        r#"
+load(":defs.bzl", "str_flag", "leaf", "top", "bfp_rule")
+str_flag(name = "foo_starlark", build_setting_default = "default_foo")
+config_feature_flag(name = "ff", allowed_values = ["default", "configured"], default_value = "default")
+config_feature_flag(name = "ff_no_default", allowed_values = ["only"])
+filegroup(name = "init_target", srcs = [])
+filegroup(name = "other_target", srcs = ["other.txt"])
+label_setting(name = "ls", build_setting_default = ":init_target")
+leaf(name = "l", ff = ":ff")
+top(name = "t", dep = ":l")
+platform(name = "p_parent", flags = ["--cpu=arm"])
+platform(name = "p_child", parents = [":p_parent"], flags = ["--cpu=k8"])
+bfp_rule(name = "bfp")
+"#,
+    );
+
+    let r = resolver_for(fs, root);
+    let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cfg.native.insert(
+        "flag_alias".into(),
+        NativeSetting {
+            raw: String::new(),
+            value: ConfigValue::List(vec!["aliased_opt=@@//:foo_starlark".into()]),
+        },
+    );
+
+    let ct = r
+        .analyze(&Label::parse_canonical("//:t").unwrap(), &cfg)
+        .unwrap();
+    let Value::ProviderInstance { fields, .. } = &ct.providers["//:defs.bzl%Info"] else {
+        panic!("expected Info");
+    };
+    assert_eq!(
+        fields["flag_val"].as_str(),
+        Some("transitioned default_foo")
+    );
+    assert_eq!(fields["ff_val"].as_str(), Some("configured"));
+    assert_eq!(fields["ls_files"].repr(), "[\"other.txt\"]");
+
+    let ff_def = r
+        .analyze(&Label::parse_canonical("//:ff").unwrap(), &cfg)
+        .unwrap();
+    let Value::ProviderInstance {
+        fields: ff_fields, ..
+    } = &ff_def.providers["FeatureFlagInfo"]
+    else {
+        panic!("expected FeatureFlagInfo");
+    };
+    assert_eq!(ff_fields["value"].as_str(), Some("default"));
+
+    let no_def_err = r
+        .analyze(&Label::parse_canonical("//:ff_no_default").unwrap(), &cfg)
+        .unwrap_err();
+    assert!(
+        no_def_err.contains("without a value present"),
+        "got: {no_def_err}"
+    );
+
+    let p_child = r
+        .analyze(&Label::parse_canonical("//:p_child").unwrap(), &cfg)
+        .unwrap();
+    let Value::ProviderInstance { fields: pf, .. } = &p_child.providers["PlatformInfo"] else {
+        panic!("expected PlatformInfo");
+    };
+    assert_eq!(pf["flags"].repr(), "[\"--cpu=arm\", \"--cpu=k8\"]");
+
+    let bfp_err = r
+        .analyze(&Label::parse_canonical("//:bfp").unwrap(), &cfg)
+        .unwrap_err();
+    assert!(
+        bfp_err.contains("Use ctx.label.package + '/BUILD' instead of ctx.build_file_path."),
+        "got: {bfp_err}"
+    );
+}
+
+#[test]
+fn package_spec_contains_tags_propagation_optional_toolchains_and_prereq_checks() {
+    use zel_analysis::build_options::ConfigValue;
+    use zel_analysis::{ActionKind, FileContent, NativeSetting};
+
+    zel_rules::set_genquery_hook(Box::new(|_loader, _expr, _scope, _strict, _opts| {
+        Ok(b"//a:one\n//a:two\n".to_vec())
+    }));
+
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(&fs, &root, "a/src.cc", "int x;");
+    write(
+        &fs,
+        &root,
+        "rule/defs.bzl",
+        r##"
+Info = provider(fields = ["in_group", "opt_tc", "id_cfg"])
+
+def _noconf_impl(ctx):
+    return [Info(in_group = False, opt_tc = "", id_cfg = ctx.bin_dir.path)]
+noconf_rule = rule(implementation = _noconf_impl, cfg = config.none())
+
+def _check_impl(ctx):
+    pg = ctx.attr.pg[PackageSpecificationInfo]
+    out = ctx.actions.declare_file(ctx.label.name + ".out")
+    tool = ctx.actions.declare_file(ctx.label.name + ".tool")
+    ctx.actions.write(tool, "#!/bin/sh\n", is_executable = True)
+    ctx.actions.run(executable = tool, outputs = [out], mnemonic = "CustomSpawn")
+    tc_info = ctx.toolchains["//tc:opt_type"]
+    return [
+        DefaultInfo(files = depset([out])),
+        Info(
+            in_group = pg.contains(Label("//sub/pkg:anything")) and not pg.contains(Label("//other:x")),
+            opt_tc = tc_info.tag if tc_info else "missing",
+            id_cfg = ctx.attr.nc[Info].id_cfg,
+        ),
+    ]
+
+check_rule = rule(
+    implementation = _check_impl,
+    attrs = {
+        "pg": attr.label(providers = [PackageSpecificationInfo]),
+        "nc": attr.label(),
+        "_priv_tool": attr.label(default = "//priv:secret", allow_single_file = True),
+    },
+    toolchains = [config_common.toolchain_type("//tc:opt_type", mandatory = False)],
+)
+
+def _no_files_impl(ctx):
+    return []
+no_files_rule = rule(
+    implementation = _no_files_impl,
+    attrs = {"deps": attr.label_list(allow_files = False)},
+)
+"##,
+    );
+    write(&fs, &root, "rule/BUILD", "exports_files(['defs.bzl'])\n");
+    write(
+        &fs,
+        &root,
+        "priv/BUILD",
+        "exports_files(['secret'], visibility = ['//a:__pkg__'])\n",
+    );
+    write(&fs, &root, "priv/secret", "shh");
+    write(
+        &fs,
+        &root,
+        "tc/BUILD",
+        r#"
+package(default_visibility = ["//visibility:public"])
+constraint_setting(name = "slot")
+constraint_value(name = "alpha_val", constraint_setting = ":slot")
+constraint_value(name = "beta_val", constraint_setting = ":slot")
+platform(name = "plat1", constraint_values = [":alpha_val"])
+platform(name = "plat2", constraint_values = [":beta_val"])
+toolchain_type(name = "opt_type")
+toolchain_type(name = "private_type", visibility = ["//visibility:private"])
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "tc/tc.bzl",
+        r#"
+def _ti(ctx):
+    return [platform_common.ToolchainInfo(tag = ctx.attr.tag)]
+tc_impl = rule(implementation = _ti, attrs = {"tag": attr.string()})
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "tc_reg/BUILD",
+        r#"
+load("//tc:tc.bzl", "tc_impl")
+tc_impl(name = "impl_beta", tag = "from_plat2")
+toolchain(
+    name = "tc_beta",
+    toolchain_type = "//tc:opt_type",
+    exec_compatible_with = ["//tc:beta_val"],
+    toolchain = ":impl_beta",
+)
+tc_impl(name = "impl_testonly", tag = "to", testonly = True)
+toolchain(
+    name = "tc_testonly",
+    toolchain_type = "//tc:opt_type",
+    toolchain = ":impl_testonly",
+)
+toolchain(
+    name = "tc_invis_type",
+    toolchain_type = "//tc:private_type",
+    toolchain = ":impl_beta",
+)
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "a/BUILD",
+        r#"
+load("//rule:defs.bzl", "noconf_rule", "check_rule", "no_files_rule")
+package_group(name = "leaf_pg", packages = ["//sub/..."])
+package_group(name = "root_pg", includes = [":leaf_pg"])
+noconf_rule(name = "nc")
+check_rule(name = "chk", pg = ":root_pg", nc = ":nc", tags = ["no-remote", "local"])
+filegroup(name = "empty_og", srcs = [":nc"], output_group = "nonexistent_group")
+genrule(name = "stamped", outs = ["stamped.txt"], cmd = "echo ok > $@", stamp = 1)
+genquery(name = "gq", expression = "//a:all", scope = [":nc"], compressed_output = True)
+no_files_rule(name = "bad_src", deps = [":src.cc"])
+"#,
+    );
+
+    let lc = LoaderConfig::new(
+        fs as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(root)),
+    );
+    let loader = PackageLoader::new(lc);
+    let mut acfg = AnalysisConfig::new();
+    acfg.execution_platform_patterns = vec!["//tc:plat1".into(), "//tc:plat2".into()];
+    acfg.toolchain_patterns = vec!["//tc_reg:tc_beta".into()];
+    let r = TargetResolver::new(loader.clone(), acfg);
+
+    let mut cfg1 = BuildConfigurationKey::target("k8", "fastbuild");
+    cfg1.native.insert(
+        "modify_execution_info".into(),
+        NativeSetting {
+            raw: String::new(),
+            value: ConfigValue::List(vec![
+                "ExecutionInfoModifier{option=CustomSpawn=+custom-req, expressions=[]}".into(),
+            ]),
+        },
+    );
+    let mut cfg2 = cfg1.clone();
+    cfg2.options.insert("features".into(), "extra_feat".into());
+
+    let ct1 = r
+        .analyze(&Label::parse_canonical("//a:chk").unwrap(), &cfg1)
+        .unwrap();
+    let ct2 = r
+        .analyze(&Label::parse_canonical("//a:chk").unwrap(), &cfg2)
+        .unwrap();
+    let Value::ProviderInstance { fields: f1, .. } = &ct1.providers["//rule:defs.bzl%Info"] else {
+        panic!("expected Info");
+    };
+    let Value::ProviderInstance { fields: f2, .. } = &ct2.providers["//rule:defs.bzl%Info"] else {
+        panic!("expected Info");
+    };
+    assert_eq!(f1["in_group"], Value::Bool(true));
+    assert_eq!(f1["opt_tc"].as_str(), Some("from_plat2"));
+    assert_eq!(f1["id_cfg"], f2["id_cfg"]);
+
+    let spawn = ct1
+        .typed_actions
+        .iter()
+        .find(|a| a.mnemonic == "CustomSpawn")
+        .expect("CustomSpawn");
+    assert!(spawn.execution_requirements.contains_key("no-remote"));
+    assert!(spawn.execution_requirements.contains_key("local"));
+    assert!(spawn.execution_requirements.contains_key("custom-req"));
+
+    // Missing output_group on filegroup contributes nothing instead of failing.
+    let fg = r
+        .analyze(&Label::parse_canonical("//a:empty_og").unwrap(), &cfg1)
+        .unwrap();
+    assert!(fg.default_info.files.is_empty());
+
+    // Stamped genrule stages stable-status.txt and volatile-status.txt.
+    let gr = r
+        .analyze(&Label::parse_canonical("//a:stamped").unwrap(), &cfg1)
+        .unwrap();
+    let gr_inputs: Vec<&str> = gr.typed_actions[0]
+        .inputs
+        .iter()
+        .map(|i| i.exec_path.path_string())
+        .collect();
+    assert!(gr_inputs.contains(&"bazel-out/stable-status.txt"));
+    assert!(gr_inputs.contains(&"bazel-out/volatile-status.txt"));
+
+    // Compressed genquery writes gzip bytes.
+    let gq = r
+        .analyze(&Label::parse_canonical("//a:gq").unwrap(), &cfg1)
+        .unwrap();
+    if let ActionKind::FileWrite {
+        content: FileContent::Bytes(gz),
+        ..
+    } = &gq.typed_actions[0].kind
+    {
+        assert_eq!(&gz[..2], &[0x1f, 0x8b]);
+        let decompressed = zel_util::deflate::gunzip(gz).unwrap();
+        assert_eq!(decompressed, b"//a:one\n//a:two\n");
+    } else {
+        panic!("expected FileWrite Bytes");
+    }
+
+    // Disallowed source file in `allow_files = False` fails with `is misplaced here`.
+    let bad_err = r
+        .analyze(&Label::parse_canonical("//a:bad_src").unwrap(), &cfg1)
+        .unwrap_err();
+    assert!(
+        bad_err.contains("source file") && bad_err.contains("is misplaced here"),
+        "got: {bad_err}"
+    );
+
+    // Non-test rule resolving a `testonly = True` toolchain fails.
+    let mut acfg_to = AnalysisConfig::new();
+    acfg_to.toolchain_patterns = vec!["//tc_reg:tc_testonly".into()];
+    let r_to = TargetResolver::new(loader.clone(), acfg_to);
+    let to_err = r_to
+        .analyze(&Label::parse_canonical("//a:chk").unwrap(), &cfg1)
+        .unwrap_err();
+    assert!(
+        to_err.contains("depends on testonly") && to_err.contains("impl_testonly"),
+        "got: {to_err}"
+    );
+
+    // `toolchain` checks `toolchain_type` visibility.
+    let invis_err = r
+        .analyze(
+            &Label::parse_canonical("//tc_reg:tc_invis_type").unwrap(),
+            &cfg1,
+        )
+        .unwrap_err();
+    assert!(
+        invis_err.contains("Visibility error") && invis_err.contains("//tc:private_type"),
+        "got: {invis_err}"
+    );
+}

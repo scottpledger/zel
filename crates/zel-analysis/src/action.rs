@@ -56,9 +56,9 @@ pub enum ParamFileFormat {
     Multiline,
     /// One raw argument per line, flag-style: grouped `--flag=value` args, spilling only `--` args.
     FlagPerLine,
-    /// Backslash-escaped GCC/Clang response file (`GCC_QUOTED`).
+    /// `ParameterFileType.GCC_QUOTED` (`GccParamFileEscaper`).
     GccQuoted,
-    /// Windows CommandLineToArgvW response file (`WINDOWS`).
+    /// `ParameterFileType.WINDOWS` (`WindowsParamFileEscaper`).
     Windows,
 }
 
@@ -111,9 +111,13 @@ impl ParamFileInfo {
             if e - s >= 2
                 && !args[s..e]
                     .iter()
-                    .any(|item| item.starts_with(crate::args::TREE_MARKER))
+                    .any(|item| item.contains("\u{1}ZEL_TREE"))
             {
-                out.push(format!("{}={}", args[s], args[s + 1..e].join(" ")));
+                if args[s].is_empty() {
+                    out.push(args[s + 1..e].join(" "));
+                } else {
+                    out.push(format!("{}={}", args[s], args[s + 1..e].join(" ")));
+                }
             } else {
                 out.extend(args[s..e].iter().cloned());
             }
@@ -153,11 +157,23 @@ pub fn shell_escape(s: &str) -> String {
     }
 }
 
+/// Quotes one argument for [`ParamFileFormat::GccQuoted`] (`GccParamFileEscaper.escapeString`).
+pub fn gcc_escape(s: &str) -> String {
+    zel_util::param_escaper::gcc_escape_param(s)
+}
+
+/// Quotes one argument for [`ParamFileFormat::Windows`] (`WindowsParamFileEscaper.escapeString`).
+pub fn windows_param_escape(s: &str) -> String {
+    zel_util::param_escaper::windows_escape_param(s)
+}
+
 /// The contents of a `FileWriteAction`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileContent {
     /// `ctx.actions.write(output, "text")`
     Literal(String),
+    /// Binary payload (e.g. `genquery(compressed_output = True)`).
+    Bytes(Vec<u8>),
     /// `ctx.actions.write(output, args)`: arguments rendered into a param file.
     Args {
         args: Vec<String>,
@@ -170,6 +186,7 @@ impl FileContent {
     pub fn render(&self) -> Vec<u8> {
         match self {
             FileContent::Literal(s) => s.as_bytes().to_vec(),
+            FileContent::Bytes(b) => b.clone(),
             FileContent::Args { args, format } => render_param_file(args, *format).into_bytes(),
         }
     }
@@ -345,6 +362,44 @@ pub struct TestRunnerKey {
     pub zip_undeclared: bool,
 }
 
+/// Propagates execution-relevant `tags` of `rule` onto `exec_info`
+/// (`TargetUtils.getExecutionInfo` when `--incompatible_allow_tags_propagation` is enabled).
+pub fn propagate_rule_tags(
+    rule: &zel_packages::RuleInstance,
+    exec_info: &mut BTreeMap<String, String>,
+) {
+    let Some(zel_packages::attr::AttrValue::StrList(tags)) = rule.attr_or_default("tags") else {
+        return;
+    };
+    for t in tags {
+        if t.starts_with("requires-")
+            || t.starts_with("cpu:")
+            || t.starts_with("resources:")
+            || t.starts_with("gpu:")
+            || matches!(
+                t.as_str(),
+                "no-sandbox"
+                    | "no-cache"
+                    | "no-remote"
+                    | "no-remote-cache"
+                    | "no-remote-exec"
+                    | "no-remote-imageless-invocation"
+                    | "no-local"
+                    | "local"
+                    | "block-network"
+                    | "requires-network"
+                    | "supports-workers"
+                    | "supports-multiplex-workers"
+                    | "supports-worker-cancellation"
+                    | "supports-graceful-termination"
+                    | "supports-path-mapping"
+            )
+        {
+            exec_info.entry(t).or_insert_with(String::new);
+        }
+    }
+}
+
 impl Action {
     /// Starts an action with defaults for everything except `owner`, `mnemonic`, and `kind`.
     pub fn new(owner: Label, mnemonic: &str, kind: ActionKind) -> Self {
@@ -388,6 +443,46 @@ impl Action {
             self.use_default_shell_env,
             &self.env,
         ));
+        if let Some(crate::build_options::ConfigValue::List(mods)) =
+            cfg.native.get("modify_execution_info").map(|n| &n.value)
+        {
+            if !mods.is_empty() {
+                let additive = cfg.bool_option("incompatible_modify_execution_info_additive", true);
+                let slice: &[String] = if additive {
+                    mods.as_slice()
+                } else {
+                    &mods[mods.len() - 1..]
+                };
+                for rendered in slice {
+                    let raw = rendered
+                        .strip_prefix("ExecutionInfoModifier{option=")
+                        .and_then(|s| s.split_once(", expressions=[").map(|(opt, _)| opt))
+                        .unwrap_or(rendered.as_str());
+                    for spec in raw.split(',').filter(|s| !s.is_empty()) {
+                        let Some((pat, rest)) = spec.rsplit_once('=') else {
+                            continue;
+                        };
+                        let (remove, key) = if let Some(k) = rest.strip_prefix('-') {
+                            (true, k)
+                        } else if let Some(k) = rest.strip_prefix('+') {
+                            (false, k)
+                        } else {
+                            continue;
+                        };
+                        if let Ok(re) = zel_util::java_regex::Regex::new(pat) {
+                            if re.full_match(&self.mnemonic) {
+                                if remove {
+                                    self.execution_requirements.remove(key);
+                                } else {
+                                    self.execution_requirements
+                                        .insert(key.to_string(), String::new());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     pub fn primary_output(&self) -> Option<&Artifact> {
@@ -642,9 +737,14 @@ impl Action {
         for (i, a) in arguments.iter().enumerate() {
             match &a.param_file {
                 Some(pf) => {
-                    let total: usize = a.args.iter().map(|s| s.encode_utf16().count() + 1).sum();
+                    let lead = pf.leading_args.min(a.args.len());
+                    let grouped = pf.format_flag_groups(lead, &a.args);
+                    let total: usize = a.args[..lead]
+                        .iter()
+                        .chain(grouped.iter())
+                        .map(|s| s.encode_utf16().count() + 1)
+                        .sum();
                     if pf.use_always || total > DEFAULT_PARAM_FILE_THRESHOLD {
-                        let lead = pf.leading_args.min(a.args.len());
                         argv.extend(a.args[..lead].iter().cloned());
                         let path = format!("{primary}-{spilled_idx}.params");
                         spilled_idx += 1;
@@ -652,7 +752,6 @@ impl Action {
                             .unwrap_or_else(|_| pf.flag_format.replace("%s", &path));
                         argv.push(formatted);
                         if pf.format == ParamFileFormat::FlagPerLine {
-                            let grouped = pf.format_flag_groups(lead, &a.args);
                             let mut file_args = Vec::new();
                             for item in grouped {
                                 if item.starts_with("--") {
@@ -670,7 +769,7 @@ impl Action {
                             params.push((
                                 i,
                                 path,
-                                render_param_file(&a.args[lead..], pf.format).into_bytes(),
+                                render_param_file(&grouped, pf.format).into_bytes(),
                             ));
                         }
                     } else {

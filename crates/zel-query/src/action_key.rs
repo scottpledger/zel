@@ -366,8 +366,8 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
                             zel_analysis::ParamFileFormat::Shell => "SHELL_QUOTED",
                             zel_analysis::ParamFileFormat::GccQuoted => "GCC_QUOTED",
                             zel_analysis::ParamFileFormat::Windows => "WINDOWS",
-                            zel_analysis::ParamFileFormat::Multiline
-                            | zel_analysis::ParamFileFormat::FlagPerLine => "UNQUOTED",
+                            zel_analysis::ParamFileFormat::FlagPerLine => "FLAG_PER_LINE",
+                            zel_analysis::ParamFileFormat::Multiline => "UNQUOTED",
                         });
                     }
                 }

@@ -197,13 +197,31 @@ fn depset_nested(
     d: &Arc<zel_starlark::Depset>,
     memo: &mut std::collections::HashMap<u64, crate::nested_set::NSet<(String, String)>>,
 ) -> crate::nested_set::NSet<(String, String)> {
-    use crate::nested_set::{NSet, COMPILE_ORDER, STABLE_ORDER};
+    use crate::nested_set::{
+        NSet, COMPILE_ORDER, LINK_ORDER, NAIVE_LINK_ORDER, STABLE_ORDER,
+    };
     if let Some(s) = memo.get(&d.id) {
         return s.clone();
     }
-    let order = if d.order == zel_starlark::DepsetOrder::Default { STABLE_ORDER } else { COMPILE_ORDER };
-    let direct: Vec<(String, String)> = d.direct.iter().filter_map(artifact_of).map(|a| Runfiles::elem(&a)).collect();
-    let trans: Vec<_> = d.transitive.iter().map(|t| depset_nested(t, memo)).collect();
+    let order = match d.order {
+        zel_starlark::DepsetOrder::Default => STABLE_ORDER,
+        zel_starlark::DepsetOrder::Postorder => COMPILE_ORDER,
+        zel_starlark::DepsetOrder::Topological => LINK_ORDER,
+        zel_starlark::DepsetOrder::Preorder => NAIVE_LINK_ORDER,
+    };
+    let mut direct: Vec<(String, String)> = d
+        .direct
+        .iter()
+        .filter_map(artifact_of)
+        .map(|a| Runfiles::elem(&a))
+        .collect();
+    let mut trans: Vec<_> = d.transitive.iter().map(|t| depset_nested(t, memo)).collect();
+    // `Depset` reverses `direct` and `transitive` at construction when `Topological`; undo so
+    // `NSet::build(LINK_ORDER, ...)` reverses once.
+    if d.order == zel_starlark::DepsetOrder::Topological {
+        direct.reverse();
+        trans.reverse();
+    }
     let s = NSet::build(order, direct, trans);
     memo.insert(d.id, s.clone());
     s
@@ -861,6 +879,7 @@ fn actions_method(
                 Some(m) => want_str(m, "write", "mnemonic")?,
                 None => "FileWrite".to_string(),
             };
+            let mut write_inputs: Vec<Artifact> = Vec::new();
             let content = match content {
                 Value::String(s) => FileContent::Literal(s.clone()),
                 v @ Value::Host(k, _) if k == "args" => {
@@ -869,6 +888,7 @@ fn actions_method(
                     let a = b.finish();
                     // `set_param_file_format` alone selects the file format (Args.getParameterFileType).
                     let format = b.format.or_else(|| a.param_file.as_ref().map(|p| p.format)).unwrap_or(ParamFileFormat::Shell);
+                    write_inputs.extend(b.directory_artifacts.iter().cloned());
                     FileContent::Args {
                         args: b.param_file_args(format),
                         format,
@@ -886,6 +906,7 @@ fn actions_method(
             if let Some(er) = none_or(arg(pos, kw, 4, "execution_requirements")) {
                 a.execution_requirements = str_dict(er, "execution_requirements")?;
             }
+            a.inputs.extend(write_inputs);
             a.outputs.push(out);
             st.register(a)?;
             Ok(Value::None)

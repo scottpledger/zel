@@ -1172,7 +1172,8 @@ impl PackageLoader {
         loc: Option<String>,
         sink: &Arc<Mutex<Vec<PackageEvent>>>,
     ) -> Result<(), String> {
-        if loader_pkg.repository().name() == crate::builtins::BUILTINS_REPO
+        if loaded_label.package_identifier() == loader_pkg
+            || loader_pkg.repository().name() == crate::builtins::BUILTINS_REPO
             || loaded_label.package_identifier().repository().name()
                 == crate::builtins::BUILTINS_REPO
         {

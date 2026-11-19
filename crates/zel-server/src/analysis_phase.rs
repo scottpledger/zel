@@ -128,8 +128,11 @@ const CONFIG_OPTIONS: &[&str] = &[
     "copt",
     "cxxopt",
     "conlyopt",
+    "objccopt",
     "linkopt",
     "ltoopt",
+    "dynamic_mode",
+    "protocopt",
     "features",
     "host_features",
     "host_copt",
@@ -159,11 +162,15 @@ const CONFIG_OPTIONS: &[&str] = &[
     "incompatible_enable_proto_toolchain_resolution",
     "incompatible_auto_exec_groups",
     "incompatible_allow_tags_propagation",
+    "incompatible_stop_exporting_build_file_path",
+    "incompatible_disallow_ctx_resolve_tools",
     "experimental_cpp_modules",
     "experimental_platforms_api",
     "skip_incompatible_explicit_targets",
     "java_language_version",
     "java_runtime_version",
+    "tool_java_language_version",
+    "tool_java_runtime_version",
     "java_launcher",
     "host_java_launcher",
     "javacopt",
@@ -171,7 +178,22 @@ const CONFIG_OPTIONS: &[&str] = &[
     "compiler",
     "crosstool_top",
     "apple_platform_type",
+    "apple_split_cpu",
     "macos_cpus",
+    "ios_multi_cpus",
+    "tvos_cpus",
+    "watchos_cpus",
+    "visionos_cpus",
+    "ios_sdk_version",
+    "macos_sdk_version",
+    "tvos_sdk_version",
+    "watchos_sdk_version",
+    "ios_minimum_os",
+    "macos_minimum_os",
+    "tvos_minimum_os",
+    "watchos_minimum_os",
+    "xcode_version",
+    "xcode_version_config",
     "minimum_os_version",
 ];
 
@@ -446,22 +468,6 @@ impl BlazeRuntime {
                 .repo_resolver
                 .registrations()
                 .map(|r| {
-                    for (alias, target_label) in &r.flag_aliases {
-                        if let Some(d) = parsed.parsed_options.get(alias) {
-                            let val = d.raw_values.last().cloned().unwrap_or_else(|| {
-                                d.value
-                                    .as_bool()
-                                    .map(|b| b.to_string())
-                                    .unwrap_or_else(|| d.value.as_str().unwrap_or("").to_string())
-                            });
-                            if let Ok(l) = Self::canonical_option_label(loader, target_label, &rel)
-                            {
-                                key.flag_values.insert(l.canonical_form(), val);
-                            }
-                            native.remove(alias);
-                            key.options.remove(alias);
-                        }
-                    }
                     r.flag_aliases
                         .into_iter()
                         .map(|(k, v)| format!("{k}={v}"))
@@ -472,6 +478,30 @@ impl BlazeRuntime {
                 native.get("flag_alias").map(|n| n.value.clone())
             {
                 aliases.extend(l);
+            }
+            // Effective alias map (later `--flag_alias` overrides earlier / MODULE.bazel entries).
+            let mut effective_aliases: BTreeMap<String, String> = BTreeMap::new();
+            for entry in &aliases {
+                if let Some((alias, target_label)) = entry.split_once('=') {
+                    if !alias.is_empty() && !target_label.is_empty() {
+                        effective_aliases.insert(alias.to_string(), target_label.to_string());
+                    }
+                }
+            }
+            for (alias, target_label) in &effective_aliases {
+                if let Some(d) = parsed.parsed_options.get(alias.as_str()) {
+                    let val = d.raw_values.last().cloned().unwrap_or_else(|| {
+                        d.value
+                            .as_bool()
+                            .map(|b| b.to_string())
+                            .unwrap_or_else(|| d.value.as_str().unwrap_or("").to_string())
+                    });
+                    if let Ok(l) = Self::canonical_option_label(loader, target_label, &rel) {
+                        key.flag_values.insert(l.canonical_form(), val);
+                    }
+                    native.remove(alias.as_str());
+                    key.options.remove(alias.as_str());
+                }
             }
             native.insert(
                 "flag_alias".to_string(),
@@ -521,8 +551,14 @@ impl BlazeRuntime {
     ) -> Result<AnalysisConfig, String> {
         let mut acfg = AnalysisConfig::new();
         let rel = self.command_relative_dir(parsed);
-        // --extra_toolchains first, then the module graph's `register_toolchains`.
-        let extra_toolchains = opt_list(parsed, "extra_toolchains");
+        // --extra_toolchains first (deduplicated keeping last, then priority-reversed per
+        // `RegisteredToolchainsFunction`), then the module graph's `register_toolchains`.
+        let mut extra_toolchains = Vec::new();
+        for pat in opt_list(parsed, "extra_toolchains").into_iter().rev() {
+            if !extra_toolchains.contains(&pat) {
+                extra_toolchains.push(pat);
+            }
+        }
         acfg.extra_toolchain_pattern_count = extra_toolchains.len();
         acfg.toolchain_patterns.extend(extra_toolchains);
         acfg.execution_platform_patterns

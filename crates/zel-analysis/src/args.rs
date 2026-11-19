@@ -541,6 +541,7 @@ pub(crate) fn args_method(
                 return Ok(Value::None);
             }
             let start = b.args.len();
+            let has_arg_name = name.is_some();
             let has_concrete = mapped.iter().any(|m| matches!(m, MappedItem::Concrete(_)));
             let only_trees_omit = omit_if_empty && !has_concrete && !mapped.is_empty();
             if let Some(n) = name {
@@ -580,9 +581,15 @@ pub(crate) fn args_method(
             }
             let end = b.args.len();
             if end > start {
-                b.groups.push((start, end));
+                if has_arg_name {
+                    b.groups.push((start, end));
+                } else {
+                    for idx in start..end {
+                        b.groups.push((idx, idx + 1));
+                    }
+                }
             }
-            Ok(Value::None)
+            Ok(Value::Host("args".into(), String::new()))
         }
         "add_joined" => {
             check_kw(
@@ -678,7 +685,7 @@ pub(crate) fn args_method(
             b.args.push(joined);
             let end = b.args.len();
             b.groups.push((start, end));
-            Ok(Value::None)
+            Ok(Value::Host("args".into(), String::new()))
         }
         "use_param_file" => {
             check_kw(
