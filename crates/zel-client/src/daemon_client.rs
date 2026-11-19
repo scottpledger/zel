@@ -77,6 +77,11 @@ impl ServerSpec<'_> {
     }
 
     pub fn jvm_out(&self) -> PathBuf {
+        if let Some(ref p) = self.startup.server_jvm_out {
+            if !p.is_empty() {
+                return PathBuf::from(p.path_string());
+            }
+        }
         match startup_raw(self.startup, "server_jvm_out") {
             Some(p) if !p.is_empty() => PathBuf::from(p),
             _ => self.server_dir().join("jvm.out"),
@@ -193,7 +198,6 @@ extern "C" {
     fn fcntl(fd: i32, cmd: i32, ...) -> i32;
     fn isatty(fd: i32) -> i32;
     fn ttyname(fd: i32) -> *const i8;
-    fn killpg(pgrp: i32, sig: i32) -> i32;
 }
 
 #[cfg(all(unix, not(target_os = "macos")))]
@@ -396,6 +400,12 @@ pub fn acquire_lock(
                 oo.custom_flags(O_CLOEXEC);
             }
         }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            // FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE
+            oo.share_mode(0x0000_0001 | 0x0000_0002 | 0x0000_0004);
+        }
         let mut file = match oo.open(path) {
             Ok(f) => f,
             Err(e) => {
@@ -433,6 +443,7 @@ pub fn acquire_lock(
                 #[cfg(not(unix))]
                 let nlink = 1u64;
                 if nlink > 0 {
+                    #[cfg(unix)]
                     if exclusive {
                         let _ = file.set_len(0);
                         let _ = file.seek(SeekFrom::Start(0));
@@ -687,6 +698,7 @@ impl ContainsSpace for Path {
 #[derive(Debug, Clone)]
 pub struct RunningServer {
     pub info: ServerInfo,
+    pub restart_reason: &'static str,
 }
 
 fn read_server_info(server_dir: &Path) -> Option<ServerInfo> {
@@ -791,13 +803,20 @@ pub fn ping(info: &ServerInfo, timeout: Duration) -> bool {
     }
 }
 
-fn wait_for_exit(pid: i32, within: Duration) -> bool {
+const POST_SHUTDOWN_GRACE_SECS: u64 = 60;
+const POST_KILL_GRACE_SECS: u64 = 10;
+
+fn wait_for_exit(pid: i32, server_dir: &Path, within: Duration) -> bool {
     let start = Instant::now();
-    while sys::process_alive(pid) {
+    let sig_base = sys::SIGNAL_COUNT.load(Ordering::SeqCst);
+    while verify_server_process(pid, server_dir) && sys::process_alive(pid) {
         if start.elapsed() > within {
             return false;
         }
-        std::thread::sleep(Duration::from_millis(20));
+        if sys::SIGNAL_COUNT.load(Ordering::SeqCst) > sig_base {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
     true
 }
@@ -855,7 +874,7 @@ fn send_shutdown_rpc(info: &ServerInfo, block_for_lock: bool, timeout: Duration)
 }
 
 /// `KillRunningServer`: if connected, send `Run("shutdown")` RPC and wait up to 60 s, then `SIGKILL`
-/// and clean status files.
+/// the server process group and wait up to 10 s (`kPostKillGracePeriodSeconds`), then clean status files.
 pub fn kill_running_server(
     server: Option<&RunningServer>,
     server_dir: &Path,
@@ -864,22 +883,22 @@ pub fn kill_running_server(
 ) {
     if let Some(srv) = server {
         let _ = send_shutdown_rpc(&srv.info, block_for_lock, connect_timeout);
-        if !wait_for_exit(srv.info.pid, Duration::from_secs(60)) {
-            #[cfg(unix)]
-            unsafe {
-                let _ = killpg(srv.info.pid, sys::SIGKILL);
-            }
-            sys::send_signal(srv.info.pid, sys::SIGKILL);
-            wait_for_exit(srv.info.pid, Duration::from_secs(5));
+        if !wait_for_exit(
+            srv.info.pid,
+            server_dir,
+            Duration::from_secs(POST_SHUTDOWN_GRACE_SECS),
+        ) {
+            sys::send_process_group_signal(srv.info.pid, sys::SIGKILL);
+            wait_for_exit(
+                srv.info.pid,
+                server_dir,
+                Duration::from_secs(POST_KILL_GRACE_SECS),
+            );
         }
     } else if let Some(pid) = read_pid(server_dir) {
         if verify_server_process(pid, server_dir) && sys::process_alive(pid) {
-            #[cfg(unix)]
-            unsafe {
-                let _ = killpg(pid, sys::SIGKILL);
-            }
-            sys::send_signal(pid, sys::SIGKILL);
-            wait_for_exit(pid, Duration::from_secs(5));
+            sys::send_process_group_signal(pid, sys::SIGKILL);
+            wait_for_exit(pid, server_dir, Duration::from_secs(POST_KILL_GRACE_SECS));
         }
     }
     remove_status_files(server_dir);
@@ -900,7 +919,10 @@ pub fn find_running_server_with_timeout(
             return None;
         }
         if verify_server_process(info.pid, server_dir) && ping(&info, timeout) {
-            return Some(RunningServer { info });
+            return Some(RunningServer {
+                info,
+                restart_reason: "no_restart",
+            });
         }
     }
     None
@@ -910,13 +932,13 @@ pub fn find_running_server(server_dir: &Path) -> Option<RunningServer> {
     find_running_server_with_timeout(server_dir, Duration::from_secs(30))
 }
 
-/// `EnsureCorrectRunningVersion`: verifies `<output_base>/install` symlink and
+/// `EnsureCorrectRunningVersion`: verifies `<output_base>/install` symlink/junction and
 /// `<install_base>/install_base_key`; kills any connected server if missing or mismatched,
-/// and creates/updates the symlink and key.
+/// and creates/updates the link and key. Returns `true` if a connected server was restarted.
 pub fn ensure_correct_running_version(
     spec: &ServerSpec<'_>,
     connected: &mut Option<RunningServer>,
-) -> Result<(), (i32, String)> {
+) -> Result<bool, (i32, String)> {
     let ib = Path::new(spec.install_base);
     let key_ok = fs::read_to_string(ib.join("install_base_key"))
         .map(|k| k == spec.install_md5)
@@ -926,13 +948,17 @@ pub fn ensure_correct_running_version(
     let link_ok = fs::read_link(&link)
         .map(|t| paths_equivalent(&t, ib))
         .unwrap_or(false);
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    let link_ok = link.exists() && paths_equivalent(&link, ib);
+    #[cfg(all(not(unix), not(windows)))]
     let link_ok = {
         let _ = &link;
         true
     };
+    let mut killed = false;
     if !key_ok || !link_ok {
         if let Some(srv) = connected.take() {
+            killed = true;
             kill_running_server(
                 Some(&srv),
                 &spec.server_dir(),
@@ -964,19 +990,33 @@ pub fn ensure_correct_running_version(
                     ),
                 )
             })?;
+            #[cfg(windows)]
+            zel_vfs::create_directory_junction_or_symlink(ib, &link).map_err(|e| {
+                (
+                    ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code(),
+                    format!(
+                        "failed to create installation junction '{}': {}",
+                        link.display(),
+                        errno_string(&e)
+                    ),
+                )
+            })?;
         }
     }
-    Ok(())
+    Ok(killed)
 }
 
-pub fn ensure_server_cwd_matches(spec: &ServerSpec<'_>, connected: &mut Option<RunningServer>) {
+pub fn ensure_server_cwd_matches(
+    spec: &ServerSpec<'_>,
+    connected: &mut Option<RunningServer>,
+) -> bool {
     let Some(srv) = connected.as_ref() else {
-        return;
+        return false;
     };
     if spec.workspace_dir.is_empty() {
-        return;
+        return false;
     }
-    if let Ok(cwd) = fs::read_link(format!("/proc/{}/cwd", srv.info.pid)) {
+    if let Some(cwd) = sys::get_process_cwd(srv.info.pid) {
         let cwd_s = cwd.to_string_lossy();
         if cwd_s.contains(" (deleted)") || !paths_equivalent(&cwd, Path::new(spec.workspace_dir)) {
             let srv = connected.take().unwrap();
@@ -986,8 +1026,10 @@ pub fn ensure_server_cwd_matches(spec: &ServerSpec<'_>, connected: &mut Option<R
                 spec.startup.block_for_lock,
                 spec.connect_timeout(),
             );
+            return true;
         }
     }
+    false
 }
 
 pub fn connect_or_start(
@@ -997,7 +1039,14 @@ pub fn connect_or_start(
     let server_dir = spec.server_dir();
     let new_args = spec.server_args();
     let mut connected = find_running_server_with_timeout(&server_dir, spec.connect_timeout());
-    ensure_correct_running_version(spec, &mut connected)?;
+    let mut restart_reason: &'static str = if connected.is_some() {
+        "no_restart"
+    } else {
+        "no_daemon"
+    };
+    if ensure_correct_running_version(spec, &mut connected)? {
+        restart_reason = "new_version";
+    }
     if let Some(srv) = connected.take() {
         let old: Vec<String> = fs::read(server_dir.join("cmdline"))
             .map(|b| {
@@ -1016,6 +1065,7 @@ pub fn connect_or_start(
                 only_old.join(" "),
                 only_new.join(" ")
             );
+            restart_reason = "new_options";
             kill_running_server(
                 Some(&srv),
                 &server_dir,
@@ -1026,6 +1076,9 @@ pub fn connect_or_start(
             connected = Some(srv);
         }
     } else if read_pid(&server_dir).is_some() {
+        if restart_reason == "no_daemon" {
+            restart_reason = "pid_file_but_no_server";
+        }
         kill_running_server(
             None,
             &server_dir,
@@ -1033,13 +1086,17 @@ pub fn connect_or_start(
             spec.connect_timeout(),
         );
     }
-    ensure_server_cwd_matches(spec, &mut connected);
-    if let Some(srv) = connected {
+    if ensure_server_cwd_matches(spec, &mut connected) {
+        restart_reason = "daemon_disconnected";
+    }
+    if let Some(mut srv) = connected {
+        srv.restart_reason = restart_reason;
         return Ok(srv);
     }
-    let srv = start_server(spec, &new_args, err)?;
+    let mut srv = start_server(spec, &new_args, err)?;
+    srv.restart_reason = restart_reason;
     let mut tmp = None;
-    ensure_correct_running_version(spec, &mut tmp)?;
+    let _ = ensure_correct_running_version(spec, &mut tmp)?;
     Ok(srv)
 }
 
@@ -1160,7 +1217,12 @@ fn start_server(
         .stdout(Stdio::from(out))
         .stderr(Stdio::from(out2));
     #[cfg(unix)]
-    cmd.process_group(0);
+    unsafe {
+        cmd.pre_exec(|| {
+            sys::setsid_and_ignore_sighup();
+            Ok(())
+        });
+    }
     #[cfg(windows)]
     let mut child = {
         use std::os::windows::process::CommandExt;
@@ -1190,7 +1252,10 @@ fn start_server(
                 let _ = fs::write(server_dir.join("cmdline"), args.join("\0"));
                 // `child` is intentionally leaked: the daemon outlives this client.
                 std::mem::forget(child);
-                return Ok(RunningServer { info });
+                return Ok(RunningServer {
+                    info,
+                    restart_reason: "no_daemon",
+                });
             }
         }
         if let Ok(Some(status)) = child.try_wait() {
@@ -1260,8 +1325,8 @@ pub struct RunOutcome {
     pub abrupt: Option<GrpcStatus>,
 }
 
-/// Streams a `Run` call: forwards stdout/stderr chunks as they arrive; SIGINT / SIGTERM send a
-/// `Cancel` RPC (three signals abort the client with exit code 8).
+/// Streams a `Run` call: forwards stdout/stderr chunks as they arrive; `SIGINT` and `SIGTERM`
+/// send a `Cancel` RPC (three `SIGINT`s kill the server process group; `SIGQUIT` is forwarded).
 pub fn run_command(
     info: &ServerInfo,
     req: &RunRequest,
@@ -1273,9 +1338,14 @@ pub fn run_command(
     let mut req = req.clone();
     req.cookie = info.request_cookie.clone();
     let ch = channel_for(&info.address, connect_timeout).expect("server address");
+    sys::unblock_client_signals();
     sys::install_handler(sys::SIGINT);
     sys::install_handler(sys::SIGTERM);
-    let baseline = sys::SIGNAL_COUNT.load(Ordering::SeqCst);
+    sys::install_handler(sys::SIGQUIT);
+    sys::install_handler(sys::SIGWINCH);
+    let sigint_base = sys::SIGINT_COUNT.load(Ordering::SeqCst);
+    let sigterm_base = sys::SIGTERM_COUNT.load(Ordering::SeqCst);
+    let sigquit_base = sys::SIGQUIT_COUNT.load(Ordering::SeqCst);
     let command_id = Arc::new(Mutex::new(String::new()));
     CANCEL_WATCH_STOP.store(false, Ordering::SeqCst);
     let watcher = {
@@ -1284,23 +1354,35 @@ pub fn run_command(
         std::thread::spawn(move || {
             let mut cancelled = false;
             let mut announced = false;
+            let mut forwarded_sigquit = 0usize;
             while !CANCEL_WATCH_STOP.load(Ordering::SeqCst) {
-                let n = sys::SIGNAL_COUNT
+                let sigint_n = sys::SIGINT_COUNT
                     .load(Ordering::SeqCst)
-                    .saturating_sub(baseline);
-                if n >= 3 {
-                    // blaze_util_posix.cc `handler`: the third SIGINT kills the server.
+                    .saturating_sub(sigint_base);
+                let sigterm_n = sys::SIGTERM_COUNT
+                    .load(Ordering::SeqCst)
+                    .saturating_sub(sigterm_base);
+                let sigquit_n = sys::SIGQUIT_COUNT
+                    .load(Ordering::SeqCst)
+                    .saturating_sub(sigquit_base);
+
+                if sigquit_n > forwarded_sigquit {
+                    forwarded_sigquit = sigquit_n;
+                    sys::send_signal(info.pid, sys::SIGQUIT);
+                }
+
+                if sigint_n >= 3 {
+                    // Only `SIGINT` increments the 3-strike server kill (`blaze_util_posix.cc`).
                     eprintln!(
                         "\n{} caught third interrupt signal; server killed. (This may be expensive, see https://bazel.build/advanced/performance/iteration-speed#avoid-ctrl-c.)\n",
                         product_name()
                     );
-                    sys::send_signal(info.pid, sys::SIGKILL);
+                    sys::send_process_group_signal(info.pid, sys::SIGKILL);
                     std::process::exit(1);
                 }
-                if n >= 1 && !announced {
+                if (sigint_n >= 1 || sigterm_n >= 1) && !announced {
                     announced = true;
-                    // blaze_util_posix.cc `handler`: SigPrintf, then CancelServer.
-                    let what = if sys::LAST_SIGNAL.load(Ordering::SeqCst) == sys::SIGTERM {
+                    let what = if sigterm_n >= 1 && sigint_n == 0 {
                         "terminate"
                     } else {
                         "interrupt"
@@ -1310,7 +1392,7 @@ pub fn run_command(
                         product_name()
                     );
                 }
-                if n >= 1 && !cancelled {
+                if (sigint_n >= 1 || sigterm_n >= 1) && !cancelled {
                     let cid = id.lock().unwrap().clone();
                     if !cid.is_empty() {
                         cancelled = true;
@@ -1389,10 +1471,13 @@ pub fn run_command(
     }
 }
 
-/// After a `shutdown`-style command wait for the server to disappear (client does the same).
+/// After a `shutdown`-style command wait up to `kPostShutdownGracePeriodSeconds` (60 s) for the server to exit.
 pub fn await_server_exit(server_dir: &Path, pid: i32) {
-    wait_for_exit(pid, Duration::from_secs(10));
-    let _ = server_dir;
+    wait_for_exit(
+        pid,
+        server_dir,
+        Duration::from_secs(POST_SHUTDOWN_GRACE_SECS),
+    );
 }
 
 /// Environment passed to the server in `RunRequest` is the daemon's own; we only need this to

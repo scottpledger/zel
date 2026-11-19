@@ -44,13 +44,53 @@ const WORKSPACE_BOUNDARY_FILES: &[&str] = &[
     "WORKSPACE",
 ];
 
+const BASIL_LEAF: &str = "\
+                                          ,
+                                       ,:' `..;
+                                       `. ,;;'%
+                                       +;;'%%%%%
+                                        /- %,)%%
+                                        `   \\ %%
+                                             =  )/ \\
+                                             `-'/ / \\
+                                               /\\/.-.\\
+                                              |  (    |
+                                              |  |   ||
+                                              |  |   ||
+                                          _.-----'   ||
+                                         / \\________,'|
+                                        (((/  |       |
+                                        //    |       |
+                                       //     |\\      |
+                                      //      | \\     |
+                                     //       |  \\    |
+                                    //        |   \\   |
+                                   //         |    \\  |
+                                  //          |    |\\ |
+                                 //           |    | \\|
+                                //            \\    \\
+                               c'             |\\    \\
+                                              | \\    \\
+                                              |  \\    \\
+                                              |.' \\    \\
+                                             _\\    \\.-' \\
+                                            (___.-(__.'\\/
+";
+
 /// Walks up from `cwd` looking for a Bazel workspace boundary marker file
 /// (`WorkspaceLayout::GetWorkspace`); `None` when the client is outside any workspace.
+/// Boundary markers must be regular files (or symlinks to files, not directories), and the
+/// upward walk stops before `/` unless `cwd` itself is `/`.
 pub fn find_workspace_root_opt(fs: &dyn FileSystem, cwd: &PathFragment) -> Option<PathFragment> {
+    let cwd_is_root = cwd.path_string() == "/";
     let mut curr = Some(cwd.clone());
     while let Some(dir) = curr {
+        if dir.path_string() == "/" && !cwd_is_root {
+            break;
+        }
         for marker in WORKSPACE_BOUNDARY_FILES {
-            if fs.exists(&dir.get_relative_str(marker), true) {
+            let candidate = dir.get_relative_str(marker);
+            if fs.stat(&candidate, true).is_ok_and(|st| !st.is_directory) {
                 return Some(dir);
             }
         }
@@ -217,14 +257,25 @@ pub fn perform_exec_request(pending: &PendingExec) -> i32 {
     };
     if let Some(sp) = &req.script_path {
         let path = lossy(&sp.script_path);
-        if let Err(e) = std::fs::write(&path, &sp.script_contents) {
+        // `blaze_util::WriteFile(..., 0755)`: unlink any existing file or symlink first so a
+        // destination symlink is replaced rather than followed, and apply `0755 & ~umask`.
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
+            let _ = std::fs::remove_file(&path);
+        }
+        let write_res = {
+            let mut oo = std::fs::OpenOptions::new();
+            oo.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                oo.mode(0o755);
+            }
+            oo.open(&path)
+                .and_then(|mut f| f.write_all(&sp.script_contents))
+        };
+        if let Err(e) = write_res {
             eprintln!("ERROR: Could not write script '{path}': {e}");
             return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755));
         }
         return 0;
     }
@@ -378,6 +429,155 @@ fn error_option_processor(msg: &str) -> String {
     )
 }
 
+/// Resolves the client's home directory (`GetHomeDir` in `blaze_util_posix.cc` / `blaze_util_windows.cc`).
+pub fn client_home_dir() -> Option<String> {
+    if let Ok(h) = std::env::var("HOME") {
+        if !h.is_empty() {
+            return Some(h);
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Ok(up) = std::env::var("USERPROFILE") {
+            if !up.is_empty() {
+                return Some(up);
+            }
+        }
+    }
+    zel_server::sys::passwd_home_dir()
+}
+
+/// Resolves the client's username (`GetUserName` in `blaze_util_posix.cc` / `blaze_util_windows.cc`).
+pub fn client_user_name() -> String {
+    if let Ok(u) = std::env::var("USER") {
+        if !u.is_empty() {
+            return u;
+        }
+    }
+    if let Ok(u) = std::env::var("USERNAME") {
+        if !u.is_empty() {
+            return u;
+        }
+    }
+    "bazel".to_string()
+}
+
+/// Normalizes a client environment key matching `OptionProcessor::PreprocessEnvString`
+/// (`option_processor_windows.cc` uppercases well-known Windows system keys).
+pub fn normalize_client_env_key(key: &str) -> String {
+    if cfg!(windows) {
+        for special in [
+            "PATH",
+            "SYSTEMROOT",
+            "SYSTEMDRIVE",
+            "TEMP",
+            "TEMPDIR",
+            "TMP",
+        ] {
+            if key.eq_ignore_ascii_case(special) {
+                return special.to_string();
+            }
+        }
+    }
+    key.to_string()
+}
+
+/// Returns the client's processed environment (`OptionProcessor::GetProcessedEnv`).
+pub fn processed_client_env() -> Vec<(String, String)> {
+    let mut env: Vec<(String, String)> = Vec::new();
+    for (k, v) in std::env::vars_os() {
+        let (Ok(ks), Ok(vs)) = (k.into_string(), v.into_string()) else {
+            continue;
+        };
+        let norm_k = normalize_client_env_key(&ks);
+        env.push((norm_k, vs));
+    }
+    let (darwin_tmp, darwin_cache) = zel_server::sys::darwin_user_dirs();
+    if let Some(tmp) = darwin_tmp {
+        if !env.iter().any(|(k, _)| k == "DARWIN_USER_TEMP_DIR") {
+            env.push(("DARWIN_USER_TEMP_DIR".to_string(), tmp));
+        }
+    }
+    if let Some(cache) = darwin_cache {
+        if !env.iter().any(|(k, _)| k == "DARWIN_USER_CACHE_DIR") {
+            env.push(("DARWIN_USER_CACHE_DIR".to_string(), cache));
+        }
+    }
+    env
+}
+
+#[cfg(windows)]
+fn detect_bash_and_export_bazel_sh() {
+    if std::env::var_os("BAZEL_SH").is_some_and(|v| !v.is_empty()) {
+        return;
+    }
+    if let Some(path_os) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_os) {
+            let cand = dir.join("bash.exe");
+            if cand.is_file() {
+                std::env::set_var("BAZEL_SH", &cand);
+                return;
+            }
+        }
+    }
+    for cand in [
+        r"C:\Program Files\Git\bin\bash.exe",
+        r"C:\Program Files\Git\usr\bin\bash.exe",
+        r"C:\msys64\usr\bin\bash.exe",
+    ] {
+        if std::path::Path::new(cand).is_file() {
+            std::env::set_var("BAZEL_SH", cand);
+            return;
+        }
+    }
+}
+
+/// Resolves the exit code when the server disconnects abruptly during `Run`:
+/// checks `<output_base>/blaze_oomed` (exit 33) and `<output_base>/exit_code_to_use_on_abrupt_exit`,
+/// defaulting to `BLAZE_INTERNAL_ERROR` (37).
+pub fn resolve_abrupt_exit_code<E: Write>(
+    output_base: &std::path::Path,
+    jvm_out: &std::path::Path,
+    status_code: i32,
+    status_message: &str,
+    stderr_writer: &mut E,
+) -> i32 {
+    for oom_marker in [
+        output_base.join("blaze_oomed"),
+        output_base.join("server/blaze_oomed"),
+    ] {
+        if oom_marker.exists() {
+            let _ = std::fs::remove_file(&oom_marker);
+            let _ = writeln!(
+                stderr_writer,
+                "Server terminated abruptly (error code: {status_code}, error message: '{status_message}', log file: '{}')\n\
+                 ERROR: The Bazel server ran out of memory and crashed.",
+                jvm_out.display()
+            );
+            return ExitCode::OOM_ERROR.numeric_exit_code();
+        }
+    }
+    let custom_exit_file = output_base.join("exit_code_to_use_on_abrupt_exit");
+    if let Ok(raw) = std::fs::read_to_string(&custom_exit_file) {
+        let _ = std::fs::remove_file(&custom_exit_file);
+        if let Ok(custom_code) = raw.trim().parse::<i32>() {
+            let _ = writeln!(
+                stderr_writer,
+                "Server terminated abruptly (error code: {status_code}, error message: '{status_message}', log file: '{}')\n",
+                jvm_out.display()
+            );
+            return custom_code;
+        }
+    }
+    let _ = writeln!(
+        stderr_writer,
+        "Server terminated abruptly (error code: {status_code}, error message: '{}', log file: '{}')\n",
+        status_message,
+        jvm_out.display()
+    );
+    ExitCode::BLAZE_INTERNAL_ERROR.numeric_exit_code()
+}
+
 /// Like [`execute_cli`] but surfaces a server `ExecRequest` (as used by `run`) to the caller.
 pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     raw_args: &[String],
@@ -387,10 +587,21 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     stderr_writer: &mut E,
     exec_request: &mut Option<PendingExec>,
 ) -> i32 {
+    let client_start = std::time::Instant::now();
+
     // Internal flag used when spawning the background server process
     if raw_args.first().map(|s| s.as_str()) == Some("--internal_server_daemon") {
         return run_background_daemon(&raw_args[1..]);
     }
+
+    // `blaze.cc` `Main`: bare `bazel leaf` easter egg exits immediately before workspace/rc setup.
+    if raw_args.len() == 1 && raw_args[0] == "leaf" {
+        let _ = write!(stdout_writer, "{BASIL_LEAF}");
+        return ExitCode::SUCCESS.numeric_exit_code();
+    }
+
+    #[cfg(windows)]
+    detect_bash_and_export_bazel_sh();
 
     // Built-in Bazelisk behavior: version resolution (`USE_BAZEL_VERSION`, `.bazelversion`),
     // enforcement and `tools/bazel` wrapper delegation. Only against the host file system.
@@ -469,10 +680,8 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         .clone()
         .unwrap_or_else(|| PathFragment::create(""));
 
-    let home = std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
-        .ok();
-    let user = std::env::var("USER").unwrap_or_else(|_| "bazel".to_string());
+    let home = client_home_dir();
+    let user = client_user_name();
 
     // Discover and load rc files in exact Bazel precedence order
     let rc_config = match discover_and_load_rc_files(
@@ -511,6 +720,9 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         );
         return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
     }
+    for warn in &rc_config.warnings {
+        let _ = writeln!(stderr_writer, "{warn}");
+    }
 
     if !startup.workspace_rc {
         if let Some(ref ws) = workspace_found {
@@ -531,23 +743,6 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
                 );
             }
         }
-    }
-
-    // Check for explicit empty command string: `zel ''`
-    if command.is_empty() && raw_args.iter().any(|a| a.is_empty()) {
-        let prefix = if startup.product_name.is_empty() {
-            "bazel"
-        } else {
-            &startup.product_name
-        };
-        let _ = writeln!(
-            stderr_writer,
-            "{}",
-            fatal_blaze_error(&format!(
-                "Command cannot be the empty string.\n  For more info, run '{prefix} help'."
-            ))
-        );
-        return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
     }
 
     // Bare `zel` without workspace: Bazel prints error that it must be invoked from within a workspace
@@ -571,6 +766,9 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     };
 
     if workspace_found.is_none() {
+        // Outside a workspace, Bazel forces batch mode (`blaze.cc`) so non-workspace commands
+        // (`version`, `help`, `canonicalize-flags`, ...) never spawn an idle daemon on `md5("")`.
+        startup.batch = true;
         if let Some(spec) = zel_server::commands::command_spec(&effective_cmd) {
             if spec.must_run_in_workspace {
                 let prefix = if startup.product_name == "bazel" || startup.product_name.is_empty() {
@@ -600,15 +798,20 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
             }
         };
     let output_user_root = startup.resolve_output_user_root(&user, home.as_deref());
-    let output_base = startup.resolve_output_base(&workspace_dir, &user, home.as_deref());
+    let raw_output_base = startup.resolve_output_base(&workspace_dir, &user, home.as_deref());
     let install_md5 = binary_install_md5();
     let install_base = startup.resolve_install_base(&install_md5, &user, home.as_deref());
 
     // `StartupOptions::SanityCheckJavabase` (`--server_javabase`), then `PrepareDirectories`
     // (`output_user_root`, `output_base`), as the C++ client does before it talks to a server.
     if let Some(desc) = startup.parsed_options.get("server_javabase") {
-        let jb = desc.raw_values.last().cloned().unwrap_or_default();
-        if !jb.is_empty() {
+        let jb_raw = desc.raw_values.last().cloned().unwrap_or_default();
+        let jb = startup
+            .server_javabase
+            .as_ref()
+            .map(|p| p.path_string().to_string())
+            .unwrap_or_else(|| jb_raw.clone());
+        if !jb_raw.is_empty() && !jb.is_empty() {
             let java = std::path::Path::new(&jb).join(if cfg!(windows) {
                 "bin/java.exe"
             } else {
@@ -652,11 +855,20 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     }
     if let Err(code) = daemon_client::prepare_directories(
         std::path::Path::new(output_user_root.path_string()),
-        std::path::Path::new(output_base.path_string()),
+        std::path::Path::new(raw_output_base.path_string()),
         stderr_writer,
     ) {
         return code;
     }
+    // `blaze_util::MakeCanonical(output_base.c_str())` after `PrepareDirectories`.
+    let output_base = std::fs::canonicalize(raw_output_base.path_string())
+        .map(|c| {
+            let s = c.to_string_lossy();
+            #[cfg(windows)]
+            let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+            PathFragment::create(&s)
+        })
+        .unwrap_or(raw_output_base);
 
     // `RepositoryOptions`/`BazelRepositoryModule`: the default repo contents cache
     // (`<output_user_root>/cache/repos/v1/contents`) must not live inside the main repository.
@@ -707,15 +919,18 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
             .iter()
             .take_while(|a| a.as_str() != "--")
             .any(|a| a == "--announce_rc" || a == "--announce_rc=true");
+    let is_emacs = std::env::var("EMACS").ok().as_deref() == Some("t")
+        || std::env::var_os("INSIDE_EMACS").is_some();
     if announce_rc {
         for l in startup_provenance_lines(&startup, ", ") {
             let _ = writeln!(stderr_writer, "{l}");
         }
-        // The launcher's own `common` chunk (blaze.cc passes --isatty/--terminal_columns through
-        // `--default_override=0:common=...`, source "client").
+        // The launcher's own `common` chunk (blaze.cc passes --isatty/--terminal_columns/[--emacs]
+        // through `--default_override=0:common=...`, source "client").
+        let emacs_suffix = if is_emacs { " --emacs" } else { "" };
         let _ = writeln!(
             stderr_writer,
-            "INFO: Options provided by the client:\n  Inherited 'common' options: --isatty={} --terminal_columns={}",
+            "INFO: Options provided by the client:\n  Inherited 'common' options: --isatty={} --terminal_columns={}{emacs_suffix}",
             if zel_server::sys::is_tty(2) { 1 } else { 0 },
             zel_server::sys::terminal_columns(2)
         );
@@ -810,46 +1025,30 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         return run_background_daemon(&server_args);
     }
 
-    let mut full_argv_bytes = Vec::with_capacity(3 + expanded_cmd_args.len());
+    let startup_ms = client_start.elapsed().as_millis() as u64;
+    let mut full_argv_bytes = Vec::with_capacity(12 + expanded_cmd_args.len());
     full_argv_bytes.push(effective_cmd.as_bytes().to_vec());
+    full_argv_bytes.push(format!("--startup_time={startup_ms}").into_bytes());
     full_argv_bytes.push(format!("--command_wait_time={wait_ms}").into_bytes());
-    // Like Bazel's C++ client, tell the server the directory the client was started in so that
-    // relative target patterns (`:foo`, `...`, `sub/pkg:all`) resolve against it. The flag goes
-    // right after the command name, i.e. before any `--` terminator.
-    if matches!(
-        effective_cmd.as_str(),
-        "build" | "test" | "run" | "coverage" | "query" | "cquery" | "aquery"
-    ) {
-        full_argv_bytes.push(format!("--client_cwd={}", cwd.path_string()).into_bytes());
-    }
-    // Like `OptionProcessor::GetBlazercAndEnvCommandArgs`, pass the client's environment to the
-    // server as `--client_env=NAME=VALUE` arguments (the server needs the *client's* variables for
-    // `--action_env=NAME`, `--test_env=NAME`, `--repo_env=NAME`, `bazel run`, ...; its own
-    // environment is whatever the daemon was started with).
+    full_argv_bytes.push(b"--extract_data_time=0".to_vec());
+    full_argv_bytes.push(format!("--binary_path={}", exe_path.display()).into_bytes());
+    full_argv_bytes.push(format!("--client_cwd={}", cwd.path_string()).into_bytes());
     if !matches!(effective_cmd.as_str(), "help" | "version" | "shutdown") {
-        let mut env: Vec<(String, String)> = std::env::vars_os()
-            .filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?)))
-            .collect();
-        env.sort();
-        for (k, v) in env {
+        for (k, v) in processed_client_env() {
             full_argv_bytes.push(format!("--client_env={k}={v}").into_bytes());
         }
     }
-    // Terminal facts for the server-side UI (`--isatty`, `--terminal_columns`), like blaze.cc.
-    // User-supplied values (appended below) win because they come later.
-    if matches!(
-        effective_cmd.as_str(),
-        "build" | "test" | "run" | "coverage"
-    ) {
-        let tty = zel_server::sys::is_tty(2);
-        full_argv_bytes.push(format!("--isatty={}", if tty { 1 } else { 0 }).into_bytes());
-        full_argv_bytes.push(
-            format!(
-                "--terminal_columns={}",
-                zel_server::sys::terminal_columns(2)
-            )
-            .into_bytes(),
-        );
+    let tty = zel_server::sys::is_tty(2);
+    full_argv_bytes.push(format!("--isatty={}", if tty { 1 } else { 0 }).into_bytes());
+    full_argv_bytes.push(
+        format!(
+            "--terminal_columns={}",
+            zel_server::sys::terminal_columns(2)
+        )
+        .into_bytes(),
+    );
+    if is_emacs {
+        full_argv_bytes.push(b"--emacs".to_vec());
     }
     for a in &expanded_cmd_args {
         full_argv_bytes.push(a.as_bytes().to_vec());
@@ -1042,11 +1241,17 @@ fn write_failure_detail(
     startup: &StartupOptions,
     detail: Option<&zel_proto::failure_details::FailureDetail>,
 ) {
-    let Some(d) = startup
-        .parsed_options
-        .get("failure_detail_out")
-        .and_then(|d| d.raw_values.last())
-    else {
+    let path_str = startup
+        .failure_detail_out
+        .as_ref()
+        .map(|p| p.path_string().to_string())
+        .or_else(|| {
+            startup
+                .parsed_options
+                .get("failure_detail_out")
+                .and_then(|d| d.raw_values.last().cloned())
+        });
+    let Some(d) = path_str else {
         return;
     };
     if d.is_empty() {
@@ -1061,7 +1266,7 @@ fn write_failure_detail(
 fn run_with_daemon<O: Write, E: Write>(
     startup: &StartupOptions,
     exe: std::path::PathBuf,
-    run_req: RunRequest,
+    mut run_req: RunRequest,
     paths: ExecPathContext,
     output_user_root: &str,
     locks: daemon_client::ClientLocks,
@@ -1070,8 +1275,8 @@ fn run_with_daemon<O: Write, E: Write>(
     exec_request: &mut Option<PendingExec>,
 ) -> i32 {
     let install_md5 = binary_install_md5();
-    let user = std::env::var("USER").unwrap_or_else(|_| "bazel".to_string());
-    let home = std::env::var("HOME").ok();
+    let user = client_user_name();
+    let home = client_home_dir();
     let install_base = startup.resolve_install_base(&install_md5, &user, home.as_deref());
     let spec = daemon_client::ServerSpec {
         exe,
@@ -1090,6 +1295,12 @@ fn run_with_daemon<O: Write, E: Write>(
             return code;
         }
     };
+    if run_req.arg.len() >= 2 {
+        run_req.arg.insert(
+            1,
+            format!("--restart_reason={}", server.restart_reason).into_bytes(),
+        );
+    }
     if debug {
         let _ = writeln!(
             stderr_writer,
@@ -1113,14 +1324,13 @@ fn run_with_daemon<O: Write, E: Write>(
         Some(locks),
     );
     if let Some(status) = outcome.abrupt {
-        let _ = writeln!(
-            stderr_writer,
-            "Server terminated abruptly (error code: {}, error message: '{}', log file: '{}')\n",
+        return resolve_abrupt_exit_code(
+            std::path::Path::new(&paths.output_base),
+            &spec.jvm_out(),
             status.code,
-            status.message,
-            spec.jvm_out().display()
+            &status.message,
+            stderr_writer,
         );
-        return ExitCode::BLAZE_INTERNAL_ERROR.numeric_exit_code();
     }
     let resp = outcome.response;
     write_failure_detail(startup, resp.failure_detail.as_ref());
@@ -1135,6 +1345,7 @@ fn run_with_daemon<O: Write, E: Write>(
 }
 
 fn run_background_daemon(args: &[String]) -> i32 {
+    zel_server::sys::ignore_signal(zel_server::sys::SIGHUP);
     let mut workspace_dir = PathFragment::create("/");
     let mut output_base = PathFragment::create("/tmp/zel-ob");
     let mut install_base = PathFragment::create("/tmp/zel-ib");
@@ -1226,9 +1437,12 @@ pub fn spawn_detached_daemon(
         .stdout(Stdio::null())
         .stderr(Stdio::null());
     #[cfg(unix)]
-    {
+    unsafe {
         use std::os::unix::process::CommandExt;
-        cmd.process_group(0);
+        cmd.pre_exec(|| {
+            zel_server::sys::setsid_and_ignore_sighup();
+            Ok(())
+        });
     }
     #[cfg(windows)]
     let child = {
@@ -1316,5 +1530,93 @@ mod tests {
         );
         assert_eq!(code, 0, "{}", String::from_utf8_lossy(&err));
         assert_eq!(String::from_utf8_lossy(&out).trim(), "//app:hello");
+    }
+
+    #[test]
+    fn cli_leaf_workspace_boundary_help_and_abrupt_exit_parity() {
+        let fs = Arc::new(InMemoryFileSystem::default());
+        // A directory named `WORKSPACE` or `MODULE.bazel` is NOT a workspace boundary, and `/` is never a workspace root.
+        let fake_ws = PathFragment::create("/not_a_ws/sub");
+        fs.create_directory_and_parents(&PathFragment::create("/not_a_ws/WORKSPACE"))
+            .unwrap();
+        fs.create_directory_and_parents(&PathFragment::create("/not_a_ws/MODULE.bazel"))
+            .unwrap();
+        fs.create_directory_and_parents(&fake_ws).unwrap();
+        assert_eq!(find_workspace_root_opt(fs.as_ref(), &fake_ws), None);
+
+        let ws = PathFragment::create("/real_ws");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.write_file(
+            &ws.get_relative_str("MODULE.bazel"),
+            b"module(name = 'x')\n",
+        )
+        .unwrap();
+        assert_eq!(find_workspace_root_opt(fs.as_ref(), &ws), Some(ws.clone()));
+
+        // `zel leaf` prints the basil leaf ASCII art and exits 0.
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = execute_cli(
+            &["leaf".to_string()],
+            &ws,
+            Arc::clone(&fs) as Arc<dyn FileSystem>,
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 0);
+        assert_eq!(String::from_utf8_lossy(&out), BASIL_LEAF);
+
+        // `-help build` prints help for `build` rather than dropping trailing args.
+        out.clear();
+        err.clear();
+        let code = execute_cli(
+            &[
+                "--batch".to_string(),
+                "-help".to_string(),
+                "build".to_string(),
+            ],
+            &ws,
+            Arc::clone(&fs) as Arc<dyn FileSystem>,
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 0);
+        assert!(String::from_utf8_lossy(&out).contains("Usage:"));
+
+        // Explicit empty command `""` fails before rc loading with exit code 2.
+        out.clear();
+        err.clear();
+        let code = execute_cli(
+            &["--batch".to_string(), String::new()],
+            &ws,
+            Arc::clone(&fs) as Arc<dyn FileSystem>,
+            &mut out,
+            &mut err,
+        );
+        assert_eq!(code, 2);
+        assert!(String::from_utf8_lossy(&err).contains("Command cannot be the empty string."));
+
+        // OOM and abrupt-exit sentinel files in `output_base`.
+        let ob = std::env::temp_dir().join(format!("zel-abrupt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&ob);
+        std::fs::create_dir_all(&ob).unwrap();
+        let jvm_out = ob.join("jvm.out");
+        err.clear();
+        assert_eq!(
+            resolve_abrupt_exit_code(&ob, &jvm_out, 14, "disconnected", &mut err),
+            37
+        );
+        std::fs::write(ob.join("exit_code_to_use_on_abrupt_exit"), "45\n").unwrap();
+        err.clear();
+        let c = resolve_abrupt_exit_code(&ob, &jvm_out, 14, "disconnected", &mut err);
+        assert_eq!(c, 45);
+        assert!(!ob.join("exit_code_to_use_on_abrupt_exit").exists());
+        std::fs::write(ob.join("blaze_oomed"), "").unwrap();
+        err.clear();
+        let c = resolve_abrupt_exit_code(&ob, &jvm_out, 14, "disconnected", &mut err);
+        assert_eq!(c, 33);
+        assert!(String::from_utf8_lossy(&err).contains("ran out of memory and crashed."));
+        assert!(!ob.join("blaze_oomed").exists());
+        let _ = std::fs::remove_dir_all(&ob);
     }
 }
