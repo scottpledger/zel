@@ -251,13 +251,24 @@ struct Race {
 struct RaceOutcome {
     result: Option<(Branch, io::Result<zel_sandbox::SpawnResult>)>,
     finished: usize,
+    remote_publishing: bool,
 }
 
 impl Race {
+    fn is_outer_cancelled(&self) -> bool {
+        self.outer_cancel.as_ref().is_some_and(|c| c.is_cancelled())
+    }
+
+    fn cancel_all(&self) {
+        self.local_cancel.cancel();
+        self.remote_cancelled.store(true, Ordering::SeqCst);
+        self.local_done.1.notify_all();
+        self.changed.notify_all();
+    }
+
     fn is_cancelled(&self, b: Branch) -> bool {
-        if self.outer_cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
-            self.local_cancel.cancel();
-            self.remote_cancelled.store(true, Ordering::SeqCst);
+        if self.is_outer_cancelled() {
+            self.cancel_all();
             return true;
         }
         match b {
@@ -268,7 +279,13 @@ impl Race {
 
     /// `DynamicSpawnStrategy.stopBranch` (preceded by `maybeIgnoreFailure`): the first branch to
     /// get here wins and cancels the other; the loser must not publish any output.
-    fn lock(&self, b: Branch, exit_code: i32) -> bool {
+    fn lock_with_outer(
+        &self,
+        b: Branch,
+        exit_code: i32,
+        outer_lock: Option<&(dyn Fn(i32) -> bool + Send + Sync)>,
+        from_deliver: bool,
+    ) -> bool {
         // A local branch killed by an ignorable signal cancels itself in favor of remote.
         if b == Branch::Local
             && exit_code != 0
@@ -279,41 +296,68 @@ impl Race {
         if self.is_cancelled(b) {
             return false;
         }
-        {
+        let first_claim = {
             let mut w = self.winner.lock().unwrap();
             match *w {
-                Some(m) => return m == b,
-                None => *w = Some(b),
-            }
-        }
-        match b {
-            Branch::Remote => {
-                // `otherBranch.cancel()` + wait for the local branch to be done.
-                self.local_cancel.cancel();
-                let (m, cv) = &self.local_done;
-                let mut done = m.lock().unwrap();
-                while !*done {
-                    done = cv.wait(done).unwrap();
+                Some(m) if m != b => return false,
+                Some(_) => false,
+                None => {
+                    *w = Some(b);
+                    true
                 }
             }
-            Branch::Local => {
-                if self.cancel_remote_on_local_win {
-                    // The remote branch cannot be interrupted mid-RPC; it is flagged so that it
-                    // never publishes outputs and finishes in the background.
-                    self.remote_cancelled.store(true, Ordering::SeqCst);
+        };
+        if first_claim {
+            match b {
+                Branch::Remote => {
+                    // `otherBranch.cancel()` + `otherBranch.getDoneSemaphore().acquire()`,
+                    // aborting if outer cancellation arrives while waiting.
+                    self.local_cancel.cancel();
+                    let (m, cv) = &self.local_done;
+                    let mut done = m.lock().unwrap();
+                    while !*done && !self.is_cancelled(Branch::Remote) {
+                        done = cv.wait(done).unwrap();
+                    }
+                    if self.is_cancelled(Branch::Remote) {
+                        return false;
+                    }
+                }
+                Branch::Local => {
+                    if self.cancel_remote_on_local_win {
+                        // The remote branch cannot be interrupted mid-RPC; it is flagged so that it
+                        // never publishes outputs and finishes in the background.
+                        self.remote_cancelled.store(true, Ordering::SeqCst);
+                    }
+                }
+            }
+            if let Some(f) = outer_lock {
+                if !f(exit_code) {
+                    return false;
                 }
             }
         }
-        true
+        if b == Branch::Remote {
+            let mut o = self.outcome.lock().unwrap();
+            if self.is_cancelled(Branch::Remote) {
+                return false;
+            }
+            if !from_deliver {
+                o.remote_publishing = true;
+            }
+        }
+        !self.is_cancelled(b)
     }
 
     fn deliver(&self, b: Branch, r: io::Result<zel_sandbox::SpawnResult>) {
         let keep = match &r {
             Err(e) if e.kind() == io::ErrorKind::Interrupted => false,
-            Ok(res) => self.lock(b, res.exit_code),
-            Err(_) => self.lock(b, 1),
+            Ok(res) => self.lock_with_outer(b, res.exit_code, None, true),
+            Err(_) => self.lock_with_outer(b, 1, None, true),
         };
         let mut o = self.outcome.lock().unwrap();
+        if b == Branch::Remote {
+            o.remote_publishing = false;
+        }
         o.finished += 1;
         if keep && o.result.is_none() {
             o.result = Some((b, r));
@@ -674,10 +718,7 @@ impl ExecRuntime {
             zel_sandbox::ExecHooks {
                 cancel: (b == Branch::Local).then(|| race.local_cancel.clone()),
                 lock_outputs: Some(Arc::new(move |code| {
-                    if !race_lock.lock(b, code) {
-                        return false;
-                    }
-                    outer_lock.as_ref().is_none_or(|f| f(code))
+                    race_lock.lock_with_outer(b, code, outer_lock.as_deref(), false)
                 })),
                 runfiles_updater: outer_hooks.runfiles_updater.clone(),
                 local_lockfree_output: b == Branch::Local && local_lockfree,
@@ -704,15 +745,19 @@ impl ExecRuntime {
             });
         }
         std::thread::scope(|scope| {
+            let scope_done = Arc::new(AtomicBool::new(false));
             if let Some(outer_c) = outer_hooks.cancel.clone() {
                 let race_watch = race.clone();
+                let done_watch = scope_done.clone();
                 scope.spawn(move || {
                     let mut guard = race_watch.outcome.lock().unwrap();
-                    while guard.result.is_none() && guard.finished < 2 {
+                    while !done_watch.load(Ordering::SeqCst)
+                        && guard.result.is_none()
+                        && guard.finished < 2
+                    {
                         if outer_c.is_cancelled() {
-                            race_watch.local_cancel.cancel();
-                            race_watch.remote_cancelled.store(true, Ordering::SeqCst);
-                            race_watch.changed.notify_all();
+                            drop(guard);
+                            race_watch.cancel_all();
                             break;
                         }
                         let (next_guard, _) = race_watch
@@ -754,16 +799,32 @@ impl ExecRuntime {
                 race2.deliver(Branch::Local, r);
             });
             let mut o = race.outcome.lock().unwrap();
-            while o.result.is_none() && o.finished < 2 && !outer_hooks.is_cancelled() {
+            while o.result.is_none()
+                && o.finished < 2
+                && (!outer_hooks.is_cancelled() || o.remote_publishing)
+            {
                 o = race.changed.wait(o).unwrap();
             }
-            if outer_hooks.is_cancelled() && o.result.is_none() {
+            if outer_hooks.is_cancelled() {
+                drop(o);
+                race.cancel_all();
+                let mut o = race.outcome.lock().unwrap();
+                while o.remote_publishing {
+                    o = race.changed.wait(o).unwrap();
+                }
+                drop(o);
+                scope_done.store(true, Ordering::SeqCst);
+                race.changed.notify_all();
                 return Ok(Err(zel_sandbox::cancelled_error()));
             }
-            match o.result.take() {
+            let res = match o.result.take() {
                 Some((_, r)) => Ok(r),
                 None => Err(format!("Neither branch of {} completed.", spawn.mnemonic)),
-            }
+            };
+            drop(o);
+            scope_done.store(true, Ordering::SeqCst);
+            race.changed.notify_all();
+            res
         })
     }
 

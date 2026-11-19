@@ -1167,3 +1167,130 @@ fn streamed_test_output_emits_live_chunks_before_child_exits_and_posts_progress(
         "streamed TestRunner must still emit Progress event: {events:?}"
     );
 }
+
+#[test]
+fn streamed_test_output_emits_full_trailers_after_setup_line_cleaning() {
+    use std::os::unix::fs::PermissionsExt;
+    use zel_exec::test_runner::{
+        install_test_setup, run_test_in, TestBaseEnv, TestExec, TestSpec, TestStatus,
+    };
+
+    let w = ws("stream-trailer-cleaned");
+    let er = std::path::Path::new(w.execroot.path_string());
+    let rf = er.join("bin/trailer.runfiles/_main");
+    std::fs::create_dir_all(&rf).unwrap();
+    let exe = er.join("bin/trailer");
+    // Emit a `tools/test/test-setup.sh: line ...` line whose prefix is much longer than
+    // `external/bazel_tools/tools/test/test-setup.sh: line 270: `, so post-run cleaning shortens
+    // `log` before trailers are appended.
+    let script = concat!(
+        "#!/bin/sh\n",
+        "echo '/very/long/sandbox/execroot/prefix/that/gets/shortened/dramatically/by/the/cleaner/tools/test/test-setup.sh: line 9999: simulated setup diagnostic'\n",
+        "if [ \"${TOUCH_PREMATURE:-0}\" = \"1\" ]; then\n",
+        "  touch \"$TEST_PREMATURE_EXIT_FILE\"\n",
+        "fi\n",
+        "exit 0\n",
+    );
+    std::fs::write(&exe, script).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let setup = er.join("test-setup.sh");
+    install_test_setup(&setup).unwrap();
+
+    let rt = runtime(
+        &w,
+        StrategyOptions::from_raw(&["local".into()], &[], &[], &[]).unwrap(),
+        4.0,
+    );
+
+    // 1. Premature-exit trailer must be streamed in full even after `log` shrank during cleaning.
+    let mut premature_env = BTreeMap::new();
+    premature_env.insert("TOUCH_PREMATURE".into(), "1".into());
+    let premature_spec = TestSpec {
+        label: "//pkg:premature".into(),
+        exe_runfiles_path: exe.to_string_lossy().into_owned(),
+        exe_path: exe.clone(),
+        runfiles_dir: er.join("bin/trailer.runfiles"),
+        exec_root: er.to_path_buf(),
+        workspace_name: "_main".into(),
+        test_log_dir: er.join("testlogs/pkg/premature"),
+        size: "small".into(),
+        timeout_secs: 30,
+        shard_count: 0,
+        runs_per_test: 1,
+        flaky_attempts: 1,
+        runs_per_test_detects_flakes: false,
+        run_under: None,
+        args: vec![],
+        env: premature_env,
+        base_env: TestBaseEnv {
+            action_env: zel_util::action_env::EnvConfig::default().action_environment(false),
+            ..Default::default()
+        },
+        test_filter: None,
+        coverage: false,
+        coverage_script: None,
+        lcov_merger: None,
+        coverage_manifest: None,
+        zip_undeclared_outputs: false,
+        setup_script: setup.clone(),
+        kill_delay_ms: Some(200),
+        test_tmpdir: None,
+        check_sharding_support: false,
+    };
+    let rep1 = Reporter::new();
+    let streamed1 = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let streamed1_sink = streamed1.clone();
+    let te1 = TestExec {
+        runtime: &rt,
+        reporter: &rep1,
+        inputs: vec![],
+        execution_info: BTreeMap::new(),
+        resources: zel_exec::resources::ResourceSet::default(),
+        announce_subcommands: false,
+        config_checksum: "deadbeef".into(),
+        cache_results: false,
+        streamed_out: Some(Arc::new(move |chunk: &[u8]| {
+            streamed1_sink.lock().unwrap().extend_from_slice(chunk);
+        })),
+    };
+    let res1 = run_test_in(&premature_spec, Some(&te1)).unwrap();
+    assert_eq!(res1.status, TestStatus::Failed);
+    let out1 = String::from_utf8_lossy(&streamed1.lock().unwrap()).into_owned();
+    assert!(
+        out1.ends_with("-- Test exited prematurely (TEST_PREMATURE_EXIT_FILE exists) --\n"),
+        "expected full premature-exit trailer in streamed output, got: {out1:?}"
+    );
+
+    // 2. Sharding-unsupported diagnostic trailer must also be streamed in full after cleaning.
+    let mut shard_spec = premature_spec;
+    shard_spec.label = "//pkg:unsharded".into();
+    shard_spec.test_log_dir = er.join("testlogs/pkg/unsharded");
+    shard_spec.env.clear();
+    shard_spec.shard_count = 2;
+    shard_spec.check_sharding_support = true;
+    let rep2 = Reporter::new();
+    let streamed2 = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let streamed2_sink = streamed2.clone();
+    let te2 = TestExec {
+        runtime: &rt,
+        reporter: &rep2,
+        inputs: vec![],
+        execution_info: BTreeMap::new(),
+        resources: zel_exec::resources::ResourceSet::default(),
+        announce_subcommands: false,
+        config_checksum: "deadbeef".into(),
+        cache_results: false,
+        streamed_out: Some(Arc::new(move |chunk: &[u8]| {
+            streamed2_sink.lock().unwrap().extend_from_slice(chunk);
+        })),
+    };
+    let res2 = run_test_in(&shard_spec, Some(&te2)).unwrap();
+    assert_eq!(res2.status, TestStatus::NoStatus);
+    let out2 = String::from_utf8_lossy(&streamed2.lock().unwrap()).into_owned();
+    assert!(
+        out2.contains(
+            "Sharding requested, but the test runner did not advertise support for it by touching TEST_SHARD_STATUS_FILE."
+        ),
+        "expected full sharding diagnostic trailer in streamed output, got: {out2:?}"
+    );
+}

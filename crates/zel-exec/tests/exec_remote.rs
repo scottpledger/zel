@@ -648,3 +648,113 @@ fn dynamic_lockfree_local_loser_cleans_partial_outputs_before_remote_publishes_a
         "non-lockfree cancellation must not delete pre-existing output"
     );
 }
+
+#[test]
+fn outer_cancel_while_remote_waits_for_local_done_prevents_remote_publish() {
+    let root = tmp("dyn-outer-cancel-remote-wait");
+    let server = FakeReapiServer::new();
+    let er_path = root.join("ob/execroot/_main");
+    let local_started = er_path.join("local_started");
+    let got_term = er_path.join("local_got_term");
+    let release_local = er_path.join("release_local");
+    let local_exited = er_path.join("local_exited");
+
+    let local_started_remote = local_started.clone();
+    server.set_executor(move |ctx| {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !local_started_remote.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let out = ctx.server.put_blob(b"remote-should-not-publish");
+        Ok(ActionResult {
+            output_files: vec![OutputFile {
+                path: "out/a.txt".to_string(),
+                digest: Some(out),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    });
+
+    let so = StrategyOptions {
+        spawn_strategy: vec!["dynamic".into()],
+        local_lockfree_output: true,
+        ..Default::default()
+    }
+    .with_dynamic(&["standalone".to_string()], &[])
+    .unwrap();
+    let rt = runtime(
+        &root,
+        &server,
+        true,
+        &["--remote_download_outputs=all"],
+        so,
+        DynamicOptions {
+            local_lockfree_output: true,
+            ..Default::default()
+        },
+    );
+
+    // Local traps SIGTERM (delivered only when the remote branch wins `Race` and cancels local,
+    // blocking on `local_done`). Outer cancellation then fires while remote is waiting on
+    // `local_done`, before local finishes cleanup.
+    let mut sp = spawn(
+        &format!(
+            "trap 'touch \"{got}\"; while [ ! -f \"{rel}\" ]; do sleep 0.02; done; touch \"{exited}\"; exit 0' TERM; \
+             touch \"{started}\"; \
+             while :; do sleep 0.05; done",
+            got = got_term.display(),
+            rel = release_local.display(),
+            exited = local_exited.display(),
+            started = local_started.display(),
+        ),
+        &[],
+        &["out/a.txt"],
+        &[("supports-graceful-termination", "")],
+    );
+    sp.kill_delay = Some(Duration::from_secs(5));
+
+    let outer_cancel = zel_sandbox::process_wrapper::CancelFlag::default();
+    let outer_cancel_trigger = outer_cancel.clone();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !got_term.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for remote branch to win lock and send SIGTERM to local"
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            outer_cancel_trigger.cancel();
+            std::thread::sleep(Duration::from_millis(50));
+            std::fs::write(&release_local, b"go").unwrap();
+        });
+        let hooks = zel_sandbox::ExecHooks {
+            cancel: Some(outer_cancel),
+            ..Default::default()
+        };
+        let err = rt
+            .execute_with_hooks(
+                &sp,
+                "Doing Gen //t:t",
+                &execroot(&root),
+                &LocalFileSystem::default(),
+                &Reporter::new(),
+                &hooks,
+            )
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::Interrupted);
+    });
+
+    assert!(
+        local_exited.exists(),
+        "dynamic execution must wait for local branch cleanup before returning Interrupted"
+    );
+    std::thread::sleep(Duration::from_millis(100));
+    assert!(
+        !er_path.join("out/a.txt").exists(),
+        "cancelled dynamic spawn must not publish remote outputs after waiting on local_done"
+    );
+}

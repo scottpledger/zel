@@ -918,6 +918,7 @@ fn run_attempt(
         }
         None => zel_sandbox::execute_spawn_local_with(&sp, &execroot, &fs, &hooks),
     };
+    hooks.stream_out = None;
     let dur = t.elapsed().as_millis() as u64;
     match res {
         Ok(r) => {
@@ -959,6 +960,7 @@ fn run_attempt(
                 }
                 log = cleaned.into_bytes();
             }
+            let pre_trailer_len = log.len();
             let mut exit_code = r.exit_code;
             let mut premature_exit = false;
             let mut cachable = matches!(
@@ -995,17 +997,14 @@ fn run_attempt(
             }
             if !streamed_any.load(std::sync::atomic::Ordering::SeqCst) {
                 write_writable_file(&live_log_path, &log)?;
-            } else {
-                let raw_len = r.stdout.len() + r.stderr.len();
-                if log.len() > raw_len {
-                    use std::io::Write;
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .append(true)
-                        .open(&live_log_path)
-                    {
-                        let _ = f.write_all(&log[raw_len..]);
-                        let _ = f.flush();
-                    }
+            } else if log.len() > pre_trailer_len {
+                use std::io::Write;
+                if let Ok(mut f) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .open(&live_log_path)
+                {
+                    let _ = f.write_all(&log[pre_trailer_len..]);
+                    let _ = f.flush();
                 }
             }
             if let Some(st) = streamer.take() {
