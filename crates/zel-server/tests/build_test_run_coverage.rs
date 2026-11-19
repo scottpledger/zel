@@ -1571,3 +1571,97 @@ fn test_single_target_of_package_with_errors_fails_pattern_without_keep_going() 
     );
     assert!(r.err.contains("ERROR: Skipping '//pkg:a': Error evaluating '//pkg:a': error loading package 'pkg': Package 'pkg' contains errors"), "{}", r.err);
 }
+
+#[test]
+fn test_flaky_attempts_last_wins_errors_output_and_streamed_strategy_override() {
+    let w = make_ws("flaky-errors-streamed");
+    w.write(
+        "pkg/BUILD",
+        r#"
+sh_test(name = "flk", srcs = ["flk.sh"])
+sh_test(name = "tmpcheck", srcs = ["tmpcheck.sh"])
+"#,
+    );
+    let marker = w.ws.join("flk_once");
+    w.write(
+        "pkg/flk.sh",
+        &format!(
+            "#!/bin/sh\nif [ -f '{}' ]; then echo PASS_ATTEMPT; exit 0; fi\ntouch '{}'\necho FAIL_ATTEMPT_ONE\nexit 1\n",
+            marker.display(),
+            marker.display()
+        ),
+    );
+    w.write(
+        "pkg/tmpcheck.sh",
+        "#!/bin/sh\necho \"TMP=$TEST_TMPDIR\"\n[ -d \"$TEST_TMPDIR\" ] || exit 1\n",
+    );
+
+    // Last-match-wins: --flaky_test_attempts=3 followed by //pkg:flk@default resets to 1 attempt (so it fails!).
+    let r_reset = w.run(&[
+        "test",
+        "--flaky_test_attempts=3",
+        "--flaky_test_attempts=//pkg:flk@default",
+        "//pkg:flk",
+    ]);
+    assert_eq!(r_reset.code, 3, "{}", r_reset.err);
+
+    // Now reverse order: default first, then //pkg:flk@2 -> 2 attempts -> FLAKY!
+    // Under --test_output=errors, FAIL_ATTEMPT_ONE must be printed even when overall status is FLAKY.
+    let _ = std::fs::remove_file(&marker);
+    let r_flaky = w.run(&[
+        "test",
+        "--flaky_test_attempts=default",
+        "--flaky_test_attempts=//pkg:flk@2",
+        "--test_output=errors",
+        "//pkg:flk",
+    ]);
+    assert_eq!(r_flaky.code, 0, "{}", r_flaky.err);
+    assert!(
+        r_flaky.out.contains("FAIL_ATTEMPT_ONE"),
+        "expected failed attempt log under --test_output=errors:\n{}",
+        r_flaky.out
+    );
+    assert!(
+        !r_flaky.out.contains("PASS_ATTEMPT"),
+        "passing attempt log must not print under --test_output=errors:\n{}",
+        r_flaky.out
+    );
+
+    // Cached rerun with --cache_test_results=yes preserves FLAKY attempt summary and prints failed log on --test_output=errors!
+    let r_cached = w.run(&[
+        "test",
+        "--flaky_test_attempts=//pkg:flk@2",
+        "--cache_test_results=yes",
+        "--test_output=errors",
+        "//pkg:flk",
+    ]);
+    assert_eq!(r_cached.code, 0, "{}", r_cached.err);
+    assert!(
+        r_cached
+            .out
+            .contains("(cached) FLAKY, failed in 1 out of 2"),
+        "{}",
+        r_cached.out
+    );
+    assert!(
+        r_cached.out.contains("FAIL_ATTEMPT_ONE"),
+        "{}",
+        r_cached.out
+    );
+
+    // --test_output=streamed overrides --test_strategy before validation; relative --test_tmpdir resolves against workspace_dir.
+    let r_stream = w.run(&[
+        "test",
+        "--test_output=streamed",
+        "--test_strategy=bogus_strategy",
+        "--test_tmpdir=rel_tt",
+        "//pkg:tmpcheck",
+    ]);
+    assert_eq!(r_stream.code, 0, "{}", r_stream.err);
+    let expected_prefix = format!("TMP={}/rel_tt/_tmp/", w.ws.display());
+    assert!(
+        r_stream.out.contains(&expected_prefix),
+        "expected {expected_prefix} in:\n{}",
+        r_stream.out
+    );
+}

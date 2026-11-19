@@ -19,7 +19,7 @@
 
 use std::collections::HashMap;
 use std::io;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use zel_analysis::Artifact;
 use zel_vfs::{FileSystem, PathFragment};
 
@@ -51,13 +51,57 @@ impl From<FileCacheError> for io::Error {
     }
 }
 
+enum FsRef<'a> {
+    Borrowed(&'a dyn FileSystem),
+    Owned(Arc<dyn FileSystem>),
+}
+
+impl FsRef<'_> {
+    fn as_fs(&self) -> &dyn FileSystem {
+        match self {
+            Self::Borrowed(f) => *f,
+            Self::Owned(f) => f.as_ref(),
+        }
+    }
+}
+
 /// Caches metadata per exec path within a single build (`SingleBuildFileCache.java`).
 pub struct SingleBuildFileCache<'a> {
     exec_root: PathFragment,
     source_root: Option<PathFragment>,
     relative_output_path: PathFragment,
-    fs: &'a dyn FileSystem,
+    fs: FsRef<'a>,
+    digest_fn: Option<crate::DigestFunction>,
     cache: Mutex<HashMap<PathFragment, Result<CachedFileMetadata, FileCacheError>>>,
+}
+
+impl std::fmt::Debug for SingleBuildFileCache<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SingleBuildFileCache")
+            .field("exec_root", &self.exec_root)
+            .field("source_root", &self.source_root)
+            .field("relative_output_path", &self.relative_output_path)
+            .finish()
+    }
+}
+
+impl SingleBuildFileCache<'static> {
+    pub fn new_owned(
+        exec_root: PathFragment,
+        source_root: Option<PathFragment>,
+        relative_output_path: PathFragment,
+        fs: Arc<dyn FileSystem>,
+        digest_fn: crate::DigestFunction,
+    ) -> Self {
+        Self {
+            exec_root,
+            source_root,
+            relative_output_path,
+            fs: FsRef::Owned(fs),
+            digest_fn: Some(digest_fn),
+            cache: Mutex::new(HashMap::new()),
+        }
+    }
 }
 
 impl<'a> SingleBuildFileCache<'a> {
@@ -71,7 +115,8 @@ impl<'a> SingleBuildFileCache<'a> {
             exec_root,
             source_root,
             relative_output_path,
-            fs,
+            fs: FsRef::Borrowed(fs),
+            digest_fn: None,
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -120,7 +165,8 @@ impl<'a> SingleBuildFileCache<'a> {
                 return cached.clone();
             }
         }
-        let computed = match self.fs.stat(disk_path, true) {
+        let fs = self.fs.as_fs();
+        let computed = match fs.stat(disk_path, true) {
             Ok(st) => {
                 if !st.is_file {
                     Err(FileCacheError::Directory(format!(
@@ -128,7 +174,11 @@ impl<'a> SingleBuildFileCache<'a> {
                         exec_path
                     )))
                 } else {
-                    match self.fs.get_digest(disk_path) {
+                    let digest_res = match self.digest_fn {
+                        Some(df) => fs.read_file(disk_path).map(|b| df.hash(&b)),
+                        None => fs.get_digest(disk_path),
+                    };
+                    match digest_res {
                         Ok(digest) => Ok(CachedFileMetadata {
                             digest,
                             size: st.size,

@@ -828,3 +828,224 @@ fn java_compile_reduced_classpath_falls_back_to_the_full_classpath() {
         "a single attempt with the reduced classpath"
     );
 }
+
+#[test]
+fn strategy_regexp_exemptions_salt_timeout_and_catastrophic_file_write() {
+    let w = ws("parity_exec");
+    let er = std::path::PathBuf::from(w.execroot.path_string());
+
+    // ExecutorBuilder salt: duplicate calls rejected, salt changes action cache key.
+    let mut eb = zel_exec::ExecutorBuilder::new();
+    assert_eq!(eb.action_execution_salt(), "");
+    eb.set_action_execution_salt("salt-one").unwrap();
+    assert!(eb.set_action_execution_salt("salt-two").is_err());
+
+    let cache = CompactPersistentActionCache::new();
+    let a = spawn(
+        "Genrule",
+        "echo salted > bazel-out/k8-fastbuild/bin/pkg/s",
+        vec![],
+        vec![out("bazel-out/k8-fastbuild/bin/pkg/s")],
+        &[],
+    );
+    let r1 = run(
+        &a,
+        &w,
+        &cache,
+        &ExecOptions {
+            action_execution_salt: "s1".into(),
+            ..Default::default()
+        },
+    );
+    assert!(!r1.cache_hit);
+    let r2 = run(
+        &a,
+        &w,
+        &cache,
+        &ExecOptions {
+            action_execution_salt: "s2".into(),
+            ..Default::default()
+        },
+    );
+    assert!(!r2.cache_hit, "different salt must invalidate action cache");
+
+    // Missing input vs literal "<missing>" digest must not collide.
+    assert_ne!(
+        cache.compute_md_digest(&[("pkg/x".to_string(), None)]),
+        cache.compute_md_digest(&[("pkg/x".to_string(), Some("<missing>".to_string()))]),
+    );
+
+    // Invalid fractional timeout fails without executing the command.
+    let marker = er.join("ran_invalid_timeout");
+    let bad_to = spawn(
+        "Genrule",
+        &format!(
+            "touch {} && touch bazel-out/k8-fastbuild/bin/pkg/to",
+            marker.display()
+        ),
+        vec![],
+        vec![out("bazel-out/k8-fastbuild/bin/pkg/to")],
+        &[("timeout", "1.5")],
+    );
+    let r_bad = run(&bad_to, &w, &cache, &ExecOptions::default());
+    assert!(!r_bad.succeeded());
+    assert!(!marker.exists(), "invalid timeout must not execute command");
+
+    // Negative timeout executes and reports Timeout with wall-time sentence.
+    let neg_to = spawn(
+        "Genrule",
+        "touch bazel-out/k8-fastbuild/bin/pkg/neg",
+        vec![],
+        vec![out("bazel-out/k8-fastbuild/bin/pkg/neg")],
+        &[("timeout", "-1")],
+    );
+    let r_neg = run(&neg_to, &w, &cache, &ExecOptions::default());
+    let f_neg = r_neg.failure.unwrap();
+    assert!(
+        f_neg.messages[0].contains("(Timeout):") && f_neg.messages[0].contains("(timed out after "),
+        "{:?}",
+        f_neg.messages
+    );
+
+    // Strategy regexp: TestRunner and None description are exempt; lookahead works.
+    let so = StrategyOptions::from_raw(
+        &["sandboxed".into()],
+        &[],
+        &[],
+        &["^(?!Skip).*Test.*=local".into()],
+    )
+    .unwrap();
+    let av = StrategyAvailability {
+        process_wrapper_sandbox: true,
+        ..Default::default()
+    };
+    let reg = SpawnStrategyRegistry::build(&so, &av).unwrap();
+    let mut test_sp = zel_sandbox::Spawn {
+        mnemonic: "TestRunner".into(),
+        ..Default::default()
+    };
+    let (strats_tr, _) = reg.resolve_opt(&test_sp, Some("Testing //pkg:t")).unwrap();
+    assert_eq!(
+        strats_tr[0],
+        zel_exec::strategy::StrategyKind::ProcessWrapperSandbox
+    );
+    test_sp.mnemonic = "Custom".into();
+    let (strats_none, _) = reg.resolve_opt(&test_sp, None).unwrap();
+    assert_eq!(
+        strats_none[0],
+        zel_exec::strategy::StrategyKind::ProcessWrapperSandbox
+    );
+    let (strats_match, _) = reg.resolve_opt(&test_sp, Some("RunTest //pkg:t")).unwrap();
+    assert_eq!(
+        strats_match[0],
+        zel_exec::strategy::StrategyKind::Standalone
+    );
+
+    // FileWriteAction follows symlink in place, and directory collision is catastrophic (exit 36),
+    // halting independent actions even with keep_going = true.
+    let target_file = er.join("real_target.txt");
+    std::fs::write(&target_file, b"old").unwrap();
+    let sym_out = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("pkg/link_out.txt"),
+        Label::parse_canonical("//pkg:fw").unwrap(),
+    );
+    let sym_abs = er.join(sym_out.exec_path.path_string());
+    std::fs::create_dir_all(sym_abs.parent().unwrap()).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(&target_file, &sym_abs).unwrap();
+        let fw = ActionAnalysisMetadata::FileWriteAction {
+            owner: Label::parse_canonical("//pkg:fw").unwrap(),
+            output: sym_out,
+            content: b"new-via-symlink".to_vec(),
+            is_executable: false,
+        };
+        let r_fw = run(&fw, &w, &cache, &ExecOptions::default());
+        assert!(r_fw.succeeded(), "{:?}", r_fw.failure);
+        assert!(std::fs::symlink_metadata(&sym_abs)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+        assert_eq!(std::fs::read(&target_file).unwrap(), b"new-via-symlink");
+    }
+
+    // Create a directory at FileWriteAction's output path -> exit 36 + catastrophic stop!
+    let bad_fw_art = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("pkg/dir_collision"),
+        Label::parse_canonical("//pkg:badfw").unwrap(),
+    );
+    std::fs::create_dir_all(er.join(bad_fw_art.exec_path.path_string())).unwrap();
+    let bad_fw = ActionAnalysisMetadata::FileWriteAction {
+        owner: Label::parse_canonical("//pkg:badfw").unwrap(),
+        output: bad_fw_art,
+        content: b"boom".to_vec(),
+        is_executable: false,
+    };
+    let after_marker = er.join("ran_after_catastrophic");
+    let indep = spawn(
+        "Genrule",
+        &format!(
+            "touch {} && touch bazel-out/k8-fastbuild/bin/pkg/indep",
+            after_marker.display()
+        ),
+        vec![],
+        vec![out("bazel-out/k8-fastbuild/bin/pkg/indep")],
+        &[],
+    );
+    let fs = zel_vfs::LocalFileSystem::default();
+    let rep = zel_events::Reporter::new();
+    let sched = zel_exec::execute_actions(
+        &[&bad_fw, &indep],
+        1,
+        true,
+        &w.execroot,
+        &fs,
+        &cache,
+        &rep,
+        &ExecOptions::default(),
+    );
+    let f0 = sched.actions[0]
+        .outcome
+        .as_ref()
+        .unwrap()
+        .failure
+        .as_ref()
+        .unwrap();
+    assert_eq!(f0.exit_code, 36);
+    assert!(f0.catastrophic);
+    assert_eq!(sched.actions[1].state, zel_exec::ActionState::NotRun);
+    assert!(!after_marker.exists());
+
+    // StreamedTestOutput: exact 77-dash + '\n' strips header; missing delimiter dumps raw without extra '\n'.
+    let stream_dir = er.join("stream_test");
+    std::fs::create_dir_all(&stream_dir).unwrap();
+    let collected = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let c1 = collected.clone();
+    let log1 = stream_dir.join("t1.log");
+    std::fs::write(
+        &log1,
+        b"Executing tests from //pkg:t\n-----------------------------------------------------------------------------\nbody-no-nl",
+    )
+    .unwrap();
+    let st1 = zel_exec::test_runner::StreamedTestOutput::start(
+        log1,
+        std::sync::Arc::new(move |b| c1.lock().unwrap().extend_from_slice(b)),
+    )
+    .unwrap();
+    st1.close().unwrap();
+    assert_eq!(collected.lock().unwrap().as_slice(), b"body-no-nl");
+
+    let collected2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let c2 = collected2.clone();
+    let log2 = stream_dir.join("t2.log");
+    std::fs::write(&log2, b"raw-without-header").unwrap();
+    let st2 = zel_exec::test_runner::StreamedTestOutput::start(
+        log2,
+        std::sync::Arc::new(move |b| c2.lock().unwrap().extend_from_slice(b)),
+    )
+    .unwrap();
+    st2.close().unwrap();
+    assert_eq!(collected2.lock().unwrap().as_slice(), b"raw-without-header");
+}

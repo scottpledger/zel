@@ -370,8 +370,6 @@ pub fn test_policy_environment(runfiles_dir: &str, tmp_dir: &str) -> BTreeMap<St
     m.insert("PYTHON_RUNFILES".to_string(), runfiles_dir.to_string());
     m.insert("RUNFILES_DIR".to_string(), runfiles_dir.to_string());
     m.insert("TEST_TMPDIR".to_string(), tmp_dir.to_string());
-    // The first layer, so users can override via `--test_env=HOME=...` / `HOME` or unset it.
-    m.insert("HOME".to_string(), tmp_dir.to_string());
     m.insert("RUN_UNDER_RUNFILES".to_string(), "1".to_string());
     m
 }
@@ -661,7 +659,8 @@ mod tests {
         assert!(t.inherited_env().contains("BAR"));
         assert!(t.unset_env().contains("HOME"));
         let mut env = test_policy_environment("/rf", "/tmp/t");
-        assert_eq!(env["HOME"], "/tmp/t");
+        assert!(!env.contains_key("HOME"));
+        env.insert("HOME".to_string(), "/from_action".to_string());
         t.resolve(&mut env, &m(&[("BAR", "client")]));
         assert!(!env.contains_key("HOME"));
         assert_eq!(env["BAR"], "client");

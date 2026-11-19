@@ -49,6 +49,7 @@ pub struct SandboxOptions {
     pub fake_username: bool,
     pub explicit_pseudoterminal: bool,
     pub use_hermetic_linux_sandbox: bool,
+    pub process_wrapper_graceful_sigterm: bool,
     /// Optional path to `process-wrapper` binary (`BinTools.getEmbeddedPath("process-wrapper")`).
     pub process_wrapper_path: Option<String>,
     /// Optional path to `linux-sandbox` binary (`LinuxSandboxUtil.getLinuxSandbox`).
@@ -70,6 +71,7 @@ impl Default for SandboxOptions {
             fake_username: false,
             explicit_pseudoterminal: false,
             use_hermetic_linux_sandbox: false,
+            process_wrapper_graceful_sigterm: false,
             process_wrapper_path: None,
             linux_sandbox_path: None,
         }
@@ -284,10 +286,8 @@ pub fn darwin_sandbox_config(
     o.push_str("(allow process-exec (with no-sandbox) (literal \"/bin/ps\"))\n");
     if !allow_network {
         o.push_str("(deny network*)\n");
-        o.push_str("(allow network-bind (local ip \"*:*\"))\n");
         o.push_str("(allow network-inbound (local ip \"localhost:*\"))\n");
         o.push_str("(allow network* (remote ip \"localhost:*\"))\n");
-        o.push_str("(allow network* (local unix-socket))\n");
         o.push_str("(allow network* (remote unix-socket))\n");
     }
     // By default, everything is read-only.
@@ -349,44 +349,147 @@ fn resolve_best_effort(path: &Path) -> String {
 static DEVELOPER_DIR_CACHE: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
 static SDK_ROOT_CACHE: OnceLock<Mutex<HashMap<(String, String), String>>> = OnceLock::new();
 
-fn query_developer_dir(key: &str) -> Option<String> {
-    let cache = DEVELOPER_DIR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(v) = cache.lock().unwrap().get(key) {
-        return Some(v.clone());
-    }
-    let out = std::process::Command::new("/usr/bin/xcode-select")
-        .arg("-p")
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let val = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    cache.lock().unwrap().insert(key.to_string(), val.clone());
-    Some(val)
+fn trim_ascii_le_space(s: &str) -> &str {
+    s.trim_matches(|c: char| (c as u32) <= 0x20)
 }
 
-fn query_sdk_root(developer_dir: &str, apple_sdk_platform: &str) -> Option<String> {
+/// Validates a dotted version (`DottedVersion.fromString`): one or more `.`-separated components,
+/// each starting with a non-negative 32-bit integer followed by optional ASCII `[a-zA-Z0-9]*`.
+pub fn validate_dotted_version(version: &str) -> Result<(), String> {
+    if version.is_empty() {
+        return Err("Invalid Xcode version: empty string".to_string());
+    }
+    for comp in version.split('.') {
+        if comp.is_empty() {
+            return Err(format!(
+                "Invalid Xcode version '{version}': empty component"
+            ));
+        }
+        let digit_len = comp.bytes().take_while(|b| b.is_ascii_digit()).count();
+        if digit_len == 0 {
+            return Err(format!(
+                "Invalid Xcode version '{version}': component '{comp}' must start with digits"
+            ));
+        }
+        comp[..digit_len].parse::<i32>().map_err(|_| {
+            format!("Invalid Xcode version '{version}': numeric overflow in '{comp}'")
+        })?;
+        if !comp[digit_len..].bytes().all(|b| b.is_ascii_alphanumeric()) {
+            return Err(format!(
+                "Invalid Xcode version '{version}': invalid suffix in '{comp}'"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn query_developer_dir(version: &str, client_env: &BTreeMap<String, String>) -> io::Result<String> {
+    let cache = DEVELOPER_DIR_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(v) = cache.lock().unwrap().get(version) {
+        return Ok(v.clone());
+    }
+    let mut cmd = std::process::Command::new("/usr/bin/xcode-select");
+    cmd.arg("-p").env_clear().envs(client_env);
+    let out = cmd.output().map_err(|e| {
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("Failed to locate Xcode '{version}': {e}"),
+        )
+    })?;
+    if !out.status.success() {
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "xcode-locator failed for Xcode version '{version}': {}",
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        ));
+    }
+    let val = trim_ascii_le_space(&String::from_utf8_lossy(&out.stdout)).to_string();
+    cache
+        .lock()
+        .unwrap()
+        .insert(version.to_string(), val.clone());
+    Ok(val)
+}
+
+fn query_sdk_root(developer_dir: &str, apple_sdk_platform: &str) -> io::Result<String> {
     let plat = apple_sdk_platform.to_ascii_lowercase();
     let key = (developer_dir.to_string(), plat.clone());
     let cache = SDK_ROOT_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(v) = cache.lock().unwrap().get(&key) {
-        return Some(v.clone());
+        return Ok(v.clone());
     }
     let mut cmd = std::process::Command::new("/usr/bin/xcrun");
+    cmd.env_clear();
     if !developer_dir.is_empty() {
         cmd.env("DEVELOPER_DIR", developer_dir);
     }
     let out = cmd
         .args(["--sdk", &plat, "--show-sdk-path"])
         .output()
-        .ok()?;
+        .map_err(|e| {
+            io::Error::new(
+                io::ErrorKind::Other,
+                format!("xcrun failed for SDK '{plat}': {e}"),
+            )
+        })?;
     if !out.status.success() {
-        return None;
+        return Err(io::Error::new(
+            io::ErrorKind::Other,
+            format!(
+                "xcrun failed for SDK '{plat}' (status {}): {}",
+                out.status,
+                String::from_utf8_lossy(&out.stderr)
+            ),
+        ));
     }
-    let val = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let val = trim_ascii_le_space(&String::from_utf8_lossy(&out.stdout)).to_string();
     cache.lock().unwrap().insert(key, val.clone());
-    Some(val)
+    Ok(val)
+}
+
+/// Testable core of `XcodeLocalEnvProvider.rewriteLocalEnv`.
+pub fn rewrite_xcode_local_env_with<FLoc, FSdk>(
+    env: &BTreeMap<String, String>,
+    client_env: &BTreeMap<String, String>,
+    mut locate_xcode: FLoc,
+    mut query_sdk: FSdk,
+) -> io::Result<BTreeMap<String, String>>
+where
+    FLoc: FnMut(&str, &BTreeMap<String, String>) -> io::Result<String>,
+    FSdk: FnMut(&str, &str) -> io::Result<String>,
+{
+    let mut r = rewrite_local_env(env, client_env);
+    let contains_xcode_version = r.contains_key("XCODE_VERSION_OVERRIDE");
+    let contains_apple_sdk_platform = r.contains_key("APPLE_SDK_PLATFORM");
+    if !contains_xcode_version && !contains_apple_sdk_platform {
+        return Ok(r);
+    }
+    let mut developer_dir = String::new();
+    if contains_xcode_version && !r.contains_key("DEVELOPER_DIR") {
+        let version = r["XCODE_VERSION_OVERRIDE"].clone();
+        if version.starts_with('/') {
+            developer_dir = version;
+        } else {
+            validate_dotted_version(&version)
+                .map_err(|m| io::Error::new(io::ErrorKind::InvalidInput, m))?;
+            developer_dir = locate_xcode(&version, client_env)?;
+        }
+        r.insert("DEVELOPER_DIR".to_string(), developer_dir.clone());
+    }
+    if contains_apple_sdk_platform {
+        if r.contains_key("SDKROOT") {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Cannot resolve APPLE_SDK_PLATFORM when SDKROOT is already set",
+            ));
+        }
+        let sdk_platform = r["APPLE_SDK_PLATFORM"].clone();
+        let sdk_root = query_sdk(&developer_dir, &sdk_platform)?;
+        r.insert("SDKROOT".to_string(), sdk_root);
+    }
+    Ok(r)
 }
 
 /// `PosixLocalEnvProvider.rewriteLocalEnv`: TMPDIR from the client environment (if absolute) or `/tmp`.
@@ -410,79 +513,17 @@ pub fn rewrite_local_env(
 
 /// `LocalEnvProvider.forCurrentOs(clientEnv).rewriteLocalEnv(...)`:
 /// On Darwin, applies `XcodeLocalEnvProvider` (`TMPDIR` + `DEVELOPER_DIR`/`SDKROOT` when
-/// `XCODE_VERSION_OVERRIDE`, `APPLE_SDK_PLATFORM`, or `requires-darwin` are present, keeping
-/// those override keys). On other Unix platforms, applies `PosixLocalEnvProvider`.
+/// `XCODE_VERSION_OVERRIDE` or `APPLE_SDK_PLATFORM` is present, keeping those override keys).
+/// On other Unix platforms, applies `PosixLocalEnvProvider`.
 pub fn rewrite_local_env_for_current_os(
     env: &BTreeMap<String, String>,
     client_env: &BTreeMap<String, String>,
-    execution_info: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut r = rewrite_local_env(env, client_env);
-    apply_xcode_local_env(&mut r, execution_info);
-    r
-}
-
-/// Variant for `LocalSpawnRunner` when no `client_env` override is given: preserves an existing
-/// absolute `TMPDIR` in `env` if set, otherwise uses `client_env` (if absolute) or `/tmp`.
-pub fn rewrite_local_env_preserving_tmpdir(
-    env: &BTreeMap<String, String>,
-    client_env: &BTreeMap<String, String>,
-    execution_info: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    let mut r = env.clone();
-    let has_abs_spawn_tmpdir = r
-        .get("TMPDIR")
-        .is_some_and(|s| !s.is_empty() && Path::new(s.as_str()).is_absolute());
-    if !has_abs_spawn_tmpdir {
-        if let Some(p) = client_env
-            .get("TMPDIR")
-            .filter(|s| !s.is_empty() && Path::new(s.as_str()).is_absolute())
-        {
-            r.insert("TMPDIR".to_string(), p.clone());
-        } else {
-            r.remove("TMPDIR");
-        }
-    }
-    apply_xcode_local_env(&mut r, execution_info);
-    r
-}
-
-fn apply_xcode_local_env(
-    env: &mut BTreeMap<String, String>,
-    execution_info: &BTreeMap<String, String>,
-) {
-    if !cfg!(target_os = "macos") {
-        return;
-    }
-    let contains_xcode = env.contains_key("XCODE_VERSION_OVERRIDE");
-    let contains_sdk = env.contains_key("APPLE_SDK_PLATFORM");
-    let requires_darwin = execution_info.contains_key("requires-darwin");
-    if !contains_xcode && !contains_sdk && !requires_darwin {
-        return;
-    }
-    let mut developer_dir = env.get("DEVELOPER_DIR").cloned().unwrap_or_default();
-    if (contains_xcode || requires_darwin) && !env.contains_key("DEVELOPER_DIR") {
-        if let Some(version) = env.get("XCODE_VERSION_OVERRIDE") {
-            if version.starts_with('/') {
-                developer_dir = version.clone();
-            } else if let Some(d) = query_developer_dir(version) {
-                developer_dir = d;
-            }
-        } else if let Some(d) = query_developer_dir("") {
-            developer_dir = d;
-        }
-        if !developer_dir.is_empty() {
-            env.insert("DEVELOPER_DIR".to_string(), developer_dir.clone());
-        }
-    }
-    if contains_sdk || (requires_darwin && !env.contains_key("SDKROOT")) {
-        let plat = env
-            .get("APPLE_SDK_PLATFORM")
-            .map(String::as_str)
-            .unwrap_or("MacOSX");
-        if let Some(sdk) = query_sdk_root(&developer_dir, plat) {
-            env.entry("SDKROOT".to_string()).or_insert(sdk);
-        }
+    _execution_info: &BTreeMap<String, String>,
+) -> io::Result<BTreeMap<String, String>> {
+    if cfg!(target_os = "macos") {
+        rewrite_xcode_local_env_with(env, client_env, query_developer_dir, query_sdk_root)
+    } else {
+        Ok(rewrite_local_env(env, client_env))
     }
 }
 
@@ -1174,6 +1215,33 @@ pub fn may_be_sandboxed(spawn: &Spawn) -> bool {
         || spawn.execution_info.contains_key("local"))
 }
 
+/// Snapshot of a real regular-file input before a hermetic hardlinked sandbox run.
+#[derive(Debug, Clone)]
+pub struct HermeticInputSnapshot {
+    pub path: PathBuf,
+    pub size: u64,
+    pub modified: Option<std::time::SystemTime>,
+}
+
+/// Verifies that no real regular-file input captured in `snapshots` was mutated via its hardlink
+/// during hermetic sandbox execution.
+pub fn verify_hermetic_inputs_unchanged(snapshots: &[HermeticInputSnapshot]) -> io::Result<()> {
+    for snap in snapshots {
+        if let Ok(md) = std::fs::metadata(&snap.path) {
+            if md.is_file() && (md.len() != snap.size || md.modified().ok() != snap.modified) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Input file '{}' was modified during hermetic sandbox execution.",
+                        snap.path.display()
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Result of preparing a sandbox, kept for diagnostics (`--sandbox_debug`).
 #[derive(Debug, Clone)]
 pub struct SandboxLayout {
@@ -1181,6 +1249,142 @@ pub struct SandboxLayout {
     pub sandbox_exec_root: PathBuf,
     pub writable_dirs: BTreeSet<String>,
     pub outputs: SandboxOutputs,
+    pub hermetic_file_snapshots: Vec<HermeticInputSnapshot>,
+}
+
+static INITIALIZED_SANDBOX_BASES: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> =
+    OnceLock::new();
+static STALE_TRASH_IDS: AtomicU64 = AtomicU64::new(1);
+
+/// `SandboxModule.beforeCommand`: on the first build for a given `sandbox_base`, wipes any
+/// leftover stale sandbox directories (`stale-trash-N` rename + helper chmod + `delete_tree`),
+/// propagating setup I/O errors so callers report `Sandbox.INITIALIZATION_FAILURE` (exit 36).
+pub fn initialize_sandbox_base(sandbox_base: &Path) -> io::Result<()> {
+    let seen =
+        INITIALIZED_SANDBOX_BASES.get_or_init(|| Mutex::new(std::collections::HashSet::new()));
+    let first_time = seen.lock().unwrap().insert(sandbox_base.to_path_buf());
+    if first_time && sandbox_base.exists() {
+        chmod_inaccessible_helpers_writable(sandbox_base);
+        let entries: Vec<PathBuf> = std::fs::read_dir(sandbox_base)?
+            .collect::<io::Result<Vec<_>>>()?
+            .into_iter()
+            .map(|e| e.path())
+            .collect();
+        for entry in entries {
+            let trash = sandbox_base.join(format!(
+                "stale-trash-{}",
+                STALE_TRASH_IDS.fetch_add(1, Ordering::SeqCst)
+            ));
+            let to_delete = if std::fs::rename(&entry, &trash).is_ok() {
+                trash
+            } else {
+                entry
+            };
+            if delete_tree(&to_delete).is_err() {
+                chmod_inaccessible_helpers_writable(sandbox_base);
+                delete_tree(&to_delete)?;
+            }
+        }
+    }
+    std::fs::create_dir_all(sandbox_base)?;
+    let helper_file = sandbox_base.join("inaccessibleHelperFile");
+    if std::fs::symlink_metadata(&helper_file).is_err() {
+        std::fs::File::create(&helper_file)?;
+    }
+    let helper_dir = sandbox_base.join("inaccessibleHelperDir");
+    if std::fs::symlink_metadata(&helper_dir).is_err() {
+        std::fs::create_dir_all(&helper_dir)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&helper_file, std::fs::Permissions::from_mode(0o000))?;
+        std::fs::set_permissions(&helper_dir, std::fs::Permissions::from_mode(0o000))?;
+    }
+    Ok(())
+}
+
+fn chmod_inaccessible_helpers_writable(sandbox_base: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = sandbox_base.join("inaccessibleHelperDir");
+        if std::fs::symlink_metadata(&dir).is_ok() {
+            let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+        }
+        let file = sandbox_base.join("inaccessibleHelperFile");
+        if std::fs::symlink_metadata(&file).is_ok() {
+            let _ = std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = sandbox_base;
+}
+
+/// `SandboxHelpers.mountAdditionalPaths`: resolves `(source, target)` pairs from
+/// `--sandbox_add_mount_pair` (relative sources under `sandbox_exec_root`, later source wins for
+/// the same target) into `(target, source)` bind-mount entries.
+pub fn resolve_additional_mounts(
+    mount_pairs: &[(String, String)],
+    sandbox_exec_root: &Path,
+) -> Result<Vec<(String, String)>, String> {
+    let mut ordered_targets: Vec<String> = Vec::new();
+    let mut target_to_source: HashMap<String, String> = HashMap::new();
+    for (src_raw, dst_raw) in mount_pairs {
+        if src_raw.is_empty() || dst_raw.is_empty() {
+            return Err("Mount path must not be empty".to_string());
+        }
+        let dst_pf = PathFragment::create(dst_raw);
+        if !dst_pf.is_absolute() {
+            return Err(format!(
+                "Mount target '{dst_raw}' must be an absolute path."
+            ));
+        }
+        let src_path = if Path::new(src_raw).is_absolute() {
+            PathBuf::from(PathFragment::create(src_raw).path_string())
+        } else {
+            let rel = PathFragment::create(src_raw);
+            sandbox_exec_root.join(rel.path_string())
+        };
+        let dst_norm = dst_pf.path_string().to_string();
+        if !target_to_source.contains_key(&dst_norm) {
+            ordered_targets.push(dst_norm.clone());
+        }
+        target_to_source.insert(dst_norm, src_path.to_string_lossy().into_owned());
+    }
+    Ok(ordered_targets
+        .into_iter()
+        .filter_map(|t| target_to_source.remove(&t).map(|s| (t, s)))
+        .collect())
+}
+
+/// `HardlinkedSandboxedSpawn.copyFile`: resolves symlinks, hardlinks regular files (falling back
+/// to a full file copy when hardlinking fails or `force_copy_for_debug` is true), and recursively
+/// walks directories hardlinking each child.
+fn materialize_hardlinked_input(
+    src: &Path,
+    dest: &Path,
+    force_copy_for_debug: bool,
+) -> io::Result<()> {
+    let resolved = std::fs::canonicalize(src)?;
+    let md = std::fs::metadata(&resolved)?;
+    if md.is_dir() {
+        std::fs::create_dir_all(dest)?;
+        for entry in std::fs::read_dir(&resolved)? {
+            let entry = entry?;
+            let child_src = entry.path();
+            let child_dst = dest.join(entry.file_name());
+            materialize_hardlinked_input(&child_src, &child_dst, force_copy_for_debug)?;
+        }
+        Ok(())
+    } else if md.is_file() {
+        if force_copy_for_debug || std::fs::hard_link(&resolved, dest).is_err() {
+            std::fs::copy(&resolved, dest)?;
+        }
+        Ok(())
+    } else {
+        Ok(())
+    }
 }
 
 /// `SpawnExecutionContext.getId()`: a counter that lives as long as the server (bazel's sandbox
@@ -1195,6 +1399,10 @@ pub struct SandboxRunner {
     pub client_env: BTreeMap<String, String>,
     pub kill_delay: Duration,
     always_writable: BTreeSet<String>,
+    always_writable_error: Option<String>,
+    inaccessible_helper_file: Option<PathBuf>,
+    inaccessible_helper_dir: Option<PathBuf>,
+    pub init_warning: Option<String>,
     #[allow(dead_code)]
     next_id: AtomicU64,
 }
@@ -1208,11 +1416,20 @@ impl SandboxRunner {
         client_env: BTreeMap<String, String>,
         kill_delay: Option<Duration>,
     ) -> Self {
-        let always_writable = if kind == SandboxKind::Darwin {
-            Self::always_writable_dirs(&client_env)
+        let (always_writable, always_writable_error) = if kind == SandboxKind::Darwin {
+            match Self::always_writable_dirs(&client_env) {
+                Ok(set) => (set, None),
+                Err(e) => (BTreeSet::new(), Some(e.to_string())),
+            }
         } else {
-            BTreeSet::new()
+            (BTreeSet::new(), None)
         };
+        let (inaccessible_helper_file, inaccessible_helper_dir, init_warning) =
+            if kind == SandboxKind::Linux && !options.block_paths.is_empty() {
+                crate::linux::create_inaccessible_helpers(sandbox_base, &options.block_paths)
+            } else {
+                (None, None, None)
+            };
         Self {
             kind,
             exec_root: exec_root.to_path_buf(),
@@ -1221,33 +1438,39 @@ impl SandboxRunner {
             client_env,
             kill_delay: kill_delay.unwrap_or(Duration::from_millis(DEFAULT_KILL_DELAY_MS)),
             always_writable,
+            always_writable_error,
+            inaccessible_helper_file,
+            inaccessible_helper_dir,
+            init_warning,
             next_id: AtomicU64::new(1),
         }
     }
 
     /// `DarwinSandboxedSpawnRunner.getAlwaysWritableDirs`.
-    fn always_writable_dirs(client_env: &BTreeMap<String, String>) -> BTreeSet<String> {
+    fn always_writable_dirs(client_env: &BTreeMap<String, String>) -> io::Result<BTreeSet<String>> {
         let mut w = BTreeSet::new();
-        let mut add = |p: &str| {
-            if let Some(r) = resolve(p) {
-                w.insert(r);
+        let mut add = |p: &Path| -> io::Result<()> {
+            if std::fs::symlink_metadata(p).is_ok() {
+                let c = std::fs::canonicalize(p)?;
+                w.insert(c.to_string_lossy().into_owned());
             }
+            Ok(())
         };
         for p in ["/dev", "/tmp", "/private/tmp", "/private/var/tmp"] {
-            add(p);
+            add(Path::new(p))?;
         }
         for k in ["DARWIN_USER_TEMP_DIR", "DARWIN_USER_CACHE_DIR"] {
             if let Some(v) = client_env.get(k) {
-                add(v);
+                add(Path::new(v))?;
             }
         }
         if let Some(home) = std::env::var_os("HOME") {
             let home = PathBuf::from(home);
             for sub in ["Library/Caches", "Library/Logs", "Library/Developer"] {
-                add(&home.join(sub).to_string_lossy());
+                add(&home.join(sub))?;
             }
         }
-        w
+        Ok(w)
     }
 
     pub fn name(&self) -> &'static str {
@@ -1261,24 +1484,24 @@ impl SandboxRunner {
         env: &BTreeMap<String, String>,
     ) -> io::Result<BTreeSet<String>> {
         let mut w = BTreeSet::new();
+        let sbx_norm = PathFragment::create(&sandbox_exec_root.to_string_lossy());
         w.insert(sandbox_exec_root.to_string_lossy().into_owned());
         if let Some(r) = resolve(&sandbox_exec_root.to_string_lossy()) {
             w.insert(r);
         }
         let add = |w: &mut BTreeSet<String>, var: &str, value: &str| -> io::Result<()> {
-            let p = if Path::new(value).is_absolute() {
-                PathBuf::from(value)
+            let raw_pf = if Path::new(value).is_absolute() {
+                PathFragment::create(value)
             } else {
-                sandbox_exec_root.join(value)
+                sbx_norm.get_relative(&PathFragment::create(value))
             };
-            if p.starts_with(sandbox_exec_root) {
-                // Below the sandbox exec root: already writable, but must exist.
+            let p = PathBuf::from(raw_pf.path_string());
+            if raw_pf.starts_with(&sbx_norm) {
+                // Below the sandbox exec root: already writable, created during sandbox setup.
                 w.insert(p.to_string_lossy().into_owned());
-            } else if p.exists() {
-                w.insert(
-                    resolve(&p.to_string_lossy())
-                        .unwrap_or_else(|| p.to_string_lossy().into_owned()),
-                );
+            } else if std::fs::symlink_metadata(&p).is_ok() {
+                let canon = std::fs::canonicalize(&p)?;
+                w.insert(canon.to_string_lossy().into_owned());
             } else {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
@@ -1293,14 +1516,24 @@ impl SandboxRunner {
         if let Some(t) = env.get("TEST_TMPDIR") {
             add(&mut w, "TEST_TMPDIR", t)?;
         }
-        add(
-            &mut w,
-            "TMPDIR",
-            env.get("TMPDIR").map(String::as_str).unwrap_or("/tmp"),
-        )?;
+        let Some(tmpdir) = env.get("TMPDIR") else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "TMPDIR environment variable is not set",
+            ));
+        };
+        add(&mut w, "TMPDIR", tmpdir)?;
         for p in &self.options.writable_paths {
+            let path = Path::new(p);
+            if !path.is_absolute() {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    format!("Sandbox writable path is not absolute: {p}"),
+                ));
+            }
+            let canon = std::fs::canonicalize(path)?;
             w.insert(p.clone());
-            w.insert(resolve_best_effort(Path::new(p)));
+            w.insert(canon.to_string_lossy().into_owned());
         }
         Ok(w)
     }
@@ -1330,6 +1563,9 @@ impl SandboxRunner {
         id: u64,
         hooks: &ExecHooks,
     ) -> io::Result<(SandboxLayout, BTreeMap<String, String>)> {
+        if let Some(err) = &self.always_writable_error {
+            return Err(io::Error::new(io::ErrorKind::Other, err.clone()));
+        }
         let sandbox_path = self.sandbox_base.join(self.name()).join(id.to_string());
         std::fs::create_dir_all(&sandbox_path)?;
         // The execroot of the sandboxed process must end with the workspace name.
@@ -1341,7 +1577,7 @@ impl SandboxRunner {
         let sandbox_exec_root = sandbox_path.join("execroot").join(ws_name);
         std::fs::create_dir_all(&sandbox_exec_root)?;
         let env =
-            rewrite_local_env_for_current_os(&spawn.env, &self.client_env, &spawn.execution_info);
+            rewrite_local_env_for_current_os(&spawn.env, &self.client_env, &spawn.execution_info)?;
 
         let mut writable = self.always_writable.clone();
         let extra = self.writable_dirs(&sandbox_exec_root, &env)?;
@@ -1386,6 +1622,9 @@ impl SandboxRunner {
             true,
             hooks.cancel.as_ref(),
         )?;
+        let use_hardlinks =
+            self.kind == SandboxKind::Linux && self.options.use_hermetic_linux_sandbox;
+        let mut hermetic_file_snapshots = Vec::new();
         for fragment in &inputs_to_create {
             if hooks.is_cancelled() {
                 return Err(cancelled_error());
@@ -1394,10 +1633,38 @@ impl SandboxRunner {
             if let Some(file_dest) = inputs.files.get(fragment) {
                 match file_dest {
                     Some(src) => {
-                        #[cfg(unix)]
-                        std::os::unix::fs::symlink(src, &dest)?;
-                        #[cfg(not(unix))]
-                        std::fs::copy(src, &dest)?;
+                        if use_hardlinks {
+                            if !inputs.virtual_inputs.contains_key(fragment) {
+                                if let Ok(canon) = std::fs::canonicalize(src) {
+                                    if let Ok(md) = std::fs::metadata(&canon) {
+                                        if md.is_file() {
+                                            hermetic_file_snapshots.push(HermeticInputSnapshot {
+                                                path: canon,
+                                                size: md.len(),
+                                                modified: md.modified().ok(),
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                            materialize_hardlinked_input(src, &dest, self.options.debug)?;
+                        } else {
+                            #[cfg(unix)]
+                            std::os::unix::fs::symlink(src, &dest)?;
+                            #[cfg(windows)]
+                            {
+                                let linked = if src.is_dir() {
+                                    std::os::windows::fs::symlink_dir(src, &dest).is_ok()
+                                } else {
+                                    std::os::windows::fs::symlink_file(src, &dest).is_ok()
+                                };
+                                if !linked {
+                                    std::fs::copy(src, &dest)?;
+                                }
+                            }
+                            #[cfg(not(any(unix, windows)))]
+                            std::fs::copy(src, &dest)?;
+                        }
                     }
                     None => {
                         std::fs::write(&dest, b"")?;
@@ -1406,7 +1673,23 @@ impl SandboxRunner {
             } else if let Some(symlink_dest) = inputs.symlinks.get(fragment) {
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(symlink_dest.path_string(), &dest)?;
-                #[cfg(not(unix))]
+                #[cfg(windows)]
+                {
+                    let target = Path::new(symlink_dest.path_string());
+                    let linked = if target.is_dir() {
+                        std::os::windows::fs::symlink_dir(target, &dest).is_ok()
+                    } else {
+                        std::os::windows::fs::symlink_file(target, &dest).is_ok()
+                    };
+                    if !linked {
+                        if target.is_file() {
+                            std::fs::copy(target, &dest)?;
+                        } else {
+                            std::fs::write(&dest, b"")?;
+                        }
+                    }
+                }
+                #[cfg(not(any(unix, windows)))]
                 let _ = symlink_dest;
             }
         }
@@ -1438,6 +1721,7 @@ impl SandboxRunner {
                 sandbox_exec_root,
                 writable_dirs: writable,
                 outputs,
+                hermetic_file_snapshots,
             },
             env,
         ))
@@ -1465,11 +1749,21 @@ impl SandboxRunner {
             exit_code: code,
             stdout,
             stderr,
-            wall_time_ms: 0,
             runner_name: self.name().to_string(),
-            missing: Vec::new(),
-            usage: None,
-            executed_command: None,
+            ..Default::default()
+        };
+        let parsed_timeout = match spawn.parse_timeout() {
+            Ok(t) => t,
+            Err(msg) => {
+                let mut r = mk(
+                    SpawnStatus::InvalidTimeout,
+                    1,
+                    Vec::new(),
+                    format!("{msg}\n").into_bytes(),
+                );
+                r.failure_message = Some(msg);
+                return Ok(r);
+            }
         };
         if spawn.argv.is_empty() {
             return Ok(mk(
@@ -1490,6 +1784,19 @@ impl SandboxRunner {
         }
 
         let (layout, env) = self.prepare_with_hooks(spawn, id, hooks)?;
+        if matches!(parsed_timeout, Some(s) if s < 0) {
+            if !self.options.debug {
+                delete_tree(&layout.sandbox_path)?;
+            }
+            return Ok(mk(SpawnStatus::Timeout, 142, Vec::new(), Vec::new()));
+        }
+        let timeout_dur = parsed_timeout
+            .filter(|&s| s > 0)
+            .map(|s| Duration::from_secs(s as u64));
+        let graceful = spawn
+            .execution_info
+            .contains_key("supports-graceful-termination")
+            || self.options.process_wrapper_graceful_sigterm;
         let stats_path = layout.sandbox_path.join("stats.out");
         let mut argv = spawn.argv.clone();
         let mut debug_output: Option<String> = None;
@@ -1505,12 +1812,10 @@ impl SandboxRunner {
                 let b = PwCommandLineBuilder {
                     wrapper: pw.to_string(),
                     args: argv,
-                    timeout: spawn.timeout_secs().map(Duration::from_secs_f64),
+                    timeout: timeout_dur,
                     kill_delay: Some(spawn.kill_delay.unwrap_or(self.kill_delay)),
                     stats_path: Some(stats_path.to_string_lossy().into_owned()),
-                    graceful_sigterm: spawn
-                        .execution_info
-                        .contains_key("supports-graceful-termination"),
+                    graceful_sigterm: graceful,
                     ..Default::default()
                 };
                 argv = b.build();
@@ -1536,12 +1841,10 @@ impl SandboxRunner {
                 let b = PwCommandLineBuilder {
                     wrapper: pw.to_string(),
                     args: argv,
-                    timeout: spawn.timeout_secs().map(Duration::from_secs_f64),
+                    timeout: timeout_dur,
                     kill_delay: Some(spawn.kill_delay.unwrap_or(self.kill_delay)),
                     stats_path: Some(stats_path.to_string_lossy().into_owned()),
-                    graceful_sigterm: spawn
-                        .execution_info
-                        .contains_key("supports-graceful-termination"),
+                    graceful_sigterm: graceful,
                     ..Default::default()
                 };
                 argv = b.build();
@@ -1555,6 +1858,38 @@ impl SandboxRunner {
             full.extend(argv);
             argv = full;
         } else if self.kind == SandboxKind::Linux {
+            let user_mounts = match resolve_additional_mounts(
+                &self.options.mount_pairs,
+                &layout.sandbox_exec_root,
+            ) {
+                Ok(m) => m,
+                Err(msg) => {
+                    if !self.options.debug {
+                        let _ = delete_tree(&layout.sandbox_path);
+                    }
+                    let mut r = mk(
+                        SpawnStatus::ExecutionFailed,
+                        1,
+                        Vec::new(),
+                        format!("{msg}\n").into_bytes(),
+                    );
+                    r.failure_message = Some(msg);
+                    return Ok(r);
+                }
+            };
+            if let Err(msg) = crate::linux::validate_bind_mounts(&user_mounts) {
+                if !self.options.debug {
+                    let _ = delete_tree(&layout.sandbox_path);
+                }
+                let mut r = mk(
+                    SpawnStatus::ExecutionFailed,
+                    1,
+                    Vec::new(),
+                    format!("{msg}\n").into_bytes(),
+                );
+                r.failure_message = Some(msg);
+                return Ok(r);
+            }
             let ls_bin = self
                 .options
                 .linux_sandbox_path
@@ -1568,45 +1903,93 @@ impl SandboxRunner {
                     writable.insert("/dev/shm".to_string());
                 }
                 writable.insert("/tmp".to_string());
-                let hermetic_tmp = layout.sandbox_path.join("_hermetic_tmp");
-                let _ = std::fs::create_dir_all(&hermetic_tmp);
+
+                let has_explicit_tmp_mount = user_mounts.iter().any(|(t, _)| t == "/tmp");
+                let has_tmp_tmpfs = self.options.tmpfs_paths.iter().any(|p| p == "/tmp");
+                let use_hermetic_tmp = !self.options.use_hermetic_linux_sandbox
+                    && !has_explicit_tmp_mount
+                    && !has_tmp_tmpfs;
+
                 let mut bind_mounts = Vec::new();
-                let mut seen_mounts = BTreeSet::new();
-                let mut tmp_roots = vec![self.sandbox_base.clone(), self.exec_root.clone()];
-                for w in &writable {
-                    tmp_roots.push(PathBuf::from(w));
-                }
-                for p in &tmp_roots {
-                    if let Ok(rel) = p.strip_prefix("/tmp") {
-                        if let Some(first) = rel.components().next() {
-                            let first_s = first.as_os_str().to_string_lossy();
-                            if !first_s.is_empty() && seen_mounts.insert(first_s.to_string()) {
-                                let src = format!("/tmp/{first_s}");
-                                let dst = hermetic_tmp.join(&*first_s);
-                                let _ = std::fs::create_dir_all(&dst);
-                                bind_mounts.push((dst.to_string_lossy().into_owned(), src));
+                if use_hermetic_tmp {
+                    let hermetic_tmp = layout.sandbox_path.join("_hermetic_tmp");
+                    std::fs::create_dir_all(&hermetic_tmp)?;
+                    let mut seen_mounts = BTreeSet::new();
+                    let mut tmp_roots = vec![self.sandbox_base.clone(), self.exec_root.clone()];
+                    for w in &writable {
+                        tmp_roots.push(PathBuf::from(w));
+                    }
+                    for p in &tmp_roots {
+                        if let Ok(rel) = p.strip_prefix("/tmp") {
+                            if let Some(first) = rel.components().next() {
+                                let first_s = first.as_os_str().to_string_lossy();
+                                if !first_s.is_empty() && seen_mounts.insert(first_s.to_string()) {
+                                    let src = format!("/tmp/{first_s}");
+                                    let dst = hermetic_tmp.join(&*first_s);
+                                    std::fs::create_dir_all(&dst)?;
+                                    bind_mounts.push((dst.to_string_lossy().into_owned(), src));
+                                }
                             }
                         }
                     }
+                    for (target, source) in &user_mounts {
+                        if let Ok(rel) = Path::new(target).strip_prefix("/tmp") {
+                            let rewritten = hermetic_tmp.join(rel);
+                            if let Some(p) = rewritten.parent() {
+                                std::fs::create_dir_all(p)?;
+                            }
+                            if std::fs::metadata(source).is_ok_and(|m| m.is_dir()) {
+                                std::fs::create_dir_all(&rewritten)?;
+                            } else if !rewritten.exists() {
+                                let _ = std::fs::File::create(&rewritten);
+                            }
+                            bind_mounts
+                                .push((rewritten.to_string_lossy().into_owned(), source.clone()));
+                        } else {
+                            bind_mounts.push((target.clone(), source.clone()));
+                        }
+                    }
+                    for tp in &self.options.tmpfs_paths {
+                        if let Ok(rel) = Path::new(tp).strip_prefix("/tmp") {
+                            std::fs::create_dir_all(hermetic_tmp.join(rel))?;
+                        }
+                    }
+                    bind_mounts.push((
+                        "/tmp".to_string(),
+                        hermetic_tmp.to_string_lossy().into_owned(),
+                    ));
+                } else {
+                    bind_mounts.extend(user_mounts);
                 }
-                bind_mounts.push((
-                    "/tmp".to_string(),
-                    hermetic_tmp.to_string_lossy().into_owned(),
-                ));
-                let mut b = crate::linux::LinuxSandboxCommandLineBuilder::new(&ls_bin);
-                b.add_execution_info(&spawn.execution_info);
-                b.writable_files_and_directories = writable.into_iter().collect();
-                for tp in &self.options.tmpfs_paths {
-                    if let Ok(rel) = Path::new(tp).strip_prefix("/tmp") {
-                        let _ = std::fs::create_dir_all(hermetic_tmp.join(rel));
+
+                if let (Some(helper_file), Some(helper_dir)) = (
+                    &self.inaccessible_helper_file,
+                    &self.inaccessible_helper_dir,
+                ) {
+                    for blocked in self.inaccessible_paths() {
+                        if let Ok(md) = std::fs::metadata(&blocked) {
+                            let src = if md.is_dir() {
+                                helper_dir.to_string_lossy().into_owned()
+                            } else {
+                                helper_file.to_string_lossy().into_owned()
+                            };
+                            bind_mounts.push((blocked, src));
+                        }
                     }
                 }
+
+                let mut b = crate::linux::LinuxSandboxCommandLineBuilder::new(&ls_bin);
+                b.add_execution_info(&spawn.execution_info);
+                if graceful {
+                    b.sigint_sends_sigterm = true;
+                }
+                b.writable_files_and_directories = writable.into_iter().collect();
                 b.tmpfs_directories = self.options.tmpfs_paths.clone();
                 b.bind_mounts = bind_mounts;
                 b.use_fake_hostname = self.options.fake_hostname;
                 b.enable_pseudoterminal = self.options.explicit_pseudoterminal;
                 if !requires_network(spawn, self.options.default_allow_network) {
-                    b.create_network_namespace = crate::linux::NetworkNamespace::Netns;
+                    b.create_network_namespace = crate::linux::NetworkNamespace::NetnsWithLoopback;
                 }
                 b.kill_delay = Some(spawn.kill_delay.unwrap_or(self.kill_delay));
                 if self.options.debug {
@@ -1618,9 +2001,7 @@ impl SandboxRunner {
                             .into_owned(),
                     );
                 }
-                if let Some(t) = spawn.timeout_secs() {
-                    b.timeout = Some(Duration::from_secs_f64(t));
-                }
+                b.timeout = timeout_dur;
                 if spawn.execution_info.contains_key("requires-fakeroot") {
                     b.use_fake_root = true;
                 } else if self.options.fake_username {
@@ -1648,13 +2029,11 @@ impl SandboxRunner {
         }
         let use_external_timeout = linux_sandbox_used || external_pw_used;
         let opt = ProcessWrapperOptions {
-            graceful_sigterm: spawn
-                .execution_info
-                .contains_key("supports-graceful-termination"),
+            graceful_sigterm: graceful,
             timeout_secs: if use_external_timeout {
                 0.0
             } else {
-                spawn.timeout_secs().unwrap_or(0.0)
+                timeout_dur.map(|d| d.as_secs_f64()).unwrap_or(0.0)
             },
             kill_delay_secs: spawn.kill_delay.unwrap_or(self.kill_delay).as_secs_f64(),
             stats_path: if use_external_timeout {
@@ -1671,25 +2050,24 @@ impl SandboxRunner {
         let outcome = process_wrapper::run(&opt, Some(&env), Some(&cwd));
         if matches!(&outcome, Ok(o) if o.cancelled) {
             if !self.options.debug {
-                let _ = delete_tree(&layout.sandbox_path);
+                delete_tree(&layout.sandbox_path)?;
             }
             return Err(crate::cancelled_error());
         }
         let mut result = match outcome {
             Ok(o) => {
                 let is_ext_timeout = use_external_timeout
-                    && spawn
-                        .timeout_secs()
+                    && timeout_dur
                         .map(|t| {
-                            t > 0.0
-                                && o.wall.as_secs_f64() + 0.1 >= t
+                            o.wall.as_secs_f64() + 0.1 >= t.as_secs_f64()
                                 && matches!(
                                     o.termination,
                                     Termination::Exited(142 | 137 | 143) | Termination::Signaled(_)
                                 )
                         })
                         .unwrap_or(false);
-                let timed_out = o.timed_out || is_ext_timeout;
+                let post_wall_timeout = timeout_dur.is_some_and(|t| o.wall > t);
+                let timed_out = o.timed_out || is_ext_timeout || post_wall_timeout;
                 let (status, mut code) = match o.termination {
                     _ if timed_out => (SpawnStatus::Timeout, 142),
                     Termination::Exited(0) => (SpawnStatus::Success, 0),
@@ -1708,15 +2086,6 @@ impl SandboxRunner {
                         }
                     }
                 }
-                if timed_out && !linux_sandbox_used {
-                    stderr.extend_from_slice(
-                        format!(
-                            "Action timed out after {:.0}s\n",
-                            spawn.timeout_secs().unwrap_or(0.0)
-                        )
-                        .as_bytes(),
-                    );
-                }
                 let mut r = mk(status, code, o.stdout, stderr);
                 r.wall_time_ms = o.wall.as_millis() as u64;
                 r.usage = o.usage;
@@ -1734,10 +2103,16 @@ impl SandboxRunner {
                 )
             }
         };
+        if let Err(e) = verify_hermetic_inputs_unchanged(&layout.hermetic_file_snapshots) {
+            if !self.options.debug {
+                let _ = delete_tree(&layout.sandbox_path);
+            }
+            return Err(e);
+        }
         // `stopConcurrentSpawns`: the dynamic-execution branch that gets here first wins.
         if hooks.is_cancelled() || !hooks.lock(result.exit_code) {
             if !self.options.debug {
-                let _ = delete_tree(&layout.sandbox_path);
+                delete_tree(&layout.sandbox_path)?;
             }
             return Err(crate::cancelled_error());
         }
@@ -1801,12 +2176,12 @@ impl SandboxRunner {
             debug_output,
         });
         if !self.options.debug {
-            let _ = delete_tree(&layout.sandbox_path);
+            delete_tree(&layout.sandbox_path)?;
         }
         Ok(result)
     }
 
-    /// `cleanupSandboxBase`: removes the per-runner directory (and the base when empty).
+    /// `cleanupSandboxBase`: removes the per-runner directory and inaccessible helpers.
     pub fn cleanup_sandbox_base(&self) -> io::Result<()> {
         let root = self.sandbox_base.join(self.name());
         if root.exists() {
@@ -1816,6 +2191,9 @@ impl SandboxRunner {
             }
             let _ = std::fs::remove_dir(&root);
         }
+        chmod_inaccessible_helpers_writable(&self.sandbox_base);
+        let _ = delete_tree(&self.sandbox_base.join("inaccessibleHelperDir"));
+        let _ = delete_tree(&self.sandbox_base.join("inaccessibleHelperFile"));
         let _ = std::fs::remove_dir(&self.sandbox_base);
         Ok(())
     }
@@ -1910,8 +2288,8 @@ mod tests {
         let b: BTreeSet<String> = ["/blocked".to_string()].into();
         let cfg = darwin_sandbox_config(&w, &b, false, Some("/s/stats.out"));
         let want = "(version 1)\n(debug deny)\n(allow default)\n(allow process-exec (with no-sandbox) (literal \"/bin/ps\"))\n\
-(deny network*)\n(allow network-bind (local ip \"*:*\"))\n(allow network-inbound (local ip \"localhost:*\"))\n\
-(allow network* (remote ip \"localhost:*\"))\n(allow network* (local unix-socket))\n(allow network* (remote unix-socket))\n\
+(deny network*)\n(allow network-inbound (local ip \"localhost:*\"))\n\
+(allow network* (remote ip \"localhost:*\"))\n(allow network* (remote unix-socket))\n\
 (deny file-write*)\n(allow file-write*\n    (subpath \"/w/a\")\n    (subpath \"/w/b\\\"q\")\n    (literal \"/s/stats.out\")\n)\n\
 (deny file-read*\n    (subpath \"/blocked\")\n)\n";
         assert_eq!(cfg, want);

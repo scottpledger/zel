@@ -6,14 +6,15 @@
 use crate::test_status::{self, TestResultData};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use zel_sandbox::{execute_spawn_local, Spawn, SpawnStatus};
+use zel_sandbox::{Spawn, SpawnStatus};
 use zel_vfs::PathFragment;
 
 /// Bazel's `tools/test/test-setup.sh`, embedded verbatim.
 pub const TEST_SETUP_SH: &str = include_str!("../resources/test-setup.sh");
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TestStatus {
+    #[default]
     NoStatus = 0,
     Passed = 1,
     Flaky = 2,
@@ -119,7 +120,7 @@ pub struct TestBaseEnv {
     pub client_env: BTreeMap<String, String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct AttemptResult {
     pub exit_code: i32,
     pub timed_out: bool,
@@ -137,19 +138,25 @@ pub struct AttemptResult {
     /// The test did not write `test.xml`, so Bazel runs a second spawn to generate it
     /// (`StandaloneTestStrategy.createXmlGeneratingSpawn`).
     pub xml_generated: bool,
+    pub remotely_cached: bool,
+    pub is_remote_strategy: bool,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct TestResult {
     pub status: TestStatus,
     pub attempts: Vec<AttemptResult>,
+    pub total_attempts: usize,
     pub failed_attempts: usize,
+    pub failed_logs: Vec<String>,
     pub duration_ms: u64,
-    pub times_ms: Vec<u64>,
+    pub times_ms: Vec<u8_or_u64::U64>,
     pub log_path: PathBuf,
     pub xml_path: PathBuf,
     pub cached: bool,
     pub cachable: bool,
+    pub remotely_cached: bool,
+    pub is_remote_strategy: bool,
     pub runs: usize,
     pub exit_code: i32,
     pub start_time_ms: u64,
@@ -159,6 +166,10 @@ pub struct TestResult {
     /// Parsed `test.xml` of every run/shard unit in execution order (`None` = no test case
     /// information); Bazel's `TestSummary` collects the cases of all of them.
     pub unit_cases: Vec<Option<test_status::TestCase>>,
+}
+
+mod u8_or_u64 {
+    pub type U64 = u64;
 }
 
 /// Writes `test-setup.sh` to `dest` (executable) if it does not already have the right contents.
@@ -506,11 +517,11 @@ pub fn synthesize_xml(
         format!("exited with error code {exit_code}")
     };
     let target_name = label.rsplit_once(':').map(|x| x.1).unwrap_or(label);
-    let _ = duration_ms;
+    let secs = duration_ms / 1000;
     let mut x = String::from("<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n");
     x.push_str(&format!(
-        "<testsuites>\n  <testsuite name=\"{0}\" tests=\"1\" failures=\"0\" errors=\"{1}\">\n    <testcase name=\"{0}\" classname=\"\" status=\"run\" duration=\"0\" time=\"0\">",
-        esc(target_name), if failed { 1 } else { 0 }
+        "<testsuites>\n  <testsuite name=\"{0}\" tests=\"1\" failures=\"0\" errors=\"{1}\">\n    <testcase name=\"{0}\" classname=\"\" status=\"run\" duration=\"{2}\" time=\"{2}\">",
+        esc(target_name), if failed { 1 } else { 0 }, secs
     ));
     if failed {
         x.push_str(&format!("<error message=\"{}\"></error>", esc(&msg)));
@@ -521,6 +532,131 @@ pub fn synthesize_xml(
         trimmed_log.replace("]]>", "]]>]]&gt;<![CDATA[")
     ));
     x
+}
+
+/// Live tailer for `--test_output=streamed` (`StreamedTestOutput.java` +
+/// `TestLogHelper.FilterTestHeaderOutputStream`).
+pub struct StreamedTestOutput {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    state: std::sync::Arc<std::sync::Mutex<StreamFilterState>>,
+    handle: Option<std::thread::JoinHandle<()>>,
+    log_path: PathBuf,
+    sink: zel_sandbox::StreamOutHook,
+}
+
+struct StreamFilterState {
+    offset: u64,
+    seen_delimiter: bool,
+    line_buf: Vec<u8>,
+}
+
+impl StreamFilterState {
+    fn feed(&mut self, chunk: &[u8], sink: &(dyn Fn(&[u8]) + Send + Sync)) {
+        const DELIM: &[u8] =
+            b"-----------------------------------------------------------------------------\n";
+        if self.seen_delimiter {
+            if !chunk.is_empty() {
+                sink(chunk);
+            }
+            return;
+        }
+        let mut i = 0;
+        while i < chunk.len() {
+            let b = chunk[i];
+            i += 1;
+            self.line_buf.push(b);
+            if b == b'\n' {
+                if self.line_buf.as_slice() == DELIM {
+                    self.seen_delimiter = true;
+                    self.line_buf.clear();
+                    if i < chunk.len() {
+                        sink(&chunk[i..]);
+                    }
+                    return;
+                }
+                self.line_buf.clear();
+            }
+        }
+    }
+}
+
+impl StreamedTestOutput {
+    pub fn start(log_path: PathBuf, sink: zel_sandbox::StreamOutHook) -> std::io::Result<Self> {
+        if let Some(p) = log_path.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        if !log_path.exists() {
+            std::fs::File::create(&log_path)?;
+        }
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let state = std::sync::Arc::new(std::sync::Mutex::new(StreamFilterState {
+            offset: 0,
+            seen_delimiter: false,
+            line_buf: Vec::new(),
+        }));
+        let stop_bg = stop.clone();
+        let state_bg = state.clone();
+        let path_bg = log_path.clone();
+        let sink_bg = sink.clone();
+        let handle = std::thread::spawn(move || {
+            while !stop_bg.load(std::sync::atomic::Ordering::SeqCst) {
+                Self::pump_available(&path_bg, &state_bg, sink_bg.as_ref());
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        });
+        Ok(Self {
+            stop,
+            state,
+            handle: Some(handle),
+            log_path,
+            sink,
+        })
+    }
+
+    fn pump_available(
+        path: &Path,
+        state: &std::sync::Mutex<StreamFilterState>,
+        sink: &(dyn Fn(&[u8]) + Send + Sync),
+    ) {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut f) = std::fs::File::open(path) else {
+            return;
+        };
+        let mut guard = state.lock().unwrap();
+        if f.seek(SeekFrom::Start(guard.offset)).is_err() {
+            return;
+        }
+        let mut buf = [0u8; 1024];
+        while let Ok(n) = f.read(&mut buf) {
+            if n == 0 {
+                break;
+            }
+            guard.offset += n as u64;
+            guard.feed(&buf[..n], sink);
+        }
+    }
+
+    pub fn close(mut self) -> std::io::Result<()> {
+        use std::io::Read;
+        self.stop.store(true, std::sync::atomic::Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+        Self::pump_available(&self.log_path, &self.state, self.sink.as_ref());
+        let seen = self.state.lock().unwrap().seen_delimiter;
+        if !seen && self.log_path.exists() {
+            let mut f = std::fs::File::open(&self.log_path)?;
+            let mut buf = [0u8; 1024];
+            loop {
+                let n = f.read(&mut buf)?;
+                if n == 0 {
+                    break;
+                }
+                (self.sink)(&buf[..n]);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// How a test is executed through the spawn strategy registry (`StandaloneTestStrategy` creates a
@@ -538,6 +674,11 @@ pub struct TestExec<'a> {
     pub announce_subcommands: bool,
     /// `BuildOptions.checksum()` of the test target's configuration.
     pub config_checksum: String,
+    /// Whether `--cache_test_results` allows caching this test (`StandaloneTestStrategy` injects
+    /// `no-cache` into execution info when false).
+    pub cache_results: bool,
+    /// Live output sink when `--test_output=streamed` is active.
+    pub streamed_out: Option<zel_sandbox::StreamOutHook>,
 }
 
 fn run_attempt(
@@ -547,9 +688,9 @@ fn run_attempt(
     run: u32,
     attempt: u32,
     exec: Option<&TestExec>,
-) -> AttemptResult {
+) -> std::io::Result<AttemptResult> {
     let _ = std::fs::remove_dir_all(dir);
-    let _ = std::fs::create_dir_all(dir);
+    std::fs::create_dir_all(dir)?;
     let env = build_test_env(spec, dir, shard, run, attempt);
     // test-setup.sh `cd`s into $TEST_SRCDIR/$TEST_WORKSPACE itself relative to PWD, so run from
     // the exec root and give it relative script/test paths exactly like the spawn does.
@@ -586,6 +727,9 @@ fn run_attempt(
     let mut info = BTreeMap::new();
     if let Some(e) = exec {
         info.extend(e.execution_info.iter().map(|(k, v)| (k.clone(), v.clone())));
+        if !e.cache_results {
+            info.insert("no-cache".to_string(), String::new());
+        }
     }
     info.insert("timeout".to_string(), spec.timeout_secs.to_string());
     if let Some(k) = spec.kill_delay_ms {
@@ -683,7 +827,6 @@ fn run_attempt(
             let cfg_hash = e.config_checksum.as_str();
             let prefix = format!("{}/", s(&spec.exec_root));
             let mut sub_env = sp.env.clone();
-            sub_env.remove("HOME");
             for v in sub_env.values_mut() {
                 if let Some(rest) = v.strip_prefix(&prefix) {
                     *v = rest.to_string();
@@ -727,22 +870,75 @@ fn run_attempt(
             )));
         }
     }
+    let live_log_path = dir.join("test.log");
+    let mut streamer: Option<StreamedTestOutput> = None;
+    let streamed_any = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let mut hooks = zel_sandbox::ExecHooks::default();
+    if let Some(sink) = exec.and_then(|e| e.streamed_out.as_ref()) {
+        let log_for_hook = live_log_path.clone();
+        let file_mutex = std::sync::Arc::new(std::sync::Mutex::new(
+            std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&log_for_hook)?,
+        ));
+        let streamed_any_bg = streamed_any.clone();
+        hooks.stream_out = Some(std::sync::Arc::new(move |chunk: &[u8]| {
+            use std::io::Write;
+            if !chunk.is_empty() {
+                streamed_any_bg.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            if let Ok(mut f) = file_mutex.lock() {
+                let _ = f.write_all(chunk);
+                let _ = f.flush();
+            }
+        }));
+        streamer = Some(StreamedTestOutput::start(
+            live_log_path.clone(),
+            sink.clone(),
+        )?);
+    }
     let res = match exec {
         // Through the strategy registry (remote / dynamic / sandboxed / local ...), holding the
         // test's resources for the duration of the spawn.
         Some(e) => {
             let _held = e.runtime.resources.acquire(&e.resources);
             let desc = format!("Testing {}", spec.label);
-            match e.runtime.execute(&sp, &desc, &execroot, &fs, e.reporter) {
+            let exec_res = if hooks.stream_out.is_some() {
+                e.runtime
+                    .execute_with_hooks(&sp, &desc, &execroot, &fs, e.reporter, &hooks)
+            } else {
+                e.runtime.execute(&sp, &desc, &execroot, &fs, e.reporter)
+            };
+            match exec_res {
                 Ok(r) => r,
                 Err(msg) => Err(std::io::Error::other(format!("{} failed: {msg}", desc))),
             }
         }
-        None => execute_spawn_local(&sp, &execroot, &fs),
+        None => zel_sandbox::execute_spawn_local_with(&sp, &execroot, &fs, &hooks),
     };
     let dur = t.elapsed().as_millis() as u64;
     match res {
         Ok(r) => {
+            if r.catastrophic
+                || matches!(
+                    r.status,
+                    SpawnStatus::ExecutionFailed
+                        | SpawnStatus::ExecutionDenied
+                        | SpawnStatus::InvalidTimeout
+                        | SpawnStatus::RemoteCacheEvicted
+                        | SpawnStatus::MissingInputs
+                )
+            {
+                if let Some(st) = streamer.take() {
+                    let _ = st.close();
+                }
+                let msg = r
+                    .failure_message
+                    .unwrap_or_else(|| format!("Test spawn failed ({:?})", r.status));
+                return Err(std::io::Error::other(msg));
+            }
             let mut log = r.stdout.clone();
             log.extend_from_slice(&r.stderr);
             let timed_out = r.status == SpawnStatus::Timeout;
@@ -763,21 +959,15 @@ fn run_attempt(
                 }
                 log = cleaned.into_bytes();
             }
-            if timed_out || log.windows(15).any(|w| w == b"Action timed ou") {
-                let text = String::from_utf8_lossy(&log);
-                let cleaned: String = text
-                    .lines()
-                    .filter(|l| !l.starts_with("Action timed out after "))
-                    .fold(String::new(), |mut acc, l| {
-                        acc.push_str(l);
-                        acc.push('\n');
-                        acc
-                    });
-                log = cleaned.into_bytes();
-            }
-            let mut exit_code = if timed_out { 142 } else { r.exit_code };
+            let mut exit_code = r.exit_code;
             let mut premature_exit = false;
-            let mut cachable = true;
+            let mut cachable = matches!(
+                r.status,
+                SpawnStatus::Success
+                    | SpawnStatus::NonZeroExit
+                    | SpawnStatus::Timeout
+                    | SpawnStatus::OutOfMemory
+            ) && !r.catastrophic;
             // Always delete TEST_PREMATURE_EXIT_FILE; if it existed when the test passed, force
             // failed and non-cachable (`StandaloneTestStrategy.java`).
             if std::fs::remove_file(dir.join("test.exited_prematurely")).is_ok()
@@ -800,10 +990,20 @@ fn run_attempt(
             {
                 exit_code = 1;
                 sharding_unsupported = true;
+                cachable = false;
                 log.extend_from_slice(b"Sharding requested, but the test runner did not advertise support for it by touching TEST_SHARD_STATUS_FILE. Either remove the 'shard_count' attribute, use a test runner that supports sharding or temporarily disable this check via --noincompatible_check_sharding_support.\n");
             }
+            if !streamed_any.load(std::sync::atomic::Ordering::SeqCst) {
+                write_writable_file(&live_log_path, &log)?;
+            }
+            if let Some(st) = streamer.take() {
+                st.close()?;
+            }
+            if streamed_any.load(std::sync::atomic::Ordering::SeqCst) {
+                write_writable_file(&live_log_path, &log)?;
+            }
             let xml = dir.join("test.xml");
-            let xml_generated = !xml.exists();
+            let xml_generated = !xml.exists() && !sharding_unsupported;
             // The test spawn (and the XML generator spawn) are logged like any other spawn.
             if let Some(e) = exec {
                 let cwd_rel = |p: &Path| rel_exec(p).path_string().to_string();
@@ -904,7 +1104,7 @@ fn run_attempt(
                 }
             }
             if xml_generated {
-                let _ = std::fs::write(
+                write_writable_file(
                     &xml,
                     synthesize_xml(
                         &spec.label,
@@ -912,10 +1112,11 @@ fn run_attempt(
                         timed_out,
                         dur,
                         &String::from_utf8_lossy(&log),
-                    ),
-                );
+                    )
+                    .as_bytes(),
+                )?;
             }
-            AttemptResult {
+            Ok(AttemptResult {
                 exit_code,
                 timed_out,
                 duration_ms: dur,
@@ -928,23 +1129,35 @@ fn run_attempt(
                 attempt,
                 runner: r.runner_name.clone(),
                 xml_generated,
+                remotely_cached: r.runner_name.contains("cache hit"),
+                is_remote_strategy: r.runner_name == "remote",
+            })
+        }
+        Err(e) => {
+            if let Some(st) = streamer.take() {
+                let _ = st.close();
+            }
+            Err(e)
+        }
+    }
+}
+
+fn write_writable_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    if let Ok(meta) = std::fs::symlink_metadata(path) {
+        if !meta.file_type().is_symlink() {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = meta.permissions().mode();
+            if mode & 0o200 == 0 {
+                let _ =
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode | 0o200));
             }
         }
-        Err(e) => AttemptResult {
-            exit_code: 1,
-            timed_out: false,
-            duration_ms: dur,
-            log: format!("Failed to run test: {e}\n").into_bytes(),
-            sharding_unsupported: false,
-            premature_exit: false,
-            cachable: false,
-            run,
-            shard,
-            attempt,
-            runner: String::new(),
-            xml_generated: false,
-        },
     }
+    std::fs::write(path, bytes)
 }
 
 /// Runs a test target: for each of `runs_per_test` runs and each shard, up to `flaky_attempts`
@@ -999,7 +1212,7 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                 } else {
                     base.join("attempt")
                 };
-                let r = run_attempt(spec, &adir, shard, run, attempt, exec);
+                let r = run_attempt(spec, &adir, shard, run, attempt, exec)?;
                 last_exit = r.exit_code;
                 times.push(r.duration_ms);
                 let pass = r.exit_code == 0
@@ -1015,13 +1228,33 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                 } else {
                     unit_status = TestStatus::Failed;
                 }
-                if max_attempts > 1 && (!pass && attempt < max_attempts) {
+                if max_attempts > 1 && (!pass && !r.sharding_unsupported && attempt < max_attempts)
+                {
                     let att_dir = base.join("test_attempts");
-                    let _ = std::fs::create_dir_all(&att_dir);
-                    let _ = std::fs::write(att_dir.join(format!("attempt_{attempt}.log")), &r.log);
-                    let x = adir.join("test.xml");
-                    if x.exists() {
-                        let _ = std::fs::copy(&x, att_dir.join(format!("attempt_{attempt}.xml")));
+                    std::fs::create_dir_all(&att_dir)?;
+                    write_writable_file(&att_dir.join(format!("attempt_{attempt}.log")), &r.log)?;
+                    // Move all mapped sibling outputs (`test.*` -> `attempt_N.*`) into `test_attempts/`.
+                    if let Ok(rd) = std::fs::read_dir(&adir) {
+                        for entry in rd.flatten() {
+                            let src = entry.path();
+                            let Some(fname) = src.file_name().and_then(|n| n.to_str()) else {
+                                continue;
+                            };
+                            if fname == "test.log" {
+                                continue;
+                            }
+                            if fname.contains("test") {
+                                let mapped =
+                                    fname.replacen("test", &format!("attempt_{attempt}"), 1);
+                                let dst = att_dir.join(mapped);
+                                if src.is_dir() {
+                                    let _ = std::fs::remove_dir_all(&dst);
+                                    let _ = copy_dir(&src, &dst);
+                                } else {
+                                    let _ = std::fs::copy(&src, &dst);
+                                }
+                            }
+                        }
                     }
                 }
                 full_log.extend_from_slice(&r.log);
@@ -1042,8 +1275,8 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                     let _ = std::fs::remove_dir_all(base.join("test.outputs"));
                     let _ = copy_dir(&uo, &base.join("test.outputs"));
                 }
-                if max_attempts == 1 || attempt == max_attempts || pass {
-                    let _ = std::fs::write(base.join("test.log"), &r.log);
+                if max_attempts == 1 || attempt == max_attempts || pass || r.sharding_unsupported {
+                    write_writable_file(&base.join("test.log"), &r.log)?;
                 }
                 if spec.coverage && pass {
                     let cov = adir.join("coverage.dat");
@@ -1054,9 +1287,10 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                         }
                     }
                 }
+                let stop_unit = pass || r.sharding_unsupported;
                 let _ = std::fs::remove_dir_all(&adir);
                 all_attempts.push(r);
-                if pass {
+                if stop_unit {
                     break;
                 }
             }
@@ -1108,16 +1342,41 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
     let duration_ms = times.iter().copied().max().unwrap_or(0);
     let any_uncachable =
         all_attempts.iter().any(|a| !a.cachable && a.premature_exit) && !overall.is_passed();
+    let remotely_cached =
+        !all_attempts.is_empty() && all_attempts.iter().all(|a| a.remotely_cached);
+    let is_remote_strategy = all_attempts.iter().any(|a| a.is_remote_strategy);
+    let total_attempts = all_attempts.len();
+    let mut failed_logs: Vec<String> = Vec::new();
+    if !overall.is_passed() && overall != TestStatus::Incomplete && overall != TestStatus::NoStatus
+    {
+        failed_logs.push(s(&log_path));
+    }
+    if let Ok(rd) = std::fs::read_dir(spec.test_log_dir.join("test_attempts")) {
+        let mut v: Vec<String> = rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "log"))
+            .map(|p| s(&p))
+            .collect();
+        v.sort();
+        failed_logs.extend(v);
+    }
     let result = TestResult {
         status: overall,
         failed_attempts,
+        total_attempts,
+        failed_logs,
         attempts: all_attempts,
         duration_ms,
         times_ms: times,
         log_path,
         xml_path: xml_path.clone(),
         cached: false,
-        cachable: overall != TestStatus::Incomplete && !any_uncachable,
+        cachable: overall != TestStatus::Incomplete
+            && overall != TestStatus::NoStatus
+            && !any_uncachable,
+        remotely_cached,
+        is_remote_strategy,
         runs: runs as usize,
         exit_code: last_exit,
         start_time_ms: start_ms,
@@ -1144,7 +1403,9 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
     if spec.coverage {
         merge_coverage(spec, &coverage_files)?;
     }
-    write_cache_status(&spec.test_log_dir, &result)?;
+    if overall != TestStatus::NoStatus {
+        write_cache_status(&spec.test_log_dir, &result)?;
+    }
     Ok(result)
 }
 
@@ -1210,19 +1471,21 @@ fn merge_coverage(spec: &TestSpec, files: &[PathBuf]) -> std::io::Result<()> {
 /// Writes `test.cache_status`, the serialized `TestResultData` (`test_status.proto`).
 pub fn write_cache_status(dir: &Path, r: &TestResult) -> std::io::Result<()> {
     let passed = r.status.is_passed();
-    let mut failed_logs: Vec<String> = Vec::new();
-    if !passed && r.status != TestStatus::Incomplete {
-        failed_logs.push(s(&r.log_path));
-    }
-    if let Ok(rd) = std::fs::read_dir(dir.join("test_attempts")) {
-        let mut v: Vec<String> = rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|x| x == "log"))
-            .map(|p| s(&p))
-            .collect();
-        v.sort();
-        failed_logs.extend(v);
+    let mut failed_logs: Vec<String> = r.failed_logs.clone();
+    if failed_logs.is_empty() {
+        if !passed && r.status != TestStatus::Incomplete {
+            failed_logs.push(s(&r.log_path));
+        }
+        if let Ok(rd) = std::fs::read_dir(dir.join("test_attempts")) {
+            let mut v: Vec<String> = rd
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|x| x == "log"))
+                .map(|p| s(&p))
+                .collect();
+            v.sort();
+            failed_logs.extend(v);
+        }
     }
     let d = TestResultData {
         cachable: Some(r.cachable && r.status != TestStatus::Incomplete),
@@ -1230,16 +1493,18 @@ pub fn write_cache_status(dir: &Path, r: &TestResult) -> std::io::Result<()> {
         status: Some(r.status as u64),
         failed_logs,
         has_coverage: Some(r.has_coverage),
-        is_remote_strategy: Some(false),
+        remotely_cached: Some(r.remotely_cached),
+        is_remote_strategy: Some(r.is_remote_strategy),
         test_times: r.times_ms.iter().map(|t| *t as i64).collect(),
         passed_log: passed.then(|| s(&r.log_path)),
         test_process_times: r.times_ms.iter().map(|t| *t as i64).collect(),
         run_duration_millis: Some(r.duration_ms as i64),
+        test_case: r.test_case.clone(),
         start_time_millis_epoch: Some(r.start_time_ms as i64),
         exit_code: Some(r.exit_code),
         ..Default::default()
     };
-    std::fs::write(dir.join("test.cache_status"), d.encode())
+    write_writable_file(&dir.join("test.cache_status"), &d.encode())
 }
 
 /// Reads a previously written `test.cache_status` (for `--cache_test_results`).
@@ -1253,10 +1518,21 @@ pub fn read_cache_status(dir: &Path) -> Option<TestResult> {
     let dur = d.run_duration_millis.unwrap_or(0).max(0) as u64;
     let xml_path = dir.join("test.xml");
     let test_case = d.test_case.or_else(|| parse_xml_file(&xml_path));
+    let logged_attempts = d.failed_logs.len() + usize::from(d.passed_log.is_some());
+    let total_attempts = d.test_times.len().max(logged_attempts).max(1);
+    let failed_attempts = if !d.failed_logs.is_empty() {
+        d.failed_logs.len()
+    } else if status.is_passed() {
+        d.test_times.len().saturating_sub(1)
+    } else {
+        total_attempts
+    };
     Some(TestResult {
         status,
         attempts: Vec::new(),
-        failed_attempts: d.test_times.len().saturating_sub(1),
+        total_attempts,
+        failed_attempts,
+        failed_logs: d.failed_logs,
         duration_ms: dur,
         times_ms: if d.test_times.is_empty() {
             vec![dur]
@@ -1267,6 +1543,8 @@ pub fn read_cache_status(dir: &Path) -> Option<TestResult> {
         xml_path,
         cached: true,
         cachable: d.cachable.unwrap_or(true),
+        remotely_cached: d.remotely_cached.unwrap_or(false),
+        is_remote_strategy: d.is_remote_strategy.unwrap_or(false),
         runs: 1,
         exit_code: d.exit_code.unwrap_or(0),
         start_time_ms: d.start_time_millis_epoch.unwrap_or(0).max(0) as u64,
@@ -1294,7 +1572,11 @@ pub fn format_summary_line(label: &str, r: &TestResult) -> String {
     let message = format!("{}{}", cache_msg, r.status.name());
     let pad = 78usize.saturating_sub(message.len());
     let mut line = format!("{label:<pad$} {message}");
-    let attempts = r.attempts.len();
+    let attempts = if r.attempts.is_empty() {
+        r.total_attempts
+    } else {
+        r.attempts.len()
+    };
     if attempts > 1 {
         match r.status {
             TestStatus::Flaky => line.push_str(&format!(
@@ -1449,7 +1731,7 @@ pub fn shell_tokenize_words(input: &str) -> Vec<String> {
                         in_word = true;
                     }
                 }
-                c if c.is_whitespace() => {
+                ' ' | '\t' => {
                     if in_word {
                         out.push(std::mem::take(&mut cur));
                         in_word = false;
@@ -1648,6 +1930,7 @@ mod tests {
             cached: false,
             cachable: true,
             runs: 1,
+            ..Default::default()
         };
         let l = format_summary_line("//pkg:t", &r);
         assert_eq!(l.find("PASSED"), Some(78 - 6 + 1));

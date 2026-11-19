@@ -168,6 +168,16 @@ pub(crate) fn exec_config(parsed: &ParsedCommandOptions) -> Result<ExecConfig, S
     av.dynamic = opt_bool(parsed, "internal_spawn_scheduler", true);
     // `RemoteModule`: the executor makes `remote` usable and part of the default strategy list.
     av.remote_exec = remote.remote_executor.is_some();
+    let any_sandbox = av.linux_sandbox || av.darwin_sandbox || av.process_wrapper_sandbox;
+    if !any_sandbox && strategy_opts.spawn_strategy.is_empty() {
+        let mut defaults = Vec::new();
+        if av.remote_exec {
+            defaults.push("remote".to_string());
+        }
+        defaults.push("worker".to_string());
+        defaults.push("local".to_string());
+        strategy_opts.spawn_strategy = defaults;
+    }
     let registry = SpawnStrategyRegistry::build(&strategy_opts, &av)?;
 
     let mut dynamic = DynamicOptions::default();
@@ -192,10 +202,11 @@ pub(crate) fn exec_config(parsed: &ParsedCommandOptions) -> Result<ExecConfig, S
         "experimental_dynamic_cancel_remote_branch_on_local_win",
         true,
     );
+    dynamic.local_lockfree_output = opt_bool(parsed, "experimental_local_lockfree_output", false);
     dynamic.debug = opt_bool(parsed, "debug_spawn_scheduler", false);
     let allowed_local_actions = opt_last(parsed, "allowed_local_actions_regex");
     if let Some(v) = &allowed_local_actions {
-        zel_bzlmod::download::Regex::new(v).map_err(|e| {
+        zel_util::java_regex::Regex::new(v).map_err(|e| {
             flag_err(
                 "allowed_local_actions_regex",
                 v,
@@ -204,12 +215,33 @@ pub(crate) fn exec_config(parsed: &ParsedCommandOptions) -> Result<ExecConfig, S
         })?;
     }
 
+    let tmpfs_paths = opt_all(parsed, "sandbox_tmpfs_path")
+        .into_iter()
+        .map(|raw| {
+            let expanded = if raw == "~" || raw.starts_with("~/") {
+                match std::env::var("HOME") {
+                    Ok(h) if !h.is_empty() => format!("{h}{}", &raw[1..]),
+                    _ => raw.clone(),
+                }
+            } else {
+                raw.clone()
+            };
+            let pf = PathFragment::create(&expanded);
+            if !pf.is_absolute() {
+                Err(format!(
+                    "Invalid value for sandbox path: '{raw}': path must be absolute"
+                ))
+            } else {
+                Ok(pf.path_string().to_string())
+            }
+        })
+        .collect::<Result<Vec<String>, String>>()?;
     let mut sandbox_opts = SandboxOptions {
         debug: opt_bool(parsed, "sandbox_debug", false),
         base: opt_last(parsed, "sandbox_base").unwrap_or_default(),
         writable_paths: opt_all(parsed, "sandbox_writable_path"),
         block_paths: opt_all(parsed, "sandbox_block_path"),
-        tmpfs_paths: opt_all(parsed, "sandbox_tmpfs_path"),
+        tmpfs_paths,
         default_allow_network: opt_bool(parsed, "sandbox_default_allow_network", true),
         fake_hostname: opt_bool(parsed, "sandbox_fake_hostname", false),
         fake_username: opt_bool(parsed, "sandbox_fake_username", false),
@@ -219,13 +251,17 @@ pub(crate) fn exec_config(parsed: &ParsedCommandOptions) -> Result<ExecConfig, S
             "experimental_use_hermetic_linux_sandbox",
             false,
         ),
+        process_wrapper_graceful_sigterm: opt_bool(
+            parsed,
+            "experimental_process_wrapper_graceful_sigterm",
+            false,
+        ),
         ..Default::default()
     };
     for p in sandbox_opts
         .writable_paths
         .iter()
         .chain(&sandbox_opts.block_paths)
-        .chain(&sandbox_opts.tmpfs_paths)
     {
         if !p.starts_with('/') {
             return Err(format!(
@@ -250,16 +286,18 @@ pub(crate) fn exec_config(parsed: &ParsedCommandOptions) -> Result<ExecConfig, S
         ..Default::default()
     };
     for v in opt_all(parsed, "worker_max_instances") {
-        wopts.max_instances.push(
-            worker::parse_instances_flag(&v)
-                .map_err(|e| flag_err("worker_max_instances", &v, e))?,
-        );
+        if let Some(entry) = worker::parse_instances_flag_opt(&v, 4)
+            .map_err(|e| flag_err("worker_max_instances", &v, e))?
+        {
+            wopts.max_instances.push(entry);
+        }
     }
     for v in opt_all(parsed, "worker_max_multiplex_instances") {
-        wopts.max_multiplex_instances.push(
-            worker::parse_instances_flag(&v)
-                .map_err(|e| flag_err("worker_max_multiplex_instances", &v, e))?,
-        );
+        if let Some(entry) = worker::parse_instances_flag_opt(&v, 8)
+            .map_err(|e| flag_err("worker_max_multiplex_instances", &v, e))?
+        {
+            wopts.max_multiplex_instances.push(entry);
+        }
     }
     for v in opt_all(parsed, "worker_extra_flag") {
         let (k, f) = v.split_once('=').ok_or_else(|| {
@@ -426,12 +464,14 @@ pub(crate) enum RuntimeError {
     Config(String),
     /// The remote cache / executor could not be set up: `REMOTE_ERROR`.
     Remote(String),
+    /// Local sandbox/environment initialization error: `LOCAL_ENVIRONMENTAL_ERROR`.
+    LocalEnv(String),
 }
 
 impl RuntimeError {
     pub(crate) fn message(&self) -> &str {
         match self {
-            RuntimeError::Config(m) | RuntimeError::Remote(m) => m,
+            RuntimeError::Config(m) | RuntimeError::Remote(m) | RuntimeError::LocalEnv(m) => m,
         }
     }
 }
@@ -456,7 +496,8 @@ pub(crate) fn build_runtime(
     let client_env: BTreeMap<String, String> = client_env.clone();
     let sandbox_base =
         sandbox::compute_sandbox_base(&output_base.to_string_lossy(), &cfg.sandbox.base);
-    let _ = std::fs::create_dir_all(&sandbox_base);
+    sandbox::initialize_sandbox_base(&sandbox_base)
+        .map_err(|e| RuntimeError::LocalEnv(format!("Failed to initialize sandbox: {e}")))?;
     let mut runners = Vec::new();
     if sandbox::process_wrapper_supported() {
         runners.push(SandboxRunner::new(
@@ -681,10 +722,18 @@ pub(crate) fn run_build_actions(
             fatal = Some(match e {
                 RuntimeError::Config(_) => 2,
                 RuntimeError::Remote(_) => 34,
+                RuntimeError::LocalEnv(_) => 36,
             });
             (parsed.jobs.max(1), None, false)
         }
     };
+    if let Some(rt) = &runtime {
+        for r in &rt.sandbox_runners {
+            if let Some(w) = &r.init_warning {
+                reporter.handle(zel_events::Event::warning(None, w.clone()));
+            }
+        }
+    }
     if let Some(r) = runtime.as_ref().and_then(|rt| rt.remote.as_ref()) {
         for w in r.take_warnings() {
             writeln(stderr, &format!("WARNING: {w}"));
@@ -820,6 +869,16 @@ pub(crate) fn run_build_actions(
             }
             tr
         },
+        action_execution_salt: String::new(),
+        file_cache: Some(Arc::new(
+            zel_exec::file_cache::SingleBuildFileCache::new_owned(
+                execroot.clone(),
+                Some(workspace_dir.clone()),
+                PathFragment::create("bazel-out"),
+                Arc::new(zel_vfs::LocalFileSystem::default()),
+                server_digest_function(),
+            ),
+        )),
     };
     let sched = execute_actions(
         &actions,
@@ -872,6 +931,14 @@ pub(crate) fn run_build_actions(
     }
     if let Some(rt) = &runtime {
         rt.after_command(quit_workers);
+        if quit_workers {
+            if let Some(ob) = std::path::Path::new(execroot.path_string())
+                .parent()
+                .and_then(|p| p.parent())
+            {
+                shutdown_worker_pools(&ob.to_string_lossy());
+            }
+        }
     }
     // Action output / failures in completion order.
     let mut action_stdout: Vec<u8> = Vec::new();
@@ -1907,6 +1974,7 @@ pub(crate) struct TestPhaseInput<'a> {
     pub execroot: &'a PathFragment,
     pub testlogs_dir: &'a PathFragment,
     pub output_base: &'a PathFragment,
+    pub workspace_dir: &'a PathFragment,
     pub workspace_name: &'a str,
     pub coverage: bool,
     /// The execution runtime of the build phase: test spawns go through its strategy registry.
@@ -1990,17 +2058,46 @@ fn check_test_size(time_ms: u64, timeout_attr: &str) -> Option<(String, String)>
     }
 }
 
+fn split_first_unescaped_at(input: &str) -> Option<(String, &str)> {
+    let mut unescaped = String::new();
+    let bytes = input.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() && bytes[i + 1] == b'@' {
+            unescaped.push('@');
+            i += 2;
+            continue;
+        }
+        if bytes[i] == b'@' {
+            return Some((unescaped, &input[i + 1..]));
+        }
+        let ch = input[i..].chars().next().unwrap();
+        unescaped.push(ch);
+        i += ch.len_utf8();
+    }
+    None
+}
+
 fn target_runs_per_test(label: &str, parsed: &ParsedCommandOptions) -> u32 {
     let mut resolved = 1u32;
     for val in opt_all(parsed, "runs_per_test") {
-        if let Some((pattern, count_str)) = val.split_once('@') {
-            if let Ok(count) = count_str.parse::<u32>() {
-                if label == pattern || label.ends_with(pattern) {
-                    resolved = count.max(1);
+        if let Some((pattern, count_str)) = split_first_unescaped_at(&val) {
+            if let Ok(count) = count_str.parse::<i32>() {
+                if count > 0 {
+                    let hit = zel_exec::strategy::RegexFilter::convert(&pattern)
+                        .map(|rf| {
+                            rf.is_included(label) || rf.is_included(label.trim_start_matches('@'))
+                        })
+                        .unwrap_or(false);
+                    if hit {
+                        resolved = count as u32;
+                    }
                 }
             }
-        } else if let Ok(count) = val.parse::<u32>() {
-            resolved = count.max(1);
+        } else if let Ok(count) = val.parse::<i32>() {
+            if count > 0 {
+                resolved = count as u32;
+            }
         }
     }
     resolved
@@ -2334,8 +2431,7 @@ pub(crate) fn run_tests(
         let mut args = attrs.args.clone();
         args.extend(test_args.iter().cloned());
         let runs_per_test = target_runs_per_test(&label, parsed);
-        let flaky_attempts = flaky_attempts_for(&flaky_attempt_specs, &label)
-            .unwrap_or(if attrs.flaky { 3 } else { 1 });
+        let flaky_attempts = flaky_attempts_for(&flaky_attempt_specs, &label, attrs.flaky);
         let shard_count = effective_shard_count(attrs.shard_count, sharding_strategy.as_deref())
             .unwrap_or(attrs.shard_count);
         let coverage_manifest = if input.coverage {
@@ -2374,7 +2470,14 @@ pub(crate) fn run_tests(
             zip_undeclared_outputs: opt_bool(parsed, "zip_undeclared_test_outputs", false),
             setup_script: setup.clone(),
             kill_delay_ms: None,
-            test_tmpdir: opt_last(parsed, "test_tmpdir").map(PathBuf::from),
+            test_tmpdir: opt_last(parsed, "test_tmpdir").map(|raw| {
+                let p = PathBuf::from(raw);
+                if p.is_absolute() {
+                    p
+                } else {
+                    PathBuf::from(input.workspace_dir.path_string()).join(p)
+                }
+            }),
             check_sharding_support: opt_bool(parsed, "incompatible_check_sharding_support", true),
         };
         let mut fp = zel_util::Fingerprint::new();
@@ -2481,17 +2584,17 @@ pub(crate) fn run_tests(
             || (is_exclusive_if_local && !force_exclusive_if_local_parallel)
             || test_strat.as_deref() == Some("exclusive")
             || is_streamed;
-        let is_local_or_standalone = attrs.tags.iter().any(|t| t == "local")
-            || test_strat.as_deref() == Some("standalone")
-            || test_strat.as_deref() == Some("local");
         let is_no_remote = attrs
             .tags
             .iter()
-            .any(|t| t == "no-remote" || t == "no-remote-exec")
-            || is_local_or_standalone;
+            .any(|t| t == "no-remote" || t == "no-remote-exec" || t == "local")
+            || is_exclusive;
         if is_no_remote {
             info.entry("no-remote-exec".into())
                 .or_insert_with(|| "1".into());
+        }
+        if is_streamed {
+            info.entry("local".into()).or_insert_with(|| "1".into());
         }
         if attrs.tags.iter().any(|t| t == "local" || t == "no-sandbox") {
             info.entry("no-sandbox".into())
@@ -2631,14 +2734,13 @@ pub(crate) fn run_tests(
         .copied()
         .filter(|&i| jobs[i].exclusive)
         .collect();
-    let local_jobs = if !test_keep_going {
-        1
-    } else {
-        opt_last(parsed, "local_test_jobs")
-            .and_then(|v| v.parse::<usize>().ok())
-            .filter(|n| *n > 0)
-            .unwrap_or(parsed.jobs.max(1))
-    };
+    let local_jobs = opt_last(parsed, "local_test_jobs")
+        .and_then(|v| {
+            let host = HostResources::detect();
+            resources::convert_local_test_jobs(&v, &host).ok()
+        })
+        .filter(|&n| n > 0)
+        .unwrap_or(parsed.jobs.max(1));
     let stop = std::sync::atomic::AtomicBool::new(false);
     let live_buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let live_buf_clone = live_buf.clone();
@@ -2659,21 +2761,15 @@ pub(crate) fn run_tests(
             .and_then(|v| v.parse::<i64>().ok())
             .unwrap_or(-1);
 
-        if mode == "streamed" {
+        if mode == "streamed" && input.runtime.is_none() {
             if r.attempts.len() > 1 {
                 for a in &r.attempts {
                     let stripped = strip_test_setup_header(&a.log);
                     out_buf.extend_from_slice(stripped);
-                    if !stripped.is_empty() && !stripped.ends_with(b"\n") {
-                        out_buf.push(b'\n');
-                    }
                 }
             } else if let Ok(b) = std::fs::read(&r.log_path) {
                 let stripped = strip_test_setup_header(&b);
                 out_buf.extend_from_slice(stripped);
-                if !stripped.is_empty() && !stripped.ends_with(b"\n") {
-                    out_buf.push(b'\n');
-                }
             }
         }
 
@@ -2860,7 +2956,7 @@ pub(crate) fn run_tests(
         if mode != "streamed" {
             let show = match mode {
                 "all" => true,
-                "errors" => !r.status.is_passed(),
+                "errors" => !r.status.is_passed() || r.status == TestStatus::Flaky,
                 _ => false,
             };
             if show {
@@ -2935,6 +3031,9 @@ pub(crate) fn run_tests(
                             out_buf.extend_from_slice(stripped);
                             // The log is copied verbatim: bazel adds no newline before the closing separator.
                             out_buf.extend_from_slice(b"================================================================================\n");
+                        }
+                        if mode == "errors" && r.status == TestStatus::Flaky {
+                            return;
                         }
                     }
                     // Every shard is its own test action with its own log and output block.
@@ -3036,6 +3135,16 @@ pub(crate) fn run_tests(
                 "testing halted by --notest_keep_going",
             ));
         }
+        let cache_results =
+            cache_mode != "no" && !j.no_cache && (cache_mode == "yes" || j.spec.runs_per_test <= 1);
+        let streamed_out: Option<zel_sandbox::StreamOutHook> = if is_streamed {
+            let ob = out_buf_clone.clone();
+            Some(Arc::new(move |chunk: &[u8]| {
+                ob.lock().unwrap().extend_from_slice(chunk);
+            }))
+        } else {
+            None
+        };
         let mut res = match input.runtime {
             Some(rt) => zel_exec::test_runner::run_test_in(
                 &j.spec,
@@ -3047,6 +3156,8 @@ pub(crate) fn run_tests(
                     resources: j.resources.clone(),
                     announce_subcommands: parsed.subcommands,
                     config_checksum: j.config_checksum.clone(),
+                    cache_results,
+                    streamed_out,
                 }),
             ),
             None => run_test(&j.spec),
@@ -3466,40 +3577,90 @@ pub(crate) fn run_tests(
     let max_test_output_bytes: i64 = opt_last(parsed, "max_test_output_bytes")
         .and_then(|v| v.parse::<i64>().ok())
         .unwrap_or(-1);
-    if mode == "all" {
+    if mode == "all" || mode == "errors" {
         for (label, _, r) in &results {
             if let Some(r) = r {
                 if r.cached {
-                    writeln(
-                        summary_out,
-                        &format!("PASSED: {label} (see {})", r.log_path.display()),
-                    );
-                    writeln(summary_out, &format!("INFO: From Testing {label}"));
-                    writeln(
-                        summary_out,
-                        &format!("==================== Test output for {label}:"),
-                    );
-                    if let Ok(b) = std::fs::read(&r.log_path) {
-                        let stripped = strip_test_setup_header(&b);
-                        if max_test_output_bytes >= 0
-                            && (stripped.len() as i64) > max_test_output_bytes
-                        {
-                            writeln(
-                                summary_out,
-                                &format!(
-                                    "Test log too large ({} > {}), skipping...",
-                                    stripped.len(),
-                                    max_test_output_bytes
-                                ),
-                            );
-                        } else {
-                            summary_out.extend_from_slice(stripped);
-                            if !stripped.is_empty() && !stripped.ends_with(b"\n") {
-                                summary_out.push(b'\n');
+                    if mode == "errors" && (!r.status.is_passed() || r.status == TestStatus::Flaky)
+                    {
+                        for flog in &r.failed_logs {
+                            if let Ok(b) = std::fs::read(flog) {
+                                let stripped = strip_test_setup_header(&b);
+                                writeln(
+                                    summary_out,
+                                    &format!("==================== Test output for {label}:"),
+                                );
+                                if max_test_output_bytes >= 0
+                                    && (stripped.len() as i64) > max_test_output_bytes
+                                {
+                                    writeln(
+                                        summary_out,
+                                        &format!(
+                                            "Test log too large ({} > {}), skipping...",
+                                            stripped.len(),
+                                            max_test_output_bytes
+                                        ),
+                                    );
+                                } else {
+                                    summary_out.extend_from_slice(stripped);
+                                    if !stripped.is_empty() && !stripped.ends_with(b"\n") {
+                                        summary_out.push(b'\n');
+                                    }
+                                }
+                                writeln(summary_out, &"=".repeat(80));
                             }
                         }
+                    } else if mode == "all" {
+                        for flog in &r.failed_logs {
+                            if Path::new(flog) == r.log_path {
+                                continue;
+                            }
+                            if let Ok(b) = std::fs::read(flog) {
+                                let stripped = strip_test_setup_header(&b);
+                                writeln(
+                                    summary_out,
+                                    &format!("==================== Test output for {label}:"),
+                                );
+                                summary_out.extend_from_slice(stripped);
+                                if !stripped.is_empty() && !stripped.ends_with(b"\n") {
+                                    summary_out.push(b'\n');
+                                }
+                                writeln(summary_out, &"=".repeat(80));
+                            }
+                        }
+                        if r.status.is_passed() {
+                            writeln(
+                                summary_out,
+                                &format!("PASSED: {label} (see {})", r.log_path.display()),
+                            );
+                        }
+                        writeln(summary_out, &format!("INFO: From Testing {label}"));
+                        writeln(
+                            summary_out,
+                            &format!("==================== Test output for {label}:"),
+                        );
+                        if let Ok(b) = std::fs::read(&r.log_path) {
+                            let stripped = strip_test_setup_header(&b);
+                            if max_test_output_bytes >= 0
+                                && (stripped.len() as i64) > max_test_output_bytes
+                            {
+                                writeln(
+                                    summary_out,
+                                    &format!(
+                                        "Test log too large ({} > {}), skipping...",
+                                        stripped.len(),
+                                        max_test_output_bytes
+                                    ),
+                                );
+                            } else {
+                                summary_out.extend_from_slice(stripped);
+                                if !stripped.is_empty() && !stripped.ends_with(b"\n") {
+                                    summary_out.push(b'\n');
+                                }
+                            }
+                        }
+                        writeln(summary_out, &"=".repeat(80));
                     }
-                    writeln(summary_out, &"=".repeat(80));
                 }
             }
         }
@@ -3943,6 +4104,7 @@ mod tests {
             premature_exit: false,
             cachable: true,
             xml_generated: false,
+            ..Default::default()
         };
         // Shard 0 flaky (pass + fail), shard 1 failed (fail + fail) => Failed!
         let mut r = TestResult {
@@ -3961,6 +4123,7 @@ mod tests {
             has_coverage: false,
             test_case: None,
             unit_cases: vec![],
+            ..Default::default()
         };
         reaggregate_runs_per_test_detects_flakes(&spec, &mut r);
         assert_eq!(r.status, TestStatus::Failed);
@@ -4170,28 +4333,33 @@ mod proc_stats_tests {
     }
 }
 
-/// `--flaky_test_attempts`: `<n>`, `default`, or `<label regex>@<n>` (the first matching label
-/// pattern wins, a bare number applies to every test).
-fn flaky_attempts_for(specs: &[String], label: &str) -> Option<u32> {
-    let mut bare = None;
+/// `--flaky_test_attempts`: `<n>`, `default`, or `<regex_filter>@<n|default>` (last match wins;
+/// `default` restores 3 when `attr_flaky` else 1).
+fn flaky_attempts_for(specs: &[String], label: &str, attr_flaky: bool) -> u32 {
+    let mut resolved: Option<u32> = None;
     for sp in specs {
-        if let Some((pat, n)) = sp.rsplit_once('@') {
-            let Ok(n) = n.parse::<u32>() else { continue };
-            let lit = pat.replace("\\", "");
-            let hit = match lit.strip_suffix(".*") {
-                Some(prefix) => label.starts_with(prefix),
-                None => label == lit || label.ends_with(&format!(":{lit}")),
-            };
+        if let Some((pat, rhs)) = split_first_unescaped_at(sp) {
+            let hit = zel_exec::strategy::RegexFilter::convert(&pat)
+                .map(|rf| rf.is_included(label) || rf.is_included(label.trim_start_matches('@')))
+                .unwrap_or(false);
             if hit {
-                return Some(n);
+                if rhs == "default" {
+                    resolved = None;
+                } else if let Ok(n) = rhs.parse::<i32>() {
+                    if n > 0 {
+                        resolved = Some(n as u32);
+                    }
+                }
             }
-        } else if let Ok(n) = sp.parse::<u32>() {
-            bare = Some(n);
         } else if sp == "default" {
-            bare = None;
+            resolved = None;
+        } else if let Ok(n) = sp.parse::<i32>() {
+            if n > 0 {
+                resolved = Some(n as u32);
+            }
         }
     }
-    bare
+    resolved.unwrap_or(if attr_flaky { 3 } else { 1 })
 }
 
 /// `TestSummaryPrinter.print`: without `--verbose_test_summary` the attempt and time summaries

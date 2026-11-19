@@ -107,27 +107,41 @@ pub struct BinTools {
 }
 
 impl BinTools {
-    pub fn for_embedded_bin(embedded_binaries_root: &Path, tools: &[String]) -> Self {
+    pub fn try_for_embedded_bin(
+        embedded_binaries_root: &Path,
+        tools: &[String],
+    ) -> Result<Self, String> {
         let bin_root = PathFragment::create("_bin");
         let mut kept = Vec::new();
         let mut action_inputs = BTreeMap::new();
+        let mut seen_exec_paths = std::collections::HashSet::new();
         for tool in tools {
             if tool.starts_with("embedded_tools/") {
                 continue;
             }
-            kept.push(tool.clone());
             let abs_path = embedded_binaries_root.join(tool);
             let exec_path = bin_root.get_relative_str(tool);
+            if !seen_exec_paths.insert(exec_path.clone()) || action_inputs.contains_key(tool) {
+                return Err(format!(
+                    "Multiple entries with same key: {tool} ({exec_path})"
+                ));
+            }
+            kept.push(tool.clone());
             action_inputs.insert(
                 tool.clone(),
                 Arc::new(PathActionInput::new(abs_path, exec_path)),
             );
         }
-        Self {
+        Ok(Self {
             embedded_binaries_root: embedded_binaries_root.to_path_buf(),
             embedded_tools: kept,
             action_inputs,
-        }
+        })
+    }
+
+    pub fn for_embedded_bin(embedded_binaries_root: &Path, tools: &[String]) -> Self {
+        Self::try_for_embedded_bin(embedded_binaries_root, tools)
+            .expect("BinTools duplicate embedded tool entry")
     }
 
     pub fn from_embedded_root(embedded_binaries_root: &Path) -> io::Result<Self> {

@@ -224,6 +224,98 @@ fn run_probe(
     }
 }
 
+/// `LinuxSandboxUtil.validateBindMounts`: validates each `(target, source)` bind mount entry.
+pub fn validate_bind_mounts(bind_mounts: &[(String, String)]) -> Result<(), String> {
+    for (target, source) in bind_mounts {
+        let src_md = std::fs::metadata(source)
+            .map_err(|_| format!("Mount source '{source}' does not exist."))?;
+        let dst_md = std::fs::metadata(target)
+            .map_err(|_| format!("Mount target '{target}' does not exist."))?;
+        let src_is_dir = src_md.is_dir();
+        let dst_is_dir = dst_md.is_dir();
+        if src_is_dir != dst_is_dir {
+            if src_is_dir {
+                return Err(format!(
+                    "Cannot mount directory '{source}' onto file '{target}'."
+                ));
+            } else {
+                return Err(format!(
+                    "Cannot mount file '{source}' onto directory '{target}'."
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `LinuxSandboxUtil.getInaccessibleHelperFile`: creates `<sandbox_base>/inaccessibleHelperFile`
+/// and clears executable, writable, and readable permission bits (`0o000`).
+pub fn get_inaccessible_helper_file(sandbox_base: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(sandbox_base)?;
+    let file = sandbox_base.join("inaccessibleHelperFile");
+    if let Ok(md) = std::fs::symlink_metadata(&file) {
+        if md.is_dir() && !md.file_type().is_symlink() {
+            crate::delete_tree(&file)?;
+        }
+    }
+    if !file.exists() {
+        let _ = std::fs::File::create(&file)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o000))?;
+    }
+    #[cfg(not(unix))]
+    {
+        let mut perms = std::fs::metadata(&file)?.permissions();
+        perms.set_readonly(true);
+        std::fs::set_permissions(&file, perms)?;
+    }
+    Ok(file)
+}
+
+/// `LinuxSandboxUtil.getInaccessibleHelperDir`: creates `<sandbox_base>/inaccessibleHelperDir`
+/// and clears executable, writable, and readable permission bits (`0o000`).
+pub fn get_inaccessible_helper_dir(sandbox_base: &Path) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(sandbox_base)?;
+    let dir = sandbox_base.join("inaccessibleHelperDir");
+    if let Ok(md) = std::fs::symlink_metadata(&dir) {
+        if !md.is_dir() || md.file_type().is_symlink() {
+            crate::delete_tree(&dir)?;
+        }
+    }
+    if std::fs::symlink_metadata(&dir).is_err() {
+        std::fs::create_dir(&dir)?;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o000))?;
+    }
+    Ok(dir)
+}
+
+/// `LinuxSandboxedStrategy.create`: creates the inaccessible helper file and directory when
+/// `block_paths` is non-empty, returning `(helper_file, helper_dir, optional_warning)`.
+pub fn create_inaccessible_helpers(
+    sandbox_base: &Path,
+    block_paths: &[String],
+) -> (Option<PathBuf>, Option<PathBuf>, Option<String>) {
+    if block_paths.is_empty() {
+        return (None, None, None);
+    }
+    let warn_msg = || format!("Could not block access to: {}", block_paths.join(","));
+    let file = match get_inaccessible_helper_file(sandbox_base) {
+        Ok(f) => f,
+        Err(_) => return (None, None, Some(warn_msg())),
+    };
+    match get_inaccessible_helper_dir(sandbox_base) {
+        Ok(d) => (Some(file), Some(d), None),
+        Err(_) => (Some(file), None, Some(warn_msg())),
+    }
+}
+
 /// Why `linux-sandbox` is unavailable here (`LinuxSandboxedSpawnRunner.getUnsupportedReason`);
 /// `None` means supported.
 pub fn get_unsupported_reason(linux_sandbox_binary: Option<&str>) -> Option<String> {

@@ -400,13 +400,18 @@ impl CompactPersistentActionCache {
         for o in &parts.output_paths {
             add(o);
         }
+        if !parts.action_execution_salt.is_empty() {
+            add("|action_execution_salt");
+            add(&parts.action_execution_salt);
+        }
         add("|payload");
         b.extend_from_slice(&parts.payload);
         self.digest.hex(&b)
     }
 
     /// `ActionCacheChecker` metadata digest: over sorted `(path, content digest)` of all inputs
-    /// (declared + discovered). `digest_of` returns `None` for unreadable inputs.
+    /// (declared + discovered). Missing/unreadable inputs (`None`) contribute only their exec path
+    /// without any literal placeholder string (`ActionCacheChecker.addInputFileMetadata`).
     pub fn compute_md_digest(&self, inputs: &[(String, Option<String>)]) -> String {
         let mut v: Vec<&(String, Option<String>)> = inputs.iter().collect();
         v.sort();
@@ -414,8 +419,16 @@ impl CompactPersistentActionCache {
         for (p, d) in v {
             b.extend_from_slice(p.as_bytes());
             b.push(0);
-            b.extend_from_slice(d.as_deref().unwrap_or("<missing>").as_bytes());
-            b.push(0);
+            match d {
+                Some(dig) => {
+                    b.push(1);
+                    b.extend_from_slice(dig.as_bytes());
+                    b.push(0);
+                }
+                None => {
+                    b.push(0);
+                }
+            }
         }
         self.digest.hex(&b)
     }
@@ -481,6 +494,7 @@ pub struct ActionKeyParts {
     pub input_paths: Vec<String>,
     pub output_paths: Vec<String>,
     pub payload: Vec<u8>,
+    pub action_execution_salt: String,
 }
 
 #[cfg(test)]
@@ -500,6 +514,7 @@ mod tests {
             input_paths: vec!["a.c".into()],
             output_paths: vec!["a.o".into()],
             payload: vec![],
+            action_execution_salt: String::new(),
         }
     }
 

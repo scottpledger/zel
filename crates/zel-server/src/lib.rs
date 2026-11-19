@@ -1249,25 +1249,27 @@ impl BlazeRuntime {
             }
         }
 
-        if let Some(v) = exec_phase::opt_last(&parsed, "test_strategy") {
-            let allowed = ["standalone", "exclusive"];
-            if v == "local" || !allowed.contains(&v.as_str()) {
-                writeln_bytes(stderr, &format!("ERROR: No context of type TestActionContext registered for requested value '{v}', available identifiers are: [exclusive, standalone]"));
-                writeln_bytes(stderr, "unused [interface com.google.devtools.build.lib.analysis.test.TestActionContext]");
-                writeln_bytes(
-                    stderr,
-                    &format!(
-                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
-                        cmd_started.elapsed().as_secs_f64()
-                    ),
-                );
-                writeln_bytes(stderr, "INFO: 0 processes.");
-                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                writeln_bytes(
-                    stderr,
-                    "ERROR: Couldn't start the build. Unable to run tests",
-                );
-                return ExitCode::COMMAND_LINE_ERROR;
+        if parsed.test_output != "streamed" {
+            if let Some(v) = exec_phase::opt_last(&parsed, "test_strategy") {
+                let allowed = ["", "standalone", "exclusive"];
+                if v == "local" || !allowed.contains(&v.as_str()) {
+                    writeln_bytes(stderr, &format!("ERROR: No context of type TestActionContext registered for requested value '{v}', available identifiers are: [exclusive, standalone]"));
+                    writeln_bytes(stderr, "unused [interface com.google.devtools.build.lib.analysis.test.TestActionContext]");
+                    writeln_bytes(
+                        stderr,
+                        &format!(
+                            "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                            cmd_started.elapsed().as_secs_f64()
+                        ),
+                    );
+                    writeln_bytes(stderr, "INFO: 0 processes.");
+                    writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                    writeln_bytes(
+                        stderr,
+                        "ERROR: Couldn't start the build. Unable to run tests",
+                    );
+                    return ExitCode::COMMAND_LINE_ERROR;
+                }
             }
         }
         if let Some(v) = exec_phase::opt_last(&parsed, "run_under") {
@@ -2315,6 +2317,7 @@ impl BlazeRuntime {
                     execroot: &execroot,
                     testlogs_dir: &testlogs_dir,
                     output_base: &self.dirs.output_base,
+                    workspace_dir: &self.dirs.workspace_dir,
                     workspace_name,
                     coverage: command == "coverage"
                         || (command == "test"
@@ -3530,11 +3533,18 @@ impl BlazeRuntime {
             if is_sp {
                 run_base.insert("TEST_TMPDIR".into(), format!("_tmp/{hash}"));
             } else {
-                let tmp_root = exec_phase::opt_last(&parsed, "test_tmpdir")
-                    .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| {
-                        std::path::PathBuf::from(execroot.path_string()).join("_tmp")
-                    });
+                let tmp_root = match exec_phase::opt_last(&parsed, "test_tmpdir") {
+                    Some(raw) => {
+                        let p = std::path::PathBuf::from(raw);
+                        let abs = if p.is_absolute() {
+                            p
+                        } else {
+                            std::path::PathBuf::from(self.dirs.workspace_dir.path_string()).join(p)
+                        };
+                        abs.join("_tmp")
+                    }
+                    None => std::path::PathBuf::from(execroot.path_string()).join("_tmp"),
+                };
                 let test_tmp = tmp_root.join(&hash);
                 let _ = std::fs::create_dir_all(&test_tmp);
                 run_base.insert("TEST_TMPDIR".into(), test_tmp.display().to_string());

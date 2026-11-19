@@ -25,8 +25,8 @@
 //! if none can, `SpawnStrategyResolver`'s error is produced.
 
 use std::collections::BTreeMap;
-use zel_bzlmod::download::Regex;
 use zel_sandbox::{sandbox, Spawn};
+use zel_util::java_regex::Regex;
 
 /// A registered strategy implementation (what `toString()` prints in Bazel).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -291,11 +291,12 @@ impl StrategyOptions {
     }
 }
 
-/// `RegexFilter`: inclusion/exclusion regexes matched with `Matcher.find()`.
+/// `RegexFilter`: inclusion/exclusion regexes matched with `java.util.regex.Matcher.find()`
+/// over an atomic-group union `(?:(?>pat_a)|(?>pat_b)|...)`.
 #[derive(Debug, Clone)]
 pub struct RegexFilter {
-    inclusions: Vec<(String, Regex)>,
-    exclusions: Vec<(String, Regex)>,
+    inclusion: Option<Regex>,
+    exclusion: Option<Regex>,
     pub original: String,
     /// Canonical identity (sorted, deduped patterns) used for filter equality.
     identity: (Vec<String>, Vec<String>),
@@ -310,7 +311,7 @@ impl RegexFilter {
             ));
         }
         let (mut inc, mut exc) = (Vec::new(), Vec::new());
-        // Split on ',' but not on '\,'.
+        // `input.split("(?<!\\\\),")`: split on ',' not preceded by '\', dropping trailing empty strings.
         let mut pieces = Vec::new();
         let mut cur = String::new();
         let chars: Vec<char> = input.chars().collect();
@@ -322,8 +323,11 @@ impl RegexFilter {
             }
         }
         pieces.push(cur);
+        while pieces.len() > 1 && pieces.last().is_some_and(|p| p.is_empty()) {
+            pieces.pop();
+        }
         for p in pieces {
-            let mut p = p.replace("\\,", ",").replace("\\@", "@");
+            let mut p = p.replace("\\,", ",");
             let excluded = p.starts_with('-');
             if excluded || p.starts_with('+') {
                 p.remove(0);
@@ -332,47 +336,38 @@ impl RegexFilter {
                 (if excluded { &mut exc } else { &mut inc }).push(p);
             }
         }
-        let compile = |v: Vec<String>| -> Result<Vec<(String, Regex)>, String> {
-            let mut set: Vec<String> = v;
-            set.sort();
-            set.dedup();
-            set.into_iter()
-                .map(|p| {
-                    Regex::new(&format!(".*(?:{p}).*"))
-                        .map(|r| (p.clone(), r))
-                        .map_err(|e| format!("Failed to build valid regular expression: {e}"))
-                })
-                .collect()
+        let compile_union = |mut v: Vec<String>| -> Result<(Vec<String>, Option<Regex>), String> {
+            v.sort();
+            v.dedup();
+            if v.is_empty() {
+                return Ok((v, None));
+            }
+            let combined = format!("(?:(?>{}))", v.join(")|(?>"));
+            let r = Regex::new(&combined)
+                .map_err(|e| format!("Failed to build valid regular expression: {e}"))?;
+            Ok((v, Some(r)))
         };
-        let inclusions = compile(inc)?;
-        let exclusions = compile(exc)?;
-        let identity = (
-            inclusions.iter().map(|(p, _)| p.clone()).collect(),
-            exclusions.iter().map(|(p, _)| p.clone()).collect(),
-        );
+        let (inc_id, inclusion) = compile_union(inc)?;
+        let (exc_id, exclusion) = compile_union(exc)?;
         Ok(Self {
-            inclusions,
-            exclusions,
+            inclusion,
+            exclusion,
             original: input.to_string(),
-            identity,
+            identity: (inc_id, exc_id),
         })
     }
 
     /// `isIncluded`: not matching any exclusion and matching some inclusion (if any).
     pub fn is_included(&self, value: &str) -> bool {
-        if self
-            .exclusions
-            .iter()
-            .any(|(_, r)| r.full_match(value).is_some())
-        {
-            return false;
+        if let Some(ex) = &self.exclusion {
+            if ex.find(value).is_some() {
+                return false;
+            }
         }
-        if self.inclusions.is_empty() {
-            return true;
+        match &self.inclusion {
+            None => true,
+            Some(inc) => inc.find(value).is_some(),
         }
-        self.inclusions
-            .iter()
-            .any(|(_, r)| r.full_match(value).is_some())
     }
 }
 
@@ -689,22 +684,36 @@ impl SpawnStrategyRegistry {
 
     /// `getStrategies(resourceOwner, mnemonic)`: also returns the progress line Bazel emits when
     /// a description filter matched (`"<description> with context [ids]"`).
+    /// `TestRunner` spawns and actions with no explicit progress message (`description == None`)
+    /// are exempt from `--strategy_regexp` matching (`SpawnStrategyRegistry.getStrategies`).
+    pub fn get_strategies_opt(
+        &self,
+        mnemonic: &str,
+        description: Option<&str>,
+    ) -> (Vec<StrategyKind>, Option<String>) {
+        if mnemonic != "TestRunner" {
+            if let Some(description) = description {
+                for (f, ks, ids) in &self.regex_filters {
+                    if f.is_included(description) {
+                        let progress = format!("{description} with context [{}]", ids.join(", "));
+                        if !ks.is_empty() {
+                            return (ks.clone(), Some(progress));
+                        }
+                        // Matched but resolved to no strategies: Bazel falls through (empty list).
+                        return self.after_regex(mnemonic, Some(progress));
+                    }
+                }
+            }
+        }
+        self.after_regex(mnemonic, None)
+    }
+
     pub fn get_strategies(
         &self,
         mnemonic: &str,
         description: &str,
     ) -> (Vec<StrategyKind>, Option<String>) {
-        for (f, ks, ids) in &self.regex_filters {
-            if f.is_included(description) {
-                let progress = format!("{description} with context [{}]", ids.join(", "));
-                if !ks.is_empty() {
-                    return (ks.clone(), Some(progress));
-                }
-                // Matched but resolved to no strategies: Bazel falls through (empty list).
-                return self.after_regex(mnemonic, Some(progress));
-            }
-        }
-        self.after_regex(mnemonic, None)
+        self.get_strategies_opt(mnemonic, (!description.is_empty()).then_some(description))
     }
 
     fn after_regex(
@@ -733,12 +742,12 @@ impl SpawnStrategyRegistry {
 
     /// `SpawnStrategyResolver.resolve`: the strategies able to execute `spawn`, in priority
     /// order, or Bazel's `NO_USABLE_STRATEGY_FOUND` message.
-    pub fn resolve(
+    pub fn resolve_opt(
         &self,
         spawn: &Spawn,
-        description: &str,
+        description: Option<&str>,
     ) -> Result<(Vec<StrategyKind>, Option<String>), String> {
-        let (strategies, progress) = self.get_strategies(&spawn.mnemonic, description);
+        let (strategies, progress) = self.get_strategies_opt(&spawn.mnemonic, description);
         let execable: Vec<StrategyKind> = strategies
             .iter()
             .copied()
@@ -758,6 +767,14 @@ impl SpawnStrategyRegistry {
             ));
         }
         Ok((execable, progress))
+    }
+
+    pub fn resolve(
+        &self,
+        spawn: &Spawn,
+        description: &str,
+    ) -> Result<(Vec<StrategyKind>, Option<String>), String> {
+        self.resolve_opt(spawn, (!description.is_empty()).then_some(description))
     }
 }
 

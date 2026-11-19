@@ -166,7 +166,7 @@ fn option_override(raw: &str) -> R {
 }
 
 /// `RegexFilter.RegexFilterConverter`.
-fn regex_filter(input: &str) -> Result<(), OptionsParsingError> {
+pub(crate) fn regex_filter(input: &str) -> Result<(), OptionsParsingError> {
     if input.starts_with("--") {
         return Err(err(format!(
             "Failed to build filter: value looks like another flag ({input}). Either escape the value with \"\\-\\-\", or pass an explicit value to the flag."
@@ -193,7 +193,7 @@ fn regex_filter(input: &str) -> Result<(), OptionsParsingError> {
         pieces = vec![String::new()];
     }
     for piece in pieces {
-        let piece = piece.replace("\\,", ",").replace("\\@", "@");
+        let piece = piece.replace("\\,", ",");
         let (excluded, body) = match piece.chars().next() {
             Some('-') => (true, piece[1..].to_string()),
             Some('+') => (false, piece[1..].to_string()),
@@ -915,16 +915,10 @@ fn empty_to_null_label(raw: &str) -> R {
 /// `PerLabelOptions.PerLabelOptionsConverter`.
 fn per_label_options(raw: &str) -> R {
     let chars: Vec<char> = raw.chars().collect();
-    let mut at = None;
-    for i in (0..chars.len()).rev() {
-        if chars[i] == '@' && (i == 0 || chars[i - 1] != '\\') {
-            at = Some(i);
-            break;
-        }
-    }
+    let at = (0..chars.len()).find(|&i| chars[i] == '@' && (i == 0 || chars[i - 1] != '\\'));
     let filter: String = match at {
-        Some(i) => chars[..i].iter().collect(),
-        None => raw.to_string(),
+        Some(i) => chars[..i].iter().collect::<String>().replace("\\@", "@"),
+        None => raw.replace("\\@", "@"),
     };
     regex_filter(&filter)?;
     ok(raw)
@@ -941,8 +935,13 @@ fn run_under(raw: &str) -> R {
         match quote {
             Some(q) if c == q => quote = None,
             Some('"') if c == '\\' => match chars.next() {
-                Some(n) => cur.push(n),
-                None => return Err(err("Not a valid command prefix unterminated escape")),
+                Some(n) => {
+                    if n != '\\' && n != '"' {
+                        cur.push('\\');
+                    }
+                    cur.push(n);
+                }
+                None => return Err(err("Not a valid command prefix backslash at end of string")),
             },
             Some(_) => cur.push(c),
             None => match c {
@@ -955,9 +954,11 @@ fn run_under(raw: &str) -> R {
                         cur.push(n);
                         has = true;
                     }
-                    None => return Err(err("Not a valid command prefix unterminated escape")),
+                    None => {
+                        return Err(err("Not a valid command prefix backslash at end of string"))
+                    }
                 },
-                c if c.is_whitespace() => {
+                ' ' | '\t' => {
                     if has || !cur.is_empty() {
                         tokens.push(std::mem::take(&mut cur));
                         has = false;
