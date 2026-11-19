@@ -1404,3 +1404,54 @@ pipeline(
         "unexpected error: {err3}"
     );
 }
+
+#[test]
+fn darwin_unix_cc_toolchain_config_and_bazel_tools_osx_analyze_on_all_hosts() {
+    let w = Ws::new("darwin-cc-tc");
+    w.write(
+        "MODULE.bazel",
+        "module(name = \"w\")\nbazel_dep(name = \"rules_cc\", version = \"0.2.17\")\n",
+    );
+    w.write(
+        "BUILD",
+        r#"
+load("@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl", "cc_toolchain_config")
+
+[
+    cc_toolchain_config(
+        name = "cfg_" + cpu,
+        cpu = cpu,
+        compiler = "clang",
+        toolchain_identifier = "local_" + cpu,
+        host_system_name = "local",
+        target_system_name = "apple-macosx",
+        target_libc = "macosx",
+        abi_version = cpu,
+        abi_libc_version = cpu,
+        tool_paths = {
+            "ar": "/usr/bin/libtool",
+            "cpp": "/usr/bin/cpp",
+            "gcc": "/usr/bin/clang",
+            "gcov": "/usr/bin/gcov",
+            "ld": "/usr/bin/ld",
+            "nm": "/usr/bin/nm",
+            "objdump": "/usr/bin/objdump",
+            "strip": "/usr/bin/strip",
+        },
+    )
+    for cpu in ["darwin_x86_64", "darwin_arm64"]
+]
+"#,
+    );
+
+    let (code, _, err, _) = w.run(&[
+        "build",
+        "--nobuild",
+        "--cpu=darwin_arm64",
+        "//:cfg_darwin_x86_64",
+        "//:cfg_darwin_arm64",
+        "@bazel_tools//tools/osx:xcode_version_flag",
+        "@bazel_tools//tools/osx:macos_sdk_version_flag",
+    ]);
+    assert_eq!(code, 0, "darwin cc_toolchain_config analysis failed: {err}");
+}

@@ -4778,6 +4778,8 @@ def _probe_impl(ctx):
     )
     tf = cc_internal.cc_toolchain_features(toolchain_config_info = cfg_info, tools_directory = "")
     fc = tf.configure_features(requested_features = tf.default_features_and_action_configs())
+    if ctx.fragments.cpp.do_not_use_macos_set_install_name != True or type(ctx.fragments.cpp.do_not_use_macos_set_install_name) != "bool":
+        fail("expected cpp.do_not_use_macos_set_install_name to be bool True")
     if not cc_common.action_is_enabled(feature_configuration = fc, action_name = "c-compile"):
         fail("expected c-compile to be enabled")
     if cc_common.action_is_enabled(feature_configuration = fc, action_name = "strip"):

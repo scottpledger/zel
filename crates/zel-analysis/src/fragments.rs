@@ -703,6 +703,7 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     "objc_should_strip_binary",
                     Value::Bool(o.b("objc_enable_binary_stripping", false) && strip_binaries),
                 ),
+                f("do_not_use_macos_set_install_name", Value::Bool(true)),
                 // Methods.
                 m("compilation_mode", sv(mode)),
                 m("lto_index_options", o.list_unsplit_v("ltoindexopt")),
@@ -813,7 +814,6 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     "disable_nocopts",
                     Value::Bool(o.b("incompatible_disable_nocopts", true)),
                 ),
-                m("do_not_use_macos_set_install_name", Value::Bool(true)),
             ])
         }
         "platform" => {
