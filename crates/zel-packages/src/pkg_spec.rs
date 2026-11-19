@@ -15,7 +15,7 @@
 //! `package_group` contents (`PackageSpecification`, `PackageGroupContents`) and visibility
 //! label classification (`RuleVisibility`, `PackageGroupsRuleVisibility`).
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use zel_cmdline::{Label, PackageIdentifier, RepositoryMapping, RepositoryName};
 use zel_vfs::PathFragment;
 
@@ -154,11 +154,18 @@ impl PackageSpec {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PackageGroupContents {
     pub specs: Vec<PackageSpec>,
+    pub includes: Vec<PackageGroupContents>,
 }
 
 impl PackageGroupContents {
-    /// `true` iff `pkg` matches some positive spec and no negative spec.
-    pub fn contains(&self, pkg: &PackageIdentifier) -> bool {
+    pub fn from_specs(specs: Vec<PackageSpec>) -> Self {
+        Self {
+            specs,
+            includes: Vec::new(),
+        }
+    }
+
+    fn own_contains(&self, pkg: &PackageIdentifier) -> bool {
         let mut positive = false;
         for s in &self.specs {
             match s {
@@ -171,6 +178,12 @@ impl PackageGroupContents {
             }
         }
         positive
+    }
+
+    /// `true` iff `pkg` matches this group's own specs (positive and not negative) OR any
+    /// transitive `includes` group.
+    pub fn contains(&self, pkg: &PackageIdentifier) -> bool {
+        self.own_contains(pkg) || self.includes.iter().any(|inc| inc.contains(pkg))
     }
 
     /// Serializes canonicalized specs so `PackageSpecificationInfo.contains` can evaluate them.
@@ -239,7 +252,7 @@ impl PackageGroupContents {
                 }
             }
         }
-        Self { specs }
+        Self::from_specs(specs)
     }
 
     /// Reconstructs one or more [`PackageGroupContents`] blocks separated by `"\n---\n"`.
@@ -268,32 +281,34 @@ pub fn resolve_package_group(
     fn visit(
         g: &Label,
         lookup: PackageGroupLookup<'_>,
-        seen: &mut BTreeSet<Label>,
+        memo: &mut BTreeMap<Label, PackageGroupContents>,
         visiting: &mut Vec<Label>,
-        out: &mut PackageGroupContents,
-    ) -> Result<(), String> {
+    ) -> Result<PackageGroupContents, String> {
         if let Some(pos) = visiting.iter().position(|x| x == g) {
             let mut cyc: Vec<String> = visiting[pos..].iter().map(|l| l.canonical_form()).collect();
             cyc.push(g.canonical_form());
             return Err(format!("cycle in dependency graph: {}", cyc.join(" -> ")));
         }
-        if !seen.insert(g.clone()) {
-            return Ok(());
+        if let Some(cached) = memo.get(g) {
+            return Ok(cached.clone());
         }
         visiting.push(g.clone());
         let (specs, includes) = lookup(g)?;
-        out.specs.extend(specs);
+        let mut inc_contents = Vec::with_capacity(includes.len());
         for inc in includes {
-            visit(&inc, lookup, seen, visiting, out)?;
+            inc_contents.push(visit(&inc, lookup, memo, visiting)?);
         }
         visiting.pop();
-        Ok(())
+        let node = PackageGroupContents {
+            specs,
+            includes: inc_contents,
+        };
+        memo.insert(g.clone(), node.clone());
+        Ok(node)
     }
-    let mut seen = BTreeSet::new();
+    let mut memo = BTreeMap::new();
     let mut visiting = Vec::new();
-    let mut out = PackageGroupContents::default();
-    visit(group, lookup, &mut seen, &mut visiting, &mut out)?;
-    Ok(out)
+    visit(group, lookup, &mut memo, &mut visiting)
 }
 
 /// Parsed `visibility` attribute.
@@ -444,13 +459,11 @@ mod tests {
 
     #[test]
     fn spec_parsing_and_matching() {
-        let g = PackageGroupContents {
-            specs: vec![
-                spec("//a/...").unwrap(),
-                spec("//b").unwrap(),
-                spec("-//a/secret/...").unwrap(),
-            ],
-        };
+        let g = PackageGroupContents::from_specs(vec![
+            spec("//a/...").unwrap(),
+            spec("//b").unwrap(),
+            spec("-//a/secret/...").unwrap(),
+        ]);
         assert!(g.contains(&pkg("a")));
         assert!(g.contains(&pkg("a/x/y")));
         assert!(g.contains(&pkg("b")));
@@ -458,18 +471,26 @@ mod tests {
         assert!(!g.contains(&pkg("a/secret")));
         assert!(!g.contains(&pkg("a/secret/z")));
         assert!(!g.contains(&pkg("c")));
-        let root = PackageGroupContents {
-            specs: vec![spec("//...").unwrap()],
-        };
+        let root = PackageGroupContents::from_specs(vec![spec("//...").unwrap()]);
         assert!(root.contains(&pkg("")) && root.contains(&pkg("any/thing")));
-        assert!(PackageGroupContents {
-            specs: vec![spec("public").unwrap()]
-        }
-        .contains(&pkg("q")));
-        assert!(!PackageGroupContents {
-            specs: vec![spec("private").unwrap()]
-        }
-        .contains(&pkg("q")));
+        assert!(
+            PackageGroupContents::from_specs(vec![spec("public").unwrap()]).contains(&pkg("q"))
+        );
+        assert!(
+            !PackageGroupContents::from_specs(vec![spec("private").unwrap()]).contains(&pkg("q"))
+        );
+        // Negation in one included group does not veto another included group.
+        let parent = PackageGroupContents {
+            specs: Vec::new(),
+            includes: vec![
+                PackageGroupContents::from_specs(vec![
+                    spec("//a/...").unwrap(),
+                    spec("-//a/secret").unwrap(),
+                ]),
+                PackageGroupContents::from_specs(vec![spec("//a/secret").unwrap()]),
+            ],
+        };
+        assert!(parent.contains(&pkg("a/secret")));
     }
 
     #[test]
@@ -515,9 +536,7 @@ mod tests {
         let mut groups = BTreeMap::new();
         groups.insert(
             l("//x:g"),
-            PackageGroupContents {
-                specs: vec![spec("//friends").unwrap()],
-            },
+            PackageGroupContents::from_specs(vec![spec("//friends").unwrap()]),
         );
         assert!(is_visible(&vis, &pkg("owner"), &pkg("lib/sub"), &groups));
         assert!(is_visible(&vis, &pkg("owner"), &pkg("friends"), &groups));

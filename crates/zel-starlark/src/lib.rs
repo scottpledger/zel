@@ -2490,46 +2490,90 @@ impl EvalContext {
                 return Ok(Ok(Value::SelectorList(SelectorList::from_select(entries))));
             }
             "depset" => {
-                let direct = eval_pos
-                    .first()
-                    .or_else(|| eval_kw.get("direct"))
-                    .and_then(|v| match v {
-                        Value::List(l) => Some(l.lock().unwrap().elements.clone()),
-                        Value::Tuple(t) => Some(t.clone()),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
-                let order = eval_kw
-                    .get("order")
-                    .and_then(|v| v.as_str())
-                    .map(DepsetOrder::parse)
-                    .transpose()?
-                    .unwrap_or_default();
-                let transitive = eval_kw
-                    .get("transitive")
-                    .and_then(|v| match v {
-                        Value::List(l) => Some(
-                            l.lock()
-                                .unwrap()
-                                .elements
-                                .iter()
-                                .filter_map(|item| match item {
-                                    Value::Depset(d) => Some(Arc::clone(d)),
-                                    _ => None,
-                                })
-                                .collect(),
-                        ),
-                        Value::Tuple(t) => Some(
-                            t.iter()
-                                .filter_map(|item| match item {
-                                    Value::Depset(d) => Some(Arc::clone(d)),
-                                    _ => None,
-                                })
-                                .collect(),
-                        ),
-                        _ => None,
-                    })
-                    .unwrap_or_default();
+                if eval_pos.len() > 2 {
+                    return Err(StarlarkError(format!(
+                        "depset() accepts no more than 2 positional arguments but got {}",
+                        eval_pos.len()
+                    )));
+                }
+                for k in eval_kw.keys() {
+                    if !matches!(k.as_str(), "direct" | "order" | "transitive") {
+                        return Err(StarlarkError(format!(
+                            "depset() got unexpected keyword argument '{k}'"
+                        )));
+                    }
+                }
+                if !eval_pos.is_empty() && eval_kw.contains_key("direct") {
+                    return Err(StarlarkError(
+                        "depset() got multiple values for parameter 'direct'".to_string(),
+                    ));
+                }
+                if eval_pos.len() >= 2 && eval_kw.contains_key("order") {
+                    return Err(StarlarkError(
+                        "depset() got multiple values for parameter 'order'".to_string(),
+                    ));
+                }
+                let direct = match eval_pos.first().or_else(|| eval_kw.get("direct")) {
+                    None | Some(Value::None) => Vec::new(),
+                    Some(Value::List(l)) => l.lock().unwrap().elements.clone(),
+                    Some(Value::Tuple(t)) => t.clone(),
+                    Some(other) => {
+                        return Err(StarlarkError(format!(
+                            "in call to depset(), parameter 'direct' got value of type '{}', want 'sequence or NoneType'",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let order = match eval_pos.get(1).or_else(|| eval_kw.get("order")) {
+                    None => DepsetOrder::Default,
+                    Some(Value::String(s)) => DepsetOrder::parse(s)?,
+                    Some(other) => {
+                        return Err(StarlarkError(format!(
+                            "in call to depset(), parameter 'order' got value of type '{}', want 'string'",
+                            other.type_name()
+                        )));
+                    }
+                };
+                let transitive = match eval_kw.get("transitive") {
+                    None | Some(Value::None) => Vec::new(),
+                    Some(Value::List(l)) => {
+                        let guard = l.lock().unwrap();
+                        let mut out = Vec::with_capacity(guard.elements.len());
+                        for item in &guard.elements {
+                            match item {
+                                Value::Depset(d) => out.push(Arc::clone(d)),
+                                other => {
+                                    return Err(StarlarkError(format!(
+                                        "for 'transitive' element, got {}, want depset",
+                                        other.type_name()
+                                    )));
+                                }
+                            }
+                        }
+                        out
+                    }
+                    Some(Value::Tuple(t)) => {
+                        let mut out = Vec::with_capacity(t.len());
+                        for item in t {
+                            match item {
+                                Value::Depset(d) => out.push(Arc::clone(d)),
+                                other => {
+                                    return Err(StarlarkError(format!(
+                                        "for 'transitive' element, got {}, want depset",
+                                        other.type_name()
+                                    )));
+                                }
+                            }
+                        }
+                        out
+                    }
+                    Some(other) => {
+                        return Err(StarlarkError(format!(
+                            "in call to depset(), parameter 'transitive' got value of type '{}', want 'sequence or NoneType'",
+                            other.type_name()
+                        )));
+                    }
+                };
                 return Ok(Ok(Value::Depset(Arc::new(Depset::new_checked(
                     order,
                     direct,

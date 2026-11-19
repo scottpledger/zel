@@ -19,7 +19,7 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
-static DEPSET_ID_COUNTER: AtomicU64 = AtomicU64::new(1);
+static DEPSET_ID_COUNTER: AtomicU64 = AtomicU64::new(5);
 
 /// Traversal order for `depset` (`NestedSet` in Java).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
@@ -34,11 +34,11 @@ pub enum DepsetOrder {
 impl DepsetOrder {
     pub fn parse(s: &str) -> Result<Self, StarlarkError> {
         match s {
-            "default" | "stable" => Ok(Self::Default),
-            "postorder" | "compile" => Ok(Self::Postorder),
-            "preorder" | "naive_link" => Ok(Self::Preorder),
-            "topological" | "link" => Ok(Self::Topological),
-            other => Err(StarlarkError(format!("Invalid depset order: '{other}'"))),
+            "default" => Ok(Self::Default),
+            "postorder" => Ok(Self::Postorder),
+            "preorder" => Ok(Self::Preorder),
+            "topological" => Ok(Self::Topological),
+            other => Err(StarlarkError(format!("Invalid order: {other}"))),
         }
     }
 
@@ -50,6 +50,15 @@ impl DepsetOrder {
             Self::Topological => "topological",
         }
     }
+
+    fn empty_id(self) -> u64 {
+        match self {
+            Self::Default => 1,
+            Self::Postorder => 2,
+            Self::Preorder => 3,
+            Self::Topological => 4,
+        }
+    }
 }
 
 /// Bazel `depset` value supporting O(1) transitive nesting and ordered deduplicated flattening.
@@ -57,8 +66,10 @@ impl DepsetOrder {
 pub struct Depset {
     pub id: u64,
     pub order: DepsetOrder,
+    node_order: DepsetOrder,
     pub direct: Vec<Value>,
     pub transitive: Vec<Arc<Depset>>,
+    pub elem_type: Option<String>,
 }
 
 impl PartialEq for Depset {
@@ -90,8 +101,12 @@ impl Depset {
         transitive: Vec<Arc<Depset>>,
         always_check_elements: bool,
     ) -> Result<Self, StarlarkError> {
-        // Incompatible order check
+        // Incompatible order & transitive element type check (skipping empty transitive sets)
+        let mut first_type: Option<String> = None;
         for t in &transitive {
+            if t.is_empty() {
+                continue;
+            }
             if t.order != DepsetOrder::Default && order != DepsetOrder::Default && t.order != order
             {
                 return Err(StarlarkError(format!(
@@ -100,21 +115,31 @@ impl Depset {
                     t.order.as_str()
                 )));
             }
+            if let Some(tt) = &t.elem_type {
+                match &first_type {
+                    None => first_type = Some(tt.clone()),
+                    Some(ft) if ft != tt => {
+                        return Err(StarlarkError(format!(
+                            "cannot add an item of type '{tt}' to a depset of '{ft}'"
+                        )));
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // Element validation & homogeneity check (mirrors Bazel Depset.checkElement)
-        let mut first_type: Option<&'static str> = None;
         let mut dedup_direct = Vec::with_capacity(direct.len());
         #[allow(clippy::mutable_key_type)]
         let mut seen_direct = HashSet::new();
         for item in direct {
             check_depset_element(&item, always_check_elements)?;
-            let tname = item.type_name();
-            match first_type {
+            let tname = depset_element_type(&item);
+            match &first_type {
                 None => first_type = Some(tname),
-                Some(ft) if ft != tname => {
+                Some(ft) if ft != &tname => {
                     return Err(StarlarkError(format!(
-                        "depset elements must all have the same type, got '{ft}' and '{tname}'"
+                        "cannot add an item of type '{tname}' to a depset of '{ft}'"
                     )));
                 }
                 _ => {}
@@ -124,13 +149,16 @@ impl Depset {
             }
         }
 
+        let non_empty_transitive: Vec<Arc<Depset>> =
+            transitive.into_iter().filter(|t| !t.is_empty()).collect();
+
         // NestedSet lays out each node's children according to its own order at construction:
         // LINK_ORDER (Topological) reverses both direct elements and transitive sets (before dedup).
         let stored_transitive = if order == DepsetOrder::Topological {
             dedup_direct.reverse();
             let mut seen_t = HashSet::new();
-            let mut out_t = Vec::with_capacity(transitive.len());
-            for t in transitive.into_iter().rev() {
+            let mut out_t = Vec::with_capacity(non_empty_transitive.len());
+            for t in non_empty_transitive.into_iter().rev() {
                 if seen_t.insert(t.id) {
                     out_t.push(t);
                 }
@@ -138,8 +166,8 @@ impl Depset {
             out_t
         } else {
             let mut seen_t = HashSet::new();
-            let mut out_t = Vec::with_capacity(transitive.len());
-            for t in transitive {
+            let mut out_t = Vec::with_capacity(non_empty_transitive.len());
+            for t in non_empty_transitive {
                 if seen_t.insert(t.id) {
                     out_t.push(t);
                 }
@@ -147,12 +175,41 @@ impl Depset {
             out_t
         };
 
+        if dedup_direct.is_empty() && stored_transitive.is_empty() {
+            return Ok(Self {
+                id: order.empty_id(),
+                order,
+                node_order: order,
+                direct: Vec::new(),
+                transitive: Vec::new(),
+                elem_type: None,
+            });
+        }
+        if stored_transitive.len() == 1
+            && (dedup_direct.is_empty()
+                || (dedup_direct.len() == 1
+                    && stored_transitive[0].transitive.is_empty()
+                    && stored_transitive[0].direct.len() == 1
+                    && stored_transitive[0].direct[0] == dedup_direct[0]))
+        {
+            let t0 = &stored_transitive[0];
+            return Ok(Self {
+                id: t0.id,
+                order,
+                node_order: t0.node_order,
+                direct: t0.direct.clone(),
+                transitive: t0.transitive.clone(),
+                elem_type: first_type,
+            });
+        }
         let id = DEPSET_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             id,
             order,
+            node_order: order,
             direct: dedup_direct,
             transitive: stored_transitive,
+            elem_type: first_type,
         })
     }
 
@@ -184,7 +241,7 @@ impl Depset {
         if !visited.insert(self.id) {
             return;
         }
-        if self.order == DepsetOrder::Preorder {
+        if self.node_order == DepsetOrder::Preorder {
             out.extend(self.direct.iter().cloned());
             for t in &self.transitive {
                 t.collect_nested(out, visited);
@@ -195,6 +252,14 @@ impl Depset {
             }
             out.extend(self.direct.iter().cloned());
         }
+    }
+}
+
+fn depset_element_type(x: &Value) -> String {
+    match x {
+        Value::ProviderInstance { provider_name, .. } => provider_name.clone(),
+        Value::Host(kind, _) => kind.clone(),
+        other => other.type_name().to_string(),
     }
 }
 
@@ -216,6 +281,58 @@ fn check_depset_element(x: &Value, strict: bool) -> Result<(), StarlarkError> {
 impl fmt::Display for Depset {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let items: Vec<String> = self.to_list().into_iter().map(|v| v.repr()).collect();
-        write!(f, "depset([{}])", items.join(", "))
+        if self.order == DepsetOrder::Default {
+            write!(f, "depset([{}])", items.join(", "))
+        } else {
+            write!(
+                f,
+                "depset([{}], order = {:?})",
+                items.join(", "),
+                self.order.as_str()
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn depset_parity_repr_identity_and_transitive_types() {
+        assert!(DepsetOrder::parse("stable").is_err());
+        assert_eq!(
+            DepsetOrder::parse("bogus").unwrap_err().0,
+            "Invalid order: bogus"
+        );
+        let e1 = Depset::new(DepsetOrder::Preorder, vec![], vec![]).unwrap();
+        let e2 = Depset::new(DepsetOrder::Preorder, vec![], vec![]).unwrap();
+        let e_def = Depset::new(DepsetOrder::Default, vec![], vec![]).unwrap();
+        assert_eq!(e1, e2);
+        assert_ne!(e1, e_def);
+        assert_eq!(e1.to_string(), "depset([], order = \"preorder\")");
+        assert_eq!(e_def.to_string(), "depset([])");
+
+        // Empty transitive depset of different order is skipped in compatibility check.
+        let post_with_empty_pre =
+            Depset::new(DepsetOrder::Postorder, vec![], vec![Arc::new(e1)]).unwrap();
+        assert_eq!(
+            post_with_empty_pre.to_string(),
+            "depset([], order = \"postorder\")"
+        );
+
+        // Singleton reuse and transitive element type homogeneity.
+        let s1 = Arc::new(
+            Depset::new(
+                DepsetOrder::Default,
+                vec![Value::String("x".into())],
+                vec![],
+            )
+            .unwrap(),
+        );
+        let s2 = Depset::new(DepsetOrder::Default, vec![], vec![s1.clone()]).unwrap();
+        assert_eq!(*s1, s2);
+        let bad = Depset::new(DepsetOrder::Default, vec![Value::Int(1.into())], vec![s1]);
+        assert!(bad.is_err());
     }
 }

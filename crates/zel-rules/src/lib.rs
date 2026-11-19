@@ -265,10 +265,9 @@ pub fn analyze_target_with(
                     }
                 }
             }
-            let own_encoded = zel_packages::pkg_spec::PackageGroupContents {
-                specs: direct_specs,
-            }
-            .encode_canonical();
+            let own_encoded =
+                zel_packages::pkg_spec::PackageGroupContents::from_specs(direct_specs)
+                    .encode_canonical();
             if !own_encoded.is_empty() {
                 group_blocks.push(own_encoded);
             }
