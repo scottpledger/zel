@@ -28,8 +28,10 @@ pub const BAZEL_COMPAT_VERSION: &str = "9.3.2";
 pub const BAZEL_COMPAT_RELEASE_NAME: &str = "release 9.3.2";
 
 pub mod action_env;
+pub mod classfile;
 pub mod deflate;
 pub mod file_type;
+pub mod ijar;
 pub mod jar;
 pub mod java_regex;
 pub mod json;

@@ -1703,8 +1703,13 @@ pub fn execute_action_with(
                     ))
                 }
             };
+            let builtin_ijar = should_run_builtin_ijar(mnemonic, &argv_expanded, execroot, fs);
+            let exe_first = argv_expanded.first().map(String::as_str).unwrap_or("");
             let mut missing_sources = Vec::new();
             for input in inputs {
+                if builtin_ijar && input.exec_path.path_string() == exe_first {
+                    continue;
+                }
                 let inp_path = execroot.get_relative(&input.exec_path);
                 if !fs.exists(&inp_path, true) {
                     if input.is_source {
@@ -1911,27 +1916,31 @@ pub fn execute_action_with(
                     r.resources
                         .acquire(&resources::ResourceSet::default_action())
                 });
-                let run = match &opts.runtime {
-                    Some(rt) => match rt.execute_opt(
-                        &spawn,
-                        strategy_desc,
-                        Some(&progress),
-                        execroot,
-                        fs,
-                        reporter,
-                    ) {
-                        Ok(r) => r,
-                        Err(msg) => {
-                            return Ok(fail(
-                                vec![format!("ERROR: {loc}: {progress} failed: {msg}")],
-                                1,
-                                Vec::new(),
-                                Vec::new(),
-                                None,
-                            ))
-                        }
-                    },
-                    None => execute_spawn_local(&spawn, execroot, fs),
+                let run = if builtin_ijar {
+                    execute_builtin_ijar(&spawn, execroot, fs)
+                } else {
+                    match &opts.runtime {
+                        Some(rt) => match rt.execute_opt(
+                            &spawn,
+                            strategy_desc,
+                            Some(&progress),
+                            execroot,
+                            fs,
+                            reporter,
+                        ) {
+                            Ok(r) => r,
+                            Err(msg) => {
+                                return Ok(fail(
+                                    vec![format!("ERROR: {loc}: {progress} failed: {msg}")],
+                                    1,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    None,
+                                ))
+                            }
+                        },
+                        None => execute_spawn_local(&spawn, execroot, fs),
+                    }
                 };
                 let res = run?;
                 if opts.announce_subcommands
@@ -2438,6 +2447,127 @@ fn config_checksum_of(opts: &ExecOptions, outputs: &[Artifact]) -> String {
         .unwrap_or_default()
 }
 
+fn is_ijar_executable(exe: &str) -> bool {
+    let base = exe.rsplit(['/', '\\']).next().unwrap_or(exe);
+    base == "ijar" || base == "ijar.exe"
+}
+
+fn should_run_builtin_ijar(
+    mnemonic: &str,
+    argv: &[String],
+    execroot: &PathFragment,
+    fs: &dyn FileSystem,
+) -> bool {
+    let Some(exe) = argv.first().map(String::as_str) else {
+        return false;
+    };
+    if !is_ijar_executable(exe) {
+        return false;
+    }
+    if exe == "_bin/ijar" || exe.ends_with("/_bin/ijar") {
+        return true;
+    }
+    let _ = mnemonic;
+    let exe_pf = if std::path::Path::new(exe).is_absolute() {
+        PathFragment::create(exe)
+    } else {
+        execroot.get_relative_str(exe)
+    };
+    !fs.exists(&exe_pf, true)
+}
+
+fn execute_builtin_ijar(
+    spawn: &Spawn,
+    execroot: &PathFragment,
+    fs: &dyn FileSystem,
+) -> io::Result<zel_sandbox::SpawnResult> {
+    let t0 = std::time::Instant::now();
+    let base_dir = std::path::Path::new(execroot.path_string());
+    let raw_args: &[String] = if spawn.argv.len() > 1 {
+        &spawn.argv[1..]
+    } else {
+        &[]
+    };
+    let read_pf = |p: &std::path::Path| -> Result<Vec<u8>, String> {
+        let pf = PathFragment::create(&p.to_string_lossy());
+        fs.read_file(&pf)
+            .map_err(|e| format!("{}: {e}", p.display()))
+    };
+    let opts = match zel_util::ijar::parse_ijar_args_with_reader(raw_args, base_dir, &|p| {
+        let bytes = read_pf(p)?;
+        String::from_utf8(bytes).map_err(|e| format!("{}: {e}", p.display()))
+    }) {
+        Ok(o) => o,
+        Err(msg) => {
+            return Ok(zel_sandbox::SpawnResult {
+                status: SpawnStatus::NonZeroExit,
+                exit_code: 1,
+                stderr: format!("ijar: {msg}\n").into_bytes(),
+                wall_time_ms: t0.elapsed().as_millis() as u64,
+                runner_name: "in-process".to_string(),
+                ..Default::default()
+            })
+        }
+    };
+    let in_bytes = match read_pf(&opts.input_jar) {
+        Ok(b) => b,
+        Err(msg) => {
+            return Ok(zel_sandbox::SpawnResult {
+                status: SpawnStatus::NonZeroExit,
+                exit_code: 1,
+                stderr: format!("Opening zip \"{}\": {msg}\n", opts.input_jar.display())
+                    .into_bytes(),
+                wall_time_ms: t0.elapsed().as_millis() as u64,
+                runner_name: "in-process".to_string(),
+                ..Default::default()
+            })
+        }
+    };
+    match zel_util::ijar::process_jar_bytes(
+        &in_bytes,
+        opts.strip_jar,
+        opts.target_label.as_deref(),
+        opts.injecting_rule_kind.as_deref(),
+        opts.verbose,
+    ) {
+        Ok((out_bytes, log)) => {
+            let out_pf = PathFragment::create(&opts.output_jar.to_string_lossy());
+            if let Some(parent) = out_pf.parent_directory() {
+                fs.create_directory_and_parents(&parent)?;
+            }
+            fs.write_file(&out_pf, &out_bytes)?;
+            let mut missing = Vec::new();
+            for out in &spawn.outputs {
+                if !fs.exists(&execroot.get_relative(out), true) {
+                    missing.push(out.path_string().to_string());
+                }
+            }
+            let status = if missing.is_empty() {
+                SpawnStatus::Success
+            } else {
+                SpawnStatus::MissingOutputs
+            };
+            Ok(zel_sandbox::SpawnResult {
+                status,
+                exit_code: 0,
+                stderr: log,
+                wall_time_ms: t0.elapsed().as_millis() as u64,
+                runner_name: "in-process".to_string(),
+                missing,
+                ..Default::default()
+            })
+        }
+        Err(msg) => Ok(zel_sandbox::SpawnResult {
+            status: SpawnStatus::NonZeroExit,
+            exit_code: 1,
+            stderr: format!("ijar: {msg}\n").into_bytes(),
+            wall_time_ms: t0.elapsed().as_millis() as u64,
+            runner_name: "in-process".to_string(),
+            ..Default::default()
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2533,5 +2663,69 @@ mod tests {
             assert_ne!(mode & 0o111, 0);
             assert_eq!(mode & 0o600, 0o600);
         }
+    }
+
+    #[test]
+    fn java_ijar_spawn_runs_in_process_when_ijar_binary_absent() {
+        let fs = InMemoryFileSystem::default();
+        let execroot = PathFragment::create("/execroot/_main");
+        fs.create_directory_and_parents(&execroot).unwrap();
+
+        let lbl = Label::parse_canonical("//pkg:lib").unwrap();
+        let in_art = Artifact::source(PathFragment::create("pkg/in.jar"), lbl.clone());
+        let tool_art = Artifact::source(
+            PathFragment::create("external/remote_java_tools/java_tools/ijar/ijar"),
+            lbl.clone(),
+        );
+        let out_art = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/in-ijar.jar"),
+            lbl.clone(),
+        );
+
+        let jar_bytes = zel_util::ijar::write_stored_jar(&[zel_util::ijar::JarEntry {
+            name: "META-INF/my.kotlin_module".to_string(),
+            external_attr: 0o100644 << 16,
+            data: b"kt".to_vec(),
+        }])
+        .unwrap();
+        let in_path = execroot.get_relative(&in_art.exec_path);
+        fs.create_directory_and_parents(&in_path.parent_directory().unwrap())
+            .unwrap();
+        fs.write_file(&in_path, &jar_bytes).unwrap();
+
+        let act = ActionAnalysisMetadata::SpawnAction {
+            owner: lbl,
+            mnemonic: "JavaIjar".to_string(),
+            progress_message: "Extracting interface //pkg:lib".to_string(),
+            argv: vec![
+                tool_art.exec_path.path_string().to_string(),
+                in_art.exec_path.path_string().to_string(),
+                out_art.exec_path.path_string().to_string(),
+                "--target_label".to_string(),
+                "//pkg:lib".to_string(),
+            ],
+            env: BTreeMap::new(),
+            inherited_env: Default::default(),
+            unset_env: Default::default(),
+            inputs: vec![in_art, tool_art.clone()],
+            outputs: vec![out_art.clone()],
+            execution_info: BTreeMap::new(),
+            tools: vec![tool_art],
+            java_compile: None,
+        };
+
+        let cache = CompactPersistentActionCache::new();
+        let reporter = Reporter::new();
+        let res = execute_action(&act, &execroot, &fs, &cache, &reporter, false).unwrap();
+        assert!(res.succeeded(), "JavaIjar failed: {:?}", res.failure);
+
+        let out_bytes = fs
+            .read_file(&execroot.get_relative(&out_art.exec_path))
+            .unwrap();
+        let entries = zel_util::ijar::read_jar_entries(&out_bytes).unwrap();
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"META-INF/MANIFEST.MF"));
+        assert!(names.contains(&"META-INF/my.kotlin_module"));
     }
 }
