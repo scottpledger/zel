@@ -1491,15 +1491,22 @@ fn visible_treats_external_public_visibility_as_public() {
 fn run_genquery_formats_expression_with_opts() {
     let ws = tree();
     let loader = ws.resolver().loader().clone();
-    let out = crate::run_genquery(&loader, "deps(//app:app)", &[], false, &[]).unwrap();
+    let out = crate::run_genquery(
+        &loader,
+        "deps(//app:app)",
+        &["//app:app".to_string()],
+        true,
+        &[],
+    )
+    .unwrap();
     let text = String::from_utf8_lossy(&out).to_string();
     assert!(text.lines().any(|l| l == "//app:app"), "{text}");
     assert!(text.lines().any(|l| l == "//lib:l"), "{text}");
     let kinds = crate::run_genquery(
         &loader,
         "//lib:l",
-        &[],
-        false,
+        &["//lib:l".to_string()],
+        true,
         &["--output=label_kind".to_string()],
     )
     .unwrap();
@@ -1508,7 +1515,7 @@ fn run_genquery_formats_expression_with_opts() {
     assert!(crate::run_genquery(
         &loader,
         "//lib:l",
-        &[],
+        &["//lib:l".to_string()],
         false,
         &["--keep_going".to_string()]
     )
@@ -1516,7 +1523,7 @@ fn run_genquery_formats_expression_with_opts() {
     assert!(crate::run_genquery(
         &loader,
         "//lib:l",
-        &[],
+        &["//lib:l".to_string()],
         false,
         &["--universe_scope=//lib:l".to_string()]
     )
@@ -2952,5 +2959,181 @@ fn cquery_starlark_build_options_returns_dict_for_configured_aspect() {
         out_lines.contains(&"@@//pkg:src.txt|False|False".to_string())
             || out_lines.contains(&"//pkg:src.txt|False|False".to_string()),
         "{out_lines:?}"
+    );
+}
+
+#[test]
+fn genquery_restricts_universe_closure_and_rejects_out_of_scope_paths() {
+    let ws = Ws::new(&[
+        ("a/helper.bzl", "HELPER = 1\n"),
+        (
+            "a/BUILD",
+            concat!(
+                "load('//a:helper.bzl', 'HELPER')\n",
+                "package_group(name = 'pg', packages = ['//a'])\n",
+                "filegroup(name = 'a', visibility = [':pg'])\n",
+                "filegroup(name = 'bridge', srcs = ['//out:mid'])\n",
+                "sh_test(name = 'bridge_test', srcs = ['t.sh'], deps = ['//b:b'])\n",
+                "test_suite(name = 'suite')\n",
+            ),
+        ),
+        ("a/t.sh", "#!/bin/sh\n"),
+        (
+            "out/BUILD",
+            "filegroup(name = 'mid', srcs = ['//b:b'])\n",
+        ),
+        (
+            "b/BUILD",
+            concat!(
+                "filegroup(name = 'b')\n",
+                "filegroup(name = 'same_pkg_bridge', srcs = [':b'])\n",
+            ),
+        ),
+        (
+            "sel/BUILD",
+            concat!(
+                "config_setting(name = 'cs', values = {'define': 'D=1'})\n",
+                "filegroup(name = 'f', srcs = select({':cs': [], '//conditions:default': ['//dne:missing']}))\n",
+            ),
+        ),
+        (
+            "g/BUILD",
+            "genrule(name = 'gen', outs = ['gen.out'], cmd = 'touch $@')\n",
+        ),
+    ]);
+    let loader = ws.resolver().loader().clone();
+    let scope = vec!["//a:a".to_string(), "//b:b".to_string()];
+
+    // Non-strict mode strips out-of-scope pattern matches BEFORE graph evaluation, so
+    // `allpaths`, `somepath`, `rdeps`, `tests`, and `deps` cannot walk through `//a:bridge`,
+    // `//a:bridge_test`, or `//out:mid` to reach in-scope `//b:b`.
+    for expr in [
+        "deps(//out:mid)",
+        "deps(//a:bridge)",
+        "allpaths(//a:a + //out:mid, //b:b)",
+        "rdeps(//a:a + //out:mid, //b:b)",
+        "allpaths(//a:all, //b:b)",
+        "somepath(//a:all, //b:b)",
+        "rdeps(//a:all, //b:b)",
+        "allpaths(tests(//a:all), //b:b)",
+    ] {
+        let out = crate::run_genquery(&loader, expr, &scope, false, &[]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out).trim(),
+            "",
+            "expected empty output for `{expr}` when path goes through out-of-scope targets"
+        );
+    }
+
+    // `//g:gen.out` is an OutputFile of `//g:gen` (not in `deps(//g:gen)`), so `deps(//g:gen.out)`
+    // cannot walk through out-of-scope `//g:gen.out` back to in-scope `//g:gen`.
+    let gen_out_strict = crate::run_genquery(
+        &loader,
+        "deps(//g:gen.out)",
+        &["//g:gen".to_string()],
+        true,
+        &[],
+    )
+    .unwrap_err();
+    assert!(
+        gen_out_strict.contains("is not within the scope of the query"),
+        "{gen_out_strict}"
+    );
+    let gen_out_non_strict = crate::run_genquery(
+        &loader,
+        "deps(//g:gen.out)",
+        &["//g:gen".to_string()],
+        false,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&gen_out_non_strict).trim(), "");
+
+    // Strict mode restricts `siblings` and `same_pkg_direct_rdeps` to the `deps(scope)` universe
+    // as well, preventing indirect traversal through out-of-scope targets.
+    for expr in [
+        "allpaths(siblings(//a:a), //b:b)",
+        "same_pkg_direct_rdeps(//b:b)",
+    ] {
+        let out = crate::run_genquery(&loader, expr, &scope, true, &[]).unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out).trim(),
+            "",
+            "expected empty output for `{expr}` in strict genquery universe"
+        );
+    }
+
+    // Empty scope restricts the universe to `{}` rather than exposing the workspace.
+    let empty_strict_err = crate::run_genquery(&loader, "//b:b", &[], true, &[]).unwrap_err();
+    assert!(
+        empty_strict_err.contains("is not within the scope of the query"),
+        "{empty_strict_err}"
+    );
+    let empty_non_strict = crate::run_genquery(&loader, "//b:b", &[], false, &[]).unwrap();
+    assert_eq!(String::from_utf8_lossy(&empty_non_strict).trim(), "");
+
+    // Recursive patterns are forbidden in genquery.
+    let rec_err = crate::run_genquery(&loader, "//a/...", &scope, true, &[]).unwrap_err();
+    assert!(
+        rec_err.contains("recursive target patterns are not permitted: '//a/...'"),
+        "{rec_err}"
+    );
+
+    // Missing target in expression fails with `no such target`.
+    let missing_expr_err =
+        crate::run_genquery(&loader, "deps(//b:nosuchtarget)", &scope, true, &[]).unwrap_err();
+    assert!(
+        missing_expr_err.contains("no such target '//b:nosuchtarget'"),
+        "{missing_expr_err}"
+    );
+
+    // Broken or missing targets in transitive scope closure fail with scope closure error.
+    let broken_scope_err =
+        crate::run_genquery(&loader, "//sel:f", &["//sel:f".to_string()], true, &[]).unwrap_err();
+    assert!(
+        broken_scope_err
+            .contains("errors were encountered while computing transitive closure of the scope"),
+        "{broken_scope_err}"
+    );
+
+    // `buildfiles` and `loadfiles` work inside genquery (including `.bzl` loads from packages
+    // outside `allowed_packages` without leaking out-of-scope `//shstub:BUILD`), while
+    // `--output=location` is rejected.
+    let bf_out = crate::run_genquery(&loader, "buildfiles(//a:a)", &scope, true, &[]).unwrap();
+    let bf_lines: Vec<&str> = std::str::from_utf8(&bf_out).unwrap().lines().collect();
+    assert_eq!(
+        bf_lines,
+        vec!["//a:BUILD", "//a:helper.bzl", "//shstub:sh.bzl"]
+    );
+    let loc_err = crate::run_genquery(
+        &loader,
+        "loadfiles(//a:a)",
+        &scope,
+        true,
+        &["--output=location".to_string()],
+    )
+    .unwrap_err();
+    assert!(
+        loc_err.contains(
+            "Query expressions involving 'buildfiles' or 'loadfiles' cannot be used with --output=location"
+        ),
+        "{loc_err}"
+    );
+
+    // `--nodep_deps=true` includes visibility package groups collected in the scope closure.
+    let with_nodep = crate::run_genquery(
+        &loader,
+        "deps(//a:a)",
+        &scope,
+        true,
+        &["--nodep_deps=true".to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        std::str::from_utf8(&with_nodep)
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        vec!["//a:a", "//a:pg"]
     );
 }

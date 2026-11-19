@@ -232,8 +232,11 @@ pub fn run_query(
 /// The `genquery` rule's `GenQuery.executeQuery`: evaluates `expression` over everything the loader
 /// can see and prints it with the `--output` formatter of `opts` (default `label`). Options follow
 /// `GenQuery.java`: `--keep_going`, `--universe_scope`, `--order_*` and `--experimental_graphless_query`
-/// are rejected, locations are relative, results are ordered, `nodep_deps` defaults to off.
-/// `strict`/`scope` are not enforced (the real rule restricts the universe to `scope`).
+/// The `genquery` rule's `GenQuery.executeQuery`: evaluates `expression` over the `deps(scope)`
+/// universe (`GenQueryPackageProvider`) and prints it with the `--output` formatter of `opts`
+/// (default `label`). Options follow `GenQuery.java`: `--keep_going`, `--universe_scope`,
+/// `--order_*` and `--experimental_graphless_query` are rejected, locations are relative,
+/// results are ordered, and `nodep_deps` defaults to off.
 pub fn run_genquery(
     loader: &std::sync::Arc<zel_packages::PackageLoader>,
     expression: &str,
@@ -241,6 +244,16 @@ pub fn run_genquery(
     strict: bool,
     opts: &[String],
 ) -> Result<Vec<u8>, String> {
+    fn parse_bool_opt(raw: &str, val: &str) -> Result<bool, String> {
+        match val {
+            "true" | "1" | "yes" => Ok(true),
+            "false" | "0" | "no" => Ok(false),
+            _ => Err(format!(
+                "error while parsing query options: '{raw}': Not a valid boolean: '{val}'"
+            )),
+        }
+    }
+
     let mut qopts = QueryOpts::default();
     let mut fmt = FormatOpts::default();
     qopts.nodep_deps = false;
@@ -253,16 +266,37 @@ pub fn run_genquery(
             "--keep_going" | "--nokeep_going" => {
                 return Err("option --keep_going is not allowed".to_string())
             }
+            _ if o.starts_with("--keep_going=") => {
+                return Err("option --keep_going is not allowed".to_string())
+            }
             "--implicit_deps" => qopts.implicit_deps = true,
             "--noimplicit_deps" => qopts.implicit_deps = false,
+            _ if o.starts_with("--implicit_deps=") => {
+                qopts.implicit_deps = parse_bool_opt(o, &o["--implicit_deps=".len()..])?;
+            }
             "--tool_deps" | "--host_deps" => qopts.tool_deps = true,
             "--notool_deps" | "--nohost_deps" => qopts.tool_deps = false,
+            _ if o.starts_with("--tool_deps=") => {
+                qopts.tool_deps = parse_bool_opt(o, &o["--tool_deps=".len()..])?;
+            }
+            _ if o.starts_with("--host_deps=") => {
+                qopts.tool_deps = parse_bool_opt(o, &o["--host_deps=".len()..])?;
+            }
             "--nodep_deps" => qopts.nodep_deps = true,
             "--nonodep_deps" => qopts.nodep_deps = false,
+            _ if o.starts_with("--nodep_deps=") => {
+                qopts.nodep_deps = parse_bool_opt(o, &o["--nodep_deps=".len()..])?;
+            }
             "--consistent_labels" => fmt.printer.consistent = true,
             "--noconsistent_labels" => fmt.printer.consistent = false,
+            _ if o.starts_with("--consistent_labels=") => {
+                fmt.printer.consistent = parse_bool_opt(o, &o["--consistent_labels=".len()..])?;
+            }
             "--strict_test_suite" => qopts.strict_test_suite = true,
             "--nostrict_test_suite" => qopts.strict_test_suite = false,
+            _ if o.starts_with("--strict_test_suite=") => {
+                qopts.strict_test_suite = parse_bool_opt(o, &o["--strict_test_suite=".len()..])?;
+            }
             "--output:display_full_kind" => fmt.display_full_kind = true,
             "--nooutput:display_full_kind" => fmt.display_full_kind = false,
             "--incompatible_package_group_includes_double_slash" => {
@@ -309,6 +343,9 @@ pub fn run_genquery(
             "--noxml:default_values" => fmt.xml_default_values = false,
             "--graph:factored" => fmt.graph_factored = true,
             "--nograph:factored" => fmt.graph_factored = false,
+            _ if o.starts_with("--graph:factored=") => {
+                fmt.graph_factored = parse_bool_opt(o, &o["--graph:factored=".len()..])?;
+            }
             "--relative_locations" | "--norelative_locations" => {}
             _ if o.starts_with("--output=") => fmt.output = o["--output=".len()..].to_string(),
             _ if o.starts_with("--aspect_deps=") => {
@@ -348,82 +385,76 @@ pub fn run_genquery(
             }
         }
     }
+    if !format::FORMATTERS.contains(&fmt.output.as_str()) {
+        return Err(format!(
+            "Invalid output format '{}'. Valid values are: {}",
+            fmt.output,
+            formatter_names()
+        ));
+    }
     fmt.implicit_deps = qopts.implicit_deps;
     fmt.tool_deps = qopts.tool_deps;
     fmt.nodep_deps = qopts.nodep_deps;
+    let graphless = format::is_streamed(&fmt.output);
+    fmt.order = if graphless {
+        format::OrderOutput::Auto
+    } else {
+        format::OrderOutput::Full
+    };
+
     let resolver = PatternResolver::new(loader.clone(), zel_vfs::PathFragment::empty());
+    let scope_probe = TargetEnv::new(&resolver, QueryOpts::default());
+    let genquery_scope = scope_probe.compute_genquery_scope(scope, strict)?;
 
-    if !scope.is_empty() {
-        let scope_qopts = QueryOpts {
-            implicit_deps: true,
-            tool_deps: true,
-            nodep_deps: true,
-            ..Default::default()
-        };
-        let quoted_scope = scope
-            .iter()
-            .map(|s| format!("'{}'", s.replace('\'', "''")))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let scope_expr_str = format!("deps(set({quoted_scope}))");
-        let mut scope_env = TargetEnv::new(&resolver, scope_qopts);
-        let scope_funcs = scope_env.functions();
-        let scope_expr = parse::parse(&scope_expr_str, &scope_funcs).map_err(|e| e.0)?;
-        let scope_nodes = {
-            let mut scope_eng = Engine::new(&mut scope_env, false, Vec::new());
-            scope_eng.eval(&scope_expr).map_err(|e| e.message)?
-        };
-        let mut allowed: std::collections::BTreeSet<zel_cmdline::Label> =
-            scope_nodes.iter().map(|n| n.label.clone()).collect();
-        for n in scope_nodes.iter() {
-            if let Ok(info) = scope_env.info(&n.label) {
-                for out_lbl in target_env::rule_outputs(&info.pkg, &n.label) {
-                    allowed.insert(out_lbl);
-                }
-            }
-        }
+    let mut env = TargetEnv::new(&resolver, qopts);
+    env.graphless = graphless;
+    env.output_format = fmt.output.clone();
+    env.order_output = Some(fmt.order);
+    env.genquery_scope = Some(genquery_scope);
 
-        let mut env = TargetEnv::new(&resolver, qopts);
-        let funcs = env.functions();
-        let expr = parse::parse(expression, &funcs).map_err(|e| e.0)?;
-        let raw_nodes = {
-            let mut eng = Engine::new(&mut env, false, Vec::new());
-            eng.eval(&expr).map_err(|e| e.message)?
-        };
-        if strict {
-            for pat_node in env.pattern_nodes.borrow().iter() {
-                if !allowed.contains(&pat_node.label) {
-                    return Err(format!(
-                        "target '{}' is not within the scope of the query",
-                        pat_node.label.canonical_form()
-                    ));
-                }
-            }
-            for n in raw_nodes.iter() {
-                if !allowed.contains(&n.label) {
-                    return Err(format!(
-                        "target '{}' is not within the scope of the query",
-                        n.label.canonical_form()
-                    ));
-                }
-            }
+    let funcs = env.functions();
+    let expr =
+        parse::parse(expression, &funcs).map_err(|e| format!("query syntax error: {}", e.0))?;
+    if fmt.output == "location" {
+        let mut names = std::collections::BTreeSet::new();
+        expr.function_names(&mut names);
+        if names.contains("buildfiles") || names.contains("loadfiles") {
+            return Err(
+                "query failed: Query expressions involving 'buildfiles' or 'loadfiles' cannot be used with --output=location"
+                    .to_string(),
+            );
         }
-        let filtered: Vec<engine::Node> = raw_nodes
-            .to_vec()
-            .into_iter()
-            .filter(|n| allowed.contains(&n.label))
-            .collect();
-        format::install_printer(&fmt.printer);
-        return format::format_targets(&env, &filtered, &fmt, expr.is_somepath());
     }
 
-    let outcome = run_query(&resolver, expression, &qopts, &fmt);
-    if outcome.exit_code != exit::SUCCESS {
-        return Err(outcome
-            .stderr
-            .join("\n")
-            .trim_start_matches("ERROR: ")
-            .to_string());
+    env.toplevel = expr.to_truncated_string();
+    let mut patterns = Vec::new();
+    expr.collect_target_patterns(&mut patterns);
+    let patterns_for_preload = patterns.clone();
+    let eval_result = {
+        let mut engine = Engine::new(&mut env, false, patterns);
+        engine.diag.graphless = graphless;
+        match engine
+            .env
+            .preload_patterns(&patterns_for_preload, &mut engine.diag)
+        {
+            Ok(()) => engine.eval(&expr),
+            Err(e) => Err(e),
+        }
+    };
+    let events = env.take_events();
+    let event_errors = events
+        .iter()
+        .any(|ev| ev.kind == zel_packages::lookup::EventKind::Error);
+    match eval_result {
+        Err(e) => Err(format!("query failed: {}", e.describe(&expr))),
+        Ok(_) if event_errors => Err(format!(
+            "query failed: Evaluation of query \"{}\" failed",
+            expr.to_truncated_string()
+        )),
+        Ok(set) => {
+            let nodes = set.to_vec();
+            format::install_printer(&fmt.printer);
+            format::format_targets(&env, &nodes, &fmt, expr.is_somepath())
+        }
     }
-    Ok(outcome.stdout)
 }

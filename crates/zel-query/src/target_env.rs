@@ -1401,6 +1401,14 @@ fn parse_loads(path: &str, src: &str) -> Vec<String> {
         .collect()
 }
 
+/// Scope universe for `genquery` (`GenQueryPackageProvider` + `AbstractBlazeQueryEnvironment.validateScopeOfTargets`).
+#[derive(Debug, Clone)]
+pub struct GenQueryScope {
+    pub allowed_targets: BTreeSet<Label>,
+    pub allowed_packages: BTreeSet<PackageIdentifier>,
+    pub strict: bool,
+}
+
 /// The environment.
 pub struct TargetEnv<'a> {
     pub resolver: &'a PatternResolver,
@@ -1419,6 +1427,10 @@ pub struct TargetEnv<'a> {
     pub filter_manual_on_wildcards: bool,
     /// Fake load targets created by `buildfiles()` and `loadfiles()`, mapping label -> referencing package.
     pub fake_load_targets: RefCell<HashMap<Label, Arc<Package>>>,
+    /// Package `BUILD` file targets emitted by `buildfiles()`, permitted through `GenQueryScope`.
+    pub buildfiles_targets: RefCell<HashSet<Label>>,
+    /// Restricted universe for `genquery` (`GenQueryPackageProvider`).
+    pub genquery_scope: Option<GenQueryScope>,
     /// When true (`labels(...)`), only edges among pattern-expanded nodes exist in the Digraph (`BlazeQueryEnvironment`).
     pub digraph_no_edges: RefCell<bool>,
     pub pattern_nodes: RefCell<HashSet<Node>>,
@@ -1442,12 +1454,191 @@ impl<'a> TargetEnv<'a> {
             pkg_error_reported: RefCell::new(HashSet::new()),
             filter_manual_on_wildcards: false,
             fake_load_targets: RefCell::new(HashMap::new()),
+            buildfiles_targets: RefCell::new(HashSet::new()),
+            genquery_scope: None,
             digraph_no_edges: RefCell::new(false),
             pattern_nodes: RefCell::new(HashSet::new()),
             graphless: true,
             output_format: String::new(),
             order_output: None,
         }
+    }
+
+    fn is_in_genquery_universe(&self, label: &Label) -> bool {
+        let Some(gs) = &self.genquery_scope else {
+            return true;
+        };
+        gs.allowed_targets.contains(label)
+            || self.fake_load_targets.borrow().contains_key(label)
+            || self.buildfiles_targets.borrow().contains(label)
+    }
+
+    fn genquery_out_of_scope_error(&self, gs: &GenQueryScope, label: &Label) -> String {
+        if !gs.allowed_packages.contains(label.package_identifier()) {
+            format!(
+                "no such package '{}': is not within the scope of the query",
+                label.package_identifier().package_fragment()
+            )
+        } else {
+            format!("no such target '{label}': is not within the scope of the query")
+        }
+    }
+
+    /// Computes the `GenQueryPackageProvider` closure (`deps(scope)` under
+    /// `DependencyFilter.NO_NODEP_ATTRIBUTES_EXCEPT_VISIBILITY` plus aspect dependencies).
+    pub fn compute_genquery_scope(
+        &self,
+        scope: &[String],
+        strict: bool,
+    ) -> Result<GenQueryScope, String> {
+        let mut allowed_targets = BTreeSet::new();
+        let mut allowed_packages = BTreeSet::new();
+        let mut queue = std::collections::VecDeque::new();
+
+        for raw in scope {
+            match zel_cmdline::TargetPattern::parse_with(
+                raw,
+                &self.resolver.relative_dir,
+                &RepositoryName::main(),
+                &self.resolver.main_mapping,
+            ) {
+                Ok(zel_cmdline::TargetPattern::SingleTarget(lbl)) => queue.push_back(lbl),
+                _ => {
+                    let (nodes, errors) = self.resolve_one(raw);
+                    if let Some(err) = errors.first() {
+                        let clean = err.trim_start_matches('\0');
+                        if clean.is_empty() {
+                            return Err(
+                                "errors were encountered while computing transitive closure of the scope"
+                                    .to_string(),
+                            );
+                        }
+                        return Err(format!(
+                            "errors were encountered while computing transitive closure of the scope: {clean}"
+                        ));
+                    }
+                    for n in nodes {
+                        queue.push_back(n.label);
+                    }
+                }
+            }
+        }
+
+        while let Some(lbl) = queue.pop_front() {
+            if !allowed_targets.insert(lbl.clone()) {
+                continue;
+            }
+            let info = self.info_unscoped(&lbl, false).map_err(|msg| {
+                format!(
+                    "errors were encountered while computing transitive closure of the scope: {msg}"
+                )
+            })?;
+            if info.pkg.contains_errors {
+                return Err(format!(
+                    "errors were encountered while computing transitive closure of the scope: Target '{lbl}' contains an error and its package is in error"
+                ));
+            }
+            allowed_packages.insert(info.pkg.id.clone());
+
+            match &info.target {
+                Target::Rule(r) => {
+                    for (dep_lbl, _) in
+                        rule_deps_with_aspect_env(Some(self), r, true, true, true, "conservative")
+                    {
+                        if !allowed_targets.contains(&dep_lbl) {
+                            queue.push_back(dep_lbl);
+                        }
+                    }
+                }
+                Target::OutputFile {
+                    generating_rule, ..
+                } => {
+                    if !allowed_targets.contains(generating_rule) {
+                        queue.push_back(generating_rule.clone());
+                    }
+                    for vis_lbl in visibility_group_labels(&self.visibility_labels(&info)) {
+                        if !allowed_targets.contains(&vis_lbl) {
+                            queue.push_back(vis_lbl);
+                        }
+                    }
+                }
+                Target::InputFile { .. } => {
+                    for vis_lbl in visibility_group_labels(&self.visibility_labels(&info)) {
+                        if !allowed_targets.contains(&vis_lbl) {
+                            queue.push_back(vis_lbl);
+                        }
+                    }
+                }
+                Target::PackageGroup { label, .. } => {
+                    if let Some(incl) = info.pkg.group_includes.get(label.name()) {
+                        for inc in incl {
+                            if !allowed_targets.contains(inc) {
+                                queue.push_back(inc.clone());
+                            }
+                        }
+                    }
+                }
+                Target::EnvironmentGroup { .. } => {}
+            }
+        }
+
+        Ok(GenQueryScope {
+            allowed_targets,
+            allowed_packages,
+            strict,
+        })
+    }
+
+    fn check_genquery_pattern(&self, pattern: &str) -> Option<String> {
+        self.genquery_scope.as_ref()?;
+        match zel_cmdline::TargetPattern::parse_with(
+            pattern,
+            &self.resolver.relative_dir,
+            &RepositoryName::main(),
+            &self.resolver.main_mapping,
+        ) {
+            Ok(zel_cmdline::TargetPattern::TargetsBelowDirectory { .. }) => Some(format!(
+                "recursive target patterns are not permitted: '{pattern}'"
+            )),
+            Ok(zel_cmdline::TargetPattern::PathAsTarget { .. }) => Some(format!(
+                "couldn't determine target from filename '{pattern}'"
+            )),
+            _ => None,
+        }
+    }
+
+    fn validate_genquery_targets(
+        &self,
+        expr: &Expr,
+        nodes: Vec<Node>,
+    ) -> Result<Vec<Node>, QueryError> {
+        let Some(gs) = &self.genquery_scope else {
+            return Ok(nodes);
+        };
+        let mut kept = Vec::with_capacity(nodes.len());
+        for n in nodes {
+            if gs.allowed_targets.contains(&n.label) {
+                kept.push(n);
+            } else if gs.strict {
+                return Err(QueryError::for_expr(
+                    expr,
+                    format!(
+                        "target '{}' is not within the scope of the query",
+                        n.label.canonical_form()
+                    ),
+                ));
+            } else {
+                self.report_event(zel_packages::PackageEvent {
+                    kind: zel_packages::lookup::EventKind::Warning,
+                    location: None,
+                    message: format!(
+                        "target '{}' is not within the scope of the query. Skipping",
+                        n.label.canonical_form()
+                    ),
+                });
+            }
+        }
+        Ok(kept)
     }
 
     #[allow(dead_code)]
@@ -1461,8 +1652,18 @@ impl<'a> TargetEnv<'a> {
             .is_ok()
     }
 
-    /// `Package.getTarget` including the implicit BUILD-file target.
+    /// `Package.getTarget` including the implicit BUILD-file target, enforcing `GenQueryScope`
+    /// when active (`GenQueryPackageProvider.getTarget`).
     pub fn info(&self, label: &Label) -> Result<Rc<TInfo>, String> {
+        if let Some(gs) = &self.genquery_scope {
+            if !self.is_in_genquery_universe(label) {
+                return Err(self.genquery_out_of_scope_error(gs, label));
+            }
+        }
+        self.info_unscoped(label, true)
+    }
+
+    fn info_unscoped(&self, label: &Label, cache_hit: bool) -> Result<Rc<TInfo>, String> {
         if let Some(c) = self.cache.borrow().get(label) {
             return match c {
                 Some(i) => Ok(i.clone()),
@@ -1499,9 +1700,11 @@ impl<'a> TargetEnv<'a> {
         match r {
             Ok(t) => {
                 let info = Rc::new(TInfo { target: t, pkg });
-                self.cache
-                    .borrow_mut()
-                    .insert(label.clone(), Some(info.clone()));
+                if cache_hit {
+                    self.cache
+                        .borrow_mut()
+                        .insert(label.clone(), Some(info.clone()));
+                }
                 Ok(info)
             }
             Err(e) => Err(e),
@@ -1546,6 +1749,9 @@ impl<'a> TargetEnv<'a> {
     }
 
     pub fn is_cached(&self, label: &Label) -> bool {
+        if !self.is_in_genquery_universe(label) {
+            return false;
+        }
         self.cache
             .borrow()
             .get(label)
@@ -2061,7 +2267,8 @@ impl<'a> TargetEnv<'a> {
                     &self.resolver.main_mapping,
                 )
             {
-                if self.info(&l).is_ok() {
+                let cache_hit = self.genquery_scope.is_none();
+                if self.info_unscoped(&l, cache_hit).is_ok() {
                     nodes.push(node(&l));
                     errors.clear();
                 }
@@ -2110,6 +2317,9 @@ impl QueryEnv for TargetEnv<'_> {
             if self.preloaded.borrow().contains_key(p) {
                 continue;
             }
+            if let Some(err) = self.check_genquery_pattern(p) {
+                return Err(QueryError::raw(err));
+            }
             let (nodes, errors) = self.resolve_one(p);
             if let Some(err) = errors.first() {
                 if !diag.keep_going {
@@ -2147,9 +2357,15 @@ impl QueryEnv for TargetEnv<'_> {
         pattern: &str,
         diag: &mut Diag,
     ) -> Result<Vec<Node>, QueryError> {
-        if let Some(n) = self.preloaded.borrow().get(pattern) {
-            self.pattern_nodes.borrow_mut().extend(n.iter().cloned());
-            return Ok(n.clone());
+        if let Some(err) = self.check_genquery_pattern(pattern) {
+            return Err(QueryError::for_expr(expr, err));
+        }
+        if let Some(n) = self.preloaded.borrow().get(pattern).cloned() {
+            let validated = self.validate_genquery_targets(expr, n)?;
+            self.pattern_nodes
+                .borrow_mut()
+                .extend(validated.iter().cloned());
+            return Ok(validated);
         }
         let (nodes, errors) = self.resolve_one(pattern);
         if let Some(err) = errors.first() {
@@ -2169,10 +2385,11 @@ impl QueryEnv for TargetEnv<'_> {
                 diag.report(e.to_string());
             }
         }
+        let validated = self.validate_genquery_targets(expr, nodes)?;
         self.pattern_nodes
             .borrow_mut()
-            .extend(nodes.iter().cloned());
-        Ok(nodes)
+            .extend(validated.iter().cloned());
+        Ok(validated)
     }
 
     fn location_prefix(&mut self, n: &Node) -> String {
@@ -2449,6 +2666,11 @@ impl QueryEnv for TargetEnv<'_> {
                         };
                         ttags.push(size);
                         if test_matches_filters(&ttags, &required, &excluded) {
+                            if let Some(gs) = &self.genquery_scope {
+                                if !gs.allowed_targets.contains(&x.label) {
+                                    return None;
+                                }
+                            }
                             Some(x.label.clone())
                         } else {
                             None
@@ -2512,9 +2734,15 @@ impl QueryEnv for TargetEnv<'_> {
         let Some(info) = self.info_of(n) else {
             return Ok(Vec::new());
         };
-        let mut out: Vec<Node> = info.pkg.targets.values().map(|t| node(t.label())).collect();
+        let mut out: Vec<Node> = info
+            .pkg
+            .targets
+            .values()
+            .filter(|t| self.is_in_genquery_universe(t.label()))
+            .map(|t| node(t.label()))
+            .collect();
         let bf = Self::build_file_label(&info.pkg);
-        if !out.iter().any(|x| x.label == bf) {
+        if self.is_in_genquery_universe(&bf) && !out.iter().any(|x| x.label == bf) {
             out.push(node(&bf));
         }
         Ok(out)
@@ -2576,7 +2804,9 @@ impl QueryEnv for TargetEnv<'_> {
         }
         for p in pkgs {
             if self.graphless || self.opts.sky {
-                let bfn = node(&Self::build_file_label(&p));
+                let bf_lbl = Self::build_file_label(&p);
+                self.buildfiles_targets.borrow_mut().insert(bf_lbl.clone());
+                let bfn = node(&bf_lbl);
                 if !out.contains(&bfn) {
                     out.push(bfn);
                 }
@@ -2590,15 +2820,21 @@ impl QueryEnv for TargetEnv<'_> {
                 if !out.contains(&ln) {
                     out.push(ln);
                 }
-                if let Ok(bzl_pkg) = self.resolver.package(l.package_identifier()) {
-                    let bfl_lbl = Self::build_file_label(&bzl_pkg);
-                    self.fake_load_targets
-                        .borrow_mut()
-                        .entry(bfl_lbl.clone())
-                        .or_insert_with(|| p.clone());
-                    let bfl = node(&bfl_lbl);
-                    if !out.contains(&bfl) {
-                        out.push(bfl);
+                let bzl_pkg_allowed = match &self.genquery_scope {
+                    Some(gs) => gs.allowed_packages.contains(l.package_identifier()),
+                    None => true,
+                };
+                if bzl_pkg_allowed {
+                    if let Ok(bzl_pkg) = self.resolver.package(l.package_identifier()) {
+                        let bfl_lbl = Self::build_file_label(&bzl_pkg);
+                        let bfl = node(&bfl_lbl);
+                        if !out.contains(&bfl) {
+                            self.fake_load_targets
+                                .borrow_mut()
+                                .entry(bfl_lbl)
+                                .or_insert_with(|| p.clone());
+                            out.push(bfl);
+                        }
                     }
                 }
             }
@@ -2690,7 +2926,15 @@ impl QueryEnv for TargetEnv<'_> {
         // Universe: every package below the universe patterns (including packages with zero targets).
         let mut pkgs: Vec<Arc<Package>> = Vec::new();
         let mut seen = HashSet::new();
-        if self.opts.universe_scope.is_empty() {
+        if let Some(gs) = &self.genquery_scope {
+            for id in &gs.allowed_packages {
+                if seen.insert(id.clone()) {
+                    if let Ok(p) = self.resolver.package(id) {
+                        pkgs.push(p);
+                    }
+                }
+            }
+        } else if self.opts.universe_scope.is_empty() {
             if let Ok(root_id) = PackageIdentifier::create_in_main_repo("") {
                 let mut pkg_ids = Vec::new();
                 let _ = self.resolver.find_packages_below(&root_id, &mut pkg_ids);
@@ -2718,6 +2962,7 @@ impl QueryEnv for TargetEnv<'_> {
             let bf = Self::build_file_label(&p);
             let loads = self.transitive_bzl_loads(&p);
             if files.contains(&bf) || files.iter().any(|f| loads.contains(f)) {
+                self.buildfiles_targets.borrow_mut().insert(bf.clone());
                 out.push(node(&bf));
             }
         }
