@@ -24,6 +24,9 @@ impl BzlmodRepoResolver {
 
 impl RepoResolver for BzlmodRepoResolver {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+        if !repo.is_visible() {
+            return None;
+        }
         if repo.is_main() || repo.name() == "_main" {
             return Some(PathFragment::create(
                 &self.rt.opts.workspace_root.display().to_string(),
@@ -39,19 +42,12 @@ impl RepoResolver for BzlmodRepoResolver {
     }
 
     fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping {
-        let mut entries: Vec<(String, RepositoryName)> = self
+        let entries: Vec<(String, RepositoryName)> = self
             .rt
             .repo_mapping_ordered_of(owner.name())
             .into_iter()
             .map(|(a, c)| (a, RepositoryName::create_unvalidated(c)))
             .collect();
-        // Target-pattern parsing may ask the mapping to resolve a canonical name after it has
-        // already translated an apparent name. Canonical repositories are always self-visible.
-        for repo in entries.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>() {
-            if !entries.iter().any(|(a, _)| a == repo.name()) {
-                entries.push((repo.name().to_string(), repo.clone()));
-            }
-        }
         RepositoryMapping::new_ordered(entries, owner.clone())
     }
 }
@@ -139,6 +135,9 @@ impl LazyBzlmodResolver {
 
 impl RepoResolver for LazyBzlmodResolver {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+        if !repo.is_visible() {
+            return None;
+        }
         if repo.is_main() || repo.name() == "_main" {
             return Some(PathFragment::create(
                 &self.cfg.workspace.display().to_string(),
@@ -169,16 +168,11 @@ impl RepoResolver for LazyBzlmodResolver {
         let Some(s) = self.session() else {
             return RepositoryMapping::always_fallback();
         };
-        let mut entries: Vec<(String, RepositoryName)> =
+        let entries: Vec<(String, RepositoryName)> =
             s.rt.repo_mapping_ordered_of(owner.name())
                 .into_iter()
                 .map(|(a, c)| (a, RepositoryName::create_unvalidated(c)))
                 .collect();
-        for repo in entries.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>() {
-            if !entries.iter().any(|(a, _)| a == repo.name()) {
-                entries.push((repo.name().to_string(), repo.clone()));
-            }
-        }
         RepositoryMapping::new_ordered(entries, owner.clone())
     }
 }

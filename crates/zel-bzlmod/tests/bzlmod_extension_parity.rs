@@ -148,3 +148,181 @@ fn netrc_and_credential_helper_auth_headers() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn bzlmod_extension_label_helpers_visibility_and_sibling_layout() {
+    let root = std::env::temp_dir().join(format!("zel-bzlmod-lbl-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ws = root.join("ws");
+    let helper = root.join("helper");
+    let leaf = root.join("leaf");
+    let reg = root.join("reg");
+    std::fs::create_dir_all(&ws).unwrap();
+    std::fs::create_dir_all(&helper).unwrap();
+    std::fs::create_dir_all(&leaf).unwrap();
+    let manifest_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let st = std::process::Command::new("python3")
+        .arg(manifest_root.join("scripts/make_vendored_registry.py"))
+        .arg(&reg)
+        .status()
+        .unwrap();
+    assert!(st.success());
+    std::fs::create_dir_all(reg.join("modules/helper/1.0")).unwrap();
+    std::fs::create_dir_all(reg.join("modules/leaf/2.0")).unwrap();
+
+    let helper_mod = "module(name = \"helper\", version = \"1.0\")\nbazel_dep(name = \"leaf\", version = \"2.0\", repo_name = \"my_leaf\")\n";
+    let leaf_mod = "module(name = \"leaf\", version = \"2.0\")\n";
+    std::fs::write(helper.join("MODULE.bazel"), helper_mod).unwrap();
+    std::fs::write(helper.join("BUILD"), "").unwrap();
+    std::fs::write(
+        helper.join("blazel_utils.bzl"),
+        r#"
+def _to_label(repo_name):
+    if not repo_name.startswith("@"):
+        repo_name = "@" + repo_name
+    return Label(repo_name + "//:unused")
+
+def get_canonical_repo_name(apparent_repo_name):
+    return _to_label(apparent_repo_name).workspace_name
+
+def get_repo_root(apparent_repo_name):
+    return _to_label(apparent_repo_name).workspace_root
+"#,
+    )
+    .unwrap();
+    std::fs::write(leaf.join("MODULE.bazel"), leaf_mod).unwrap();
+    std::fs::write(leaf.join("BUILD"), "").unwrap();
+
+    std::fs::write(reg.join("modules/helper/1.0/MODULE.bazel"), helper_mod).unwrap();
+    std::fs::write(
+        reg.join("modules/helper/1.0/source.json"),
+        format!(
+            "{{\"type\": \"local_path\", \"path\": \"{}\"}}",
+            helper.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+    std::fs::write(reg.join("modules/leaf/2.0/MODULE.bazel"), leaf_mod).unwrap();
+    std::fs::write(
+        reg.join("modules/leaf/2.0/source.json"),
+        format!(
+            "{{\"type\": \"local_path\", \"path\": \"{}\"}}",
+            leaf.to_string_lossy().replace('\\', "/")
+        ),
+    )
+    .unwrap();
+
+    std::fs::write(
+        ws.join("MODULE.bazel"),
+        "module(name = \"root\")\nbazel_dep(name = \"helper\", version = \"1.0\")\next = use_extension(\"//:ext.bzl\", \"ext\")\nuse_repo(ext, \"generated\")\n",
+    )
+    .unwrap();
+    std::fs::write(ws.join("BUILD"), "").unwrap();
+    std::fs::write(
+        ws.join("ext.bzl"),
+        r#"
+load("@helper//:blazel_utils.bzl", "get_canonical_repo_name", "get_repo_root")
+
+def _repo_impl(rctx):
+    rctx.file("BUILD", "")
+    rctx.file("info.txt", rctx.attr.info)
+
+_repo = repository_rule(
+    implementation = _repo_impl,
+    attrs = {"info": attr.string()},
+)
+
+def _ext_impl(mctx):
+    info = "|".join([
+        get_canonical_repo_name("my_leaf"),
+        get_repo_root("my_leaf"),
+        Label("@helper//:unused").workspace_root,
+        Label("//:unused").workspace_root,
+    ])
+    _repo(name = "generated", info = info)
+
+ext = module_extension(implementation = _ext_impl)
+"#,
+    )
+    .unwrap();
+
+    let mut ropts = ResolveOptions::new(ws.clone());
+    ropts.registries = vec![zel_bzlmod::file_url_for_path(&reg)];
+    ropts.check_direct_dependencies = CheckMode::Off;
+    ropts.bazel_compatibility_mode = CheckMode::Off;
+    let graph = Arc::new(resolve(&ropts).unwrap());
+
+    // Default layout: external/<canonical>.
+    let ob1 = root.join("ob1");
+    let rt1 = Rt::new(
+        ExternalOptions {
+            output_base: ob1,
+            workspace_root: ws.clone(),
+            ..Default::default()
+        },
+        Arc::clone(&graph),
+    );
+    let gen_dir1 = rt1.fetch_repo("+ext+generated").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(gen_dir1.join("info.txt")).unwrap(),
+        "leaf+|external/leaf+|external/helper+|"
+    );
+
+    // Sibling layout: ../<canonical>.
+    let ob2 = root.join("ob2");
+    let rt2 = Rt::new(
+        ExternalOptions {
+            output_base: ob2,
+            workspace_root: ws.clone(),
+            experimental_sibling_repository_layout: true,
+            ..Default::default()
+        },
+        Arc::clone(&graph),
+    );
+    let gen_dir2 = rt2.fetch_repo("+ext+generated").unwrap();
+    assert_eq!(
+        std::fs::read_to_string(gen_dir2.join("info.txt")).unwrap(),
+        "leaf+|../leaf+|../helper+|"
+    );
+
+    // Unmapped `platforms` and typo `my_leef` in `helper+` fail with invalid Label error.
+    for (expr, want) in [
+        (
+            "get_canonical_repo_name('platforms')",
+            "'workspace_name' is not allowed on invalid Label @@[unknown repo 'platforms' requested from @@helper+]//:unused",
+        ),
+        (
+            "get_repo_root('my_leef')",
+            "'workspace_root' is not allowed on invalid Label @@[unknown repo 'my_leef' requested from @@helper+ (did you mean 'my_leaf'?)]//:unused",
+        ),
+    ] {
+        std::fs::write(
+            ws.join("ext.bzl"),
+            format!(
+                "load('@helper//:blazel_utils.bzl', 'get_canonical_repo_name', 'get_repo_root')\ndef _ext_impl(mctx):\n    _ = {expr}\next = module_extension(implementation = _ext_impl)\n"
+            ),
+        )
+        .unwrap();
+        let ob_bad = root.join("ob_bad");
+        let _ = std::fs::remove_dir_all(&ob_bad);
+        let rt_bad = Rt::new(
+            ExternalOptions {
+                output_base: ob_bad,
+                workspace_root: ws.clone(),
+                ..Default::default()
+            },
+            Arc::clone(&graph),
+        );
+        let ext_id = graph
+            .extension_usages
+            .iter()
+            .find(|(id, _, _)| id.name == "ext")
+            .unwrap()
+            .0
+            .clone();
+        let err = rt_bad.eval_extension(&ext_id).unwrap_err();
+        assert!(err.contains(want), "for {expr}: {err}");
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

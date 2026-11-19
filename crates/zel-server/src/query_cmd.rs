@@ -342,7 +342,6 @@ const DEPRECATION_WARNINGS: &[(&str, &str)] = &[
     ("bes_best_effort", "BES best effort upload has been removed. The flag has no more functionality attached to it and will be removed in a future release."),
     ("build_python_zip", "The '--no' prefix is no longer supported for this flag. Please use --build_python_zip=false instead."),
     ("check_fileset_dependencies_recursively", "This flag is a no-op and fileset dependencies are always checked to ensure correctness of builds."),
-    ("experimental_sibling_repository_layout", "This flag is a no-op. Non-main repositories are always planted under $output_base/execution_root/_main/external."),
     ("experimental_skyframe_native_filesets", "This flag is a no-op and skyframe-native-filesets is always true."),
     ("experimental_skyframe_prepare_analysis", "This flag is a no-op and will be deleted in a future release."),
     ("experimental_spawn_scheduler", "--experimental_spawn_scheduler is deprecated. Using dynamic execution for everything is rarely a good idea (see https://bazel.build/remote/dynamic). If you really want to enable dynamic execution globally, pass `--internal_spawn_scheduler --spawn_strategy=dynamic`."),

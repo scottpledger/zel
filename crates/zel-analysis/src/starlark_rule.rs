@@ -137,6 +137,8 @@ pub struct AnalysisInputs {
     pub exec_group_platforms: BTreeMap<String, String>,
     /// `--incompatible_allow_tags_propagation` (default true).
     pub allow_tags_propagation: bool,
+    /// `--experimental_sibling_repository_layout` (default false).
+    pub sibling_repository_layout: bool,
 }
 
 impl AnalysisInputs {
@@ -152,6 +154,7 @@ impl AnalysisInputs {
             exec_group_toolchains: BTreeMap::new(),
             exec_group_platforms: BTreeMap::new(),
             allow_tags_propagation: true,
+            sibling_repository_layout: false,
         }
     }
 }

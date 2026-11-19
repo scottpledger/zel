@@ -13,6 +13,7 @@
 // limitations under the License.
 
 use crate::bigint::BigInt;
+use crate::semantics::StarlarkSemantics;
 use crate::syntax::checks::did_you_mean;
 use crate::types::dict::StarlarkDict;
 use crate::types::list::{StarlarkError, StarlarkList};
@@ -279,6 +280,22 @@ pub fn eval_universal_function_in(
     kw_args: &BTreeMap<String, Value>,
     mutability: &Arc<Mutability>,
 ) -> Result<Option<Value>, StarlarkError> {
+    eval_universal_function_with_semantics(
+        name,
+        pos_args,
+        kw_args,
+        mutability,
+        &StarlarkSemantics::default(),
+    )
+}
+
+pub fn eval_universal_function_with_semantics(
+    name: &str,
+    pos_args: &[Value],
+    kw_args: &BTreeMap<String, Value>,
+    mutability: &Arc<Mutability>,
+    semantics: &StarlarkSemantics,
+) -> Result<Option<Value>, StarlarkError> {
     match name {
         "abs" => {
             let x = pos_args
@@ -459,20 +476,22 @@ pub fn eval_universal_function_in(
                     "name" => Ok(Some(Value::String(l.name().to_string()))),
                     "package" => Ok(Some(Value::String(l.package_name().to_string()))),
                     "repo_name" | "workspace_name" => {
-                        if let Some(msg) = l.repository().not_visible_error_message() {
-                            return Err(StarlarkError(msg));
+                        if !l.repository().is_visible() {
+                            return Err(StarlarkError(format!(
+                                "'{name}' is not allowed on invalid Label {l}"
+                            )));
                         }
                         Ok(Some(Value::String(l.repository().name().to_string())))
                     }
                     "workspace_root" => {
-                        if let Some(msg) = l.repository().not_visible_error_message() {
-                            return Err(StarlarkError(msg));
+                        if !l.repository().is_visible() {
+                            return Err(StarlarkError(format!(
+                                "'workspace_root' is not allowed on invalid Label {l}"
+                            )));
                         }
-                        Ok(Some(Value::String(if l.repository().is_main() {
-                            String::new()
-                        } else {
-                            format!("external/{}", l.repository().name())
-                        })))
+                        Ok(Some(Value::String(l.workspace_root(
+                            semantics.experimental_sibling_repository_layout,
+                        ))))
                     }
                     _ => match default {
                         Some(d) => Ok(Some(d)),

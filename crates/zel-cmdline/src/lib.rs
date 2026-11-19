@@ -150,7 +150,8 @@ pub mod validator {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct RepositoryName {
     name: String,
-    owner_repo_if_not_visible: Option<String>,
+    owner_repo_if_not_visible: Option<Box<RepositoryName>>,
+    did_you_mean_suffix: String,
 }
 
 impl RepositoryName {
@@ -158,6 +159,7 @@ impl RepositoryName {
         Self {
             name: String::new(),
             owner_repo_if_not_visible: None,
+            did_you_mean_suffix: String::new(),
         }
     }
 
@@ -165,6 +167,7 @@ impl RepositoryName {
         Self {
             name: "bazel_tools".to_string(),
             owner_repo_if_not_visible: None,
+            did_you_mean_suffix: String::new(),
         }
     }
 
@@ -172,6 +175,7 @@ impl RepositoryName {
         Self {
             name: "_builtins".to_string(),
             owner_repo_if_not_visible: None,
+            did_you_mean_suffix: String::new(),
         }
     }
 
@@ -180,6 +184,7 @@ impl RepositoryName {
         Ok(Self {
             name: name.to_string(),
             owner_repo_if_not_visible: None,
+            did_you_mean_suffix: String::new(),
         })
     }
 
@@ -187,6 +192,7 @@ impl RepositoryName {
         Self {
             name: name.into(),
             owner_repo_if_not_visible: None,
+            did_you_mean_suffix: String::new(),
         }
     }
 
@@ -196,18 +202,23 @@ impl RepositoryName {
         apparent_name: impl Into<String>,
         owner_repo: &RepositoryName,
     ) -> Self {
+        Self::create_unvalidated(apparent_name).to_non_visible(owner_repo.clone())
+    }
+
+    pub fn to_non_visible(&self, owner_repo: RepositoryName) -> Self {
+        self.to_non_visible_with_suggestion(owner_repo, String::new())
+    }
+
+    pub fn to_non_visible_with_suggestion(
+        &self,
+        owner_repo: RepositoryName,
+        did_you_mean_suffix: impl Into<String>,
+    ) -> Self {
         Self {
-            name: apparent_name.into(),
-            owner_repo_if_not_visible: Some(owner_repo.name.clone()),
+            name: self.name.clone(),
+            owner_repo_if_not_visible: Some(Box::new(owner_repo)),
+            did_you_mean_suffix: did_you_mean_suffix.into(),
         }
-    }
-
-    pub fn is_visible(&self) -> bool {
-        self.owner_repo_if_not_visible.is_none() && !self.name.starts_with("[unknown repo '")
-    }
-
-    pub fn owner_repo_if_not_visible(&self) -> Option<&str> {
-        self.owner_repo_if_not_visible.as_deref()
     }
 
     pub fn validate(name: &str) -> Result<(), LabelSyntaxError> {
@@ -234,8 +245,20 @@ impl RepositoryName {
         !name.is_empty() && !name.contains('+')
     }
 
+    pub fn is_visible(&self) -> bool {
+        self.owner_repo_if_not_visible.is_none() && !self.name.starts_with("[unknown repo '")
+    }
+
+    pub fn owner_repo_if_not_visible(&self) -> Option<&RepositoryName> {
+        self.owner_repo_if_not_visible.as_deref()
+    }
+
+    pub fn did_you_mean_suffix(&self) -> &str {
+        &self.did_you_mean_suffix
+    }
+
     pub fn is_main(&self) -> bool {
-        self.is_visible() && self.name.is_empty()
+        self.name.is_empty() && self.is_visible()
     }
 
     pub fn name(&self) -> &str {
@@ -243,18 +266,14 @@ impl RepositoryName {
     }
 
     pub fn name_with_at(&self) -> String {
-        if let Some(owner) = &self.owner_repo_if_not_visible {
-            let owner_display = if owner.is_empty() {
-                "@@".to_string()
-            } else {
-                format!("@@{owner}")
-            };
-            format!(
-                "@@[unknown repo '{}' requested from {}]",
-                self.name, owner_display
-            )
-        } else {
-            format!("@@{}", self.name)
+        match &self.owner_repo_if_not_visible {
+            None => format!("@@{}", self.name),
+            Some(owner) => format!(
+                "@@[unknown repo '{}' requested from {}{}]",
+                self.name,
+                owner.name_with_at(),
+                self.did_you_mean_suffix
+            ),
         }
     }
 
@@ -266,48 +285,47 @@ impl RepositoryName {
         }
     }
 
-    /// Constructs a non-visible `RepositoryName` marker matching `RepositoryName.toNonVisible`.
-    pub fn to_non_visible(requested: &str, owner: &RepositoryName, dym_suffix: &str) -> Self {
-        let owner_at = if owner.is_main() {
-            "@@".to_string()
-        } else {
-            owner.name_with_at()
-        };
-        Self::create_unvalidated(format!(
-            "[unknown repo '{requested}' requested from {owner_at}{dym_suffix}]"
-        ))
-    }
-
-    /// If `!self.is_visible()`, returns Bazel's `getNotVisibleErrorMessage()` text.
-    pub fn not_visible_error_message(&self) -> Option<String> {
-        if let Some(owner) = &self.owner_repo_if_not_visible {
-            let owner_display = if owner.is_empty() {
-                "main repository".to_string()
-            } else {
-                format!("repository '@@{owner}'")
-            };
-            return Some(format!(
-                "No repository visible as '@{}' from {owner_display}",
-                self.name
-            ));
-        }
-        let rest = self
-            .name
-            .strip_prefix("[unknown repo '")?
-            .strip_suffix(']')?;
+    /// Parses a `[unknown repo '<requested>' requested from @@<owner><dym>]` marker back into a
+    /// structured non-visible `RepositoryName`.
+    pub fn parse_unknown_repo_marker(raw: &str) -> Option<Self> {
+        let rest = raw.strip_prefix("[unknown repo '")?.strip_suffix(']')?;
         let (requested, after_req) = rest.split_once("' requested from ")?;
         let (owner_at, dym) = match after_req.find(" (did you mean ") {
             Some(idx) => (&after_req[..idx], &after_req[idx..]),
             None => (after_req, ""),
         };
-        let owner_display = if owner_at == "@@" {
-            "main repository".to_string()
+        let owner = if owner_at == "@@" {
+            Self::main()
         } else {
-            format!("repository '{owner_at}'")
+            Self::create_unvalidated(owner_at.strip_prefix("@@").unwrap_or(owner_at))
         };
-        Some(format!(
-            "No repository visible as '@{requested}' from {owner_display}{dym}"
-        ))
+        Some(Self::create_unvalidated(requested).to_non_visible_with_suggestion(owner, dym))
+    }
+
+    /// If `!self.is_visible()`, returns Bazel's not-visible repository resolution message.
+    pub fn not_visible_error_message(&self) -> Option<String> {
+        if let Some(owner) = self.owner_repo_if_not_visible.as_deref() {
+            let owner_display = if owner.is_main() {
+                "main repository".to_string()
+            } else {
+                format!("repository '{}'", owner.canonical_form())
+            };
+            return Some(format!(
+                "No repository visible as '@{}' from {owner_display}{}",
+                self.name, self.did_you_mean_suffix
+            ));
+        }
+        Self::parse_unknown_repo_marker(&self.name)?.not_visible_error_message()
+    }
+
+    pub fn workspace_root(&self, sibling_repository_layout: bool) -> String {
+        if self.is_main() {
+            String::new()
+        } else if sibling_repository_layout {
+            format!("../{}", self.name)
+        } else {
+            format!("external/{}", self.name)
+        }
     }
 }
 
@@ -317,36 +335,118 @@ impl fmt::Display for RepositoryName {
     }
 }
 
+fn edit_distance_bounded(s1: &str, s2: &str, max: usize) -> Option<usize> {
+    if s1 == s2 {
+        return Some(0);
+    }
+    let a: Vec<char> = s1.chars().collect();
+    let b: Vec<char> = s2.chars().collect();
+    if a.len().abs_diff(b.len()) > max {
+        return None;
+    }
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        row[0] = i;
+        let mut best_in_row = row[0];
+        let mut previous = i - 1;
+        for j in 1..=b.len() {
+            let old = row[j];
+            row[j] = std::cmp::min(
+                previous + usize::from(a[i - 1] != b[j - 1]),
+                1 + std::cmp::min(row[j - 1], row[j]),
+            );
+            previous = old;
+            best_in_row = best_in_row.min(row[j]);
+        }
+        if best_in_row > max {
+            return None;
+        }
+    }
+    (row[b.len()] <= max).then_some(row[b.len()])
+}
+
+/// Port of `SpellChecker.didYouMean` for apparent repository names.
+pub fn did_you_mean_repo<'a>(input: &str, words: impl IntoIterator<Item = &'a str>) -> String {
+    let mut best: Option<&'a str> = None;
+    let mut best_distance = std::cmp::min(5, (input.chars().count() + 1) / 2);
+    if best_distance == 0 {
+        return String::new();
+    }
+    let lower = input.to_lowercase();
+    for cand in words {
+        if let Some(d) = edit_distance_bounded(&lower, &cand.to_lowercase(), best_distance - 1) {
+            if d < best_distance {
+                best_distance = d;
+                best = Some(cand);
+            }
+        }
+    }
+    match best {
+        Some(s) => format!(" (did you mean '{s}'?)"),
+        None => String::new(),
+    }
+}
+
 /// Maps apparent repository names (`@foo`) to canonical repository names (`@@foo+1.0`).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default)]
 pub struct RepositoryMapping {
     entries: HashMap<String, RepositoryName>,
-    /// Apparent names in `ImmutableMap` insertion order when known (empty: unordered).
+    /// Apparent names in `ImmutableMap` insertion order when known (sorted when unordered).
     order: Vec<String>,
     owner_repo: RepositoryName,
+    fallback: bool,
 }
+
+impl PartialEq for RepositoryMapping {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+            && self.owner_repo == other.owner_repo
+            && self.fallback == other.fallback
+    }
+}
+impl Eq for RepositoryMapping {}
 
 impl RepositoryMapping {
     pub fn always_fallback() -> Self {
-        Self::default()
+        Self {
+            entries: HashMap::new(),
+            order: Vec::new(),
+            owner_repo: RepositoryName::main(),
+            fallback: true,
+        }
     }
 
     pub fn new(entries: HashMap<String, RepositoryName>, owner_repo: RepositoryName) -> Self {
+        let mut order: Vec<String> = entries.keys().cloned().collect();
+        order.sort();
         Self {
             entries,
-            order: Vec::new(),
+            order,
             owner_repo,
+            fallback: false,
         }
     }
 
     /// A mapping that remembers the iteration order of Bazel's `ImmutableMap` of entries.
     pub fn new_ordered(ordered: Vec<(String, RepositoryName)>, owner_repo: RepositoryName) -> Self {
-        let order: Vec<String> = ordered.iter().map(|(a, _)| a.clone()).collect();
+        let mut order = Vec::with_capacity(ordered.len());
+        let mut entries = HashMap::with_capacity(ordered.len());
+        for (apparent, canonical) in ordered {
+            if !entries.contains_key(&apparent) {
+                order.push(apparent.clone());
+            }
+            entries.insert(apparent, canonical);
+        }
         Self {
-            entries: ordered.into_iter().collect(),
+            entries,
             order,
             owner_repo,
+            fallback: false,
         }
+    }
+
+    pub fn is_fallback(&self) -> bool {
+        self.fallback
     }
 
     /// All `(apparent name, canonical repository)` entries (used to invert the mapping when
@@ -368,18 +468,21 @@ impl RepositoryMapping {
     }
 
     pub fn get(&self, apparent_name: &str) -> RepositoryName {
+        if let Some(repo) = self.entries.get(apparent_name) {
+            return repo.clone();
+        }
         if apparent_name.is_empty() {
             return RepositoryName::main();
         }
-        self.entries
-            .get(apparent_name)
-            .cloned()
-            .unwrap_or_else(|| RepositoryName::create_unvalidated(apparent_name))
+        if self.fallback {
+            return RepositoryName::create_unvalidated(apparent_name);
+        }
+        self.non_visible_for_unmapped(apparent_name)
     }
 
     /// Strict lookup matching `RepositoryMapping.get(String)` when `ownerRepo != null`:
     /// returns a non-visible `RepositoryName` (`is_visible() == false`) when `apparent_name` is
-    /// absent from the mapping.
+    /// absent from the mapping, even if `self.fallback` is set.
     pub fn get_strict(&self, apparent_name: &str) -> RepositoryName {
         if let Some(mapped) = self.entries.get(apparent_name) {
             return mapped.clone();
@@ -387,7 +490,18 @@ impl RepositoryMapping {
         if apparent_name.is_empty() {
             return RepositoryName::main();
         }
-        RepositoryName::create_non_visible(apparent_name, &self.owner_repo)
+        self.non_visible_for_unmapped(apparent_name)
+    }
+
+    fn non_visible_for_unmapped(&self, apparent_name: &str) -> RepositoryName {
+        let suggestion = did_you_mean_repo(
+            apparent_name,
+            self.entries()
+                .map(|(k, _)| k.as_str())
+                .filter(|k| !k.is_empty()),
+        );
+        RepositoryName::create_unvalidated(apparent_name)
+            .to_non_visible_with_suggestion(self.owner_repo.clone(), suggestion)
     }
 
     /// Suggests the closest visible apparent repository name (`SpellChecker.didYouMean`),
@@ -863,7 +977,8 @@ impl Label {
             }
             Some(r) if parts.repo_is_canonical => {
                 if r.starts_with("[unknown repo ") {
-                    RepositoryName::create_unvalidated(r)
+                    RepositoryName::parse_unknown_repo_marker(r)
+                        .unwrap_or_else(|| RepositoryName::create_unvalidated(r))
                 } else {
                     RepositoryName::create(r)?
                 }
@@ -889,6 +1004,10 @@ impl Label {
 
     pub fn repository(&self) -> &RepositoryName {
         self.package_identifier.repository()
+    }
+
+    pub fn workspace_root(&self, sibling_repository_layout: bool) -> String {
+        self.repository().workspace_root(sibling_repository_layout)
     }
 
     pub fn name(&self) -> &str {
@@ -1124,7 +1243,8 @@ impl TargetPattern {
             None => current_repo.clone(),
             Some(r) if parts.repo_is_canonical => {
                 if r.starts_with("[unknown repo ") {
-                    RepositoryName::create_unvalidated(r.clone())
+                    RepositoryName::parse_unknown_repo_marker(r)
+                        .unwrap_or_else(|| RepositoryName::create_unvalidated(r.clone()))
                 } else {
                     RepositoryName::create(r)?
                 }
@@ -1813,11 +1933,8 @@ mod tests {
         assert_eq!(ordered.did_you_mean("completely_unrelated"), "");
 
         // Non-visible marker formatting.
-        let nv = RepositoryName::to_non_visible(
-            "rules_r",
-            &RepositoryName::main(),
-            " (did you mean 'rules_rs'?)",
-        );
+        let nv = RepositoryName::create_unvalidated("rules_r")
+            .to_non_visible_with_suggestion(RepositoryName::main(), " (did you mean 'rules_rs'?)");
         assert!(!nv.is_visible());
         assert_eq!(
             nv.not_visible_error_message().as_deref(),
@@ -1837,5 +1954,109 @@ mod tests {
                 path: "pkg/sub/dir/file.txt".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn non_visible_repository_name_and_workspace_root() {
+        let main = RepositoryName::main();
+        assert!(main.is_visible());
+        assert!(main.is_main());
+        assert_eq!(main.workspace_root(false), "");
+        assert_eq!(main.workspace_root(true), "");
+
+        let ext = RepositoryName::create("foo+1.0").unwrap();
+        assert!(ext.is_visible());
+        assert!(!ext.is_main());
+        assert_eq!(ext.workspace_root(false), "external/foo+1.0");
+        assert_eq!(ext.workspace_root(true), "../foo+1.0");
+
+        let non_vis_main_owner =
+            RepositoryName::create_unvalidated("bar").to_non_visible(RepositoryName::main());
+        assert!(!non_vis_main_owner.is_visible());
+        assert!(!non_vis_main_owner.is_main());
+        assert_eq!(non_vis_main_owner.name(), "bar");
+        assert_eq!(
+            non_vis_main_owner.name_with_at(),
+            "@@[unknown repo 'bar' requested from @@]"
+        );
+        assert_eq!(
+            non_vis_main_owner.canonical_form(),
+            "@@[unknown repo 'bar' requested from @@]"
+        );
+
+        let non_vis_ext_owner = RepositoryName::create_unvalidated("baz")
+            .to_non_visible_with_suggestion(ext.clone(), " (did you mean 'bazz'?)");
+        assert!(!non_vis_ext_owner.is_visible());
+        assert_eq!(
+            non_vis_ext_owner.canonical_form(),
+            "@@[unknown repo 'baz' requested from @@foo+1.0 (did you mean 'bazz'?)]"
+        );
+
+        // Even an empty repo name is not main when marked non-visible.
+        let non_vis_empty = RepositoryName::create_unvalidated("").to_non_visible(ext);
+        assert!(!non_vis_empty.is_main());
+        assert_eq!(
+            non_vis_empty.canonical_form(),
+            "@@[unknown repo '' requested from @@foo+1.0]"
+        );
+    }
+
+    #[test]
+    fn strict_repo_mapping_suggestions_and_builtin_names() {
+        let owner = RepositoryName::create("my_mod+").unwrap();
+        let mapping = RepositoryMapping::new_ordered(
+            vec![
+                (
+                    "foobar".to_string(),
+                    RepositoryName::create("foobar+").unwrap(),
+                ),
+                (
+                    "foobaz".to_string(),
+                    RepositoryName::create("foobaz+").unwrap(),
+                ),
+            ],
+            owner.clone(),
+        );
+        let base_pkg = PackageIdentifier::create(owner, PathFragment::empty()).unwrap();
+
+        // Mapped apparent repo resolves to a visible canonical repo.
+        let ok_lbl =
+            Label::parse_with_package_context("@foobar//:unused", &base_pkg, &mapping).unwrap();
+        assert!(ok_lbl.repository().is_visible());
+        assert_eq!(ok_lbl.repository().name(), "foobar+");
+        assert_eq!(ok_lbl.workspace_root(false), "external/foobar+");
+        assert_eq!(ok_lbl.workspace_root(true), "../foobar+");
+
+        // Unmapped typo produces non-visible repo with insertion-order tie-break suggestion.
+        let typo_lbl =
+            Label::parse_with_package_context("@foobax//:unused", &base_pkg, &mapping).unwrap();
+        assert!(!typo_lbl.repository().is_visible());
+        assert_eq!(
+            typo_lbl.to_string(),
+            "@@[unknown repo 'foobax' requested from @@my_mod+ (did you mean 'foobar'?)]//:unused"
+        );
+
+        // `bazel_tools` and `platforms` are NOT exempted when absent from the repo mapping.
+        for unmapped in ["bazel_tools", "platforms", "completely_unknown"] {
+            let lbl = Label::parse_with_package_context(
+                &format!("@{unmapped}//:unused"),
+                &base_pkg,
+                &mapping,
+            )
+            .unwrap();
+            assert!(
+                !lbl.repository().is_visible(),
+                "{unmapped} should be non-visible when absent from mapping"
+            );
+            assert_eq!(
+                lbl.to_string(),
+                format!("@@[unknown repo '{unmapped}' requested from @@my_mod+]//:unused")
+            );
+        }
+
+        // `always_fallback` continues to produce visible repositories.
+        let fb = Label::parse_canonical("@unmapped//:unused").unwrap();
+        assert!(fb.repository().is_visible());
+        assert_eq!(fb.repository().name(), "unmapped");
     }
 }

@@ -33,6 +33,7 @@ pub struct ExternalOptions {
     pub nofetch: bool,
     pub verbose: bool,
     pub experimental_repository_ctx_execute_wasm: bool,
+    pub experimental_sibling_repository_layout: bool,
     pub credential_helpers: Vec<(String, PathBuf)>,
 }
 
@@ -528,6 +529,18 @@ impl Rt {
 
     // ---------------------------------------------------------------- bzl loading
 
+    fn repo_mapping_for_owner(
+        &self,
+        owner: &zel_cmdline::RepositoryName,
+    ) -> zel_cmdline::RepositoryMapping {
+        let entries: Vec<(String, zel_cmdline::RepositoryName)> = self
+            .repo_mapping_ordered_of(owner.name())
+            .into_iter()
+            .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
+            .collect();
+        zel_cmdline::RepositoryMapping::new_ordered(entries, owner.clone())
+    }
+
     fn new_context(
         self: &Arc<Self>,
         file_name: &str,
@@ -541,6 +554,18 @@ impl Rt {
             main_repo_mapping: Some(Arc::new(self.repo_mapping_of(""))),
             ..Default::default()
         };
+        ctx.semantics.experimental_sibling_repository_layout =
+            self.opts.experimental_sibling_repository_layout;
+        ctx.thread.semantics.experimental_sibling_repository_layout =
+            self.opts.experimental_sibling_repository_layout;
+        let owner = zel_cmdline::RepositoryName::create_unvalidated(ctx_repo);
+        if let Ok(pkg_id) = zel_cmdline::PackageIdentifier::create(
+            owner.clone(),
+            zel_vfs::PathFragment::create(ctx_pkg),
+        ) {
+            *ctx.module_env.label_ctx.lock().unwrap() =
+                Some((pkg_id, self.repo_mapping_for_owner(&owner)));
+        }
         let rt = self.clone();
         ctx.host = Some(Arc::new(move |c, name, args, kw| {
             rt.host_dispatch(c, name, args, kw)
@@ -830,6 +855,7 @@ impl Rt {
             fs,
             Arc::new(crate::resolver::BzlmodRepoResolver::new(self.clone())),
         );
+        cfg.sibling_repository_layout = self.opts.experimental_sibling_repository_layout;
         // Helper .bzl files evaluated by the loader call repository rules and `repository_ctx` /
         // `module_ctx` methods; those belong to this runtime.
         let rt_o = Arc::downgrade(self);
@@ -1091,14 +1117,43 @@ impl Rt {
                     Some(Value::Label(l)) => return Ok(Value::Label(l.clone())),
                     _ => return err("Label() takes a string argument"),
                 };
-                let (repo, pkg) = self.current_label_context(ctx);
-                let resolved = self.resolve_label(&raw, &repo, &pkg);
+                let (pkg_id, mapping) = match ctx.current_label_ctx() {
+                    Some((p, m)) => (p, m),
+                    None => {
+                        let (repo, pkg) = self.current_label_context(ctx);
+                        let owner = zel_cmdline::RepositoryName::create_unvalidated(&repo);
+                        let p = zel_cmdline::PackageIdentifier::create(
+                            owner.clone(),
+                            zel_vfs::PathFragment::create(&pkg),
+                        )
+                        .map_err(|e| StarlarkError(e.to_string()))?;
+                        let m = self.repo_mapping_for_owner(&owner);
+                        (p, m)
+                    }
+                };
+                let repo = pkg_id.repository().name().to_string();
+                let parsed =
+                    zel_cmdline::Label::parse_with_package_context(&raw, &pkg_id, &mapping);
                 // `Label()` records the apparent-name lookups it performs (`RecordedRepoMapping`).
                 if let Some(rest) = raw.strip_prefix('@').filter(|r| !r.starts_with('@')) {
                     let apparent = rest.split_once("//").map(|x| x.0).unwrap_or(rest);
-                    let active: Vec<crate::ctx::CtxData> = self.state.lock().unwrap().ctxs.iter().flatten().filter(|c| c.kind == crate::ctx::CtxKind::Module).cloned().collect();
+                    let resolved_canon = parsed
+                        .as_ref()
+                        .ok()
+                        .filter(|l| l.repository().is_visible())
+                        .map(|l| l.repository().name().to_string());
+                    let active: Vec<crate::ctx::CtxData> = self
+                        .state
+                        .lock()
+                        .unwrap()
+                        .ctxs
+                        .iter()
+                        .flatten()
+                        .filter(|c| c.kind == crate::ctx::CtxKind::Module)
+                        .cloned()
+                        .collect();
                     if active.is_empty() {
-                        if let Ok((r, _, _)) = &resolved {
+                        if let Some(r) = &resolved_canon {
                             let mut g = LOAD_LABEL_MAPPINGS.lock().unwrap();
                             let e = (repo.clone(), apparent.to_string(), r.clone());
                             if !g.contains(&e) {
@@ -1108,13 +1163,16 @@ impl Rt {
                     }
                     for c in active {
                         c.record(
-                            format!("REPO_MAPPING:{}", crate::ctx::escape_input(&format!("{repo},{apparent}"))),
-                            resolved.as_ref().ok().filter(|(r, _, _)| !r.starts_with("[unknown repo")).map(|(r, _, _)| r.clone()),
+                            format!(
+                                "REPO_MAPPING:{}",
+                                crate::ctx::escape_input(&format!("{repo},{apparent}"))
+                            ),
+                            resolved_canon.clone(),
                         );
                     }
                 }
-                let (r, p, n) = resolved.map_err(StarlarkError)?;
-                Ok(self.label_value(&r, &p, &n))
+                let lbl = parsed.map_err(|e| StarlarkError(e.to_string()))?;
+                Ok(Value::Label(lbl))
             }
             other => err(format!("unknown host function '{other}'")),
         }

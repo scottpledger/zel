@@ -625,6 +625,10 @@ fn analyze_rule(
         let mut inputs = AnalysisInputs::new(resolver.clone());
         inputs.allow_unresolved_symlinks = acfg.allow_unresolved_symlinks;
         inputs.compact_repo_mapping = !acfg.no_compact_repo_mapping;
+        inputs.sibling_repository_layout = acfg.sibling_repository_layout
+            || resolver
+                .package_loader()
+                .is_some_and(|l| l.config().sibling_repository_layout);
         inputs.allow_tags_propagation = cfg
             .options
             .get("incompatible_allow_tags_propagation")

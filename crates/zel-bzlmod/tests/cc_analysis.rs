@@ -50,6 +50,7 @@ fn analyze_cc_binary() {
         bazel_version: "9.3.2".into(),
         repo_contents_cache: None,
         experimental_repository_ctx_execute_wasm: false,
+        experimental_sibling_repository_layout: false,
         isolated_extension_usages: false,
         credential_helpers: vec![],
         main_mapping_errors: false,

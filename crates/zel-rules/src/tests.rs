@@ -3,6 +3,7 @@
 use super::*;
 use std::sync::Arc;
 use zel_analysis::{ActionKind, ConfiguredTarget};
+use zel_cmdline::RepositoryName;
 use zel_packages::{LoaderConfig, PackageLoader, SimpleRepoResolver};
 use zel_vfs::{FileSystem, InMemoryFileSystem, PathFragment};
 
@@ -2277,6 +2278,13 @@ current_launcher_binary(name = "launcher")
     let mut repo_resolver = SimpleRepoResolver::new(main_root);
     repo_resolver.external.insert("bazel_tools".into(), bt_root);
     repo_resolver.external.insert("platforms".into(), plat_root);
+    repo_resolver
+        .apparent
+        .insert("bazel_tools".into(), RepositoryName::bazel_tools());
+    repo_resolver.apparent.insert(
+        "platforms".into(),
+        RepositoryName::create("platforms").unwrap(),
+    );
     let lc = LoaderConfig::new(fs, Arc::new(repo_resolver));
     let mut acfg = AnalysisConfig::new();
     acfg.registered_toolchains =

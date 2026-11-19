@@ -179,8 +179,32 @@ pub(crate) struct BuiltinsResolver {
     pub root: PathFragment,
 }
 
+/// Apparent repository dependencies declared in `@bazel_tools`'s `MODULE.tools`.
+const BAZEL_TOOLS_DEFAULT_REPOS: &[(&str, &str)] = &[
+    ("bazel_tools", "bazel_tools"),
+    ("rules_license", "rules_license"),
+    ("buildozer", "buildozer"),
+    ("platforms", "platforms"),
+    ("zlib", "zlib"),
+    ("local_config_xcode", "local_config_xcode"),
+    ("local_jdk", "local_jdk"),
+    ("remote_java_tools", "remote_java_tools"),
+    ("remote_coverage_tools", "remote_coverage_tools"),
+    ("buildozer_binary", "buildozer_binary"),
+    ("com_google_protobuf", "protobuf"),
+    ("rules_java", "rules_java"),
+    ("rules_cc", "rules_cc"),
+    ("rules_python", "rules_python"),
+    ("rules_shell", "rules_shell"),
+    ("apple_support", "apple_support"),
+    ("local_config_winsdk", "local_config_winsdk"),
+];
+
 impl RepoResolver for BuiltinsResolver {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+        if !repo.is_visible() {
+            return None;
+        }
         if repo.name() == BUILTINS_REPO {
             return Some(self.root.clone());
         }
@@ -189,9 +213,41 @@ impl RepoResolver for BuiltinsResolver {
 
     fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping {
         if owner.name() == BUILTINS_REPO {
-            let mut m: HashMap<String, RepositoryName> = HashMap::new();
+            let mut m: HashMap<String, RepositoryName> = BAZEL_TOOLS_DEFAULT_REPOS
+                .iter()
+                .map(|(apparent, canon)| {
+                    (
+                        (*apparent).to_string(),
+                        RepositoryName::create_unvalidated(*canon),
+                    )
+                })
+                .collect();
+            for (apparent, canon) in self.inner.mapping(&RepositoryName::bazel_tools()).entries() {
+                m.insert(apparent.clone(), canon.clone());
+            }
+            m.insert(String::new(), RepositoryName::main());
             m.insert(BUILTINS_REPO.to_string(), owner.clone());
             return RepositoryMapping::new(m, owner.clone());
+        }
+        if owner.name() == "bazel_tools" {
+            let inner_map = self.inner.mapping(owner);
+            let has_bazel_tools = inner_map.entries().any(|(k, _)| k == "bazel_tools");
+            if !has_bazel_tools && !inner_map.is_fallback() {
+                let mut m: HashMap<String, RepositoryName> = BAZEL_TOOLS_DEFAULT_REPOS
+                    .iter()
+                    .map(|(apparent, canon)| {
+                        (
+                            (*apparent).to_string(),
+                            RepositoryName::create_unvalidated(*canon),
+                        )
+                    })
+                    .collect();
+                for (apparent, canon) in inner_map.entries() {
+                    m.insert(apparent.clone(), canon.clone());
+                }
+                return RepositoryMapping::new(m, owner.clone());
+            }
+            return inner_map;
         }
         self.inner.mapping(owner)
     }

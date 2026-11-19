@@ -427,7 +427,16 @@ fn convert_rule_attrs(
                     }
                 }
                 None => match &attr.computed_default {
-                    Some(f) => computed_default_value(f, attr, name, &raw_attrs, rule, &inputs.resolver).map_err(wrap)?,
+                    Some(f) => computed_default_value(
+                        f,
+                        attr,
+                        name,
+                        &raw_attrs,
+                        rule,
+                        &inputs.resolver,
+                        inputs.sibling_repository_layout,
+                    )
+                    .map_err(wrap)?,
                     None => attr.default_value(),
                 },
             },
@@ -821,6 +830,9 @@ pub fn analyze_starlark_rule(
 
     // 3. Run the implementation function.
     let mut ectx = EvalContext::new(pkg_dir.clone(), None);
+    ectx.semantics.experimental_sibling_repository_layout = st.inputs.sibling_repository_layout;
+    ectx.thread.semantics.experimental_sibling_repository_layout =
+        st.inputs.sibling_repository_layout;
     ectx.file_name = rule.extra.location.clone().unwrap_or_else(|| "BUILD".to_string());
     let st2 = st.clone();
     ectx.host = Some(Arc::new(move |c, n, p, k| dispatch(&st2, c, n, p, k)));
@@ -850,6 +862,7 @@ fn computed_default_value(
     raw_attrs: &Value,
     rule: &RuleInstance,
     resolver: &Arc<dyn DepResolver>,
+    sibling_repository_layout: bool,
 ) -> Result<AttrValue, String> {
     let Value::UserFunction(def) = f else { return Err(format!("attribute '{name}': invalid computed default")) };
     let mut kw = BTreeMap::new();
@@ -861,6 +874,8 @@ fn computed_default_value(
         }
     }
     let mut ctx = EvalContext::default();
+    ctx.semantics.experimental_sibling_repository_layout = sibling_repository_layout;
+    ctx.thread.semantics.experimental_sibling_repository_layout = sibling_repository_layout;
     let owner = rule.label.package_identifier().clone();
     let resolver_arc = Arc::clone(resolver);
     ctx.host = Some(Arc::new(move |ctx, host_name, pos, _kw| {
@@ -874,14 +889,18 @@ fn computed_default_value(
                     let (pkg, mapping) = match ctx.current_label_ctx() {
                         Some((p, m)) => (p, m),
                         None => {
-                            let entries = resolver_arc.repo_mapping_entries(owner.repository().name());
-                            let mut map = std::collections::HashMap::new();
-                            for (a, c) in entries {
-                                if let Ok(rn) = zel_cmdline::RepositoryName::create(&c) {
-                                    map.insert(a, rn);
-                                }
-                            }
-                            (owner.clone(), zel_cmdline::RepositoryMapping::new(map, owner.repository().clone()))
+                            let ordered: Vec<(String, zel_cmdline::RepositoryName)> = resolver_arc
+                                .repo_mapping_entries(owner.repository().name())
+                                .into_iter()
+                                .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
+                                .collect();
+                            (
+                                owner.clone(),
+                                zel_cmdline::RepositoryMapping::new_ordered(
+                                    ordered,
+                                    owner.repository().clone(),
+                                ),
+                            )
                         }
                     };
                     Label::parse_with_package_context(s, &pkg, &mapping)

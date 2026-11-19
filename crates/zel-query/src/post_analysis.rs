@@ -59,6 +59,8 @@ pub struct PostOpts {
     pub explicit_aspects: bool,
     /// `--incompatible_disable_target_default_provider_fields` for `cquery --output=starlark`.
     pub incompatible_disable_target_default_provider_fields: bool,
+    /// `--experimental_sibling_repository_layout` for `cquery --output=starlark`.
+    pub sibling_repository_layout: bool,
 }
 
 impl Default for PostOpts {
@@ -85,6 +87,7 @@ impl Default for PostOpts {
             aspect_params: BTreeMap::new(),
             explicit_aspects: false,
             incompatible_disable_target_default_provider_fields: false,
+            sibling_repository_layout: false,
         }
     }
 }

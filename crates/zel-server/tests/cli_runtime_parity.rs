@@ -1084,3 +1084,141 @@ fn test_bep_undeclared_outputs_zip_and_nozip_names() {
         "passing retry attempt 2 leaked stale extras from attempt 1:\n{att2}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn blazel_utils_workspace_root_sibling_layout_and_unmapped_repos_e2e() {
+    let w = make_ws("blazel-utils");
+    // Override MODULE.bazel so `platforms` is NOT declared as a dep of the root module,
+    // while `rules_shell` IS declared under apparent name `my_shell`.
+    w.write(
+        "MODULE.bazel",
+        "module(name = \"w\")\nbazel_dep(name = \"rules_shell\", version = \"0.6.1\", repo_name = \"my_shell\")\n",
+    );
+    w.write(
+        "blazel_utils.bzl",
+        r#"
+def _to_label(repo_name):
+    if not repo_name.startswith("@"):
+        repo_name = "@" + repo_name
+    return Label(repo_name + "//:unused")
+
+def get_canonical_repo_name(apparent_repo_name):
+    return _to_label(apparent_repo_name).workspace_name
+
+def get_repo_root(apparent_repo_name):
+    return _to_label(apparent_repo_name).workspace_root
+
+def _probe_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(
+        output = out,
+        content = "|".join([
+            ctx.attr.load_val,
+            get_canonical_repo_name("my_shell"),
+            get_repo_root("my_shell"),
+            get_canonical_repo_name(""),
+            get_repo_root(""),
+            get_repo_root("w"),
+        ]),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+probe_rule = rule(
+    implementation = _probe_impl,
+    attrs = {"load_val": attr.string()},
+)
+"#,
+    );
+    w.write(
+        "p/BUILD",
+        r#"
+load("//:blazel_utils.bzl", "get_canonical_repo_name", "get_repo_root", "probe_rule")
+
+probe_rule(
+    name = "probe",
+    load_val = get_canonical_repo_name("my_shell") + ":" + get_repo_root("my_shell") + ":" + get_repo_root(""),
+)
+"#,
+    );
+
+    // 1. Default layout: external/<canonical>, empty for main repo.
+    let b1 = w.run(&["build", "//p:probe"]);
+    assert_eq!(b1.code, 0, "{}", b1.err);
+    let out_path = w.ws.join("bazel-bin/p/probe.txt");
+    let content1 = std::fs::read_to_string(&out_path).unwrap();
+    assert_eq!(
+        content1,
+        "rules_shell+:external/rules_shell+:|rules_shell+|external/rules_shell+|||"
+    );
+
+    // 2. Toggle --experimental_sibling_repository_layout on the SAME daemon instance:
+    //    must re-evaluate both package loading and rule analysis to ../<canonical>, with no
+    //    bogus deprecation warning.
+    let b2 = w.run(&[
+        "build",
+        "--experimental_sibling_repository_layout",
+        "//p:probe",
+    ]);
+    assert_eq!(b2.code, 0, "{}", b2.err);
+    assert!(
+        !b2.err.contains("experimental_sibling_repository_layout"),
+        "unexpected warning: {}",
+        b2.err
+    );
+    let content2 = std::fs::read_to_string(&out_path).unwrap();
+    assert_eq!(
+        content2,
+        "rules_shell+:../rules_shell+:|rules_shell+|../rules_shell+|||"
+    );
+
+    // 3. `cquery --output=starlark` respects --experimental_sibling_repository_layout too.
+    let cq_sib = w.run(&[
+        "cquery",
+        "--experimental_sibling_repository_layout",
+        "--output=starlark",
+        "--starlark:expr=target.label.workspace_root",
+        "@my_shell//shell:sh_binary.bzl",
+    ]);
+    assert_eq!(cq_sib.code, 0, "{}", cq_sib.err);
+    assert_eq!(cq_sib.out.trim(), "../rules_shell+");
+
+    let cq_def = w.run(&[
+        "cquery",
+        "--output=starlark",
+        "--starlark:expr=target.label.workspace_root",
+        "@my_shell//shell:sh_binary.bzl",
+    ]);
+    assert_eq!(cq_def.code, 0, "{}", cq_def.err);
+    assert_eq!(cq_def.out.trim(), "external/rules_shell+");
+
+    // 4. Unmapped `platforms` (absent from root MODULE.bazel) and typo `my_shel` must fail with
+    //    invalid Label errors rather than returning `[unknown repo ...]`.
+    w.write(
+        "bad_plat/BUILD",
+        "load('//:blazel_utils.bzl', 'get_repo_root')\nx = get_repo_root('platforms')\n",
+    );
+    let bad1 = w.run(&["build", "//bad_plat:all"]);
+    assert_ne!(bad1.code, 0);
+    assert!(
+        bad1.err.contains(
+            "'workspace_root' is not allowed on invalid Label @@[unknown repo 'platforms' requested from @@]//:unused"
+        ),
+        "{}",
+        bad1.err
+    );
+
+    w.write(
+        "bad_typo/BUILD",
+        "load('//:blazel_utils.bzl', 'get_canonical_repo_name')\nx = get_canonical_repo_name('my_shel')\n",
+    );
+    let bad2 = w.run(&["build", "//bad_typo:all"]);
+    assert_ne!(bad2.code, 0);
+    assert!(
+        bad2.err.contains(
+            "'workspace_name' is not allowed on invalid Label @@[unknown repo 'my_shel' requested from @@ (did you mean 'my_shell'?)]//:unused"
+        ),
+        "{}",
+        bad2.err
+    );
+}

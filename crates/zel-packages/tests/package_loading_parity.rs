@@ -292,3 +292,179 @@ fn smart_negation_and_keep_going_and_symlinks_in_resolve() {
         out_sym.events
     );
 }
+
+#[test]
+fn blazel_utils_helpers_resolve_in_defining_bzl_and_reject_unmapped_repos() {
+    use std::collections::HashMap;
+    use zel_packages::RepoResolver;
+
+    struct ScopedResolver {
+        main: PathFragment,
+        helper: PathFragment,
+        dep: PathFragment,
+    }
+    impl RepoResolver for ScopedResolver {
+        fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+            if !repo.is_visible() {
+                return None;
+            }
+            if repo.is_main() {
+                return Some(self.main.clone());
+            }
+            match repo.name() {
+                "helper+" => Some(self.helper.clone()),
+                "dep+2.0" => Some(self.dep.clone()),
+                _ => None,
+            }
+        }
+        fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping {
+            let mut m = HashMap::new();
+            if owner.is_main() {
+                m.insert(String::new(), RepositoryName::main());
+                m.insert("helper".into(), RepositoryName::create("helper+").unwrap());
+                // Main repo maps `caller_only`, NOT `helper_dep`.
+                m.insert(
+                    "caller_only".into(),
+                    RepositoryName::create("dep+2.0").unwrap(),
+                );
+            } else if owner.name() == "helper+" {
+                // Defining `.bzl` in `helper+` maps `helper_dep` (and NOT `platforms`, `bazel_tools`, or `caller_only`).
+                m.insert(
+                    "helper_dep".into(),
+                    RepositoryName::create("dep+2.0").unwrap(),
+                );
+            }
+            RepositoryMapping::new(m, owner.clone())
+        }
+    }
+
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let main = PathFragment::create("/ws");
+    let helper = PathFragment::create("/ext/helper+");
+    let dep = PathFragment::create("/ext/dep+2.0");
+    write(&fs, &dep, "BUILD", "");
+    write(&fs, &helper, "lib/BUILD", "");
+    write(
+        &fs,
+        &helper,
+        "lib/blazel_utils.bzl",
+        r#"
+def _to_label(repo_name):
+    if not repo_name.startswith("@"):
+        repo_name = "@" + repo_name
+    return Label(repo_name + "//:unused")
+
+def get_canonical_repo_name(apparent_repo_name):
+    return _to_label(apparent_repo_name).workspace_name
+
+def get_repo_root(apparent_repo_name):
+    return _to_label(apparent_repo_name).workspace_root
+"#,
+    );
+    write(
+        &fs,
+        &main,
+        "BUILD",
+        r#"
+load("@helper//lib:blazel_utils.bzl", "get_canonical_repo_name", "get_repo_root")
+genrule(
+    name = "info",
+    outs = ["out.txt"],
+    cmd = "|".join([
+        get_canonical_repo_name("helper_dep"),
+        get_repo_root("helper_dep"),
+        get_canonical_repo_name(""),
+        get_repo_root(""),
+    ]) + " > $@",
+)
+"#,
+    );
+
+    let resolver: Arc<dyn RepoResolver> = Arc::new(ScopedResolver {
+        main: main.clone(),
+        helper,
+        dep,
+    });
+
+    // Default layout: external/<canonical>.
+    let cfg_default = LoaderConfig::new(
+        Arc::clone(&fs) as Arc<dyn FileSystem>,
+        Arc::clone(&resolver),
+    );
+    let pkg_default = PackageLoader::new(cfg_default)
+        .load_package(&PackageIdentifier::create_in_main_repo("").unwrap())
+        .unwrap();
+    assert!(!pkg_default.contains_errors, "{:?}", pkg_default.events);
+    let cmd_default = match pkg_default.targets.get("info").unwrap() {
+        zel_packages::Target::Rule(r) => match r.extra.attr_values.get("cmd").unwrap() {
+            zel_packages::attr::AttrValue::Str(s) => s.clone(),
+            other => panic!("unexpected cmd: {other:?}"),
+        },
+        _ => panic!("expected rule"),
+    };
+    assert_eq!(cmd_default, "dep+2.0|external/dep+2.0|| > $@");
+
+    // Sibling layout: ../<canonical>.
+    let mut cfg_sibling = LoaderConfig::new(
+        Arc::clone(&fs) as Arc<dyn FileSystem>,
+        Arc::clone(&resolver),
+    );
+    cfg_sibling.sibling_repository_layout = true;
+    let pkg_sibling = PackageLoader::new(cfg_sibling)
+        .load_package(&PackageIdentifier::create_in_main_repo("").unwrap())
+        .unwrap();
+    assert!(!pkg_sibling.contains_errors, "{:?}", pkg_sibling.events);
+    let cmd_sibling = match pkg_sibling.targets.get("info").unwrap() {
+        zel_packages::Target::Rule(r) => match r.extra.attr_values.get("cmd").unwrap() {
+            zel_packages::attr::AttrValue::Str(s) => s.clone(),
+            other => panic!("unexpected cmd: {other:?}"),
+        },
+        _ => panic!("expected rule"),
+    };
+    assert_eq!(cmd_sibling, "dep+2.0|../dep+2.0|| > $@");
+
+    // Calling with a repo only mapped in the caller (`caller_only`), a typo (`helper_deb`),
+    // `platforms`, or `bazel_tools` (absent from `helper+`'s mapping) must fail on invalid Label.
+    for (bad_call, expected) in [
+        (
+            "get_canonical_repo_name('caller_only')",
+            "'workspace_name' is not allowed on invalid Label @@[unknown repo 'caller_only' requested from @@helper+]//:unused",
+        ),
+        (
+            "get_repo_root('helper_deb')",
+            "'workspace_root' is not allowed on invalid Label @@[unknown repo 'helper_deb' requested from @@helper+ (did you mean 'helper_dep'?)]//:unused",
+        ),
+        (
+            "get_canonical_repo_name('platforms')",
+            "'workspace_name' is not allowed on invalid Label @@[unknown repo 'platforms' requested from @@helper+]//:unused",
+        ),
+        (
+            "get_repo_root('bazel_tools')",
+            "'workspace_root' is not allowed on invalid Label @@[unknown repo 'bazel_tools' requested from @@helper+]//:unused",
+        ),
+    ] {
+        write(
+            &fs,
+            &main,
+            "bad/BUILD",
+            &format!(
+                "load('@helper//lib:blazel_utils.bzl', 'get_canonical_repo_name', 'get_repo_root')\nx = {bad_call}\n"
+            ),
+        );
+        let loader = PackageLoader::new(LoaderConfig::new(
+            Arc::clone(&fs) as Arc<dyn FileSystem>,
+            Arc::clone(&resolver),
+        ));
+        let pkg = loader
+            .load_package(&PackageIdentifier::create_in_main_repo("bad").unwrap())
+            .unwrap();
+        assert!(pkg.contains_errors, "expected error for {bad_call}");
+        let errs = pkg
+            .events
+            .iter()
+            .map(|e| e.render())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(errs.contains(expected), "for {bad_call}: {errs}");
+    }
+}

@@ -561,6 +561,9 @@ impl BlazeRuntime {
         acfg.no_compact_repo_mapping = !parsed
             .get_bool("incompatible_compact_repo_mapping_manifest")
             .unwrap_or(true);
+        acfg.sibling_repository_layout = parsed
+            .get_bool("experimental_sibling_repository_layout")
+            .unwrap_or(false);
         Ok(acfg)
     }
 

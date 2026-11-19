@@ -556,3 +556,185 @@ comp_l = [a + 1 for [a] in [[1], [2]]]
         Some(&Value::String("a\\\nb".into()))
     );
 }
+
+#[test]
+fn label_visibility_workspace_name_workspace_root_and_sibling_layout() {
+    use zel_cmdline::{PackageIdentifier, RepositoryMapping, RepositoryName};
+    use zel_vfs::PathFragment;
+
+    let make_ctx = |sibling_layout: bool, entries: Vec<(&str, &str)>, owner: RepositoryName| {
+        let mut ctx = EvalContext {
+            file_name: "blazel_utils.bzl".into(),
+            ..Default::default()
+        };
+        ctx.semantics.experimental_sibling_repository_layout = sibling_layout;
+        ctx.thread.semantics.experimental_sibling_repository_layout = sibling_layout;
+        let ordered = entries
+            .into_iter()
+            .map(|(a, c)| (a.to_string(), RepositoryName::create_unvalidated(c)))
+            .collect();
+        let pkg = PackageIdentifier::create(owner.clone(), PathFragment::empty()).unwrap();
+        *ctx.module_env.label_ctx.lock().unwrap() =
+            Some((pkg, RepositoryMapping::new_ordered(ordered, owner)));
+        ctx.eval_str(
+            r#"
+def _to_label(repo_name):
+    if not repo_name.startswith("@"):
+        repo_name = "@" + repo_name
+    return Label(repo_name + "//:unused")
+
+def get_canonical_repo_name(apparent_repo_name):
+    return _to_label(apparent_repo_name).workspace_name
+
+def get_repo_root(apparent_repo_name):
+    return _to_label(apparent_repo_name).workspace_root
+"#,
+        )
+        .unwrap();
+        ctx
+    };
+
+    // Mapped main + external repos under default external/<canonical> layout.
+    let mut default_ctx = make_ctx(
+        false,
+        vec![
+            ("", ""),
+            ("my_ws", ""),
+            ("rules_foo", "rules_foo+1.2"),
+            ("bazel_tools", "bazel_tools"),
+            ("platforms", "platforms+0.0.10"),
+        ],
+        RepositoryName::main(),
+    );
+    default_ctx
+        .eval_str(
+            r#"
+c_main = get_canonical_repo_name("")
+c_ws = get_canonical_repo_name("my_ws")
+c_foo = get_canonical_repo_name("rules_foo")
+c_foo_at = get_canonical_repo_name("@rules_foo")
+c_bt = get_canonical_repo_name("bazel_tools")
+c_plat = get_canonical_repo_name("platforms")
+r_main = get_repo_root("")
+r_ws = get_repo_root("my_ws")
+r_foo = get_repo_root("rules_foo")
+r_plat = get_repo_root("platforms")
+ga_root = getattr(Label("@rules_foo//:t"), "workspace_root")
+"#,
+        )
+        .unwrap();
+    assert_eq!(
+        default_ctx.globals.get("c_main"),
+        Some(&Value::String("".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("c_ws"),
+        Some(&Value::String("".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("c_foo"),
+        Some(&Value::String("rules_foo+1.2".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("c_foo_at"),
+        Some(&Value::String("rules_foo+1.2".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("c_bt"),
+        Some(&Value::String("bazel_tools".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("c_plat"),
+        Some(&Value::String("platforms+0.0.10".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("r_main"),
+        Some(&Value::String("".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("r_ws"),
+        Some(&Value::String("".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("r_foo"),
+        Some(&Value::String("external/rules_foo+1.2".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("r_plat"),
+        Some(&Value::String("external/platforms+0.0.10".into()))
+    );
+    assert_eq!(
+        default_ctx.globals.get("ga_root"),
+        Some(&Value::String("external/rules_foo+1.2".into()))
+    );
+
+    // Same under --experimental_sibling_repository_layout: main stays "", external becomes ../<canonical>.
+    let mut sibling_ctx = make_ctx(
+        true,
+        vec![("", ""), ("my_ws", ""), ("rules_foo", "rules_foo+1.2")],
+        RepositoryName::main(),
+    );
+    sibling_ctx
+        .eval_str(
+            r#"
+r_main = get_repo_root("")
+r_ws = get_repo_root("my_ws")
+r_foo = get_repo_root("rules_foo")
+ga_root = getattr(Label("@rules_foo//:t"), "workspace_root")
+"#,
+        )
+        .unwrap();
+    assert_eq!(
+        sibling_ctx.globals.get("r_main"),
+        Some(&Value::String("".into()))
+    );
+    assert_eq!(
+        sibling_ctx.globals.get("r_ws"),
+        Some(&Value::String("".into()))
+    );
+    assert_eq!(
+        sibling_ctx.globals.get("r_foo"),
+        Some(&Value::String("../rules_foo+1.2".into()))
+    );
+    assert_eq!(
+        sibling_ctx.globals.get("ga_root"),
+        Some(&Value::String("../rules_foo+1.2".into()))
+    );
+
+    // Unmapped apparent repo (with did-you-mean suggestion, without suggestion, and unmapped
+    // bazel_tools / platforms) fails on workspace_name, repo_name, workspace_root, and getattr.
+    for (expr, expected) in [
+        (
+            "get_canonical_repo_name('rules_fob')",
+            "'workspace_name' is not allowed on invalid Label @@[unknown repo 'rules_fob' requested from @@ (did you mean 'rules_foo'?)]//:unused",
+        ),
+        (
+            "Label('@rules_fob//:unused').repo_name",
+            "'repo_name' is not allowed on invalid Label @@[unknown repo 'rules_fob' requested from @@ (did you mean 'rules_foo'?)]//:unused",
+        ),
+        (
+            "get_repo_root('nope')",
+            "'workspace_root' is not allowed on invalid Label @@[unknown repo 'nope' requested from @@]//:unused",
+        ),
+        (
+            "get_canonical_repo_name('bazel_tools')",
+            "'workspace_name' is not allowed on invalid Label @@[unknown repo 'bazel_tools' requested from @@]//:unused",
+        ),
+        (
+            "get_repo_root('platforms')",
+            "'workspace_root' is not allowed on invalid Label @@[unknown repo 'platforms' requested from @@]//:unused",
+        ),
+        (
+            "getattr(Label('@platforms//:unused'), 'workspace_name', 'fallback')",
+            "'workspace_name' is not allowed on invalid Label @@[unknown repo 'platforms' requested from @@]//:unused",
+        ),
+    ] {
+        let mut c = make_ctx(
+            true,
+            vec![("", ""), ("my_ws", ""), ("rules_foo", "rules_foo+1.2")],
+            RepositoryName::main(),
+        );
+        let err = c.eval_str(expr).unwrap_err().0;
+        assert!(err.contains(expected), "for {expr}: {err}");
+    }
+}

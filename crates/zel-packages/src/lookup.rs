@@ -81,6 +81,9 @@ impl SimpleRepoResolver {
 
 impl RepoResolver for SimpleRepoResolver {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+        if !repo.is_visible() {
+            return None;
+        }
         if repo.is_main() {
             Some(self.main_root.clone())
         } else {
@@ -323,27 +326,20 @@ impl PackageLookupConfig {
 
     pub fn lookup(&self, pkg: &PackageIdentifier) -> PackageLookup {
         let Some(root) = self.resolver.repo_root(pkg.repository()) else {
+            let repo = pkg.repository();
             let main_map = self.resolver.mapping(&RepositoryName::main());
-            let dym = main_map.did_you_mean(pkg.repository().name());
-            let repo_display = if pkg.repository().is_main() {
-                pkg.repository().canonical_form()
-            } else if !pkg.repository().is_visible() {
-                pkg.repository().name_with_at()
+            let dym = main_map.did_you_mean(repo.name());
+            let repo_display = if repo.is_main() || !repo.is_visible() {
+                repo.canonical_form()
             } else {
-                format!(
-                    "@@[unknown repo '{}' requested from @@{dym}]",
-                    pkg.repository().name()
-                )
+                format!("@@[unknown repo '{}' requested from @@{dym}]", repo.name())
             };
-            let not_vis = pkg
-                .repository()
-                .not_visible_error_message()
-                .unwrap_or_else(|| {
-                    format!(
-                        "No repository visible as '@{}' from main repository{dym}",
-                        pkg.repository().name()
-                    )
-                });
+            let not_vis = repo.not_visible_error_message().unwrap_or_else(|| {
+                format!(
+                    "No repository visible as '@{}' from main repository{dym}",
+                    repo.name()
+                )
+            });
             return PackageLookup::RepoNotFound(format!(
                 "The repository '{repo_display}' could not be resolved: {not_vis}"
             ));

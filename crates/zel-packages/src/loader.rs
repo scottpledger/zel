@@ -57,6 +57,8 @@ pub struct LoaderConfig {
     /// Lets an embedding runtime evaluate selected `.bzl` files itself (files defining repository
     /// rules / module extensions): returns `None` to let the loader evaluate the file.
     pub bzl_override: Option<BzlOverride>,
+    /// Value of `--experimental_sibling_repository_layout` for Starlark `Label.workspace_root`.
+    pub sibling_repository_layout: bool,
 }
 
 /// See [`LoaderConfig::bzl_override`].
@@ -96,6 +98,7 @@ impl LoaderConfig {
             use_prelude: true,
             external_host: None,
             bzl_override: None,
+            sibling_repository_layout: false,
         }
     }
 }
@@ -614,14 +617,16 @@ impl PackageLoader {
             other => {
                 let pkg_display = if id.repository().is_main() {
                     id.package_fragment().to_string()
-                } else if matches!(other, crate::lookup::PackageLookup::RepoNotFound(_)) {
+                } else if matches!(other, crate::lookup::PackageLookup::RepoNotFound(_))
+                    && id.repository().is_visible()
+                {
                     format!(
                         "@@[unknown repo '{}' requested from @@]//{}",
                         id.repository().name(),
                         id.package_fragment()
                     )
                 } else {
-                    // The repository exists: its canonical name (`@@bazel_tools//platforms`).
+                    // The repository exists or already carries non-visible owner context.
                     format!(
                         "{}//{}",
                         id.repository().canonical_form(),
@@ -765,6 +770,9 @@ impl PackageLoader {
         let state = Arc::new(Mutex::new(st));
 
         let mut ctx = EvalContext::new(pkg_dir.clone(), Some(Arc::clone(&self.cfg.lookup.fs)));
+        ctx.semantics.experimental_sibling_repository_layout = self.cfg.sibling_repository_layout;
+        ctx.thread.semantics.experimental_sibling_repository_layout =
+            self.cfg.sibling_repository_layout;
         ctx.file_name = build_file.path_string().to_string();
         ctx.strict_names = true;
         ctx.captured_prints = Some(Vec::new());
@@ -1612,6 +1620,9 @@ impl PackageLoader {
             path.parent_directory().unwrap_or_else(PathFragment::empty),
             Some(Arc::clone(&self.cfg.lookup.fs)),
         );
+        ctx.semantics.experimental_sibling_repository_layout = self.cfg.sibling_repository_layout;
+        ctx.thread.semantics.experimental_sibling_repository_layout =
+            self.cfg.sibling_repository_layout;
         ctx.file_name = path.path_string().to_string();
         ctx.strict_names = true;
         let is_scl = !is_prelude && label.name().ends_with(".scl");
