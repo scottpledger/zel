@@ -935,8 +935,9 @@ fn actions_method(
                     let format = b.format.or_else(|| a.param_file.as_ref().map(|p| p.format)).unwrap_or(ParamFileFormat::Shell);
                     write_inputs.extend(b.directory_artifacts.iter().cloned());
                     FileContent::Args {
-                        args: b.param_file_args(format),
+                        args: b.args.clone(),
                         format,
+                        flag_groups: b.groups.clone(),
                     }
                 }
                 other => {

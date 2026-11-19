@@ -172,6 +172,8 @@ pub(crate) fn analyze_legacy(
                     output: out_art.clone(),
                     content: Vec::new(),
                     is_executable: is_bin,
+                    inputs: Vec::new(),
+                    param_file_spec: None,
                 });
             }
             if is_bin {

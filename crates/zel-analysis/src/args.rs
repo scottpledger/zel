@@ -155,15 +155,6 @@ impl ArgsBuilder {
             param_file: p,
         }
     }
-
-    pub fn param_file_args(&self, fmt: ParamFileFormat) -> Vec<String> {
-        let info = ParamFileInfo {
-            format: fmt,
-            flag_groups: self.groups.clone(),
-            ..Default::default()
-        };
-        info.format_flag_groups(0, &self.args)
-    }
 }
 
 fn e(m: impl Into<String>) -> StarlarkError {

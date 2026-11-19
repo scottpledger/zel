@@ -960,6 +960,8 @@ fn strategy_regexp_exemptions_salt_timeout_and_catastrophic_file_write() {
             output: sym_out,
             content: b"new-via-symlink".to_vec(),
             is_executable: false,
+            inputs: Vec::new(),
+            param_file_spec: None,
         };
         let r_fw = run(&fw, &w, &cache, &ExecOptions::default());
         assert!(r_fw.succeeded(), "{:?}", r_fw.failure);
@@ -982,6 +984,8 @@ fn strategy_regexp_exemptions_salt_timeout_and_catastrophic_file_write() {
         output: bad_fw_art,
         content: b"boom".to_vec(),
         is_executable: false,
+        inputs: Vec::new(),
+        param_file_spec: None,
     };
     let after_marker = er.join("ran_after_catastrophic");
     let indep = spawn(

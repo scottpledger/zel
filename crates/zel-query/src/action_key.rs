@@ -369,6 +369,15 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
                             zel_analysis::ParamFileFormat::FlagPerLine => "FLAG_PER_LINE",
                             zel_analysis::ParamFileFormat::Multiline => "UNQUOTED",
                         });
+                        fp.add_bool(p.use_always);
+                        if p.format == zel_analysis::ParamFileFormat::FlagPerLine
+                            && !p.flag_groups.is_empty()
+                        {
+                            fp.add_int(p.flag_groups.len() as i32);
+                            for &(s, e) in &p.flag_groups {
+                                fp.add_int(s as i32).add_int(e as i32);
+                            }
+                        }
                     }
                 }
             }
@@ -628,5 +637,32 @@ mod tests {
         assert_ne!(key_on_mac(&multi), key_on_mac(&fpl_grouped));
         assert_ne!(key_on_mac(&multi), key_on_mac(&fpl_ungrouped));
         assert_ne!(key_on_mac(&fpl_grouped), key_on_mac(&fpl_ungrouped));
+    }
+
+    #[test]
+    fn aquery_action_key_distinguishes_flag_per_line_pair_vs_separate_adds() {
+        let make = |groups: Vec<(usize, usize)>| {
+            Action::new(
+                owner(),
+                "Compile",
+                ActionKind::Spawn {
+                    executable: "/bin/tool".into(),
+                    arguments: vec![CommandLineArgs {
+                        args: vec!["--flag".into(), "v".into()],
+                        param_file: Some(zel_analysis::ParamFileInfo {
+                            flag_format: "@%s".into(),
+                            use_always: true,
+                            format: zel_analysis::ParamFileFormat::FlagPerLine,
+                            leading_args: 0,
+                            flag_groups: groups,
+                        }),
+                    }],
+                    shell_command: None,
+                },
+            )
+        };
+        let k_paired = key_on_mac(&make(vec![(0, 2)]));
+        let k_split = key_on_mac(&make(vec![(0, 1), (1, 2)]));
+        assert_ne!(k_paired, k_split);
     }
 }

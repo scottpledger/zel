@@ -131,31 +131,10 @@ impl Netrc {
         Self::from_file(&path).ok()
     }
 
-    /// Locate `.netrc` checking `client_env` first, then process `std::env`.
+    /// Locate `.netrc` using `NETRC`, `HOME/.netrc`, or `USERPROFILE/.netrc` from `client_env`
+    /// only (`BazelRepositoryModule.newCredentialsFromNetrc` never falls back to server JVM env).
     pub fn load_from_env(client_env: &BTreeMap<String, String>) -> Option<Self> {
-        let get = |k: &str| -> Option<String> {
-            client_env
-                .get(k)
-                .filter(|v| !v.is_empty())
-                .cloned()
-                .or_else(|| std::env::var(k).ok().filter(|v| !v.is_empty()))
-        };
-        if let Some(p) = get("NETRC").map(PathBuf::from).filter(|p| p.exists()) {
-            return Self::from_file(&p).ok();
-        }
-        if let Some(p) = get("HOME")
-            .map(|h| PathBuf::from(h).join(".netrc"))
-            .filter(|p| p.exists())
-        {
-            return Self::from_file(&p).ok();
-        }
-        if let Some(p) = get("USERPROFILE")
-            .map(|h| PathBuf::from(h).join(".netrc"))
-            .filter(|p| p.exists())
-        {
-            return Self::from_file(&p).ok();
-        }
-        None
+        Self::load_from_client_env_only(client_env)
     }
 
     /// Loads `.netrc` using `NETRC`, `HOME/.netrc`, or `USERPROFILE/.netrc` from `client_env`
@@ -364,7 +343,7 @@ pub fn resolve_netrc_headers(
     client_env: &BTreeMap<String, String>,
 ) -> Vec<(String, String)> {
     let host = url_host(url);
-    if let Some(netrc) = Netrc::load_from_env(client_env) {
+    if let Some(netrc) = Netrc::load_from_client_env_only(client_env) {
         if let Some(m) = netrc.get_credential(host) {
             if let Some(pwd) = &m.password {
                 let login = m.login.as_deref().unwrap_or("");
@@ -463,6 +442,60 @@ default login defuser password defpass
         let d = netrc.get_credential("other.com").unwrap();
         assert_eq!(d.login.as_deref(), Some("defuser"));
         assert_eq!(d.password.as_deref(), Some("defpass"));
+    }
+
+    #[test]
+    fn resolve_netrc_headers_ignores_server_process_env() {
+        let dir =
+            std::env::temp_dir().join(format!("zel-netrc-proc-isolation-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let server_netrc = dir.join(".netrc");
+        std::fs::write(
+            &server_netrc,
+            "machine leak.example.com login srvuser password srvsecret\n",
+        )
+        .unwrap();
+
+        let prev_netrc = std::env::var_os("NETRC");
+        std::env::set_var("NETRC", &server_netrc);
+
+        let empty_client_env = BTreeMap::new();
+        let leaked =
+            resolve_netrc_headers("https://leak.example.com/pkg.tar.gz", &empty_client_env);
+        let leaked_auth = resolve_auth_headers(
+            "https://leak.example.com/pkg.tar.gz",
+            &[],
+            &empty_client_env,
+        )
+        .unwrap();
+
+        let mut explicit_client_env = BTreeMap::new();
+        explicit_client_env.insert(
+            "NETRC".to_string(),
+            server_netrc.to_string_lossy().into_owned(),
+        );
+        let allowed =
+            resolve_netrc_headers("https://leak.example.com/pkg.tar.gz", &explicit_client_env);
+
+        match prev_netrc {
+            Some(v) => std::env::set_var("NETRC", v),
+            None => std::env::remove_var("NETRC"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            leaked.is_empty(),
+            "server process NETRC must not leak when absent from client_env: {leaked:?}"
+        );
+        assert!(leaked_auth.is_empty(), "{leaked_auth:?}");
+        assert_eq!(
+            allowed,
+            vec![(
+                "Authorization".to_string(),
+                "Basic c3J2dXNlcjpzcnZzZWNyZXQ=".to_string()
+            )]
+        );
     }
 
     #[cfg(unix)]

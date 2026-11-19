@@ -1285,6 +1285,73 @@ pub fn format_utc_build_date(epoch_secs: i64) -> String {
     )
 }
 
+/// Deferred parameter-file formatting specification for [`ActionAnalysisMetadata::FileWriteAction`],
+/// allowing tree-artifact placeholders (`Args.add_all`) to expand at execution time before
+/// parameter-file quoting/escaping (`ParameterFileWriteAction` / `ParameterFile.writeParameterFile`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParamFileWriteSpec {
+    pub args: Vec<String>,
+    pub format: ParamFileFormat,
+    pub flag_groups: Vec<(usize, usize)>,
+    pub flags_only: bool,
+}
+
+impl ParamFileWriteSpec {
+    /// Returns true if any argument contains a deferred tree-artifact placeholder.
+    pub fn has_tree_artifacts(&self) -> bool {
+        self.args.iter().any(|s| s.contains("\u{1}ZEL_TREE"))
+    }
+
+    /// Expands tree-artifact placeholders via `list_dir` and renders the parameter file bytes.
+    pub fn render_expanded(
+        &self,
+        list_dir: &dyn Fn(&str) -> Result<Vec<String>, String>,
+    ) -> Result<Vec<u8>, String> {
+        let mut lines =
+            if self.format == ParamFileFormat::FlagPerLine && !self.flag_groups.is_empty() {
+                let mut collapsed = Vec::with_capacity(self.flag_groups.len());
+                let mut cursor = 0usize;
+                let collapse_one = |group: Vec<String>, dst: &mut Vec<String>| match group
+                    .as_slice()
+                {
+                    [] => {}
+                    [only] => dst.push(only.clone()),
+                    [first, rest @ ..] if first.is_empty() => dst.push(rest.join(" ")),
+                    [first, rest @ ..] => dst.push(format!("{first}={}", rest.join(" "))),
+                };
+                for &(start, end) in &self.flag_groups {
+                    if end == 0 || start >= self.args.len() || start >= end {
+                        continue;
+                    }
+                    let s = start;
+                    let e = end.min(self.args.len());
+                    while cursor < s {
+                        let expanded =
+                            crate::expand_tree_artifact_args(&self.args[cursor..cursor + 1], list_dir)?;
+                        collapsed.extend(expanded);
+                        cursor += 1;
+                    }
+                    let expanded = crate::expand_tree_artifact_args(&self.args[s..e], list_dir)?;
+                    collapse_one(expanded, &mut collapsed);
+                    cursor = e;
+                }
+                while cursor < self.args.len() {
+                    let expanded =
+                        crate::expand_tree_artifact_args(&self.args[cursor..cursor + 1], list_dir)?;
+                    collapsed.extend(expanded);
+                    cursor += 1;
+                }
+                collapsed
+            } else {
+                crate::expand_tree_artifact_args(&self.args, list_dir)?
+            };
+        if self.flags_only {
+            lines.retain(|s| s.starts_with("--"));
+        }
+        Ok(crate::action::render_param_file(&lines, self.format).into_bytes())
+    }
+}
+
 /// Action specification generated during the Analysis phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionAnalysisMetadata {
@@ -1313,6 +1380,8 @@ pub enum ActionAnalysisMetadata {
         output: Artifact,
         content: Vec<u8>,
         is_executable: bool,
+        inputs: Vec<Artifact>,
+        param_file_spec: Option<ParamFileWriteSpec>,
     },
     SymlinkAction {
         owner: Label,
@@ -1360,14 +1429,16 @@ impl ActionAnalysisMetadata {
 
     pub fn inputs(&self) -> Vec<Artifact> {
         match self {
-            Self::SpawnAction { inputs, .. } => inputs.clone(),
+            Self::SpawnAction { inputs, .. } | Self::FileWriteAction { inputs, .. } => {
+                inputs.clone()
+            }
             Self::TemplateExpansionAction { template, .. } => vec![template.clone()],
             Self::BuildInfoTranslateAction {
                 status_file,
                 template,
                 ..
             } => vec![status_file.clone(), template.clone()],
-            Self::FileWriteAction { .. } | Self::SymlinkAction { .. } => Vec::new(),
+            Self::SymlinkAction { .. } => Vec::new(),
         }
     }
 
@@ -1422,11 +1493,25 @@ impl ActionAnalysisMetadata {
                 output,
                 content,
                 is_executable,
+                inputs,
+                param_file_spec,
                 ..
             } => {
                 fp.add_str(output.exec_path.path_string())
                     .add_bytes(content)
                     .add_bool(*is_executable);
+                for inp in inputs {
+                    fp.add_str(inp.exec_path.path_string());
+                }
+                if let Some(spec) = param_file_spec {
+                    fp.add_i32(spec.format as i32)
+                        .add_bool(spec.flags_only)
+                        .add_strings(spec.args.iter())
+                        .add_i32(spec.flag_groups.len() as i32);
+                    for &(s, e) in &spec.flag_groups {
+                        fp.add_i32(s as i32).add_i32(e as i32);
+                    }
+                }
             }
             Self::SymlinkAction {
                 input_path,
@@ -1774,6 +1859,8 @@ mod tests {
             output: out_art.clone(),
             content: b"#!/bin/sh\necho hi\n".to_vec(),
             is_executable: true,
+            inputs: Vec::new(),
+            param_file_spec: None,
         };
         let act2 = act1.clone();
         assert_eq!(act1.action_key(), act2.action_key());

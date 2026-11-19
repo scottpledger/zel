@@ -178,16 +178,29 @@ pub enum FileContent {
     Args {
         args: Vec<String>,
         format: ParamFileFormat,
+        flag_groups: Vec<(usize, usize)>,
     },
 }
 
 impl FileContent {
-    /// Bytes written to disk.
+    /// Bytes written to disk when no execution-time tree expansion is needed.
     pub fn render(&self) -> Vec<u8> {
         match self {
             FileContent::Literal(s) => s.as_bytes().to_vec(),
             FileContent::Bytes(b) => b.clone(),
-            FileContent::Args { args, format } => render_param_file(args, *format).into_bytes(),
+            FileContent::Args {
+                args,
+                format,
+                flag_groups,
+            } => {
+                let pf = ParamFileInfo {
+                    format: *format,
+                    flag_groups: flag_groups.clone(),
+                    ..Default::default()
+                };
+                let effective = pf.format_flag_groups(0, args);
+                render_param_file(&effective, *format).into_bytes()
+            }
         }
     }
 }
@@ -400,6 +413,8 @@ pub fn propagate_rule_tags(
     }
 }
 
+type LoweredParamFile = (usize, String, Vec<u8>, crate::ParamFileWriteSpec);
+
 impl Action {
     /// Starts an action with defaults for everything except `owner`, `mnemonic`, and `kind`.
     pub fn new(owner: Label, mnemonic: &str, kind: ActionKind) -> Self {
@@ -552,6 +567,12 @@ impl Action {
                         fp.add_str(&p.flag_format)
                             .add_str(fmt_tag)
                             .add_bool(p.use_always);
+                        if p.format == ParamFileFormat::FlagPerLine && !p.flag_groups.is_empty() {
+                            fp.add_i32(p.flag_groups.len() as i32);
+                            for &(s, e) in &p.flag_groups {
+                                fp.add_i32(s as i32).add_i32(e as i32);
+                            }
+                        }
                     }
                 }
                 fp.add_str(shell_command.as_deref().unwrap_or(""));
@@ -569,6 +590,19 @@ impl Action {
                 fp.add_str("332877c7-ca9f-4731-b387-54f620408522")
                     .add_bool(*is_executable)
                     .add_bytes(&content.render());
+                if let FileContent::Args {
+                    format,
+                    flag_groups,
+                    ..
+                } = content
+                {
+                    if *format == ParamFileFormat::FlagPerLine && !flag_groups.is_empty() {
+                        fp.add_i32(flag_groups.len() as i32);
+                        for &(s, e) in flag_groups {
+                            fp.add_i32(s as i32).add_i32(e as i32);
+                        }
+                    }
+                }
             }
             ActionKind::Symlink {
                 target_file,
@@ -707,16 +741,33 @@ impl Action {
     /// according to `ParamFileInfo`; the second element lists `(param file exec path, body)`
     /// pairs that must be written before the spawn runs.
     pub fn command_line(&self) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
-        let (argv, indexed) = self.command_line_with_indices();
-        let params = indexed
-            .into_iter()
-            .map(|(_, path, body)| (path, body))
-            .collect();
-        (argv, params)
+        let (argv, params) = self.command_line_with_specs();
+        (
+            argv,
+            params
+                .into_iter()
+                .map(|(_, path, body, _)| (path, body))
+                .collect(),
+        )
     }
 
-    #[allow(clippy::type_complexity)]
-    fn command_line_with_indices(&self) -> (Vec<String>, Vec<(usize, String, Vec<u8>)>) {
+    fn command_line_with_specs(&self) -> (Vec<String>, Vec<LoweredParamFile>) {
+        fn is_flag_per_line_entry(s: &str) -> bool {
+            if s.starts_with("--") {
+                return true;
+            }
+            if let Some(rest) = s.strip_prefix("\u{1}ZEL_TREE_HEAD\u{1}") {
+                return rest.starts_with("--");
+            }
+            if let Some(rest) = s.strip_prefix(crate::TREE_MARKER) {
+                let mut parts = rest.splitn(3, '\u{1}');
+                let fmt_each = parts.next().unwrap_or("");
+                let before_each = parts.next().unwrap_or("");
+                return fmt_each.starts_with("--") || before_each.starts_with("--");
+            }
+            false
+        }
+
         let mut argv = Vec::new();
         let mut params = Vec::new();
         let ActionKind::Spawn {
@@ -752,24 +803,101 @@ impl Action {
                             .unwrap_or_else(|_| pf.flag_format.replace("%s", &path));
                         argv.push(formatted);
                         if pf.format == ParamFileFormat::FlagPerLine {
-                            let mut file_args = Vec::new();
-                            for item in grouped {
-                                if item.starts_with("--") {
-                                    file_args.push(item);
-                                } else {
-                                    argv.push(item);
+                            // `ParamFileInfo.flagsOnly`: only `--` arguments go into the param
+                            // file; non-flag arguments stay on the command line in order.
+                            if !pf.flag_groups.is_empty() {
+                                let mut raw_flag_args: Vec<String> = Vec::new();
+                                let mut spec_groups: Vec<(usize, usize)> = Vec::new();
+                                let mut cursor = lead;
+                                let mut push_slice = |s: usize, e: usize| {
+                                    let slice = &a.args[s..e];
+                                    if slice.first().is_some_and(|first| is_flag_per_line_entry(first))
+                                    {
+                                        let ns = raw_flag_args.len();
+                                        raw_flag_args.extend_from_slice(slice);
+                                        spec_groups.push((ns, raw_flag_args.len()));
+                                    } else if slice.iter().any(|x| x.contains("\u{1}ZEL_TREE")) {
+                                        argv.extend_from_slice(slice);
+                                    } else if e - s >= 2 {
+                                        if slice[0].is_empty() {
+                                            argv.push(slice[1..].join(" "));
+                                        } else {
+                                            argv.push(format!("{}={}", slice[0], slice[1..].join(" ")));
+                                        }
+                                    } else if e > s {
+                                        argv.push(slice[0].clone());
+                                    }
+                                };
+                                for &(start, end) in &pf.flag_groups {
+                                    if end <= lead || start >= a.args.len() {
+                                        continue;
+                                    }
+                                    let s = start.max(lead);
+                                    let e = end.min(a.args.len());
+                                    while cursor < s {
+                                        push_slice(cursor, cursor + 1);
+                                        cursor += 1;
+                                    }
+                                    push_slice(s, e);
+                                    cursor = e;
                                 }
+                                while cursor < a.args.len() {
+                                    push_slice(cursor, cursor + 1);
+                                    cursor += 1;
+                                }
+                                let spec_pf = ParamFileInfo {
+                                    format: pf.format,
+                                    flag_groups: spec_groups.clone(),
+                                    ..Default::default()
+                                };
+                                let flags = spec_pf.format_flag_groups(0, &raw_flag_args);
+                                let body = render_param_file(&flags, pf.format).into_bytes();
+                                params.push((
+                                    i,
+                                    path,
+                                    body,
+                                    crate::ParamFileWriteSpec {
+                                        args: raw_flag_args,
+                                        format: pf.format,
+                                        flag_groups: spec_groups,
+                                        flags_only: true,
+                                    },
+                                ));
+                            } else {
+                                let mut flags = Vec::new();
+                                for item in grouped {
+                                    if is_flag_per_line_entry(&item) {
+                                        flags.push(item);
+                                    } else {
+                                        argv.push(item);
+                                    }
+                                }
+                                let body = render_param_file(&flags, pf.format).into_bytes();
+                                params.push((
+                                    i,
+                                    path,
+                                    body,
+                                    crate::ParamFileWriteSpec {
+                                        args: flags,
+                                        format: pf.format,
+                                        flag_groups: Vec::new(),
+                                        flags_only: true,
+                                    },
+                                ));
                             }
-                            params.push((
-                                i,
-                                path,
-                                render_param_file(&file_args, pf.format).into_bytes(),
-                            ));
                         } else {
+                            let raw_spilled = a.args[lead..].to_vec();
+                            let body = render_param_file(&grouped, pf.format).into_bytes();
                             params.push((
                                 i,
                                 path,
-                                render_param_file(&grouped, pf.format).into_bytes(),
+                                body,
+                                crate::ParamFileWriteSpec {
+                                    args: raw_spilled,
+                                    format: pf.format,
+                                    flag_groups: Vec::new(),
+                                    flags_only: false,
+                                },
                             ));
                         }
                     } else {
@@ -809,10 +937,16 @@ impl Action {
         }
         match &self.kind {
             ActionKind::Spawn { .. } => {
-                let (argv, params) = self.command_line_with_indices();
+                let (argv, params) = self.command_line_with_specs();
                 let mut inputs = self.inputs.clone();
+                let tree_inputs: Vec<Artifact> = self
+                    .inputs
+                    .iter()
+                    .filter(|a| a.is_tree_artifact)
+                    .cloned()
+                    .collect();
                 let mut java_compile = self.java_compile.clone();
-                for (arg_idx, path, body) in params {
+                for (arg_idx, path, body, spec) in params {
                     // The classpath param file of a reduced-classpath Java compile is written by
                     // the executor (its content depends on `.jdeps` files read at execution time).
                     if let Some(jc) = java_compile.as_mut() {
@@ -840,11 +974,18 @@ impl Action {
                         ),
                         owner_label: self.owner.clone(),
                     };
+                    let param_inputs = if spec.has_tree_artifacts() {
+                        tree_inputs.clone()
+                    } else {
+                        Vec::new()
+                    };
                     out.push(ActionAnalysisMetadata::FileWriteAction {
                         owner: self.owner.clone(),
                         output: art.clone(),
                         content: body,
                         is_executable: false,
+                        inputs: param_inputs,
+                        param_file_spec: Some(spec),
                     });
                     inputs.push(art);
                 }
@@ -892,11 +1033,26 @@ impl Action {
                 is_executable,
             } => {
                 if let Some(output) = self.outputs.first() {
+                    let param_file_spec = match content {
+                        FileContent::Args {
+                            args,
+                            format,
+                            flag_groups,
+                        } => Some(crate::ParamFileWriteSpec {
+                            args: args.clone(),
+                            format: *format,
+                            flag_groups: flag_groups.clone(),
+                            flags_only: false,
+                        }),
+                        FileContent::Literal(_) | FileContent::Bytes(_) => None,
+                    };
                     out.push(ActionAnalysisMetadata::FileWriteAction {
                         owner: self.owner.clone(),
                         output: output.clone(),
                         content: content.render(),
                         is_executable: *is_executable,
+                        inputs: self.inputs.clone(),
+                        param_file_spec,
                     });
                 }
             }
@@ -1672,5 +1828,52 @@ mod tests {
             Some("linux")
         );
         assert!(execution_info.contains_key("no-sandbox"));
+    }
+
+    #[test]
+    fn param_file_flag_per_line_groups_distinguish_action_keys_and_prevent_sharing() {
+        let make_spawn = |groups: Vec<(usize, usize)>| {
+            let mut a = Action::new(
+                Label::parse_canonical("//a:b").unwrap(),
+                "Compile",
+                ActionKind::Spawn {
+                    executable: "/bin/tool".into(),
+                    arguments: vec![CommandLineArgs {
+                        args: vec!["--flag".into(), "v".into()],
+                        param_file: Some(ParamFileInfo {
+                            flag_format: "@%s".into(),
+                            use_always: true,
+                            format: ParamFileFormat::FlagPerLine,
+                            leading_args: 0,
+                            flag_groups: groups,
+                        }),
+                    }],
+                    shell_command: None,
+                },
+            );
+            a.outputs.push(art("a/out"));
+            a
+        };
+
+        // `args.add("--flag", "v")` -> `--flag=v` in param file.
+        let paired = make_spawn(vec![(0, 2)]);
+        // `args.add("--flag"); args.add("v")` -> `--flag` in param file, `v` on argv.
+        let split = make_spawn(vec![(0, 1), (1, 2)]);
+
+        let (argv_paired, params_paired) = paired.command_line();
+        let (argv_split, params_split) = split.command_line();
+        assert_eq!(params_paired[0].1, b"--flag=v\n");
+        assert_eq!(params_split[0].1, b"--flag\n");
+        assert_ne!(argv_paired, argv_split);
+
+        assert_ne!(paired.key(), split.key());
+        assert!(!paired.can_be_shared(&split));
+
+        let lowered_paired = paired.lower();
+        let lowered_split = split.lower();
+        assert_ne!(
+            lowered_paired[0].action_key(),
+            lowered_split[0].action_key()
+        );
     }
 }
