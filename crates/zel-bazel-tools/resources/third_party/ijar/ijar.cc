@@ -145,14 +145,25 @@ class JarStripper : public ZipExtractorProcessor {
       return;
     }
 
+    u1* buf = static_cast<u1*>(malloc(size > 0 ? size : 1));
+    if (!buf) abort();
+    u1* out_end = buf;
+    if (!StripClass(out_end, data, size)) {
+      free(buf);
+      return;
+    }
+    size_t out_length = static_cast<size_t>(out_end - buf);
     u1* dst = builder_->NewFile(filename, kFileAttr);
-    if (!dst) abort();
-    u1* out_end = dst;
-    if (StripClass(out_end, data, size)) {
-      if (builder_->FinishFile(static_cast<size_t>(out_end - dst), false,
-                               true) < 0) {
-        abort();
-      }
+    if (!dst) {
+      free(buf);
+      abort();
+    }
+    if (out_length > 0) {
+      memcpy(dst, buf, out_length);
+    }
+    free(buf);
+    if (builder_->FinishFile(out_length, false, true) < 0) {
+      abort();
     }
   }
 

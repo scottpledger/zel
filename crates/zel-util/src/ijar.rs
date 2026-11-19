@@ -1052,4 +1052,101 @@ public class B extends A {
 
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn dropped_enclosing_method_classes_leave_no_unfinished_zip_entries() {
+        fn build_test_class(internal_name: &str, with_enclosing_method: bool) -> Vec<u8> {
+            fn push_utf8(cp: &mut Vec<u8>, s: &str) {
+                cp.push(1);
+                cp.extend_from_slice(&(s.len() as u16).to_be_bytes());
+                cp.extend_from_slice(s.as_bytes());
+            }
+            fn push_class(cp: &mut Vec<u8>, idx: u16) {
+                cp.push(7);
+                cp.extend_from_slice(&idx.to_be_bytes());
+            }
+
+            let mut cp = Vec::new();
+            push_utf8(&mut cp, internal_name); // 1
+            push_class(&mut cp, 1); // 2
+            push_utf8(&mut cp, "java/lang/Object"); // 3
+            push_class(&mut cp, 3); // 4
+            push_utf8(&mut cp, "EnclosingMethod"); // 5
+
+            let mut out = Vec::new();
+            out.extend_from_slice(&0xCAFE_BABEu32.to_be_bytes());
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&52u16.to_be_bytes());
+            out.extend_from_slice(&6u16.to_be_bytes());
+            out.extend_from_slice(&cp);
+            out.extend_from_slice(&0x0021u16.to_be_bytes());
+            out.extend_from_slice(&2u16.to_be_bytes());
+            out.extend_from_slice(&4u16.to_be_bytes());
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&0u16.to_be_bytes());
+            out.extend_from_slice(&0u16.to_be_bytes());
+            if with_enclosing_method {
+                out.extend_from_slice(&1u16.to_be_bytes());
+                out.extend_from_slice(&5u16.to_be_bytes());
+                out.extend_from_slice(&4u32.to_be_bytes());
+                out.extend_from_slice(&4u16.to_be_bytes());
+                out.extend_from_slice(&0u16.to_be_bytes());
+            } else {
+                out.extend_from_slice(&0u16.to_be_bytes());
+            }
+            out
+        }
+
+        let in_jar = write_stored_jar(&[
+            JarEntry {
+                name: "pkg/Outer$1.class".to_string(),
+                external_attr: UNIX_FILE_ATTR,
+                data: build_test_class("pkg/Outer$1", true),
+            },
+            JarEntry {
+                name: "pkg/Kept.class".to_string(),
+                external_attr: UNIX_FILE_ATTR,
+                data: build_test_class("pkg/Kept", false),
+            },
+            JarEntry {
+                name: "pkg/Outer$2.class".to_string(),
+                external_attr: UNIX_FILE_ATTR,
+                data: build_test_class("pkg/Outer$2", true),
+            },
+        ])
+        .unwrap();
+
+        let (out_jar, _) = process_jar_bytes(&in_jar, true, None, None, false).unwrap();
+        let cd_entries = read_jar_entries(&out_jar).unwrap();
+        assert_eq!(cd_entries.len(), 1);
+        assert_eq!(cd_entries[0].name, "pkg/Kept.class");
+
+        // Also walk local file headers sequentially from byte 0 up to the central directory to
+        // ensure no unfinished local header was emitted for either dropped class.
+        let eocd = out_jar.len() - 22;
+        let cd_offset =
+            u32::from_le_bytes(out_jar[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+        let mut pos = 0usize;
+        let mut local_names = Vec::new();
+        while pos < cd_offset {
+            assert_eq!(
+                u32::from_le_bytes(out_jar[pos..pos + 4].try_into().unwrap()),
+                0x0403_4B50
+            );
+            let comp_len =
+                u32::from_le_bytes(out_jar[pos + 18..pos + 22].try_into().unwrap()) as usize;
+            let name_len =
+                u16::from_le_bytes(out_jar[pos + 26..pos + 28].try_into().unwrap()) as usize;
+            let extra_len =
+                u16::from_le_bytes(out_jar[pos + 28..pos + 30].try_into().unwrap()) as usize;
+            local_names.push(
+                std::str::from_utf8(&out_jar[pos + 30..pos + 30 + name_len])
+                    .unwrap()
+                    .to_string(),
+            );
+            pos += 30 + name_len + extra_len + comp_len;
+        }
+        assert_eq!(pos, cd_offset);
+        assert_eq!(local_names, vec!["pkg/Kept.class".to_string()]);
+    }
 }
