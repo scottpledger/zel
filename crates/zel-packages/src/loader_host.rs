@@ -3270,9 +3270,23 @@ impl PackageLoader {
                 Some(v) => sl_values(v).map_err(|e| format!("for parameter '{k}': {e}")),
             }
         };
-        let attr_aspects = match kw.get("attr_aspects") {
-            Some(Value::String(s)) => vec![s.clone()],
-            _ => strs("attr_aspects").map_err(|e| herr(ctx, e))?,
+        let (attr_aspects, attr_aspects_fn) = match kw.get("attr_aspects") {
+            None | Some(Value::None) => (Vec::new(), None),
+            Some(f @ (Value::UserFunction(_) | Value::BuiltinFunction(_))) => {
+                (Vec::new(), Some(f.clone()))
+            }
+            Some(v @ (Value::List(_) | Value::Tuple(_))) => {
+                (sl_values(v).map_err(|e| herr(ctx, format!("for parameter 'attr_aspects': {e}")))?, None)
+            }
+            Some(other) => {
+                return Err(herr(
+                    ctx,
+                    format!(
+                        "in call to aspect(), parameter 'attr_aspects' got value of type '{}', want 'sequence or function'",
+                        other.type_name()
+                    ),
+                ))
+            }
         };
         if attr_aspects.len() > 1 && attr_aspects.iter().any(|x| x == "*") {
             return Err(herr(
@@ -3280,6 +3294,38 @@ impl PackageLoader {
                 "'*' must be the only string in 'attr_aspects' list",
             ));
         }
+        let (toolchains_aspects, toolchains_aspects_fn) = match kw.get("toolchains_aspects") {
+            None | Some(Value::None) => (Vec::new(), None),
+            Some(f @ (Value::UserFunction(_) | Value::BuiltinFunction(_))) => {
+                (Vec::new(), Some(f.clone()))
+            }
+            Some(v @ (Value::List(_) | Value::Tuple(_))) => (
+                zel_starlark::eval::builtins::value_to_sequence(v).map_err(|e| herr(ctx, e.0))?,
+                None,
+            ),
+            Some(other) => {
+                return Err(herr(
+                    ctx,
+                    format!(
+                        "in call to aspect(), parameter 'toolchains_aspects' got value of type '{}', want 'sequence or function'",
+                        other.type_name()
+                    ),
+                ))
+            }
+        };
+        let propagation_predicate = match kw.get("propagation_predicate") {
+            None | Some(Value::None) => None,
+            Some(f @ (Value::UserFunction(_) | Value::BuiltinFunction(_))) => Some(f.clone()),
+            Some(other) => {
+                return Err(herr(
+                    ctx,
+                    format!(
+                        "in call to aspect(), parameter 'propagation_predicate' got value of type '{}', want 'function or NoneType'",
+                        other.type_name()
+                    ),
+                ))
+            }
+        };
         let groups = |k: &str| -> Vec<Vec<String>> {
             let Some(p) = kw.get(k) else { return Vec::new() };
             let items = zel_starlark::eval::builtins::value_to_sequence(p).unwrap_or_default();
@@ -3318,7 +3364,7 @@ impl PackageLoader {
                 let Value::String(k) = k else {
                     return Err(herr(ctx, "attrs keys must be strings"));
                 };
-                let mut attr = self.attr_from_value(&k, &v, owner).map_err(|e| herr(ctx, e))?;
+                let attr = self.attr_from_value(&k, &v, owner).map_err(|e| herr(ctx, e))?;
                 if !k.starts_with('_') {
                     let simple = matches!(attr.ty, AttrType::Bool | AttrType::Int | AttrType::String);
                     if !simple {
@@ -3329,21 +3375,33 @@ impl PackageLoader {
                             ),
                         ));
                     }
-                    if attr.allowed_values.is_none() && attr.ty != AttrType::Bool {
-                        match &attr.default {
-                            Some(AttrValue::Str(s)) => attr.allowed_values = Some(vec![s.clone()]),
-                            Some(AttrValue::Int(i)) => {
-                                attr.allowed_values = Some(vec![i.to_string()])
-                            }
-                            _ => {
+                    if let Some(allowed) = &attr.allowed_values {
+                        let def_str = match &attr.default {
+                            Some(AttrValue::Str(s)) => Some(s.clone()),
+                            Some(AttrValue::Int(i)) => Some(i.to_string()),
+                            _ => None,
+                        };
+                        if let Some(ds) = def_str {
+                            if !allowed.is_empty() && !allowed.contains(&ds) {
                                 return Err(herr(
                                     ctx,
                                     format!(
-                                        "Aspect parameter attribute '{k}' must have type 'bool', 'int' or 'string' and use the 'values' restriction."
+                                        "Aspect parameter attribute '{k}' has a bad default value: has to be one of {} instead of '{ds}'",
+                                        allowed.iter().map(|x| format!("'{x}'")).collect::<Vec<_>>().join(", ")
                                     ),
                                 ));
                             }
                         }
+                    }
+                } else {
+                    if !matches!(attr.ty, AttrType::Label | AttrType::LabelList) {
+                        return Err(herr(
+                            ctx,
+                            format!(
+                                "Aspect attribute '{k}' has unsupported type '{}'; private attributes must be label or label_list",
+                                attr.ty.name()
+                            ),
+                        ));
                     }
                 }
                 attrs.push(attr);
@@ -3404,6 +3462,10 @@ impl PackageLoader {
             id: 0,
             implementation,
             attr_aspects,
+            attr_aspects_fn,
+            toolchains_aspects,
+            toolchains_aspects_fn,
+            propagation_predicate,
             attrs,
             required_providers,
             required_aspect_providers: groups("required_aspect_providers"),
@@ -3411,6 +3473,7 @@ impl PackageLoader {
             requires: seq("requires"),
             toolchains: seq("toolchains"),
             fragments: strs("fragments").map_err(|e| herr(ctx, e))?,
+            subrules: seq("subrules"),
             apply_to_generating_rules,
             exec_compatible_with,
             defined_in: Mutex::new(String::new()),
@@ -3844,8 +3907,51 @@ impl PackageLoader {
             ));
         }
         if !initializers.is_empty() && pos.is_empty() {
+            let attr_zero_default = |attr: &Attribute| -> Value {
+                if let Some(d) = &attr.default {
+                    return d.to_value();
+                }
+                match attr.ty {
+                    AttrType::LabelList
+                    | AttrType::StringList
+                    | AttrType::IntList
+                    | AttrType::OutputList => mk_list(Vec::new()),
+                    AttrType::StringDict
+                    | AttrType::StringListDict
+                    | AttrType::LabelListDict
+                    | AttrType::LabelKeyedStringDict
+                    | AttrType::StringKeyedLabelDict => mk_dict(Vec::new()),
+                    AttrType::String => Value::String(String::new()),
+                    AttrType::Int => Value::Int(0.into()),
+                    AttrType::Bool => Value::Bool(false),
+                    AttrType::Tristate => Value::Int((-1).into()),
+                    AttrType::Label | AttrType::Output => Value::None,
+                }
+            };
             for init_fn in initializers.into_iter().rev() {
-                let res = ctx.call_value(init_fn, Vec::new(), kw.clone())?;
+                let required_params: Vec<String> = match &init_fn {
+                    Value::UserFunction(uf) => uf
+                        .params
+                        .iter()
+                        .filter(|p| !p.is_args && !p.is_kwargs && p.default.is_none())
+                        .map(|p| p.name.clone())
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let mut init_kw = BTreeMap::new();
+                for (k, v) in &kw {
+                    if !matches!(v, Value::None) {
+                        init_kw.insert(k.clone(), v.clone());
+                    }
+                }
+                for req in &required_params {
+                    if !init_kw.contains_key(req) {
+                        if let Some(attr) = rc.attrs.get(req) {
+                            init_kw.insert(req.clone(), attr_zero_default(attr));
+                        }
+                    }
+                }
+                let res = ctx.call_value(init_fn, Vec::new(), init_kw)?;
                 match res {
                     Value::None => {}
                     Value::Dict(d) => {
@@ -3853,7 +3959,11 @@ impl PackageLoader {
                             let Value::String(rk) = rk else {
                                 return Err(herr(ctx, "initializer return dict keys must be strings"));
                             };
-                            kw.insert(rk, rv);
+                            if matches!(rv, Value::None) {
+                                kw.remove(&rk);
+                            } else {
+                                kw.insert(rk, rv);
+                            }
                         }
                     }
                     other => {

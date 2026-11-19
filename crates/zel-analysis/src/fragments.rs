@@ -813,6 +813,7 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     "disable_nocopts",
                     Value::Bool(o.b("incompatible_disable_nocopts", true)),
                 ),
+                m("do_not_use_macos_set_install_name", Value::Bool(true)),
             ])
         }
         "platform" => {
@@ -1243,10 +1244,16 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                 ),
             ])
         }
-        "coverage" => mk_struct(vec![(
-            "collect_code_coverage",
-            Value::Bool(o.b("collect_code_coverage", false)),
-        )]),
+        "coverage" => {
+            let cov_on = o.b("collect_code_coverage", false);
+            let out_gen = late_bound_label("coverage", "output_generator", cfg)
+                .map(Value::Label)
+                .unwrap_or(Value::None);
+            mk(vec![
+                f("collect_code_coverage", Value::Bool(cov_on)),
+                m("output_generator", out_gen),
+            ])
+        }
         _ => return Ok(None),
     }))
 }
@@ -1320,7 +1327,7 @@ pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey)
         ("py", "native_rules_allowlist") => opt("python_native_rules_allowlist"),
         ("coverage", "output_generator") => {
             if o.b("collect_code_coverage", false) {
-                tools("tools/test:lcov_merger")
+                opt("coverage_output_generator").or_else(|| tools("tools/test:lcov_merger"))
             } else {
                 None
             }

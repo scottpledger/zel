@@ -26,6 +26,10 @@ pub struct AspectDef {
     /// `attr_aspects`: attribute names along which the aspect propagates (`"*"` = all label
     /// attributes).
     pub attr_aspects: Vec<String>,
+    pub attr_aspects_fn: Option<Value>,
+    pub toolchains_aspects: Vec<Value>,
+    pub toolchains_aspects_fn: Option<Value>,
+    pub propagation_predicate: Option<Value>,
     /// The aspect's own attributes (implicit `_x` dependencies and parameters).
     pub attrs: Vec<Attribute>,
     /// `required_providers`: a target is only visited if it advertises/has all providers of one
@@ -40,6 +44,7 @@ pub struct AspectDef {
     /// `toolchains`: raw toolchain type values.
     pub toolchains: Vec<Value>,
     pub fragments: Vec<String>,
+    pub subrules: Vec<Value>,
     pub apply_to_generating_rules: bool,
     pub exec_compatible_with: Vec<String>,
     /// Canonical label of the `.bzl` file (set when exported).

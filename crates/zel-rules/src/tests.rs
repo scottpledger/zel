@@ -4432,3 +4432,317 @@ chained_rule(name = "t")
         other => panic!("expected TemplateExpand, got {other:?}"),
     }
 }
+
+#[test]
+fn starlark_actions_inspection_map_directory_and_shadowed_action() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _id(x):
+    return x
+
+def _expand_dir(template_ctx, *, input_directories, output_directories, additional_inputs, additional_outputs, additional_params):
+    in_exp = input_directories["src_dir"]
+    out_dir = output_directories["dst_dir"]
+    child = template_ctx.declare_file("generated.txt", directory = out_dir)
+    a = template_ctx.args()
+    a.add("--mode", additional_params["mode"])
+    a.add("--dir", in_exp.directory.path)
+    template_ctx.run(
+        outputs = [child],
+        inputs = [in_exp.directory],
+        executable = "/bin/cp",
+        arguments = [a],
+    )
+
+def _impl(ctx):
+    w = ctx.actions.declare_file("hello.txt")
+    ctx.actions.write(w, "hello")
+
+    tpl = ctx.actions.declare_file("tpl.in")
+    ctx.actions.write(tpl, "vals=%VALS%")
+    expanded = ctx.actions.declare_file("tpl.out")
+    td = ctx.actions.template_dict()
+    td.add_joined("%VALS%", depset(["a", "b", "a"]), join_with = ",", map_each = _id, uniquify = True)
+    ctx.actions.expand_template(template = tpl, output = expanded, computed_substitutions = td)
+
+    created = ctx.created_actions()
+    w_act = created.by_file[w]
+    if w_act.content != "hello" or w_act.mnemonic != "FileWrite":
+        fail("unexpected write action fields")
+    exp_act = created.by_file[expanded]
+    if exp_act.substitutions["%VALS%"] != "a,b":
+        fail("unexpected template_dict substitutions: " + repr(exp_act.substitutions))
+
+    base_out = ctx.actions.declare_file("base.out")
+    ctx.actions.run(
+        outputs = [base_out],
+        inputs = [w],
+        executable = "/bin/true",
+        arguments = ["--base"],
+        env = {"A": "1", "B": "base"},
+    )
+    base_act = ctx.created_actions().by_file[base_out]
+    shadow_out = ctx.actions.declare_file("shadow.out")
+    ctx.actions.run(
+        outputs = [shadow_out],
+        executable = "/bin/true",
+        shadowed_action = base_act,
+        env = {"B": "override"},
+    )
+    sh_act = ctx.created_actions().by_file[shadow_out]
+    if sh_act.env["A"] != "1" or sh_act.env["B"] != "override":
+        fail("shadowed_action env merge failed: " + repr(sh_act.env))
+    if w not in sh_act.inputs.to_list():
+        fail("shadowed_action inputs not inherited")
+
+    src_dir = ctx.actions.declare_directory("src_tree")
+    ctx.actions.run(outputs = [src_dir], executable = "/bin/mkdir")
+    dst_dir = ctx.actions.declare_directory("dst_tree")
+    ctx.actions.map_directory(
+        input_directories = {"src_dir": src_dir},
+        output_directories = {"dst_dir": dst_dir},
+        additional_params = {"mode": "fast"},
+        implementation = _expand_dir,
+    )
+    return [
+        DefaultInfo(files = depset([w, expanded, shadow_out, dst_dir])),
+        OutputGroupInfo(extra = depset([expanded])),
+    ]
+
+testable_rule = rule(implementation = _impl, _skylark_testable = True)
+
+def _inspect_impl(ctx):
+    dep = ctx.attr.dep
+    if len(dep.actions) < 4:
+        fail("expected target.actions on dep")
+    if "extra" not in dep.output_groups:
+        fail("expected extra in OutputGroupInfo iteration")
+    out = ctx.actions.declare_file("ok.txt")
+    ctx.actions.write(out, "ok")
+    return [DefaultInfo(files = depset([out]))]
+
+inspector = rule(implementation = _inspect_impl, attrs = {"dep": attr.label()})
+"#,
+        ),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"testable_rule\", \"inspector\")\ntestable_rule(name = \"t\")\ninspector(name = \"i\", dep = \":t\")\n",
+        ),
+    ]);
+    let ct = ws.analyze("//:i").unwrap();
+    assert_eq!(ct.default_info.files.len(), 1);
+}
+
+#[test]
+fn aspect_propagation_predicate_and_dynamic_attr_aspects() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+SeenInfo = provider(fields = ["labels"])
+
+def _pred(ctx):
+    return ctx.rule.qualified_kind.rule_name == "node" and ctx.rule.attr.tag.value != "skip"
+
+def _dyn_attrs(ctx):
+    if ctx.attr.follow_extra == "yes":
+        return ["deps", "extra"]
+    return ["deps"]
+
+def _asp_impl(target, ctx):
+    acc = [str(target.label)]
+    for d in getattr(ctx.rule.attr, "deps", []):
+        if SeenInfo in d:
+            acc.extend(d[SeenInfo].labels)
+    for d in getattr(ctx.rule.attr, "extra", []):
+        if SeenInfo in d:
+            acc.extend(d[SeenInfo].labels)
+    return [SeenInfo(labels = acc)]
+
+dyn_aspect = aspect(
+    implementation = _asp_impl,
+    attr_aspects = _dyn_attrs,
+    propagation_predicate = _pred,
+    attrs = {"follow_extra": attr.string(default = "yes")},
+)
+
+def _node_impl(ctx):
+    return [DefaultInfo()]
+
+node = rule(
+    implementation = _node_impl,
+    attrs = {
+        "deps": attr.label_list(),
+        "extra": attr.label_list(),
+        "tag": attr.string(default = ""),
+    },
+)
+
+def _collect_impl(ctx):
+    seen = ctx.attr.root[SeenInfo].labels
+    out = ctx.actions.declare_file("seen.txt")
+    ctx.actions.write(out, ",".join(seen))
+    return [DefaultInfo(files = depset([out]))]
+
+collector = rule(
+    implementation = _collect_impl,
+    attrs = {"root": attr.label(aspects = [dyn_aspect])},
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "node", "collector")
+node(name = "skipped", tag = "skip")
+node(name = "extra_leaf")
+node(name = "root", deps = [":skipped"], extra = [":extra_leaf"])
+collector(name = "c", root = ":root")
+"#,
+        ),
+    ]);
+    let ct = ws.analyze("//:c").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let rendered = String::from_utf8(content.render()).unwrap();
+    assert!(rendered.contains("//:root"), "{rendered}");
+    assert!(rendered.contains("//:extra_leaf"), "{rendered}");
+    assert!(!rendered.contains("skipped"), "{rendered}");
+}
+
+#[test]
+fn allow_analysis_failure_and_analysis_failure_info() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _bad_impl(ctx):
+    fail("boom from bad_rule")
+
+bad_rule = rule(implementation = _bad_impl)
+
+def _wrap_impl(ctx):
+    out = ctx.actions.declare_file("never.txt")
+    ctx.actions.write(out, "never")
+    return [DefaultInfo(files = depset([out]))]
+
+wrap_rule = rule(implementation = _wrap_impl, attrs = {"dep": attr.label()})
+
+def _test_impl(ctx):
+    tut = ctx.attr.target_under_test[0]
+    ok = AnalysisFailureInfo in tut
+    causes = tut[AnalysisFailureInfo].causes.to_list() if ok else []
+    msg = causes[0].message if len(causes) == 1 else "wrong causes"
+    return [AnalysisTestResultInfo(success = ok and "boom from bad_rule" in msg, message = msg)]
+
+failure_test = rule(
+    implementation = _test_impl,
+    analysis_test = True,
+    attrs = {
+        "target_under_test": attr.label(
+            cfg = analysis_test_transition(
+                settings = {"//command_line_option:allow_analysis_failure": "true"},
+            ),
+        ),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "bad_rule", "wrap_rule", "failure_test")
+bad_rule(name = "bad")
+wrap_rule(name = "wrap", dep = ":bad")
+failure_test(name = "check_failure", target_under_test = ":wrap")
+"#,
+        ),
+    ]);
+    let ct = ws.analyze("//:check_failure").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected analysis test script");
+    };
+    let script = String::from_utf8(content.render()).unwrap();
+    assert!(script.contains("exit 0"), "{script}");
+}
+
+#[test]
+fn fragments_configuration_methods_and_string_set_flags() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _flag_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, ",".join(list(ctx.build_setting_value)))
+    return [DefaultInfo(files = depset([out]))]
+
+set_flag = rule(
+    implementation = _flag_impl,
+    build_setting = config.string_set(flag = True),
+)
+
+def _check_impl(ctx):
+    df = ctx.configuration.disabled_features()
+    ios_min = ctx.fragments.apple.ios_minimum_os_flag
+    j_ord = ctx.fragments.java.default_javac_flags_depset
+    cov_gen = ctx.fragments.coverage.output_generator()
+    out = ctx.actions.declare_file("info.txt")
+    ctx.actions.write(
+        out,
+        "{}|{}|{}|{}".format(
+            ",".join(df),
+            str(ios_min),
+            ",".join(j_ord.to_list()),
+            str(cov_gen),
+        ),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+check_rule = rule(
+    implementation = _check_impl,
+    fragments = ["apple", "java"],
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "set_flag", "check_rule")
+set_flag(name = "my_set", build_setting_default = set(["x"]))
+check_rule(name = "chk")
+"#,
+        ),
+    ]);
+    let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cfg.options.insert("features".into(), "a,-b".into());
+    cfg.options.insert("ios_minimum_os".into(), "15.2".into());
+    cfg.options
+        .insert("javacopt".into(), "-Xlint:all,-source 11".into());
+    cfg.options
+        .insert("collect_code_coverage".into(), "true".into());
+    cfg.flag_values.insert("//:my_set".into(), "p,q,p".into());
+    let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
+    let flag_ct = r
+        .analyze(&Label::parse_canonical("//:my_set").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &flag_ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(String::from_utf8(content.render()).unwrap(), "p,q");
+
+    let chk_ct = r
+        .analyze(&Label::parse_canonical("//:chk").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &chk_ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    assert_eq!(
+        text,
+        "b|15.2|-Xlint:all -source 11|@@bazel_tools//tools/test:lcov_merger"
+    );
+}

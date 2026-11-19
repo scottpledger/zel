@@ -886,7 +886,55 @@ pub fn apply_transition_split_with_resolver(
             trans.type_name()
         ));
     };
+    if let Some(Value::List(chain)) = s.fields.get("_composed_transitions") {
+        let steps = chain.lock().unwrap().elements.clone();
+        let mut current: Vec<(Option<String>, BuildConfigurationKey)> = vec![(None, cfg.clone())];
+        for step in &steps {
+            let mut next = Vec::new();
+            for (k0, c0) in current {
+                for (k1, c1) in apply_transition_split_with_resolver(step, &c0, attrs, resolver)? {
+                    let key = match (k0.as_ref(), k1) {
+                        (None, k) => k,
+                        (Some(a), None) => Some(a.clone()),
+                        (Some(a), Some(b)) if a.is_empty() => Some(b),
+                        (Some(a), Some(b)) if b.is_empty() => Some(a.clone()),
+                        (Some(a), Some(b)) => Some(format!("{a}/{b}")),
+                    };
+                    next.push((key, c1));
+                }
+            }
+            current = next;
+        }
+        return Ok(current);
+    }
+    if matches!(
+        s.fields.get("_build_setting").and_then(|v| v.as_str()),
+        Some("none")
+    ) {
+        let mut out = cfg.clone();
+        out.flag_values.clear();
+        out.flag_types.clear();
+        out.transition_changes.clear();
+        return Ok(vec![(None, out)]);
+    }
     let tctx = parse_transition_ctx(&s.fields);
+    if let Some(Value::String(attr_name)) = s.fields.get("_feature_flag_transition_attr") {
+        let mut out = cfg.clone();
+        if let Some(Value::Struct(attr_s)) = attrs {
+            if let Some(Value::Dict(d)) = attr_s.fields.get(attr_name) {
+                for (k, v) in d.lock().unwrap().items() {
+                    let key_str = match &k {
+                        Value::Label(l) => l.canonical_form(),
+                        Value::String(st) => canonicalize_setting(st, tctx.as_ref())?,
+                        _ => continue,
+                    };
+                    let spec = resolve_build_setting(&key_str, &out, resolver)?;
+                    set_setting_with_spec(&mut out, &key_str, &v, spec.as_ref(), tctx.as_ref())?;
+                }
+            }
+        }
+        return Ok(vec![(None, out)]);
+    }
     // `analysis_test_transition(settings = {...})`: sets the given build settings.
     if let Some(Value::Dict(d)) = s
         .fields

@@ -299,6 +299,7 @@ struct CtxState {
     actions: Mutex<Vec<Action>>,
     graph: Mutex<ActionGraph>,
     declared_trees: Mutex<BTreeSet<String>>,
+    mapped_trees: Mutex<BTreeSet<String>>,
     declared_files: Mutex<BTreeSet<String>>,
     declared_artifacts: Mutex<Vec<Artifact>>,
     rule_errors: Mutex<Vec<String>>,
@@ -457,12 +458,15 @@ impl CtxState {
         drop(files);
 
         let graph = self.graph.lock().unwrap();
+        let mapped = self.mapped_trees.lock().unwrap();
         let mut orphans: Vec<String> = Vec::new();
         let mut seen = BTreeSet::new();
         let mut check_art = |a: &Artifact| {
+            let ep = a.exec_path.path_string();
             if !a.is_source
-                && seen.insert(a.exec_path.path_string().to_string())
-                && graph.generating_action(a.exec_path.path_string()).is_none()
+                && seen.insert(ep.to_string())
+                && graph.generating_action(ep).is_none()
+                && !(a.is_tree_artifact && mapped.contains(ep))
             {
                 orphans.push(a.root_relative_path.path_string().to_string());
             }

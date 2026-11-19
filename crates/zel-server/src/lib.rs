@@ -484,6 +484,38 @@ impl BlazeRuntime {
             }
         }
 
+        // Start `--starlark_cpu_profile` sampling if requested on the command line.
+        let starlark_cpu_profile_started = {
+            let mut prof_arg: Option<String> = None;
+            let mut it = cmd_args.iter();
+            while let Some(a) = it.next() {
+                if a == "--" {
+                    break;
+                }
+                if let Some(v) = a.strip_prefix("--starlark_cpu_profile=") {
+                    prof_arg = Some(v.to_string());
+                } else if a == "--starlark_cpu_profile" {
+                    if let Some(v) = it.next() {
+                        prof_arg = Some(v.clone());
+                    }
+                }
+            }
+            if let Some(raw_path) = prof_arg.filter(|p| !p.is_empty()) {
+                let p = std::path::Path::new(&raw_path);
+                let resolved = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    std::path::Path::new(self.dirs.workspace_dir.path_string()).join(p)
+                };
+                zel_starlark::profiler::start_cpu_profile(
+                    resolved,
+                    std::time::Duration::from_millis(10),
+                )
+            } else {
+                false
+            }
+        };
+
         // External repositories (Bzlmod) are resolved lazily for commands that load packages.
         let uses_external_repos = matches!(
             command,
@@ -735,6 +767,15 @@ impl BlazeRuntime {
                     exit_code.numeric_exit_code()
                 ),
             );
+        }
+
+        if starlark_cpu_profile_started {
+            if let Err(e) = zel_starlark::profiler::stop_cpu_profile() {
+                writeln_bytes(
+                    &mut stderr,
+                    &format!("ERROR: Cannot write Starlark CPU profile: {e}"),
+                );
+            }
         }
 
         let failure_detail =

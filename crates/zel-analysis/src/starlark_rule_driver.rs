@@ -822,6 +822,7 @@ pub fn analyze_starlark_rule(
         actions: Mutex::new(Vec::new()),
         graph: Mutex::new(ActionGraph::new()),
         declared_trees: Mutex::new(BTreeSet::new()),
+        mapped_trees: Mutex::new(BTreeSet::new()),
         declared_files: Mutex::new(BTreeSet::new()),
         declared_artifacts: Mutex::new(Vec::new()),
         rule_errors: Mutex::new(attr_errors),
@@ -842,6 +843,59 @@ pub fn analyze_starlark_rule(
     crate::fragments::validate_declared_fragments(&declared_fragments(&st), &st.cfg)
         .map_err(wrap)?;
 
+    let allow_failure = cfg.bool_option("allow_analysis_failure", false);
+    let is_analysis_test = spec
+        .kwargs
+        .get("analysis_test")
+        .is_some_and(|v| matches!(v, Value::Bool(true)));
+    let mut dep_failure_sets: Vec<Arc<Depset>> = Vec::new();
+    if allow_failure && !is_analysis_test {
+        for dep_list in st.deps.values() {
+            for dep in dep_list {
+                if let Some(Value::ProviderInstance { fields, .. }) =
+                    dep.providers.get("AnalysisFailureInfo")
+                {
+                    if let Some(Value::Depset(ds)) = fields.get("causes") {
+                        dep_failure_sets.push(Arc::clone(ds));
+                    }
+                }
+            }
+        }
+    }
+    let make_failure_target =
+        |own_msg: Option<String>, transitive: Vec<Arc<Depset>>| -> ConfiguredTarget {
+            let direct = match own_msg {
+                Some(m) => vec![analysis_failure_value(label.clone(), m)],
+                None => Vec::new(),
+            };
+            let causes = Value::Depset(Arc::new(
+                Depset::new(DepsetOrder::Default, direct, transitive)
+                    .expect("analysis_failure values are hashable"),
+            ));
+            let mut ct = ConfiguredTarget::new(label.clone(), cfg.clone(), rule.rule_class.clone());
+            ct.providers.insert(
+                "DefaultInfo".to_string(),
+                default_info_provider(&[], Runfiles::default(), Runfiles::default(), None),
+            );
+            ct.providers.insert(
+                "OutputGroupInfo".to_string(),
+                Value::ProviderInstance {
+                    provider_name: "OutputGroupInfo".to_string(),
+                    fields: BTreeMap::new(),
+                },
+            );
+            ct.providers.insert(
+                "AnalysisFailureInfo".to_string(),
+                provider_instance("AnalysisFailureInfo", vec![("causes", causes)]),
+            );
+            ct.testonly = rule.testonly;
+            ct.is_test = rc.is_test;
+            ct
+        };
+    if allow_failure && !is_analysis_test && !dep_failure_sets.is_empty() {
+        return Ok(make_failure_target(None, dep_failure_sets));
+    }
+
     // 3. Run the implementation function.
     let mut ectx = EvalContext::new(pkg_dir.clone(), None);
     ectx.semantics.experimental_sibling_repository_layout = st.inputs.sibling_repository_layout;
@@ -851,20 +905,34 @@ pub fn analyze_starlark_rule(
     let st2 = st.clone();
     ectx.host = Some(Arc::new(move |c, n, p, k| dispatch(&st2, c, n, p, k)));
     let ret = ectx
-        .call_value(spec.implementation.clone(), vec![Value::Host("ctx".into(), "0".into())], BTreeMap::new())
-        .map_err(|e| wrap(e.0));
+        .call_value(spec.implementation.clone(), vec![Value::Host("ctx".into(), "0".into())], BTreeMap::new());
     *st.frozen.lock().unwrap() = true;
     ectx.mutability.freeze();
-    let ret = ret?;
+    let ret = match ret {
+        Ok(v) => v,
+        Err(e) => {
+            if allow_failure && !is_analysis_test {
+                return Ok(make_failure_target(Some(e.0), dep_failure_sets));
+            }
+            return Err(wrap(e.0));
+        }
+    };
     ret.freeze();
 
     // 4. Providers.
-    finish_target(&st, &rc, rule, cfg, ret)
-        .map(|mut ct| {
+    match finish_target(&st, &rc, rule, cfg, ret) {
+        Ok(mut ct) => {
             ct.collect_cc_coverage = cc_cov_script;
-            ct
-        })
-        .map_err(wrap)
+            Ok(ct)
+        }
+        Err(e) => {
+            if allow_failure && !is_analysis_test {
+                Ok(make_failure_target(Some(e), dep_failure_sets))
+            } else {
+                Err(wrap(e))
+            }
+        }
+    }
 }
 
 /// Evaluates a computed attribute default (`default = fn`): the function's parameters are bound

@@ -28,6 +28,8 @@ pub struct Runfiles {
     pub artifacts: Vec<Artifact>,
     pub symlinks: BTreeMap<String, Artifact>,
     pub root_symlinks: BTreeMap<String, Artifact>,
+    pub symlink_entries: Vec<(String, Artifact)>,
+    pub root_symlink_entries: Vec<(String, Artifact)>,
     pub empty_filenames: Vec<String>,
     /// Legacy Python `__init__.py` empty-files supplier (`GetInitPyFiles`): propagated across
     /// `merge` and evaluated over the final manifest entries (after obscuring-symlink filtering).
@@ -133,8 +135,32 @@ impl Runfiles {
         for (k, v) in &other.symlinks {
             out.symlinks.insert(k.clone(), v.clone());
         }
+        if !other.symlink_entries.is_empty() {
+            if out.symlink_entries.is_empty() && !self.symlinks.is_empty() {
+                out.symlink_entries = self
+                    .symlinks
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+            }
+            for (k, v) in &other.symlink_entries {
+                out.symlink_entries.push((k.clone(), v.clone()));
+            }
+        }
         for (k, v) in &other.root_symlinks {
             out.root_symlinks.insert(k.clone(), v.clone());
+        }
+        if !other.root_symlink_entries.is_empty() {
+            if out.root_symlink_entries.is_empty() && !self.root_symlinks.is_empty() {
+                out.root_symlink_entries = self
+                    .root_symlinks
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+            }
+            for (k, v) in &other.root_symlink_entries {
+                out.root_symlink_entries.push((k.clone(), v.clone()));
+            }
         }
         for e in &other.empty_filenames {
             if !out.empty_filenames.contains(e) {

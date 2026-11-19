@@ -101,12 +101,107 @@ fn collect_aspect_path(
     Ok(())
 }
 
+/// Builds the `propagation_ctx` struct passed to `propagation_predicate`, `attr_aspects`, and
+/// `toolchains_aspects` functions (`StarlarkAspectPropagationContextApi`).
+fn build_propagation_ctx(
+    def: &zel_packages::aspect::AspectDef,
+    rule: &RuleInstance,
+    rc: &zel_packages::RuleClass,
+    label: &Label,
+    params: &BTreeMap<String, AttrValue>,
+) -> Value {
+    let mut aspect_attr_fields = BTreeMap::new();
+    for a in &def.attrs {
+        if a.name.starts_with('_') {
+            continue;
+        }
+        if let Some(v) = params.get(&a.name).or(a.default.as_ref()) {
+            aspect_attr_fields.insert(a.name.clone(), v.to_value());
+        }
+    }
+    let mut rule_attr_fields = BTreeMap::new();
+    for (k, attr_def) in &rc.attrs {
+        if k.starts_with('$') {
+            continue;
+        }
+        let val = rule
+            .attr_or_default(k)
+            .map(|av| av.to_value())
+            .unwrap_or(Value::None);
+        let is_tool = attr_def
+            .tool_dep
+            .unwrap_or(attr_def.cfg_exec || attr_def.cfg_exec_group.is_some());
+        rule_attr_fields.insert(
+            k.clone(),
+            mk_struct(vec![("value", val), ("is_tool", Value::Bool(is_tool))]),
+        );
+    }
+    let file_label = rc
+        .starlark
+        .as_ref()
+        .and_then(|sp| Label::parse_canonical(&sp.defined_in).ok())
+        .map(Value::Label)
+        .unwrap_or(Value::None);
+    let qualified_kind = mk_struct(vec![
+        ("file_label", file_label),
+        ("rule_name", Value::String(rule.rule_class.clone())),
+    ]);
+    let rule_v = mk_struct(vec![
+        ("label", Value::Label(label.clone())),
+        (
+            "attr",
+            Value::Struct(Arc::new(StructValue::new(rule_attr_fields))),
+        ),
+        ("qualified_kind", qualified_kind),
+    ]);
+    mk_struct(vec![
+        (
+            "attr",
+            Value::Struct(Arc::new(StructValue::new(aspect_attr_fields))),
+        ),
+        ("rule", rule_v),
+    ])
+}
+
+fn eval_dynamic_attr_aspects(
+    def: &zel_packages::aspect::AspectDef,
+    prop_ctx: &Value,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(func) = &def.attr_aspects_fn else {
+        return Ok(None);
+    };
+    let mut ectx = EvalContext::default();
+    let ret = ectx
+        .call_value(func.clone(), vec![prop_ctx.clone()], BTreeMap::new())
+        .map_err(|e| e.0)?;
+    let items = sequence(&ret).ok_or_else(|| {
+        format!(
+            "attr_aspects function must return a list of strings, got {}",
+            type_name(&ret)
+        )
+    })?;
+    let mut out = Vec::with_capacity(items.len());
+    for i in items {
+        match i {
+            Value::String(s) => out.push(s),
+            other => {
+                return Err(format!(
+                    "attr_aspects function elements must be strings, got {}",
+                    type_name(&other)
+                ))
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 /// `AspectResolutionHelpers.collectPropagatingAspects`: walks `aspects_path` backwards
 /// (top-down), skipping aspects that own `attr_name`, keeping aspects whose `attr_aspects` match
 /// OR that are required by an already-selected aspect, then reverses back to path order.
 fn collect_propagating_aspects(
     aspects_path: &[(Value, Arc<zel_packages::aspect::AspectDef>)],
     attr_name: &str,
+    dynamic_attrs: &std::collections::HashMap<usize, Vec<String>>,
 ) -> Vec<(Value, Arc<zel_packages::aspect::AspectDef>)> {
     let mut selected: Vec<(Value, Arc<zel_packages::aspect::AspectDef>)> = Vec::new();
     for (v, def) in aspects_path.iter().rev() {
@@ -114,7 +209,8 @@ fn collect_propagating_aspects(
         if def.attrs.iter().any(|a| a.name == attr_name) {
             continue;
         }
-        let matches_attr = def.attr_aspects.iter().any(|a| a == "*" || a == attr_name);
+        let attrs_list = dynamic_attrs.get(&def.id).unwrap_or(&def.attr_aspects);
+        let matches_attr = attrs_list.iter().any(|a| a == "*" || a == attr_name);
         if matches_attr || is_aspect_required_by_any(def.id, &selected) {
             selected.push((v.clone(), def.clone()));
         }
@@ -193,6 +289,23 @@ fn apply_aspect_path(
         {
             continue;
         }
+        let prop_ctx = build_propagation_ctx(def, &rule, &rc, current_ct.actual_target_label(), params);
+        if let Some(pred) = &def.propagation_predicate {
+            let mut pctx = EvalContext::default();
+            let keep = pctx
+                .call_value(pred.clone(), vec![prop_ctx.clone()], BTreeMap::new())
+                .map_err(|e| e.0)?;
+            match keep {
+                Value::Bool(false) => continue,
+                Value::Bool(true) => {}
+                other => {
+                    return Err(format!(
+                        "propagation_predicate must return a bool, got {}",
+                        type_name(&other)
+                    ))
+                }
+            }
+        }
 
         let applied_so_far = &kept[..=idx];
         let aspect_id = def.display_id();
@@ -230,9 +343,24 @@ fn apply_aspect_path(
 
         // 1. `ctx.rule`: rule attributes + base aspects' attributes (`mergeRuleAndBaseAspectsAttributes`),
         // with propagating aspects applied along matching `attr_aspects`.
+        let mut dynamic_attrs_map: std::collections::HashMap<usize, Vec<String>> =
+            std::collections::HashMap::new();
+        for (_, d_item) in applied_so_far {
+            let item_pctx = build_propagation_ctx(
+                d_item,
+                &rule,
+                &rc,
+                current_ct.actual_target_label(),
+                params,
+            );
+            if let Some(dyn_list) = eval_dynamic_attr_aspects(d_item, &item_pctx).map_err(&wrap)? {
+                dynamic_attrs_map.insert(d_item.id, dyn_list);
+            }
+        }
+        let dyn_for_retain = dynamic_attrs_map.clone();
         let path_for_hook: Vec<(Value, Arc<zel_packages::aspect::AspectDef>)> = applied_so_far.to_vec();
         let hook = move |attr_name: &str, dep: Arc<ConfiguredTarget>, _c: &BuildConfigurationKey| {
-            let prop = collect_propagating_aspects(&path_for_hook, attr_name);
+            let prop = collect_propagating_aspects(&path_for_hook, attr_name, &dyn_for_retain);
             if prop.is_empty() {
                 Ok(dep)
             } else {
@@ -248,9 +376,10 @@ fn apply_aspect_path(
         }
         rule_attrs.retain(|_, a| {
             !a.name.starts_with('_')
-                || applied_so_far
-                    .iter()
-                    .any(|(_, d)| d.attr_aspects.iter().any(|x| x == "*" || x == &a.name))
+                || applied_so_far.iter().any(|(_, d)| {
+                    let list = dynamic_attrs_map.get(&d.id).unwrap_or(&d.attr_aspects);
+                    list.iter().any(|x| x == "*" || x == &a.name)
+                })
         });
         let rule_bundle =
             convert_rule_attrs(&rule, &rule_attrs, &cfg, inputs, &pkg_dir, out_root, &wrap, Some(&hook))?;
@@ -367,6 +496,7 @@ fn apply_aspect_path(
             actions: Mutex::new(Vec::new()),
             graph: Mutex::new(graph),
             declared_trees: Mutex::new(BTreeSet::new()),
+            mapped_trees: Mutex::new(BTreeSet::new()),
             declared_files: Mutex::new(BTreeSet::new()),
             declared_artifacts: Mutex::new(Vec::new()),
             rule_errors: Mutex::new(

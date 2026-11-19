@@ -1099,7 +1099,14 @@ fn config_feature_flag_platform_flags_flag_alias_transition_and_fragments() {
         apple_frag
             .fields
             .get("ios_sdk_version_flag")
-            .map(|v| v.to_string())
+            .map(zel_starlark::Value::type_name),
+        Some("DottedVersion")
+    );
+    assert_eq!(
+        apple_frag
+            .fields
+            .get("ios_sdk_version_flag")
+            .map(ToString::to_string)
             .as_deref(),
         Some("17.2")
     );

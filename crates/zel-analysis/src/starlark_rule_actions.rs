@@ -96,8 +96,8 @@ fn host_method(
                 "add" => {
                     check_kwargs("add", pos, kw, &["key", "value"])?;
                     let v = want_str(arg(pos, kw, 1, "value").ok_or_else(|| StarlarkError("add() missing 1 required positional argument: value".into()))?, "add", "value")?;
-                    d.lock().unwrap().push((key, v));
-                    Ok(Value::Host("template_dict".into(), id.to_owned()))
+                    d.lock().unwrap().push(crate::objects::TemplateDictEntry::Literal(key, v));
+                    Ok(recv.clone())
                 }
                 "add_joined" => {
                     if pos.len() > 2 {
@@ -116,9 +116,11 @@ fn host_method(
                             type_name(&values)
                         ));
                     }
-                    if !kw.contains_key("join_with") {
-                        return err("add_joined() missing 1 required named-only argument: 'join_with'");
-                    }
+                    let _ = want_str(
+                        kw.get("join_with").ok_or_else(|| StarlarkError("add_joined() missing 1 required named-only argument: 'join_with'".into()))?,
+                        "add_joined",
+                        "join_with",
+                    )?;
                     let Some(map_fn) = kw.get("map_each") else {
                         return err("add_joined() missing 1 required named-only argument: 'map_each'");
                     };
@@ -132,18 +134,25 @@ fn host_method(
                             return err("map_each must be a function accepting a single positional argument");
                         }
                     }
-                    let mut b = ArgsBuilder::default();
+                    if let Some(fj) = none_or(kw.get("format_joined")) {
+                        let s = want_str(fj, "add_joined", "format_joined")?;
+                        crate::args::validate_format_str("format_joined", &s)?;
+                    }
                     let mut akw = kw.clone();
                     akw.remove("key");
                     akw.remove("values");
                     akw.insert("omit_if_empty".into(), Value::Bool(false));
-                    args_method(&mut b, ctx, "add_joined", &[values], &akw)?;
-                    d.lock().unwrap().push((key, b.args.pop().unwrap_or_default()));
-                    Ok(Value::Host("template_dict".into(), id.to_owned()))
+                    d.lock().unwrap().push(crate::objects::TemplateDictEntry::Joined {
+                        key,
+                        values,
+                        kw: akw,
+                    });
+                    Ok(recv.clone())
                 }
                 other => err(format!("'TemplateDict' value has no field or method '{other}'")),
             }
         }
+        "template_ctx" => template_ctx_method(st, ctx, method, pos, kw),
         "configuration" => match method {
             "is_tool_configuration" => Ok(Value::Bool(st.cfg.is_exec)),
             "is_sibling_repository_layout" => {
@@ -161,6 +170,11 @@ fn host_method(
             "runfiles_enabled" => Ok(Value::Bool(st.cfg.env.runfiles_enabled)),
             // Genfiles are merged into bin in this implementation.
             "has_separate_genfiles_directory" => Ok(Value::Bool(false)),
+            "disabled_features" => {
+                check_kwargs("disabled_features", pos, kw, &[])?;
+                let fs = FeatureSet::parse(&st.cfg.global_features());
+                Ok(mk_list(fs.off.into_iter().map(Value::String).collect()))
+            }
             other => err(format!("'configuration' value has no field or method '{other}'")),
         },
         "toolchains" => match method {
@@ -443,7 +457,11 @@ fn ctx_method(
             let mut has_symlinks = false;
             for (idx, name, root) in [(4usize, "symlinks", false), (5, "root_symlinks", true)] {
                 if let Some(s) = none_or(arg(pos, kw, idx, name)) {
-                    let target = if root { &mut out.root_symlinks } else { &mut out.symlinks };
+                    let (target, entries_vec) = if root {
+                        (&mut out.root_symlinks, &mut out.root_symlink_entries)
+                    } else {
+                        (&mut out.symlinks, &mut out.symlink_entries)
+                    };
                     match s {
                         Value::Dict(d) => {
                             let items = d.lock().unwrap().items();
@@ -452,7 +470,9 @@ fn ctx_method(
                             }
                             for (k, v) in items {
                                 let Value::String(k) = k else { return err(format!("{name} keys must be strings")) };
-                                target.insert(k, want_file(&v, "runfiles", name)?);
+                                let af = want_file(&v, "runfiles", name)?;
+                                entries_vec.push((k.clone(), af.clone()));
+                                target.insert(k, af);
                             }
                         }
                         other => {
@@ -466,7 +486,10 @@ fn ctx_method(
                                 };
                                 let p = sv.get("path")?;
                                 let f = sv.get("target_file")?;
-                                target.insert(want_str(&p, "runfiles", name)?, want_file(&f, "runfiles", name)?);
+                                let k = want_str(&p, "runfiles", name)?;
+                                let af = want_file(&f, "runfiles", name)?;
+                                entries_vec.push((k.clone(), af.clone()));
+                                target.insert(k, af);
                             }
                         }
                     }
@@ -642,12 +665,18 @@ fn ctx_method(
             if !coverage_enabled(&st.cfg) || st.cfg.is_exec {
                 return Ok(Value::Bool(false));
             }
-            let (lbl, is_test) = match arg(pos, kw, 0, "target") {
-                None | Some(Value::None) => (st.label.clone(), st.rule.is_test_rule()),
-                Some(v) => {
-                    let ct = target_of(v).ok_or_else(|| {
-                        StarlarkError("coverage_instrumented: expected Target or None".into())
+            let (lbl, is_test) = match none_or(arg(pos, kw, 0, "target")) {
+                None => (st.label.clone(), st.rule.is_test_rule()),
+                Some(t) => {
+                    let ct = target_of(t).ok_or_else(|| {
+                        StarlarkError(format!(
+                            "in call to coverage_instrumented(), parameter 'target' got value of type '{}', want 'Target or NoneType'",
+                            type_name(t)
+                        ))
                     })?;
+                    if ct.rule_class == "source file" || ct.rule_class == "generated file" {
+                        return Ok(Value::Bool(false));
+                    }
                     (ct.label.clone(), ct.is_test)
                 }
             };
@@ -706,7 +735,30 @@ fn ctx_method(
         "created_actions" => {
             st.check_mutable("created_actions")?;
             check_kwargs("created_actions", pos, kw, &[])?;
-            Ok(Value::None)
+            let testable = st
+                .rule
+                .extra
+                .rule_class
+                .as_ref()
+                .and_then(|rc| rc.starlark.as_ref())
+                .and_then(|sp| sp.kwargs.get("_skylark_testable"))
+                .is_some_and(|v| matches!(v, Value::Bool(true)));
+            if !testable {
+                return Ok(Value::None);
+            }
+            let mut by_file = StarlarkDict::new();
+            let mut seen = std::collections::HashSet::new();
+            for a in st.actions.lock().unwrap().iter() {
+                let av = action_value(Arc::new(a.clone()));
+                for out in &a.outputs {
+                    if seen.insert(out.exec_path.path_string().to_string()) {
+                        let _ = by_file.insert(file_value(out), av.clone());
+                    }
+                }
+            }
+            let d = Value::Dict(Arc::new(Mutex::new(by_file)));
+            d.freeze();
+            Ok(provider_instance("Actions", vec![("by_file", d)]))
         }
         "check_placeholders" => {
             st.check_mutable("check_placeholders")?;
@@ -998,12 +1050,34 @@ fn actions_method(
             let template = want_file(arg(pos, kw, 0, "template").ok_or_else(|| StarlarkError("expand_template() missing 1 required positional argument: template".into()))?, "expand_template", "template")?;
             let out = want_file(arg(pos, kw, 1, "output").ok_or_else(|| StarlarkError("expand_template() missing 1 required positional argument: output".into()))?, "expand_template", "output")?;
             check_output(&out, "expand_template")?;
-            let subs = str_dict_ordered(arg(pos, kw, 2, "substitutions").ok_or_else(|| StarlarkError("expand_template() missing 1 required positional argument: substitutions".into()))?, "substitutions")?;
+            let subs = match arg(pos, kw, 2, "substitutions") {
+                Some(v) => str_dict_ordered(v, "substitutions")?,
+                None => Vec::new(),
+            };
             let is_exec = arg(pos, kw, 3, "is_executable").map(|v| v.is_truthy()).unwrap_or(false);
             let mut computed = Vec::new();
-            if let Some(Value::Host(k, id)) = none_or(arg(pos, kw, 4, "computed_substitutions")) {
-                if k == "template_dict" {
-                    computed = crate::objects::template_dict_entries(id).unwrap_or_default();
+            if let Some(cs) = none_or(arg(pos, kw, 4, "computed_substitutions")) {
+                match cs {
+                    Value::Host(k, id) if k == "template_dict" => {
+                        for entry in crate::objects::template_dict_entries(id).unwrap_or_default() {
+                            match entry {
+                                crate::objects::TemplateDictEntry::Literal(k, v) => {
+                                    computed.push((k, v));
+                                }
+                                crate::objects::TemplateDictEntry::Joined { key, values, kw: akw } => {
+                                    let mut b = ArgsBuilder::default();
+                                    args_method(&mut b, ctx, "add_joined", &[values], &akw)?;
+                                    computed.push((key, b.args.pop().unwrap_or_default()));
+                                }
+                            }
+                        }
+                    }
+                    other => {
+                        return err(format!(
+                            "in call to expand_template(), parameter 'computed_substitutions' got value of type '{}', want 'TemplateDict or NoneType'",
+                            type_name(other)
+                        ));
+                    }
                 }
             }
             let mut seen_keys = std::collections::HashSet::new();
@@ -1190,6 +1264,7 @@ fn actions_method(
         }
         "run" => run_action(st, ctx, false, pos, kw),
         "run_shell" => run_action(st, ctx, true, pos, kw),
+        "map_directory" => map_directory_action(st, ctx, pos, kw),
         other => err(format!("'actions' value has no field or method '{other}'")),
     }
 }
@@ -1264,6 +1339,34 @@ fn run_action(
         Some(v) => files_in(v, "inputs")?,
         None => Vec::new(),
     };
+    if !shell {
+        if let Some(u) = get("unused_inputs_list") {
+            let ua = want_file(u, func, "unused_inputs_list")?;
+            if ua.is_source {
+                return err("param 'unused_inputs_list' may not be a source file");
+            }
+            if ua.is_tree_artifact {
+                return err("param 'unused_inputs_list' may not be a declared directory");
+            }
+        }
+    }
+    let mut shadowed_env: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(sa) = get("shadowed_action") {
+        let act = action_of(sa).ok_or_else(|| {
+            StarlarkError(format!(
+                "in call to {func}(), parameter 'shadowed_action' got value of type '{}', want 'Action or NoneType'",
+                type_name(sa)
+            ))
+        })?;
+        inputs.extend(act.inputs.iter().cloned());
+        let env_map = match &act.action_env {
+            Some(ae) => ae.fixed_env(),
+            None => &act.env,
+        };
+        for (k, v) in env_map {
+            shadowed_env.insert(k.clone(), v.clone());
+        }
+    }
     let mut tool_files: Vec<Artifact> = Vec::new();
 
     // tools
@@ -1398,10 +1501,10 @@ fn run_action(
         None => "Action".to_string(),
     };
 
-    let env = match get("env") {
-        Some(v) => str_dict(v, "env")?,
-        None => BTreeMap::new(),
-    };
+    let mut env = shadowed_env;
+    if let Some(v) = get("env") {
+        env.extend(str_dict(v, "env")?);
+    }
     let mut exec_req = match get("execution_requirements") {
         Some(v) => str_dict(v, "execution_requirements")?
             .into_iter()
@@ -1418,7 +1521,7 @@ fn run_action(
             }
         }
     }
-    let exec_group = match get("exec_group") {
+    let mut exec_group = match get("exec_group") {
         Some(g) => {
             let g = want_str(g, func, "exec_group")?;
             if !st.exec_groups.contains(&g) {
@@ -1431,6 +1534,47 @@ fn run_action(
         }
         None => None,
     };
+    if let Some(tc_v) = get("toolchain") {
+        let k = transform_toolchain_key(st, tc_v)?;
+        let matches_key = |m: &BTreeMap<String, Value>| {
+            m.contains_key(&k)
+                || (k.starts_with("//") && m.keys().any(|c| c.starts_with("@@") && c.ends_with(&k)))
+        };
+        if let Some(ref eg) = exec_group {
+            let in_eg = st
+                .inputs
+                .exec_group_toolchains
+                .get(eg)
+                .is_some_and(matches_key);
+            if !in_eg {
+                return err(format!(
+                    "Action declared for exec group '{eg}', which does not have toolchain '{k}'"
+                ));
+            }
+        } else if matches_key(&st.inputs.toolchains) {
+            // Default exec group declares this toolchain.
+        } else {
+            let matching_egs: Vec<String> = st
+                .inputs
+                .exec_group_toolchains
+                .iter()
+                .filter(|(_, m)| matches_key(m))
+                .map(|(g, _)| g.clone())
+                .collect();
+            if matching_egs.len() == 1 {
+                exec_group = Some(matching_egs[0].clone());
+            } else if matching_egs.is_empty() {
+                return err(format!(
+                    "Action declared for non-existent toolchain '{k}'."
+                ));
+            } else {
+                return err(format!(
+                    "Toolchain '{k}' is declared in multiple exec groups [{}]; specify 'exec_group' explicitly",
+                    matching_egs.join(", ")
+                ));
+            }
+        }
+    }
     inputs.extend(tool_files.iter().cloned());
     let mut resource_set = ResourceSet::default();
     if let Some(rs) = get("resource_set") {
@@ -1544,5 +1688,209 @@ fn add_files_to_run_inputs(fields: &BTreeMap<String, Value>, out: &mut Vec<Artif
         out.extend(r.artifacts.iter().cloned());
         out.extend(r.symlinks.values().cloned());
         out.extend(r.root_symlinks.values().cloned());
+    }
+}
+
+const MAP_DIRECTORY_PARAMS: &[&str] = &[
+    "input_directories",
+    "additional_inputs",
+    "output_directories",
+    "additional_outputs",
+    "additional_params",
+    "implementation",
+    "use_default_shell_env",
+    "env",
+    "mnemonic",
+    "execution_requirements",
+    "exec_group",
+    "toolchain",
+    "resource_set",
+];
+
+fn map_directory_action(
+    st: &Arc<CtxState>,
+    ctx: &mut EvalContext,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+) -> HostResult {
+    st.check_mutable("actions.map_directory")?;
+    check_kwargs("map_directory", &[], kw, MAP_DIRECTORY_PARAMS)?;
+    if !pos.is_empty() {
+        return err(format!(
+            "map_directory() accepts no positional arguments but got {}",
+            pos.len()
+        ));
+    }
+    let want_dict = |name: &str, required: bool| -> Result<Vec<(Value, Value)>, StarlarkError> {
+        match kw.get(name) {
+            Some(Value::Dict(d)) => Ok(d.lock().unwrap().items()),
+            Some(other) => err(format!(
+                "in call to map_directory(), parameter '{name}' got value of type '{}', want 'dict'",
+                type_name(other)
+            )),
+            None if required => err(format!(
+                "map_directory() missing 1 required keyword-only argument: {name}"
+            )),
+            None => Ok(Vec::new()),
+        }
+    };
+    let in_dirs_raw = want_dict("input_directories", true)?;
+    let add_in_raw = want_dict("additional_inputs", false)?;
+    let out_dirs_raw = want_dict("output_directories", true)?;
+    let add_out_raw = want_dict("additional_outputs", false)?;
+    let add_params_raw = want_dict("additional_params", false)?;
+    let imp = kw.get("implementation").cloned().ok_or_else(|| {
+        StarlarkError(
+            "map_directory() missing 1 required keyword-only argument: implementation".into(),
+        )
+    })?;
+    match &imp {
+        Value::UserFunction(u) => {
+            if !u.closure.scopes.is_empty() || u.name == "<lambda>" {
+                return err(format!(
+                    "to avoid unintended retention of analysis data structures, the implementation function (declared at {}) must be declared by a top-level def statement",
+                    u.location
+                ));
+            }
+        }
+        Value::BuiltinFunction(_) => {}
+        other => {
+            return err(format!(
+                "in call to map_directory(), parameter 'implementation' got value of type '{}', want 'callable'",
+                type_name(other)
+            ));
+        }
+    }
+
+    let mut in_dirs_entries = Vec::with_capacity(in_dirs_raw.len());
+    for (k, v) in in_dirs_raw {
+        let ks = want_str(&k, "map_directory", "input_directories")?;
+        let af = want_file(&v, "map_directory", "input_directories")?;
+        if !af.is_tree_artifact {
+            return err(format!(
+                "in call to map_directory(), input_directories['{ks}'] must be a directory (tree artifact), got '{}'",
+                af.exec_path
+            ));
+        }
+        in_dirs_entries.push((Value::String(ks), expanded_directory_value(af, Vec::new())));
+    }
+    let mut out_dirs_entries = Vec::with_capacity(out_dirs_raw.len());
+    for (k, v) in out_dirs_raw {
+        let ks = want_str(&k, "map_directory", "output_directories")?;
+        let af = want_file(&v, "map_directory", "output_directories")?;
+        if !af.is_tree_artifact || af.is_source {
+            return err(format!(
+                "in call to map_directory(), output_directories['{ks}'] must be a declared output directory, got '{}'",
+                af.exec_path
+            ));
+        }
+        st.mapped_trees
+            .lock()
+            .unwrap()
+            .insert(af.exec_path.path_string().to_string());
+        out_dirs_entries.push((Value::String(ks), file_value(&af)));
+    }
+    if out_dirs_entries.is_empty() && add_out_raw.is_empty() {
+        return err("map_directory(): at least one output directory or additional output is required");
+    }
+    for (k, v) in &add_out_raw {
+        let _ = want_str(k, "map_directory", "additional_outputs")?;
+        let af = want_file(v, "map_directory", "additional_outputs")?;
+        check_output(&af, "map_directory")?;
+    }
+
+    let mut cb_kw = BTreeMap::new();
+    cb_kw.insert("input_directories".to_string(), mk_dict(in_dirs_entries));
+    cb_kw.insert("output_directories".to_string(), mk_dict(out_dirs_entries));
+    cb_kw.insert("additional_inputs".to_string(), mk_dict(add_in_raw));
+    cb_kw.insert("additional_outputs".to_string(), mk_dict(add_out_raw));
+    cb_kw.insert("additional_params".to_string(), mk_dict(add_params_raw));
+    let tctx = Value::Host("template_ctx".into(), "0".into());
+    ctx.call_value(imp, vec![tctx], cb_kw)?;
+    Ok(Value::None)
+}
+
+fn template_ctx_method(
+    st: &Arc<CtxState>,
+    ctx: &mut EvalContext,
+    method: &str,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+) -> HostResult {
+    match method {
+        "declare_file" => {
+            check_kwargs("declare_file", pos, kw, &["filename", "directory"])?;
+            if pos.len() > 1 {
+                return err(format!(
+                    "declare_file() accepts no more than 1 positional argument but got {}",
+                    pos.len()
+                ));
+            }
+            let filename = want_str(
+                pos.first().or_else(|| kw.get("filename")).ok_or_else(|| {
+                    StarlarkError(
+                        "declare_file() missing 1 required positional argument: filename".into(),
+                    )
+                })?,
+                "declare_file",
+                "filename",
+            )?;
+            let dir_v = kw.get("directory").ok_or_else(|| {
+                StarlarkError(
+                    "declare_file() missing 1 required keyword-only argument: directory".into(),
+                )
+            })?;
+            let dir = want_file(dir_v, "declare_file", "directory")?;
+            if !dir.is_tree_artifact || dir.is_source {
+                return err("declare_file(): 'directory' must be a declared output directory");
+            }
+            if filename.is_empty()
+                || filename.starts_with('/')
+                || filename == ".."
+                || filename.starts_with("../")
+                || filename.contains("/../")
+            {
+                return err(format!(
+                    "declare_file(): invalid relative filename '{filename}'"
+                ));
+            }
+            let rel = dir.root_relative_path.get_relative_str(&filename);
+            let a = st.derived(rel);
+            st.declared_files
+                .lock()
+                .unwrap()
+                .insert(a.exec_path.path_string().to_string());
+            st.declared_artifacts.lock().unwrap().push(a.clone());
+            Ok(file_value(&a))
+        }
+        "args" => {
+            check_kwargs("args", pos, kw, &[])?;
+            Ok(args_value(ArgsBuilder::default()))
+        }
+        "run" => {
+            check_kwargs(
+                "run",
+                &[],
+                kw,
+                &[
+                    "outputs",
+                    "inputs",
+                    "executable",
+                    "tools",
+                    "arguments",
+                    "progress_message",
+                ],
+            )?;
+            if !pos.is_empty() {
+                return err(format!(
+                    "run() accepts no positional arguments but got {}",
+                    pos.len()
+                ));
+            }
+            run_action(st, ctx, false, pos, kw)
+        }
+        other => err(format!(
+            "'template_ctx' value has no field or method '{other}'"
+        )),
     }
 }
