@@ -1052,7 +1052,13 @@ impl FileSystem for LocalFileSystem {
     }
 
     fn write_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
-        fs::write(Self::to_std_path(path), content)
+        let p = Self::to_std_path(path);
+        // `blaze_util::WriteFile`: unlink any existing file or symlink first so a symlink at `p`
+        // is replaced rather than followed.
+        if fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir()) {
+            let _ = fs::remove_file(&p);
+        }
+        fs::write(&p, content)
     }
 
     fn append_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
@@ -1105,6 +1111,11 @@ impl FileSystem for LocalFileSystem {
         let p = Self::to_std_path(path);
         match fs::symlink_metadata(&p) {
             Ok(meta) => {
+                #[cfg(windows)]
+                if meta.file_type().is_symlink() {
+                    fs::remove_dir(&p).or_else(|_| fs::remove_file(&p))?;
+                    return Ok(true);
+                }
                 if meta.is_dir() {
                     fs::remove_dir(&p)?;
                 } else {
@@ -1138,7 +1149,24 @@ impl FileSystem for LocalFileSystem {
                 Self::to_std_path(link_path),
             )
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let link = Self::to_std_path(link_path);
+            let raw_target = StdPath::new(target_fragment.path_string());
+            let resolved_target = if raw_target.is_absolute() {
+                raw_target.to_path_buf()
+            } else {
+                link.parent()
+                    .unwrap_or_else(|| StdPath::new("."))
+                    .join(raw_target)
+            };
+            if resolved_target.is_dir() {
+                create_directory_junction_or_symlink(&resolved_target, &link)
+            } else {
+                std::os::windows::fs::symlink_file(raw_target, &link)
+            }
+        }
+        #[cfg(all(not(unix), not(windows)))]
         {
             let _ = (link_path, target_fragment);
             Err(io::Error::new(
@@ -1150,7 +1178,13 @@ impl FileSystem for LocalFileSystem {
 
     fn read_symbolic_link(&self, link_path: &PathFragment) -> io::Result<PathFragment> {
         let target = fs::read_link(Self::to_std_path(link_path))?;
-        Ok(PathFragment::create(&target.to_string_lossy()))
+        let s = target.to_string_lossy();
+        #[cfg(windows)]
+        let s = s
+            .strip_prefix(r"\??\")
+            .or_else(|| s.strip_prefix(r"\\?\"))
+            .unwrap_or(&s);
+        Ok(PathFragment::create(&s))
     }
 
     fn chmod(&self, path: &PathFragment, mode: u32) -> io::Result<()> {
@@ -1199,6 +1233,150 @@ impl FileSystem for LocalFileSystem {
         }
         fs::hard_link(canon_orig, dst)
     }
+}
+
+/// Creates a directory symlink on Unix, or an NTFS directory junction (with `symlink_dir` fallback)
+/// on Windows (`CreateJunction` in `src/main/native/windows/file.cc`).
+pub fn create_directory_junction_or_symlink(target: &StdPath, link: &StdPath) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(windows)]
+    {
+        create_windows_junction(target, link)
+            .or_else(|_| std::os::windows::fs::symlink_dir(target, link))
+    }
+    #[cfg(all(not(unix), not(windows)))]
+    {
+        let _ = (target, link);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "directory links not supported on this platform",
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn create_windows_junction(target: &StdPath, link: &StdPath) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn CreateFileW(
+            lp_file_name: *const u16,
+            dw_desired_access: u32,
+            dw_share_mode: u32,
+            lp_security_attributes: *mut core::ffi::c_void,
+            dw_creation_disposition: u32,
+            dw_flags_and_attributes: u32,
+            h_template_file: *mut core::ffi::c_void,
+        ) -> *mut core::ffi::c_void;
+        fn DeviceIoControl(
+            h_device: *mut core::ffi::c_void,
+            dw_io_control_code: u32,
+            lp_in_buffer: *const core::ffi::c_void,
+            n_in_buffer_size: u32,
+            lp_out_buffer: *mut core::ffi::c_void,
+            n_out_buffer_size: u32,
+            lp_bytes_returned: *mut u32,
+            lp_overlapped: *mut core::ffi::c_void,
+        ) -> i32;
+        fn CloseHandle(h_object: *mut core::ffi::c_void) -> i32;
+    }
+
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const OPEN_EXISTING: u32 = 3;
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+    let abs_target = if target.is_absolute() {
+        target.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(target)
+    };
+    let raw_target = abs_target.to_string_lossy().replace('/', "\\");
+    let stripped = raw_target
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw_target.strip_prefix(r"\??\"))
+        .unwrap_or(&raw_target);
+    let subst = format!(r"\??\{}", stripped);
+    let subst_utf16: Vec<u16> = std::ffi::OsStr::new(&subst).encode_wide().collect();
+    let print_utf16: Vec<u16> = std::ffi::OsStr::new(stripped).encode_wide().collect();
+
+    let subst_bytes = (subst_utf16.len() * 2) as u16;
+    let print_offset = subst_bytes + 2;
+    let print_bytes = (print_utf16.len() * 2) as u16;
+    let data_len = 8u16
+        .checked_add(subst_bytes)
+        .and_then(|n| n.checked_add(2))
+        .and_then(|n| n.checked_add(print_bytes))
+        .and_then(|n| n.checked_add(2))
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "junction target too long"))?;
+
+    fs::create_dir(link)?;
+
+    let mut link_wide: Vec<u16> = link.as_os_str().encode_wide().collect();
+    link_wide.push(0);
+    let invalid = (-1isize) as *mut core::ffi::c_void;
+    let handle = unsafe {
+        CreateFileW(
+            link_wide.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            std::ptr::null_mut(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    if handle.is_null() || handle == invalid {
+        let err = io::Error::last_os_error();
+        let _ = fs::remove_dir(link);
+        return Err(err);
+    }
+
+    let mut buf: Vec<u8> = Vec::with_capacity(8 + data_len as usize);
+    buf.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buf.extend_from_slice(&data_len.to_le_bytes());
+    buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+    buf.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+    buf.extend_from_slice(&subst_bytes.to_le_bytes()); // SubstituteNameLength
+    buf.extend_from_slice(&print_offset.to_le_bytes()); // PrintNameOffset
+    buf.extend_from_slice(&print_bytes.to_le_bytes()); // PrintNameLength
+    for w in &subst_utf16 {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    buf.extend_from_slice(&0u16.to_le_bytes());
+    for w in &print_utf16 {
+        buf.extend_from_slice(&w.to_le_bytes());
+    }
+    buf.extend_from_slice(&0u16.to_le_bytes());
+
+    let mut returned = 0u32;
+    let ok = unsafe {
+        DeviceIoControl(
+            handle,
+            FSCTL_SET_REPARSE_POINT,
+            buf.as_ptr() as *const _,
+            buf.len() as u32,
+            std::ptr::null_mut(),
+            0,
+            &mut returned,
+            std::ptr::null_mut(),
+        )
+    };
+    let ioctl_err = io::Error::last_os_error();
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    if ok == 0 {
+        let _ = fs::remove_dir(link);
+        return Err(ioctl_err);
+    }
+    Ok(())
 }
 
 #[derive(Debug)]
@@ -2380,5 +2558,35 @@ mod tests {
         lfs.delete(&l_orig).unwrap();
         assert_eq!(lfs.read_file(&l_link).unwrap(), b"world");
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn local_fs_write_file_replaces_symlink_and_junction_helper_works() {
+        let dir = std::env::temp_dir().join(format!("zel-vfs-sym-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("target_dir")).unwrap();
+        fs::write(dir.join("target_dir/inside"), b"ok").unwrap();
+        fs::write(dir.join("protected"), b"keep").unwrap();
+
+        let dir_link = dir.join("dir_link");
+        create_directory_junction_or_symlink(&dir.join("target_dir"), &dir_link).unwrap();
+        assert_eq!(fs::read(dir_link.join("inside")).unwrap(), b"ok");
+
+        #[cfg(unix)]
+        {
+            let file_link = dir.join("file_link");
+            std::os::unix::fs::symlink(dir.join("protected"), &file_link).unwrap();
+            let lfs = LocalFileSystem::default();
+            let frag = PathFragment::create(&file_link.to_string_lossy());
+            lfs.write_file(&frag, b"replaced").unwrap();
+            assert_eq!(fs::read(dir.join("protected")).unwrap(), b"keep");
+            assert_eq!(fs::read(&file_link).unwrap(), b"replaced");
+            assert!(!fs::symlink_metadata(&file_link)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+        }
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

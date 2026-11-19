@@ -29,23 +29,102 @@ pub fn builtins_files() -> &'static [(&'static str, &'static [u8])] {
     BUILTINS
 }
 
+/// Generated `WORKSPACE` file at the root of `@bazel_tools` (`create_embedded_tools.py`).
+pub const WORKSPACE_CONTENT: &[u8] = b"workspace(name = \"bazel_tools\")\n";
+
+/// Bazel's `src/java_opt_binary.bzl` macro wrapping `java_binary` with server optimization flags.
+pub const JAVA_OPT_BINARY_BZL: &[u8] =
+    b"\"\"\"Macro for building optimized Java server binaries.\"\"\"
+
+def java_opt_binary(name, **kwargs):
+    native.java_binary(
+        name = name,
+        **kwargs
+    )
+";
+
+/// Rewrites an archive input path using `src/create_embedded_tools.py`'s `output_paths` mapping.
+pub fn rewrite_embedded_tool_path(input_path: &str) -> String {
+    let mut p = input_path.replace('\\', "/");
+    if let Some(rest) = p.strip_prefix("bazel-out/") {
+        if let Some((_cfg, after_cfg)) = rest.split_once("/bin/") {
+            p = after_cfg.to_string();
+        }
+    }
+    if let Some(rest) = p.strip_prefix("external/") {
+        if let Some((_repo, inner)) = rest.split_once('/') {
+            p = inner.to_string();
+        }
+    }
+    if p == "MODULE.tools" {
+        return "MODULE.bazel".to_string();
+    }
+    if let Some(prefix) = p.strip_suffix("BUILD.tools") {
+        return format!("{prefix}BUILD");
+    }
+    if let Some(prefix) = p.strip_suffix("BUILD.repo") {
+        return format!("{prefix}BUILD");
+    }
+    if let Some(prefix) = p.strip_suffix(".bzl.tools") {
+        return format!("{prefix}.bzl");
+    }
+    if let Some(rest) = p.strip_prefix("tools/platforms/") {
+        return format!("platforms/{rest}");
+    }
+    p
+}
+
+fn is_executable_embedded_tool(rel: &str, bytes: &[u8]) -> bool {
+    bytes.starts_with(b"#!")
+        || rel.ends_with(".sh")
+        || rel.ends_with(".py")
+        || rel.ends_with(".bat")
+        || rel.ends_with(".cmd")
+        || rel.ends_with(".exe")
+}
+
 /// Fixed past timestamp (2000-01-01 UTC) so materialized embedded trees are never treated as racy.
 fn non_racy_mtime() -> std::time::SystemTime {
     std::time::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800)
 }
 
-fn write_embedded(dir: &Path, entries: &[(&str, &[u8])]) -> Result<(), String> {
+fn write_one_embedded(
+    dir: &Path,
+    rel: &str,
+    bytes: &[u8],
+    executable: bool,
+    mtime: std::time::SystemTime,
+) -> Result<(), String> {
     use std::io::Write;
+    let dest = dir.join(rel);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    }
+    let mut f = std::fs::File::create(&dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+    f.write_all(bytes)
+        .map_err(|e| format!("{}: {e}", dest.display()))?;
+    let _ = f.set_modified(mtime);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if executable { 0o755 } else { 0o644 };
+        let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(mode));
+    }
+    #[cfg(not(unix))]
+    let _ = executable;
+    Ok(())
+}
+
+fn write_embedded(dir: &Path, entries: &[(&str, &[u8])]) -> Result<(), String> {
     let mtime = non_racy_mtime();
     for (rel, bytes) in entries {
-        let dest = dir.join(rel);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
-        let mut f = std::fs::File::create(&dest).map_err(|e| format!("{}: {e}", dest.display()))?;
-        f.write_all(bytes)
-            .map_err(|e| format!("{}: {e}", dest.display()))?;
-        let _ = f.set_modified(mtime);
+        write_one_embedded(
+            dir,
+            rel,
+            bytes,
+            is_executable_embedded_tool(rel, bytes),
+            mtime,
+        )?;
     }
     Ok(())
 }
@@ -57,12 +136,55 @@ pub fn materialize_builtins(dir: &Path) -> Result<(), String> {
 
 /// Returns the content of a repo-relative file (e.g. `tools/cpp/unix_cc_toolchain_config.bzl`).
 pub fn read(path: &str) -> Option<&'static [u8]> {
-    FILES.iter().find(|(p, _)| *p == path).map(|(_, b)| *b)
+    if let Some((_, b)) = FILES.iter().find(|(p, _)| *p == path) {
+        return Some(*b);
+    }
+    if path == "WORKSPACE" {
+        return Some(WORKSPACE_CONTENT);
+    }
+    if path == "src/java_opt_binary.bzl" {
+        return Some(JAVA_OPT_BINARY_BZL);
+    }
+    if let Some(rest) = path.strip_prefix("platforms/") {
+        let alt = format!("tools/platforms/{rest}");
+        if let Some((_, b)) = FILES.iter().find(|(p, _)| *p == alt) {
+            return Some(*b);
+        }
+    }
+    None
 }
 
 /// Writes the repository to `dir`.
 pub fn materialize(dir: &Path) -> Result<(), String> {
-    write_embedded(dir, FILES)
+    let mtime = non_racy_mtime();
+    write_embedded(dir, FILES)?;
+    if !dir.join("WORKSPACE").exists() {
+        write_one_embedded(dir, "WORKSPACE", WORKSPACE_CONTENT, false, mtime)?;
+    }
+    if !dir.join("src/java_opt_binary.bzl").exists() {
+        write_one_embedded(
+            dir,
+            "src/java_opt_binary.bzl",
+            JAVA_OPT_BINARY_BZL,
+            false,
+            mtime,
+        )?;
+    }
+    for (rel, bytes) in FILES {
+        if let Some(rest) = rel.strip_prefix("tools/platforms/") {
+            let alias_rel = format!("platforms/{rest}");
+            if !dir.join(&alias_rel).exists() {
+                write_one_embedded(
+                    dir,
+                    &alias_rel,
+                    bytes,
+                    is_executable_embedded_tool(&alias_rel, bytes),
+                    mtime,
+                )?;
+            }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -109,8 +231,47 @@ mod tests {
     #[test]
     fn materializes() {
         let d = std::env::temp_dir().join(format!("zel-bt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
         materialize(&d).unwrap();
         assert!(d.join("tools/cpp/BUILD").exists());
+        assert_eq!(
+            std::fs::read_to_string(d.join("WORKSPACE")).unwrap(),
+            "workspace(name = \"bazel_tools\")\n"
+        );
+        assert!(d.join("src/java_opt_binary.bzl").exists());
+        assert_eq!(rewrite_embedded_tool_path("MODULE.tools"), "MODULE.bazel");
+        assert_eq!(
+            rewrite_embedded_tool_path("tools/cpp/BUILD.tools"),
+            "tools/cpp/BUILD"
+        );
+        assert_eq!(
+            rewrite_embedded_tool_path("tools/platforms/BUILD.tools"),
+            "tools/platforms/BUILD"
+        );
+        assert_eq!(
+            rewrite_embedded_tool_path("tools/platforms/platforms.bzl"),
+            "platforms/platforms.bzl"
+        );
+        assert_eq!(
+            rewrite_embedded_tool_path("bazel-out/k8-opt/bin/tools/jdk/BUILD.repo"),
+            "tools/jdk/BUILD"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let sh_mode = std::fs::metadata(d.join("tools/sh/collect_cc_coverage.sh"))
+                .or_else(|_| std::fs::metadata(d.join("tools/coverage/collect-coverage.sh")))
+                .map(|m| m.permissions().mode() & 0o777);
+            if let Ok(m) = sh_mode {
+                assert_eq!(m, 0o755);
+            }
+            let build_mode = std::fs::metadata(d.join("tools/cpp/BUILD"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(build_mode, 0o644);
+        }
         let _ = std::fs::remove_dir_all(&d);
     }
 

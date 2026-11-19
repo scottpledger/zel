@@ -103,17 +103,46 @@ pub extern "C" fn zel_isatty_stderr() -> i32 {
 }
 
 /// Whether the process `pid` exists.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[no_mangle]
 pub extern "C" fn zel_process_alive(pid: u32) -> i32 {
     native::process::is_alive(pid) as i32
 }
 
 /// System memory pressure: 0 normal, 1 warning, 2 critical.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[no_mangle]
 pub extern "C" fn zel_memory_pressure_level() -> i32 {
     native::system::memory_pressure() as i32
+}
+
+/// Creates a directory symlink (Unix) or NTFS directory junction (Windows). Returns 0 on success.
+#[cfg(any(unix, windows))]
+#[no_mangle]
+#[allow(clippy::missing_safety_doc)]
+pub unsafe extern "C" fn zel_create_junction(
+    link_path: *const c_char,
+    target_path: *const c_char,
+) -> i32 {
+    if link_path.is_null() || target_path.is_null() {
+        return -1;
+    }
+    let (Ok(link), Ok(target)) = (
+        unsafe { CStr::from_ptr(link_path) }.to_str(),
+        unsafe { CStr::from_ptr(target_path) }.to_str(),
+    ) else {
+        return -1;
+    };
+    if zel_vfs::create_directory_junction_or_symlink(
+        std::path::Path::new(target),
+        std::path::Path::new(link),
+    )
+    .is_ok()
+    {
+        0
+    } else {
+        -1
+    }
 }
 
 /// Frees a `CString` allocated by `zel_*` FFI functions.

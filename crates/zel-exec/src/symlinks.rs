@@ -117,6 +117,9 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
         let existing = std::fs::symlink_metadata(lp);
         if req.mode == ConvenienceSymlinksMode::Clean {
             if matches!(&existing, Ok(m) if m.file_type().is_symlink()) {
+                #[cfg(windows)]
+                let _ = std::fs::remove_dir(lp).or_else(|_| std::fs::remove_file(lp));
+                #[cfg(not(windows))]
                 let _ = std::fs::remove_file(lp);
             }
             continue;
@@ -125,11 +128,28 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
         if let Ok(m) = &existing {
             if m.file_type().is_symlink() {
                 if std::fs::read_link(lp)
-                    .map(|t| t == Path::new(target))
+                    .map(|t| {
+                        #[cfg(windows)]
+                        {
+                            let ts = t.to_string_lossy();
+                            let stripped = ts
+                                .strip_prefix(r"\??\")
+                                .or_else(|| ts.strip_prefix(r"\\?\"))
+                                .unwrap_or(&ts);
+                            Path::new(stripped) == Path::new(target)
+                        }
+                        #[cfg(not(windows))]
+                        {
+                            t == Path::new(target)
+                        }
+                    })
                     .unwrap_or(false)
                 {
                     continue;
                 }
+                #[cfg(windows)]
+                let _ = std::fs::remove_dir(lp).or_else(|_| std::fs::remove_file(lp));
+                #[cfg(not(windows))]
                 let _ = std::fs::remove_file(lp);
             } else {
                 msgs.push(format!(
@@ -141,8 +161,7 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
         if let Some(parent) = lp.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        #[cfg(unix)]
-        if let Err(e) = std::os::unix::fs::symlink(target, lp) {
+        if let Err(e) = zel_vfs::create_directory_junction_or_symlink(Path::new(target), lp) {
             msgs.push(format!(
                 "WARNING: Failed to create convenience symlink '{link}': {e}"
             ));

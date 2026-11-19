@@ -1686,7 +1686,7 @@ pub fn write_cache_status(dir: &Path, r: &TestResult) -> std::io::Result<()> {
 pub fn read_cache_status(dir: &Path) -> Option<TestResult> {
     let b = std::fs::read(dir.join("test.cache_status")).ok()?;
     let d = TestResultData::decode(&b).ok()?;
-    let status = TestStatus::from_i32(d.status?);
+    let status = TestStatus::from_i32(d.status_or_default());
     if !dir.join("test.log").exists() {
         return None;
     }

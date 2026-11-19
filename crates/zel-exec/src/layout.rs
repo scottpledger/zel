@@ -71,7 +71,16 @@ pub fn delete_trees_below_not_prefixed(dir: &Path, prefix: &str) -> io::Result<(
         }
         let p = e.path();
         let md = std::fs::symlink_metadata(&p)?;
-        if md.is_dir() {
+        if md.file_type().is_symlink() {
+            #[cfg(windows)]
+            {
+                std::fs::remove_dir(&p).or_else(|_| std::fs::remove_file(&p))?;
+            }
+            #[cfg(not(windows))]
+            {
+                std::fs::remove_file(&p)?;
+            }
+        } else if md.is_dir() {
             std::fs::remove_dir_all(&p)?;
         } else {
             std::fs::remove_file(&p)?;
@@ -126,7 +135,15 @@ pub fn plant_symlink_forest(
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(target, execroot.join(&base))?;
                 #[cfg(not(unix))]
-                copy_tree_fallback(target, &execroot.join(&base))?;
+                {
+                    let dst = execroot.join(&base);
+                    if target.is_dir() {
+                        zel_vfs::create_directory_junction_or_symlink(target, &dst)
+                            .or_else(|_| copy_tree_fallback(target, &dst))?;
+                    } else {
+                        copy_tree_fallback(target, &dst)?;
+                    }
+                }
             }
         } else {
             conflicts.insert(lower);
@@ -176,7 +193,9 @@ pub fn plant_external_repo_links_with_layout(
                     continue;
                 }
                 let p = e.path();
-                if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
+                if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink())
+                    || std::fs::read_link(&p).is_ok()
+                {
                     let _ = remove_symlink(&p);
                 }
             }
@@ -214,12 +233,12 @@ pub fn plant_external_repo_links_with_layout(
         }
         #[cfg(unix)]
         std::os::unix::fs::symlink(ext.join(&n), &link)?;
-        #[cfg(windows)]
-        if std::os::windows::fs::symlink_dir(ext.join(&n), &link).is_err() {
-            copy_tree_fallback(&ext.join(&n), &link)?;
+        #[cfg(not(unix))]
+        {
+            let target = ext.join(&n);
+            zel_vfs::create_directory_junction_or_symlink(&target, &link)
+                .or_else(|_| copy_tree_fallback(&target, &link))?;
         }
-        #[cfg(not(any(unix, windows)))]
-        copy_tree_fallback(&ext.join(&n), &link)?;
         planted.push(link);
     }
     Ok(planted)
@@ -318,9 +337,11 @@ pub fn ensure_output_base_layout(
         let link = output_base.join("install");
         let cur = std::fs::read_link(&link).ok();
         if cur.as_deref() != Some(ib) {
+            #[cfg(windows)]
+            let _ = std::fs::remove_dir(&link).or_else(|_| std::fs::remove_file(&link));
+            #[cfg(not(windows))]
             let _ = std::fs::remove_file(&link);
-            #[cfg(unix)]
-            std::os::unix::fs::symlink(ib, &link)?;
+            zel_vfs::create_directory_junction_or_symlink(ib, &link)?;
         }
     }
     Ok(())
