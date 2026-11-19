@@ -360,45 +360,161 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         materialize(&dir).unwrap();
 
-        let ijar_bin = dir.join("ijar_bin");
-        let mut compiled = false;
-        let mut last_stderr = String::new();
-        for cxx in ["g++", "c++"] {
-            let Ok(out) = Command::new(cxx)
+        // Step 1: Select a working C++17 + C toolchain via minimal probes so we never conflate a
+        // missing host C++/C standard library with an error in `third_party/ijar`.
+        let probe_src = dir.join("probe.cc");
+        let probe_bin = dir.join("probe_bin");
+        let probe_c_src = dir.join("probe.c");
+        let probe_c_obj = dir.join("probe.o");
+        std::fs::write(&probe_src, "#include <memory>\nint main() { return 0; }\n").unwrap();
+        std::fs::write(&probe_c_src, "int zel_probe_fn(void) { return 0; }\n").unwrap();
+        let mut selected_toolchain: Option<(&str, &str)> = None;
+        for (cxx, cc) in [("g++", "gcc"), ("clang++", "clang"), ("c++", "cc")] {
+            let Ok(cxx_out) = Command::new(cxx)
                 .arg("-std=c++17")
-                .arg("-O2")
-                .arg("-I")
-                .arg(&dir)
-                .arg(dir.join("third_party/ijar/ijar.cc"))
-                .arg(dir.join("third_party/ijar/classfile.cc"))
-                .arg(dir.join("third_party/ijar/zip.cc"))
-                .arg(dir.join("third_party/ijar/mapped_file_unix.cc"))
-                .arg(dir.join("third_party/ijar/zlib_client.cc"))
-                .arg("-lz")
+                .arg(&probe_src)
                 .arg("-o")
-                .arg(&ijar_bin)
+                .arg(&probe_bin)
                 .output()
             else {
                 continue;
             };
-            if out.status.success() {
-                compiled = true;
+            if !cxx_out.status.success() {
+                continue;
+            }
+            let Ok(cc_out) = Command::new(cc)
+                .arg("-c")
+                .arg(&probe_c_src)
+                .arg("-o")
+                .arg(&probe_c_obj)
+                .output()
+            else {
+                continue;
+            };
+            if cc_out.status.success() {
+                selected_toolchain = Some((cxx, cc));
                 break;
             }
-            last_stderr = String::from_utf8_lossy(&out.stderr).into_owned();
         }
-        if !compiled {
+        let Some((cxx, cc)) = selected_toolchain else {
             let _ = std::fs::remove_dir_all(&dir);
-            if last_stderr.is_empty()
-                || last_stderr.contains("'memory' file not found")
-                || last_stderr.contains("memory: No such file")
-                || last_stderr.contains("zlib.h")
-                || last_stderr.contains("-lz")
-            {
+            return;
+        };
+
+        // Step 2: Prefer compiling the repo's vendored `zlib` C sources so this test has zero
+        // dependency on system `zlib-dev` headers/libs; fall back to `-lz` only when running
+        // outside the Cargo workspace tree (e.g. an isolated test sandbox).
+        let vendored_zlib = option_env!("CARGO_MANIFEST_DIR")
+            .map(|m| Path::new(m).join("../../third_party/bcr/zlib/1.3.1.bcr.5"))
+            .filter(|p| p.join("zlib.h").exists());
+        let mut zlib_objs = Vec::new();
+        let mut use_system_libz = false;
+        if let Some(ref zdir) = vendored_zlib {
+            let obj_dir = dir.join("zlib_objs");
+            std::fs::create_dir_all(&obj_dir).unwrap();
+            for c_file in [
+                "adler32.c",
+                "compress.c",
+                "crc32.c",
+                "deflate.c",
+                "gzclose.c",
+                "gzlib.c",
+                "gzread.c",
+                "gzwrite.c",
+                "infback.c",
+                "inffast.c",
+                "inflate.c",
+                "inftrees.c",
+                "trees.c",
+                "uncompr.c",
+                "zutil.c",
+            ] {
+                let obj = obj_dir.join(format!("{c_file}.o"));
+                let z_out = Command::new(cc)
+                    .arg("-O2")
+                    .arg("-w")
+                    .arg("-I")
+                    .arg(zdir)
+                    .arg("-c")
+                    .arg(zdir.join(c_file))
+                    .arg("-o")
+                    .arg(&obj)
+                    .output()
+                    .expect("compile vendored zlib C source");
+                assert!(
+                    z_out.status.success(),
+                    "failed to compile vendored zlib {c_file}:\n{}",
+                    String::from_utf8_lossy(&z_out.stderr)
+                );
+                zlib_objs.push(obj);
+            }
+        } else {
+            let zprobe_src = dir.join("probe_zlib.cc");
+            let zprobe_bin = dir.join("probe_zlib_bin");
+            std::fs::write(&zprobe_src, "#include <zlib.h>\nint main() { return 0; }\n").unwrap();
+            let Ok(zprobe) = Command::new(cxx)
+                .arg("-std=c++17")
+                .arg(&zprobe_src)
+                .arg("-lz")
+                .arg("-o")
+                .arg(&zprobe_bin)
+                .output()
+            else {
+                let _ = std::fs::remove_dir_all(&dir);
+                return;
+            };
+            if !zprobe.status.success() {
+                let _ = std::fs::remove_dir_all(&dir);
                 return;
             }
-            panic!("failed to compile embedded third_party/ijar C++ sources:\n{last_stderr}");
+            use_system_libz = true;
         }
+
+        // Step 3: Compile and link the exact `//third_party/ijar:ijar` C++ dependency closure from
+        // `third_party/ijar/BUILD` + `src/main/cpp/util/BUILD` — any compile or link failure here
+        // fails the test unconditionally (no silent skip).
+        let ijar_bin = dir.join("ijar_bin");
+        let mut cmd = Command::new(cxx);
+        cmd.arg("-std=c++17")
+            .arg("-O2")
+            .arg("-DBLAZE_OPENSOURCE")
+            .arg("-I")
+            .arg(&dir);
+        if let Some(ref zdir) = vendored_zlib {
+            cmd.arg("-I").arg(zdir);
+        }
+        for rel_src in [
+            "third_party/ijar/ijar.cc",
+            "third_party/ijar/classfile.cc",
+            "third_party/ijar/zip.cc",
+            "third_party/ijar/mapped_file_unix.cc",
+            "third_party/ijar/platform_utils.cc",
+            "third_party/ijar/zlib_client.cc",
+            "src/main/cpp/util/errors_posix.cc",
+            "src/main/cpp/util/file.cc",
+            "src/main/cpp/util/file_posix.cc",
+            "src/main/cpp/util/logging.cc",
+            "src/main/cpp/util/path.cc",
+            "src/main/cpp/util/path_posix.cc",
+            "src/main/cpp/util/port.cc",
+            "src/main/cpp/util/strings.cc",
+        ] {
+            cmd.arg(dir.join(rel_src));
+        }
+        for obj in &zlib_objs {
+            cmd.arg(obj);
+        }
+        if use_system_libz {
+            cmd.arg("-lz");
+        }
+        cmd.arg("-o").arg(&ijar_bin);
+        let compile_out = cmd.output().expect("invoke C++ compiler for ijar");
+        assert!(
+            compile_out.status.success(),
+            "failed to compile/link embedded third_party/ijar C++ sources with {cxx}:\n{}",
+            String::from_utf8_lossy(&compile_out.stderr)
+        );
+        assert!(ijar_bin.exists(), "compiled ijar binary missing");
 
         let dropped_before = synthetic_class_bytes("pkg/Outer$1", true);
         let kept_public = synthetic_class_bytes("pkg/KeptPublic", false);
@@ -436,6 +552,10 @@ mod tests {
         assert!(
             !entries[0].1.windows(4).any(|w| w == b"Code"),
             "stripped class must omit Code attribute"
+        );
+        eprintln!(
+            "verified compiled C++ ijar ({cxx}) produced {} byte valid JAR with 1 kept entry",
+            out_bytes.len()
         );
 
         let _ = std::fs::remove_dir_all(&dir);
