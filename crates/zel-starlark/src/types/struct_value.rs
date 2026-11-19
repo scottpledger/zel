@@ -124,7 +124,7 @@ impl StructValue {
         for (k, v) in &other.fields {
             if fields.contains_key(k) {
                 return Err(StarlarkError(format!(
-                    "cannot add structs: field '{k}' appears in both operands"
+                    "cannot add struct instances with common field '{k}'"
                 )));
             }
             fields.insert(k.clone(), v.clone());

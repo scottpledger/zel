@@ -1308,9 +1308,57 @@ impl EvalContext {
                 Pattern::Tuple(inner) => {
                     return self.bind_patterns(inner, elem, "");
                 }
+                Pattern::Index { target, index } => {
+                    return self.assign_index_value(target, index, elem, "");
+                }
             }
         }
         self.bind_patterns(var_names, elem, "")
+    }
+
+    fn assign_index_value(
+        &mut self,
+        index_target: &Expr,
+        index_expr: &Expr,
+        val: Value,
+        loc: &str,
+    ) -> Result<(), StarlarkError> {
+        let prefix = if loc.is_empty() {
+            String::new()
+        } else {
+            format!("{loc}: ")
+        };
+        let target_val = self.eval_expr(index_target)?;
+        let key_val = self.eval_expr(index_expr)?;
+        match target_val {
+            Value::List(l) => {
+                let mut guard = l.lock().unwrap();
+                guard.check_mutable()?;
+                let len = guard.elements.len() as i64;
+                let idx = key_val.as_i64().ok_or_else(|| {
+                    StarlarkError(format!(
+                        "{prefix}list index must be integer, not {}",
+                        key_val.type_name()
+                    ))
+                })?;
+                let actual = if idx < 0 { len + idx } else { idx };
+                if actual < 0 || actual >= len {
+                    return Err(StarlarkError(format!("{prefix}list index out of range")));
+                }
+                guard.elements[actual as usize] = val;
+                Ok(())
+            }
+            Value::Dict(d) => {
+                let mut guard = d.lock().unwrap();
+                guard.check_mutable()?;
+                guard.insert(key_val, val)?;
+                Ok(())
+            }
+            other => Err(StarlarkError(format!(
+                "{prefix}type '{}' does not support item assignment",
+                other.type_name()
+            ))),
+        }
     }
 
     /// Unpacks `val` (a sequence) into `pats`, recursing into nested tuple patterns.
@@ -1355,6 +1403,9 @@ impl EvalContext {
             match p {
                 Pattern::Name(n) => self.set_var(n, item),
                 Pattern::Tuple(inner) => self.bind_patterns(inner, item, loc)?,
+                Pattern::Index { target, index } => {
+                    self.assign_index_value(target, index, item, loc)?
+                }
             }
         }
         Ok(())
@@ -2026,13 +2077,37 @@ impl EvalContext {
                 (Value::Int(a), Value::Int(b)) => {
                     let bf = b.to_f64();
                     if bf == 0.0 {
-                        return Err(StarlarkError(format!("{loc}: division by zero")));
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point division by zero"
+                        )));
                     }
                     Ok(Value::Float(a.to_f64() / bf))
                 }
-                (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a / b)),
-                (Value::Int(a), Value::Float(b)) => Ok(Value::Float(a.to_f64() / b)),
-                (Value::Float(a), Value::Int(b)) => Ok(Value::Float(a / b.to_f64())),
+                (Value::Float(a), Value::Float(b)) => {
+                    if *b == 0.0 {
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point division by zero"
+                        )));
+                    }
+                    Ok(Value::Float(a / b))
+                }
+                (Value::Int(a), Value::Float(b)) => {
+                    if *b == 0.0 {
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point division by zero"
+                        )));
+                    }
+                    Ok(Value::Float(a.to_f64() / b))
+                }
+                (Value::Float(a), Value::Int(b)) => {
+                    let bf = b.to_f64();
+                    if bf == 0.0 {
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point division by zero"
+                        )));
+                    }
+                    Ok(Value::Float(a / bf))
+                }
                 _ => Err(StarlarkError(format!(
                     "{loc}: unsupported binary operation: {} / {}",
                     l.type_name(),
@@ -2070,34 +2145,46 @@ impl EvalContext {
                     r.type_name()
                 ))),
             },
-            BinaryOpKind::Mod => match (l, r) {
-                (Value::Int(a), Value::Int(b)) => {
-                    let m = a
-                        .floored_mod(b)
-                        .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
-                    Ok(Value::Int(m))
-                }
-                (Value::Float(a), Value::Float(b)) => {
-                    if *b == 0.0 {
-                        return Err(StarlarkError(format!("{loc}: integer modulo by zero")));
+            BinaryOpKind::Mod => {
+                let float_mod = |a: f64, b: f64| -> Result<Value, StarlarkError> {
+                    if b == 0.0 {
+                        return Err(StarlarkError(format!(
+                            "{loc}: floating-point modulo by zero"
+                        )));
                     }
-                    let m = a - (a / b).floor() * b;
-                    Ok(Value::Float(m))
+                    let mut r = a % b;
+                    if r != 0.0 && (r < 0.0) != (b < 0.0) {
+                        r += b;
+                    } else if r == 0.0 {
+                        r = 0.0f64.copysign(b);
+                    }
+                    Ok(Value::Float(r))
+                };
+                match (l, r) {
+                    (Value::Int(a), Value::Int(b)) => {
+                        let m = a
+                            .floored_mod(b)
+                            .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
+                        Ok(Value::Int(m))
+                    }
+                    (Value::Float(a), Value::Float(b)) => float_mod(*a, *b),
+                    (Value::Int(a), Value::Float(b)) => float_mod(a.to_f64(), *b),
+                    (Value::Float(a), Value::Int(b)) => float_mod(*a, b.to_f64()),
+                    (Value::String(fmt_str), Value::Tuple(args)) => {
+                        let res = percent_format(fmt_str, args, None)?;
+                        Ok(Value::String(res))
+                    }
+                    (Value::String(fmt_str), single) => {
+                        let res = percent_format(fmt_str, &[single.clone()], None)?;
+                        Ok(Value::String(res))
+                    }
+                    _ => Err(StarlarkError(format!(
+                        "{loc}: unsupported binary operation: {} % {}",
+                        l.type_name(),
+                        r.type_name()
+                    ))),
                 }
-                (Value::String(fmt_str), Value::Tuple(args)) => {
-                    let res = percent_format(fmt_str, args, None)?;
-                    Ok(Value::String(res))
-                }
-                (Value::String(fmt_str), single) => {
-                    let res = percent_format(fmt_str, &[single.clone()], None)?;
-                    Ok(Value::String(res))
-                }
-                _ => Err(StarlarkError(format!(
-                    "{loc}: unsupported binary operation: {} % {}",
-                    l.type_name(),
-                    r.type_name()
-                ))),
-            },
+            }
             BinaryOpKind::BitAnd => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.bit_and(b))),
                 (Value::Set(a), Value::Set(b)) => {
@@ -2169,7 +2256,15 @@ impl EvalContext {
             Value::List(l) => Ok(l.lock().unwrap().elements.contains(item)),
             Value::Tuple(t) => Ok(t.contains(item)),
             Value::Set(s) => Ok(s.lock().unwrap().contains(item)),
-            Value::Dict(d) => Ok(d.lock().unwrap().contains_key(item)),
+            Value::Dict(d) => {
+                if !item.is_hashable() {
+                    return Err(StarlarkError(format!(
+                        "unhashable type: '{}'",
+                        item.type_name()
+                    )));
+                }
+                Ok(d.lock().unwrap().contains_key(item))
+            }
             // `"group" in target[OutputGroupInfo]`: membership of a field name.
             Value::ProviderInstance { fields, .. } => {
                 Ok(item.as_str().is_some_and(|n| fields.contains_key(n)))
@@ -3234,7 +3329,15 @@ impl EvalContext {
                         let arg = eval_pos.first().and_then(|v| v.as_str()).ok_or_else(|| {
                             StarlarkError(format!("{loc}: json.decode requires string argument"))
                         })?;
-                        let default = eval_kw.get("default").cloned();
+                        if eval_pos.len() > 1 && eval_kw.contains_key("default") {
+                            return Err(StarlarkError(format!(
+                                "{loc}: json.decode() got multiple values for parameter 'default'"
+                            )));
+                        }
+                        let default = eval_pos
+                            .get(1)
+                            .cloned()
+                            .or_else(|| eval_kw.get("default").cloned());
                         json_decode(arg, default)
                     }
                     "json.indent" => {
@@ -3504,6 +3607,12 @@ impl EvalContext {
                         let key = pos_args.first().ok_or_else(|| {
                             StarlarkError(format!("{loc}: get() takes at least 1 argument"))
                         })?;
+                        if !key.is_hashable() {
+                            return Err(StarlarkError(format!(
+                                "{loc}: unhashable type: '{}'",
+                                key.type_name()
+                            )));
+                        }
                         let default = pos_args
                             .get(1)
                             .or_else(|| kw_args.get("default"))
@@ -3815,7 +3924,15 @@ impl EvalContext {
                                         "{loc}: json.decode requires string argument"
                                     ))
                                 })?;
-                            let default = kw_args.get("default").cloned();
+                            if pos_args.len() > 1 && kw_args.contains_key("default") {
+                                return Err(StarlarkError(format!(
+                                    "{loc}: json.decode() got multiple values for parameter 'default'"
+                                )));
+                            }
+                            let default = pos_args
+                                .get(1)
+                                .cloned()
+                                .or_else(|| kw_args.get("default").cloned());
                             return json_decode(arg, default);
                         }
                         "json.indent" => {

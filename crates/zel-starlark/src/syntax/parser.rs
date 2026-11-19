@@ -562,6 +562,7 @@ impl Parser {
     fn expr_to_pattern(e: Expr, loc: &Location) -> Result<Pattern, StarlarkError> {
         match e {
             Expr::Ident(n, _) => Ok(Pattern::Name(n)),
+            Expr::Index { target, index, .. } => Ok(Pattern::Index { target, index }),
             Expr::Tuple(items, _) | Expr::List(items, _) => Ok(Pattern::Tuple(
                 items
                     .into_iter()

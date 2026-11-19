@@ -177,6 +177,12 @@ impl StarlarkDict {
 
     pub fn pop(&mut self, key: &Value, default: Option<Value>) -> Result<Value, StarlarkError> {
         self.check_mutable()?;
+        if !key.is_hashable() {
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                key.type_name()
+            )));
+        }
         if let Some(pos) = self.entries.iter().position(|(k, _)| k == key) {
             Ok(self.entries.remove(pos).1)
         } else if let Some(def) = default {
@@ -191,9 +197,11 @@ impl StarlarkDict {
 
     pub fn popitem(&mut self) -> Result<(Value, Value), StarlarkError> {
         self.check_mutable()?;
-        self.entries
-            .pop()
-            .ok_or_else(|| StarlarkError("popitem(): dictionary is empty".to_string()))
+        if self.entries.is_empty() {
+            Err(StarlarkError("popitem(): dictionary is empty".to_string()))
+        } else {
+            Ok(self.entries.remove(0))
+        }
     }
 
     pub fn setdefault(&mut self, key: Value, default: Value) -> Result<Value, StarlarkError> {

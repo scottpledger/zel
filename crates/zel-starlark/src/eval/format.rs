@@ -75,6 +75,49 @@ pub fn percent_format(
     Ok(out)
 }
 
+fn format_float_conv(v: f64, conv: char) -> String {
+    if v.is_nan() || v.is_infinite() {
+        let s = format_float(v);
+        return if conv.is_ascii_uppercase() {
+            s.to_ascii_uppercase()
+        } else {
+            s
+        };
+    }
+    let sign = if v.is_sign_negative() { "-" } else { "" };
+    let abs = v.abs();
+    match conv {
+        'e' | 'E' => {
+            let sci = format!("{abs:.6e}");
+            let (mant, exp_s) = sci.split_once('e').unwrap_or((&sci, "0"));
+            let exp: i32 = exp_s.parse().unwrap_or(0);
+            let e_ch = if conv == 'E' { 'E' } else { 'e' };
+            let exp_sign = if exp < 0 { '-' } else { '+' };
+            format!("{sign}{mant}{e_ch}{exp_sign}{:02}", exp.abs())
+        }
+        'f' | 'F' => {
+            let sci = format!("{abs:e}");
+            let (mant, exp_s) = sci.split_once('e').unwrap_or((&sci, "0"));
+            let exp: i32 = exp_s.parse().unwrap_or(0);
+            let digits: String = mant.chars().filter(|c| *c != '.').collect();
+            if exp >= 16 && digits.len() <= (exp as usize + 1) {
+                let pad = (exp as usize + 1) - digits.len();
+                format!("{sign}{digits}{}.000000", "0".repeat(pad))
+            } else {
+                format!("{sign}{abs:.6}")
+            }
+        }
+        _ => {
+            let s = format_float(v);
+            if conv == 'G' {
+                s.replace('e', "E")
+            } else {
+                s
+            }
+        }
+    }
+}
+
 fn format_one_value(
     out: &mut String,
     conv: char,
@@ -110,8 +153,8 @@ fn format_one_value(
             }
         }
         'e' | 'f' | 'g' | 'E' | 'F' | 'G' => match arg {
-            Value::Float(f) => out.push_str(&format_float(*f)),
-            Value::Int(n) => out.push_str(&format_float(n.to_f64())),
+            Value::Float(f) => out.push_str(&format_float_conv(*f, conv)),
+            Value::Int(n) => out.push_str(&format_float_conv(n.to_f64(), conv)),
             _ => {
                 return Err(StarlarkError(format!(
                     "got {} for '%{conv}' format, want int or float",

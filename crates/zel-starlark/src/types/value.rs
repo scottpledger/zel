@@ -346,17 +346,88 @@ impl Value {
                 Ok(Self::Tuple(v))
             }
             (Self::Struct(a), Self::Struct(b)) => Ok(Self::Struct(Arc::new(a.add(b)?))),
+            (
+                Self::ProviderInstance {
+                    provider_name: p1,
+                    fields: f1,
+                },
+                Self::ProviderInstance {
+                    provider_name: p2,
+                    fields: f2,
+                },
+            ) => {
+                if p1 != p2 {
+                    fn printable(p: &str) -> &str {
+                        if p.starts_with("%anonymous#") {
+                            "<no name>"
+                        } else {
+                            p.rsplit('%').next().unwrap_or(p)
+                        }
+                    }
+                    return Err(StarlarkError(format!(
+                        "Cannot use '+' operator on instances of different providers ({} and {})",
+                        printable(p1),
+                        printable(p2)
+                    )));
+                }
+                let mut merged = f1.clone();
+                for (k, v) in f2 {
+                    if merged.contains_key(k) {
+                        return Err(StarlarkError(format!(
+                            "cannot add struct instances with common field '{k}'"
+                        )));
+                    }
+                    merged.insert(k.clone(), v.clone());
+                }
+                Ok(Self::ProviderInstance {
+                    provider_name: p1.clone(),
+                    fields: merged,
+                })
+            }
+            (Self::SelectorList(_), Self::Dict(_)) => Err(StarlarkError(
+                "unsupported binary operation: select + dict".to_string(),
+            )),
+            (Self::Dict(_), Self::SelectorList(_)) => Err(StarlarkError(
+                "unsupported binary operation: dict + select".to_string(),
+            )),
             (Self::SelectorList(s1), Self::SelectorList(s2)) => {
+                if let (Some(t1), Some(t2)) = (s1.elem_type_name(), s2.elem_type_name()) {
+                    if t1 != t2 || t1 == "dict" {
+                        return Err(StarlarkError(format!(
+                            "Cannot combine incompatible types ({}, {})",
+                            s1.display_type_name(),
+                            s2.display_type_name()
+                        )));
+                    }
+                }
                 let mut elements = s1.elements.clone();
                 elements.extend(s2.elements.iter().cloned());
                 Ok(Self::SelectorList(SelectorList { elements }))
             }
             (Self::SelectorList(s1), rhs) => {
+                if let Some(t1) = s1.elem_type_name() {
+                    if !matches!(rhs, Self::None) && t1 != rhs.type_name() {
+                        return Err(StarlarkError(format!(
+                            "Cannot combine incompatible types ({}, {})",
+                            s1.display_type_name(),
+                            rhs.type_name()
+                        )));
+                    }
+                }
                 let mut elements = s1.elements.clone();
                 elements.push(SelectorElement::Native(rhs.clone()));
                 Ok(Self::SelectorList(SelectorList { elements }))
             }
             (lhs, Self::SelectorList(s2)) => {
+                if let Some(t2) = s2.elem_type_name() {
+                    if !matches!(lhs, Self::None) && lhs.type_name() != t2 {
+                        return Err(StarlarkError(format!(
+                            "Cannot combine incompatible types ({}, {})",
+                            lhs.type_name(),
+                            s2.display_type_name()
+                        )));
+                    }
+                }
                 let mut elements = vec![SelectorElement::Native(lhs.clone())];
                 elements.extend(s2.elements.iter().cloned());
                 Ok(Self::SelectorList(SelectorList { elements }))
@@ -383,20 +454,63 @@ impl Value {
                 Ok(Self::Dict(Arc::new(Mutex::new(d1.union(&d2)))))
             }
             (Self::SelectorList(s1), Self::SelectorList(s2)) => {
+                if let (Some(t1), Some(t2)) = (s1.elem_type_name(), s2.elem_type_name()) {
+                    if t1 != t2 || !matches!(t1, "dict" | "set" | "int") {
+                        return Err(StarlarkError(format!(
+                            "Cannot combine incompatible types ({}, {})",
+                            s1.display_type_name(),
+                            s2.display_type_name()
+                        )));
+                    }
+                }
                 let mut elements = s1.elements.clone();
                 elements.extend(s2.elements.iter().cloned());
                 Ok(Self::SelectorList(SelectorList { elements }))
             }
             // `select({...}) | {...}` concatenates dict-valued selects (SelectorList's PIPE).
-            (Self::SelectorList(s1), rhs @ Self::Dict(_)) => {
-                let mut elements = s1.elements.clone();
-                elements.push(SelectorElement::Native(rhs.clone()));
-                Ok(Self::SelectorList(SelectorList { elements }))
+            (Self::SelectorList(s1), rhs) => {
+                if let Some(t1) = s1.elem_type_name() {
+                    if !matches!(rhs, Self::None) && t1 != rhs.type_name() {
+                        return Err(StarlarkError(format!(
+                            "Cannot combine incompatible types ({}, {})",
+                            s1.display_type_name(),
+                            rhs.type_name()
+                        )));
+                    }
+                }
+                if matches!(rhs, Self::Dict(_) | Self::Set(_) | Self::Int(_)) {
+                    let mut elements = s1.elements.clone();
+                    elements.push(SelectorElement::Native(rhs.clone()));
+                    Ok(Self::SelectorList(SelectorList { elements }))
+                } else {
+                    Err(StarlarkError(format!(
+                        "unsupported binary operation: {} | {}",
+                        self.type_name(),
+                        other.type_name()
+                    )))
+                }
             }
-            (lhs @ Self::Dict(_), Self::SelectorList(s2)) => {
-                let mut elements = vec![SelectorElement::Native(lhs.clone())];
-                elements.extend(s2.elements.iter().cloned());
-                Ok(Self::SelectorList(SelectorList { elements }))
+            (lhs, Self::SelectorList(s2)) => {
+                if let Some(t2) = s2.elem_type_name() {
+                    if !matches!(lhs, Self::None) && lhs.type_name() != t2 {
+                        return Err(StarlarkError(format!(
+                            "Cannot combine incompatible types ({}, {})",
+                            lhs.type_name(),
+                            s2.display_type_name()
+                        )));
+                    }
+                }
+                if matches!(lhs, Self::Dict(_) | Self::Set(_) | Self::Int(_)) {
+                    let mut elements = vec![SelectorElement::Native(lhs.clone())];
+                    elements.extend(s2.elements.iter().cloned());
+                    Ok(Self::SelectorList(SelectorList { elements }))
+                } else {
+                    Err(StarlarkError(format!(
+                        "unsupported binary operation: {} | {}",
+                        self.type_name(),
+                        other.type_name()
+                    )))
+                }
             }
             _ => Err(StarlarkError(format!(
                 "unsupported binary operation: {} | {}",
@@ -639,6 +753,21 @@ pub fn format_float(v: f64) -> String {
     }
 }
 
+fn dotted_version_canonical_components(v: &str) -> Vec<(u64, String)> {
+    let mut comps: Vec<(u64, String)> = v
+        .split('.')
+        .map(|c| {
+            let digits: String = c.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+            let rest: String = c.chars().skip(digits.len()).collect();
+            (digits.parse().unwrap_or(0), rest)
+        })
+        .collect();
+    while comps.last().is_some_and(|(n, r)| *n == 0 && r.is_empty()) {
+        comps.pop();
+    }
+    comps
+}
+
 pub fn int_equals_float(x: &BigInt, y: f64) -> bool {
     !y.is_nan() && crate::bigint::compare_int_and_float(x, y) == std::cmp::Ordering::Equal
 }
@@ -718,7 +847,16 @@ impl PartialEq for Value {
             ) => p1 == p2 && f1 == f2,
             (Self::UserFunction(f1), Self::UserFunction(f2)) => Arc::ptr_eq(f1, f2),
             (Self::BuiltinFunction(b1), Self::BuiltinFunction(b2)) => b1 == b2,
-            (Self::Host(k1, i1), Self::Host(k2, i2)) => k1 == k2 && i1 == i2,
+            (Self::Host(k1, i1), Self::Host(k2, i2)) => {
+                if k1 != k2 {
+                    false
+                } else if k1 == "dotted_version" {
+                    dotted_version_canonical_components(i1)
+                        == dotted_version_canonical_components(i2)
+                } else {
+                    i1 == i2
+                }
+            }
             _ => false,
         }
     }
@@ -797,7 +935,11 @@ impl Hash for Value {
             Self::Host(k, id) => {
                 9u8.hash(state);
                 k.hash(state);
-                id.hash(state);
+                if k == "dotted_version" {
+                    dotted_version_canonical_components(id).hash(state);
+                } else {
+                    id.hash(state);
+                }
             }
             Self::Struct(s) => {
                 10u8.hash(state);
@@ -872,7 +1014,8 @@ impl fmt::Display for Value {
                 provider_name,
                 fields,
             } => {
-                write!(f, "{provider_name}(")?;
+                let shown = provider_name.rsplit('%').next().unwrap_or(provider_name);
+                write!(f, "{shown}(")?;
                 for (i, (k, v)) in fields.iter().enumerate() {
                     if i > 0 {
                         f.write_str(", ")?;

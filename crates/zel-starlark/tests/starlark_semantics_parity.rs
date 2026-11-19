@@ -738,3 +738,192 @@ ga_root = getattr(Label("@rules_foo//:t"), "workspace_root")
         assert!(err.contains(expected), "for {expr}: {err}");
     }
 }
+
+#[test]
+fn depset_str_dict_fifo_float_format_and_unpacking_subscripts() {
+    let ctx = eval(
+        r#"
+ds_topo = str(depset([3, 4, 5], transitive = [depset([2, 4, 6])], order = "topological"))
+ds_def = str(depset([2, 4, 6], transitive = [depset([3, 5])]))
+
+d_pop = {2: "bar", 3: "baz", 1: "foo"}
+first_popped = d_pop.popitem()
+
+def user_fn():
+    pass
+fn_in_dict = user_fn in {}
+
+d_self = {"a": 1}
+d_self.update(d_self, d=4)
+
+d_sub = {"a": 1}
+d_sub["b"], d_sub["c"] = 2, 3
+
+fe0 = "%e" % 0
+fe_neg0 = "%e" % -0.0
+fe123 = "%e" % 123
+fe45 = "%e" % 1.23e45
+ff0 = "%f" % 0
+ff_neg0 = "%f" % -0.0
+ff45 = "%f" % 1.23e45
+ff_tiny = "%f" % -1.23e-45
+
+mod_fi = -100.0 % 7
+mod_if = 100 % 7.0
+
+jd_str = json.decode('{"invalid": "json"', "default value")
+jd_none = json.decode('{"invalid": "json"', None)
+ix = int(x = "2a", base = 16)
+"#,
+    );
+    assert_eq!(
+        ctx.globals.get("ds_topo"),
+        Some(&Value::String(
+            "depset([3, 5, 6, 4, 2], order = \"topological\")".into()
+        ))
+    );
+    assert_eq!(
+        ctx.globals.get("ds_def"),
+        Some(&Value::String("depset([3, 5, 2, 4, 6])".into()))
+    );
+    assert_eq!(
+        ctx.globals.get("first_popped").unwrap().to_string(),
+        "(2, \"bar\")"
+    );
+    assert_eq!(ctx.globals.get("fn_in_dict"), Some(&Value::Bool(false)));
+    assert_eq!(
+        ctx.globals.get("d_self").unwrap().to_string(),
+        "{\"a\": 1, \"d\": 4}"
+    );
+    assert_eq!(
+        ctx.globals.get("d_sub").unwrap().to_string(),
+        "{\"a\": 1, \"b\": 2, \"c\": 3}"
+    );
+
+    assert_eq!(
+        ctx.globals.get("fe0"),
+        Some(&Value::String("0.000000e+00".into()))
+    );
+    assert_eq!(
+        ctx.globals.get("fe_neg0"),
+        Some(&Value::String("-0.000000e+00".into()))
+    );
+    assert_eq!(
+        ctx.globals.get("fe123"),
+        Some(&Value::String("1.230000e+02".into()))
+    );
+    assert_eq!(
+        ctx.globals.get("fe45"),
+        Some(&Value::String("1.230000e+45".into()))
+    );
+    assert_eq!(
+        ctx.globals.get("ff0"),
+        Some(&Value::String("0.000000".into()))
+    );
+    assert_eq!(
+        ctx.globals.get("ff_neg0"),
+        Some(&Value::String("-0.000000".into()))
+    );
+    assert_eq!(
+        ctx.globals.get("ff45"),
+        Some(&Value::String(
+            "1230000000000000000000000000000000000000000000.000000".into()
+        ))
+    );
+    assert_eq!(
+        ctx.globals.get("ff_tiny"),
+        Some(&Value::String("-0.000000".into()))
+    );
+    assert_eq!(ctx.globals.get("mod_fi"), Some(&Value::Float(5.0)));
+    assert_eq!(ctx.globals.get("mod_if"), Some(&Value::Float(2.0)));
+    assert_eq!(
+        ctx.globals.get("jd_str"),
+        Some(&Value::String("default value".into()))
+    );
+    assert_eq!(ctx.globals.get("jd_none"), Some(&Value::None));
+    assert_eq!(ctx.globals.get("ix").unwrap().to_string(), "42");
+
+    assert!(eval_err("{}.pop([], 1)").contains("unhashable type: 'list'"));
+    assert!(eval_err("{} in {}").contains("unhashable type: 'dict'"));
+    assert!(eval_err("len in {}").contains("unhashable type: 'builtin_function_or_method'"));
+    assert!(eval_err("{1: 2}.get(len)").contains("unhashable type: 'builtin_function_or_method'"));
+    assert!(eval_err("1 / 0.0").contains("floating-point division by zero"));
+    assert!(eval_err("1 % 0.0").contains("floating-point modulo by zero"));
+    assert!(eval_err("int()").contains("missing 1 required positional argument: x"));
+}
+
+#[test]
+fn provider_instance_add_display_and_select_type_checks() {
+    let mut ctx = EvalContext::default();
+    let mut f1 = std::collections::BTreeMap::new();
+    f1.insert("a".to_string(), Value::Int(1.into()));
+    let mut f2 = std::collections::BTreeMap::new();
+    f2.insert("b".to_string(), Value::String("foo".into()));
+    let p1 = Value::ProviderInstance {
+        provider_name: "%anonymous#1%struct".into(),
+        fields: f1.clone(),
+    };
+    let p2 = Value::ProviderInstance {
+        provider_name: "%anonymous#1%struct".into(),
+        fields: f2,
+    };
+    let p_other = Value::ProviderInstance {
+        provider_name: "%anonymous#2%other".into(),
+        fields: f1,
+    };
+    let merged = p1.add(&p2).unwrap();
+    assert_eq!(merged.to_string(), "struct(a = 1, b = \"foo\")");
+    assert_eq!(merged.repr(), "struct(a = 1, b = \"foo\")");
+    assert!(p1
+        .add(&p1)
+        .unwrap_err()
+        .0
+        .contains("cannot add struct instances with common field 'a'"));
+    assert!(p1.add(&p_other).unwrap_err().0.contains(
+        "Cannot use '+' operator on instances of different providers (<no name> and <no name>)"
+    ));
+
+    ctx.eval_str(
+        r#"
+sl = select({"//a": ["x"]})
+sd = select({"//a": {"k": "v"}})
+si = select({"//a": 1})
+"#,
+    )
+    .unwrap();
+    assert!(ctx
+        .eval_str("sl + 1")
+        .unwrap_err()
+        .0
+        .contains("Cannot combine incompatible types (select of list, int)"));
+    assert!(ctx
+        .eval_str("sl + si")
+        .unwrap_err()
+        .0
+        .contains("Cannot combine incompatible types (select of list, select of int)"));
+    assert!(ctx
+        .eval_str("sl + sd")
+        .unwrap_err()
+        .0
+        .contains("Cannot combine incompatible types (select of list, select of dict)"));
+    assert!(ctx
+        .eval_str("sl + {}")
+        .unwrap_err()
+        .0
+        .contains("unsupported binary operation: select + dict"));
+    assert!(ctx
+        .eval_str("{} + sl")
+        .unwrap_err()
+        .0
+        .contains("unsupported binary operation: dict + select"));
+    assert!(ctx
+        .eval_str("sl | {}")
+        .unwrap_err()
+        .0
+        .contains("Cannot combine incompatible types (select of list, dict)"));
+    assert!(ctx
+        .eval_str("{} | sl")
+        .unwrap_err()
+        .0
+        .contains("Cannot combine incompatible types (dict, select of list)"));
+}
