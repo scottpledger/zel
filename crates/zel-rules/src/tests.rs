@@ -2617,3 +2617,81 @@ pos_analysis_test(name = "at")
     let at = ws.analyze("//:at").unwrap();
     assert!(at.default_info.executable.is_some());
 }
+
+#[test]
+fn empty_list_transition_drops_attr_dep_and_rejects_rule_transition() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _empty_list_impl(settings, attr):
+    return []
+
+empty_list_t = transition(
+    implementation = _empty_list_impl,
+    inputs = [],
+    outputs = ["//command_line_option:cpu"],
+)
+
+def _empty_dict_impl(settings, attr):
+    return {}
+
+empty_dict_t = transition(
+    implementation = _empty_dict_impl,
+    inputs = [],
+    outputs = ["//command_line_option:cpu"],
+)
+
+def _boom_impl(ctx):
+    fail("boom_dep should never be analyzed when dropped by [] split transition")
+
+boom_rule = rule(implementation = _boom_impl)
+
+def _holder_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(
+        out,
+        "{}:{}:{}".format(
+            len(ctx.attr.dep),
+            len(ctx.split_attr.dep),
+            len(ctx.attr.dict_deps),
+        ),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+holder = rule(
+    implementation = _holder_impl,
+    cfg = empty_dict_t,
+    attrs = {
+        "dep": attr.label(cfg = empty_list_t),
+        "dict_deps": attr.string_keyed_label_dict(cfg = empty_list_t),
+    },
+)
+
+bad_empty_rule = rule(implementation = _holder_impl, cfg = empty_list_t)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "boom_rule", "holder", "bad_empty_rule")
+boom_rule(name = "boom")
+holder(name = "ok_drop", dep = ":boom", dict_deps = {":boom": "x"})
+bad_empty_rule(name = "bad_rule")
+"#,
+        ),
+    ]);
+
+    let ct = ws.analyze("//:ok_drop").unwrap();
+    let zel_analysis::ActionAnalysisMetadata::FileWriteAction { content, .. } = &ct.actions[0]
+    else {
+        panic!("expected FileWriteAction");
+    };
+    assert_eq!(std::str::from_utf8(content).unwrap(), "0:0:0");
+
+    let err = ws.analyze("//:bad_rule").unwrap_err();
+    assert!(
+        err.contains("Rule transition only allowed to return a single transitioned configuration."),
+        "{err}"
+    );
+}

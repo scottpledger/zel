@@ -123,7 +123,15 @@ fn attr_to_value(
             split.push((k, conv.value));
         }
     }
-    let value = if !flat_dict.is_empty() { mk_dict(flat_dict) } else { mk_list(flat) };
+    let is_dict_attr = matches!(
+        attr.ty,
+        AttrType::StringKeyedLabelDict | AttrType::LabelKeyedStringDict | AttrType::LabelListDict
+    );
+    let value = if !flat_dict.is_empty() || is_dict_attr {
+        mk_dict(flat_dict)
+    } else {
+        mk_list(flat)
+    };
     Ok(ConvertedAttr { value, deps, split: Some(mk_dict(split)) })
 }
 

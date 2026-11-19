@@ -882,7 +882,7 @@ pub fn apply_transition_split_with_resolver(
         Value::List(l) => {
             let elems = l.lock().unwrap().elements.clone();
             if elems.is_empty() {
-                return Ok(vec![(None, cfg.clone())]);
+                return Ok(Vec::new());
             }
             let mut res = Vec::with_capacity(elems.len());
             for (idx, elem) in elems.into_iter().enumerate() {
@@ -899,7 +899,7 @@ pub fn apply_transition_split_with_resolver(
         }
         Value::Dict(d) => {
             let items = d.lock().unwrap().items();
-            if items.is_empty() && canonical_outputs.is_empty() {
+            if items.is_empty() {
                 return Ok(vec![(None, cfg.clone())]);
             }
             let is_split =

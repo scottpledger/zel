@@ -427,13 +427,24 @@ impl Action {
             } => {
                 fp.add_str("Spawn").add_str(executable);
                 for a in arguments {
-                    fp.add_strings(a.args.iter());
+                    match &a.param_file {
+                        Some(p) if p.format == ParamFileFormat::FlagPerLine => {
+                            let lead = p.leading_args.min(a.args.len());
+                            fp.add_strings(a.args[..lead].iter());
+                            let grouped = p.format_flag_groups(lead, &a.args);
+                            fp.add_strings(grouped.iter());
+                        }
+                        _ => {
+                            fp.add_strings(a.args.iter());
+                        }
+                    }
                     if let Some(p) = &a.param_file {
                         let fmt_tag = match p.format {
                             ParamFileFormat::Shell => "SHELL_QUOTED",
                             ParamFileFormat::GccQuoted => "GCC_QUOTED",
                             ParamFileFormat::Windows => "WINDOWS",
-                            ParamFileFormat::Multiline | ParamFileFormat::FlagPerLine => "UNQUOTED",
+                            ParamFileFormat::Multiline => "UNQUOTED",
+                            ParamFileFormat::FlagPerLine => "FLAG_PER_LINE",
                         };
                         fp.add_str(&p.flag_format)
                             .add_str(fmt_tag)
@@ -1444,5 +1455,49 @@ mod tests {
             }
             other => panic!("unexpected lowered action: {other:?}"),
         }
+    }
+
+    #[test]
+    fn flag_per_line_vs_multiline_changes_action_key_and_prevents_false_sharing() {
+        let mk_spawn = |owner: &str, format: ParamFileFormat, groups: Vec<(usize, usize)>| {
+            let mut act = Action::new(
+                Label::parse_canonical(owner).unwrap(),
+                "PackageTar",
+                ActionKind::Spawn {
+                    executable: "/bin/tar_tool".into(),
+                    arguments: vec![CommandLineArgs {
+                        args: vec!["--output".into(), "out.tar".into(), "pos_input".into()],
+                        param_file: Some(ParamFileInfo {
+                            flag_format: "@%s".into(),
+                            format,
+                            use_always: true,
+                            leading_args: 0,
+                            flag_groups: groups,
+                        }),
+                    }],
+                    shell_command: None,
+                },
+            );
+            act.outputs.push(art("a/shared.tar"));
+            act
+        };
+
+        let multi = mk_spawn("//a:m", ParamFileFormat::Multiline, vec![(0, 2), (2, 3)]);
+        let flag_grouped = mk_spawn("//a:f", ParamFileFormat::FlagPerLine, vec![(0, 2), (2, 3)]);
+        let flag_ungrouped = mk_spawn(
+            "//a:u",
+            ParamFileFormat::FlagPerLine,
+            vec![(0, 1), (1, 2), (2, 3)],
+        );
+
+        assert_ne!(multi.key(), flag_grouped.key());
+        assert_ne!(multi.key(), flag_ungrouped.key());
+        assert_ne!(flag_grouped.key(), flag_ungrouped.key());
+        assert!(!multi.can_be_shared(&flag_grouped));
+        assert!(!multi.can_be_shared(&flag_ungrouped));
+
+        let mut g = ActionGraph::new();
+        g.register(&multi).unwrap();
+        assert!(g.register(&flag_grouped).is_err());
     }
 }

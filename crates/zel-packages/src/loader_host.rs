@@ -3015,13 +3015,11 @@ impl PackageLoader {
         }
         let mut kwargs: BTreeMap<String, Value> = BTreeMap::new();
         for k in &attr_names {
-            let arg_key = k.strip_prefix('_').unwrap_or(k);
-            kwargs.insert(arg_key.to_string(), Value::None);
+            kwargs.insert(k.clone(), Value::None);
         }
         kwargs.insert("name".into(), Value::String(call.name.clone()));
         for (k, v) in &call.values {
-            let arg_key = k.strip_prefix('_').unwrap_or(k);
-            kwargs.insert(arg_key.to_string(), to_macro_value(v));
+            kwargs.insert(k.clone(), to_macro_value(v));
         }
         let _ = (&call.parent, &call.location);
         let res = ctx.call_value(imp, Vec::new(), kwargs);

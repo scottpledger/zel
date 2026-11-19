@@ -2240,3 +2240,65 @@ test_suite(name = "short_only", tags = ["short", "noflaky", ""])
     )]);
     assert!(dup_meta.load("").contains_errors);
 }
+
+#[test]
+fn symbolic_macro_private_underscore_attrs_keep_underscore_and_avoid_collision() {
+    let ws = Ws::new(&[
+        (
+            "BUILD",
+            r#"
+load(":m.bzl", "priv_m")
+priv_m(name = "inst", foo = "public_val")
+"#,
+        ),
+        (
+            "m.bzl",
+            r#"
+def _impl(name, visibility, foo, _foo, _unset_priv):
+    if _unset_priv != None:
+        fail("_unset_priv should be None")
+    native.genrule(
+        name = name,
+        outs = [name + ".out"],
+        cmd = foo + ":" + str(_foo),
+        visibility = visibility,
+    )
+
+priv_m = macro(
+    implementation = _impl,
+    attrs = {
+        "foo": attr.string(mandatory = True, configurable = False),
+        "_foo": attr.label(default = Label("//:helper_tool"), configurable = False),
+        "_unset_priv": attr.label(configurable = False),
+    },
+)
+"#,
+        ),
+    ]);
+    let p = ws.load("");
+    assert!(!p.contains_errors, "{:?}", errors(&p));
+    assert_eq!(
+        rule(&p, "inst").extra.attr_values.get("cmd"),
+        Some(&AttrValue::Str("public_val:@@//:helper_tool".into()))
+    );
+
+    let ws_bad_caller = Ws::new(&[
+        (
+            "BUILD",
+            "load(':m.bzl', 'priv_m')\npriv_m(name = 'inst', foo = 'x', _foo = '//:other')\n",
+        ),
+        (
+            "m.bzl",
+            "def _impl(name, visibility, foo, _foo):\n    pass\npriv_m = macro(implementation = _impl, attrs = {'foo': attr.string(configurable = False), '_foo': attr.label(default = Label('//:t'), configurable = False)})\n",
+        ),
+    ]);
+    let p_bad = ws_bad_caller.load("");
+    assert!(p_bad.contains_errors);
+    assert!(
+        errors(&p_bad)
+            .join("\n")
+            .contains("cannot set non-public attribute '_foo' in 'priv_m' macro"),
+        "{:?}",
+        errors(&p_bad)
+    );
+}

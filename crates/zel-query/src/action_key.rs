@@ -342,8 +342,22 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
                 // `format_each`/`map_each` have their own fingerprint in Bazel).
                 fp.add_string(executable);
                 for args in arguments {
-                    for s in &args.args {
-                        fp.add_string(s);
+                    match &args.param_file {
+                        Some(p) if p.format == zel_analysis::ParamFileFormat::FlagPerLine => {
+                            let lead = p.leading_args.min(args.args.len());
+                            fp.add_string("FLAG_PER_LINE").add_int(lead as i32);
+                            for s in &args.args[..lead] {
+                                fp.add_string(s);
+                            }
+                            for s in p.format_flag_groups(lead, &args.args) {
+                                fp.add_string(&s);
+                            }
+                        }
+                        _ => {
+                            for s in &args.args {
+                                fp.add_string(s);
+                            }
+                        }
                     }
                     if let Some(p) = &args.param_file {
                         fp.add_uuid(PARAM_FILE_UUID);
@@ -562,5 +576,44 @@ mod tests {
         });
         // The shared child array digest is reused (only `"c"` invokes the mapper).
         assert_eq!(calls, 3);
+    }
+
+    #[test]
+    fn flag_per_line_changes_aquery_action_key() {
+        let mk = |format: zel_analysis::ParamFileFormat, groups: Vec<(usize, usize)>| {
+            Action::new(
+                owner(),
+                "PackageTar",
+                ActionKind::Spawn {
+                    executable: "/bin/tar_tool".into(),
+                    arguments: vec![CommandLineArgs {
+                        args: vec!["--output".into(), "out.tar".into(), "pos_input".into()],
+                        param_file: Some(zel_analysis::ParamFileInfo {
+                            flag_format: "@%s".into(),
+                            format,
+                            use_always: true,
+                            leading_args: 0,
+                            flag_groups: groups,
+                        }),
+                    }],
+                    shell_command: None,
+                },
+            )
+        };
+        let multi = mk(
+            zel_analysis::ParamFileFormat::Multiline,
+            vec![(0, 2), (2, 3)],
+        );
+        let fpl_grouped = mk(
+            zel_analysis::ParamFileFormat::FlagPerLine,
+            vec![(0, 2), (2, 3)],
+        );
+        let fpl_ungrouped = mk(
+            zel_analysis::ParamFileFormat::FlagPerLine,
+            vec![(0, 1), (1, 2), (2, 3)],
+        );
+        assert_ne!(key_on_mac(&multi), key_on_mac(&fpl_grouped));
+        assert_ne!(key_on_mac(&multi), key_on_mac(&fpl_ungrouped));
+        assert_ne!(key_on_mac(&fpl_grouped), key_on_mac(&fpl_ungrouped));
     }
 }
