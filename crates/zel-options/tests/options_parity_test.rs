@@ -806,3 +806,181 @@ fn test_extract_client_env_both_forms_and_empty_when_absent() {
     assert_eq!(env.get("B").map(String::as_str), Some(""));
     assert!(!env.contains_key("C"));
 }
+
+#[test]
+fn test_path_fragment_converter_expands_tilde_and_normalizes() {
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() {
+        let parsed = ParsedCommandOptions::parse_for_command(
+            "build",
+            &[
+                "--profile=~/subdir/../trace.json.gz".to_string(),
+                "--client_cwd=~/ws/./sub".to_string(),
+            ],
+        )
+        .unwrap();
+        let norm_home = zel_vfs::PathFragment::create(&home)
+            .path_string()
+            .to_string();
+        assert_eq!(
+            parsed.get_str("profile"),
+            Some(format!("{norm_home}/trace.json.gz").as_str())
+        );
+        assert_eq!(
+            parsed.profile.as_ref().map(|p| p.path_string()),
+            Some(format!("{norm_home}/trace.json.gz").as_str())
+        );
+        assert_eq!(
+            parsed.get_str("client_cwd"),
+            Some(format!("{norm_home}/ws/sub").as_str())
+        );
+
+        let (startup, _, _) = zel_options::split_command_line(&[
+            "--output_base=~/my_ob/./nested/..".to_string(),
+            "build".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            startup.output_base.as_ref().map(|p| p.path_string()),
+            Some(format!("{norm_home}/my_ob").as_str())
+        );
+    }
+}
+
+#[test]
+fn test_uuid_converter_empty_null_and_signed_long_bounds() {
+    // Empty --invocation_id converts to null (None) so env fallback can apply.
+    let parsed =
+        ParsedCommandOptions::parse_for_command("build", &["--invocation_id=".to_string()])
+            .unwrap();
+    assert_eq!(parsed.get_str("invocation_id"), None);
+
+    // 16 hex digits exceeding i64::MAX (MSB set) is rejected by Java's Long.parseLong(..., 16).
+    let err = ParsedCommandOptions::parse_for_command(
+        "build",
+        &["--invocation_id=ffffffffffffffff-1-1-1-1".to_string()],
+    )
+    .unwrap_err();
+    assert!(err.message.contains("is not a value UUID"), "{}", err.message);
+
+    // 15 hex digits (within signed i64) is accepted.
+    let ok = ParsedCommandOptions::parse_for_command(
+        "build",
+        &["--invocation_id=7fffffffffffffff-1-1-1-1".to_string()],
+    )
+    .unwrap();
+    assert_eq!(
+        ok.get_str("invocation_id"),
+        Some("7fffffffffffffff-1-1-1-1")
+    );
+}
+
+#[test]
+fn test_command_line_option_pseudo_package_rewrites_to_native() {
+    let parsed = ParsedCommandOptions::parse_for_command(
+        "build",
+        &[
+            "--//command_line_option:jobs=6".to_string(),
+            "--@//command_line_option:keep_going".to_string(),
+            "--@@//command_line_option:compilation_mode=opt".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(parsed.jobs, 6);
+    assert!(parsed.keep_going);
+    assert_eq!(parsed.compilation_mode, "opt");
+
+    let parsed_neg = ParsedCommandOptions::parse_for_command(
+        "build",
+        &[
+            "-k".to_string(),
+            "--no//command_line_option:keep_going".to_string(),
+        ],
+    )
+    .unwrap();
+    assert!(!parsed_neg.keep_going);
+
+    // Empty target name in --//command_line_option:=val must fail.
+    let bad_empty = ParsedCommandOptions::parse_for_command(
+        "build",
+        &["--//command_line_option:=val".to_string()],
+    )
+    .unwrap_err();
+    assert!(
+        bad_empty.message.contains("empty target name")
+            || bad_empty.message.contains("Error loading option"),
+        "{}",
+        bad_empty.message
+    );
+
+    // Non-boolean --//command_line_option:jobs without `=` does not consume the next token.
+    let missing_eq = ParsedCommandOptions::parse_for_command(
+        "build",
+        &["--//command_line_option:jobs".to_string(), "6".to_string()],
+    )
+    .unwrap_err();
+    assert!(
+        missing_eq
+            .message
+            .contains("Did you mean --//command_line_option:jobs=6?"),
+        "{}",
+        missing_eq.message
+    );
+}
+
+#[test]
+fn test_default_override_applies_rc_options_and_validates_two_token_form() {
+    let flags = zel_options::canonicalize_flags(&[
+        "--for_command=build".to_string(),
+        "--".to_string(),
+        "--rc_source=/path/to/.bazelrc".to_string(),
+        "--default_override=0:build=--jobs=8".to_string(),
+        "-k".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(flags, vec!["--jobs=8", "--keep_going=1"]);
+
+    // Two-token --default_override with invalid format fails.
+    let bad = zel_options::canonicalize_flags(&[
+        "--".to_string(),
+        "--default_override".to_string(),
+        "not_valid".to_string(),
+    ])
+    .unwrap_err();
+    assert!(
+        bad.message
+            .contains("option overrides must be in form rcfile:command=option"),
+        "{}",
+        bad.message
+    );
+
+    // Flag alias before `--` in canonicalize-flags rewrites alias after `--`.
+    let aliased = zel_options::canonicalize_flags(&[
+        "--flag_alias=my_flag=//pkg:setting".to_string(),
+        "--".to_string(),
+        "--my_flag=custom".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(aliased, vec!["--//pkg:setting=custom"]);
+}
+
+#[test]
+fn test_common_config_reports_ignored_unsupported_options() {
+    let mut rc = BazelrcConfig::default();
+    rc.sections.insert(
+        "common:ci".to_string(),
+        vec![
+            ("--keep_going".to_string(), "/ws/.bazelrc".to_string()),
+            ("--jobs=4".to_string(), "/ws/.bazelrc".to_string()),
+        ],
+    );
+    let (expanded, notes) =
+        zel_options::expand_command_args(&rc, "query", &["--config=ci".to_string()]).unwrap();
+    assert_eq!(expanded, vec!["--keep_going"]);
+    assert!(
+        notes
+            .iter()
+            .any(|n| n.contains("Ignored as unsupported by 'query': --jobs=4")),
+        "{notes:?}"
+    );
+}

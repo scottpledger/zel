@@ -216,7 +216,7 @@ impl ParsedCommandOptions {
 
     /// Parses command-line arguments for a specific command (e.g. "build", "test", "run", "query").
     pub fn parse_for_command(command: &str, args: &[String]) -> Result<Self, OptionsParsingError> {
-        Self::parse_internal(command, args, PriorityCategory::CommandLine, true, true)
+        Self::parse_internal(command, args, PriorityCategory::CommandLine, true, true, None)
     }
 
     /// Parses command-line arguments without `editOptions` or invocation policy (for `canonicalize-flags`).
@@ -224,7 +224,30 @@ impl ParsedCommandOptions {
         command: &str,
         args: &[String],
     ) -> Result<Self, OptionsParsingError> {
-        Self::parse_internal(command, args, PriorityCategory::CommandLine, false, false)
+        Self::parse_internal(
+            command,
+            args,
+            PriorityCategory::CommandLine,
+            false,
+            false,
+            None,
+        )
+    }
+
+    /// Like [`Self::parse_for_command_no_edit`], seeded with `--flag_alias` mappings parsed before `--`.
+    pub fn parse_for_command_no_edit_with_aliases(
+        command: &str,
+        args: &[String],
+        initial_aliases: &BTreeMap<String, String>,
+    ) -> Result<Self, OptionsParsingError> {
+        Self::parse_internal(
+            command,
+            args,
+            PriorityCategory::CommandLine,
+            false,
+            false,
+            Some(initial_aliases),
+        )
     }
 
     /// Parses options with a specific initial priority category.
@@ -233,7 +256,7 @@ impl ParsedCommandOptions {
         args: &[String],
         priority: PriorityCategory,
     ) -> Result<Self, OptionsParsingError> {
-        Self::parse_internal(command, args, priority, true, true)
+        Self::parse_internal(command, args, priority, true, true, None)
     }
 
     /// `OptionsParser.getResidue`: pre-`--` followed by post-`--` residue.
@@ -290,10 +313,59 @@ impl ParsedCommandOptions {
         initial_priority: PriorityCategory,
         run_edit_options: bool,
         run_invocation_policy: bool,
+        initial_aliases: Option<&BTreeMap<String, String>>,
     ) -> Result<Self, OptionsParsingError> {
         let mut opts = Self::default();
+        if let Some(aliases) = initial_aliases {
+            for (k, v) in aliases {
+                opts.command_line_aliases.insert(k.clone(), v.clone());
+                opts.flag_aliases.insert(k.clone(), v.clone());
+            }
+        }
+
+        let has_rc_partition = args.iter().any(|a| {
+            a == "--rc_source"
+                || a == "--default_override"
+                || a.starts_with("--rc_source=")
+                || a.starts_with("--default_override=")
+        });
+
+        let effective_args_owned;
+        let effective_args: &[String] = if has_rc_partition {
+            let mut override_rc = crate::rc::BazelrcConfig::default();
+            let remaining = crate::rc::partition_rc_sources_and_apply(&mut override_rc, args)?;
+            if !override_rc.sections.is_empty() {
+                let (rc_expanded, _) =
+                    crate::config_expander::expand_command_args(&override_rc, command, &[])?;
+                if !rc_expanded.is_empty() {
+                    let rc_prio = OptionPriority::lowest_at_category(PriorityCategory::RcFile);
+                    let _ =
+                        opts.parse_into(command, &rc_expanded, rc_prio, "rc_override", None, None)?;
+                }
+                let has_cli_config = remaining
+                    .iter()
+                    .take_while(|a| a.as_str() != "--")
+                    .any(|a| a == "--config" || a.starts_with("--config="));
+                if has_cli_config {
+                    effective_args_owned = crate::config_expander::expand_cli_configs_only(
+                        &override_rc,
+                        command,
+                        &remaining,
+                    )?;
+                } else {
+                    effective_args_owned = remaining;
+                }
+            } else {
+                effective_args_owned = remaining;
+            }
+            &effective_args_owned
+        } else {
+            args
+        };
+
         let priority = OptionPriority::lowest_at_category(initial_priority);
-        let (pre, post) = opts.parse_into(command, args, priority, "command line", None, None)?;
+        let (pre, post) =
+            opts.parse_into(command, effective_args, priority, "command line", None, None)?;
         opts.pre_double_dash_residue = pre;
         opts.post_double_dash_residue = post;
 
@@ -522,6 +594,37 @@ impl ParsedCommandOptions {
                 break;
             }
 
+            // Rewrite `--[no][@|@@]//command_line_option[:name][=val]` (and aliases to it) to the
+            // underlying native option (`LabelConstants.COMMAND_LINE_OPTION_PACKAGE_IDENTIFIER`).
+            let rewritten_native;
+            let mut from_command_line_option_label = false;
+            let arg = if analyzes {
+                let candidate = if !arg.starts_with("--//")
+                    && !arg.starts_with("--@")
+                    && !arg.starts_with("--no//")
+                    && !arg.starts_with("--no@")
+                    && arg.starts_with("--no")
+                    && !arg.contains('=')
+                {
+                    let rest = &arg[4..];
+                    self.flag_aliases
+                        .get(rest)
+                        .map(|t| format!("--no{t}"))
+                        .unwrap_or_else(|| arg.to_string())
+                } else {
+                    arg.to_string()
+                };
+                if let Some(rewritten) = try_rewrite_command_line_option(&candidate)? {
+                    rewritten_native = rewritten;
+                    from_command_line_option_label = true;
+                    rewritten_native.as_str()
+                } else {
+                    arg
+                }
+            } else {
+                arg
+            };
+
             // 3. Starlark flags (`STARLARK_SKIPPED_PREFIXES`: `--//`, `--@`, `--no//`, `--no@`)
             // Only recognized on commands that analyze (`BlazeOptionHandler.parseStarlarkOptions`).
             if analyzes
@@ -704,6 +807,12 @@ impl ParsedCommandOptions {
                 ("true".to_string(), 1)
             } else if def.option_type == OptionType::Void {
                 ("".to_string(), 1)
+            } else if from_command_line_option_label {
+                let mut msg = format!("Expected value after {raw_arg}");
+                if let Some(nxt) = args.get(i + 1).filter(|s| !s.starts_with('-')) {
+                    msg.push_str(&format!(". Did you mean {raw_arg}={nxt}?"));
+                }
+                return Err(OptionsParsingError::new(msg));
             } else {
                 if i + 1 >= args.len() {
                     return Err(OptionsParsingError::new(format!(
@@ -1241,19 +1350,29 @@ impl ParsedCommandOptions {
                 }
             }
             "disk_cache" => {
-                if !raw_val.is_empty() {
-                    self.disk_cache = Some(PathFragment::create(raw_val));
-                }
+                let s = val.as_str().unwrap_or(raw_val);
+                self.disk_cache = if s.is_empty() {
+                    None
+                } else {
+                    Some(PathFragment::create(s))
+                };
             }
             "profile" => {
-                if !raw_val.is_empty() {
-                    self.profile = Some(PathFragment::create(raw_val));
-                }
+                let s = val.as_str().unwrap_or(raw_val);
+                self.profile = if s.is_empty() {
+                    None
+                } else {
+                    Some(PathFragment::create(s))
+                };
             }
             "build_event_json_file" => {
-                if !raw_val.is_empty() {
-                    self.build_event_json_file = Some(PathFragment::create(raw_val));
-                }
+                self.build_event_json_file = if raw_val.is_empty() {
+                    None
+                } else {
+                    Some(PathFragment::create(&crate::converters::expand_tilde_path(
+                        raw_val,
+                    )))
+                };
             }
             "test_output" => {
                 if let Some(s) = val.as_str() {
@@ -1291,6 +1410,58 @@ impl ParsedCommandOptions {
             .get(name)
             .and_then(|desc| desc.value.as_int())
     }
+}
+
+/// Rewrites `--[no][@|@@]//command_line_option[:<target>][=<val>]` to the native `--<target>[=<val>]`
+/// or `--no<target>` form, failing if the `//command_line_option` label is syntactically invalid
+/// (for instance `--//command_line_option:=val`).
+fn try_rewrite_command_line_option(arg: &str) -> Result<Option<String>, OptionsParsingError> {
+    fn strip_main_clo_pkg(s: &str) -> Option<&str> {
+        for prefix in [
+            "//command_line_option",
+            "@//command_line_option",
+            "@@//command_line_option",
+        ] {
+            if let Some(rest) = s.strip_prefix(prefix) {
+                if rest.is_empty() || rest.starts_with(':') {
+                    return Some(rest);
+                }
+            }
+        }
+        None
+    }
+
+    if let Some((lhs, val)) = arg.strip_prefix("--").and_then(|s| s.split_once('=')) {
+        if let Some(rest) = strip_main_clo_pkg(lhs) {
+            let canonical_check = format!("//command_line_option{rest}");
+            let lbl = zel_cmdline::Label::parse_canonical(&canonical_check).map_err(|e| {
+                OptionsParsingError::new(format!("Error loading option {lhs}: {e}"))
+            })?;
+            return Ok(Some(format!("--{}={val}", lbl.name())));
+        }
+        return Ok(None);
+    }
+
+    let (negated, lhs) = if arg.starts_with("--no//") || arg.starts_with("--no@") {
+        (true, &arg[4..])
+    } else if let Some(s) = arg.strip_prefix("--") {
+        (false, s)
+    } else {
+        return Ok(None);
+    };
+
+    if let Some(rest) = strip_main_clo_pkg(lhs) {
+        let canonical_check = format!("//command_line_option{rest}");
+        let lbl = zel_cmdline::Label::parse_canonical(&canonical_check)
+            .map_err(|e| OptionsParsingError::new(format!("Error loading option {lhs}: {e}")))?;
+        return Ok(Some(if negated {
+            format!("--no{}", lbl.name())
+        } else {
+            format!("--{}", lbl.name())
+        }));
+    }
+
+    Ok(None)
 }
 
 /// Appends one occurrence of an `allowMultiple` option to its accumulated value. List-valued

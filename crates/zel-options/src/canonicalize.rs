@@ -75,14 +75,17 @@ pub fn canonicalize_flags(raw_args: &[String]) -> Result<Vec<String>, OptionsPar
         return Ok(Vec::new());
     }
 
-    let mut parsed =
-        match ParsedCommandOptions::parse_for_command_no_edit(&cmd_opts.for_command, after_dash) {
-            Ok(p) => p,
-            Err(mut e) => {
-                e.failed_arg = None;
-                return Err(e);
-            }
-        };
+    let mut parsed = match ParsedCommandOptions::parse_for_command_no_edit_with_aliases(
+        &cmd_opts.for_command,
+        after_dash,
+        &parsed_cmd.flag_aliases,
+    ) {
+        Ok(p) => p,
+        Err(mut e) => {
+            e.failed_arg = None;
+            return Err(e);
+        }
+    };
 
     if !parsed.targets.is_empty() {
         return Err(OptionsParsingError::new(format!(

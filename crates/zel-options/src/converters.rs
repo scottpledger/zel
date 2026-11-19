@@ -439,6 +439,29 @@ fn convert_multi_resource(input: &str) -> Result<OptionValue, OptionsParsingErro
     }
 }
 
+/// Expands a leading `~` or `~/` using `HOME` when set and normalizes via `PathFragment::create`
+/// (`OptionsUtils.PathFragmentConverter`).
+pub fn expand_tilde_path(raw: &str) -> String {
+    if raw == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                return zel_vfs::PathFragment::create(&home)
+                    .path_string()
+                    .to_string();
+            }
+        }
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            if !home.is_empty() {
+                return zel_vfs::PathFragment::create(&format!("{home}/{rest}"))
+                    .path_string()
+                    .to_string();
+            }
+        }
+    }
+    zel_vfs::PathFragment::create(raw).path_string().to_string()
+}
+
 /// `OptionsUtils.WorkspacePathFragmentConverter` (`PathFragment` normalizes `.` and `a/..`).
 pub(crate) fn convert_workspace_path(input: &str) -> Result<OptionValue, OptionsParsingError> {
     if input.starts_with('/') {
@@ -545,20 +568,18 @@ pub(crate) fn convert_custom(name: &str, raw: &str) -> Result<OptionValue, Optio
         "TestTimeoutConverter" => convert_test_timeout(raw),
         "TestResourcesConverter" => convert_test_resources(raw),
         "MultiResourceConverter" => convert_multi_resource(raw),
-        "AbsolutePathFragmentConverter" => {
-            let expanded = if raw == "~" {
-                std::env::var("HOME").unwrap_or_else(|_| "~".to_string())
-            } else if let Some(rest) = raw.strip_prefix("~/") {
-                match std::env::var("HOME") {
-                    Ok(h) if !h.is_empty() => format!("{h}/{rest}"),
-                    _ => raw.to_string(),
-                }
+        "PathFragmentConverter" => Ok(OptionValue::String(expand_tilde_path(raw))),
+        "EmptyToNullPathFragmentConverter" => {
+            if raw.is_empty() {
+                Ok(OptionValue::String(String::new()))
             } else {
-                raw.to_string()
-            };
-            let pf = zel_vfs::PathFragment::create(&expanded);
-            if pf.is_absolute() {
-                Ok(OptionValue::String(pf.path_string().to_string()))
+                Ok(OptionValue::String(expand_tilde_path(raw)))
+            }
+        }
+        "AbsolutePathFragmentConverter" => {
+            let expanded = expand_tilde_path(raw);
+            if zel_vfs::PathFragment::create(&expanded).is_absolute() {
+                Ok(OptionValue::String(expanded))
             } else {
                 Err(err(format!("Not an absolute path: '{raw}'")))
             }

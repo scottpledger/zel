@@ -663,6 +663,97 @@ pub fn discover_and_load_rc_files(
     Ok(config)
 }
 
+/// Partitions `--rc_source` and `--default_override` arguments out of `cmd_line`, validates every
+/// `--default_override` (both `--default_override=val` and `--default_override val`), records any
+/// resulting command/config overrides in `rc_config`, and returns the remaining arguments
+/// (`BlazeOptionHandler.partitionCommandLineArgs` + `parseRcOptions`).
+pub fn partition_rc_sources_and_apply(
+    rc_config: &mut BazelrcConfig,
+    cmd_line: &[String],
+) -> Result<Vec<String>, OptionsParsingError> {
+    const OVERRIDE_MSG: &str =
+        "option overrides must be in form rcfile:command=option, where rcfile is a nonzero integer";
+    let mut remaining = Vec::with_capacity(cmd_line.len());
+    let mut rc_sources: Vec<String> = Vec::new();
+    let mut overrides: Vec<(usize, String, String)> = Vec::new();
+
+    let parse_override =
+        |clf: &str, raw: &str| -> Result<(usize, String, String), OptionsParsingError> {
+            let colon = raw.find(':');
+            let assign = raw.find('=');
+            let Some(colon) = colon else {
+                return Err(OptionsParsingError::new(format!(
+                    "While parsing option {clf}: {OVERRIDE_MSG}"
+                )));
+            };
+            let Some(assign) = assign.filter(|a| *a > colon + 1) else {
+                return Err(OptionsParsingError::new(format!(
+                    "While parsing option {clf}: {OVERRIDE_MSG}"
+                )));
+            };
+            let Some(idx) =
+                crate::converters::java_integer_value_of(&raw[..colon]).filter(|n| *n >= 0)
+            else {
+                return Err(OptionsParsingError::new(format!(
+                    "While parsing option {clf}: {OVERRIDE_MSG}"
+                )));
+            };
+            Ok((
+                idx as usize,
+                raw[colon + 1..assign].to_string(),
+                raw[assign + 1..].to_string(),
+            ))
+        };
+
+    let mut i = 0;
+    while i < cmd_line.len() {
+        let arg = &cmd_line[i];
+        if let Some(src) = arg.strip_prefix("--rc_source=") {
+            rc_sources.push(src.to_string());
+            i += 1;
+        } else if arg == "--rc_source" {
+            if i + 1 >= cmd_line.len() {
+                return Err(OptionsParsingError::new("Expected value after --rc_source"));
+            }
+            rc_sources.push(cmd_line[i + 1].clone());
+            i += 2;
+        } else if let Some(val) = arg.strip_prefix("--default_override=") {
+            overrides.push(parse_override(arg, val)?);
+            i += 1;
+        } else if arg == "--default_override" {
+            if i + 1 >= cmd_line.len() {
+                return Err(OptionsParsingError::new(
+                    "Expected value after --default_override",
+                ));
+            }
+            let val = &cmd_line[i + 1];
+            let clf = format!("--default_override {val}");
+            overrides.push(parse_override(&clf, val)?);
+            i += 2;
+        } else {
+            remaining.push(arg.clone());
+            i += 1;
+        }
+    }
+
+    for (rc_idx, section, opt) in overrides {
+        let src = if rc_sources.is_empty() && rc_idx == 0 {
+            "client".to_string()
+        } else if let Some(s) = rc_sources.get(rc_idx) {
+            s.clone()
+        } else {
+            return Err(OptionsParsingError::new(format!(
+                "Consistency error in options: --default_override index {rc_idx} out of bounds"
+            )));
+        };
+        if !opt.is_empty() {
+            rc_config.sections.entry(section).or_default().push((opt, src));
+        }
+    }
+
+    Ok(remaining)
+}
+
 /// Tokenizes an RC file line respecting quotes, backslashes, and # comments.
 pub fn tokenize_rc_line(line: &str) -> Vec<String> {
     let mut tokens = Vec::new();

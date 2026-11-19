@@ -39,11 +39,11 @@ pub mod tags;
 pub mod types;
 
 pub use canonicalize::{canonicalize_flags, CanonicalizeCommandOptions};
-pub use config_expander::{expand_command_args, get_platform_name};
+pub use config_expander::{expand_cli_configs_only, expand_command_args, get_platform_name};
 pub use converters::{
     convert_assignment, convert_boolean, convert_bytesize, convert_comma_list,
     convert_compilation_mode, convert_double, convert_duration, convert_enum, convert_flag_alias,
-    convert_int, convert_long, convert_option, convert_tristate, convert_value,
+    convert_int, convert_long, convert_option, convert_tristate, convert_value, expand_tilde_path,
 };
 pub use definition::{OptionDefinition, OptionValueDescription};
 pub use error::OptionsParsingError;
@@ -60,7 +60,10 @@ pub use parser::{
     command_analyzes, split_unsupported_common_args, ParsedCommandOptions, StarlarkOccurrence,
 };
 pub use priority::{OptionPriority, PriorityCategory};
-pub use rc::{discover_and_load_rc_files, get_command_ancestry, tokenize_rc_line, BazelrcConfig};
+pub use rc::{
+    discover_and_load_rc_files, get_command_ancestry, partition_rc_sources_and_apply,
+    tokenize_rc_line, BazelrcConfig,
+};
 pub use semantics_info::starlark_semantics_string;
 pub use spellcheck::{did_you_mean, edit_distance, suggest};
 pub use startup::{split_command_line, StartupOptions};
