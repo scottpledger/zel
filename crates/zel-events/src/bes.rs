@@ -174,7 +174,10 @@ impl ByteStreamBuildEventArtifactUploader {
     /// Registers an already-remote artifact path + digest so `bytestream://` conversion skips
     /// local file reads and CAS re-uploads.
     pub fn register_remote_artifact(&self, abs_path: String, digest: Digest) {
-        self.known_remote.lock().unwrap().insert(abs_path, digest);
+        self.known_remote
+            .lock()
+            .unwrap()
+            .insert(normalize_local_path_key(&abs_path), digest);
     }
 
     pub fn take_warnings(&self) -> Vec<String> {
@@ -195,9 +198,17 @@ impl ByteStreamBuildEventArtifactUploader {
     }
 
     fn should_upload_in_minimal(&self, path: &str, is_build_tool_logs: bool) -> bool {
-        is_build_tool_logs
-            || self.minimal_testlog_re.is_match(path)
-            || self.minimal_stdio_re.is_match(path)
+        if is_build_tool_logs {
+            return true;
+        }
+        let slash_path;
+        let p = if path.contains('\\') {
+            slash_path = path.replace('\\', "/");
+            slash_path.as_str()
+        } else {
+            path
+        };
+        self.minimal_testlog_re.is_match(p) || self.minimal_stdio_re.is_match(p)
     }
 
     fn upload_blob(&self, d: &Digest, data: Vec<u8>) -> Result<(), String> {
@@ -226,7 +237,8 @@ impl ByteStreamBuildEventArtifactUploader {
         let Some(local_path) = decode_file_uri(&uri) else {
             return;
         };
-        if let Some(d) = self.known_remote.lock().unwrap().get(&local_path).cloned() {
+        let key = normalize_local_path_key(&local_path);
+        if let Some(d) = self.known_remote.lock().unwrap().get(&key).cloned() {
             let bs = self.bytestream_uri(&d);
             f.clear("uri");
             f.set_str("uri", bs);
@@ -258,10 +270,7 @@ impl ByteStreamBuildEventArtifactUploader {
                             "Uploading BEP referenced local file {local_path}: {e}"
                         ));
                     } else {
-                        self.known_remote
-                            .lock()
-                            .unwrap()
-                            .insert(local_path, d.clone());
+                        self.known_remote.lock().unwrap().insert(key, d.clone());
                     }
                 }
                 // In MINIMAL mode, every digested regular file receives a `bytestream://` URI even
@@ -273,10 +282,7 @@ impl ByteStreamBuildEventArtifactUploader {
             BuildEventUploadMode::All => {
                 match self.upload_blob(&d, data) {
                     Ok(()) => {
-                        self.known_remote
-                            .lock()
-                            .unwrap()
-                            .insert(local_path, d.clone());
+                        self.known_remote.lock().unwrap().insert(key, d.clone());
                         let bs = self.bytestream_uri(&d);
                         f.clear("uri");
                         f.set_str("uri", bs);
@@ -293,8 +299,40 @@ impl ByteStreamBuildEventArtifactUploader {
     }
 }
 
+fn has_windows_drive_prefix(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'/' || b[2] == b'\\')
+}
+
+fn normalize_local_path_key(path: &str) -> String {
+    let replaced = path.replace('\\', "/");
+    let trimmed = if replaced.starts_with('/') && has_windows_drive_prefix(&replaced[1..]) {
+        &replaced[1..]
+    } else {
+        replaced.as_str()
+    };
+    if has_windows_drive_prefix(trimmed) {
+        let mut out = trimmed.to_string();
+        out.replace_range(0..1, &out[0..1].to_ascii_uppercase());
+        out
+    } else {
+        trimmed.to_string()
+    }
+}
+
 fn decode_file_uri(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("file://")?;
+    decode_file_uri_for_os(uri, cfg!(windows))
+}
+
+fn decode_file_uri_for_os(uri: &str, windows: bool) -> Option<String> {
+    let mut rest = uri.strip_prefix("file://")?;
+    if rest.len() >= 10 && rest[..9].eq_ignore_ascii_case("localhost") && rest.as_bytes()[9] == b'/'
+    {
+        rest = &rest[9..];
+    }
     let bytes = rest.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -309,7 +347,17 @@ fn decode_file_uri(uri: &str) -> Option<String> {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8(out).ok()
+    let decoded = String::from_utf8(out).ok()?;
+    if decoded.starts_with('/') && has_windows_drive_prefix(&decoded[1..]) {
+        return Some(decoded[1..].to_string());
+    }
+    if !decoded.starts_with('/') && !has_windows_drive_prefix(&decoded) && !decoded.is_empty() {
+        if windows {
+            return Some(format!("\\\\{}", decoded.replace('/', "\\")));
+        }
+        return Some(format!("//{decoded}"));
+    }
+    Some(decoded)
 }
 
 fn hex_val(b: u8) -> Option<u8> {
@@ -1857,5 +1905,93 @@ mod tests {
         let srv_stream = FakeBes::default();
         *srv_stream.fail_stream_immediately.lock().unwrap() = true;
         run_case(srv_stream);
+    }
+
+    #[test]
+    fn windows_and_unc_file_uris_decode_and_rewrite_to_bytestream() {
+        use crate::bep::file_uri_for_os;
+
+        // `FileUriPathConverter` Windows encoding (`C:\Temp\Foo Bar.txt` -> `file:///C:/Temp/Foo%20Bar.txt`)
+        // and UNC encoding (`\\server\share\Foo Bar.txt` -> `file://server/share/Foo%20Bar.txt`).
+        assert_eq!(
+            file_uri_for_os(r"C:\Temp\Foo Bar.txt", true),
+            "file:///C:/Temp/Foo%20Bar.txt"
+        );
+        assert_eq!(
+            file_uri_for_os(r"\\server\share\Foo Bar.txt", true),
+            "file://server/share/Foo%20Bar.txt"
+        );
+
+        // `decode_file_uri_for_os` handles percent-encoded backslashes (`%5C`), forward slashes,
+        // `localhost` authority, and UNC authorities.
+        let encoded_bs =
+            "file:///C:%5CUsers%5CRUNNER~1%5CAppData%5CLocal%5CTemp%5Czel-bes-up-2192%5Cout.bin";
+        let forward_slash = "file:///C:/Users/RUNNER~1/AppData/Local/Temp/zel-bes-up-2192/out.bin";
+        assert_eq!(
+            decode_file_uri_for_os(encoded_bs, true).as_deref(),
+            Some(r"C:\Users\RUNNER~1\AppData\Local\Temp\zel-bes-up-2192\out.bin")
+        );
+        assert_eq!(
+            decode_file_uri_for_os(forward_slash, true).as_deref(),
+            Some("C:/Users/RUNNER~1/AppData/Local/Temp/zel-bes-up-2192/out.bin")
+        );
+        assert_eq!(
+            decode_file_uri_for_os("file://localhost/C:/Temp/Foo%20Bar.txt", true).as_deref(),
+            Some("C:/Temp/Foo Bar.txt")
+        );
+        assert_eq!(
+            decode_file_uri_for_os("file://server/share/Foo%20Bar.txt", true).as_deref(),
+            Some(r"\\server\share\Foo Bar.txt")
+        );
+
+        // Rewriting BEP `File` messages works across both `file:///C:%5C...` and `file:///C:/...`
+        // (and case-insensitive drive letters) even when exercised on a non-Windows host.
+        let uploader = ByteStreamBuildEventArtifactUploader::new(
+            None,
+            None,
+            DigestFn::Sha256,
+            BuildEventUploadMode::All,
+            "cas.example:443",
+            "main",
+            None,
+        );
+        let expected_d = DigestFn::Sha256.digest(b"artifact-bytes");
+        uploader.register_remote_artifact(
+            r"c:\Users\RUNNER~1\AppData\Local\Temp\zel-bes-up-2192\out.bin".to_string(),
+            expected_d.clone(),
+        );
+        let expected_bs = format!(
+            "bytestream://cas.example:443/main/blobs/{}/{}",
+            expected_d.hash, expected_d.size_bytes
+        );
+
+        for candidate_uri in [encoded_bs, forward_slash] {
+            let mut f = Msg::new("build_event_stream.File");
+            f.set_str("name", "out.bin");
+            f.set_str("uri", candidate_uri);
+            let (_, nodes) = BepBuilder::named_sets("0", vec![f], None);
+            let rewritten = rewrite_bep_event(&nodes[0].to_proto(false), true, Some(&uploader));
+            let got = rewritten
+                .get_msg("named_set_of_files")
+                .unwrap()
+                .get_msgs("files")[0]
+                .get_str("uri")
+                .to_string();
+            assert_eq!(got, expected_bs, "failed to rewrite {candidate_uri}");
+        }
+
+        // Windows backslash paths also match `MINIMAL` mode testlog/stdio upload patterns.
+        assert!(uploader.should_upload_in_minimal(
+            r"C:\Users\RUNNER~1\AppData\Local\Temp\zel-bes-up\bazel-out\x64_windows-fastbuild\testlogs\pkg\test.log",
+            false
+        ));
+        assert!(uploader.should_upload_in_minimal(
+            r"C:\Users\RUNNER~1\AppData\Local\Temp\zel-bes-up\bazel-out\_tmp\actions\stderr-3",
+            false
+        ));
+        assert!(!uploader.should_upload_in_minimal(
+            r"C:\Users\RUNNER~1\AppData\Local\Temp\zel-bes-up\out.bin",
+            false
+        ));
     }
 }

@@ -2083,26 +2083,37 @@ impl BepBuilder {
 
 /// `PathConverter.FileUriPathConverter.pathToUriString`.
 pub fn file_uri(path: &str) -> String {
+    file_uri_for_os(path, cfg!(windows))
+}
+
+pub(crate) fn file_uri_for_os(path: &str, windows: bool) -> String {
     if path.contains("://") {
         return path.to_string();
     }
     let normalized;
-    let path = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+    let is_unc;
+    let p_in = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
         normalized = format!("//{}", unc.replace('\\', "/"));
+        is_unc = true;
         normalized.as_str()
     } else if let Some(verbatim) = path.strip_prefix(r"\\?\") {
         normalized = verbatim.replace('\\', "/");
+        is_unc = false;
         normalized.as_str()
-    } else if cfg!(windows) || has_windows_drive_prefix(path) {
+    } else if windows || has_windows_drive_prefix(path) {
         normalized = path.replace('\\', "/");
+        is_unc = windows && normalized.starts_with("//") && !normalized.starts_with("///");
         normalized.as_str()
     } else {
+        is_unc = false;
         path
     };
-    let p = if path.starts_with('/') {
-        path.to_string()
+    let p = if is_unc {
+        p_in.strip_prefix("//").unwrap_or(p_in).to_string()
+    } else if p_in.starts_with('/') {
+        p_in.to_string()
     } else {
-        format!("/{path}")
+        format!("/{p_in}")
     };
     let mut out = String::from("file://");
     for b in p.bytes() {
