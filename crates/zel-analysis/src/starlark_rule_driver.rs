@@ -147,7 +147,41 @@ fn attr_to_value_in(
         // Aspects declared on the attribute (`attr.label(aspects = [...])`), then the aspect
         // currently propagating along this attribute (`attr_aspects`).
         for asp in &attr.aspects {
-            ct = apply_aspect(inputs, ct, asp)?;
+            let mut asp_params = BTreeMap::new();
+            if let Some(def) = zel_packages::aspect::aspect_of(asp) {
+                for a in &def.attrs {
+                    if a.name.starts_with('_') || a.name.starts_with('$') || a.name.starts_with(':') {
+                        continue;
+                    }
+                    let rule_av = rule
+                        .extra
+                        .attr_values
+                        .get(&a.name)
+                        .cloned()
+                        .or_else(|| {
+                            rule.extra
+                                .rule_class
+                                .as_ref()
+                                .and_then(|rc| rc.attrs.get(&a.name))
+                                .map(|ra| ra.default_value())
+                        });
+                    if let Some(rav) = rule_av {
+                        if let Ok(resolved) =
+                            crate::select::resolve_select(&rav, &a.name, rule, cfg, inputs.resolver.as_ref())
+                        {
+                            if matches!(
+                                (&a.ty, &resolved),
+                                (AttrType::String, AttrValue::Str(_))
+                                    | (AttrType::Int, AttrValue::Int(_))
+                                    | (AttrType::Bool, AttrValue::Bool(_))
+                            ) {
+                                asp_params.insert(a.name.clone(), resolved);
+                            }
+                        }
+                    }
+                }
+            }
+            ct = apply_aspect_with_params(inputs, ct, asp, &asp_params)?;
         }
         if let Some(h) = hook {
             ct = h(&attr.name, ct, dep_cfg)?;
@@ -348,23 +382,8 @@ fn convert_rule_attrs(
     let mut predeclared: Vec<Artifact> = Vec::new();
     let mut attr_errors: Vec<String> = Vec::new();
     let resolver = inputs.resolver.clone();
-    // Plain (non-label) attribute values, passed to attribute transitions as `attr`.
-    let raw_attrs = {
-        let mut m = BTreeMap::new();
-        for (name, attr) in attrs {
-            if matches!(attr.ty, AttrType::Label | AttrType::LabelList | AttrType::LabelKeyedStringDict | AttrType::StringKeyedLabelDict | AttrType::LabelListDict | AttrType::Output | AttrType::OutputList) {
-                continue;
-            }
-            let av = rule.extra.attr_values.get(name).cloned().unwrap_or_else(|| attr.default_value());
-            if let Ok(av) = crate::select::resolve_select(&av, name, rule, cfg, resolver.as_ref()) {
-                let dummy_inputs = inputs;
-                if let Ok(c) = attr_to_value(attr, &av, rule, cfg, dummy_inputs, pkg_dir, out_root, None, hook) {
-                    m.insert(name.clone(), c.value);
-                }
-            }
-        }
-        Value::Struct(Arc::new(StructValue::new(m)))
-    };
+    // Rule attribute values exposed to attribute transitions and computed defaults as `attr`.
+    let raw_attrs = build_transition_attr_struct(rule, cfg, resolver.as_ref());
     let mut attr_order: Vec<&String> = attrs.keys().collect();
     attr_order.sort_by(|a, b| {
         match (a.starts_with('_'), b.starts_with('_')) {
@@ -519,6 +538,107 @@ fn convert_rule_attrs(
         }
     }
     Ok(AttrBundle { attr_fields, file_fields, files_fields, exe_fields, outputs_fields, deps_by_attr, predeclared, split_fields, attr_errors })
+}
+
+/// Builds the Starlark `attr` struct passed to rule-level and attribute-level transitions.
+pub fn build_transition_attr_struct(
+    rule: &RuleInstance,
+    cfg: &BuildConfigurationKey,
+    resolver: &dyn DepResolver,
+) -> Value {
+    use zel_packages::AttrValue as A;
+    let rc_attrs = rule
+        .extra
+        .rule_class
+        .as_ref()
+        .map(|rc| rc.attrs.clone())
+        .unwrap_or_default();
+    let mut names: Vec<String> = rc_attrs.keys().cloned().collect();
+    for k in rule.extra.attr_values.keys() {
+        if !names.contains(k) {
+            names.push(k.clone());
+        }
+    }
+    let mut af = BTreeMap::new();
+    af.insert(
+        "name".to_string(),
+        Value::String(rule.label.name().to_string()),
+    );
+    for k in names {
+        if k == "name" {
+            continue;
+        }
+        let v = match rule.extra.attr_values.get(&k) {
+            Some(v) => v.clone(),
+            None => match rc_attrs.get(&k) {
+                Some(a) => a.default_value(),
+                None => continue,
+            },
+        };
+        let v = match &v {
+            A::Select(_) => match crate::select::resolve_select(&v, &k, rule, cfg, resolver) {
+                Ok(r) => r,
+                Err(_) => continue,
+            },
+            _ => v,
+        };
+        let val = match &v {
+            A::Str(x) => Value::String(x.clone()),
+            A::Bool(b) => Value::Bool(*b),
+            A::Int(i) => Value::Int(BigInt::from_i64(*i)),
+            A::Tristate(t) => Value::Int(BigInt::from_i64(*t as i64)),
+            A::Label(None) | A::Output(None) => Value::None,
+            A::Label(Some(l)) | A::Output(Some(l)) => Value::Label(l.clone()),
+            A::LabelList(l) | A::OutputList(l) => {
+                mk_list(l.iter().cloned().map(Value::Label).collect())
+            }
+            A::StrList(l) => mk_list(l.iter().cloned().map(Value::String).collect()),
+            A::IntList(l) => mk_list(l.iter().copied().map(|i| Value::Int(BigInt::from_i64(i))).collect()),
+            A::StrDict(d) => mk_dict(
+                d.iter()
+                    .map(|(a, b)| (Value::String(a.clone()), Value::String(b.clone())))
+                    .collect(),
+            ),
+            A::StrListDict(d) => mk_dict(
+                d.iter()
+                    .map(|(a, bs)| {
+                        (
+                            Value::String(a.clone()),
+                            mk_list(bs.iter().cloned().map(Value::String).collect()),
+                        )
+                    })
+                    .collect(),
+            ),
+            A::LabelListDict(d) => mk_dict(
+                d.iter()
+                    .map(|(a, bs)| {
+                        (
+                            Value::String(a.clone()),
+                            mk_list(bs.iter().cloned().map(Value::Label).collect()),
+                        )
+                    })
+                    .collect(),
+            ),
+            A::LabelKeyedStrDict(d) => mk_dict(
+                d.iter()
+                    .map(|(a, b)| (Value::Label(a.clone()), Value::String(b.clone())))
+                    .collect(),
+            ),
+            A::StrKeyedLabelDict(d) => mk_dict(
+                d.iter()
+                    .map(|(a, b)| (Value::String(a.clone()), Value::Label(b.clone())))
+                    .collect(),
+            ),
+            A::Select(_) => continue,
+        };
+        let skyname = k
+            .strip_prefix('$')
+            .or_else(|| k.strip_prefix(':'))
+            .map(|r| format!("_{r}"))
+            .unwrap_or(k);
+        af.entry(skyname).or_insert(val);
+    }
+    Value::Struct(Arc::new(StructValue::new(af)))
 }
 
 /// Analyses a Starlark-defined rule: runs its `implementation` with a real `ctx`.
@@ -688,6 +808,7 @@ pub fn analyze_starlark_rule(
         base_exec_group_toolchains: BTreeMap::new(),
         base_exec_group_platforms: BTreeMap::new(),
         split_attr: Value::Struct(Arc::new(StructValue::new(split_fields))),
+        in_subrule: std::sync::atomic::AtomicBool::new(false),
     });
 
     // 3. Run the implementation function.

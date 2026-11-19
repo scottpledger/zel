@@ -52,10 +52,14 @@ impl Default for ResourceSet {
 pub enum ParamFileFormat {
     /// One shell-quoted argument per whitespace-separated token, on one line per arg.
     Shell,
-    /// One raw argument per line.
+    /// One raw argument per line (`UNQUOTED`).
     Multiline,
-    /// One raw argument per line, flag-style: `--flag=value` args are kept intact.
+    /// One raw argument per line, flag-style: grouped `--flag=value` args, spilling only `--` args.
     FlagPerLine,
+    /// Backslash-escaped GCC/Clang response file (`GCC_QUOTED`).
+    GccQuoted,
+    /// Windows CommandLineToArgvW response file (`WINDOWS`).
+    Windows,
 }
 
 /// `Args.use_param_file` / `set_param_file_format` settings.
@@ -69,6 +73,9 @@ pub struct ParamFileInfo {
     pub use_always: bool,
     /// Number of leading arguments (the executable and fixed flags) left on the command line.
     pub leading_args: usize,
+    /// Slice ranges `(start, end)` in `CommandLineArgs.args` recorded by each `Args.add*` call,
+    /// used by `ParamFileFormat::FlagPerLine` to join `flag` and `rest` as `flag=rest`.
+    pub flag_groups: Vec<(usize, usize)>,
 }
 
 impl Default for ParamFileInfo {
@@ -78,7 +85,45 @@ impl Default for ParamFileInfo {
             format: ParamFileFormat::Shell,
             use_always: false,
             leading_args: 0,
+            flag_groups: Vec::new(),
         }
+    }
+}
+
+impl ParamFileInfo {
+    /// Applies `flag_per_line` grouping (`first=rest`) to `args[lead..]` using `self.flag_groups`.
+    pub fn format_flag_groups(&self, lead: usize, args: &[String]) -> Vec<String> {
+        if self.format != ParamFileFormat::FlagPerLine || self.flag_groups.is_empty() {
+            return args[lead..].to_vec();
+        }
+        let mut out = Vec::new();
+        let mut cursor = lead;
+        for &(start, end) in &self.flag_groups {
+            if end <= lead || start >= args.len() {
+                continue;
+            }
+            let s = start.max(lead);
+            let e = end.min(args.len());
+            while cursor < s {
+                out.push(args[cursor].clone());
+                cursor += 1;
+            }
+            if e - s >= 2
+                && !args[s..e]
+                    .iter()
+                    .any(|item| item.starts_with(crate::args::TREE_MARKER))
+            {
+                out.push(format!("{}={}", args[s], args[s + 1..e].join(" ")));
+            } else {
+                out.extend(args[s..e].iter().cloned());
+            }
+            cursor = e;
+        }
+        while cursor < args.len() {
+            out.push(args[cursor].clone());
+            cursor += 1;
+        }
+        out
     }
 }
 
@@ -136,6 +181,10 @@ pub fn render_param_file(args: &[String], format: ParamFileFormat) -> String {
     for a in args {
         match format {
             ParamFileFormat::Shell => s.push_str(&shell_escape(a)),
+            ParamFileFormat::GccQuoted => s.push_str(&zel_util::param_escaper::gcc_escape_param(a)),
+            ParamFileFormat::Windows => {
+                s.push_str(&zel_util::param_escaper::windows_escape_param(a))
+            }
             ParamFileFormat::Multiline | ParamFileFormat::FlagPerLine => s.push_str(a),
         }
         s.push('\n');
@@ -382,8 +431,9 @@ impl Action {
                     if let Some(p) = &a.param_file {
                         let fmt_tag = match p.format {
                             ParamFileFormat::Shell => "SHELL_QUOTED",
-                            ParamFileFormat::Multiline => "UNQUOTED",
-                            ParamFileFormat::FlagPerLine => "FLAG_PER_LINE",
+                            ParamFileFormat::GccQuoted => "GCC_QUOTED",
+                            ParamFileFormat::Windows => "WINDOWS",
+                            ParamFileFormat::Multiline | ParamFileFormat::FlagPerLine => "UNQUOTED",
                         };
                         fp.add_str(&p.flag_format)
                             .add_str(fmt_tag)
@@ -531,6 +581,16 @@ impl Action {
     /// according to `ParamFileInfo`; the second element lists `(param file exec path, body)`
     /// pairs that must be written before the spawn runs.
     pub fn command_line(&self) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
+        let (argv, indexed) = self.command_line_with_indices();
+        let params = indexed
+            .into_iter()
+            .map(|(_, path, body)| (path, body))
+            .collect();
+        (argv, params)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn command_line_with_indices(&self) -> (Vec<String>, Vec<(usize, String, Vec<u8>)>) {
         let mut argv = Vec::new();
         let mut params = Vec::new();
         let ActionKind::Spawn {
@@ -547,6 +607,7 @@ impl Action {
             .first()
             .map(|o| o.exec_path.path_string().to_string())
             .unwrap_or_default();
+        let mut spilled_idx = 0usize;
         for (i, a) in arguments.iter().enumerate() {
             match &a.param_file {
                 Some(pf) => {
@@ -554,14 +615,33 @@ impl Action {
                     if pf.use_always || total > DEFAULT_PARAM_FILE_THRESHOLD {
                         let lead = pf.leading_args.min(a.args.len());
                         argv.extend(a.args[..lead].iter().cloned());
-                        let path = format!("{primary}-{i}.params");
+                        let path = format!("{primary}-{spilled_idx}.params");
+                        spilled_idx += 1;
                         let formatted = crate::args::format_arg(&pf.flag_format, &path)
                             .unwrap_or_else(|_| pf.flag_format.replace("%s", &path));
                         argv.push(formatted);
-                        params.push((
-                            path,
-                            render_param_file(&a.args[lead..], pf.format).into_bytes(),
-                        ));
+                        if pf.format == ParamFileFormat::FlagPerLine {
+                            let grouped = pf.format_flag_groups(lead, &a.args);
+                            let mut file_args = Vec::new();
+                            for item in grouped {
+                                if item.starts_with("--") {
+                                    file_args.push(item);
+                                } else {
+                                    argv.push(item);
+                                }
+                            }
+                            params.push((
+                                i,
+                                path,
+                                render_param_file(&file_args, pf.format).into_bytes(),
+                            ));
+                        } else {
+                            params.push((
+                                i,
+                                path,
+                                render_param_file(&a.args[lead..], pf.format).into_bytes(),
+                            ));
+                        }
                     } else {
                         argv.extend(a.args.iter().cloned());
                     }
@@ -599,19 +679,14 @@ impl Action {
         }
         match &self.kind {
             ActionKind::Spawn { .. } => {
-                let (argv, params) = self.command_line();
+                let (argv, params) = self.command_line_with_indices();
                 let mut inputs = self.inputs.clone();
                 let mut java_compile = self.java_compile.clone();
-                let primary_path = self
-                    .outputs
-                    .first()
-                    .map(|o| o.exec_path.path_string().to_string())
-                    .unwrap_or_default();
-                for (path, body) in params {
+                for (arg_idx, path, body) in params {
                     // The classpath param file of a reduced-classpath Java compile is written by
                     // the executor (its content depends on `.jdeps` files read at execution time).
                     if let Some(jc) = java_compile.as_mut() {
-                        if path == format!("{primary_path}-{}.params", jc.classpath_arg_index) {
+                        if arg_idx == jc.classpath_arg_index {
                             jc.classpath_params_path = path;
                             continue;
                         }
@@ -714,11 +789,8 @@ impl Action {
                 computed_substitutions,
             } => {
                 if let Some(output) = self.outputs.first() {
-                    let mut subs: BTreeMap<String, String> =
-                        substitutions.iter().cloned().collect();
-                    for (k, v) in computed_substitutions {
-                        subs.insert(k.clone(), v.clone());
-                    }
+                    let mut subs: Vec<(String, String)> = substitutions.clone();
+                    subs.extend(computed_substitutions.iter().cloned());
                     out.push(ActionAnalysisMetadata::TemplateExpansionAction {
                         owner: self.owner.clone(),
                         template: template.clone(),
@@ -1105,6 +1177,7 @@ mod tests {
                         format: ParamFileFormat::Shell,
                         use_always: true,
                         leading_args: 0,
+                        flag_groups: Vec::new(),
                     }),
                 }],
                 shell_command: None,
@@ -1286,5 +1359,90 @@ mod tests {
             "{}",
             err.message
         );
+    }
+
+    #[test]
+    fn gcc_quoted_windows_flag_per_line_and_spilled_index_numbering() {
+        let gcc = render_param_file(&["".into(), "a b'c".into()], ParamFileFormat::GccQuoted);
+        assert_eq!(gcc, "''\na\\ b\\'c\n");
+        let win = render_param_file(
+            &["plain".into(), "a \"b\"\\".into()],
+            ParamFileFormat::Windows,
+        );
+        assert_eq!(win, "plain\n\"a \\\"b\\\"\\\\\"\n");
+
+        let mut act = Action::new(
+            Label::parse_canonical("//a:b").unwrap(),
+            "PackageTar",
+            ActionKind::Spawn {
+                executable: "/bin/tar_tool".into(),
+                arguments: vec![
+                    CommandLineArgs {
+                        args: vec!["--inline-first".into()],
+                        param_file: None,
+                    },
+                    CommandLineArgs {
+                        args: vec![
+                            "--output".into(),
+                            "out.tar".into(),
+                            "pos_input".into(),
+                            "--mode".into(),
+                            "0644".into(),
+                        ],
+                        param_file: Some(ParamFileInfo {
+                            flag_format: "@%s".into(),
+                            format: ParamFileFormat::FlagPerLine,
+                            use_always: true,
+                            leading_args: 0,
+                            flag_groups: vec![(0, 2), (2, 3), (3, 5)],
+                        }),
+                    },
+                ],
+                shell_command: None,
+            },
+        );
+        act.outputs.push(art("a/out.tar"));
+        let (argv, params) = act.command_line();
+        assert_eq!(
+            argv,
+            vec![
+                "/bin/tar_tool",
+                "--inline-first",
+                "@bazel-out/k8-fastbuild/bin/a/out.tar-0.params",
+                "pos_input",
+            ]
+        );
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].0, "bazel-out/k8-fastbuild/bin/a/out.tar-0.params");
+        assert_eq!(
+            String::from_utf8(params[0].1.clone()).unwrap(),
+            "--output=out.tar\n--mode=0644\n"
+        );
+
+        let mut tmpl = Action::new(
+            Label::parse_canonical("//a:t").unwrap(),
+            "TemplateExpand",
+            ActionKind::TemplateExpand {
+                template: art("a/in.tpl"),
+                substitutions: vec![("{Z}".into(), "{A}".into()), ("{A}".into(), "done".into())],
+                is_executable: false,
+                computed_substitutions: vec![("{C}".into(), "last".into())],
+            },
+        );
+        tmpl.outputs.push(art("a/out.txt"));
+        let lowered = tmpl.lower();
+        match &lowered[0] {
+            ActionAnalysisMetadata::TemplateExpansionAction { substitutions, .. } => {
+                assert_eq!(
+                    substitutions,
+                    &vec![
+                        ("{Z}".into(), "{A}".into()),
+                        ("{A}".into(), "done".into()),
+                        ("{C}".into(), "last".into()),
+                    ]
+                );
+            }
+            other => panic!("unexpected lowered action: {other:?}"),
+        }
     }
 }

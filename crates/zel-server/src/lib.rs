@@ -3909,7 +3909,10 @@ impl BlazeRuntime {
         for (k, v) in &stable_map {
             stable_str.push_str(&format!("{k} {v}\n"));
         }
-        let _ = std::fs::write(out_dir.join("stable-status.txt"), stable_str);
+        let stable_path = out_dir.join("stable-status.txt");
+        if std::fs::read(&stable_path).ok().as_deref() != Some(stable_str.as_bytes()) {
+            let _ = std::fs::write(&stable_path, stable_str);
+        }
 
         let mut volatile_str = String::new();
         for (k, v) in &volatile_map {

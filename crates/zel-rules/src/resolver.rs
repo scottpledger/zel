@@ -1422,6 +1422,8 @@ impl DepResolver for TargetResolver {
                         a.ty,
                         zel_packages::attr::AttrType::Label
                             | zel_packages::attr::AttrType::LabelList
+                            | zel_packages::attr::AttrType::LabelKeyedStringDict
+                            | zel_packages::attr::AttrType::StringKeyedLabelDict
                     ) && match &a.allowed_files {
                         zel_packages::attr::FileTypes::Any => a.files_unspecified,
                         zel_packages::attr::FileTypes::NoFiles => true,

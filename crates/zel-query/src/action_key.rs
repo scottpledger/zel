@@ -350,7 +350,10 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
                         fp.add_string(&p.flag_format);
                         fp.add_string(match p.format {
                             zel_analysis::ParamFileFormat::Shell => "SHELL_QUOTED",
-                            _ => "UNQUOTED",
+                            zel_analysis::ParamFileFormat::GccQuoted => "GCC_QUOTED",
+                            zel_analysis::ParamFileFormat::Windows => "WINDOWS",
+                            zel_analysis::ParamFileFormat::Multiline
+                            | zel_analysis::ParamFileFormat::FlagPerLine => "UNQUOTED",
                         });
                     }
                 }

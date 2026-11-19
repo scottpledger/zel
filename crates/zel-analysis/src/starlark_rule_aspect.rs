@@ -5,6 +5,30 @@
 //
 // Mirrors `AspectContext`, `AspectResolutionHelpers`, `ConfiguredAspect`, `MergedConfiguredTarget`.
 
+fn validate_aspect_allowed_value(attr: &Attribute, v: &AttrValue) -> Result<(), String> {
+    let Some(allowed) = &attr.allowed_values else {
+        return Ok(());
+    };
+    let rendered = match v {
+        AttrValue::Str(s) => s.clone(),
+        AttrValue::Int(n) => n.to_string(),
+        AttrValue::Bool(b) => if *b { "true" } else { "false" }.to_string(),
+        _ => return Ok(()),
+    };
+    if !allowed.contains(&rendered) {
+        return Err(format!(
+            "invalid value in '{}' attribute: has to be one of {} instead of '{rendered}'",
+            attr.name,
+            allowed
+                .iter()
+                .map(|a| format!("'{a}'"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    Ok(())
+}
+
 /// Converts a `--aspects_parameters` style string into the value of aspect attribute `attr`.
 fn aspect_param_value(attr: &Attribute, raw: &str) -> Result<AttrValue, String> {
     let bad = || {
@@ -24,15 +48,7 @@ fn aspect_param_value(attr: &Attribute, raw: &str) -> Result<AttrValue, String> 
         }),
         _ => return Err(bad()),
     };
-    if let (Some(allowed), AttrValue::Str(s)) = (&attr.allowed_values, &v) {
-        if !allowed.contains(s) {
-            return Err(format!(
-                "invalid value in '{}' attribute: has to be one of {} instead of '{s}'",
-                attr.name,
-                allowed.iter().map(|a| format!("'{a}'")).collect::<Vec<_>>().join(", ")
-            ));
-        }
-    }
+    validate_aspect_allowed_value(attr, &v)?;
     Ok(v)
 }
 
@@ -256,15 +272,7 @@ fn apply_aspect_path(
                 .or_else(|| a.default.clone());
             match v {
                 Some(v) => {
-                    if let (Some(allowed), AttrValue::Str(s)) = (&a.allowed_values, &v) {
-                        if !allowed.contains(s) {
-                            return Err(wrap(format!(
-                                "invalid value in '{}' attribute: has to be one of {} instead of '{s}'",
-                                a.name,
-                                allowed.iter().map(|x| format!("'{x}'")).collect::<Vec<_>>().join(", ")
-                            )));
-                        }
-                    }
+                    validate_aspect_allowed_value(a, &v).map_err(wrap)?;
                     arule.extra.attr_values.insert(a.name.clone(), v);
                 }
                 None => {
@@ -380,6 +388,7 @@ fn apply_aspect_path(
             base_exec_group_toolchains: inputs.exec_group_toolchains.clone(),
             base_exec_group_platforms: inputs.exec_group_platforms.clone(),
             split_attr: Value::None,
+            in_subrule: std::sync::atomic::AtomicBool::new(false),
         });
 
         // 4. Run the implementation: `impl(target, ctx)`.
@@ -430,7 +439,6 @@ fn apply_aspect_path(
                     "Returning a struct from an aspect implementation function is deprecated.".into(),
                 ));
             }
-            Value::None => {}
             other => {
                 return Err(wrap(format!(
                     "Aspect implementation should return a list, or a provider instance, but got {}",
@@ -464,6 +472,10 @@ fn apply_aspect_path(
         for (k, v) in declared {
             if k == "OutputGroupInfo" {
                 merge_output_groups(&mut out, &v).map_err(wrap)?;
+                continue;
+            }
+            if k == "InstrumentedFilesInfo" {
+                merge_instrumented_files(&mut out, &v).map_err(wrap)?;
                 continue;
             }
             if out.providers.contains_key(&k) {
@@ -523,6 +535,54 @@ fn merge_output_groups(ct: &mut ConfiguredTarget, v: &Value) -> Result<(), Strin
             fields: fields.into_iter().collect(),
         },
     );
+    Ok(())
+}
+
+/// Merges an aspect's `InstrumentedFilesInfo` into `ct`.
+fn merge_instrumented_files(ct: &mut ConfiguredTarget, v: &Value) -> Result<(), String> {
+    let Value::ProviderInstance { fields, .. } = v else {
+        return Ok(());
+    };
+    let files = |k: &str| -> Result<Vec<Artifact>, String> {
+        match get_field(fields, k) {
+            Some(val) => files_in(val, k).map_err(|e| e.0),
+            None => Ok(Vec::new()),
+        }
+    };
+    let asp_inst = files("instrumented_files")?;
+    let asp_meta = files("metadata_files")?;
+    let asp_env = match get_field(fields, "coverage_environment") {
+        Some(val @ Value::Dict(_)) => str_dict(val, "coverage_environment").map_err(|e| e.0)?,
+        _ => BTreeMap::new(),
+    };
+    let asp_support = files("coverage_support_files")?;
+
+    let mut merged = ct.instrumented_files.clone().unwrap_or_default();
+    merged.instrumented_files.extend(asp_inst);
+    merged.instrumented_files = dedup(merged.instrumented_files);
+    merged.metadata_files.extend(asp_meta);
+    merged.metadata_files = dedup(merged.metadata_files);
+    merged.environment.extend(asp_env);
+    merged.support_files.extend(asp_support);
+    merged.support_files = dedup(merged.support_files);
+
+    let mut env_dict = StarlarkDict::new();
+    for (k, val) in &merged.environment {
+        let _ = env_dict.insert(Value::String(k.clone()), Value::String(val.clone()));
+    }
+    ct.providers.insert(
+        "InstrumentedFilesInfo".to_string(),
+        provider_instance(
+            "InstrumentedFilesInfo",
+            vec![
+                ("instrumented_files", files_depset(&merged.instrumented_files)),
+                ("metadata_files", files_depset(&merged.metadata_files)),
+                ("coverage_environment", Value::Dict(Arc::new(Mutex::new(env_dict)))),
+                ("coverage_support_files", files_depset(&merged.support_files)),
+            ],
+        ),
+    );
+    ct.instrumented_files = Some(merged);
     Ok(())
 }
 
