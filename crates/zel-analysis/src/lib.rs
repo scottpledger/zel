@@ -1043,9 +1043,10 @@ impl PartialEq for BuildInfoTranslator {
 impl Eq for BuildInfoTranslator {}
 
 /// Parses workspace status file bytes (`stable-status.txt` / `volatile-status.txt`) into `out`,
-/// matching `BuildInfoTranslationHelper`: splits each line on the first `' '` without trimming
-/// values, treats a line with no `' '` as `(line, "")` (allowing repeated empty-value keys), and
-/// fails with `<key> is duplicated in the file.` if a `' '`-bearing line repeats an existing key.
+/// matching `BuildInfoTranslationHelper::ParseFile`: splits each `' '`-bearing line on the first
+/// `' '` without trimming values and fails with `<key> is duplicated in the file.` if `key` is
+/// already present, while lines without `' '` insert `(line, "")` only if absent (ignoring later
+/// spaceless repeats without overwriting existing values).
 pub fn parse_workspace_status_file(
     bytes: &[u8],
     out: &mut BTreeMap<String, String>,
@@ -1060,11 +1061,14 @@ pub fn parse_workspace_status_file(
         if line.is_empty() {
             continue;
         }
-        let (key, val) = line.split_once(' ').unwrap_or((line, ""));
-        if out.contains_key(key) {
-            return Err(format!("{key} is duplicated in the file."));
+        if let Some((key, val)) = line.split_once(' ') {
+            if out.contains_key(key) {
+                return Err(format!("{key} is duplicated in the file."));
+            }
+            out.insert(key.to_string(), val.to_string());
+        } else {
+            out.entry(line.to_string()).or_default();
         }
-        out.insert(key.to_string(), val.to_string());
     }
     Ok(())
 }
@@ -1628,6 +1632,23 @@ mod tests {
             map.get("STABLE_SPACE").unwrap(),
             " leading_and_inner spaces "
         );
+        let mut spaceless_repeat = BTreeMap::new();
+        parse_workspace_status_file(b"FOO\nFOO\n", &mut spaceless_repeat).unwrap();
+        assert_eq!(spaceless_repeat.get("FOO").map(String::as_str), Some(""));
+
+        let mut val_then_spaceless = BTreeMap::new();
+        parse_workspace_status_file(b"FOO val\nFOO\n", &mut val_then_spaceless).unwrap();
+        assert_eq!(
+            val_then_spaceless.get("FOO").map(String::as_str),
+            Some("val")
+        );
+
+        let mut spaceless_then_val = BTreeMap::new();
+        assert_eq!(
+            parse_workspace_status_file(b"FOO\nFOO val\n", &mut spaceless_then_val),
+            Err("FOO is duplicated in the file.".to_string())
+        );
+
         let mut bad = BTreeMap::new();
         assert_eq!(
             parse_workspace_status_file(b"DUP_KEY a\nDUP_KEY b\n", &mut bad),
