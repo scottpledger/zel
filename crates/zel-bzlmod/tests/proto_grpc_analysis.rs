@@ -530,3 +530,156 @@ cc_grpc_library(
         "unexpected error for mixed virtual/real protos: {mixed_err}"
     );
 }
+
+#[test]
+fn generate_cc_and_cc_grpc_library_well_known_protos_wire_proto_paths() {
+    let Some(env) = setup_env(
+        "wkt",
+        &[
+            (
+                "wkt_svc/audit.proto",
+                "syntax = \"proto3\";\npackage wkt_svc;\nimport \"google/protobuf/timestamp.proto\";\nimport \"google/protobuf/empty.proto\";\nservice Audit {}\n",
+            ),
+            (
+                "wkt_svc/BUILD",
+                r#"
+load("@bazel_tools//third_party/grpc/bazel:cc_grpc_library.bzl", "cc_grpc_library")
+load("@bazel_tools//third_party/grpc/bazel:generate_cc.bzl", "generate_cc")
+load("@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
+
+proto_library(
+    name = "audit_proto",
+    srcs = ["audit.proto"],
+)
+
+cc_proto_library(
+    name = "audit_cc_proto",
+    deps = [":audit_proto"],
+)
+
+generate_cc(
+    name = "audit_without_wkt",
+    srcs = [":audit_proto"],
+    well_known_protos = False,
+)
+
+generate_cc(
+    name = "audit_with_wkt",
+    srcs = [":audit_proto"],
+    well_known_protos = True,
+)
+
+cc_grpc_library(
+    name = "audit_cc_grpc",
+    srcs = [":audit_proto"],
+    deps = [":audit_cc_proto"],
+    well_known_protos = True,
+)
+"#,
+            ),
+        ],
+    ) else {
+        return;
+    };
+
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+    let without_wkt = env
+        .resolver
+        .analyze(
+            &Label::parse_canonical("//wkt_svc:audit_without_wkt").unwrap(),
+            &cfg,
+        )
+        .expect("audit_without_wkt failed");
+    let without_argv = without_wkt
+        .actions
+        .iter()
+        .find_map(|a| match a {
+            ActionAnalysisMetadata::SpawnAction { mnemonic, argv, .. }
+                if mnemonic == "CppGrpcGenSource" =>
+            {
+                Some(argv.clone())
+            }
+            _ => None,
+        })
+        .expect("expected CppGrpcGenSource on audit_without_wkt");
+    assert!(
+        !without_argv.iter().any(|a| a.contains("timestamp_proto")),
+        "well_known_protos=False should not add timestamp_proto include path: {without_argv:?}"
+    );
+
+    let with_wkt = env
+        .resolver
+        .analyze(
+            &Label::parse_canonical("//wkt_svc:audit_with_wkt").unwrap(),
+            &cfg,
+        )
+        .expect("audit_with_wkt failed");
+    let (with_argv, with_inputs) = with_wkt
+        .actions
+        .iter()
+        .find_map(|a| match a {
+            ActionAnalysisMetadata::SpawnAction {
+                mnemonic,
+                argv,
+                inputs,
+                ..
+            } if mnemonic == "CppGrpcGenSource" => Some((argv.clone(), inputs.clone())),
+            _ => None,
+        })
+        .expect("expected CppGrpcGenSource on audit_with_wkt");
+    assert!(
+        with_argv
+            .iter()
+            .any(|a| a.starts_with("--proto_path=")
+                && a.contains("_virtual_imports/timestamp_proto")),
+        "missing timestamp_proto --proto_path in {with_argv:?}"
+    );
+    assert!(
+        with_argv
+            .iter()
+            .any(|a| a.starts_with("--proto_path=") && a.contains("_virtual_imports/any_proto")),
+        "missing any_proto --proto_path in {with_argv:?}"
+    );
+    assert!(
+        with_argv
+            .iter()
+            .any(|a| a.starts_with("--proto_path=")
+                && a.contains("_virtual_imports/descriptor_proto")),
+        "missing descriptor_proto --proto_path in {with_argv:?}"
+    );
+    assert!(
+        with_inputs.iter().any(|f| f
+            .exec_path
+            .path_string()
+            .ends_with("google/protobuf/timestamp.proto")),
+        "missing google/protobuf/timestamp.proto in action inputs"
+    );
+
+    let grpc_codegen = env
+        .resolver
+        .analyze(
+            &Label::parse_canonical("//wkt_svc:_audit_cc_grpc_grpc_codegen").unwrap(),
+            &cfg,
+        )
+        .expect("_audit_cc_grpc_grpc_codegen failed");
+    let grpc_argv = grpc_codegen
+        .actions
+        .iter()
+        .find_map(|a| match a {
+            ActionAnalysisMetadata::SpawnAction { mnemonic, argv, .. }
+                if mnemonic == "CppGrpcGenSource" =>
+            {
+                Some(argv.clone())
+            }
+            _ => None,
+        })
+        .expect("expected CppGrpcGenSource on _audit_cc_grpc_grpc_codegen");
+    assert!(
+        grpc_argv
+            .iter()
+            .any(|a| a.starts_with("--proto_path=") && a.contains("_virtual_imports/empty_proto")),
+        "cc_grpc_library well_known_protos=True did not forward empty_proto --proto_path: {grpc_argv:?}"
+    );
+}
