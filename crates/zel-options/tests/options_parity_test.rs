@@ -988,3 +988,46 @@ fn test_common_config_reports_ignored_unsupported_options() {
         "{notes:?}"
     );
 }
+
+#[test]
+fn test_empty_to_null_path_fragment_converter_returns_void() {
+    let parsed = ParsedCommandOptions::parse_for_command(
+        "build",
+        &[
+            "--execution_log_binary_file=".to_string(),
+            "--execution_log_compact_file=".to_string(),
+            "--execution_log_json_file=/tmp/exec.json".to_string(),
+            "--execution_log_json_file=".to_string(),
+            "--remote_grpc_log=test.log".to_string(),
+            "--remote_grpc_log=".to_string(),
+            "--remote_grpc_service_config=".to_string(),
+        ],
+    )
+    .unwrap();
+
+    for flag in [
+        "execution_log_binary_file",
+        "execution_log_compact_file",
+        "execution_log_json_file",
+        "remote_grpc_log",
+        "remote_grpc_service_config",
+    ] {
+        assert_eq!(
+            parsed.parsed_options[flag].value,
+            zel_options::OptionValue::Void,
+            "{flag} should convert empty input to OptionValue::Void"
+        );
+        assert_eq!(
+            parsed.get_str(flag),
+            None,
+            "{flag} get_str should be None when empty"
+        );
+    }
+
+    let non_empty = ParsedCommandOptions::parse_for_command(
+        "build",
+        &["--remote_grpc_log=dir/sub/../grpc.log".to_string()],
+    )
+    .unwrap();
+    assert_eq!(non_empty.get_str("remote_grpc_log"), Some("dir/grpc.log"));
+}

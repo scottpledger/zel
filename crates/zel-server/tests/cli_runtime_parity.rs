@@ -782,3 +782,48 @@ fn dispatch_validates_client_cwd_downloader_and_invocation_policy() {
     let resp = w.rt.dispatch_command(&req, "");
     assert_eq!(resp.exit_code, 2);
 }
+
+#[cfg(unix)]
+#[test]
+fn fetch_vendor_client_cwd_pattern_file_and_empty_to_null_path_override() {
+    let w = make_ws("cwd-pattern-and-void-path");
+    w.write("MODULE.bazel", "module(name = \"ws\")\n");
+    w.write("BUILD", "filegroup(name = \"root_fg\")\n");
+    w.write("patterns.txt", "//:missing_root_target\n");
+    w.write(
+        "sub/BUILD",
+        "genrule(name = \"app\", outs = [\"app.txt\"], cmd = \"echo ok > $@\")\n",
+    );
+    w.write("sub/patterns.txt", ":app\n");
+
+    let fetch_res = w.run(&[
+        "fetch",
+        "--client_cwd=sub",
+        "--target_pattern_file=patterns.txt",
+    ]);
+    assert_eq!(fetch_res.code, 0, "{}", fetch_res.err);
+
+    let vendor_dir = w.ws.join("vendored_deps");
+    let vendor_flag = format!("--vendor_dir={}", vendor_dir.display());
+    let vendor_res = w.run(&[
+        "vendor",
+        &vendor_flag,
+        "--client_cwd=sub",
+        "--target_pattern_file=patterns.txt",
+    ]);
+    assert_eq!(vendor_res.code, 0, "{}", vendor_res.err);
+
+    let exec_json = w.ws.join("should_not_be_created.json");
+    let set_flag = format!("--execution_log_json_file={}", exec_json.display());
+    let build_res = w.run(&[
+        "build",
+        &set_flag,
+        "--execution_log_json_file=",
+        "//sub:app",
+    ]);
+    assert_eq!(build_res.code, 0, "{}", build_res.err);
+    assert!(
+        !exec_json.exists(),
+        "empty --execution_log_json_file= override must clear earlier path to null"
+    );
+}

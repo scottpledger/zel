@@ -571,7 +571,7 @@ pub(crate) fn convert_custom(name: &str, raw: &str) -> Result<OptionValue, Optio
         "PathFragmentConverter" => Ok(OptionValue::String(expand_tilde_path(raw))),
         "EmptyToNullPathFragmentConverter" => {
             if raw.is_empty() {
-                Ok(OptionValue::String(String::new()))
+                Ok(OptionValue::Void)
             } else {
                 Ok(OptionValue::String(expand_tilde_path(raw)))
             }

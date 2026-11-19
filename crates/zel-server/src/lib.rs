@@ -953,16 +953,15 @@ impl BlazeRuntime {
             // `RemoteModule.beforeCommand` reports the invocation id once a cache/executor is set.
             if ["remote_cache", "remote_executor", "disk_cache"]
                 .iter()
-                .any(|f| exec_phase::opt_last(&parsed, f).is_some_and(|v| !v.is_empty()))
+                .any(|f| parsed.get_str(f).is_some_and(|v| !v.is_empty()))
             {
                 writeln_bytes(stderr, &format!("INFO: Invocation ID: {}", pseudo_uuid()));
             }
-            if let Some(dc) = exec_phase::opt_last(&parsed, "disk_cache").filter(|s| !s.is_empty())
-            {
-                let abs = if std::path::Path::new(&dc).is_absolute() {
-                    std::path::PathBuf::from(&dc)
+            if let Some(dc) = parsed.get_str("disk_cache").filter(|s| !s.is_empty()) {
+                let abs = if std::path::Path::new(dc).is_absolute() {
+                    std::path::PathBuf::from(dc)
                 } else {
-                    std::path::PathBuf::from(self.dirs.workspace_dir.path_string()).join(&dc)
+                    std::path::PathBuf::from(self.dirs.workspace_dir.path_string()).join(dc)
                 };
                 if let Err(e) = std::fs::create_dir_all(&abs) {
                     let why = match e.raw_os_error() {

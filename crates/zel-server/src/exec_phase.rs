@@ -92,6 +92,15 @@ impl OptionSource for ParsedSource<'_> {
         if flag == "digest_function" {
             return self.digest_function.iter().cloned().collect();
         }
+        if let Some(d) = self.parsed.parsed_options.get(flag) {
+            if !d.definition.allow_multiple {
+                match &d.value {
+                    zel_options::OptionValue::Void => return Vec::new(),
+                    zel_options::OptionValue::String(s) => return vec![s.clone()],
+                    _ => {}
+                }
+            }
+        }
         opt_all(self.parsed, flag)
     }
 }
@@ -153,7 +162,7 @@ pub(crate) fn exec_config(parsed: &ParsedCommandOptions) -> Result<ExecConfig, S
 
     // `RemoteModule.beforeCommand`: remote options are validated before anything runs. The
     // server's digest function is what the remote client must use.
-    let has_cache_flag = |name: &str| opt_last(parsed, name).is_some_and(|v| !v.is_empty());
+    let has_cache_flag = |name: &str| parsed.get_str(name).is_some_and(|v| !v.is_empty());
     let uses_remote = has_cache_flag("remote_cache")
         || has_cache_flag("remote_executor")
         || has_cache_flag("disk_cache");

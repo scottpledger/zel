@@ -16,7 +16,7 @@
 //! Protocol stream (files and BES), and the JSON trace profiler. `lib.rs` wraps every
 //! build/test command in a [`BuildObserver`] so that all exit paths produce the same artifacts.
 
-use crate::exec_phase::{opt_all, opt_last};
+use crate::exec_phase::opt_all;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -215,7 +215,19 @@ impl BuildObserver {
         output_base: &str,
         fallback_invocation_id: Option<&str>,
     ) -> Self {
-        let get = |n: &str| parsed.and_then(|p| opt_last(p, n));
+        let get = |n: &str| {
+            parsed.and_then(|p| {
+                let d = p.parsed_options.get(n)?;
+                if !d.definition.allow_multiple {
+                    match &d.value {
+                        zel_options::OptionValue::Void => return None,
+                        zel_options::OptionValue::String(s) => return Some(s.clone()),
+                        _ => {}
+                    }
+                }
+                d.raw_values.last().cloned()
+            })
+        };
         let get_all = |n: &str| parsed.map(|p| opt_all(p, n)).unwrap_or_default();
         let mut setup_errors = Vec::new();
 
