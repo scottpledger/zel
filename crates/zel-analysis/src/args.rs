@@ -135,6 +135,7 @@ fn expand_one_tree(
 #[derive(Default)]
 pub(crate) struct ArgsBuilder {
     pub args: Vec<String>,
+    pub groups: Vec<(usize, usize)>,
     pub param_file: Option<ParamFileInfo>,
     pub format: Option<ParamFileFormat>,
     pub directory_artifacts: Vec<Artifact>,
@@ -143,13 +144,25 @@ pub(crate) struct ArgsBuilder {
 impl ArgsBuilder {
     pub fn finish(&self) -> CommandLineArgs {
         let mut p = self.param_file.clone();
-        if let (Some(p), Some(f)) = (p.as_mut(), self.format) {
-            p.format = f;
+        if let Some(ref mut p) = p {
+            if let Some(f) = self.format {
+                p.format = f;
+            }
+            p.flag_groups = self.groups.clone();
         }
         CommandLineArgs {
             args: self.args.clone(),
             param_file: p,
         }
+    }
+
+    pub fn param_file_args(&self, fmt: ParamFileFormat) -> Vec<String> {
+        let info = ParamFileInfo {
+            format: fmt,
+            flag_groups: self.groups.clone(),
+            ..Default::default()
+        };
+        info.format_flag_groups(0, &self.args)
     }
 }
 
@@ -431,6 +444,7 @@ pub(crate) fn args_method(
                 }
                 Ok(())
             };
+            let start = b.args.len();
             match value {
                 // 9.3.2: a `None` value is stringified (`args.add("--flag", None)` -> `--flag None`).
                 Some(v) => {
@@ -452,6 +466,10 @@ pub(crate) fn args_method(
                     };
                     b.args.push(fmtd(vs)?);
                 }
+            }
+            let end = b.args.len();
+            if end > start {
+                b.groups.push((start, end));
             }
             Ok(Value::Host("args".into(), String::new()))
         }
@@ -522,6 +540,7 @@ pub(crate) fn args_method(
             if mapped.is_empty() && omit_if_empty {
                 return Ok(Value::None);
             }
+            let start = b.args.len();
             let has_concrete = mapped.iter().any(|m| matches!(m, MappedItem::Concrete(_)));
             let only_trees_omit = omit_if_empty && !has_concrete && !mapped.is_empty();
             if let Some(n) = name {
@@ -558,6 +577,10 @@ pub(crate) fn args_method(
                 } else {
                     b.args.push(t);
                 }
+            }
+            let end = b.args.len();
+            if end > start {
+                b.groups.push((start, end));
             }
             Ok(Value::None)
         }
@@ -648,10 +671,13 @@ pub(crate) fn args_method(
             if let Some(f) = format_joined {
                 joined = format_arg(&f, &joined)?;
             }
+            let start = b.args.len();
             if let Some(n) = name {
                 b.args.push(n);
             }
             b.args.push(joined);
+            let end = b.args.len();
+            b.groups.push((start, end));
             Ok(Value::None)
         }
         "use_param_file" => {
@@ -676,15 +702,15 @@ pub(crate) fn args_method(
             let use_always =
                 want_bool(kw.get("use_always"), "use_param_file", "use_always", false)?;
             let fmt = b
-                .param_file
-                .as_ref()
-                .map(|p| p.format)
+                .format
+                .or_else(|| b.param_file.as_ref().map(|p| p.format))
                 .unwrap_or(ParamFileFormat::Shell);
             b.param_file = Some(ParamFileInfo {
                 flag_format: flag,
                 format: fmt,
                 use_always,
                 leading_args: 0,
+                flag_groups: b.groups.clone(),
             });
             Ok(Value::None)
         }

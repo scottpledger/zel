@@ -208,6 +208,7 @@ fn param_info() -> crate::action::ParamFileInfo {
         format: crate::action::ParamFileFormat::Multiline,
         use_always: true,
         leading_args: 0,
+        flag_groups: Vec::new(),
     }
 }
 
@@ -1049,6 +1050,7 @@ fn java_resource_jar_action(
                     format: crate::action::ParamFileFormat::Shell,
                     use_always: false,
                     leading_args: 0,
+                    flag_groups: Vec::new(),
                 }),
             }],
             shell_command: None,

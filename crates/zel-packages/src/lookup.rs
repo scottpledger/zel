@@ -162,11 +162,11 @@ pub fn find_build_file_checked(
                     }
                 }
             }
-            Err(zel_vfs::SymlinkError::Cycle { chain }) => {
+            Err(zel_vfs::SymlinkError::Cycle { chain, .. }) => {
                 let s: Vec<&str> = chain.iter().map(|x| x.path_string()).collect();
                 return Err(format!("Symlink cycle: {}", s.join("- > ")));
             }
-            Err(zel_vfs::SymlinkError::InfiniteExpansion { chain }) => {
+            Err(zel_vfs::SymlinkError::InfiniteExpansion { chain, .. }) => {
                 let s: Vec<&str> = chain.iter().map(|x| x.path_string()).collect();
                 return Err(format!("Infinite symlink expansion: {}", s.join("- > ")));
             }

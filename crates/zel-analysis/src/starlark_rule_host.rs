@@ -123,17 +123,25 @@ fn call_subrule(
     if let Value::Host(_, id) = &recv {
         if st.rule_struct.is_none() && !declared.contains(id) {
             return err(format!(
-                "subrule called from rule '{}' which does not declare it in 'subrules'",
-                st.rule.rule_class
+                "rule '{}' must declare subrule in 'subrules' (subrule called from rule '{}' which does not declare it in 'subrules')",
+                st.rule.rule_class, st.rule.rule_class
             ));
         }
     }
     if !def.attrs.is_empty() {
+        for a in &def.attrs {
+            if a.name.starts_with('_') && kw.contains_key(&a.name) {
+                return err(format!(
+                    "got invalid named argument: '{}' is an implicit dependency and cannot be overridden",
+                    a.name
+                ));
+            }
+        }
         let amap: BTreeMap<String, Attribute> = def.attrs.iter().map(|a| (a.name.clone(), a.clone())).collect();
         let mut arule = st.rule.clone();
         arule.extra.attr_values.clear();
         let wrap = |e: String| e;
-        let bundle = convert_rule_attrs(&arule, &amap, &st.cfg, &st.inputs, &st.pkg_dir, st.root(), &wrap, None)
+        let bundle = convert_rule_attrs(&arule, &amap, &st.cfg, &st.inputs, &st.pkg_dir, ArtifactRoot::Bin, &wrap, None)
             .map_err(StarlarkError)?;
         for a in &def.attrs {
             let v = if a.executable {
@@ -150,7 +158,10 @@ fn call_subrule(
     }
     let mut args = vec![Value::Host("ctx".into(), "0".into())];
     args.extend(pos);
-    ctx.call_value(def.implementation.clone(), args, kw)
+    let prev = st.in_subrule.swap(true, std::sync::atomic::Ordering::Relaxed);
+    let res = ctx.call_value(def.implementation.clone(), args, kw);
+    st.in_subrule.store(prev, std::sync::atomic::Ordering::Relaxed);
+    res
 }
 
 /// Whether `--collect_code_coverage` is on in `cfg`.
@@ -202,7 +213,11 @@ fn instrumented_files_info(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Stri
             for f in files_in(list, a)? {
                 let ext_ok = match &extensions {
                     None => true,
-                    Some(exts) => exts.is_empty() || exts.iter().any(|e| f.exec_path.path_string().ends_with(&format!(".{}", e.trim_start_matches('.')))),
+                    Some(exts) => exts.iter().any(|e| {
+                        f.exec_path
+                            .path_string()
+                            .ends_with(&format!(".{}", e.trim_start_matches('.')))
+                    }),
                 };
                 if ext_ok {
                     instrumented.push(f);
@@ -898,6 +913,16 @@ fn build_setting_value(st: &Arc<CtxState>) -> HostResult {
                 .get("build_setting_default")
                 .cloned()
                 .ok_or_else(|| StarlarkError("build setting has no default".into()))?;
+            let def = if ty == "string_set" {
+                let items = sequence(&def).unwrap_or_default();
+                let mut set = zel_starlark::StarlarkSet::default();
+                for item in items {
+                    let _ = set.add(item);
+                }
+                Value::Set(Arc::new(Mutex::new(set)))
+            } else {
+                def
+            };
             if allow_multiple {
                 Ok(mk_list(vec![def]))
             } else {
@@ -941,6 +966,19 @@ pub fn render_flag_value(ty: &str, raw: &str) -> String {
                 format!("[{}]", raw.split(',').collect::<Vec<_>>().join(", "))
             }
         }
+        "string_set" => {
+            if raw.is_empty() {
+                "[]".to_string()
+            } else {
+                let mut seen = Vec::new();
+                for item in raw.split(',') {
+                    if !seen.contains(&item) {
+                        seen.push(item);
+                    }
+                }
+                format!("[{}]", seen.join(", "))
+            }
+        }
         _ => raw.to_string(),
     }
 }
@@ -971,6 +1009,15 @@ pub fn convert_flag_value(ty: &str, raw: &str) -> Result<Value, String> {
             } else {
                 mk_list(raw.split(',').map(|s| Value::String(s.to_string())).collect())
             }
+        }
+        "string_set" => {
+            let mut set = zel_starlark::StarlarkSet::default();
+            if !raw.is_empty() {
+                for s in raw.split(',') {
+                    let _ = set.add(Value::String(s.to_string()));
+                }
+            }
+            Value::Set(Arc::new(Mutex::new(set)))
         }
         _ => Value::String(raw.to_string()),
     })

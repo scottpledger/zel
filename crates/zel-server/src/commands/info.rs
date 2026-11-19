@@ -474,7 +474,7 @@ impl BlazeRuntime {
                 false,
                 text(format!(
                     "RAM={}MB, CPU={:.1}",
-                    host.host_ram_mb(),
+                    host.truncated_ram_mb(),
                     host.cpus
                 )),
             ),

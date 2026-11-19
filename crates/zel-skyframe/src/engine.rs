@@ -53,14 +53,37 @@ pub struct ErrorInfo {
     /// Keys whose functions produced the underlying error.
     pub root_causes: Vec<SkyKey>,
     pub cycles: Vec<CycleInfo>,
+    pub directly_transient: bool,
+    pub transitively_transient: bool,
+    pub catastrophic: bool,
 }
 
 impl ErrorInfo {
-    fn from_error(key: &SkyKey, e: SkyFunctionError) -> Self {
+    pub fn from_error(key: &SkyKey, e: SkyFunctionError) -> Self {
+        let transient = e.transient;
+        let catastrophic = e.catastrophic;
         Self {
             error: Some(e),
             root_causes: vec![key.clone()],
             cycles: vec![],
+            directly_transient: transient,
+            transitively_transient: transient,
+            catastrophic,
+        }
+    }
+
+    pub fn from_cycle(path_to_cycle: Vec<SkyKey>, cycle: Vec<SkyKey>) -> Self {
+        let root_causes = cycle.first().cloned().into_iter().collect();
+        let cycles = CycleInfo::normalize_cycle(path_to_cycle, cycle)
+            .into_iter()
+            .collect();
+        Self {
+            error: None,
+            root_causes,
+            cycles,
+            directly_transient: false,
+            transitively_transient: false,
+            catastrophic: false,
         }
     }
 
@@ -72,30 +95,71 @@ impl ErrorInfo {
         }
     }
 
+    pub fn is_directly_transient(&self) -> bool {
+        self.directly_transient
+    }
+
+    pub fn is_transitively_transient(&self) -> bool {
+        self.transitively_transient
+    }
+
     pub fn is_transient(&self) -> bool {
-        self.error.as_ref().map(|e| e.transient).unwrap_or(false)
+        self.transitively_transient
     }
 
     pub fn is_catastrophic(&self) -> bool {
-        self.error.as_ref().map(|e| e.catastrophic).unwrap_or(false)
+        self.catastrophic || self.error.as_ref().map(|e| e.catastrophic).unwrap_or(false)
+    }
+
+    /// Error of `parent` caused by the failure of one or more dependencies
+    /// (`ErrorInfo.fromChildErrors`): prefers the first non-cycle exception, OR-merges
+    /// `transitively_transient` and `catastrophic` across all failed children, and marks
+    /// `directly_transient = false`.
+    pub fn from_child_errors<'a, I>(parent: &SkyKey, children: I) -> Self
+    where
+        I: IntoIterator<Item = &'a ErrorInfo>,
+    {
+        let mut first_error: Option<SkyFunctionError> = None;
+        let mut root_causes: Vec<SkyKey> = Vec::new();
+        let mut cycles: Vec<CycleInfo> = Vec::new();
+        let mut transitively_transient = false;
+        let mut catastrophic = false;
+
+        for child in children {
+            if first_error.is_none() && child.error.is_some() {
+                first_error = child.error.clone();
+            }
+            if child.is_transitively_transient() {
+                transitively_transient = true;
+            }
+            if child.is_catastrophic() {
+                catastrophic = true;
+            }
+            for rc in &child.root_causes {
+                if !root_causes.contains(rc) {
+                    root_causes.push(rc.clone());
+                }
+            }
+            cycles.extend(CycleInfo::prepare_cycles(parent, &child.cycles));
+        }
+        if let Some(err) = first_error.as_mut() {
+            if catastrophic {
+                err.catastrophic = true;
+            }
+        }
+        Self {
+            error: first_error,
+            root_causes,
+            cycles,
+            directly_transient: false,
+            transitively_transient,
+            catastrophic,
+        }
     }
 
     /// Error of `parent` caused by the failure of its dependency `child`.
     fn bubbled(parent: &SkyKey, child: &ErrorInfo) -> Self {
-        let cycles = child
-            .cycles
-            .iter()
-            .map(|c| {
-                let mut path = vec![parent.clone()];
-                path.extend(c.path_to_cycle.iter().cloned());
-                CycleInfo::new(path, c.cycle.clone())
-            })
-            .collect();
-        Self {
-            error: child.error.clone(),
-            root_causes: child.root_causes.clone(),
-            cycles,
-        }
+        Self::from_child_errors(parent, std::iter::once(child))
     }
 }
 
@@ -108,8 +172,12 @@ enum NodeValue {
 impl NodeValue {
     fn same_as(&self, other: &NodeValue) -> bool {
         match (self, other) {
-            (NodeValue::Value(a), NodeValue::Value(b)) => a.eq_value(b.as_ref()),
-            (NodeValue::Error(a), NodeValue::Error(b)) => a == b,
+            (NodeValue::Value(a), NodeValue::Value(b)) => {
+                !a.is_not_comparable() && !b.is_not_comparable() && a.eq_value(b.as_ref())
+            }
+            (NodeValue::Error(a), NodeValue::Error(b)) => {
+                !a.is_transitively_transient() && !b.is_transitively_transient() && a == b
+            }
             _ => false,
         }
     }
@@ -666,7 +734,7 @@ impl InMemoryMemoizingEvaluator {
             .collect()
     }
 
-    /// Value of a clean node, if any.
+    /// Value of a clean node, if any (`WalkableGraph.getValue`).
     pub fn peek(&self, key: &SkyKey) -> Option<Arc<dyn SkyValue>> {
         match self.core.lock().unwrap().graph.nodes.get(key) {
             Some(n) if n.is_done() => match n.value.as_ref()? {
@@ -675,6 +743,86 @@ impl InMemoryMemoizingEvaluator {
             },
             _ => None,
         }
+    }
+
+    pub fn get_value(&self, key: &SkyKey) -> Option<Arc<dyn SkyValue>> {
+        self.peek(key)
+    }
+
+    /// Exception of a clean failed node (`WalkableGraph.getException`); returns `None` for
+    /// missing, dirty, successful, or pure-cycle nodes.
+    pub fn get_exception(&self, key: &SkyKey) -> Option<SkyFunctionError> {
+        match self.core.lock().unwrap().graph.nodes.get(key) {
+            Some(n) if n.is_done() => match n.value.as_ref()? {
+                NodeValue::Error(info) => info.error.clone(),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn get_error_info(&self, key: &SkyKey) -> Option<ErrorInfo> {
+        match self.core.lock().unwrap().graph.nodes.get(key) {
+            Some(n) if n.is_done() => match n.value.as_ref()? {
+                NodeValue::Error(info) => Some(info.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Whether `key` is a clean failed node carrying cycle information (`WalkableGraph.isCycle`).
+    pub fn is_cycle(&self, key: &SkyKey) -> bool {
+        match self.core.lock().unwrap().graph.nodes.get(key) {
+            Some(n) if n.is_done() => match n.value.as_ref() {
+                Some(NodeValue::Error(info)) => !info.cycles.is_empty(),
+                _ => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// `WalkableGraph.getSuccessfulValues`: returns all requested keys that hold a clean `SkyValue`.
+    pub fn get_successful_values(&self, keys: &[SkyKey]) -> HashMap<SkyKey, Arc<dyn SkyValue>> {
+        let core = self.core.lock().unwrap();
+        let mut out = HashMap::new();
+        for k in keys {
+            if let Some(n) = core.graph.nodes.get(k) {
+                if n.is_done() {
+                    if let Some(NodeValue::Value(v)) = &n.value {
+                        out.insert(k.clone(), Arc::clone(v));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// `WalkableGraph.getMissingAndExceptions`: omits clean successful keys; maps failed keys to
+    /// `Some(err)` (or `None` when cycle-only) and missing/dirty keys to `None`.
+    pub fn get_missing_and_exceptions(
+        &self,
+        keys: &[SkyKey],
+    ) -> HashMap<SkyKey, Option<SkyFunctionError>> {
+        let core = self.core.lock().unwrap();
+        let mut out = HashMap::new();
+        for k in keys {
+            match core.graph.nodes.get(k) {
+                Some(n) if n.is_done() => match &n.value {
+                    Some(NodeValue::Value(_)) => {}
+                    Some(NodeValue::Error(info)) => {
+                        out.insert(k.clone(), info.error.clone());
+                    }
+                    None => {
+                        out.insert(k.clone(), None);
+                    }
+                },
+                _ => {
+                    out.insert(k.clone(), None);
+                }
+            }
+        }
+        out
     }
 
     pub fn evaluate(&self, roots: &[SkyKey]) -> EvaluationResult {
@@ -953,20 +1101,9 @@ impl InMemoryMemoizingEvaluator {
                 }
             }
             Ok(Ok(None)) => {
-                if let Some((_, child)) = error_deps.first() {
-                    // Unhandled failed dependency: this node fails with the child's error.
-                    let info = ErrorInfo::bubbled(&key, child);
-                    // Merge cycle info and root causes of all failed deps.
-                    let mut info = info;
-                    for (_, c) in error_deps.iter().skip(1) {
-                        for rc in &c.root_causes {
-                            if !info.root_causes.contains(rc) {
-                                info.root_causes.push(rc.clone());
-                            }
-                        }
-                        let b = ErrorInfo::bubbled(&key, c);
-                        info.cycles.extend(b.cycles);
-                    }
+                if !error_deps.is_empty() {
+                    let info =
+                        ErrorInfo::from_child_errors(&key, error_deps.iter().map(|(_, c)| c));
                     Self::finish_error(&mut core, &key, info, false, groups);
                     return;
                 }
@@ -1164,7 +1301,8 @@ impl InMemoryMemoizingEvaluator {
         } else {
             core.run.stats.pruned.push(key.clone());
         }
-        let is_transient = matches!(&value, NodeValue::Error(e) if e.is_transient());
+        let is_directly_transient =
+            matches!(&value, NodeValue::Error(e) if e.is_directly_transient());
         let node = core.graph.nodes.get_mut(key).unwrap();
         // Always store the fresh value (equal values may carry different metadata such as the
         // observed mtime); only `last_changed` is held back for change pruning.
@@ -1172,7 +1310,7 @@ impl InMemoryMemoizingEvaluator {
         node.last_evaluated = version;
         node.dirty = Dirty::Clean;
         node.deps = groups;
-        if is_transient {
+        if is_directly_transient {
             core.transient_errors.insert(key.clone());
         }
         core.run.stats.evaluated.push(key.clone());
@@ -1321,11 +1459,7 @@ impl InMemoryMemoizingEvaluator {
                         // cycle as `ErrorInfo::from_cycle(path_to_cycle, cycle)` without committing
                         // cycle nodes to the graph or evaluating later roots.
                         let path_to_cycle = path[..pos].to_vec();
-                        let info = ErrorInfo {
-                            error: None,
-                            root_causes: vec![cycle[0].clone()],
-                            cycles: vec![CycleInfo::new(path_to_cycle, cycle)],
-                        };
+                        let info = ErrorInfo::from_cycle(path_to_cycle, cycle);
                         core.run.failed.insert(start.clone(), info);
                         core.run.aborted = true;
                         core.run.done = true;
@@ -1333,8 +1467,7 @@ impl InMemoryMemoizingEvaluator {
                         core.run.waiters.clear();
                         return;
                     }
-                    let mut id = cycle.clone();
-                    id.sort();
+                    let id = CycleInfo::new(vec![], cycle.clone()).identity();
                     if seen_ids.insert(id) {
                         cycles.push(cycle);
                     }
@@ -1356,11 +1489,7 @@ impl InMemoryMemoizingEvaluator {
                 if members.contains(m) {
                     continue;
                 }
-                let info = ErrorInfo {
-                    error: None,
-                    root_causes: vec![m.clone()],
-                    cycles: vec![CycleInfo::new(vec![], CycleInfo::rotated(c, j))],
-                };
+                let info = ErrorInfo::from_cycle(vec![], CycleInfo::rotated(c, j));
                 core.run.failed.insert(m.clone(), info.clone());
                 let groups = {
                     let g = core

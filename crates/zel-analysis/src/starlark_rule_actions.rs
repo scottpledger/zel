@@ -65,8 +65,38 @@ fn host_method(
                     Ok(recv.clone())
                 }
                 "add_joined" => {
+                    if pos.len() > 2 {
+                        return err(format!(
+                            "add_joined() accepts no more than 2 positional arguments but got {}",
+                            pos.len()
+                        ));
+                    }
                     check_kwargs("add_joined", pos, kw, &["key", "values", "join_with", "map_each", "uniquify", "format_joined", "allow_closure"])?;
-                    let values = arg(pos, kw, 1, "values").cloned().ok_or_else(|| StarlarkError("add_joined() missing 1 required positional argument: values".into()))?;
+                    let values = arg(pos, kw, 1, "values")
+                        .cloned()
+                        .ok_or_else(|| StarlarkError("add_joined() missing 1 required positional argument: values".into()))?;
+                    if !matches!(values, Value::Depset(_)) {
+                        return err(format!(
+                            "in call to add_joined(), parameter 'values' got value of type '{}', want 'depset'",
+                            type_name(&values)
+                        ));
+                    }
+                    if !kw.contains_key("join_with") {
+                        return err("add_joined() missing 1 required named-only argument: 'join_with'");
+                    }
+                    let Some(map_fn) = kw.get("map_each") else {
+                        return err("add_joined() missing 1 required named-only argument: 'map_each'");
+                    };
+                    if let Value::UserFunction(u) = map_fn {
+                        let req_pos = u
+                            .params
+                            .iter()
+                            .filter(|p| !p.is_args && !p.is_kwargs && !p.is_kw_only && p.default.is_none())
+                            .count();
+                        if req_pos > 1 {
+                            return err("map_each must be a function accepting a single positional argument");
+                        }
+                    }
                     let mut b = ArgsBuilder::default();
                     let mut akw = kw.clone();
                     akw.remove("key");
@@ -816,7 +846,10 @@ fn actions_method(
                     let a = b.finish();
                     // `set_param_file_format` alone selects the file format (Args.getParameterFileType).
                     let format = b.format.or_else(|| a.param_file.as_ref().map(|p| p.format)).unwrap_or(ParamFileFormat::Shell);
-                    FileContent::Args { args: a.args, format }
+                    FileContent::Args {
+                        args: b.param_file_args(format),
+                        format,
+                    }
                 }
                 other => {
                     return err(format!(

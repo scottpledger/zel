@@ -4272,7 +4272,77 @@ fn construct_native_provider(
             for (p, v) in ["requirements", "exec_group"].iter().zip(eval_pos.iter()) {
                 eval_kw.entry((*p).to_string()).or_insert_with(|| v.clone());
             }
+            eval_kw
+                .entry("requirements".to_string())
+                .or_insert_with(|| Value::Dict(Arc::new(Mutex::new(StarlarkDict::new()))));
+            if matches!(eval_kw.get("exec_group"), None | Some(Value::None)) {
+                eval_kw.insert(
+                    "exec_group".to_string(),
+                    Value::String("default".to_string()),
+                );
+            }
             Ok(eval_kw)
+        }
+        "AnalysisTestResultInfo" => {
+            if eval_pos.len() > 2 {
+                return Err(StarlarkError(format!(
+                    "AnalysisTestResultInfo() accepts at most 2 positional arguments, got {}",
+                    eval_pos.len()
+                )));
+            }
+            for k in eval_kw.keys() {
+                if k != "success" && k != "message" {
+                    return Err(StarlarkError(format!(
+                        "AnalysisTestResultInfo() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            if !eval_pos.is_empty() && eval_kw.contains_key("success") {
+                return Err(StarlarkError(
+                    "AnalysisTestResultInfo() got multiple values for parameter 'success'"
+                        .to_string(),
+                ));
+            }
+            if eval_pos.len() >= 2 && eval_kw.contains_key("message") {
+                return Err(StarlarkError(
+                    "AnalysisTestResultInfo() got multiple values for parameter 'message'"
+                        .to_string(),
+                ));
+            }
+            let success_raw = eval_pos
+                .first()
+                .cloned()
+                .or_else(|| eval_kw.remove("success"))
+                .ok_or_else(|| {
+                    StarlarkError(
+                        "AnalysisTestResultInfo() missing 1 required argument: success".to_string(),
+                    )
+                })?;
+            let message_raw = eval_pos
+                .get(1)
+                .cloned()
+                .or_else(|| eval_kw.remove("message"))
+                .ok_or_else(|| {
+                    StarlarkError(
+                        "AnalysisTestResultInfo() missing 1 required argument: message".to_string(),
+                    )
+                })?;
+            if !matches!(success_raw, Value::Bool(_)) {
+                return Err(StarlarkError(format!(
+                    "in call to AnalysisTestResultInfo(), parameter 'success' got value of type '{}', want 'bool'",
+                    success_raw.type_name()
+                )));
+            }
+            if !matches!(message_raw, Value::String(_)) {
+                return Err(StarlarkError(format!(
+                    "in call to AnalysisTestResultInfo(), parameter 'message' got value of type '{}', want 'string'",
+                    message_raw.type_name()
+                )));
+            }
+            let mut out = BTreeMap::new();
+            out.insert("success".to_string(), success_raw);
+            out.insert("message".to_string(), message_raw);
+            Ok(out)
         }
         "TemplateVariableInfo" => {
             if eval_pos.len() > 1 {

@@ -311,6 +311,8 @@ struct CtxState {
     base_exec_group_platforms: BTreeMap<String, String>,
     /// `ctx.split_attr` (rules only; `None` in aspects).
     split_attr: Value,
+    /// True while executing a `subrule(...)` implementation (`SubruleContext`: always `ArtifactRoot::Bin`).
+    in_subrule: std::sync::atomic::AtomicBool,
 }
 
 impl CtxState {
@@ -352,7 +354,7 @@ impl CtxState {
         format!("bazel-out/{}/bin", self.cfg.mnemonic())
     }
     fn root(&self) -> ArtifactRoot {
-        if self.output_to_genfiles {
+        if self.output_to_genfiles && !self.in_subrule.load(std::sync::atomic::Ordering::Relaxed) {
             ArtifactRoot::Genfiles
         } else {
             ArtifactRoot::Bin

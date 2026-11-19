@@ -1622,7 +1622,9 @@ pub fn execute_action_with(
             };
             let mut expanded = raw;
             for (k, v) in substitutions {
-                expanded = expanded.replace(k, v);
+                if !k.is_empty() {
+                    expanded = expanded.replace(k, v);
+                }
             }
             let out_path = execroot.get_relative(&output.exec_path);
             if let Some(parent) = out_path.parent_directory() {

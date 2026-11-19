@@ -509,103 +509,11 @@ fn analyze_rule(
             {
                 cfg = config.to_core_only();
             } else if ts.fields.contains_key("implementation") {
-                // Plain attribute values are visible to the transition as `attr`.
-                let mut af = std::collections::BTreeMap::new();
-                let rc_attrs = rule
-                    .extra
-                    .rule_class
-                    .as_ref()
-                    .map(|rc| rc.attrs.clone())
-                    .unwrap_or_default();
-                let mut names: Vec<String> = rc_attrs.keys().cloned().collect();
-                for k in rule.extra.attr_values.keys() {
-                    if !names.contains(k) {
-                        names.push(k.clone());
-                    }
-                }
-                for k in names {
-                    use zel_packages::AttrValue as A;
-                    let v = match rule.extra.attr_values.get(&k) {
-                        Some(v) => v.clone(),
-                        None => match rc_attrs.get(&k) {
-                            Some(a) => a.default_value(),
-                            None => continue,
-                        },
-                    };
-                    // Selects are resolved against the incoming configuration.
-                    let v = match &v {
-                        A::Select(_) => match zel_analysis::select::resolve_select(
-                            &v,
-                            &k,
-                            rule,
-                            config,
-                            resolver.as_ref(),
-                        ) {
-                            Ok(r) => r,
-                            Err(_) => continue,
-                        },
-                        _ => v,
-                    };
-                    let val = match &v {
-                        A::Str(x) => Value::String(x.clone()),
-                        A::Bool(b) => Value::Bool(*b),
-                        A::Int(i) => Value::Int((*i).into()),
-                        A::Tristate(t) => Value::Int((*t as i64).into()),
-                        A::Label(None) | A::Output(None) => Value::None,
-                        A::Label(Some(l)) | A::Output(Some(l)) => Value::Label(l.clone()),
-                        A::LabelList(l) | A::OutputList(l) => zel_analysis::starlark_rule::mk_list(
-                            l.iter().cloned().map(Value::Label).collect(),
-                        ),
-                        A::StrList(l) => zel_analysis::starlark_rule::mk_list(
-                            l.iter().cloned().map(Value::String).collect(),
-                        ),
-                        A::IntList(l) => zel_analysis::starlark_rule::mk_list(
-                            l.iter().copied().map(|i| Value::Int(i.into())).collect(),
-                        ),
-                        A::StrDict(d) => zel_analysis::starlark_rule::mk_dict(
-                            d.iter()
-                                .map(|(a, b)| (Value::String(a.clone()), Value::String(b.clone())))
-                                .collect(),
-                        ),
-                        A::StrListDict(d) => zel_analysis::starlark_rule::mk_dict(
-                            d.iter()
-                                .map(|(a, bs)| {
-                                    (
-                                        Value::String(a.clone()),
-                                        zel_analysis::starlark_rule::mk_list(
-                                            bs.iter().cloned().map(Value::String).collect(),
-                                        ),
-                                    )
-                                })
-                                .collect(),
-                        ),
-                        A::LabelListDict(d) => zel_analysis::starlark_rule::mk_dict(
-                            d.iter()
-                                .map(|(a, bs)| {
-                                    (
-                                        Value::String(a.clone()),
-                                        zel_analysis::starlark_rule::mk_list(
-                                            bs.iter().cloned().map(Value::Label).collect(),
-                                        ),
-                                    )
-                                })
-                                .collect(),
-                        ),
-                        A::LabelKeyedStrDict(d) => zel_analysis::starlark_rule::mk_dict(
-                            d.iter()
-                                .map(|(a, b)| (Value::Label(a.clone()), Value::String(b.clone())))
-                                .collect(),
-                        ),
-                        A::StrKeyedLabelDict(d) => zel_analysis::starlark_rule::mk_dict(
-                            d.iter()
-                                .map(|(a, b)| (Value::String(a.clone()), Value::Label(b.clone())))
-                                .collect(),
-                        ),
-                        _ => continue,
-                    };
-                    af.insert(k.clone(), val);
-                }
-                let attrs = Value::Struct(Arc::new(zel_starlark::StructValue::new(af)));
+                let attrs = zel_analysis::starlark_rule::build_transition_attr_struct(
+                    rule,
+                    config,
+                    resolver.as_ref(),
+                );
                 cfg = zel_analysis::transition::apply_transition_with_resolver(
                     t,
                     config,

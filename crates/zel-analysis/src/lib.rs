@@ -990,7 +990,7 @@ pub enum ActionAnalysisMetadata {
         owner: Label,
         template: Artifact,
         output: Artifact,
-        substitutions: BTreeMap<String, String>,
+        substitutions: Vec<(String, String)>,
         is_executable: bool,
     },
 }

@@ -2301,3 +2301,397 @@ current_launcher_binary(name = "launcher")
         "external/bazel_tools/tools/launcher/launcher"
     );
 }
+
+#[test]
+fn string_set_and_transition_validation_parity() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+SetValInfo = provider(fields = ["items", "flag", "i"])
+
+def _ss_impl(ctx):
+    return [SetValInfo(items = sorted(list(ctx.build_setting_value)), flag = False, i = 0)]
+
+string_set_flag = rule(
+    implementation = _ss_impl,
+    build_setting = config.string_set(flag = True),
+)
+
+def _b_impl(ctx):
+    return [SetValInfo(items = [], flag = ctx.build_setting_value, i = 0)]
+
+bool_flag = rule(implementation = _b_impl, build_setting = config.bool(flag = True))
+
+def _i_impl(ctx):
+    return [SetValInfo(items = [], flag = False, i = ctx.build_setting_value)]
+
+int_flag = rule(implementation = _i_impl, build_setting = config.int(flag = True))
+
+def _trans_impl(settings, attr):
+    return [{
+        "//:ss": set(["b", "a", "b", attr.name]),
+        "//:bf": 1,
+        "//:iflag": 42,
+    }]
+
+my_trans = transition(
+    implementation = _trans_impl,
+    inputs = [],
+    outputs = ["//:ss", "//:bf", "//:iflag"],
+)
+
+def _split_list_impl(settings, attr):
+    return [
+        {"//command_line_option:cpu": "arm64"},
+        {"//command_line_option:cpu": "x86_64"},
+    ]
+
+split_list_t = transition(
+    implementation = _split_list_impl,
+    inputs = [],
+    outputs = ["//command_line_option:cpu"],
+)
+
+def _leaf(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, out.path)
+    return [DefaultInfo(files = depset([out]))]
+
+leaf = rule(implementation = _leaf)
+
+def _holder(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".out")
+    ss = ctx.attr.ss[SetValInfo].items
+    bf = ctx.attr.bf[SetValInfo].flag
+    iv = ctx.attr.iflag[SetValInfo].i
+    keys = sorted(ctx.split_attr.leaves.keys())
+    ctx.actions.write(out, ",".join(ss) + "|" + str(bf) + "|" + str(iv) + "|" + ",".join(keys))
+    return [DefaultInfo(files = depset([out]))]
+
+holder = rule(
+    implementation = _holder,
+    cfg = my_trans,
+    attrs = {
+        "ss": attr.label(default = "//:ss"),
+        "bf": attr.label(default = "//:bf"),
+        "iflag": attr.label(default = "//:iflag"),
+        "leaves": attr.label(cfg = split_list_t),
+    },
+)
+
+bad_rule_split = rule(implementation = _leaf, cfg = split_list_t)
+
+def _overflow_impl(settings, attr):
+    return {"//:iflag": 1 << 40}
+
+overflow_t = transition(implementation = _overflow_impl, inputs = [], outputs = ["//:iflag"])
+overflow_rule = rule(implementation = _leaf, cfg = overflow_t)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "string_set_flag", "bool_flag", "int_flag", "leaf", "holder", "bad_rule_split", "overflow_rule")
+string_set_flag(name = "ss", build_setting_default = set(["x"]))
+bool_flag(name = "bf", build_setting_default = False)
+int_flag(name = "iflag", build_setting_default = 0)
+leaf(name = "lf")
+holder(name = "h", leaves = ":lf")
+bad_rule_split(name = "bad_split")
+overflow_rule(name = "bad_int")
+"#,
+        ),
+    ]);
+    let ct = ws.analyze("//:h").unwrap();
+    let zel_analysis::ActionAnalysisMetadata::FileWriteAction { content, .. } = &ct.actions[0]
+    else {
+        panic!("expected FileWriteAction");
+    };
+    assert_eq!(std::str::from_utf8(content).unwrap(), "a,b,h|True|42|0,1");
+
+    let err_split = ws.analyze("//:bad_split").unwrap_err();
+    assert!(
+        err_split.contains(
+            "Rule transition only allowed to return a single transitioned configuration."
+        ),
+        "{err_split}"
+    );
+    let err_int = ws.analyze("//:bad_int").unwrap_err();
+    assert!(err_int.contains("signed 32-bit int"), "{err_int}");
+}
+
+#[test]
+fn aspect_rule_attr_params_none_rejection_and_coverage_merge() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+ParamInfo = provider(fields = ["summary"])
+
+def _param_asp_impl(target, ctx):
+    cov = coverage_common.instrumented_files_info(
+        ctx,
+        source_attributes = ["srcs"],
+        extensions = [],
+    )
+    return [
+        ParamInfo(summary = ctx.attr.mode + ":" + str(ctx.attr.count)),
+        cov,
+    ]
+
+param_asp = aspect(
+    implementation = _param_asp_impl,
+    attrs = {
+        "mode": attr.string(default = "slow", values = ["slow", "fast"]),
+        "count": attr.int(default = 1, values = [1, 2]),
+    },
+)
+
+def _none_asp_impl(target, ctx):
+    pass
+
+none_asp = aspect(implementation = _none_asp_impl)
+
+def _lib(ctx):
+    cov = coverage_common.instrumented_files_info(
+        ctx,
+        source_attributes = ["srcs"],
+        extensions = [],
+    )
+    return [cov]
+
+lib = rule(implementation = _lib, attrs = {"srcs": attr.label_list(allow_files = True)})
+
+def _consumer(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, ctx.attr.dep[ParamInfo].summary)
+    return [DefaultInfo(files = depset([out]))]
+
+consumer = rule(
+    implementation = _consumer,
+    attrs = {
+        "dep": attr.label(aspects = [param_asp]),
+        "mode": attr.string(default = "fast"),
+        "count": attr.int(default = 2),
+    },
+)
+
+bad_consumer = rule(
+    implementation = _consumer,
+    attrs = {"dep": attr.label(aspects = [none_asp])},
+)
+"#,
+        ),
+        ("a.cc", "int x = 0;\n"),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "lib", "consumer", "bad_consumer")
+lib(name = "l", srcs = ["a.cc"])
+consumer(name = "c", dep = ":l")
+consumer(name = "bad_val", dep = ":l", count = 99)
+bad_consumer(name = "bad_none", dep = ":l")
+"#,
+        ),
+    ]);
+    let mut cov_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cov_cfg
+        .options
+        .insert("collect_code_coverage".into(), "true".into());
+    let ct = ws
+        .resolver()
+        .analyze(&Label::parse_canonical("//:c").unwrap(), &cov_cfg)
+        .unwrap();
+    let zel_analysis::ActionAnalysisMetadata::FileWriteAction { content, .. } = &ct.actions[0]
+    else {
+        panic!("expected FileWriteAction");
+    };
+    assert_eq!(std::str::from_utf8(content).unwrap(), "fast:2");
+
+    let l_ct = ws
+        .resolver()
+        .analyze(&Label::parse_canonical("//:l").unwrap(), &cov_cfg)
+        .unwrap();
+    assert!(
+        l_ct.instrumented_files
+            .as_ref()
+            .unwrap()
+            .instrumented_files
+            .is_empty(),
+        "empty extensions = [] must match zero source files"
+    );
+
+    let bad_val = ws.analyze("//:bad_val").unwrap_err();
+    assert!(bad_val.contains("has to be one of"), "{bad_val}");
+
+    let bad_none = ws.analyze("//:bad_none").unwrap_err();
+    assert!(
+        bad_none.contains(
+            "Aspect implementation should return a list, or a provider instance, but got NoneType"
+        ),
+        "{bad_none}"
+    );
+}
+
+#[test]
+fn subrule_bin_root_implicit_override_template_dict_and_positional_analysis_test() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _sub_impl(ctx, *, _helper):
+    f = ctx.actions.declare_file(ctx.label.name + "_sub.txt")
+    ctx.actions.write(f, str(_helper.label))
+    return f
+
+my_sub = subrule(
+    implementation = _sub_impl,
+    attrs = {"_helper": attr.label(default = "//:helper")},
+)
+
+def _upper(s):
+    return s.upper()
+
+def _gen_rule_impl(ctx):
+    sub_f = my_sub()
+    td = ctx.actions.template_dict()
+    td.add_joined("{ITEMS}", depset(["x", "y", "x"]), join_with = ",", map_each = _upper, uniquify = True)
+    out = ctx.actions.declare_file(ctx.label.name + "_main.txt")
+    ctx.actions.expand_template(
+        template = ctx.file.tpl,
+        output = out,
+        substitutions = {},
+        computed_substitutions = td,
+    )
+    return [DefaultInfo(files = depset([sub_f, out]))]
+
+gen_rule = rule(
+    implementation = _gen_rule_impl,
+    output_to_genfiles = True,
+    subrules = [my_sub],
+    attrs = {"tpl": attr.label(allow_single_file = True)},
+)
+
+def _bad_sub_override_impl(ctx):
+    my_sub(_helper = None)
+    return []
+
+bad_sub_override = rule(implementation = _bad_sub_override_impl, subrules = [my_sub])
+
+def _atest_impl(ctx):
+    return [AnalysisTestResultInfo(True, "all good")]
+
+pos_analysis_test = rule(implementation = _atest_impl, analysis_test = True)
+"#,
+        ),
+        ("in.tpl", "vals={ITEMS}\n"),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "gen_rule", "bad_sub_override", "pos_analysis_test")
+filegroup(name = "helper", srcs = ["in.tpl"])
+gen_rule(name = "g", tpl = "in.tpl")
+bad_sub_override(name = "bad_override")
+pos_analysis_test(name = "at")
+"#,
+        ),
+    ]);
+
+    let ct = ws.analyze("//:g").unwrap();
+    assert_eq!(
+        ct.default_info.files[0].root,
+        zel_analysis::ArtifactRoot::Bin
+    );
+    assert_eq!(
+        ct.default_info.files[1].root,
+        zel_analysis::ArtifactRoot::Genfiles
+    );
+
+    let err = ws.analyze("//:bad_override").unwrap_err();
+    assert!(
+        err.contains("implicit dependency and cannot be overridden"),
+        "{err}"
+    );
+
+    let at = ws.analyze("//:at").unwrap();
+    assert!(at.default_info.executable.is_some());
+}
+
+#[test]
+fn empty_list_transition_drops_attr_dep_and_rejects_rule_transition() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _empty_list_impl(settings, attr):
+    return []
+
+empty_list_t = transition(
+    implementation = _empty_list_impl,
+    inputs = [],
+    outputs = ["//command_line_option:cpu"],
+)
+
+def _empty_dict_impl(settings, attr):
+    return {}
+
+empty_dict_t = transition(
+    implementation = _empty_dict_impl,
+    inputs = [],
+    outputs = ["//command_line_option:cpu"],
+)
+
+def _boom_impl(ctx):
+    fail("boom_dep should never be analyzed when dropped by [] split transition")
+
+boom_rule = rule(implementation = _boom_impl)
+
+def _holder_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(
+        out,
+        "{}:{}:{}".format(
+            len(ctx.attr.dep),
+            len(ctx.split_attr.dep),
+            len(ctx.attr.dict_deps),
+        ),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+holder = rule(
+    implementation = _holder_impl,
+    cfg = empty_dict_t,
+    attrs = {
+        "dep": attr.label(cfg = empty_list_t),
+        "dict_deps": attr.string_keyed_label_dict(cfg = empty_list_t),
+    },
+)
+
+bad_empty_rule = rule(implementation = _holder_impl, cfg = empty_list_t)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "boom_rule", "holder", "bad_empty_rule")
+boom_rule(name = "boom")
+holder(name = "ok_drop", dep = ":boom", dict_deps = {":boom": "x"})
+bad_empty_rule(name = "bad_rule")
+"#,
+        ),
+    ]);
+
+    let ct = ws.analyze("//:ok_drop").unwrap();
+    let zel_analysis::ActionAnalysisMetadata::FileWriteAction { content, .. } = &ct.actions[0]
+    else {
+        panic!("expected FileWriteAction");
+    };
+    assert_eq!(std::str::from_utf8(content).unwrap(), "0:0:0");
+
+    let err = ws.analyze("//:bad_rule").unwrap_err();
+    assert!(
+        err.contains("Rule transition only allowed to return a single transitioned configuration."),
+        "{err}"
+    );
+}

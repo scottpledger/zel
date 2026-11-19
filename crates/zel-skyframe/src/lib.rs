@@ -38,6 +38,13 @@ pub use engine::{
 };
 pub use executor::{loading_signature, SkyframeExecutor, SyncReport};
 
+/// Whether a [`SkyFunction`] reads external/untracked state (`FunctionHermeticity.java`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FunctionHermeticity {
+    Hermetic,
+    NonHermetic,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SkyFunctionName(pub &'static str);
 
@@ -46,12 +53,24 @@ impl SkyFunctionName {
     pub const FILE: Self = Self("FILE");
     pub const DIRECTORY_LISTING: Self = Self("DIRECTORY_LISTING");
     pub const PACKAGE_LOOKUP: Self = Self("PACKAGE_LOOKUP");
+    pub const CONTAINING_PACKAGE_LOOKUP: Self = Self("CONTAINING_PACKAGE_LOOKUP");
     pub const BZL_LOAD: Self = Self("BZL_LOAD");
     pub const PACKAGE: Self = Self("PACKAGE");
     pub const PACKAGE_LOAD: Self = Self("PACKAGE_LOAD");
+    pub const PACKAGE_ERROR: Self = Self("PACKAGE_ERROR");
+    pub const PACKAGE_ERROR_MESSAGE: Self = Self("PACKAGE_ERROR_MESSAGE");
     pub const CONFIGURED_TARGET: Self = Self("CONFIGURED_TARGET");
     pub const ACTION_EXECUTION: Self = Self("ACTION_EXECUTION");
     pub const PRECOMPUTED: Self = Self("PRECOMPUTED");
+
+    pub fn hermeticity(&self) -> FunctionHermeticity {
+        match self.0 {
+            "FILE_STATE" | "DIRECTORY_LISTING" | "ACTION_EXECUTION" => {
+                FunctionHermeticity::NonHermetic
+            }
+            _ => FunctionHermeticity::Hermetic,
+        }
+    }
 }
 
 impl fmt::Display for SkyFunctionName {
@@ -67,10 +86,13 @@ pub enum SkyKey {
     File(RootedPath),
     DirectoryListingState(RootedPath),
     PackageLookup(PackageIdentifier),
+    ContainingPackageLookup(PackageIdentifier),
     Package(PackageIdentifier),
     /// Loads a package through the server's `PackageLoader`, yielding the loader's exact
     /// `Result<Package, PackageLoadError>` (see [`PackageLoadValue`]).
     PackageLoad(PackageIdentifier),
+    PackageError(PackageIdentifier),
+    PackageErrorMessage(PackageIdentifier),
     ConfiguredTarget {
         label: Label,
         config_hash: String,
@@ -92,12 +114,36 @@ impl SkyKey {
             Self::DirectoryListingState(_) => SkyFunctionName::DIRECTORY_LISTING,
             Self::ActionExecution(_) => SkyFunctionName::ACTION_EXECUTION,
             Self::PackageLookup(_) => SkyFunctionName::PACKAGE_LOOKUP,
+            Self::ContainingPackageLookup(_) => SkyFunctionName::CONTAINING_PACKAGE_LOOKUP,
             Self::Package(_) => SkyFunctionName::PACKAGE,
             Self::PackageLoad(_) => SkyFunctionName::PACKAGE_LOAD,
+            Self::PackageError(_) => SkyFunctionName::PACKAGE_ERROR,
+            Self::PackageErrorMessage(_) => SkyFunctionName::PACKAGE_ERROR_MESSAGE,
             Self::ConfiguredTarget { .. } => SkyFunctionName::CONFIGURED_TARGET,
             Self::Precomputed(_) => SkyFunctionName::PRECOMPUTED,
             Self::Custom { function_name, .. } => *function_name,
         }
+    }
+
+    /// `SkyKey.getCanonicalName()`: `<FUNCTION_NAME>:<arg>` with newlines replaced by `_`.
+    pub fn canonical_name(&self) -> String {
+        let format_rp = |rp: &RootedPath| -> String {
+            format!("[{}]/[{}]", rp.root_value(), rp.root_relative_path())
+        };
+        let raw_arg = match self {
+            Self::FileState(rp) | Self::File(rp) | Self::DirectoryListingState(rp) => format_rp(rp),
+            Self::ActionExecution(id) => id.clone(),
+            Self::PackageLookup(pkg)
+            | Self::ContainingPackageLookup(pkg)
+            | Self::Package(pkg)
+            | Self::PackageLoad(pkg)
+            | Self::PackageError(pkg)
+            | Self::PackageErrorMessage(pkg) => pkg.to_string(),
+            Self::ConfiguredTarget { label, config_hash } => format!("{label}@{config_hash}"),
+            Self::Precomputed(name) => name.clone(),
+            Self::Custom { argument, .. } => argument.clone(),
+        };
+        format!("{}:{}", self.function_name(), raw_arg.replace('\n', "_"))
     }
 }
 
@@ -111,8 +157,13 @@ impl fmt::Display for SkyKey {
             }
             Self::ActionExecution(id) => write!(f, "ACTION_EXECUTION:[{id}]"),
             Self::PackageLookup(pkg) => write!(f, "PACKAGE_LOOKUP:[{pkg}]"),
+            Self::ContainingPackageLookup(pkg) => {
+                write!(f, "CONTAINING_PACKAGE_LOOKUP:[{pkg}]")
+            }
             Self::Package(pkg) => write!(f, "PACKAGE:[{pkg}]"),
             Self::PackageLoad(pkg) => write!(f, "PACKAGE_LOAD:[{pkg}]"),
+            Self::PackageError(pkg) => write!(f, "PACKAGE_ERROR:[{pkg}]"),
+            Self::PackageErrorMessage(pkg) => write!(f, "PACKAGE_ERROR_MESSAGE:[{pkg}]"),
             Self::ConfiguredTarget { label, config_hash } => {
                 write!(f, "CONFIGURED_TARGET:[{label}@{config_hash}]")
             }
@@ -129,6 +180,28 @@ impl fmt::Display for SkyKey {
 pub trait SkyValue: Any + fmt::Debug + Send + Sync {
     fn as_any(&self) -> &dyn Any;
     fn eq_value(&self, other: &dyn SkyValue) -> bool;
+    /// `NotComparableSkyValue`: when `true`, rebuilt values never suppress downstream dirtying via
+    /// change pruning.
+    fn is_not_comparable(&self) -> bool {
+        false
+    }
+}
+
+/// Wrapper marking any `T` as a `NotComparableSkyValue` so rebuilding always increments
+/// `last_changed`.
+#[derive(Debug, Clone)]
+pub struct NotComparableSkyValue<T: fmt::Debug + Send + Sync + 'static>(pub T);
+
+impl<T: fmt::Debug + Send + Sync + 'static> SkyValue for NotComparableSkyValue<T> {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn eq_value(&self, _other: &dyn SkyValue) -> bool {
+        false
+    }
+    fn is_not_comparable(&self) -> bool {
+        true
+    }
 }
 
 /// Comparison result of `FileStateValue::compare_contents`.
@@ -436,6 +509,15 @@ impl PackageLookupValue {
             error_message: Some(error_message),
         }
     }
+
+    pub fn incorrect_repo(error_message: String) -> Self {
+        Self {
+            package_exists: false,
+            build_file_path: None,
+            reason: PackageLookupReason::IncorrectRepo,
+            error_message: Some(error_message),
+        }
+    }
 }
 
 impl SkyValue for PackageLookupValue {
@@ -679,60 +761,145 @@ impl SkyFunction for FileStateFunction {
 
 const MAX_SYMLINK_HOPS: usize = 40;
 
-/// Resolves a `RootedPath` through `SkyKey::FileState`, following symlink targets up to
-/// [`MAX_SYMLINK_HOPS`] and detecting cycles.
+fn re_root_preserving(
+    base_root: &PathFragment,
+    abs: &PathFragment,
+) -> Result<RootedPath, SkyFunctionError> {
+    if let Ok(rel) = abs.relative_to(base_root) {
+        RootedPath::to_rooted_path(base_root.clone(), rel).map_err(SkyFunctionError::persistent)
+    } else {
+        crate::recording_fs::rooted(abs).ok_or_else(|| {
+            SkyFunctionError::persistent(format!("Symlink target must be absolute: {abs}"))
+        })
+    }
+}
+
+fn resolve_file_state_inner(
+    env: &mut Environment<'_>,
+    base_root: &PathFragment,
+    orig_abs: &PathFragment,
+    target_abs: &PathFragment,
+    logical_chain: &mut Vec<PathFragment>,
+    depth: usize,
+) -> Result<Option<(RootedPath, FileStateValue, bool)>, SkyFunctionError> {
+    if depth > MAX_SYMLINK_HOPS {
+        return Err(SkyFunctionError::persistent(format!(
+            "Infinite symlink expansion detected while trying to find {orig_abs}"
+        )));
+    }
+    let (from_ancestors_abs, parent_missing) = match target_abs.parent_directory() {
+        Some(parent_abs) if parent_abs != *base_root && parent_abs.starts_with(base_root) => {
+            let mut parent_chain = logical_chain.clone();
+            let Some((real_parent_rp, parent_state, _)) = resolve_file_state_inner(
+                env,
+                base_root,
+                orig_abs,
+                &parent_abs,
+                &mut parent_chain,
+                depth + 1,
+            )?
+            else {
+                return Ok(None);
+            };
+            let real_parent_abs = real_parent_rp.as_path();
+            let joined = real_parent_abs.get_relative_str(target_abs.base_name());
+            if !matches!(parent_state, FileStateValue::Directory) {
+                (joined, true)
+            } else {
+                (joined, false)
+            }
+        }
+        _ => (target_abs.clone(), false),
+    };
+
+    if parent_missing {
+        let rp = re_root_preserving(base_root, &from_ancestors_abs)?;
+        let Some(leaf_val) = env.get_value(&SkyKey::FileState(rp.clone())) else {
+            return Ok(None);
+        };
+        if let Some(FileStateValue::NonExistent) =
+            leaf_val.as_any().downcast_ref::<FileStateValue>()
+        {
+            return Ok(Some((rp, FileStateValue::NonExistent, false)));
+        }
+    }
+
+    let cur_abs = from_ancestors_abs;
+    let mut saw_symlink = false;
+    let mut hops = depth;
+    if logical_chain.contains(&cur_abs) {
+        return Err(SkyFunctionError::persistent(format!(
+            "Symlink cycle detected while trying to find {orig_abs}"
+        )));
+    }
+    if logical_chain
+        .iter()
+        .any(|earlier| cur_abs != *earlier && cur_abs.starts_with(earlier))
+    {
+        return Err(SkyFunctionError::persistent(format!(
+            "Infinite symlink expansion detected while trying to find {orig_abs}"
+        )));
+    }
+    logical_chain.push(cur_abs.clone());
+
+    let cur_rp = re_root_preserving(base_root, &cur_abs)?;
+    let Some(v) = env.get_value(&SkyKey::FileState(cur_rp.clone())) else {
+        return Ok(None);
+    };
+    let state = v
+        .as_any()
+        .downcast_ref::<FileStateValue>()
+        .cloned()
+        .ok_or_else(|| SkyFunctionError::persistent("Invalid FileStateValue"))?;
+    match &state {
+        FileStateValue::Symlink { target } => {
+            saw_symlink = true;
+            hops += 1;
+            if hops > MAX_SYMLINK_HOPS {
+                return Err(SkyFunctionError::persistent(format!(
+                    "Infinite symlink expansion detected while trying to find {orig_abs}"
+                )));
+            }
+            let next_abs = if target.is_absolute() {
+                target.clone()
+            } else if let Some(parent) = cur_abs.parent_directory() {
+                parent.get_relative(target)
+            } else {
+                target.clone()
+            };
+            if logical_chain.contains(&next_abs) {
+                return Err(SkyFunctionError::persistent(format!(
+                    "Symlink cycle detected while trying to find {orig_abs}"
+                )));
+            }
+            if logical_chain
+                .iter()
+                .any(|earlier| next_abs != *earlier && next_abs.starts_with(earlier))
+            {
+                return Err(SkyFunctionError::persistent(format!(
+                    "Infinite symlink expansion detected while trying to find {orig_abs}"
+                )));
+            }
+            let Some((resolved_rp, resolved_state, _)) =
+                resolve_file_state_inner(env, base_root, orig_abs, &next_abs, logical_chain, hops)?
+            else {
+                return Ok(None);
+            };
+            Ok(Some((resolved_rp, resolved_state, saw_symlink)))
+        }
+        _ => Ok(Some((cur_rp, state, saw_symlink))),
+    }
+}
+
+/// Resolves a `RootedPath` through `SkyKey::FileState`, following ancestor and leaf symlinks up to
+/// [`MAX_SYMLINK_HOPS`] and detecting cycles and descendant infinite expansions.
 fn resolve_file_state(
     env: &mut Environment<'_>,
     start_rp: &RootedPath,
 ) -> Result<Option<(RootedPath, FileStateValue, bool)>, SkyFunctionError> {
-    let mut current_rp = start_rp.clone();
-    let mut visited = std::collections::HashSet::new();
-    let mut saw_symlink = false;
-    for _ in 0..=MAX_SYMLINK_HOPS {
-        let full_path = current_rp.as_path();
-        if !visited.insert(full_path.clone()) {
-            return Err(SkyFunctionError::persistent(format!(
-                "Symlink cycle detected while trying to find {}",
-                start_rp.as_path()
-            )));
-        }
-        let Some(v) = env.get_value(&SkyKey::FileState(current_rp.clone())) else {
-            return Ok(None);
-        };
-        let state = v
-            .as_any()
-            .downcast_ref::<FileStateValue>()
-            .cloned()
-            .ok_or_else(|| SkyFunctionError::persistent("Invalid FileStateValue"))?;
-        match &state {
-            FileStateValue::Symlink { target } => {
-                saw_symlink = true;
-                let resolved_abs = if target.is_absolute() {
-                    target.clone()
-                } else if let Some(parent) = full_path.parent_directory() {
-                    parent.get_relative(target)
-                } else {
-                    target.clone()
-                };
-                // Keep relative under the same root when possible, otherwise anchor at drive root.
-                current_rp = if let Ok(rel) = resolved_abs.relative_to(current_rp.root()) {
-                    RootedPath::to_rooted_path(current_rp.root().clone(), rel)
-                        .map_err(SkyFunctionError::persistent)?
-                } else {
-                    crate::recording_fs::rooted(&resolved_abs).ok_or_else(|| {
-                        SkyFunctionError::persistent(format!(
-                            "Symlink target must be absolute: {resolved_abs}"
-                        ))
-                    })?
-                };
-            }
-            _ => return Ok(Some((current_rp, state, saw_symlink))),
-        }
-    }
-    Err(SkyFunctionError::persistent(format!(
-        "Infinite symlink expansion detected while trying to find {}",
-        start_rp.as_path()
-    )))
+    let orig_abs = start_rp.as_path();
+    let mut chain = Vec::new();
+    resolve_file_state_inner(env, start_rp.root(), &orig_abs, &orig_abs, &mut chain, 0)
 }
 
 /// Built-in `FILE` SkyFunction (`FileFunction`), resolving symlinks over `FILE_STATE`.
@@ -1266,6 +1433,199 @@ impl SkyFunction for ConfiguredTargetFunction {
         Ok(Some(Arc::new(ConfiguredTargetValue {
             configured_target: ct,
         })))
+    }
+}
+
+/// Result of [`ContainingPackageLookupFunction`], matching `ContainingPackageLookupValue.java`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContainingPackageLookupValue {
+    ContainingPackage {
+        containing_package_name: PackageIdentifier,
+        containing_package_root: PathFragment,
+    },
+    NoContainingPackage,
+    DeletedPackage {
+        package_id: PackageIdentifier,
+        error_message: String,
+    },
+}
+
+impl ContainingPackageLookupValue {
+    pub const fn has_containing_package(&self) -> bool {
+        matches!(self, Self::ContainingPackage { .. })
+    }
+
+    pub const fn containing_package_name(&self) -> Option<&PackageIdentifier> {
+        match self {
+            Self::ContainingPackage {
+                containing_package_name,
+                ..
+            } => Some(containing_package_name),
+            _ => None,
+        }
+    }
+}
+
+impl SkyValue for ContainingPackageLookupValue {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn eq_value(&self, other: &dyn SkyValue) -> bool {
+        other.as_any().downcast_ref::<Self>() == Some(self)
+    }
+}
+
+/// Built-in `CONTAINING_PACKAGE_LOOKUP` SkyFunction (`ContainingPackageLookupFunction.java`).
+pub struct ContainingPackageLookupFunction;
+
+impl SkyFunction for ContainingPackageLookupFunction {
+    fn compute(
+        &self,
+        key: &SkyKey,
+        env: &mut Environment<'_>,
+    ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        let SkyKey::ContainingPackageLookup(pkg_id) = key else {
+            return Err(SkyFunctionError::persistent(
+                "Expected ContainingPackageLookup SkyKey",
+            ));
+        };
+        let Some(lookup_any) = env.get_value(&SkyKey::PackageLookup(pkg_id.clone())) else {
+            return Ok(None);
+        };
+        let lookup = lookup_any
+            .as_any()
+            .downcast_ref::<PackageLookupValue>()
+            .ok_or_else(|| SkyFunctionError::persistent("Invalid PackageLookupValue"))?;
+
+        if lookup.package_exists {
+            let root = lookup
+                .build_file_path
+                .as_ref()
+                .map(|rp| rp.root().clone())
+                .unwrap_or_else(PathFragment::empty);
+            return Ok(Some(Arc::new(
+                ContainingPackageLookupValue::ContainingPackage {
+                    containing_package_name: pkg_id.clone(),
+                    containing_package_root: root,
+                },
+            )));
+        }
+
+        if lookup.reason == PackageLookupReason::Deleted && pkg_id.package_fragment().is_empty() {
+            return Ok(Some(Arc::new(
+                ContainingPackageLookupValue::DeletedPackage {
+                    package_id: pkg_id.clone(),
+                    error_message: lookup
+                        .error_message
+                        .clone()
+                        .unwrap_or_else(|| "Package is considered deleted".to_string()),
+                },
+            )));
+        }
+
+        let Some(parent_frag) = pkg_id.package_fragment().parent_directory() else {
+            return Ok(Some(Arc::new(
+                ContainingPackageLookupValue::NoContainingPackage,
+            )));
+        };
+        if pkg_id.package_fragment().is_empty() {
+            return Ok(Some(Arc::new(
+                ContainingPackageLookupValue::NoContainingPackage,
+            )));
+        }
+        let parent_id =
+            PackageIdentifier::create_unvalidated(pkg_id.repository().clone(), parent_frag);
+        let Some(parent_val) = env.get_value(&SkyKey::ContainingPackageLookup(parent_id)) else {
+            return Ok(None);
+        };
+        Ok(Some(parent_val))
+    }
+}
+
+/// Outcome of [`PackageErrorMessageFunction`], matching `PackageErrorMessageValue.java`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PackageErrorMessageValue {
+    NoError,
+    Error,
+    NoSuchPackageException(String),
+}
+
+impl SkyValue for PackageErrorMessageValue {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn eq_value(&self, other: &dyn SkyValue) -> bool {
+        other.as_any().downcast_ref::<Self>() == Some(self)
+    }
+}
+
+/// Built-in `PACKAGE_ERROR_MESSAGE` SkyFunction (`PackageErrorMessageFunction.java`).
+pub struct PackageErrorMessageFunction;
+
+impl SkyFunction for PackageErrorMessageFunction {
+    fn compute(
+        &self,
+        key: &SkyKey,
+        env: &mut Environment<'_>,
+    ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        let SkyKey::PackageErrorMessage(pkg_id) = key else {
+            return Err(SkyFunctionError::persistent(
+                "Expected PackageErrorMessage SkyKey",
+            ));
+        };
+        match env.get_value_or_error(&SkyKey::Package(pkg_id.clone())) {
+            Ok(None) => Ok(None),
+            Ok(Some(pkg_any)) => {
+                let had_errors = pkg_any
+                    .as_any()
+                    .downcast_ref::<PackageValue>()
+                    .and_then(|pv| pv.package.as_ref())
+                    .map(|p| p.contains_errors)
+                    .unwrap_or(false);
+                let val = if had_errors {
+                    PackageErrorMessageValue::Error
+                } else {
+                    PackageErrorMessageValue::NoError
+                };
+                Ok(Some(Arc::new(val)))
+            }
+            Err(err) => Ok(Some(Arc::new(
+                PackageErrorMessageValue::NoSuchPackageException(err.message),
+            ))),
+        }
+    }
+}
+
+/// Built-in `PACKAGE_ERROR` SkyFunction (`PackageErrorFunction.java`): fails persistently with a
+/// `BuildFileContainsErrorsException`-style message when a loaded `Package` has `contains_errors`.
+pub struct PackageErrorFunction;
+
+impl SkyFunction for PackageErrorFunction {
+    fn compute(
+        &self,
+        key: &SkyKey,
+        env: &mut Environment<'_>,
+    ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        let SkyKey::PackageError(pkg_id) = key else {
+            return Err(SkyFunctionError::persistent("Expected PackageError SkyKey"));
+        };
+        let Some(pkg_any) = env.get_value(&SkyKey::Package(pkg_id.clone())) else {
+            return Ok(None);
+        };
+        let had_errors = pkg_any
+            .as_any()
+            .downcast_ref::<PackageValue>()
+            .and_then(|pv| pv.package.as_ref())
+            .map(|p| p.contains_errors)
+            .unwrap_or(false);
+        if had_errors {
+            Err(SkyFunctionError::persistent(format!(
+                "Package '{}' contains errors",
+                pkg_id.package_fragment()
+            )))
+        } else {
+            Ok(Some(Arc::new(StringSkyValue(String::new()))))
+        }
     }
 }
 

@@ -20,7 +20,7 @@
 //! execution phase (`zel-exec`, which evaluates the raw flag strings against the host) share one
 //! implementation, including Bazel's exact error messages.
 
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 pub const AUTO_KEYWORD: &str = "auto";
 pub const HOST_CPUS_KEYWORD: &str = "HOST_CPUS";
@@ -32,28 +32,52 @@ pub const MAX_JOBS: i32 = 5000;
 /// `ResourceConverter.FLAG_SYNTAX`.
 pub const FLAG_SYNTAX: &str = "an integer, or a keyword (\"auto\", \"HOST_CPUS\", \"HOST_RAM\"), optionally followed by an operation ([-|*]<float>) eg. \"auto\", \"HOST_CPUS*.5\"";
 
-/// Detected host resources (`LocalHostComputeResources`).
+/// Detected host resources (`LocalHostComputeResources` / `LocalHostResource`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct HostResources {
     pub cpus: f64,
     pub memory_mb: f64,
 }
 
+static DEFAULT_HOST_RESOURCES: OnceLock<HostResources> = OnceLock::new();
+static LOCAL_HOST_CAPACITY_OVERRIDE: OnceLock<RwLock<Option<HostResources>>> = OnceLock::new();
+
 impl HostResources {
     pub fn detect() -> Self {
-        let cpus = std::thread::available_parallelism()
-            .map(|n| n.get() as f64)
-            .unwrap_or(1.0);
+        let cpus = detect_cpus();
         Self {
             cpus,
             memory_mb: detect_memory_mb(),
         }
     }
 
-    /// Like [`detect`](Self::detect) but probed once per process.
+    /// `LocalHostCapacity.getLocalHostCapacity()`: returns any override set via
+    /// [`set_local_host_capacity`](Self::set_local_host_capacity), otherwise the static
+    /// `LocalHostResource.DEFAULT_RESOURCES` snapshot probed once per process.
     pub fn detect_cached() -> Self {
-        static HOST: OnceLock<HostResources> = OnceLock::new();
-        *HOST.get_or_init(HostResources::detect)
+        if let Some(lock) = LOCAL_HOST_CAPACITY_OVERRIDE.get() {
+            if let Ok(guard) = lock.read() {
+                if let Some(override_cap) = *guard {
+                    return override_cap;
+                }
+            }
+        }
+        *DEFAULT_HOST_RESOURCES.get_or_init(HostResources::detect)
+    }
+
+    /// `LocalHostCapacity.setLocalHostCapacity(ResourceSet)`: sets or clears (`None`) the
+    /// process-wide override; clearing restores the original static snapshot without re-probing.
+    pub fn set_local_host_capacity(capacity: Option<HostResources>) {
+        let _ = DEFAULT_HOST_RESOURCES.get_or_init(HostResources::detect);
+        let lock = LOCAL_HOST_CAPACITY_OVERRIDE.get_or_init(|| RwLock::new(None));
+        if let Ok(mut guard) = lock.write() {
+            *guard = capacity;
+        }
+    }
+
+    /// `LocalHostResource` local test slot count (`Integer.MAX_VALUE`).
+    pub const fn local_test_count(&self) -> i32 {
+        i32::MAX
     }
 
     /// `ResourceConverter.HOST_CPUS_SUPPLIER`.
@@ -65,6 +89,134 @@ impl HostResources {
     pub fn host_ram_mb(&self) -> i32 {
         self.memory_mb.ceil() as i32
     }
+
+    /// `LocalHostCapacity` log / `info local_resources` RAM megabytes (`(int)` truncation).
+    pub fn truncated_ram_mb(&self) -> i32 {
+        self.memory_mb as i32
+    }
+
+    /// Formats `RAM=%dMB, CPU=%.1f` matching `LocalHostCapacity` / `info local_resources`.
+    pub fn format_summary(&self) -> String {
+        format!("RAM={}MB, CPU={:.1}", self.truncated_ram_mb(), self.cpus)
+    }
+}
+
+fn detect_cpus() -> f64 {
+    let avail = std::thread::available_parallelism()
+        .map(|n| n.get() as f64)
+        .unwrap_or(1.0);
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(quota_cpus) = detect_linux_cgroup_cpus() {
+            if quota_cpus > 0.0 && quota_cpus < avail {
+                return quota_cpus;
+            }
+        }
+    }
+    avail
+}
+
+#[cfg(target_os = "linux")]
+fn parse_cgroup_v2_cpu_max(content: &str) -> Option<f64> {
+    let mut parts = content.split_whitespace();
+    let quota_str = parts.next()?;
+    if quota_str == "max" {
+        return None;
+    }
+    let period_str = parts.next().unwrap_or("100000");
+    let quota: f64 = quota_str.parse().ok()?;
+    let period: f64 = period_str.parse().ok()?;
+    if quota > 0.0 && period > 0.0 {
+        Some(quota / period)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_cgroup_cpus() -> Option<f64> {
+    if let Ok(cg) = std::fs::read_to_string("/proc/self/cgroup") {
+        for line in cg.lines() {
+            if let Some(rel) = line.strip_prefix("0::") {
+                let rel = rel.trim_start_matches('/');
+                let p = if rel.is_empty() {
+                    "/sys/fs/cgroup/cpu.max".to_string()
+                } else {
+                    format!("/sys/fs/cgroup/{rel}/cpu.max")
+                };
+                if let Ok(s) = std::fs::read_to_string(&p) {
+                    if let Some(v) = parse_cgroup_v2_cpu_max(&s) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+    }
+    if let Ok(s) = std::fs::read_to_string("/sys/fs/cgroup/cpu.max") {
+        if let Some(v) = parse_cgroup_v2_cpu_max(&s) {
+            return Some(v);
+        }
+    }
+    if let (Ok(q), Ok(p)) = (
+        std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_quota_us"),
+        std::fs::read_to_string("/sys/fs/cgroup/cpu/cpu.cfs_period_us"),
+    ) {
+        if let (Ok(qv), Ok(pv)) = (q.trim().parse::<i64>(), p.trim().parse::<i64>()) {
+            if qv > 0 && pv > 0 {
+                return Some((qv as f64) / (pv as f64));
+            }
+        }
+    }
+    None
+}
+
+pub(crate) fn parse_cgroup_memory_limit_bytes(content: &str) -> Option<u64> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() || trimmed == "max" {
+        return None;
+    }
+    let val: u64 = trimmed.parse().ok()?;
+    // Ignore kernel PAGE_COUNTER_MAX / unlimited sentinels (>= 1 EiB).
+    if val == 0 || val >= (1u64 << 60) {
+        None
+    } else {
+        Some(val)
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn detect_linux_cgroup_memory_bytes() -> Option<u64> {
+    let mut best: Option<u64> = None;
+    let mut consider = |path: &str| {
+        if let Ok(s) = std::fs::read_to_string(path) {
+            if let Some(b) = parse_cgroup_memory_limit_bytes(&s) {
+                best = Some(best.map_or(b, |cur| cur.min(b)));
+            }
+        }
+    };
+    if let Ok(cg) = std::fs::read_to_string("/proc/self/cgroup") {
+        for line in cg.lines() {
+            if let Some(rel) = line.strip_prefix("0::") {
+                let rel = rel.trim_start_matches('/');
+                if !rel.is_empty() {
+                    consider(&format!("/sys/fs/cgroup/{rel}/memory.max"));
+                }
+            } else {
+                let parts: Vec<&str> = line.splitn(3, ':').collect();
+                if parts.len() == 3 && parts[1].split(',').any(|c| c == "memory") {
+                    let rel = parts[2].trim_start_matches('/');
+                    if !rel.is_empty() {
+                        consider(&format!(
+                            "/sys/fs/cgroup/memory/{rel}/memory.limit_in_bytes"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    consider("/sys/fs/cgroup/memory.max");
+    consider("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+    best
 }
 
 fn detect_memory_mb() -> f64 {
@@ -111,17 +263,25 @@ fn detect_memory_mb() -> f64 {
             return (ms.ull_total_phys as f64) / (1024.0 * 1024.0);
         }
     }
+    let mut host_mb = None;
     if let Ok(t) = std::fs::read_to_string("/proc/meminfo") {
         for l in t.lines() {
             if let Some(r) = l.strip_prefix("MemTotal:") {
                 if let Ok(kb) = r.trim().trim_end_matches("kB").trim().parse::<f64>() {
-                    return kb / 1024.0;
+                    host_mb = Some(kb / 1024.0);
+                    break;
                 }
             }
         }
     }
-    // Same fallback as `LocalHostCapacity` when probing fails.
-    1024.0
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(cg_bytes) = detect_linux_cgroup_memory_bytes() {
+            let cg_mb = (cg_bytes as f64) / (1024.0 * 1024.0);
+            host_mb = Some(host_mb.map_or(cg_mb, |h| h.min(cg_mb)));
+        }
+    }
+    host_mb.unwrap_or(1024.0)
 }
 
 /// Which keywords a converter accepts (the `keywords` map handed to `ResourceConverter`), in
@@ -800,5 +960,31 @@ mod tests {
         assert_eq!(java_parse_double("."), None);
         assert_eq!(java_parse_double("1d"), Some(1.0));
         assert_eq!(guava_try_parse_double(" 1"), None);
+    }
+
+    #[test]
+    fn host_resources_override_and_summary() {
+        let custom = HostResources {
+            cpus: 3.5,
+            memory_mb: 4096.9,
+        };
+        assert_eq!(custom.local_test_count(), i32::MAX);
+        assert_eq!(custom.truncated_ram_mb(), 4096);
+        assert_eq!(custom.format_summary(), "RAM=4096MB, CPU=3.5");
+        assert_eq!(parse_cgroup_memory_limit_bytes("max\n"), None);
+        assert_eq!(
+            parse_cgroup_memory_limit_bytes("9223372036854771712\n"),
+            None
+        );
+        assert_eq!(
+            parse_cgroup_memory_limit_bytes("2147483648\n"),
+            Some(2_147_483_648)
+        );
+
+        let orig = HostResources::detect_cached();
+        HostResources::set_local_host_capacity(Some(custom));
+        assert_eq!(HostResources::detect_cached(), custom);
+        HostResources::set_local_host_capacity(None);
+        assert_eq!(HostResources::detect_cached(), orig);
     }
 }

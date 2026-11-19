@@ -75,7 +75,9 @@ impl PackageSpec {
         }
         // `//pkg:__pkg__` and `//pkg:__subpackages__` (in any repo form) are valid package specs.
         if let Ok(mut label) = Label::parse_with_repo_mapping(spec, mapping) {
-            if spec.starts_with("//") && !repo.is_main() {
+            let pkg_str = label.package_identifier().package_fragment().path_string();
+            let pinned_main = matches!(pkg_str, "visibility" | "conditions");
+            if spec.starts_with("//") && !repo.is_main() && !pinned_main {
                 if let Ok(rebound_pkg) = PackageIdentifier::create(
                     repo.clone(),
                     label.package_identifier().package_fragment().clone(),
@@ -93,7 +95,7 @@ impl PackageSpec {
             }
         }
         // Split off the repository.
-        let (repo_name, path) = if let Some(rest) = spec.strip_prefix('@') {
+        let (mut repo_name, path) = if let Some(rest) = spec.strip_prefix('@') {
             let canonical = rest.starts_with('@');
             let rest = rest.trim_start_matches('@');
             let idx = rest
@@ -116,6 +118,9 @@ impl PackageSpec {
         } else {
             (path, false)
         };
+        if spec.starts_with("//") && matches!(pkg, "visibility" | "conditions") {
+            repo_name = RepositoryName::main();
+        }
         // A `//pkg:all`-style spec is not valid here.
         if pkg.contains(':') {
             return Err(format!(

@@ -106,11 +106,23 @@ impl SkyframeExecutor {
                 }),
             )
             .register_function(
+                SkyFunctionName::CONTAINING_PACKAGE_LOOKUP,
+                Arc::new(crate::ContainingPackageLookupFunction),
+            )
+            .register_function(
                 SkyFunctionName::PACKAGE,
                 Arc::new(PackageFunction::with_resolver(
                     Arc::clone(&raw_fs),
                     repo_resolver,
                 )),
+            )
+            .register_function(
+                SkyFunctionName::PACKAGE_ERROR,
+                Arc::new(crate::PackageErrorFunction),
+            )
+            .register_function(
+                SkyFunctionName::PACKAGE_ERROR_MESSAGE,
+                Arc::new(crate::PackageErrorMessageFunction),
             )
             .register_function(
                 SkyFunctionName::PACKAGE_LOAD,

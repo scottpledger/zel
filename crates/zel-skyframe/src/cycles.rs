@@ -37,16 +37,78 @@ impl CycleInfo {
 
     /// Cycle rotated so that it starts at `idx` (every member sees the cycle from itself).
     pub fn rotated(cycle: &[SkyKey], idx: usize) -> Vec<SkyKey> {
-        let mut v = cycle[idx..].to_vec();
-        v.extend_from_slice(&cycle[..idx]);
+        if cycle.is_empty() {
+            return Vec::new();
+        }
+        let i = idx % cycle.len();
+        let mut v = cycle[i..].to_vec();
+        v.extend_from_slice(&cycle[..i]);
         v
     }
 
-    /// `CycleDeduper` identity: the *set* of keys on the cycle.
+    /// `CycleDeduper` canonical rotation: rotates `cycle` so the minimum element (by `Ord`,
+    /// keeping the earliest occurrence on ties) comes first. Rotations of the same directed cycle
+    /// share an identity while distinct directed cycles over the same vertex set (`A->B->C` vs
+    /// `A->C->B`) remain distinct.
     pub fn identity(&self) -> Vec<SkyKey> {
-        let mut v = self.cycle.clone();
-        v.sort();
-        v
+        if self.cycle.is_empty() {
+            return Vec::new();
+        }
+        let mut min_idx = 0usize;
+        for (idx, k) in self.cycle.iter().enumerate().skip(1) {
+            if k < &self.cycle[min_idx] {
+                min_idx = idx;
+            }
+        }
+        Self::rotated(&self.cycle, min_idx)
+    }
+
+    /// `CycleInfo.normalizeCycle`: returns `None` when `cycle` is empty; if any element of
+    /// `path_to_cycle` already appears on `cycle`, trims `path_to_cycle` to the prefix before that
+    /// entry point and rotates `cycle` to start at that entry point.
+    pub fn normalize_cycle(path_to_cycle: Vec<SkyKey>, cycle: Vec<SkyKey>) -> Option<Self> {
+        if cycle.is_empty() {
+            return None;
+        }
+        for (p_idx, pk) in path_to_cycle.iter().enumerate() {
+            if let Some(c_idx) = cycle.iter().position(|ck| ck == pk) {
+                return Some(Self {
+                    path_to_cycle: path_to_cycle[..p_idx].to_vec(),
+                    cycle: Self::rotated(&cycle, c_idx),
+                });
+            }
+        }
+        Some(Self {
+            path_to_cycle,
+            cycle,
+        })
+    }
+
+    /// `CycleInfo.prepareCycles`: prepends `parent` to each cycle's `path_to_cycle` and normalizes
+    /// (handling the case where `parent` is itself on the cycle).
+    pub fn prepare_cycles(parent: &SkyKey, cycles: &[CycleInfo]) -> Vec<CycleInfo> {
+        let mut out = Vec::with_capacity(cycles.len());
+        for c in cycles {
+            if let Some(c_idx) = c.cycle.iter().position(|k| k == parent) {
+                out.push(CycleInfo {
+                    path_to_cycle: Vec::new(),
+                    cycle: Self::rotated(&c.cycle, c_idx),
+                });
+            } else if let Some(p_idx) = c.path_to_cycle.iter().position(|k| k == parent) {
+                out.push(CycleInfo {
+                    path_to_cycle: c.path_to_cycle[p_idx..].to_vec(),
+                    cycle: c.cycle.clone(),
+                });
+            } else {
+                let mut path = Vec::with_capacity(1 + c.path_to_cycle.len());
+                path.push(parent.clone());
+                path.extend(c.path_to_cycle.iter().cloned());
+                if let Some(norm) = Self::normalize_cycle(path, c.cycle.clone()) {
+                    out.push(norm);
+                }
+            }
+        }
+        out
     }
 }
 
@@ -57,7 +119,7 @@ pub fn print_cycle(
     msg: &mut String,
     pretty: &dyn Fn(&SkyKey) -> String,
 ) -> SkyKey {
-    assert!(!cycle.is_empty());
+    assert!(!cycle.is_empty(), "cycle must not be empty");
     let first = &cycle[0];
     if cycle.len() == 1 {
         msg.push_str("\n.-> ");
@@ -122,6 +184,9 @@ impl CyclesReporter {
         pretty: &dyn Fn(&SkyKey) -> String,
         describe: &dyn Fn(&SkyKey) -> (String, String),
     ) -> String {
+        if info.cycle.is_empty() {
+            return String::new();
+        }
         if !self.seen.insert(info.identity()) {
             let (loc, what) = describe(top_level);
             return format!(
@@ -194,5 +259,15 @@ mod tests {
         let x = CycleInfo::new(vec![], c.clone());
         let y = CycleInfo::new(vec![k("p")], CycleInfo::rotated(&c, 2));
         assert_eq!(x.identity(), y.identity());
+
+        // Opposite directed cycle over the same vertices is a distinct cycle!
+        let rev = CycleInfo::new(vec![], vec![k("a"), k("c"), k("b")]);
+        assert_ne!(x.identity(), rev.identity());
+
+        // normalize_cycle trims overlapping path_to_cycle and rotates cycle to entry.
+        let norm = CycleInfo::normalize_cycle(vec![k("top"), k("b")], c.clone()).unwrap();
+        assert_eq!(norm.path_to_cycle, vec![k("top")]);
+        assert_eq!(norm.cycle, vec![k("b"), k("c"), k("a")]);
+        assert!(CycleInfo::normalize_cycle(vec![k("top")], vec![]).is_none());
     }
 }

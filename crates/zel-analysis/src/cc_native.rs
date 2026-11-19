@@ -221,9 +221,11 @@ fn cc_get_link_args(pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
         };
         let format = match t.as_str() {
             "UNQUOTED" => ParamFileFormat::Multiline,
+            "GCC_QUOTED" => ParamFileFormat::GccQuoted,
+            "WINDOWS" => ParamFileFormat::Windows,
             _ => ParamFileFormat::Shell,
         };
-        builder.param_file = Some(crate::action::ParamFileInfo { flag_format, format, use_always: true, leading_args: 0 });
+        builder.param_file = Some(crate::action::ParamFileInfo { flag_format, format, use_always: true, leading_args: 0, flag_groups: Vec::new() });
         builder.format = Some(format);
     }
     builder.args = argv;

@@ -421,6 +421,13 @@ fn default_value_for_spec(spec: &BuildSettingSpec) -> Value {
         Some(AttrValue::Int(i)) => Value::Int(BigInt::from_i64(*i)),
         Some(AttrValue::Bool(b)) => Value::Bool(*b),
         Some(AttrValue::Label(Some(l))) => Value::Label(l.clone()),
+        Some(AttrValue::StrList(l)) if spec.ty == "string_set" => {
+            let mut set = zel_starlark::StarlarkSet::default();
+            for s in l {
+                let _ = set.add(Value::String(s.clone()));
+            }
+            Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)))
+        }
         Some(AttrValue::StrList(l)) => Value::List(std::sync::Arc::new(std::sync::Mutex::new(
             zel_starlark::StarlarkList::new(l.iter().map(|s| Value::String(s.clone())).collect()),
         ))),
@@ -429,6 +436,9 @@ fn default_value_for_spec(spec: &BuildSettingSpec) -> Value {
             "bool" => Value::Bool(false),
             "string_list" => Value::List(std::sync::Arc::new(std::sync::Mutex::new(
                 zel_starlark::StarlarkList::new(vec![]),
+            ))),
+            "string_set" => Value::Set(std::sync::Arc::new(std::sync::Mutex::new(
+                zel_starlark::StarlarkSet::default(),
             ))),
             "label" => Value::None,
             _ => Value::String(String::new()),
@@ -452,6 +462,13 @@ fn setting_value_with_spec(
         return setting_value(cfg, key);
     };
     if let Some(raw) = cfg.flag_values.get(&spec.resolved_key) {
+        if spec.ty == "string_set" {
+            let mut set = zel_starlark::StarlarkSet::default();
+            for part in raw.split(',').filter(|s| !s.is_empty()) {
+                let _ = set.add(Value::String(part.to_string()));
+            }
+            return Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)));
+        }
         if spec.allow_multiple || spec.ty == "string_list" {
             let mut items = Vec::new();
             for part in raw.split(',').filter(|s| !s.is_empty()) {
@@ -489,7 +506,18 @@ fn validate_scalar_for_spec(
             )),
         },
         "int" => match v {
-            Value::Int(i) => Ok(i.to_string()),
+            Value::Int(i) => {
+                let n = i
+                    .to_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| {
+                        format!(
+                            "signed 32-bit int expected for {key}, got out-of-range value {}",
+                            i
+                        )
+                    })?;
+                Ok(n.to_string())
+            }
             other => Err(format!(
                 "expected value of type 'int' for {key}, but got {} ({})",
                 other.repr(),
@@ -498,6 +526,8 @@ fn validate_scalar_for_spec(
         },
         "bool" => match v {
             Value::Bool(b) => Ok(if *b { "true" } else { "false" }.to_string()),
+            Value::Int(i) if i.to_i64() == Some(0) => Ok("false".to_string()),
+            Value::Int(i) if i.to_i64() == Some(1) => Ok("true".to_string()),
             other => Err(format!(
                 "expected value of type 'bool' for {key}, but got {} ({})",
                 other.repr(),
@@ -561,6 +591,28 @@ fn set_setting_with_spec(
             parts.push(validate_scalar_for_spec(key, "string", item, tctx)?);
         }
         parts.join(",")
+    } else if spec.ty == "string_set" {
+        let items = match value {
+            Value::Set(s) => s.lock().unwrap().elements.clone(),
+            Value::List(_) | Value::Tuple(_) => {
+                zel_starlark::eval::builtins::value_to_sequence(value).map_err(|e| e.0)?
+            }
+            _ => {
+                return Err(format!(
+                    "expected value of type 'set(string)' for {key}, but got {} ({})",
+                    value.repr(),
+                    value.type_name()
+                ))
+            }
+        };
+        let mut parts = Vec::with_capacity(items.len());
+        for item in &items {
+            let s = validate_scalar_for_spec(key, "string", item, tctx)?;
+            if !parts.contains(&s) {
+                parts.push(s);
+            }
+        }
+        parts.join(",")
     } else {
         validate_scalar_for_spec(key, &spec.ty, value, tctx)?
     };
@@ -568,6 +620,15 @@ fn set_setting_with_spec(
     let def_val = default_value_for_spec(spec);
     let def_rendered = if matches!(def_val, Value::None) {
         String::new()
+    } else if let Value::Set(s) = &def_val {
+        let elems: Vec<String> = s
+            .lock()
+            .unwrap()
+            .elements
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        format!("[{}]", elems.join(", "))
     } else {
         render_java(&def_val, false)?
     };
@@ -578,7 +639,18 @@ fn set_setting_with_spec(
     };
     let before_val = setting_value_with_spec(cfg, key, Some(spec));
     let before_java = if cfg.flag_values.contains_key(resolved) {
-        Some(render_java(&before_val, false)?)
+        if let Value::Set(s) = &before_val {
+            let elems: Vec<String> = s
+                .lock()
+                .unwrap()
+                .elements
+                .iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect();
+            Some(format!("[{}]", elems.join(", ")))
+        } else {
+            Some(render_java(&before_val, false)?)
+        }
     } else {
         None
     };
@@ -625,10 +697,13 @@ pub fn apply_transition_with_resolver(
     resolver: Option<&dyn crate::starlark_rule::DepResolver>,
 ) -> Result<BuildConfigurationKey, String> {
     let mut v = apply_transition_split_with_resolver(trans, cfg, attrs, resolver)?;
-    if v.len() == 1 && v[0].0.is_none() {
+    if v.len() == 1 {
         Ok(v.remove(0).1)
     } else {
-        Err("split transitions are only supported on attributes".to_string())
+        Err(
+            "Rule transition only allowed to return a single transitioned configuration."
+                .to_string(),
+        )
     }
 }
 
@@ -757,19 +832,8 @@ pub fn apply_transition_split_with_resolver(
     if matches!(r, Value::None) {
         return Ok(vec![(None, cfg.clone())]);
     }
-    let Value::Dict(d) = r else {
-        return Err(format!(
-            "transition function returned {}, want dict of option names to values",
-            r.type_name()
-        ));
-    };
-    let items = d.lock().unwrap().items();
-    if items.is_empty() {
-        return Ok(vec![(None, cfg.clone())]);
-    }
-    let is_split = !items.is_empty() && items.iter().all(|(_, v)| matches!(v, Value::Dict(_)));
     let apply_one = |entries: Vec<(Value, Value)>| -> Result<BuildConfigurationKey, String> {
-        if entries.is_empty() {
+        if entries.is_empty() && canonical_outputs.is_empty() {
             return Ok(cfg.clone());
         }
         let mut canon_entries: Vec<(String, Value)> = Vec::with_capacity(entries.len());
@@ -800,30 +864,70 @@ pub fn apply_transition_split_with_resolver(
             }
         }
         let mut out = cfg.clone();
+        let old_cpu = out.cpu.clone();
         for (ck, v) in canon_entries {
             let spec = output_specs.get(&ck).and_then(|s| s.as_ref());
             set_setting_with_spec(&mut out, &ck, &v, spec, tctx.as_ref())?;
         }
+        if out.cpu != old_cpu
+            && !canonical_outputs
+                .iter()
+                .any(|o| o == "//command_line_option:platforms")
+        {
+            out.platforms.clear();
+        }
         Ok(out)
     };
-    if is_split {
-        let mut res = Vec::new();
-        for (k, v) in items {
-            let Some(key) = k.as_str().map(str::to_string) else {
-                return Err(format!(
-                    "transition split key must be a string, got {}",
-                    k.type_name()
-                ));
-            };
-            let Value::Dict(inner) = v else {
-                unreachable!()
-            };
-            let entries = inner.lock().unwrap().items();
-            res.push((Some(key), apply_one(entries)?));
+    match r {
+        Value::List(l) => {
+            let elems = l.lock().unwrap().elements.clone();
+            if elems.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut res = Vec::with_capacity(elems.len());
+            for (idx, elem) in elems.into_iter().enumerate() {
+                let Value::Dict(inner) = elem else {
+                    return Err(format!(
+                        "transition split list element must be a dict, got {}",
+                        elem.type_name()
+                    ));
+                };
+                let entries = inner.lock().unwrap().items();
+                res.push((Some(idx.to_string()), apply_one(entries)?));
+            }
+            Ok(res)
         }
-        Ok(res)
-    } else {
-        Ok(vec![(None, apply_one(items)?)])
+        Value::Dict(d) => {
+            let items = d.lock().unwrap().items();
+            if items.is_empty() {
+                return Ok(vec![(None, cfg.clone())]);
+            }
+            let is_split =
+                !items.is_empty() && items.iter().all(|(_, v)| matches!(v, Value::Dict(_)));
+            if is_split {
+                let mut res = Vec::new();
+                for (k, v) in items {
+                    let Some(key) = k.as_str().map(str::to_string) else {
+                        return Err(format!(
+                            "transition split key must be a string, got {}",
+                            k.type_name()
+                        ));
+                    };
+                    let Value::Dict(inner) = v else {
+                        unreachable!()
+                    };
+                    let entries = inner.lock().unwrap().items();
+                    res.push((Some(key), apply_one(entries)?));
+                }
+                Ok(res)
+            } else {
+                Ok(vec![(None, apply_one(items)?)])
+            }
+        }
+        other => Err(format!(
+            "transition function returned {}, want dict or list of dicts",
+            other.type_name()
+        )),
     }
 }
 

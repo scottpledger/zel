@@ -773,3 +773,117 @@ fn notrack_incremental_state_clears_graph_on_sync() {
         "sync with tracking off clears evaluator"
     );
 }
+
+#[test]
+fn containing_package_lookup_and_symlinked_ancestor_file_resolution() {
+    let (fs, ws) = mem_world(&[
+        ("top/BUILD", "filegroup(name = \"t\", srcs = [])\n"),
+        ("real/sub/file.txt", "hello"),
+    ]);
+    fs.create_symbolic_link(&ws.get_relative_str("link"), &PathFragment::create("real"))
+        .unwrap();
+    fs.create_directory_and_parents(&ws.get_relative_str("real2/sub"))
+        .unwrap();
+    fs.write_file(&ws.get_relative_str("real2/sub/file.txt"), b"updated")
+        .unwrap();
+
+    let exec = SkyframeExecutor::new(fs.clone() as Arc<dyn FileSystem>, ws.clone());
+
+    let contain_k = SkyKey::ContainingPackageLookup(pkg("top/nested/dir"));
+    let r = exec.evaluator.evaluate(std::slice::from_ref(&contain_k));
+    assert_eq!(
+        r.get::<ContainingPackageLookupValue>(&contain_k),
+        Some(&ContainingPackageLookupValue::ContainingPackage {
+            containing_package_name: pkg("top"),
+            containing_package_root: ws.clone(),
+        })
+    );
+
+    let orphan_k = SkyKey::ContainingPackageLookup(pkg("orphan/nested"));
+    let r_orphan = exec.evaluator.evaluate(std::slice::from_ref(&orphan_k));
+    assert_eq!(
+        r_orphan.get::<ContainingPackageLookupValue>(&orphan_k),
+        Some(&ContainingPackageLookupValue::NoContainingPackage)
+    );
+
+    // FileFunction resolves symlinked ancestor directory and records FileState on the symlink.
+    let file_k = SkyKey::File(rooted(&ws, "link/sub/file.txt"));
+    let rf1 = exec.evaluator.evaluate(std::slice::from_ref(&file_k));
+    let fv1 = rf1.get::<FileValue>(&file_k).unwrap();
+    assert!(fv1.exists && fv1.is_file);
+    assert_eq!(fv1.real_path, rooted(&ws, "real/sub/file.txt"));
+
+    // Retargeting `link -> real2` invalidates `link/sub/file.txt` via `FileState(link)`.
+    fs.delete(&ws.get_relative_str("link")).unwrap();
+    fs.create_symbolic_link(&ws.get_relative_str("link"), &PathFragment::create("real2"))
+        .unwrap();
+    exec.sync("v1");
+    let rf2 = exec.evaluator.evaluate(std::slice::from_ref(&file_k));
+    let fv2 = rf2.get::<FileValue>(&file_k).unwrap();
+    assert_eq!(fv2.real_path, rooted(&ws, "real2/sub/file.txt"));
+}
+
+#[test]
+fn error_info_child_merging_walkable_graph_and_modified_file_set() {
+    let cyc = ErrorInfo::from_cycle(vec![], vec![SkyKey::Precomputed("c1".into())]);
+    let cat = ErrorInfo::from_error(
+        &SkyKey::Precomputed("e1".into()),
+        SkyFunctionError::catastrophic_transient("boom"),
+    );
+    assert!(cat.is_directly_transient());
+    let parent = SkyKey::Precomputed("parent".into());
+    let merged = ErrorInfo::from_child_errors(&parent, [&cyc, &cat]);
+    assert!(!merged.is_directly_transient());
+    assert!(merged.is_transitively_transient());
+    assert!(merged.is_catastrophic());
+    assert_eq!(merged.error.as_ref().unwrap().message, "boom");
+    assert_eq!(merged.cycles.len(), 1);
+
+    // ModifiedFileSet set equality and EverythingModified invalidation.
+    let k1 = SkyKey::Precomputed("a".into());
+    let k2 = SkyKey::Precomputed("b".into());
+    assert_eq!(
+        ModifiedFileSet::Keys(vec![k2.clone(), k1.clone(), k1.clone()]),
+        ModifiedFileSet::Keys(vec![k1.clone(), k2.clone()])
+    );
+    assert!(ModifiedFileSet::EverythingModified
+        .union(ModifiedFileSet::EverythingDeleted)
+        .treat_everything_as_deleted());
+
+    // WalkableGraph queries + NotComparableSkyValue never prunes.
+    struct NcFn;
+    impl SkyFunction for NcFn {
+        fn compute(
+            &self,
+            _key: &SkyKey,
+            _env: &mut Environment<'_>,
+        ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+            Ok(Some(Arc::new(NotComparableSkyValue(42i32))))
+        }
+    }
+    let mut eval = InMemoryMemoizingEvaluator::new();
+    eval.register_function(SkyFunctionName("NC"), Arc::new(NcFn));
+    let nc_key = SkyKey::Custom {
+        function_name: SkyFunctionName("NC"),
+        argument: "line1\nline2".into(),
+    };
+    assert_eq!(nc_key.canonical_name(), "NC:line1_line2");
+    let r1 = eval.evaluate(std::slice::from_ref(&nc_key));
+    assert!(!r1.has_error());
+    assert_eq!(
+        eval.get_successful_values(std::slice::from_ref(&nc_key))
+            .len(),
+        1
+    );
+    let missing_key = SkyKey::Precomputed("missing".into());
+    let me = eval.get_missing_and_exceptions(&[nc_key.clone(), missing_key.clone()]);
+    assert!(!me.contains_key(&nc_key));
+    assert_eq!(me.get(&missing_key), Some(&None));
+
+    eval.invalidate(std::slice::from_ref(&nc_key));
+    let r2 = eval.evaluate(std::slice::from_ref(&nc_key));
+    assert!(
+        !r2.stats.pruned.contains(&nc_key),
+        "NotComparableSkyValue must not be pruned"
+    );
+}

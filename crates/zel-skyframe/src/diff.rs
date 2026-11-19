@@ -45,13 +45,86 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Which keys changed since the last command.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Which keys changed since the last command (`com.google.devtools.build.lib.vfs.ModifiedFileSet`).
+#[derive(Debug, Clone)]
 pub enum ModifiedFileSet {
     Nothing,
     /// Exactly these keys are dirty.
     Keys(Vec<SkyKey>),
+    /// `ModifiedFileSet.EVERYTHING_MODIFIED`: all file/directory state must be re-checked.
+    EverythingModified,
+    /// `ModifiedFileSet.EVERYTHING_DELETED`: all previously known files are treated as deleted.
+    EverythingDeleted,
 }
+
+impl ModifiedFileSet {
+    pub fn from_keys<I>(keys: I) -> Self
+    where
+        I: IntoIterator<Item = SkyKey>,
+    {
+        let mut v: Vec<SkyKey> = keys.into_iter().collect();
+        if v.is_empty() {
+            return Self::Nothing;
+        }
+        v.sort();
+        v.dedup();
+        Self::Keys(v)
+    }
+
+    pub const fn treat_everything_as_modified(&self) -> bool {
+        matches!(self, Self::EverythingModified | Self::EverythingDeleted)
+    }
+
+    pub const fn treat_everything_as_deleted(&self) -> bool {
+        matches!(self, Self::EverythingDeleted)
+    }
+
+    pub fn modified_source_files(&self) -> Option<&[SkyKey]> {
+        match self {
+            Self::Nothing => Some(&[]),
+            Self::Keys(k) => Some(k.as_slice()),
+            Self::EverythingModified | Self::EverythingDeleted => None,
+        }
+    }
+
+    /// `ModifiedFileSet.union`: combines two sets preserving `EverythingDeleted` >
+    /// `EverythingModified` > deduplicated `Keys` > `Nothing`.
+    pub fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::EverythingDeleted, _) | (_, Self::EverythingDeleted) => Self::EverythingDeleted,
+            (Self::EverythingModified, _) | (_, Self::EverythingModified) => {
+                Self::EverythingModified
+            }
+            (Self::Nothing, x) | (x, Self::Nothing) => x,
+            (Self::Keys(mut a), Self::Keys(b)) => {
+                a.extend(b);
+                Self::from_keys(a)
+            }
+        }
+    }
+}
+
+impl PartialEq for ModifiedFileSet {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Nothing, Self::Nothing) => true,
+            (Self::Nothing, Self::Keys(k)) | (Self::Keys(k), Self::Nothing) => k.is_empty(),
+            (Self::EverythingModified, Self::EverythingModified) => true,
+            (Self::EverythingDeleted, Self::EverythingDeleted) => true,
+            (Self::Keys(a), Self::Keys(b)) => {
+                let mut sa = a.clone();
+                sa.sort();
+                sa.dedup();
+                let mut sb = b.clone();
+                sb.sort();
+                sb.dedup();
+                sa == sb
+            }
+            _ => false,
+        }
+    }
+}
+impl Eq for ModifiedFileSet {}
 
 pub trait DiffAwareness: Send + Sync {
     fn name(&self) -> &'static str;
@@ -267,6 +340,13 @@ pub fn apply_diff(evaluator: &InMemoryMemoizingEvaluator, diff: &ModifiedFileSet
     match diff {
         ModifiedFileSet::Nothing => 0,
         ModifiedFileSet::Keys(k) => evaluator.invalidate(k),
+        ModifiedFileSet::EverythingModified | ModifiedFileSet::EverythingDeleted => {
+            let all_fs_keys = evaluator.keys_by_function(&[
+                SkyFunctionName::FILE_STATE,
+                SkyFunctionName::DIRECTORY_LISTING,
+            ]);
+            evaluator.invalidate(&all_fs_keys)
+        }
     }
 }
 

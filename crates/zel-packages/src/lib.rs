@@ -39,6 +39,7 @@ pub use loader::{BzlOverride, LoaderConfig, PackageCache, PackageLoadError, Pack
 pub use lookup::{PackageEvent, PackageLookupConfig, RepoResolver, SimpleRepoResolver};
 pub use resolve::{PackageErrors, PatternError, PatternResolver, ResolveOutcome};
 pub use rule_class::RuleClass;
+pub use zel_cmdline::{InvalidPackageNameError, RelativePackageNameResolver};
 
 /// Extra per-rule information of the typed model (`Rule.java`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -269,10 +270,14 @@ pub struct PackageArgs {
     pub default_testonly: Option<bool>,
     pub default_deprecation: Option<String>,
     pub default_compatible_with: Vec<Label>,
+    pub default_compatible_with_set: bool,
     pub default_restricted_to: Vec<Label>,
+    pub default_restricted_to_set: bool,
     pub features: Vec<String>,
     pub licenses: Vec<String>,
+    pub licenses_set: bool,
     pub default_package_metadata: Vec<Label>,
+    pub default_package_metadata_set: bool,
     pub default_hdrs_check: Option<String>,
     pub transitive_visibility: Option<Label>,
 }
@@ -348,17 +353,21 @@ impl PackageArgs {
         if !other.features.is_empty() {
             self.features = Self::merge_feature_lists(&self.features, &other.features);
         }
-        if !other.licenses.is_empty() {
+        if other.licenses_set || !other.licenses.is_empty() {
             self.licenses = other.licenses.clone();
+            self.licenses_set = true;
         }
-        if !other.default_compatible_with.is_empty() {
+        if other.default_compatible_with_set || !other.default_compatible_with.is_empty() {
             self.default_compatible_with = other.default_compatible_with.clone();
+            self.default_compatible_with_set = true;
         }
-        if !other.default_restricted_to.is_empty() {
+        if other.default_restricted_to_set || !other.default_restricted_to.is_empty() {
             self.default_restricted_to = other.default_restricted_to.clone();
+            self.default_restricted_to_set = true;
         }
-        if !other.default_package_metadata.is_empty() {
+        if other.default_package_metadata_set || !other.default_package_metadata.is_empty() {
             self.default_package_metadata = other.default_package_metadata.clone();
+            self.default_package_metadata_set = true;
         }
         if let Some(h) = &other.default_hdrs_check {
             self.default_hdrs_check = Some(h.clone());
