@@ -2356,3 +2356,210 @@ fn ignored_below_directory_warns_and_invalid_bazelignore_errors() {
         err.message
     );
 }
+
+#[test]
+fn bzl_load_visibility_enforced_across_build_bzl_and_repos() {
+    use crate::lookup::SimpleRepoResolver;
+    use zel_vfs::InMemoryFileSystem;
+
+    let fs = Arc::new(InMemoryFileSystem::new(zel_vfs::DigestHashFunction::Sha256));
+    let write = |p: &str, c: &str| {
+        let pf = PathFragment::create(p);
+        if let Some(par) = pf.parent_directory() {
+            fs.create_directory_and_parents(&par).unwrap();
+        }
+        fs.write_file(&pf, c.as_bytes()).unwrap();
+    };
+    // Embedded `@bazel_tools` style modules: `visibility("//tools/...")` and `visibility("private")`.
+    write("/bt/MODULE.bazel", "");
+    write("/bt/tools/BUILD", "");
+    write(
+        "/bt/tools/build_defs.bzl",
+        "visibility(\"//tools/...\")\nX = 1\n",
+    );
+    write(
+        "/bt/tools/sub/BUILD",
+        "load(\"//tools:build_defs.bzl\", \"X\")\nfilegroup(name = \"ok\")\n",
+    );
+    write(
+        "/bt/other/BUILD",
+        "load(\"//tools:build_defs.bzl\", \"X\")\nfilegroup(name = \"bad\")\n",
+    );
+    write(
+        "/bt/tools/test/BUILD",
+        "load(\":default_test_toolchain.bzl\", \"T\")\nfilegroup(name = \"same_pkg\")\n",
+    );
+    write(
+        "/bt/tools/test/default_test_toolchain.bzl",
+        "visibility(\"private\")\nT = 2\n",
+    );
+    write(
+        "/bt/tools/jdk/BUILD",
+        "load(\"//tools/test:default_test_toolchain.bzl\", \"T\")\n",
+    );
+
+    // Main repo attempting to load `@bazel_tools//tools:build_defs.bzl`, plus local `.bzl` chains.
+    write(
+        "/ws/ext_bad/BUILD",
+        "load(\"@bazel_tools//tools:build_defs.bzl\", \"X\")\n",
+    );
+    write("/ws/priv/BUILD", "");
+    write("/ws/priv/secret.bzl", "visibility([])\nS = 1\n");
+    write(
+        "/ws/priv/call_in_fn.bzl",
+        "def bad():\n    visibility(\"public\")\n",
+    );
+    write(
+        "/ws/priv/dup.bzl",
+        "visibility(\"private\")\nvisibility(\"public\")\n",
+    );
+    write("/ws/priv/neg.bzl", "visibility([\"-//foo\"])\n");
+    write(
+        "/ws/priv/top_fn.bzl",
+        "def f():\n    visibility(\"private\")\nf()\n",
+    );
+    write("/ws/caller/BUILD", "load(\"//priv:secret.bzl\", \"S\")\n");
+    write("/ws/caller2/BUILD", "load(\":mid.bzl\", \"M\")\n");
+    write(
+        "/ws/caller2/mid.bzl",
+        "load(\"//priv:secret.bzl\", \"S\")\nM = S\n",
+    );
+    write(
+        "/ws/caller3/BUILD",
+        "load(\"//priv:call_in_fn.bzl\", \"bad\")\nbad()\n",
+    );
+    write("/ws/caller_dup/BUILD", "load(\"//priv:dup.bzl\", \"x\")\n");
+    write("/ws/caller_neg/BUILD", "load(\"//priv:neg.bzl\", \"x\")\n");
+    write(
+        "/ws/caller_top_fn/BUILD",
+        "load(\"//priv:top_fn.bzl\", \"f\")\n",
+    );
+
+    let mut res = SimpleRepoResolver::new(PathFragment::create("/ws"));
+    res.external
+        .insert("bazel_tools".into(), PathFragment::create("/bt"));
+    res.apparent.insert(
+        "bazel_tools".into(),
+        zel_cmdline::RepositoryName::create_unvalidated("bazel_tools"),
+    );
+    let res = Arc::new(res);
+    let loader = PackageLoader::new(LoaderConfig::new(
+        Arc::clone(&fs) as Arc<dyn zel_vfs::FileSystem>,
+        Arc::clone(&res) as Arc<dyn crate::lookup::RepoResolver>,
+    ));
+
+    let pkg_id = |repo: &str, pkg: &str| {
+        PackageIdentifier::create(
+            zel_cmdline::RepositoryName::create_unvalidated(repo),
+            PathFragment::create(pkg),
+        )
+        .unwrap()
+    };
+
+    // Allowed: subpackage under `//tools/...` in `@bazel_tools` and same-package `private` load.
+    assert!(loader
+        .load_package(&pkg_id("bazel_tools", "tools/sub"))
+        .is_ok());
+    assert!(loader
+        .load_package(&pkg_id("bazel_tools", "tools/test"))
+        .is_ok());
+
+    // Rejected: sibling package in `@bazel_tools`, main-repo package loading `@bazel_tools//tools:build_defs.bzl`,
+    // and another `@bazel_tools` package loading `visibility("private")`.
+    let e_other = loader
+        .load_package(&pkg_id("bazel_tools", "other"))
+        .unwrap_err();
+    assert!(
+        e_other
+            .message
+            .contains("contains .bzl load visibility violations"),
+        "{}",
+        e_other.message
+    );
+    assert!(
+        e_other.events.iter().any(|ev| ev
+            .message
+            .contains("is not visible for loading from package @@bazel_tools//other")),
+        "{:?}",
+        e_other.events
+    );
+
+    let e_ext = loader.load_package(&pkg_id("", "ext_bad")).unwrap_err();
+    assert!(e_ext
+        .message
+        .contains("file //ext_bad:BUILD contains .bzl load visibility violations"));
+
+    let e_jdk = loader
+        .load_package(&pkg_id("bazel_tools", "tools/jdk"))
+        .unwrap_err();
+    assert!(e_jdk
+        .message
+        .contains("contains .bzl load visibility violations"));
+
+    // Transitive `.bzl` -> `.bzl` violation reports `module //caller2:mid.bzl contains .bzl load visibility violations`.
+    let e_mid = loader.load_package(&pkg_id("", "caller2")).unwrap_err();
+    assert!(
+        e_mid
+            .message
+            .contains("module //caller2:mid.bzl contains .bzl load visibility violations"),
+        "{}",
+        e_mid.message
+    );
+
+    // Calling `visibility()` from a macro invoked by BUILD, inside a function, twice, or with negative pattern fails.
+    let p_fn = loader.load_package(&pkg_id("", "caller3")).unwrap();
+    assert!(p_fn.contains_errors);
+    assert!(p_fn.events.iter().any(|e| e
+        .message
+        .contains("visibility() can only be used during .bzl initialization")));
+    assert!(loader
+        .load_package(&pkg_id("", "caller_dup"))
+        .unwrap_err()
+        .events
+        .iter()
+        .any(|e| e
+            .message
+            .contains("load visibility may not be set more than once")));
+    assert!(loader
+        .load_package(&pkg_id("", "caller_neg"))
+        .unwrap_err()
+        .events
+        .iter()
+        .any(|e| e
+            .message
+            .contains("Cannot use negative package patterns here")));
+    assert!(loader
+        .load_package(&pkg_id("", "caller_top_fn"))
+        .unwrap_err()
+        .events
+        .iter()
+        .any(|e| e
+            .message
+            .contains("load visibility may only be set at the top level")));
+
+    // `--nocheck_bzl_visibility` demotes violations to warnings and allows loading.
+    let mut warn_cfg = LoaderConfig::new(
+        Arc::clone(&fs) as Arc<dyn zel_vfs::FileSystem>,
+        Arc::clone(&res) as Arc<dyn crate::lookup::RepoResolver>,
+    );
+    warn_cfg.check_bzl_visibility = false;
+    let warn_loader = PackageLoader::new(warn_cfg);
+    let p_warn = warn_loader.load_package(&pkg_id("", "caller")).unwrap();
+    assert!(!p_warn.contains_errors);
+    assert!(p_warn.events.iter().any(|e| e
+        .message
+        .contains("Continuing because --nocheck_bzl_visibility is active")));
+
+    // `--noexperimental_bzl_visibility` rejects `visibility(...)` calls outright.
+    let mut dis_cfg = LoaderConfig::new(fs, res);
+    dis_cfg.experimental_bzl_visibility = false;
+    let dis_loader = PackageLoader::new(dis_cfg);
+    assert!(dis_loader
+        .load_package(&pkg_id("", "caller"))
+        .unwrap_err()
+        .events
+        .iter()
+        .any(|e| e
+            .message
+            .contains("requires `--experimental_bzl_visibility`")));
+}

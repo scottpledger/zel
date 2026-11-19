@@ -163,8 +163,17 @@ impl BlazeRuntime {
         cfg.allow_empty_glob = !parsed
             .get_bool("incompatible_disallow_empty_glob")
             .unwrap_or(true);
+        cfg.experimental_bzl_visibility = parsed
+            .get_bool("experimental_bzl_visibility")
+            .unwrap_or(true);
+        cfg.check_bzl_visibility = parsed.get_bool("check_bzl_visibility").unwrap_or(true);
         let mut sig_parts: Vec<String> = vec![
             format!("allow_empty_glob={}", cfg.allow_empty_glob),
+            format!(
+                "experimental_bzl_visibility={}",
+                cfg.experimental_bzl_visibility
+            ),
+            format!("check_bzl_visibility={}", cfg.check_bzl_visibility),
             format!("deleted={:?}", cfg.lookup.deleted_packages),
         ];
         sig_parts.extend(

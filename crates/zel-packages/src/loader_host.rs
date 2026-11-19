@@ -99,10 +99,12 @@ fn starlarkify(v: &AttrValue, pkg: &PackageIdentifier) -> Option<Value> {
 }
 
 impl PackageLoader {
+    #[allow(clippy::too_many_arguments)]
     fn dispatch_host(
         self: &Arc<Self>,
         ctx: &mut EvalContext,
         state: Option<&Arc<Mutex<PackageState>>>,
+        bzl_init: Option<&Arc<Mutex<crate::loader::BzlInitSlot>>>,
         owner: &PackageIdentifier,
         name: &str,
         pos: Vec<Value>,
@@ -126,7 +128,7 @@ impl PackageLoader {
             ))));
         }
         if name == "visibility" {
-            return Ok(Value::None);
+            return self.set_bzl_visibility(ctx, state, bzl_init, owner, pos, kw);
         }
         if name == "cc_common.internal_DO_NOT_USE" {
             return Ok(zel_builtins::cc_internal::internal_struct());
@@ -548,6 +550,123 @@ impl PackageLoader {
             other => return Err(herr(ctx, format!("unknown config function 'config.{other}'"))),
         }
         Ok(Value::Struct(Arc::new(StructValue::new(f))))
+    }
+
+    fn set_bzl_visibility(
+        &self,
+        ctx: &EvalContext,
+        state: Option<&Arc<Mutex<PackageState>>>,
+        bzl_init: Option<&Arc<Mutex<crate::loader::BzlInitSlot>>>,
+        owner: &PackageIdentifier,
+        pos: Vec<Value>,
+        kw: BTreeMap<String, Value>,
+    ) -> HostResult {
+        if !self.cfg.experimental_bzl_visibility {
+            return Err(herr(
+                ctx,
+                "Use of `visibility()` requires `--experimental_bzl_visibility`",
+            ));
+        }
+        let Some(slot_arc) = bzl_init.filter(|_| state.is_none()) else {
+            return Err(herr(
+                ctx,
+                "visibility() can only be used during .bzl initialization (top-level evaluation)",
+            ));
+        };
+        if !ctx.thread.frames.is_empty() {
+            return Err(herr(
+                ctx,
+                "load visibility may only be set at the top level, not inside a function",
+            ));
+        }
+        if let Some(k) = kw.keys().next() {
+            return Err(herr(
+                ctx,
+                format!("visibility() got an unexpected keyword argument '{k}'"),
+            ));
+        }
+        if pos.is_empty() {
+            return Err(herr(
+                ctx,
+                "visibility() missing 1 required positional argument: value",
+            ));
+        }
+        if pos.len() > 1 {
+            return Err(herr(
+                ctx,
+                format!(
+                    "visibility() accepts no more than 1 positional argument but got {}",
+                    pos.len()
+                ),
+            ));
+        }
+        let raw_items: Vec<String> = match &pos[0] {
+            Value::String(s) => vec![s.clone()],
+            Value::List(l) => {
+                let elems = l.lock().unwrap().elements.clone();
+                let mut out = Vec::with_capacity(elems.len());
+                for (i, item) in elems.iter().enumerate() {
+                    match item {
+                        Value::String(s) => out.push(s.clone()),
+                        other => {
+                            return Err(herr(
+                                ctx,
+                                format!(
+                                    "in call to visibility(), parameter 'value' got element of type '{}' at index {i}, want 'string'",
+                                    other.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                out
+            }
+            other => {
+                return Err(herr(
+                    ctx,
+                    format!(
+                        "in call to visibility(), parameter 'value' got value of type '{}', want 'list or string'",
+                        other.type_name()
+                    ),
+                ));
+            }
+        };
+        {
+            let guard = slot_arc.lock().unwrap();
+            if !guard.initializing {
+                return Err(herr(
+                    ctx,
+                    "visibility() can only be used during .bzl initialization (top-level evaluation)",
+                ));
+            }
+            if guard.visibility.is_some() {
+                return Err(herr(ctx, "load visibility may not be set more than once"));
+            }
+        }
+        let mapping = self.cfg.lookup.resolver.mapping(owner.repository());
+        let mut specs = Vec::with_capacity(raw_items.len());
+        let mut is_public = false;
+        for raw in &raw_items {
+            if raw.starts_with('-') {
+                return Err(herr(
+                    ctx,
+                    format!("Cannot use negative package patterns here: '{raw}'"),
+                ));
+            }
+            let spec = PackageSpec::parse(&mapping, owner.repository(), raw)
+                .map_err(|e| herr(ctx, e))?;
+            if matches!(spec, PackageSpec::AllPackages) {
+                is_public = true;
+            }
+            specs.push(spec);
+        }
+        let vis = if is_public {
+            crate::loader::BzlVisibility::Public
+        } else {
+            crate::loader::BzlVisibility::Restricted(specs)
+        };
+        slot_arc.lock().unwrap().visibility = Some(vis);
+        Ok(Value::None)
     }
 
     fn label_fn(&self, ctx: &EvalContext, owner: &PackageIdentifier, pos: &[Value]) -> HostResult {
