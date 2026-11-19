@@ -307,10 +307,7 @@ pub fn execute_actions(
     let mut critical_path = Vec::new();
     let mut cur = best_root.map(|(i, _)| i);
     while let Some(ci) = cur {
-        let dur_ms = st.results[ci]
-            .as_ref()
-            .map(|o| o.wall_time_ms)
-            .unwrap_or(0);
+        let dur_ms = st.results[ci].as_ref().map(|o| o.wall_time_ms).unwrap_or(0);
         let primary_output = uniq[ci]
             .outputs()
             .first()

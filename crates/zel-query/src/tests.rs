@@ -2216,3 +2216,517 @@ fn cquery_config_labels_files_and_starlark_semantics() {
         o_dis.stderr
     );
 }
+
+#[test]
+fn visibility_environment_group_config_setting_javatests_and_included_negations() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        (
+            "env/BUILD",
+            "environment(name = 'e1')\nenvironment_group(name = 'eg', environments = [':e1'], defaults = [':e1'])\n",
+        ),
+        (
+            "cfg/BUILD",
+            "config_setting(name = 'cs', values = {'cpu': 'k8'})\n",
+        ),
+        (
+            "java/com/foo/BUILD",
+            "filegroup(name = 'internal_lib', visibility = ['//visibility:private'])\n",
+        ),
+        ("javatests/com/foo/BUILD", "filegroup(name = 'test_target')\n"),
+        (
+            "vis/BUILD",
+            "package_group(name = 'exclude_sub', packages = ['//a/...', '-//a/sub/...'])\n\
+             package_group(name = 'allow_sub', packages = ['//a/sub'])\n\
+             package_group(name = 'combined', includes = [':exclude_sub', ':allow_sub'])\n\
+             filegroup(name = 'guarded', visibility = [':combined'])\n",
+        ),
+        ("a/sub/BUILD", "filegroup(name = 'consumer')\n"),
+        (
+            "badvis/BUILD",
+            "filegroup(name = 't', visibility = ['//vis:consumer_not_pg'])\n",
+        ),
+    ]);
+
+    // environment_group is private to its own package
+    assert!(ql(&ws, "visible(//a/sub:consumer, //env:eg)").is_empty());
+    assert_eq!(ql(&ws, "visible(//env:e1, //env:eg)"), vec!["//env:eg"]);
+
+    // config_setting without explicit/package visibility defaults to public
+    assert_eq!(
+        ql(&ws, "visible(//a/sub:consumer, //cfg:cs)"),
+        vec!["//cfg:cs"]
+    );
+
+    // javatests/com/foo can see private targets in java/com/foo
+    assert_eq!(
+        ql(
+            &ws,
+            "visible(//javatests/com/foo:test_target, //java/com/foo:internal_lib)"
+        ),
+        vec!["//java/com/foo:internal_lib"]
+    );
+
+    // Sibling included package_group negative spec does not cancel sibling positive spec
+    assert_eq!(
+        ql(&ws, "visible(//a/sub:consumer, //vis:guarded)"),
+        vec!["//vis:guarded"]
+    );
+
+    // Invalid visibility label reports error
+    let o_bad = q(&ws, "visible(//a/sub:consumer, //badvis:t)", |_, _| {});
+    assert_ne!(o_bad.exit_code, 0);
+    assert!(
+        o_bad
+            .stderr
+            .iter()
+            .any(|l| l.contains("Invalid visibility label")),
+        "{:?}",
+        o_bad.stderr
+    );
+}
+
+#[test]
+fn query_aspect_deps_precise_transitive_requires_and_proto_metadata() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        ("t/tool1.sh", "#!/bin/sh\n"),
+        ("t/tool2.sh", "#!/bin/sh\n"),
+        (
+            "t/BUILD",
+            "sh_binary(name = 'tool1', srcs = ['tool1.sh'])\n\
+             sh_binary(name = 'tool2', srcs = ['tool2.sh'])\n",
+        ),
+        (
+            "pkg/defs.bzl",
+            "MyInfo = provider()\n\
+             OtherInfo = provider()\n\
+             def _base_asp(target, ctx):\n    return []\n\
+             base_asp = aspect(implementation = _base_asp, attrs = {'_t1': attr.label(default = '//t:tool1')})\n\
+             def _top_asp(target, ctx):\n    return []\n\
+             top_asp = aspect(\n\
+                 implementation = _top_asp,\n\
+                 requires = [base_asp],\n\
+                 required_providers = [MyInfo],\n\
+                 attrs = {'_t2': attr.label(default = '//t:tool2')},\n\
+             )\n\
+             def _impl(ctx):\n    return [MyInfo()]\n\
+             def _other_impl(ctx):\n    return [OtherInfo()]\n\
+             good_leaf = rule(implementation = _impl, provides = [MyInfo])\n\
+             other_leaf = rule(implementation = _other_impl, provides = [OtherInfo])\n\
+             holder = rule(implementation = _other_impl, attrs = {'deps': attr.label_list(aspects = [top_asp])})\n",
+        ),
+        (
+            "pkg/BUILD",
+            "load('//pkg:defs.bzl', 'good_leaf', 'other_leaf', 'holder')\n\
+             good_leaf(name = 'good')\n\
+             other_leaf(name = 'other')\n\
+             holder(name = 'h_match', deps = [':good'])\n\
+             holder(name = 'h_nomatch', deps = [':other'])\n",
+        ),
+    ]);
+
+    // Conservative mode includes both top_asp and transitive required base_asp even when providers don't match
+    let cons = q(&ws, "deps(//pkg:h_nomatch)", |o, _| {
+        o.aspect_deps = "conservative".into();
+    });
+    let cons_lines = lines(&cons);
+    assert!(
+        cons_lines.contains(&"//t:tool1".to_string()),
+        "{cons_lines:?}"
+    );
+    assert!(
+        cons_lines.contains(&"//t:tool2".to_string()),
+        "{cons_lines:?}"
+    );
+
+    // Precise mode drops top_asp (and its required base_asp) on h_nomatch, but keeps both on h_match
+    let prec_no = q(&ws, "deps(//pkg:h_nomatch)", |o, _| {
+        o.aspect_deps = "precise".into();
+    });
+    let prec_no_lines = lines(&prec_no);
+    assert!(
+        !prec_no_lines.contains(&"//t:tool1".to_string()),
+        "{prec_no_lines:?}"
+    );
+    assert!(
+        !prec_no_lines.contains(&"//t:tool2".to_string()),
+        "{prec_no_lines:?}"
+    );
+
+    let prec_yes = q(&ws, "deps(//pkg:h_match)", |o, _| {
+        o.aspect_deps = "precise".into();
+    });
+    let prec_yes_lines = lines(&prec_yes);
+    assert!(
+        prec_yes_lines.contains(&"//t:tool1".to_string()),
+        "{prec_yes_lines:?}"
+    );
+    assert!(
+        prec_yes_lines.contains(&"//t:tool2".to_string()),
+        "{prec_yes_lines:?}"
+    );
+
+    // Proto output: source_aspect_name, synthetic $internal_attr_hash, rule_class_key (16) and rule_class_info (17) once
+    let proto_json = q(&ws, "//pkg:h_match + //pkg:h_nomatch", |_, f| {
+        f.output = "streamed_jsonproto".into();
+        f.proto_include_attribute_source_aspects = true;
+        f.proto_include_synthetic_attribute_hash = true;
+        f.proto_rule_classes = true;
+    });
+    assert_eq!(proto_json.exit_code, 0, "{:?}", proto_json.stderr);
+    let pj = String::from_utf8_lossy(&proto_json.stdout);
+    assert!(pj.contains("\"$internal_attr_hash\""), "{pj}");
+    assert!(
+        pj.contains("\"sourceAspectName\":\"//pkg:defs.bzl%top_asp\""),
+        "{pj}"
+    );
+    assert!(
+        pj.contains("\"ruleClassKey\":\"//pkg:defs.bzl%holder\""),
+        "{pj}"
+    );
+    assert_eq!(
+        pj.matches("\"ruleClassInfo\":").count(),
+        1,
+        "ruleClassInfo must be emitted once per rule class key: {pj}"
+    );
+}
+
+#[test]
+fn query_rbuildfiles_subpath_zero_target_pkg_and_genquery_scope() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        ("pkg/BUILD", ""),
+        ("pkg/sub/helper.bzl", "X = 1\n"),
+        ("consumer/BUILD", "load('//pkg:sub/helper.bzl', 'X')\n"),
+        (
+            "g/BUILD",
+            "filegroup(name = 'in_scope', srcs = [':dep'])\n\
+             filegroup(name = 'dep')\n\
+             filegroup(name = 'out_of_scope')\n",
+        ),
+    ]);
+
+    // rbuildfiles resolves pkg/sub/helper.bzl to //pkg:sub/helper.bzl and finds consumer/BUILD even with 0 rules
+    let rb = q(&ws, "rbuildfiles(pkg/sub/helper.bzl)", |o, _| {
+        o.infer_universe_scope = true;
+    });
+    assert_eq!(rb.exit_code, 0, "{:?}", rb.stderr);
+    assert_eq!(lines(&rb), vec!["//consumer:BUILD"]);
+
+    // genquery scope enforcement (strict vs non-strict)
+    let strict_err = crate::run_genquery(
+        ws.resolver().loader(),
+        "//g:in_scope + //g:out_of_scope",
+        &["//g:in_scope".to_string()],
+        true,
+        &[],
+    )
+    .unwrap_err();
+    assert!(
+        strict_err.contains("is not within the scope of the query"),
+        "{strict_err}"
+    );
+
+    let non_strict = crate::run_genquery(
+        ws.resolver().loader(),
+        "//g:in_scope + //g:out_of_scope",
+        &["//g:in_scope".to_string()],
+        false,
+        &[],
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&non_strict).trim(), "//g:in_scope");
+}
+
+#[test]
+fn query_build_xml_proto_and_subgraph_shortcuts() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        (
+            "pkg/defs.bzl",
+            concat!(
+                "def _impl(ctx):\n",
+                "    pass\n",
+                "my_rule = rule(implementation = _impl, attrs = {'tool': attr.label(), 'note': attr.string(), 'num': attr.int()})\n",
+            ),
+        ),
+        (
+            "pkg/BUILD",
+            concat!(
+                "load('//pkg:defs.bzl', 'my_rule')\n",
+                "config_setting(name = 'c1', values = {'cpu': 'k8'})\n",
+                "package_group(name = 'pg', packages = ['-//b/...', '//a/...'])\n",
+                "my_rule(\n",
+                "    name = 'r',\n",
+                "    note = select({'//conditions:default': 'plain'}),\n",
+                ")\n",
+                "my_rule(name = 'r_sel', tool = select({'//pkg:c1': None, '//conditions:default': '//pkg:r'}))\n",
+                "my_rule(name = 'r_nul', note = 'bad\\0str')\n",
+                "filegroup(name = 'top', srcs = [':mid'])\n",
+                "filegroup(name = 'mid', srcs = [':bot'])\n",
+                "filegroup(name = 'bot')\n",
+            ),
+        ),
+    ]);
+
+    // build formatter: default package_group in source order, None -> null, single //conditions:default collapsed
+    let b_out = q(&ws, "//pkg:pg + //pkg:r + //pkg:r_sel", |_, f| {
+        f.output = "build".into();
+    });
+    assert_eq!(b_out.exit_code, 0, "{:?}", b_out.stderr);
+    let b_str = String::from_utf8_lossy(&b_out.stdout);
+    assert!(
+        b_str.contains("packages = [\"-//b/...\", \"//a/...\"]"),
+        "{b_str}"
+    );
+    assert!(b_str.contains("note = \"plain\","), "{b_str}");
+    assert!(b_str.contains("\"//pkg:c1\": null"), "{b_str}");
+
+    // xml formatter: NUL char produces Bazel DOM error placeholder, display_full_kind does not alter class
+    let xml_out = q(&ws, "//pkg:r_nul", |_, f| {
+        f.output = "xml".into();
+        f.display_full_kind = true;
+    });
+    let xml_str = String::from_utf8_lossy(&xml_out.stdout);
+    assert!(xml_str.contains("class=\"my_rule\""), "{xml_str}");
+    assert!(
+        xml_str.contains("[[[ERROR: could not be encoded as XML]]]"),
+        "{xml_str}"
+    );
+
+    // location formatter: display_full_kind does not alter target kind
+    let loc_out = q(&ws, "//pkg:r", |_, f| {
+        f.output = "location".into();
+        f.display_full_kind = true;
+    });
+    let loc_str = String::from_utf8_lossy(&loc_out.stdout);
+    assert!(loc_str.contains(": my_rule rule //pkg:r"), "{loc_str}");
+
+    // unflattened proto select: is_default_value true for None branch, false for explicit //conditions:default
+    let sel_json = q(&ws, "//pkg:r_sel", |_, f| {
+        f.output = "streamed_jsonproto".into();
+        f.proto_flatten_selects = false;
+    });
+    let sj = String::from_utf8_lossy(&sel_json.stdout);
+    assert!(
+        sj.contains("{\"label\":\"//pkg:c1\",\"isDefaultValue\":true}"),
+        "{sj}"
+    );
+    assert!(
+        sj.contains(
+            "{\"label\":\"//conditions:default\",\"stringValue\":\"//pkg:r\",\"isDefaultValue\":false}"
+        ) || sj.contains(
+            "{\"label\":\"//conditions:default\",\"isDefaultValue\":false,\"stringValue\":\"//pkg:r\"}"
+        ),
+        "{sj}"
+    );
+
+    // extractSubgraph shortcut: dropping //pkg:mid from deps(//pkg:top) preserves //pkg:top -> //pkg:bot rank
+    let mr = q(&ws, "deps(//pkg:top) - //pkg:mid", |_, f| {
+        f.output = "maxrank".into();
+    });
+    let mr_str = String::from_utf8_lossy(&mr.stdout);
+    assert!(mr_str.contains("0 //pkg:top"), "{mr_str}");
+    assert!(mr_str.contains("1 //pkg:bot"), "{mr_str}");
+}
+
+#[test]
+fn cquery_and_aquery_formatters_skyframe_state_and_starlark_validation() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        ("pkg/src.txt", "hello\n"),
+        (
+            "pkg/defs.bzl",
+            concat!(
+                "def _impl(ctx):\n",
+                "    f1 = ctx.actions.declare_file('z_first.txt')\n",
+                "    f2 = ctx.actions.declare_file('a_second.txt')\n",
+                "    f3 = ctx.actions.declare_file('extra_default.txt')\n",
+                "    ctx.actions.write(f1, '1')\n",
+                "    ctx.actions.write(f2, '2')\n",
+                "    ctx.actions.write(f3, '3')\n",
+                "    return [\n",
+                "        DefaultInfo(files = depset([f1, f2])),\n",
+                "        OutputGroupInfo(default = depset([f3])),\n",
+                "    ]\n",
+                "ord_rule = rule(implementation = _impl)\n",
+            ),
+        ),
+        (
+            "pkg/BUILD",
+            concat!(
+                "load('//pkg:defs.bzl', 'ord_rule')\n",
+                "exports_files(['src.txt'])\n",
+                "ord_rule(name = 'ord')\n",
+                "genrule(name = 'multi', outs = ['not_main.txt', 'main.txt'], cmd = 'touch $(OUTS)')\n",
+                "alias(name = 'multi_alias', actual = ':multi')\n",
+            ),
+        ),
+    ]);
+
+    // 1. cquery --output=files preserves insertion order and unions OutputGroupInfo.default,
+    //    and OutputFile target emits only exact file (not suffix match not_main.txt)
+    let f_ord = ws.post("//pkg:ord", |_, _, popts| {
+        popts.output = "files".into();
+    });
+    assert_eq!(f_ord.exit_code, 0, "{:?}", f_ord.stderr);
+    let f_lines: Vec<&str> = std::str::from_utf8(&f_ord.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(f_lines.len(), 3, "{f_lines:?}");
+    assert!(f_lines[0].ends_with("z_first.txt"), "{f_lines:?}");
+    assert!(f_lines[1].ends_with("a_second.txt"), "{f_lines:?}");
+    assert!(f_lines[2].ends_with("extra_default.txt"), "{f_lines:?}");
+
+    let f_exact = ws.post("//pkg:main.txt", |_, _, popts| {
+        popts.output = "files".into();
+    });
+    let exact_lines: Vec<&str> = std::str::from_utf8(&f_exact.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(exact_lines.len(), 1, "{exact_lines:?}");
+    assert!(exact_lines[0].ends_with("/pkg/main.txt"), "{exact_lines:?}");
+
+    // 2. cquery --output=starlark: depset & struct predeclared, build_options(source_file) is None,
+    //    bad expr paren escape and bad format arity rejected up front
+    let st_ok = ws.post("//pkg:src.txt + //pkg:ord", |_, _, popts| {
+        popts.output = "starlark".into();
+        popts.starlark_expr =
+            "str(struct(n = len(depset([1]).to_list())).n) + ':' + str(build_options(target) == None)"
+                .into();
+    });
+    assert_eq!(st_ok.exit_code, 0, "{:?}", st_ok.stderr);
+    let st_lines: Vec<&str> = std::str::from_utf8(&st_ok.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert!(st_lines.contains(&"1:True"), "{st_lines:?}");
+    assert!(st_lines.contains(&"1:False"), "{st_lines:?}");
+
+    let st_escape = ws.post("//pkg:ord", |_, _, popts| {
+        popts.output = "starlark".into();
+        popts.starlark_expr = "1)\ndef evil(): pass\n(".into();
+    });
+    assert_ne!(st_escape.exit_code, 0);
+    assert!(
+        st_escape
+            .stderr
+            .iter()
+            .any(|l| l.contains("invalid --starlark:expr")),
+        "{:?}",
+        st_escape.stderr
+    );
+
+    let st_bad_arity = ws.post("//pkg:ord", |_, _, popts| {
+        popts.output = "starlark".into();
+        popts.starlark_file = "bad.cquery".into();
+        popts.starlark_file_source = "def format(a, b):\n    return str(a)\n".into();
+    });
+    assert_ne!(st_bad_arity.exit_code, 0);
+    assert!(
+        st_bad_arity
+            .stderr
+            .iter()
+            .any(|l| l.contains("must take 1 argument")),
+        "{:?}",
+        st_bad_arity.stderr
+    );
+
+    // 3. cquery --output=textproto with --transitions=lite emits configured_rule_input
+    let cq_tp = ws.post("//pkg:ord", |_, _, popts| {
+        popts.output = "textproto".into();
+        popts.transitions = "lite".into();
+    });
+    assert_eq!(cq_tp.exit_code, 0, "{:?}", cq_tp.stderr);
+    let cq_tp_str = String::from_utf8_lossy(&cq_tp.stdout);
+    assert!(
+        cq_tp_str.contains("configured_rule_input") || cq_tp_str.contains("configuration_id"),
+        "{cq_tp_str}"
+    );
+
+    // 4. cquery --output=transitions on OutputFile emits rule transition header and no dep lines
+    let tr_of = ws.post("//pkg:main.txt", |_, _, popts| {
+        popts.output = "transitions".into();
+        popts.transitions = "lite".into();
+    });
+    assert_eq!(tr_of.exit_code, 0, "{:?}", tr_of.stderr);
+    let tr_of_lines: Vec<&str> = std::str::from_utf8(&tr_of.stdout)
+        .unwrap()
+        .lines()
+        .collect();
+    assert_eq!(tr_of_lines.len(), 1, "{tr_of_lines:?}");
+    assert!(
+        tr_of_lines[0].starts_with("NoTransition -> //pkg:main.txt ("),
+        "{tr_of_lines:?}"
+    );
+
+    // 5. aquery: 1-arg inputs('*') reports Wrong query syntax (regex compiled before arity check),
+    //    filter() follows alias actual label, and --skyframe_state accepts 1-arg mnemonic('Genrule')
+    let aq_bad_re = ws.post("inputs('*')", |_, _, popts| {
+        popts.aquery = true;
+    });
+    assert_ne!(aq_bad_re.exit_code, 0);
+    assert!(
+        aq_bad_re
+            .stderr
+            .iter()
+            .any(|l| l.contains("Wrong query syntax:")),
+        "{:?}",
+        aq_bad_re.stderr
+    );
+
+    let aq_alias_filter = ws.post(
+        "deps(filter('//pkg:multi$', //pkg:multi_alias))",
+        |_, _, popts| {
+            popts.aquery = true;
+            popts.output = "summary".into();
+        },
+    );
+    assert_eq!(aq_alias_filter.exit_code, 0, "{:?}", aq_alias_filter.stderr);
+    assert!(
+        String::from_utf8_lossy(&aq_alias_filter.stdout).contains("1 total action"),
+        "{}",
+        String::from_utf8_lossy(&aq_alias_filter.stdout)
+    );
+
+    let resolver = ws.resolver();
+    let shared_tr = TargetResolver::new(resolver.loader().clone(), AnalysisConfig::default());
+    let seed_popts = PostOpts {
+        aquery: true,
+        output: "summary".into(),
+        ..Default::default()
+    };
+    let seed = crate::post_analysis::run_post_analysis(
+        &resolver,
+        shared_tr.clone(),
+        BuildConfigurationKey::default(),
+        "//pkg:multi + //pkg:ord",
+        &QueryOpts::default(),
+        &FormatOpts::default(),
+        &seed_popts,
+    );
+    assert_eq!(seed.exit_code, 0, "{:?}", seed.stderr);
+
+    let sky_popts = PostOpts {
+        aquery: true,
+        skyframe_state: true,
+        output: "textproto".into(),
+        ..Default::default()
+    };
+    let aq_sky = crate::post_analysis::run_post_analysis(
+        &resolver,
+        shared_tr,
+        BuildConfigurationKey::default(),
+        "mnemonic('Genrule')",
+        &QueryOpts::default(),
+        &FormatOpts::default(),
+        &sky_popts,
+    );
+    assert_eq!(aq_sky.exit_code, 0, "{:?}", aq_sky.stderr);
+    let sky_str = String::from_utf8_lossy(&aq_sky.stdout);
+    assert!(sky_str.contains("mnemonic: \"Genrule\""), "{sky_str}");
+    assert!(!sky_str.contains("mnemonic: \"FileWrite\""), "{sky_str}");
+}

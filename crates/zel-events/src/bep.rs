@@ -784,7 +784,8 @@ impl BuildEventStreamer {
             return;
         }
         if let Some(cfg) = id.get_msg("configuration") {
-            st.configurations_posted.insert(cfg.get_str("id").to_string());
+            st.configurations_posted
+                .insert(cfg.get_str("id").to_string());
         }
 
         Self::record_posted(st, id);
@@ -1481,12 +1482,8 @@ impl BepBuilder {
             for f in files {
                 ns.set_msg("files", f);
             }
-            let node = BuildEventNode::new(
-                ids::named_set(group_key),
-                vec![],
-                "named_set_of_files",
-                ns,
-            );
+            let node =
+                BuildEventNode::new(ids::named_set(group_key), vec![], "named_set_of_files", ns);
             return (ids::named_set(group_key), vec![node]);
         };
 
@@ -2434,12 +2431,26 @@ mod tests {
             ],
         ));
         s.post(
-            BepBuilder::configuration("cfg1", "k8-fastbuild", "k8", "k8", &[("K".into(), "V1".into())], false)
-                .as_replaceable(),
+            BepBuilder::configuration(
+                "cfg1",
+                "k8-fastbuild",
+                "k8",
+                "k8",
+                &[("K".into(), "V1".into())],
+                false,
+            )
+            .as_replaceable(),
         );
         s.post(
-            BepBuilder::configuration("cfg1", "k8-fastbuild", "k8", "k8", &[("K".into(), "V2".into())], false)
-                .as_replaceable(),
+            BepBuilder::configuration(
+                "cfg1",
+                "k8-fastbuild",
+                "k8",
+                "k8",
+                &[("K".into(), "V2".into())],
+                false,
+            )
+            .as_replaceable(),
         );
         s.post(BepBuilder::target_configured(
             "//p:a",
@@ -2476,7 +2487,11 @@ mod tests {
             .expect("NullConfiguration emitted");
         let tc_idx = evs
             .iter()
-            .position(|e| e.get_msg("id").and_then(|i| i.get_msg("target_configured")).is_some())
+            .position(|e| {
+                e.get_msg("id")
+                    .and_then(|i| i.get_msg("target_configured"))
+                    .is_some()
+            })
             .unwrap();
         assert!(null_idx < tc_idx);
         let cfg1_evs: Vec<_> = evs
@@ -2497,28 +2512,28 @@ mod tests {
             [("build_event_json_file_path_conversion", "false")]
                 .into_iter()
                 .collect();
-        let opts = BepOptions::from_flags(
-            &|k| flags.get(k).map(|v| v.to_string()),
-            &|k| {
-                if k == "experimental_build_event_output_group_mode" {
-                    vec![
-                        "default=inline_only".into(),
-                        "default=both".into(),
-                    ]
-                } else {
-                    vec![]
-                }
-            },
-        );
+        let opts = BepOptions::from_flags(&|k| flags.get(k).map(|v| v.to_string()), &|k| {
+            if k == "experimental_build_event_output_group_mode" {
+                vec!["default=inline_only".into(), "default=both".into()]
+            } else {
+                vec![]
+            }
+        });
         assert!(!opts.json_path_conversion);
         assert_eq!(opts.output_group_mode("default"), OutputGroupMode::Both);
-        assert_eq!(opts.output_group_mode("baseline.lcov"), OutputGroupMode::Both);
+        assert_eq!(
+            opts.output_group_mode("baseline.lcov"),
+            OutputGroupMode::Both
+        );
         assert_eq!(
             opts.output_group_mode("other"),
             OutputGroupMode::NamedSetOfFilesOnly
         );
         let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
-        ns.set_msg("files", BepBuilder::file("a.txt", "/tmp/a b.txt", &[], None, None));
+        ns.set_msg(
+            "files",
+            BepBuilder::file("a.txt", "/tmp/a b.txt", &[], None, None),
+        );
         let f_node = BuildEventNode::new(ids::progress(9), vec![], "named_set_of_files", ns);
         let raw_proto = f_node.to_proto(false);
         let with_conv = String::from_utf8(serialize_event_with_conversion(

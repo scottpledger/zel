@@ -745,6 +745,7 @@ pub fn visit_attribute_values(v: &AttrValue) -> Vec<AttrValue> {
 /// `select()` branch combination, with list-typed selects collapsed to a single superset).
 pub fn possible_values(v: &AttrValue) -> Vec<AttrValue> {
     match v {
+        AttrValue::Label(None) | AttrValue::Output(None) => Vec::new(),
         AttrValue::Select(parts) => {
             // List-typed selects: one value holding every branch's elements (a superset), like
             // `getConcatenatedSelectorListsOfListType` / `getReachableLabels`.
@@ -755,38 +756,53 @@ pub fn possible_values(v: &AttrValue) -> Vec<AttrValue> {
                     SelectPart::Select { entries, .. } => entries.first().map(|(_, v)| v.clone()),
                 })
                 .unwrap_or(AttrValue::StrList(Vec::new()));
-            let is_list = matches!(
-                first,
-                AttrValue::StrList(_)
-                    | AttrValue::LabelList(_)
-                    | AttrValue::OutputList(_)
-                    | AttrValue::IntList(_)
-            );
-            if is_list {
-                let mut all: Vec<AttrValue> = Vec::new();
+            if matches!(first, AttrValue::LabelList(_)) {
+                let mut seen = Vec::new();
                 for p in parts {
                     match p {
-                        SelectPart::Plain(v) => all.push(v.clone()),
+                        SelectPart::Plain(val) => {
+                            for l in val.labels() {
+                                if !seen.contains(&l) {
+                                    seen.push(l);
+                                }
+                            }
+                        }
                         SelectPart::Select { entries, .. } => {
-                            all.extend(entries.iter().map(|(_, v)| v.clone()))
+                            for (_, val) in entries {
+                                for l in val.labels() {
+                                    if !seen.contains(&l) {
+                                        seen.push(l);
+                                    }
+                                }
+                            }
                         }
                     }
                 }
-                return concat_values(&all)
-                    .map(|v| match v {
-                        AttrValue::LabelList(l) => {
-                            let mut seen = Vec::new();
-                            for x in l {
-                                if !seen.contains(&x) {
-                                    seen.push(x);
+                return vec![AttrValue::LabelList(seen)];
+            }
+            if matches!(
+                first,
+                AttrValue::StrList(_) | AttrValue::OutputList(_) | AttrValue::IntList(_)
+            ) {
+                let mut all: Vec<AttrValue> = Vec::new();
+                for p in parts {
+                    match p {
+                        SelectPart::Plain(val) => {
+                            if !matches!(val, AttrValue::Label(None) | AttrValue::Output(None)) {
+                                all.push(val.clone());
+                            }
+                        }
+                        SelectPart::Select { entries, .. } => {
+                            for (_, val) in entries {
+                                if !matches!(val, AttrValue::Label(None) | AttrValue::Output(None))
+                                {
+                                    all.push(val.clone());
                                 }
                             }
-                            AttrValue::LabelList(seen)
                         }
-                        other => other,
-                    })
-                    .into_iter()
-                    .collect();
+                    }
+                }
+                return concat_values(&all).into_iter().collect();
             }
             let mut out = Vec::new();
             for val in visit_attribute_values(v) {
@@ -834,11 +850,23 @@ fn concat_values(vs: &[AttrValue]) -> Option<AttrValue> {
                 AttrValue::StrListDict(a)
             }
             (AttrValue::LabelKeyedStrDict(mut a), AttrValue::LabelKeyedStrDict(b)) => {
-                a.extend(b.iter().cloned());
+                for (k, val) in b {
+                    if let Some((_, slot)) = a.iter_mut().find(|(ek, _)| ek == k) {
+                        *slot = val.clone();
+                    } else {
+                        a.push((k.clone(), val.clone()));
+                    }
+                }
                 AttrValue::LabelKeyedStrDict(a)
             }
             (AttrValue::StrKeyedLabelDict(mut a), AttrValue::StrKeyedLabelDict(b)) => {
-                a.extend(b.iter().cloned());
+                for (k, val) in b {
+                    if let Some((_, slot)) = a.iter_mut().find(|(ek, _)| ek == k) {
+                        *slot = val.clone();
+                    } else {
+                        a.push((k.clone(), val.clone()));
+                    }
+                }
                 AttrValue::StrKeyedLabelDict(a)
             }
             (_, b) => b.clone(),
@@ -974,33 +1002,212 @@ pub fn rule_class_toolchain_types(rule: &RuleInstance) -> Vec<Label> {
         .collect()
 }
 
-pub fn aspect_deps(rule: &RuleInstance, tool: bool, nodep: bool) -> Vec<(Label, String)> {
-    let mut out = Vec::new();
-    let Some(rc) = &rule.extra.rule_class else {
-        return out;
-    };
-    for attr in rc.attrs.values() {
-        for asp_v in &attr.aspects {
-            if let Some(asp_def) = zel_packages::aspect::aspect_of(asp_v) {
-                for asp_attr in &asp_def.attrs {
-                    if !tool && asp_attr.cfg_exec {
-                        continue;
-                    }
-                    let is_nodep = matches!(
-                        asp_attr.name.as_str(),
-                        "visibility" | "deprecation" | "licenses"
+fn rule_advertised_providers(rule: &RuleInstance) -> HashSet<String> {
+    let mut out = HashSet::new();
+    match rule.rule_class.as_str() {
+        "cc_library" | "cc_binary" | "cc_test" | "cc_import" | "cc_shared_library" => {
+            out.insert("CcInfo".to_string());
+        }
+        "java_library" | "java_binary" | "java_test" | "java_import" => {
+            out.insert("JavaInfo".to_string());
+        }
+        "py_library" | "py_binary" | "py_test" => {
+            out.insert("PyInfo".to_string());
+        }
+        "proto_library" => {
+            out.insert("ProtoInfo".to_string());
+        }
+        _ => {}
+    }
+    if let Some(spec) = rule
+        .extra
+        .rule_class
+        .as_ref()
+        .and_then(|rc| rc.starlark.as_ref())
+    {
+        if let Some(v) = spec.kwargs.get("provides") {
+            for item in zel_starlark::eval::builtins::value_to_sequence(v).unwrap_or_default() {
+                if let Some(r) = zel_packages::provider::provider_ref_of(&item) {
+                    let resolved = zel_packages::provider::resolve_provider_ref(&r);
+                    out.insert(
+                        zel_packages::provider::provider_display_name(&resolved).to_string(),
                     );
-                    if !nodep && is_nodep {
+                    out.insert(resolved);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn rule_satisfies_aspect(
+    dep_rule: &RuleInstance,
+    asp_def: &zel_packages::aspect::AspectDef,
+) -> bool {
+    if asp_def.required_providers.is_empty() {
+        return true;
+    }
+    let adv = rule_advertised_providers(dep_rule);
+    asp_def.required_providers.iter().any(|group| {
+        group.iter().all(|req| {
+            let resolved = zel_packages::provider::resolve_provider_ref(req);
+            adv.contains(&resolved)
+                || adv.contains(zel_packages::provider::provider_display_name(&resolved))
+        })
+    })
+}
+
+fn collect_transitive_aspects(
+    asp_v: &zel_starlark::Value,
+    seen: &mut HashSet<usize>,
+    out: &mut Vec<Arc<zel_packages::aspect::AspectDef>>,
+) {
+    let Some(asp_def) = zel_packages::aspect::aspect_of(asp_v) else {
+        return;
+    };
+    if !seen.insert(asp_def.id) {
+        return;
+    }
+    for req in &asp_def.requires {
+        collect_transitive_aspects(req, seen, out);
+    }
+    out.push(asp_def);
+}
+
+/// Aspect attributes active on `rule`, returning `(source_aspect_name, AttrEntry)` pairs.
+pub fn aspect_attrs_for_rule(
+    env: Option<&TargetEnv<'_>>,
+    rule: &RuleInstance,
+    implicit: bool,
+    tool: bool,
+    nodep: bool,
+    aspect_deps_mode: &str,
+) -> Vec<(String, AttrEntry)> {
+    if !implicit || aspect_deps_mode.eq_ignore_ascii_case("off") {
+        return Vec::new();
+    }
+    let Some(rc) = &rule.extra.rule_class else {
+        return Vec::new();
+    };
+    let precise = aspect_deps_mode.eq_ignore_ascii_case("precise");
+    let mut out = Vec::new();
+    let mut active_aspects: Vec<Arc<zel_packages::aspect::AspectDef>> = Vec::new();
+    let mut seen_aspect_ids: HashSet<usize> = HashSet::new();
+
+    for (attr_name, attr) in &rc.attrs {
+        if attr.aspects.is_empty() || attr.nodep {
+            continue;
+        }
+        let attr_val = rule
+            .extra
+            .attr_values
+            .get(attr_name)
+            .or(attr.default.as_ref());
+        let dep_labels: Vec<Label> = attr_val.map(|v| v.labels()).unwrap_or_default();
+        if precise && dep_labels.is_empty() {
+            continue;
+        }
+        for asp_v in &attr.aspects {
+            let Some(root_asp) = zel_packages::aspect::aspect_of(asp_v) else {
+                continue;
+            };
+            if precise {
+                if let Some(env_ref) = env {
+                    let any_match = dep_labels.iter().any(|dl| {
+                        env_ref
+                            .info(dl)
+                            .ok()
+                            .map(|ti| match &ti.target {
+                                Target::Rule(dr) => rule_satisfies_aspect(dr, &root_asp),
+                                _ => false,
+                            })
+                            .unwrap_or(false)
+                    });
+                    if !any_match {
                         continue;
-                    }
-                    if let Some(ref val) = asp_attr.default {
-                        for l in val.labels() {
-                            if !out.iter().any(|(x, _)| *x == l) {
-                                out.push((l, asp_attr.name.clone()));
-                            }
-                        }
                     }
                 }
+            }
+            collect_transitive_aspects(asp_v, &mut seen_aspect_ids, &mut active_aspects);
+        }
+    }
+
+    for asp_def in active_aspects {
+        let source_name = asp_def.display_id();
+        for asp_attr in &asp_def.attrs {
+            if !tool && asp_attr.cfg_exec {
+                continue;
+            }
+            let is_nodep = asp_attr.nodep
+                || matches!(
+                    asp_attr.name.as_str(),
+                    "visibility" | "deprecation" | "licenses"
+                );
+            if !nodep && is_nodep {
+                continue;
+            }
+            let val = asp_attr.default.clone().unwrap_or(AttrValue::Label(None));
+            let null_default = asp_attr.ty == AttrType::String && asp_attr.default.is_none();
+            let nodep_set = asp_attr.nodep_set.unwrap_or(matches!(
+                asp_attr.ty,
+                AttrType::String
+                    | AttrType::Label
+                    | AttrType::Output
+                    | AttrType::StringList
+                    | AttrType::LabelList
+                    | AttrType::StringKeyedLabelDict
+                    | AttrType::LabelKeyedStringDict
+                    | AttrType::OutputList
+            ));
+            let shown_name = if let Some(rest) = asp_attr.name.strip_prefix('_') {
+                format!("${rest}")
+            } else {
+                asp_attr.name.clone()
+            };
+            let d = match asp_attr.proto_type {
+                Some(p) => disc::from_name(p).unwrap_or_else(|| disc_for(&shown_name, asp_attr.ty)),
+                None => disc_for(&shown_name, asp_attr.ty),
+            };
+            out.push((
+                source_name.clone(),
+                AttrEntry {
+                    name: shown_name,
+                    ty: asp_attr.ty,
+                    disc: d,
+                    value: val,
+                    explicit: false,
+                    null_default,
+                    tool: asp_attr.tool_dep.unwrap_or(asp_attr.cfg_exec),
+                    nodep: is_nodep,
+                    configurable: asp_attr.configurable,
+                    nodep_set,
+                },
+            ));
+        }
+    }
+    out
+}
+
+pub fn aspect_deps(rule: &RuleInstance, tool: bool, nodep: bool) -> Vec<(Label, String)> {
+    aspect_deps_with_env(None, rule, true, tool, nodep, "conservative")
+}
+
+pub fn aspect_deps_with_env(
+    env: Option<&TargetEnv<'_>>,
+    rule: &RuleInstance,
+    implicit: bool,
+    tool: bool,
+    nodep: bool,
+    aspect_deps_mode: &str,
+) -> Vec<(Label, String)> {
+    let mut out = Vec::new();
+    for (_, entry) in aspect_attrs_for_rule(env, rule, implicit, tool, nodep, aspect_deps_mode) {
+        if entry.nodep && entry.name != "visibility" {
+            continue;
+        }
+        for l in entry.value.labels() {
+            if !out.iter().any(|(x, _)| *x == l) {
+                out.push((l, entry.name.clone()));
             }
         }
     }
@@ -1014,12 +1221,21 @@ pub fn rule_deps_with_aspect_opt(
     nodep: bool,
     aspect_deps_mode: &str,
 ) -> Vec<(Label, String)> {
+    rule_deps_with_aspect_env(None, rule, implicit, tool, nodep, aspect_deps_mode)
+}
+
+pub fn rule_deps_with_aspect_env(
+    env: Option<&TargetEnv<'_>>,
+    rule: &RuleInstance,
+    implicit: bool,
+    tool: bool,
+    nodep: bool,
+    aspect_deps_mode: &str,
+) -> Vec<(Label, String)> {
     let mut out = rule_deps_ext(rule, implicit, tool, nodep);
-    if aspect_deps_mode != "off" {
-        for (l, name) in aspect_deps(rule, tool, nodep) {
-            if !out.iter().any(|(x, _)| *x == l) {
-                out.push((l, name));
-            }
+    for (l, name) in aspect_deps_with_env(env, rule, implicit, tool, nodep, aspect_deps_mode) {
+        if !out.iter().any(|(x, _)| *x == l) {
+            out.push((l, name));
         }
     }
     out
@@ -1067,13 +1283,10 @@ pub fn is_test_suite(rule: &RuleInstance) -> bool {
 
 /// `TargetUtils.isExecutableNonTestRule`.
 pub fn is_executable_non_test(rule: &RuleInstance) -> bool {
-    let exec = rule.executable
-        || rule
-            .extra
-            .rule_class
-            .as_ref()
-            .map(|rc| rc.is_executable)
-            .unwrap_or(false);
+    let exec = match &rule.extra.rule_class {
+        Some(rc) => rc.is_executable,
+        None => rule.executable,
+    };
     exec && !is_test_rule(rule)
 }
 
@@ -1084,17 +1297,47 @@ pub fn package_root(pkg: &Package) -> PathFragment {
         .parent_directory()
         .unwrap_or_else(PathFragment::empty);
     for _ in 0..pkg.id.package_fragment().segments().len() {
-        dir = dir.parent_directory().unwrap_or_else(PathFragment::empty);
+        dir = dir.parent_directory().unwrap_or_else(|| {
+            pkg.build_file
+                .parent_directory()
+                .unwrap_or_else(PathFragment::empty)
+        });
     }
     dir
 }
 
 fn relativize(path: &str, root: &PathFragment) -> String {
     let r = root.path_string();
+    if path == r {
+        return String::new();
+    }
+    if r == "/" {
+        return path.strip_prefix('/').unwrap_or(path).to_string();
+    }
     match path.strip_prefix(r) {
         Some(rest) if rest.starts_with('/') && !r.is_empty() => rest[1..].to_string(),
         _ => path.to_string(),
     }
+}
+
+/// Splits a `file:line:col` location from the right so colons inside the path (such as Windows
+/// drive letters or path segments) are preserved in the file component.
+pub fn split_location_line_col(loc: &str) -> (&str, &str) {
+    let bytes = loc.as_bytes();
+    if let Some(last_colon) = loc.rfind(':') {
+        let col = &loc[last_colon + 1..];
+        if !col.is_empty() && col.bytes().all(|b| b.is_ascii_digit()) {
+            let head = &loc[..last_colon];
+            if let Some(prev_colon) = head.rfind(':') {
+                let line = &head[prev_colon + 1..];
+                if !line.is_empty() && line.bytes().all(|b| b.is_ascii_digit()) {
+                    let _ = bytes;
+                    return (&loc[..prev_colon], &loc[prev_colon..]);
+                }
+            }
+        }
+    }
+    (loc, "")
 }
 
 /// `FormatUtils.getLocation` for `FakeLoadTarget`: returns the referencing package's `buildFileLocation`
@@ -1131,9 +1374,8 @@ pub fn target_location(info: &TInfo, relative: bool) -> String {
             .unwrap_or_else(|| format!("{}:1:1", pkg.build_file)),
     };
     if relative {
-        // `file:line:col`
-        if let Some(idx) = loc.find(':') {
-            let (file, rest) = loc.split_at(idx);
+        let (file, rest) = split_location_line_col(&loc);
+        if !rest.is_empty() {
             return format!("{}{}", relativize(file, &package_root(pkg)), rest);
         }
     }
@@ -1303,46 +1545,80 @@ impl<'a> TargetEnv<'a> {
         self.info(&n.label).ok()
     }
 
-    /// Package group contents (transitively through `includes`).
-    fn group_contents(&self, label: &Label) -> Option<Rc<PackageGroupContents>> {
-        if let Some(g) = self.groups.borrow().get(label) {
-            return Some(g.clone());
+    pub fn is_cached(&self, label: &Label) -> bool {
+        self.cache
+            .borrow()
+            .get(label)
+            .and_then(|v| v.as_ref())
+            .is_some()
+    }
+
+    fn build_group_contents(
+        &self,
+        label: &Label,
+        seen: &mut BTreeSet<Label>,
+    ) -> Result<PackageGroupContents, String> {
+        if !seen.insert(label.clone()) {
+            return Ok(PackageGroupContents::default());
         }
-        let mut seen: BTreeSet<Label> = BTreeSet::new();
-        let mut stack = vec![label.clone()];
+        let info = self.info(label).map_err(|e| e.to_string())?;
+        let Target::PackageGroup { packages, .. } = &info.target else {
+            return Err(format!(
+                "target '{}' does not refer to a package group",
+                label.canonical_form()
+            ));
+        };
+        let mapping = self
+            .resolver
+            .loader()
+            .config()
+            .lookup
+            .resolver
+            .mapping(label.repository());
         let mut out = PackageGroupContents::default();
-        while let Some(g) = stack.pop() {
-            if !seen.insert(g.clone()) {
-                continue;
-            }
-            let info = self.info(&g).ok()?;
-            if let Target::PackageGroup { packages, .. } = &info.target {
-                let mapping = self
-                    .resolver
-                    .loader()
-                    .config()
-                    .lookup
-                    .resolver
-                    .mapping(g.repository());
-                for p in packages {
-                    if let Ok(spec) = PackageSpec::parse(&mapping, g.repository(), p) {
-                        out.specs.push(spec);
-                    }
-                }
-                if let Some(incl) = info.pkg.group_includes.get(g.name()) {
-                    stack.extend(incl.iter().cloned());
-                }
+        for p in packages {
+            if let Ok(spec) = PackageSpec::parse(&mapping, label.repository(), p) {
+                out.specs.push(spec);
             }
         }
+        if let Some(incl) = info.pkg.group_includes.get(label.name()) {
+            for inc in incl {
+                let mut branch_seen = seen.clone();
+                let child = self.build_group_contents(inc, &mut branch_seen)?;
+                out.includes.push(child);
+            }
+        }
+        Ok(out)
+    }
+
+    /// Package group contents (transitively through `includes`).
+    fn group_contents_checked(&self, label: &Label) -> Result<Rc<PackageGroupContents>, String> {
+        if let Some(g) = self.groups.borrow().get(label) {
+            return Ok(g.clone());
+        }
+        let mut seen = BTreeSet::new();
+        let out = self.build_group_contents(label, &mut seen)?;
         let rc = Rc::new(out);
         self.groups.borrow_mut().insert(label.clone(), rc.clone());
-        Some(rc)
+        Ok(rc)
     }
 
     /// Visibility specification labels of a target (`getVisibilityDeclaredLabels`).
     pub fn visibility_labels(&self, info: &TInfo) -> Vec<Label> {
         match &info.target {
-            Target::Rule(r) => r.extra.effective_visibility.clone(),
+            Target::Rule(r) => {
+                if r.rule_class == "bind" {
+                    return vec![Label::parse_canonical("//visibility:public").unwrap()];
+                }
+                if r.rule_class == "config_setting"
+                    && !r.extra.attr_values.contains_key("visibility")
+                    && !r.extra.pkg_default_attrs.iter().any(|a| a == "visibility")
+                    && info.pkg.args.default_visibility.is_none()
+                {
+                    return vec![Label::parse_canonical("//visibility:public").unwrap()];
+                }
+                r.extra.effective_visibility.clone()
+            }
             Target::InputFile { label } => info
                 .pkg
                 .exported_files
@@ -1363,8 +1639,11 @@ impl<'a> TargetEnv<'a> {
                 Ok(i) => self.visibility_labels(&i),
                 Err(_) => Vec::new(),
             },
-            Target::PackageGroup { .. } | Target::EnvironmentGroup { .. } => {
+            Target::PackageGroup { .. } => {
                 vec![Label::parse_canonical("//visibility:public").unwrap()]
+            }
+            Target::EnvironmentGroup { .. } => {
+                vec![Label::parse_canonical("//visibility:private").unwrap()]
             }
         }
     }
@@ -1373,16 +1652,45 @@ impl<'a> TargetEnv<'a> {
         pkg.args.default_visibility.clone().unwrap_or_default()
     }
 
+    fn same_package_or_javatests(owner: &PackageIdentifier, from: &PackageIdentifier) -> bool {
+        if owner == from {
+            return true;
+        }
+        if owner.repository() != from.repository() {
+            return false;
+        }
+        let owner_pkg = owner.package_fragment().path_string();
+        let from_pkg = from.package_fragment().path_string();
+        if owner_pkg == "java" && from_pkg == "javatests" {
+            return true;
+        }
+        if let Some(rest) = owner_pkg.strip_prefix("java/") {
+            if from_pkg.strip_prefix("javatests/") == Some(rest) {
+                return true;
+            }
+        }
+        if let Some(idx) = owner_pkg.find("/java/") {
+            let expected = format!("{}/javatests/{}", &owner_pkg[..idx], &owner_pkg[idx + 6..]);
+            if from_pkg == expected {
+                return true;
+            }
+        }
+        if let Some(prefix) = owner_pkg.strip_suffix("/java") {
+            if from_pkg == format!("{prefix}/javatests") {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Whether package `from_pkg` is allowed by the visibility labels (owned by `owner`).
-    fn spec_contains(
+    fn spec_contains_checked(
         &self,
         vis: &[Label],
         owner: &PackageIdentifier,
         from: &PackageIdentifier,
-    ) -> bool {
-        if owner == from {
-            return true;
-        }
+    ) -> Result<bool, (Label, String)> {
+        let mut allowed = Self::same_package_or_javatests(owner, from);
         for l in vis {
             let n = l.name();
             let pkgpath = l.package_identifier().package_fragment().path_string();
@@ -1390,13 +1698,13 @@ impl<'a> TargetEnv<'a> {
             // special label (`RuleVisibility.PUBLIC_LABEL` is parsed repository-independently).
             if pkgpath == "visibility" {
                 if n == "public" {
-                    return true;
+                    allowed = true;
                 }
                 continue;
             }
             if n == "__pkg__" {
                 if l.package_identifier() == from {
-                    return true;
+                    allowed = true;
                 }
             } else if n == "__subpackages__" {
                 if l.repository() == from.repository()
@@ -1404,15 +1712,18 @@ impl<'a> TargetEnv<'a> {
                         .package_fragment()
                         .starts_with(l.package_identifier().package_fragment())
                 {
-                    return true;
+                    allowed = true;
                 }
-            } else if let Some(g) = self.group_contents(l) {
+            } else {
+                let g = self
+                    .group_contents_checked(l)
+                    .map_err(|msg| (l.clone(), msg))?;
                 if g.contains(from) {
-                    return true;
+                    allowed = true;
                 }
             }
         }
-        false
+        Ok(allowed)
     }
 
     fn label_package_id(l: &Label) -> PackageIdentifier {
@@ -1889,7 +2200,8 @@ impl QueryEnv for TargetEnv<'_> {
         let mut raw: Vec<(Label, Option<Label>)> = Vec::new();
         match &info.target {
             Target::Rule(r) => {
-                for (l, _) in rule_deps_with_aspect_opt(
+                for (l, _) in rule_deps_with_aspect_env(
+                    Some(self),
                     r,
                     self.opts.implicit_deps,
                     self.opts.tool_deps,
@@ -2210,10 +2522,10 @@ impl QueryEnv for TargetEnv<'_> {
 
     fn visible(
         &mut self,
-        _expr: &Expr,
+        expr: &Expr,
         to: &Node,
         from: &Node,
-        _diag: &mut Diag,
+        diag: &mut Diag,
     ) -> Result<bool, QueryError> {
         let Some(info) = self.info_of(from) else {
             return Ok(false);
@@ -2221,7 +2533,19 @@ impl QueryEnv for TargetEnv<'_> {
         let vis = self.visibility_labels(&info);
         let owner = Self::label_package_id(&from.label);
         let to_pkg = Self::label_package_id(&to.label);
-        Ok(self.spec_contains(&vis, &owner, &to_pkg))
+        match self.spec_contains_checked(&vis, &owner, &to_pkg) {
+            Ok(allowed) => Ok(allowed),
+            Err((bad_label, msg)) => {
+                diag.handle_error(
+                    expr,
+                    format!(
+                        "Invalid visibility label '{}': {msg}",
+                        bad_label.canonical_form()
+                    ),
+                )?;
+                Ok(false)
+            }
+        }
     }
 
     fn buildfiles(
@@ -2311,38 +2635,80 @@ impl QueryEnv for TargetEnv<'_> {
         words: &[String],
         diag: &mut Diag,
     ) -> Result<Vec<Node>, QueryError> {
-        // Resolve each word to a file path / label.
+        // Resolve each word to a file path / label by walking ancestor packages for path inputs.
         let mut files: Vec<Label> = Vec::new();
-        for w in words {
-            if let Ok(zel_cmdline::TargetPattern::SingleTarget(l)) =
-                zel_cmdline::TargetPattern::parse(w, &PathFragment::empty())
-            {
-                files.push(l);
+        for raw_w in words {
+            let norm = raw_w.replace('\\', "/");
+            if norm.starts_with("//") || norm.starts_with('@') || norm.contains(':') {
+                if let Ok(zel_cmdline::TargetPattern::SingleTarget(l)) =
+                    zel_cmdline::TargetPattern::parse(&norm, &PathFragment::empty())
+                {
+                    files.push(l);
+                    continue;
+                }
+            }
+            let frag = PathFragment::create(&norm);
+            let full_str = frag.path_string();
+            if full_str.is_empty() {
                 continue;
             }
-            let frag = PathFragment::create(w);
-            let id = PackageIdentifier::create(
-                RepositoryName::main(),
-                frag.parent_directory().unwrap_or_else(PathFragment::empty),
-            );
-            if let Ok(id) = id {
-                if let Ok(l) = Label::create(id, frag.base_name()) {
-                    files.push(l);
+            let mut candidate_pkg = frag.parent_directory();
+            loop {
+                let pkg_frag = candidate_pkg.clone().unwrap_or_else(PathFragment::empty);
+                if let Ok(pkg_id) =
+                    PackageIdentifier::create(RepositoryName::main(), pkg_frag.clone())
+                {
+                    if self.resolver.package(&pkg_id).is_ok() {
+                        let pfx = pkg_frag.path_string();
+                        let rel = if pfx.is_empty() {
+                            full_str.to_string()
+                        } else {
+                            full_str
+                                .strip_prefix(pfx)
+                                .and_then(|r| r.strip_prefix('/'))
+                                .unwrap_or(full_str)
+                                .to_string()
+                        };
+                        if let Ok(l) = Label::create(pkg_id, &rel) {
+                            files.push(l);
+                        }
+                        break;
+                    }
+                }
+                match candidate_pkg {
+                    Some(cur) if !cur.is_empty() => {
+                        candidate_pkg = cur.parent_directory();
+                    }
+                    _ => break,
                 }
             }
         }
         if files.is_empty() {
             return Ok(Vec::new());
         }
-        // Universe: every package below the universe patterns.
-        let pats = self.universe_patterns(&["//...".to_string()]);
-        let roots = self.universe_roots(expr, &pats, diag)?;
+        // Universe: every package below the universe patterns (including packages with zero targets).
         let mut pkgs: Vec<Arc<Package>> = Vec::new();
         let mut seen = HashSet::new();
-        for r in &roots {
-            if let Some(i) = self.info_of(r) {
-                if seen.insert(i.pkg.id.clone()) {
-                    pkgs.push(i.pkg.clone());
+        if self.opts.universe_scope.is_empty() {
+            if let Ok(root_id) = PackageIdentifier::create_in_main_repo("") {
+                let mut pkg_ids = Vec::new();
+                let _ = self.resolver.find_packages_below(&root_id, &mut pkg_ids);
+                for id in pkg_ids {
+                    if seen.insert(id.clone()) {
+                        if let Ok(p) = self.resolver.package(&id) {
+                            pkgs.push(p);
+                        }
+                    }
+                }
+            }
+        } else {
+            let pats = self.universe_patterns(&["//...".to_string()]);
+            let roots = self.universe_roots(expr, &pats, diag)?;
+            for r in &roots {
+                if let Some(i) = self.info_of(r) {
+                    if seen.insert(i.pkg.id.clone()) {
+                        pkgs.push(i.pkg.clone());
+                    }
                 }
             }
         }
@@ -2377,8 +2743,14 @@ impl QueryEnv for TargetEnv<'_> {
         let mut raw: Vec<Label> = Vec::new();
         match &info.target {
             Target::Rule(r) => {
-                for (l, _) in rule_deps_with_aspect_opt(r, true, true, true, &self.opts.aspect_deps)
-                {
+                for (l, _) in rule_deps_with_aspect_env(
+                    Some(self),
+                    r,
+                    true,
+                    true,
+                    true,
+                    &self.opts.aspect_deps,
+                ) {
                     raw.push(l);
                 }
             }

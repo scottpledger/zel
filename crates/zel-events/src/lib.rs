@@ -180,7 +180,11 @@ impl Event {
         }
     }
 
-    pub fn of_bytes(kind: EventKind, location: Option<Location>, bytes: impl Into<Vec<u8>>) -> Self {
+    pub fn of_bytes(
+        kind: EventKind,
+        location: Option<Location>,
+        bytes: impl Into<Vec<u8>>,
+    ) -> Self {
         let raw = bytes.into();
         let message = String::from_utf8_lossy(&raw).into_owned();
         Self {
@@ -200,7 +204,7 @@ impl Event {
     pub fn raw_bytes(&self) -> &[u8] {
         self.message_bytes
             .as_deref()
-            .unwrap_or_else(|| self.message.as_bytes())
+            .unwrap_or(self.message.as_bytes())
     }
 
     pub fn error(location: Option<Location>, message: impl Into<String>) -> Self {
@@ -916,6 +920,9 @@ mod tests {
         assert_eq!(out.take_out(), vec![0xff, 0xfe, b'\n']);
         let err_s = out.err_string();
         assert!(!err_s.contains("drop me"), "{err_s}");
-        assert!(err_s.contains("keep me") && err_s.contains("err always kept"), "{err_s}");
+        assert!(
+            err_s.contains("keep me") && err_s.contains("err always kept"),
+            "{err_s}"
+        );
     }
 }

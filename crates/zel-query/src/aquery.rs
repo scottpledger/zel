@@ -498,9 +498,37 @@ fn test_runner_key(
     }
 }
 
-fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> {
+fn record_action_param_files(a: &Action, m: &mut BTreeMap<String, String>) {
+    let (_, params) = a.command_line();
+    for (path, body) in params {
+        m.insert(
+            path,
+            String::from_utf8_lossy(&body).replace('\n', " \\\n    "),
+        );
+    }
+    if let ActionKind::FileWrite { content, .. } = &a.kind {
+        if a.mnemonic == "ParameterFileWrite" {
+            if let Some(o) = a.outputs.first() {
+                let formatted = match content {
+                    FileContent::Args { args, .. } => args.join(" \\\n    "),
+                    _ => String::from_utf8_lossy(&content.render())
+                        .lines()
+                        .collect::<Vec<_>>()
+                        .join(" \\\n    "),
+                };
+                m.insert(o.exec_path.path_string().to_string(), formatted);
+            }
+        }
+    }
+}
+
+fn collect(
+    env: &mut PostEnv<'_>,
+    nodes: &[Node],
+) -> Result<(Vec<Entry>, BTreeMap<String, String>), String> {
     let filters = filters_of(env);
     let mut out = Vec::new();
+    let mut pre_params = BTreeMap::new();
     for n in nodes {
         let Some(id) = &n.cfg else { continue };
         let Some(info) = env.info_of(&n.label) else {
@@ -533,6 +561,7 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
         for (current_ct, asp_opt) in cts {
             let mut local: Vec<Entry> = Vec::new();
             for a in &current_ct.typed_actions {
+                record_action_param_files(a, &mut pre_params);
                 if !matches_filters(a, &filters) {
                     continue;
                 }
@@ -603,7 +632,7 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
             out.extend(local);
         }
     }
-    Ok(out)
+    Ok((out, pre_params))
 }
 
 /// The `<tool>.runfiles` inputs of the executable tools of the genrule `label`.
@@ -900,7 +929,7 @@ pub(crate) fn format_aquery(
     popts: &PostOpts,
     _fopts: &FormatOpts,
 ) -> Result<Vec<u8>, String> {
-    let mut entries = collect(env, nodes)?;
+    let (mut entries, mut pre_params) = collect(env, nodes)?;
     if popts.prune_unused_actions {
         let mut generating: HashMap<Artifact, usize> = HashMap::new();
         for (i, e) in entries.iter().enumerate() {
@@ -940,7 +969,10 @@ pub(crate) fn format_aquery(
             .collect();
     }
     let params = if popts.include_param_files {
-        param_files(&entries)
+        for (k, v) in param_files(&entries) {
+            pre_params.insert(k, v);
+        }
+        pre_params
     } else {
         BTreeMap::new()
     };
@@ -962,6 +994,9 @@ pub(crate) fn format_aquery(
                     continue;
                 }
                 let args = command_line(e);
+                if args.is_empty() {
+                    continue;
+                }
                 let mut first = true;
                 for a in args {
                     if !first {

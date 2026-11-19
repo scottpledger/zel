@@ -407,6 +407,9 @@ pub trait QueryEnv {
     fn has_explicit_platforms(&self) -> bool {
         false
     }
+    fn filter_label(&mut self, n: &Node) -> String {
+        n.label.to_string()
+    }
     /// Functions specific to a particular environment (`config`, `inputs`, `outputs`, `mnemonic`).
     /// Step 1: validate before evaluating any expression argument, returning `Some(Ok(Some(idx)))`
     /// if `args[idx]` should be evaluated once by the engine and passed to `custom_function_finish`.
@@ -1106,9 +1109,20 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
             Expr::Target(word) => self.eval_target_literal(expr, word),
             Expr::Set(words) => {
                 let mut out = NodeSet::new();
+                let mut first_err = None;
                 for w in words {
-                    let n = self.eval_target_literal(expr, w)?;
-                    out.extend(n.iter().cloned());
+                    match self.eval_target_literal(expr, w) {
+                        Ok(n) => out.extend(n.iter().cloned()),
+                        Err(e) => {
+                            if first_err.is_none() {
+                                first_err = Some(e);
+                            }
+                        }
+                    }
+                }
+                if let Some(mut e) = first_err {
+                    e.expr = Some(expr.to_truncated_string());
+                    return Err(e);
                 }
                 Ok(out)
             }
@@ -1480,7 +1494,7 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
         for n in input.iter() {
             let strs: Vec<Option<String>> = match name {
                 "kind" => vec![Some(self.env.target_kind(n))],
-                "filter" => vec![Some(n.label.to_string())],
+                "filter" => vec![Some(self.env.filter_label(n))],
                 _ => {
                     if self.env.is_rule(n) {
                         self.env

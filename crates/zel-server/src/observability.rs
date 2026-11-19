@@ -502,17 +502,16 @@ impl BuildObserver {
         let sampler = profile_path
             .as_ref()
             .map(|_| ResourceSampler::start(started));
-        let parse_bool = |n: &str, d: bool| match get(n)
-            .map(|s| s.trim().to_ascii_lowercase())
-            .as_deref()
-        {
-            Some("0") | Some("false") | Some("f") | Some("no") | Some("n") => false,
-            Some("1") | Some("true") | Some("t") | Some("yes") | Some("y") => true,
-            Some(_) => d,
-            None => d,
-        };
+        let parse_bool =
+            |n: &str, d: bool| match get(n).map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+                Some("0") | Some("false") | Some("f") | Some("no") | Some("n") => false,
+                Some("1") | Some("true") | Some("t") | Some("yes") | Some("y") => true,
+                Some(_) => d,
+                None => d,
+            };
         let perform_build = parse_bool("build", true);
-        let record_all_mnemonics = parse_bool("experimental_record_metrics_for_all_mnemonics", false);
+        let record_all_mnemonics =
+            parse_bool("experimental_record_metrics_for_all_mnemonics", false);
         let memory_profile = get("memory_profile").is_some_and(|s| !s.is_empty());
 
         Self {
@@ -1043,8 +1042,7 @@ impl BuildObserver {
             let spans = self.actions.spans.lock().unwrap();
             if !spans.is_empty() {
                 let bucket = 200_000_000i64;
-                let all: Vec<(i64, i64)> =
-                    spans.iter().map(|s| (s.start_ns, s.end_ns)).collect();
+                let all: Vec<(i64, i64)> = spans.iter().map(|s| (s.start_ns, s.end_ns)).collect();
                 self.profiler.add_action_count_series(&all, bucket);
                 let local: Vec<(i64, i64)> = spans
                     .iter()
@@ -1306,8 +1304,7 @@ impl BuildObserver {
                     let pf = PathFragment::create(&resolved);
                     match r.force_write_bep_file_with_conversion(fs, &pf, fmt, conv) {
                         Ok(()) => {
-                            wrote_any_bep_file =
-                                wrote_any_bep_file || fs.exists(&pf, true);
+                            wrote_any_bep_file = wrote_any_bep_file || fs.exists(&pf, true);
                         }
                         Err(e) => {
                             file_write_failed = true;
@@ -1414,8 +1411,7 @@ impl BuildObserver {
         // ActionSummary
         let mut action_summary = Msg::new("build_event_stream.BuildMetrics.ActionSummary");
         action_summary.set_int("actions_created", st.actions_created);
-        action_summary
-            .set_int("actions_created_not_including_aspects", st.actions_created);
+        action_summary.set_int("actions_created_not_including_aspects", st.actions_created);
         let executed_count = spans.iter().filter(|s| !s.cache_hit).count() as i64;
         action_summary.set_int("actions_executed", executed_count);
 
@@ -1530,7 +1526,10 @@ impl BuildObserver {
             spans.iter().map(|s| s.start_ns).min(),
             spans.iter().map(|s| s.end_ns).max(),
         ) {
-            timing.set_int("actions_execution_start_in_ms", (first_s / 1_000_000).max(0));
+            timing.set_int(
+                "actions_execution_start_in_ms",
+                (first_s / 1_000_000).max(0),
+            );
             timing.set_int(
                 "execution_phase_time_in_ms",
                 ((last_e - first_s) / 1_000_000).max(0),
@@ -1558,8 +1557,7 @@ impl BuildObserver {
 
         // ArtifactMetrics
         let files_metric = |count: usize| {
-            let mut fm =
-                Msg::new("build_event_stream.BuildMetrics.ArtifactMetrics.FilesMetric");
+            let mut fm = Msg::new("build_event_stream.BuildMetrics.ArtifactMetrics.FilesMetric");
             fm.set_int("count", count as i64);
             fm
         };
@@ -1584,10 +1582,7 @@ impl BuildObserver {
             st.targets_configured,
         );
         bgm.set_int("action_count", st.actions_created);
-        bgm.set_int(
-            "action_count_not_including_aspects",
-            st.actions_created,
-        );
+        bgm.set_int("action_count_not_including_aspects", st.actions_created);
         bgm.set_int("output_artifact_count", st.output_artifacts as i64);
         for (rc_name, &(cnt, act_cnt)) in &st.rule_classes {
             let mut rcc =

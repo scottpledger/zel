@@ -237,8 +237,8 @@ pub fn run_query(
 pub fn run_genquery(
     loader: &std::sync::Arc<zel_packages::PackageLoader>,
     expression: &str,
-    _scope: &[String],
-    _strict: bool,
+    scope: &[String],
+    strict: bool,
     opts: &[String],
 ) -> Result<Vec<u8>, String> {
     let mut qopts = QueryOpts::default();
@@ -249,21 +249,83 @@ pub fn run_genquery(
     fmt.order = format::OrderOutput::Full;
     for o in opts {
         let o = o.as_str();
-        let bad = |name: &str| {
-            format!("error while parsing query options: option --{name} is not allowed")
-        };
         match o {
             "--keep_going" | "--nokeep_going" => {
                 return Err("option --keep_going is not allowed".to_string())
             }
             "--implicit_deps" => qopts.implicit_deps = true,
             "--noimplicit_deps" => qopts.implicit_deps = false,
-            "--tool_deps" => qopts.tool_deps = true,
-            "--notool_deps" => qopts.tool_deps = false,
+            "--tool_deps" | "--host_deps" => qopts.tool_deps = true,
+            "--notool_deps" | "--nohost_deps" => qopts.tool_deps = false,
             "--nodep_deps" => qopts.nodep_deps = true,
             "--nonodep_deps" => qopts.nodep_deps = false,
+            "--consistent_labels" => fmt.printer.consistent = true,
+            "--noconsistent_labels" => fmt.printer.consistent = false,
+            "--strict_test_suite" => qopts.strict_test_suite = true,
+            "--nostrict_test_suite" => qopts.strict_test_suite = false,
+            "--output:display_full_kind" => fmt.display_full_kind = true,
+            "--nooutput:display_full_kind" => fmt.display_full_kind = false,
+            "--incompatible_package_group_includes_double_slash" => {
+                fmt.package_group_includes_double_slash = true
+            }
+            "--noincompatible_package_group_includes_double_slash" => {
+                fmt.package_group_includes_double_slash = false
+            }
+            "--incompatible_package_group_build_output" => fmt.package_group_build_output = true,
+            "--noincompatible_package_group_build_output" => fmt.package_group_build_output = false,
+            "--line_terminator_null" => fmt.line_terminator = "\0".into(),
+            "--noline_terminator_null" => fmt.line_terminator = "\n".into(),
+            "--proto:locations" => fmt.proto_locations = true,
+            "--noproto:locations" => fmt.proto_locations = false,
+            "--proto:default_values" => fmt.proto_default_values = true,
+            "--noproto:default_values" => fmt.proto_default_values = false,
+            "--proto:flatten_selects" => fmt.proto_flatten_selects = true,
+            "--noproto:flatten_selects" => fmt.proto_flatten_selects = false,
+            "--proto:rule_inputs_and_outputs" => fmt.proto_rule_inputs_and_outputs = true,
+            "--noproto:rule_inputs_and_outputs" => fmt.proto_rule_inputs_and_outputs = false,
+            "--proto:instantiation_stack" => fmt.proto_instantiation_stack = true,
+            "--noproto:instantiation_stack" => fmt.proto_instantiation_stack = false,
+            "--proto:definition_stack" => fmt.proto_definition_stack = true,
+            "--noproto:definition_stack" => fmt.proto_definition_stack = false,
+            "--proto:include_attribute_source_aspects" => {
+                fmt.proto_include_attribute_source_aspects = true
+            }
+            "--noproto:include_attribute_source_aspects" => {
+                fmt.proto_include_attribute_source_aspects = false
+            }
+            "--proto:rule_classes" => fmt.proto_rule_classes = true,
+            "--noproto:rule_classes" => fmt.proto_rule_classes = false,
+            "--proto:include_synthetic_attribute_hash" => {
+                fmt.proto_include_synthetic_attribute_hash = true
+            }
+            "--noproto:include_synthetic_attribute_hash" => {
+                fmt.proto_include_synthetic_attribute_hash = false
+            }
+            "--proto:include_starlark_rule_env" => fmt.proto_include_starlark_rule_env = true,
+            "--noproto:include_starlark_rule_env" => fmt.proto_include_starlark_rule_env = false,
+            "--xml:line_numbers" => fmt.xml_line_numbers = true,
+            "--noxml:line_numbers" => fmt.xml_line_numbers = false,
+            "--xml:default_values" => fmt.xml_default_values = true,
+            "--noxml:default_values" => fmt.xml_default_values = false,
+            "--graph:factored" => fmt.graph_factored = true,
+            "--nograph:factored" => fmt.graph_factored = false,
             "--relative_locations" | "--norelative_locations" => {}
             _ if o.starts_with("--output=") => fmt.output = o["--output=".len()..].to_string(),
+            _ if o.starts_with("--aspect_deps=") => {
+                let m = o["--aspect_deps=".len()..].to_string();
+                qopts.aspect_deps = m.clone();
+                fmt.aspect_deps = m;
+            }
+            _ if o.starts_with("--graph:node_limit=") => {
+                if let Ok(v) = o["--graph:node_limit=".len()..].parse::<i32>() {
+                    fmt.graph_node_limit = v;
+                }
+            }
+            _ if o.starts_with("--graph:conditional_edges_limit=") => {
+                if let Ok(v) = o["--graph:conditional_edges_limit=".len()..].parse::<i32>() {
+                    fmt.graph_conditional_edges_limit = v;
+                }
+            }
             _ if o.starts_with("--universe_scope") => {
                 return Err("option --universe_scope is not allowed".to_string())
             }
@@ -285,11 +347,76 @@ pub fn run_genquery(
                 ))
             }
         }
-        let _ = bad;
     }
     fmt.implicit_deps = qopts.implicit_deps;
     fmt.tool_deps = qopts.tool_deps;
+    fmt.nodep_deps = qopts.nodep_deps;
     let resolver = PatternResolver::new(loader.clone(), zel_vfs::PathFragment::empty());
+
+    if !scope.is_empty() {
+        let scope_qopts = QueryOpts {
+            implicit_deps: true,
+            tool_deps: true,
+            nodep_deps: true,
+            ..Default::default()
+        };
+        let quoted_scope = scope
+            .iter()
+            .map(|s| format!("'{}'", s.replace('\'', "''")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let scope_expr_str = format!("deps(set({quoted_scope}))");
+        let mut scope_env = TargetEnv::new(&resolver, scope_qopts);
+        let scope_funcs = scope_env.functions();
+        let scope_expr = parse::parse(&scope_expr_str, &scope_funcs).map_err(|e| e.0)?;
+        let scope_nodes = {
+            let mut scope_eng = Engine::new(&mut scope_env, false, Vec::new());
+            scope_eng.eval(&scope_expr).map_err(|e| e.message)?
+        };
+        let mut allowed: std::collections::BTreeSet<zel_cmdline::Label> =
+            scope_nodes.iter().map(|n| n.label.clone()).collect();
+        for n in scope_nodes.iter() {
+            if let Ok(info) = scope_env.info(&n.label) {
+                for out_lbl in target_env::rule_outputs(&info.pkg, &n.label) {
+                    allowed.insert(out_lbl);
+                }
+            }
+        }
+
+        let mut env = TargetEnv::new(&resolver, qopts);
+        let funcs = env.functions();
+        let expr = parse::parse(expression, &funcs).map_err(|e| e.0)?;
+        let raw_nodes = {
+            let mut eng = Engine::new(&mut env, false, Vec::new());
+            eng.eval(&expr).map_err(|e| e.message)?
+        };
+        if strict {
+            for pat_node in env.pattern_nodes.borrow().iter() {
+                if !allowed.contains(&pat_node.label) {
+                    return Err(format!(
+                        "target '{}' is not within the scope of the query",
+                        pat_node.label.canonical_form()
+                    ));
+                }
+            }
+            for n in raw_nodes.iter() {
+                if !allowed.contains(&n.label) {
+                    return Err(format!(
+                        "target '{}' is not within the scope of the query",
+                        n.label.canonical_form()
+                    ));
+                }
+            }
+        }
+        let filtered: Vec<engine::Node> = raw_nodes
+            .to_vec()
+            .into_iter()
+            .filter(|n| allowed.contains(&n.label))
+            .collect();
+        format::install_printer(&fmt.printer);
+        return format::format_targets(&env, &filtered, &fmt, expr.is_somepath());
+    }
+
     let outcome = run_query(&resolver, expression, &qopts, &fmt);
     if outcome.exit_code != exit::SUCCESS {
         return Err(outcome
