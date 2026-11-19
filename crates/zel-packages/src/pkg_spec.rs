@@ -241,6 +241,18 @@ impl PackageGroupContents {
         }
         Self { specs }
     }
+
+    /// Reconstructs one or more [`PackageGroupContents`] blocks separated by `"\n---\n"`.
+    pub fn decode_canonical_groups(encoded: &str) -> Vec<Self> {
+        if encoded.is_empty() {
+            return Vec::new();
+        }
+        encoded
+            .split("\n---\n")
+            .filter(|block| !block.is_empty())
+            .map(Self::decode_canonical)
+            .collect()
+    }
 }
 
 /// Resolves the transitive contents of the package group `group`, following `includes`.

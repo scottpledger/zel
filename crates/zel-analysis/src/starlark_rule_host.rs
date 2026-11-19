@@ -63,10 +63,9 @@ fn dispatch(
                 ))
             }
         };
-        let contents = zel_packages::pkg_spec::PackageGroupContents::decode_canonical(encoded);
-        return Ok(Value::Bool(
-            contents.contains(target_label.package_identifier()),
-        ));
+        let groups = zel_packages::pkg_spec::PackageGroupContents::decode_canonical_groups(encoded);
+        let target_pkg = target_label.package_identifier();
+        return Ok(Value::Bool(groups.iter().any(|g| g.contains(target_pkg))));
     }
     if name == "proto_common_do_not_use.incompatible_enable_proto_toolchain_resolution" {
         return Ok(Value::Bool(true));

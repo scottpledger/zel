@@ -173,56 +173,106 @@ pub fn analyze_target_with(
             ct.testonly = gen.testonly;
             Ok(ct)
         }
-        Target::PackageGroup { label, .. } => {
+        Target::PackageGroup { label, packages } => {
+            thread_local! {
+                static ACTIVE_PKG_GROUPS: std::cell::RefCell<Vec<Label>> =
+                    const { std::cell::RefCell::new(Vec::new()) };
+            }
+            let cycle_err = ACTIVE_PKG_GROUPS.with(|stack| {
+                let mut st = stack.borrow_mut();
+                if let Some(pos) = st.iter().position(|x| x == label) {
+                    let mut cyc: Vec<String> =
+                        st[pos..].iter().map(|l| l.canonical_form()).collect();
+                    cyc.push(label.canonical_form());
+                    return Some(format!("cycle in dependency graph: {}", cyc.join(" -> ")));
+                }
+                st.push(label.clone());
+                None
+            });
+            if let Some(e) = cycle_err {
+                return Err(e);
+            }
+            struct ActivePkgGroupGuard;
+            impl Drop for ActivePkgGroupGuard {
+                fn drop(&mut self) {
+                    ACTIVE_PKG_GROUPS.with(|stack| {
+                        stack.borrow_mut().pop();
+                    });
+                }
+            }
+            let _guard = ActivePkgGroupGuard;
+
             let null_cfg = config.to_core_only();
-            if let Some(pkg) = resolver
-                .package_loader()
-                .and_then(|l| l.load_package(label.package_identifier()).ok())
-            {
+            let repo = label.package_identifier().repository();
+            let entries = resolver.repo_mapping_entries(repo.name());
+            let mut map = std::collections::HashMap::new();
+            for (a, c) in entries {
+                if let Ok(rn) = zel_cmdline::RepositoryName::create(&c) {
+                    map.insert(a, rn);
+                }
+            }
+            let mapping = zel_cmdline::RepositoryMapping::new(map, repo.clone());
+            let mut direct_specs = Vec::with_capacity(packages.len());
+            for raw in packages {
+                let spec = zel_packages::pkg_spec::PackageSpec::parse(&mapping, repo, raw)
+                    .map_err(|e| format!("package group '{}': {e}", label.canonical_form()))?;
+                direct_specs.push(spec);
+            }
+
+            let mut group_blocks: Vec<String> = Vec::new();
+            if let Some(loader) = resolver.package_loader() {
+                let pkg = loader
+                    .load_package(label.package_identifier())
+                    .map_err(|e| {
+                        let mut lines: Vec<String> = e
+                            .events
+                            .iter()
+                            .filter(|ev| ev.kind == zel_packages::lookup::EventKind::Error)
+                            .map(|ev| ev.render())
+                            .collect();
+                        lines.push(e.message.clone());
+                        lines.join("\n")
+                    })?;
+                if pkg.contains_errors {
+                    let msgs: Vec<String> = pkg
+                        .events
+                        .iter()
+                        .filter(|ev| ev.kind == zel_packages::lookup::EventKind::Error)
+                        .map(|ev| ev.render())
+                        .collect();
+                    return Err(format!(
+                        "error loading package '{}': {}",
+                        label.package_identifier().package_fragment(),
+                        msgs.join("\n")
+                    ));
+                }
                 if let Some(incs) = pkg.group_includes.get(label.name()) {
                     for inc in incs {
-                        resolver.configured_target(inc, &null_cfg)?;
+                        let inc_ct = resolver.configured_target(inc, &null_cfg)?;
+                        let Some(Value::ProviderInstance { fields, .. }) =
+                            inc_ct.providers.get("PackageSpecificationInfo")
+                        else {
+                            return Err(format!(
+                                "Label '{}' does not refer to a package group",
+                                inc.canonical_form()
+                            ));
+                        };
+                        if let Some(Value::Host(_, inc_encoded)) = fields.get("contains") {
+                            if !inc_encoded.is_empty() {
+                                group_blocks.push(inc_encoded.clone());
+                            }
+                        }
                     }
                 }
             }
-            let encoded_specs = if let Some(loader) = resolver.package_loader() {
-                zel_packages::pkg_spec::resolve_package_group(label, &mut |g| {
-                    let pkg = loader
-                        .load_package(g.package_identifier())
-                        .map_err(|e| e.to_string())?;
-                    let raw_pkgs = match pkg.targets.get(g.name()) {
-                        Some(Target::PackageGroup { packages, .. }) => packages.clone(),
-                        _ => Vec::new(),
-                    };
-                    let repo = g.package_identifier().repository();
-                    let entries = resolver.repo_mapping_entries(repo.name());
-                    let mut map = std::collections::HashMap::new();
-                    for (a, c) in entries {
-                        if let Ok(rn) = zel_cmdline::RepositoryName::create(&c) {
-                            map.insert(a, rn);
-                        }
-                    }
-                    let mapping = zel_cmdline::RepositoryMapping::new(map, repo.clone());
-                    let mut parsed = Vec::with_capacity(raw_pkgs.len());
-                    for raw in &raw_pkgs {
-                        if let Ok(spec) =
-                            zel_packages::pkg_spec::PackageSpec::parse(&mapping, repo, raw)
-                        {
-                            parsed.push(spec);
-                        }
-                    }
-                    let incs = pkg
-                        .group_includes
-                        .get(g.name())
-                        .cloned()
-                        .unwrap_or_default();
-                    Ok((parsed, incs))
-                })
-                .map(|c| c.encode_canonical())
-                .unwrap_or_default()
-            } else {
-                String::new()
-            };
+            let own_encoded = zel_packages::pkg_spec::PackageGroupContents {
+                specs: direct_specs,
+            }
+            .encode_canonical();
+            if !own_encoded.is_empty() {
+                group_blocks.push(own_encoded);
+            }
+            let encoded_specs = group_blocks.join("\n---\n");
             let mut ct =
                 ConfiguredTarget::new(label.clone(), config.clone(), "package_group".to_string());
             ct.providers.insert(

@@ -3831,3 +3831,75 @@ check_group(name = "chk", group = ":grp")
         .collect();
     assert_eq!(got, vec![true, false, true, false]);
 }
+
+#[test]
+fn package_specification_info_propagates_cycle_and_load_errors() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _check_impl(ctx):
+    _ = ctx.attr.group[PackageSpecificationInfo].contains("//allowed:tgt")
+    return [DefaultInfo()]
+
+check_group = rule(
+    implementation = _check_impl,
+    attrs = {"group": attr.label(providers = [PackageSpecificationInfo])},
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "check_group")
+
+filegroup(name = "not_a_group", srcs = [])
+
+package_group(name = "cyc_a", includes = [":cyc_b"])
+package_group(name = "cyc_b", includes = [":cyc_a"])
+check_group(name = "chk_cycle", group = ":cyc_a")
+
+package_group(name = "bad_inc", includes = [":not_a_group"])
+check_group(name = "chk_bad_inc", group = ":bad_inc")
+
+package_group(name = "inc_err_pkg", includes = ["//broken:grp"])
+check_group(name = "chk_err_pkg", group = ":inc_err_pkg")
+"#,
+        ),
+        (
+            "broken/BUILD",
+            r#"
+package_group(name = "grp", packages = ["not_a_valid_spec"])
+"#,
+        ),
+    ]);
+
+    let cycle_err = ws.analyze("//:chk_cycle").unwrap_err();
+    assert!(
+        cycle_err.contains("cycle in dependency graph"),
+        "expected cycle error, got: {cycle_err}"
+    );
+
+    let bad_inc_err = ws.analyze("//:chk_bad_inc").unwrap_err();
+    assert!(
+        bad_inc_err.contains("does not refer to a package group"),
+        "expected non-package_group include error, got: {bad_inc_err}"
+    );
+
+    let broken_pkg_err = ws.analyze("//:chk_err_pkg").unwrap_err();
+    assert!(
+        broken_pkg_err.contains("invalid package name 'not_a_valid_spec'"),
+        "expected invalid spec package error, got: {broken_pkg_err}"
+    );
+
+    let malformed_target = Target::PackageGroup {
+        label: Label::parse_canonical("//:inline_bad").unwrap(),
+        packages: vec!["invalid_inline_spec".to_string()],
+    };
+    let inline_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let inline_err = analyze_target(&malformed_target, &inline_cfg).unwrap_err();
+    assert!(
+        inline_err.contains("invalid package name 'invalid_inline_spec'"),
+        "expected spec parse error from analyze_target, got: {inline_err}"
+    );
+}
