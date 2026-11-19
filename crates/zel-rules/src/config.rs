@@ -62,7 +62,7 @@ fn option_values(cfg: &zel_analysis::BuildConfigurationKey, name: &str) -> Optio
         "platforms" => Some(cfg.platforms.clone()),
         other => {
             if let Some(n) = cfg.native.get(other) {
-                if cfg.options.get(other).map_or(true, |raw| raw == &n.raw) {
+                if cfg.options.get(other).is_none_or(|raw| raw == &n.raw) {
                     return match &n.value {
                         zel_analysis::build_options::ConfigValue::List(l) => Some(l.clone()),
                         zel_analysis::build_options::ConfigValue::Scalar(s) => {

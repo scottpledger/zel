@@ -520,7 +520,7 @@ pub(crate) fn resolve_toolchains_lazy(
             if !has_optional || resolved_count == types.len() {
                 return Ok(cand);
             }
-            if best.as_ref().map_or(true, |(c, _)| resolved_count > *c) {
+            if best.as_ref().is_none_or(|(c, _)| resolved_count > *c) {
                 best = Some((resolved_count, cand));
             }
         } else if missing_for_all.is_empty() {
@@ -642,7 +642,7 @@ pub fn resolve_toolchains(
             if !has_optional || resolved_count == types.len() {
                 return Ok(cand);
             }
-            if best.as_ref().map_or(true, |(c, _)| resolved_count > *c) {
+            if best.as_ref().is_none_or(|(c, _)| resolved_count > *c) {
                 best = Some((resolved_count, cand));
             }
         } else if missing_for_all.is_empty() {

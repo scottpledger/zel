@@ -82,7 +82,7 @@ impl Opts<'_> {
     }
     fn list(&self, k: &str) -> Vec<String> {
         if let Some(n) = self.0.native.get(k) {
-            if self.0.options.get(k).map_or(true, |raw| raw == &n.raw) {
+            if self.0.options.get(k).is_none_or(|raw| raw == &n.raw) {
                 if let crate::build_options::ConfigValue::List(l) = &n.value {
                     return l.clone();
                 }
