@@ -395,7 +395,7 @@ pub fn propagate_rule_tags(
                     | "supports-path-mapping"
             )
         {
-            exec_info.entry(t).or_insert_with(String::new);
+            exec_info.entry(t).or_default();
         }
     }
 }

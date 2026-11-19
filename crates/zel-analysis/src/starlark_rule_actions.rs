@@ -610,7 +610,7 @@ fn ctx_method(
             let (lbl, is_test) = match arg(pos, kw, 0, "target") {
                 None | Some(Value::None) => (st.label.clone(), st.rule.is_test_rule()),
                 Some(v) => {
-                    let ct = target_of(&v).ok_or_else(|| {
+                    let ct = target_of(v).ok_or_else(|| {
                         StarlarkError("coverage_instrumented: expected Target or None".into())
                     })?;
                     (ct.label.clone(), ct.is_test)
