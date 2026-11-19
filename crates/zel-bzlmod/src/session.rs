@@ -108,17 +108,42 @@ impl BzlmodConfig {
         output_base: &Path,
         client_env: BTreeMap<String, String>,
     ) -> Result<Self, String> {
+        let non_empty = |v: Option<&String>| v.filter(|s| !s.is_empty()).cloned();
+        let non_empty_env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+        let user_home = non_empty(client_env.get("HOME"))
+            .or_else(|| non_empty(client_env.get("USERPROFILE")))
+            .or_else(|| {
+                if client_env.contains_key("HOME") || client_env.contains_key("USERPROFILE") {
+                    None
+                } else {
+                    non_empty_env("HOME").or_else(|| non_empty_env("USERPROFILE"))
+                }
+            });
         let abs = |p: &str| -> PathBuf {
-            if let Some(rest) = p.strip_prefix("%workspace%/") {
+            if let Some(rest) = p.strip_prefix("%workspace%/").or_else(|| {
+                if cfg!(windows) {
+                    p.strip_prefix("%workspace%\\")
+                } else {
+                    None
+                }
+            }) {
                 workspace.join(rest)
             } else if p == "%workspace%" {
                 workspace.to_path_buf()
-            } else if let Some(rest) = p.strip_prefix("~/") {
-                if let Some(home) = client_env
-                    .get("HOME")
-                    .cloned()
-                    .or_else(|| std::env::var("HOME").ok())
-                {
+            } else if p == "~" {
+                if let Some(home) = &user_home {
+                    PathBuf::from(home)
+                } else {
+                    workspace.join(p)
+                }
+            } else if let Some(rest) = p.strip_prefix("~/").or_else(|| {
+                if cfg!(windows) {
+                    p.strip_prefix("~\\")
+                } else {
+                    None
+                }
+            }) {
+                if let Some(home) = &user_home {
                     PathBuf::from(home).join(rest)
                 } else {
                     workspace.join(p)
@@ -179,15 +204,7 @@ impl BzlmodConfig {
                 .map(|v| {
                     split_pair(v)
                         .map(|(a, b)| {
-                            let b_path = if let Some(rest) = b.strip_prefix("%workspace%/") {
-                                workspace.join(rest)
-                            } else if b == "%workspace%" {
-                                workspace.to_path_buf()
-                            } else if Path::new(&b).is_absolute() {
-                                PathBuf::from(&b)
-                            } else {
-                                workspace.join(&b)
-                            };
+                            let b_path = abs(&b);
                             (a, b_path.display().to_string())
                         })
                         .ok_or_else(|| {
@@ -291,10 +308,19 @@ impl BzlmodConfig {
             semantics_fingerprint: crate::semantics_fp::stable_fingerprint(
                 &crate::semantics_fp::bool_overrides(parsed),
             ),
-            downloader_rewriter: crate::download::UrlRewriter::from_config_paths(
-                workspace,
-                &raw(parsed, "downloader_config"),
-            )?,
+            downloader_rewriter: {
+                let downloader_configs: Vec<String> = raw(parsed, "downloader_config")
+                    .into_iter()
+                    .map(|c| {
+                        if c.is_empty() {
+                            c
+                        } else {
+                            abs(&c).display().to_string()
+                        }
+                    })
+                    .collect();
+                crate::download::UrlRewriter::from_config_paths(workspace, &downloader_configs)?
+            },
             download_retries: parsed
                 .get_int("experimental_repository_downloader_retries")
                 .map(|v| v.max(0) as u32)
@@ -1671,5 +1697,89 @@ mod repo_env_tests {
                 "expected None for {escaping_or_invalid}"
             );
         }
+    }
+
+    #[test]
+    fn tilde_paths_expand_home_and_windows_userprofile() {
+        let cfg_of = |client: &[(&str, &str)], args: &[&str]| -> BzlmodConfig {
+            let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+            let parsed = ParsedCommandOptions::parse_for_command("build", &args).unwrap();
+            let client = client
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect();
+            BzlmodConfig::from_parsed(&parsed, Path::new("/ws"), Path::new("/ob"), client).unwrap()
+        };
+
+        // Windows-style environment where HOME is unset (or empty) and USERPROFILE is set.
+        let win_cfg = cfg_of(
+            &[("USERPROFILE", "/users/win_alice")],
+            &[
+                "--repository_cache=~/bazel_cache",
+                "--repo_contents_cache=~",
+                "--distdir=~/dists",
+                "--credential_helper=example.com=~/bin/cred-helper",
+                "--override_repository=ext=~/repos/ext",
+                "--override_module=mod_a=~/mods/mod_a",
+            ],
+        );
+        assert_eq!(
+            win_cfg.repository_cache.as_deref(),
+            Some(Path::new("/users/win_alice/bazel_cache"))
+        );
+        assert_eq!(
+            win_cfg.repo_contents_cache.as_deref(),
+            Some(Path::new("/users/win_alice"))
+        );
+        assert_eq!(
+            win_cfg.distdirs,
+            vec![PathBuf::from("/users/win_alice/dists")]
+        );
+        assert_eq!(
+            win_cfg.credential_helpers,
+            vec![(
+                "example.com".to_string(),
+                PathBuf::from("/users/win_alice/bin/cred-helper")
+            )]
+        );
+        assert_eq!(
+            win_cfg.override_repository.get("ext").map(PathBuf::as_path),
+            Some(Path::new("/users/win_alice/repos/ext"))
+        );
+        assert_eq!(
+            win_cfg.override_modules,
+            vec![(
+                "mod_a".to_string(),
+                "/users/win_alice/mods/mod_a".to_string()
+            )]
+        );
+
+        // When both HOME and USERPROFILE are set, HOME takes precedence; empty HOME falls back to USERPROFILE.
+        let both_cfg = cfg_of(
+            &[("HOME", "/home/alice"), ("USERPROFILE", "/users/win_alice")],
+            &["--repository_cache=~/cache"],
+        );
+        assert_eq!(
+            both_cfg.repository_cache.as_deref(),
+            Some(Path::new("/home/alice/cache"))
+        );
+        let empty_home_cfg = cfg_of(
+            &[("HOME", ""), ("USERPROFILE", "/users/win_alice")],
+            &["--repository_cache=~/cache"],
+        );
+        assert_eq!(
+            empty_home_cfg.repository_cache.as_deref(),
+            Some(Path::new("/users/win_alice/cache"))
+        );
+
+        // When neither home variable is non-empty, literal ~/... falls back to workspace-relative.
+        let no_home_cfg = cfg_of(
+            &[("HOME", ""), ("USERPROFILE", "")],
+            &["--repository_cache=~/cache"],
+        );
+        assert_eq!(
+            no_home_cfg.repository_cache.as_deref(),
+            Some(Path::new("/ws/~/cache"))
+        );
     }
 }
