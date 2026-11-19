@@ -4491,10 +4491,7 @@ fn construct_native_provider(
                 .entry("requirements".to_string())
                 .or_insert_with(|| Value::Dict(Arc::new(Mutex::new(StarlarkDict::new()))));
             if matches!(eval_kw.get("exec_group"), None | Some(Value::None)) {
-                eval_kw.insert(
-                    "exec_group".to_string(),
-                    Value::String("test".to_string()),
-                );
+                eval_kw.insert("exec_group".to_string(), Value::String("test".to_string()));
             }
             Ok(eval_kw)
         }

@@ -1307,44 +1307,43 @@ impl ParamFileWriteSpec {
         &self,
         list_dir: &dyn Fn(&str) -> Result<Vec<String>, String>,
     ) -> Result<Vec<u8>, String> {
-        let mut lines =
-            if self.format == ParamFileFormat::FlagPerLine && !self.flag_groups.is_empty() {
-                let mut collapsed = Vec::with_capacity(self.flag_groups.len());
-                let mut cursor = 0usize;
-                let collapse_one = |group: Vec<String>, dst: &mut Vec<String>| match group
-                    .as_slice()
-                {
-                    [] => {}
-                    [only] => dst.push(only.clone()),
-                    [first, rest @ ..] if first.is_empty() => dst.push(rest.join(" ")),
-                    [first, rest @ ..] => dst.push(format!("{first}={}", rest.join(" "))),
-                };
-                for &(start, end) in &self.flag_groups {
-                    if end == 0 || start >= self.args.len() || start >= end {
-                        continue;
-                    }
-                    let s = start;
-                    let e = end.min(self.args.len());
-                    while cursor < s {
-                        let expanded =
-                            crate::expand_tree_artifact_args(&self.args[cursor..cursor + 1], list_dir)?;
-                        collapsed.extend(expanded);
-                        cursor += 1;
-                    }
-                    let expanded = crate::expand_tree_artifact_args(&self.args[s..e], list_dir)?;
-                    collapse_one(expanded, &mut collapsed);
-                    cursor = e;
+        let mut lines = if self.format == ParamFileFormat::FlagPerLine
+            && !self.flag_groups.is_empty()
+        {
+            let mut collapsed = Vec::with_capacity(self.flag_groups.len());
+            let mut cursor = 0usize;
+            let collapse_one = |group: Vec<String>, dst: &mut Vec<String>| match group.as_slice() {
+                [] => {}
+                [only] => dst.push(only.clone()),
+                [first, rest @ ..] if first.is_empty() => dst.push(rest.join(" ")),
+                [first, rest @ ..] => dst.push(format!("{first}={}", rest.join(" "))),
+            };
+            for &(start, end) in &self.flag_groups {
+                if end == 0 || start >= self.args.len() || start >= end {
+                    continue;
                 }
-                while cursor < self.args.len() {
+                let s = start;
+                let e = end.min(self.args.len());
+                while cursor < s {
                     let expanded =
                         crate::expand_tree_artifact_args(&self.args[cursor..cursor + 1], list_dir)?;
                     collapsed.extend(expanded);
                     cursor += 1;
                 }
-                collapsed
-            } else {
-                crate::expand_tree_artifact_args(&self.args, list_dir)?
-            };
+                let expanded = crate::expand_tree_artifact_args(&self.args[s..e], list_dir)?;
+                collapse_one(expanded, &mut collapsed);
+                cursor = e;
+            }
+            while cursor < self.args.len() {
+                let expanded =
+                    crate::expand_tree_artifact_args(&self.args[cursor..cursor + 1], list_dir)?;
+                collapsed.extend(expanded);
+                cursor += 1;
+            }
+            collapsed
+        } else {
+            crate::expand_tree_artifact_args(&self.args, list_dir)?
+        };
         if self.flags_only {
             lines.retain(|s| s.starts_with("--"));
         }

@@ -108,11 +108,7 @@ impl ParamFileInfo {
                 out.push(args[cursor].clone());
                 cursor += 1;
             }
-            if e - s >= 2
-                && !args[s..e]
-                    .iter()
-                    .any(|item| item.contains("\u{1}ZEL_TREE"))
-            {
+            if e - s >= 2 && !args[s..e].iter().any(|item| item.contains("\u{1}ZEL_TREE")) {
                 if args[s].is_empty() {
                     out.push(args[s + 1..e].join(" "));
                 } else {
@@ -811,7 +807,9 @@ impl Action {
                                 let mut cursor = lead;
                                 let mut push_slice = |s: usize, e: usize| {
                                     let slice = &a.args[s..e];
-                                    if slice.first().is_some_and(|first| is_flag_per_line_entry(first))
+                                    if slice
+                                        .first()
+                                        .is_some_and(|first| is_flag_per_line_entry(first))
                                     {
                                         let ns = raw_flag_args.len();
                                         raw_flag_args.extend_from_slice(slice);
@@ -822,7 +820,11 @@ impl Action {
                                         if slice[0].is_empty() {
                                             argv.push(slice[1..].join(" "));
                                         } else {
-                                            argv.push(format!("{}={}", slice[0], slice[1..].join(" ")));
+                                            argv.push(format!(
+                                                "{}={}",
+                                                slice[0],
+                                                slice[1..].join(" ")
+                                            ));
                                         }
                                     } else if e > s {
                                         argv.push(slice[0].clone());
