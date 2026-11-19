@@ -3053,9 +3053,9 @@ mod tests {
                 assert!(out.status.success());
                 out.stdout
             };
-            let mut concat_xz = xz_compress_part(&tar_bytes[..mid], "p1.bin");
+            let mut concat_xz = xz_compress_part(&tar_bytes[..mid], "part_one.bin");
             concat_xz.extend_from_slice(&[0, 0, 0, 0]); // 4-byte zero padding between streams
-            concat_xz.extend_from_slice(&xz_compress_part(&tar_bytes[mid..], "p2.bin"));
+            concat_xz.extend_from_slice(&xz_compress_part(&tar_bytes[mid..], "part_two.bin"));
             fs::write(d.join("concat.tar.xz"), &concat_xz).unwrap();
             extract(
                 &d.join("concat.tar.xz"),
