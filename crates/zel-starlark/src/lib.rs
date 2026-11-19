@@ -4484,16 +4484,55 @@ fn construct_native_provider(
 ) -> Result<BTreeMap<String, Value>, StarlarkError> {
     match name {
         "ExecutionInfo" => {
-            for (p, v) in ["requirements", "exec_group"].iter().zip(eval_pos.iter()) {
-                eval_kw.entry((*p).to_string()).or_insert_with(|| v.clone());
+            if eval_pos.len() > 2 {
+                return Err(StarlarkError(format!(
+                    "ExecutionInfo() accepts at most 2 positional arguments, got {}",
+                    eval_pos.len()
+                )));
             }
-            eval_kw
-                .entry("requirements".to_string())
-                .or_insert_with(|| Value::Dict(Arc::new(Mutex::new(StarlarkDict::new()))));
-            if matches!(eval_kw.get("exec_group"), None | Some(Value::None)) {
-                eval_kw.insert("exec_group".to_string(), Value::String("test".to_string()));
+            for k in eval_kw.keys() {
+                if k != "requirements" && k != "exec_group" {
+                    return Err(StarlarkError(format!(
+                        "ExecutionInfo() got unexpected keyword argument '{k}'"
+                    )));
+                }
             }
-            Ok(eval_kw)
+            if !eval_pos.is_empty() && eval_kw.contains_key("requirements") {
+                return Err(StarlarkError(
+                    "ExecutionInfo() got multiple values for parameter 'requirements'".to_string(),
+                ));
+            }
+            if eval_pos.len() >= 2 && eval_kw.contains_key("exec_group") {
+                return Err(StarlarkError(
+                    "ExecutionInfo() got multiple values for parameter 'exec_group'".to_string(),
+                ));
+            }
+            let req_raw = eval_pos
+                .first()
+                .cloned()
+                .or_else(|| eval_kw.remove("requirements"));
+            let reqs = match req_raw {
+                Some(v) => validate_str_dict(&v, "requirements")?,
+                None => Value::Dict(Arc::new(Mutex::new(StarlarkDict::new()))),
+            };
+            let eg_raw = eval_pos
+                .get(1)
+                .cloned()
+                .or_else(|| eval_kw.remove("exec_group"));
+            let exec_group = match eg_raw {
+                Some(Value::String(s)) => Value::String(s),
+                Some(other) => {
+                    return Err(StarlarkError(format!(
+                        "in call to ExecutionInfo(), parameter 'exec_group' got value of type '{}', want 'string'",
+                        other.type_name()
+                    )))
+                }
+                None => Value::String("test".to_string()),
+            };
+            let mut out = BTreeMap::new();
+            out.insert("requirements".to_string(), reqs);
+            out.insert("exec_group".to_string(), exec_group);
+            Ok(out)
         }
         "AnalysisTestResultInfo" => {
             if eval_pos.len() > 2 {

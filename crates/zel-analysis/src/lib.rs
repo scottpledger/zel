@@ -1696,6 +1696,8 @@ pub struct ConfiguredTarget {
     pub warnings: Vec<String>,
     /// For `alias` targets: the chain of aliased target labels ending at the final non-alias target.
     pub alias_targets: Vec<Label>,
+    /// Direct aliased `ConfiguredTarget` (`AliasConfiguredTarget.getActualNoFollow`).
+    pub actual: Option<std::sync::Arc<ConfiguredTarget>>,
     /// Non-`None` when this target is incompatible with the target platform (`target_compatible_with`).
     pub incompatible: Option<IncompatiblePlatform>,
 }
@@ -1755,8 +1757,28 @@ impl ConfiguredTarget {
             created_in_symbolic_macro: false,
             warnings: Vec::new(),
             alias_targets: Vec::new(),
+            actual: None,
             incompatible: None,
         }
+    }
+
+    /// `AliasConfiguredTarget.getOriginalLabel`: the lookup-key label of this configured target.
+    pub fn original_label(&self) -> &Label {
+        &self.label
+    }
+
+    /// `AliasConfiguredTarget.getActualNoFollow`: the direct aliased target, if this is an alias.
+    pub fn get_actual_no_follow(&self) -> Option<&std::sync::Arc<ConfiguredTarget>> {
+        self.actual.as_ref()
+    }
+
+    /// `AliasConfiguredTarget.getActual`: walks the alias chain to the underlying real target.
+    pub fn get_actual(&self) -> &ConfiguredTarget {
+        let mut cur = self;
+        while let Some(next) = cur.actual.as_deref() {
+            cur = next;
+        }
+        cur
     }
 
     /// `AliasProvider.getDependencyLabel`: head of the alias chain, or `self.label`.
@@ -1814,6 +1836,246 @@ impl ConfiguredTarget {
         }
         s
     }
+}
+
+/// Backing representation of `PlatformInfo.constraints` (`ConstraintCollection.java`),
+/// preserving the parent chain and falling back to `ConstraintSettingInfo.default_constraint_value`.
+#[derive(Debug, Clone)]
+pub struct ConstraintCollectionData {
+    /// `(ConstraintSettingInfo, ConstraintValueInfo)` entries explicitly declared on this platform.
+    pub entries: Vec<(zel_starlark::Value, zel_starlark::Value)>,
+    pub parent: Option<std::sync::Arc<ConstraintCollectionData>>,
+}
+
+static CONSTRAINT_COLLECTIONS: std::sync::Mutex<Vec<std::sync::Arc<ConstraintCollectionData>>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub fn register_constraint_collection(
+    entries: Vec<(zel_starlark::Value, zel_starlark::Value)>,
+    parent_constraints: Option<&zel_starlark::Value>,
+) -> zel_starlark::Value {
+    let parent = parent_constraints.and_then(constraint_collection_of);
+    let data = std::sync::Arc::new(ConstraintCollectionData { entries, parent });
+    let mut reg = CONSTRAINT_COLLECTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let id = reg.len();
+    reg.push(data);
+    zel_starlark::Value::Host("constraint_collection".to_string(), id.to_string())
+}
+
+pub fn constraint_collection_of(
+    v: &zel_starlark::Value,
+) -> Option<std::sync::Arc<ConstraintCollectionData>> {
+    let zel_starlark::Value::Host(k, id) = v else {
+        return None;
+    };
+    if k != "constraint_collection" {
+        return None;
+    }
+    let idx: usize = id.parse().ok()?;
+    CONSTRAINT_COLLECTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(idx)
+        .cloned()
+}
+
+fn constraint_setting_label(v: &zel_starlark::Value) -> Option<Label> {
+    match v {
+        zel_starlark::Value::ProviderInstance {
+            provider_name,
+            fields,
+        } if provider_name == "ConstraintSettingInfo" || provider_name.ends_with("%ConstraintSettingInfo") => {
+            match fields.get("label") {
+                Some(zel_starlark::Value::Label(l)) => Some(l.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn constraint_value_label(v: &zel_starlark::Value) -> Option<Label> {
+    match v {
+        zel_starlark::Value::ProviderInstance {
+            provider_name,
+            fields,
+        } if provider_name == "ConstraintValueInfo" || provider_name.ends_with("%ConstraintValueInfo") => {
+            match fields.get("label") {
+                Some(zel_starlark::Value::Label(l)) => Some(l.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn collect_cc_map(
+    cc: &ConstraintCollectionData,
+    out: &mut BTreeMap<String, (Label, Label)>,
+    order: &mut Vec<String>,
+) {
+    if let Some(p) = &cc.parent {
+        collect_cc_map(p, out, order);
+    }
+    for (s, v) in &cc.entries {
+        if let (Some(sl), Some(vl)) = (constraint_setting_label(s), constraint_value_label(v)) {
+            let key = sl.canonical_form();
+            if !out.contains_key(&key) {
+                order.push(key.clone());
+            }
+            out.insert(key, (sl, vl));
+        }
+    }
+}
+
+/// Flattens a `ConstraintCollection` (or legacy `(Label -> Label)` dict) into `(setting, value)` labels.
+pub fn platform_constraint_map(
+    constraints_val: &zel_starlark::Value,
+) -> BTreeMap<String, (Label, Label)> {
+    let mut out = BTreeMap::new();
+    if let Some(cc) = constraint_collection_of(constraints_val) {
+        let mut order = Vec::new();
+        collect_cc_map(&cc, &mut out, &mut order);
+        return out;
+    }
+    if let zel_starlark::Value::Dict(d) = constraints_val {
+        for (k, v) in d.lock().unwrap().items() {
+            if let (zel_starlark::Value::Label(sl), zel_starlark::Value::Label(vl)) = (k, v) {
+                out.insert(sl.canonical_form(), (sl, vl));
+            }
+        }
+    }
+    out
+}
+
+/// Ordered constraint value labels of a platform's `constraints` (parent-then-own, child wins).
+pub fn platform_constraint_value_labels(constraints_val: &zel_starlark::Value) -> Vec<Label> {
+    if let Some(cc) = constraint_collection_of(constraints_val) {
+        let mut map = BTreeMap::new();
+        let mut order = Vec::new();
+        collect_cc_map(&cc, &mut map, &mut order);
+        return order
+            .into_iter()
+            .filter_map(|k| map.remove(&k).map(|(_, v)| v))
+            .collect();
+    }
+    platform_constraint_map(constraints_val)
+        .into_values()
+        .map(|(_, v)| v)
+        .collect()
+}
+
+fn cc_lookup_explicit(
+    cc: &ConstraintCollectionData,
+    setting_canon: &str,
+) -> Option<zel_starlark::Value> {
+    for (s, v) in &cc.entries {
+        if constraint_setting_label(s).as_ref().map(Label::canonical_form).as_deref()
+            == Some(setting_canon)
+        {
+            return Some(v.clone());
+        }
+    }
+    cc.parent
+        .as_ref()
+        .and_then(|p| cc_lookup_explicit(p, setting_canon))
+}
+
+/// `ConstraintCollection.get(constraint)`: returns explicit `ConstraintValueInfo`, parent's value,
+/// synthesized default `ConstraintValueInfo`, or `None`.
+pub fn constraint_collection_get(
+    cc: &ConstraintCollectionData,
+    setting_info: &zel_starlark::Value,
+) -> Result<zel_starlark::Value, String> {
+    let Some(sl) = constraint_setting_label(setting_info) else {
+        return Err(format!(
+            "got value of type '{}', want 'ConstraintSettingInfo'",
+            setting_info.type_name()
+        ));
+    };
+    if let Some(found) = cc_lookup_explicit(cc, &sl.canonical_form()) {
+        return Ok(found);
+    }
+    if let zel_starlark::Value::ProviderInstance { fields, .. } = setting_info {
+        match fields.get("default_constraint_value") {
+            Some(v @ zel_starlark::Value::ProviderInstance { .. }) => return Ok(v.clone()),
+            Some(zel_starlark::Value::Label(def_lbl)) => {
+                let refines = fields
+                    .get("refines_constraint_values")
+                    .cloned()
+                    .unwrap_or_else(|| crate::starlark_rule::mk_list(vec![]));
+                return Ok(crate::starlark_rule::provider_instance(
+                    "ConstraintValueInfo",
+                    vec![
+                        ("constraint", setting_info.clone()),
+                        ("label", zel_starlark::Value::Label(def_lbl.clone())),
+                        ("refines", refines),
+                    ],
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(zel_starlark::Value::None)
+}
+
+pub fn constraint_collection_has(
+    cc: &ConstraintCollectionData,
+    setting_info: &zel_starlark::Value,
+) -> Result<bool, String> {
+    Ok(!matches!(
+        constraint_collection_get(cc, setting_info)?,
+        zel_starlark::Value::None
+    ))
+}
+
+pub fn constraint_collection_has_value(
+    cc: &ConstraintCollectionData,
+    cv_info: &zel_starlark::Value,
+) -> Result<bool, String> {
+    let Some(cv_lbl) = constraint_value_label(cv_info) else {
+        return Err(format!(
+            "got value of type '{}', want 'ConstraintValueInfo'",
+            cv_info.type_name()
+        ));
+    };
+    let setting = match cv_info {
+        zel_starlark::Value::ProviderInstance { fields, .. } => fields
+            .get("constraint")
+            .ok_or_else(|| "ConstraintValueInfo missing constraint".to_string())?,
+        _ => return Ok(false),
+    };
+    let cur = constraint_collection_get(cc, setting)?;
+    Ok(constraint_value_label(&cur).as_ref() == Some(&cv_lbl))
+}
+
+pub fn constraint_collection_settings(cc: &ConstraintCollectionData) -> Vec<zel_starlark::Value> {
+    fn walk(
+        cc: &ConstraintCollectionData,
+        seen: &mut BTreeMap<String, usize>,
+        out: &mut Vec<zel_starlark::Value>,
+    ) {
+        if let Some(p) = &cc.parent {
+            walk(p, seen, out);
+        }
+        for (s, _) in &cc.entries {
+            if let Some(sl) = constraint_setting_label(s) {
+                let key = sl.canonical_form();
+                if let Some(&idx) = seen.get(&key) {
+                    out[idx] = s.clone();
+                } else {
+                    seen.insert(key, out.len());
+                    out.push(s.clone());
+                }
+            }
+        }
+    }
+    let mut seen = BTreeMap::new();
+    let mut out = Vec::new();
+    walk(cc, &mut seen, &mut out);
+    out
 }
 
 #[cfg(test)]

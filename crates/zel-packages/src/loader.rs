@@ -400,6 +400,10 @@ fn install_analysis_modules(ctx: &mut EvalContext) {
         mk_struct(vec![
             ("FeatureFlagInfo", provider("FeatureFlagInfo")),
             ("toolchain_type", host("config_common.toolchain_type")),
+            (
+                "config_feature_flag_transition",
+                host("config_common.config_feature_flag_transition"),
+            ),
         ]),
     );
     ctx.globals.insert(
@@ -407,6 +411,7 @@ fn install_analysis_modules(ctx: &mut EvalContext) {
         mk_struct(vec![
             ("ExecutionInfo", provider("ExecutionInfo")),
             ("TestEnvironment", provider("TestEnvironment")),
+            ("analysis_test", host("testing.analysis_test")),
         ]),
     );
     ctx.globals.insert(
@@ -1998,21 +2003,26 @@ impl PackageLoader {
                                                         .unwrap_or_else(|_| v.clone())
                                                 }
                                                 Value::Struct(st)
-                                                    if st
-                                                        .fields
-                                                        .contains_key("_toolchain_type") =>
+                                                    if st.fields.contains_key("toolchain_type")
+                                                        || st
+                                                            .fields
+                                                            .contains_key("_toolchain_type") =>
                                                 {
                                                     let mut f = st.fields.clone();
-                                                    if let Some(Value::String(n)) =
-                                                        f.get("name").cloned()
-                                                    {
-                                                        if let Ok(l) =
-                                                            crate::attr::convert_label(&n, &cctx)
+                                                    for fnm in ["toolchain_type", "name"] {
+                                                        if let Some(Value::String(n)) =
+                                                            f.get(fnm).cloned()
                                                         {
-                                                            f.insert(
-                                                                "name".into(),
-                                                                Value::Label(l),
-                                                            );
+                                                            if let Ok(l) =
+                                                                crate::attr::convert_label(
+                                                                    &n, &cctx,
+                                                                )
+                                                            {
+                                                                f.insert(
+                                                                    fnm.into(),
+                                                                    Value::Label(l),
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                     Value::Struct(Arc::new(

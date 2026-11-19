@@ -346,11 +346,14 @@ pub(crate) fn alias(n: &Nctx) -> Result<ConfiguredTarget, String> {
     chain.extend(ct.alias_chain.iter().cloned());
     out.alias_chain = chain;
     out.alias_targets = targets_chain;
+    out.actual = Some(ct.clone());
     out.actual_label = Some(ct.actual_target_label().clone());
     out.actual_rule_class = Some(ct.actual_rule_class_name().to_string());
     out.actual_testonly = Some(ct.actual_testonly.unwrap_or(ct.testonly));
     out.label = n.rule.label.clone();
-    out.configuration = cfg;
+    // `AliasConfiguredTarget.getConfigurationKey` keeps the alias lookup key's configuration,
+    // even when `host_platform` resolves `actual` in the core-only configuration.
+    out.configuration = n.cfg.clone();
     out.actions.clear();
     out.typed_actions.clear();
     out.is_test = false;
@@ -363,6 +366,30 @@ pub(crate) fn alias(n: &Nctx) -> Result<ConfiguredTarget, String> {
                 ("alias_chain", mk_list(alias_chain)),
                 ("actual_label", Value::Label(actual_label)),
                 ("original_label", Value::Label(n.rule.label.clone())),
+            ],
+        ),
+    );
+    out.providers.insert(
+        "VisibilityProvider".to_string(),
+        provider_instance(
+            "VisibilityProvider",
+            vec![
+                (
+                    "visibility",
+                    mk_list(
+                        n.rule
+                            .extra
+                            .effective_visibility
+                            .iter()
+                            .cloned()
+                            .map(Value::Label)
+                            .collect(),
+                    ),
+                ),
+                (
+                    "is_created_in_symbolic_macro",
+                    Value::Bool(n.rule.extra.macro_instance.is_some()),
+                ),
             ],
         ),
     );
@@ -403,33 +430,56 @@ pub(crate) fn test_suite(n: &Nctx) -> Result<ConfiguredTarget, String> {
 }
 
 pub(crate) fn label_flag(n: &Nctx) -> Result<ConfiguredTarget, String> {
+    label_build_setting(n, true)
+}
+
+fn parse_libc_top_label(raw: &str) -> Result<Option<Label>, String> {
+    if raw.is_empty() || raw == "default" {
+        return Ok(None);
+    }
+    if !raw.starts_with("//") && !raw.starts_with('@') {
+        return Err(format!(
+            "Invalid --grte_top value '{raw}': expected a label starting with '//' or '@'"
+        ));
+    }
+    let parsed = Label::parse_canonical(raw)
+        .map_err(|e| format!("Invalid --grte_top value '{raw}': {e}"))?;
+    let everything = Label::create(parsed.package_identifier().clone(), "everything")
+        .map_err(|e| e.to_string())?;
+    Ok(Some(everything))
+}
+
+fn label_build_setting(n: &Nctx, is_flag: bool) -> Result<ConfiguredTarget, String> {
+    let default_lbl = match n.value("build_setting_default")? {
+        Some(AttrValue::Label(Some(l))) => l,
+        _ => {
+            return Err(n.err(
+                "build_setting_default",
+                &format!(
+                    "missing value for mandatory attribute 'build_setting_default' in '{}' rule",
+                    n.rule.rule_class
+                ),
+            ))
+        }
+    };
     let key = n.rule.label.canonical_form();
     let actual = match n.cfg.flag_values.get(&key) {
         Some(v) => {
-            Label::parse_canonical(v).map_err(|e| n.err("build_setting_default", &e.to_string()))?
+            let pkg = n.rule.label.package_identifier();
+            let entries = n
+                .resolver
+                .repo_mapping_entries(pkg.repository().name())
+                .into_iter()
+                .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
+                .collect();
+            let mapping = zel_cmdline::RepositoryMapping::new(entries, pkg.repository().clone());
+            Label::parse_with_package_context(v, pkg, &mapping)
+                .map_err(|e| n.err("build_setting_default", &e.to_string()))?
         }
-        None => match n.value("build_setting_default")? {
-            Some(AttrValue::Label(Some(l))) => l,
-            _ => {
-                let mut empty = finish(
-                    n,
-                    vec![],
-                    Runfiles::default(),
-                    Runfiles::default(),
-                    None,
-                    vec![],
-                )?;
-                empty.is_late_bound_alias = true;
-                empty.providers.insert(
-                    "BuildSettingProvider".into(),
-                    provider_instance("BuildSettingProvider", vec![("value", Value::None)]),
-                );
-                return Ok(empty);
-            }
-        },
+        None => default_lbl.clone(),
     };
     let ct = n.resolver.configured_target(&actual, n.cfg)?;
-    n.resolver.check_dependency(n.rule, "actual", &ct)?;
+    n.resolver.check_dependency(n.rule, ":alias", &ct)?;
     let mut targets_chain = vec![actual.clone()];
     targets_chain.extend(ct.alias_targets.iter().cloned());
     let mut out = (*ct).clone();
@@ -437,19 +487,31 @@ pub(crate) fn label_flag(n: &Nctx) -> Result<ConfiguredTarget, String> {
     chain.extend(ct.alias_chain.iter().cloned());
     out.alias_chain = chain;
     out.alias_targets = targets_chain;
+    out.actual = Some(ct.clone());
     out.actual_label = Some(ct.actual_target_label().clone());
     out.actual_rule_class = Some(ct.actual_rule_class_name().to_string());
     out.actual_testonly = Some(ct.actual_testonly.unwrap_or(ct.testonly));
     out.is_late_bound_alias = true;
     out.label = n.rule.label.clone();
+    out.configuration = n.cfg.clone();
     out.actions.clear();
     out.typed_actions.clear();
+    out.is_test = false;
     out.rule_class = "alias".to_string();
+    out.providers.insert(
+        "LateBoundAliasProvider".into(),
+        provider_instance("LateBoundAliasProvider", vec![]),
+    );
     out.providers.insert(
         "BuildSettingProvider".into(),
         provider_instance(
             "BuildSettingProvider",
-            vec![("value", Value::Label(actual))],
+            vec![
+                ("value", Value::Label(actual)),
+                ("default", Value::Label(default_lbl)),
+                ("label", Value::Label(n.rule.label.clone())),
+                ("is_flag", Value::Bool(is_flag)),
+            ],
         ),
     );
     Ok(out)
@@ -536,25 +598,40 @@ pub(crate) fn java_plugins_flag_alias(n: &Nctx) -> Result<ConfiguredTarget, Stri
 /// `CcLibcTopAlias`: an alias of `CppConfiguration.getLibcTopLabel()` (`--grte_top`); without a
 /// label the target provides nothing.
 pub(crate) fn cc_libc_top_alias(n: &Nctx) -> Result<ConfiguredTarget, String> {
-    let top = n
+    let raw_top = n
         .cfg
-        .options
+        .build_options()
         .get("grte_top")
-        .filter(|v| !v.is_empty())
-        .cloned();
-    match top {
-        Some(l) => {
-            let actual = Label::parse_canonical(&l).map_err(|e| e.to_string())?;
+        .map(|v| v.display())
+        .filter(|s| !s.is_empty() && s != "null")
+        .or_else(|| n.cfg.options.get("grte_top").cloned())
+        .unwrap_or_default();
+    match parse_libc_top_label(&raw_top)? {
+        Some(actual) => {
             let ct = n.resolver.configured_target(&actual, n.cfg)?;
+            n.resolver.check_dependency(n.rule, ":alias", &ct)?;
+            let mut targets_chain = vec![actual];
+            targets_chain.extend(ct.alias_targets.iter().cloned());
             let mut out = (*ct).clone();
             let mut chain = vec![n.rule.label.clone()];
             chain.extend(ct.alias_chain.iter().cloned());
             out.alias_chain = chain;
+            out.alias_targets = targets_chain;
+            out.actual = Some(ct.clone());
             out.actual_label = Some(ct.actual_target_label().clone());
             out.actual_rule_class = Some(ct.actual_rule_class_name().to_string());
             out.actual_testonly = Some(ct.actual_testonly.unwrap_or(ct.testonly));
             out.is_late_bound_alias = true;
             out.label = n.rule.label.clone();
+            out.configuration = n.cfg.clone();
+            out.actions.clear();
+            out.typed_actions.clear();
+            out.is_test = false;
+            out.rule_class = "alias".to_string();
+            out.providers.insert(
+                "LateBoundAliasProvider".into(),
+                provider_instance("LateBoundAliasProvider", vec![]),
+            );
             Ok(out)
         }
         None => {
@@ -567,6 +644,10 @@ pub(crate) fn cc_libc_top_alias(n: &Nctx) -> Result<ConfiguredTarget, String> {
                 vec![],
             )?;
             empty.is_late_bound_alias = true;
+            empty.providers.insert(
+                "LateBoundAliasProvider".into(),
+                provider_instance("LateBoundAliasProvider", vec![]),
+            );
             Ok(empty)
         }
     }
@@ -595,7 +676,7 @@ pub(crate) fn extra_action_like(n: &Nctx) -> Result<ConfiguredTarget, String> {
 }
 
 pub(crate) fn label_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
-    label_flag(n)
+    label_build_setting(n, false)
 }
 
 // ---------------------------------------------------------------------------------- genrule

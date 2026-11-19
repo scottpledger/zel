@@ -97,6 +97,14 @@ fn stringify(v: &Value) -> Result<String, String> {
         Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         Value::Int(i) => i.to_string(),
         Value::Label(l) => l.canonical_form(),
+        Value::Set(s) => s
+            .lock()
+            .unwrap()
+            .elements
+            .iter()
+            .map(stringify)
+            .collect::<Result<Vec<_>, _>>()?
+            .join(","),
         Value::List(_) | Value::Tuple(_) => zel_starlark::eval::builtins::value_to_sequence(v)
             .map_err(|e| e.0)?
             .iter()
@@ -172,6 +180,16 @@ fn is_list_option(name: &str) -> bool {
 /// `OutputPathMnemonicComputer.hashChosenOptions`.
 pub fn render_java(v: &Value, native_list: bool) -> Result<String, String> {
     Ok(match v {
+        Value::Set(s) => {
+            let items = s
+                .lock()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|x| render_java(x, false))
+                .collect::<Result<Vec<_>, _>>()?;
+            crate::render_list(&items)
+        }
         Value::List(_) | Value::Tuple(_) => {
             let items = zel_starlark::eval::builtins::value_to_sequence(v)
                 .map_err(|e| e.0)?
@@ -454,25 +472,36 @@ fn default_value_for_spec(spec: &BuildSettingSpec) -> Value {
         Some(AttrValue::Int(i)) => Value::Int(BigInt::from_i64(*i)),
         Some(AttrValue::Bool(b)) => Value::Bool(*b),
         Some(AttrValue::Label(Some(l))) => Value::Label(l.clone()),
-        Some(AttrValue::StrList(l)) if spec.ty == "string_set" => {
-            let mut set = zel_starlark::StarlarkSet::default();
-            for s in l {
-                let _ = set.add(Value::String(s.clone()));
+        Some(AttrValue::StrList(l)) => {
+            if spec.ty == "string_set" {
+                let mut set = zel_starlark::StarlarkSet::new();
+                for s in l {
+                    let _ = set.add(Value::String(s.clone()));
+                }
+                let val = Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)));
+                val.freeze();
+                val
+            } else {
+                Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+                    zel_starlark::StarlarkList::new(
+                        l.iter().map(|s| Value::String(s.clone())).collect(),
+                    ),
+                )))
             }
-            Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)))
         }
-        Some(AttrValue::StrList(l)) => Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-            zel_starlark::StarlarkList::new(l.iter().map(|s| Value::String(s.clone())).collect()),
-        ))),
         _ => match spec.ty.as_str() {
             "int" => Value::Int(BigInt::from_i64(0)),
             "bool" => Value::Bool(false),
             "string_list" => Value::List(std::sync::Arc::new(std::sync::Mutex::new(
                 zel_starlark::StarlarkList::new(vec![]),
             ))),
-            "string_set" => Value::Set(std::sync::Arc::new(std::sync::Mutex::new(
-                zel_starlark::StarlarkSet::default(),
-            ))),
+            "string_set" => {
+                let val = Value::Set(std::sync::Arc::new(std::sync::Mutex::new(
+                    zel_starlark::StarlarkSet::new(),
+                )));
+                val.freeze();
+                val
+            }
             "label" => Value::None,
             _ => Value::String(String::new()),
         },
@@ -496,11 +525,13 @@ fn setting_value_with_spec(
     };
     if let Some(raw) = cfg.flag_values.get(&spec.resolved_key) {
         if spec.ty == "string_set" {
-            let mut set = zel_starlark::StarlarkSet::default();
+            let mut set = zel_starlark::StarlarkSet::new();
             for part in raw.split(',').filter(|s| !s.is_empty()) {
                 let _ = set.add(Value::String(part.to_string()));
             }
-            return Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)));
+            let val = Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)));
+            val.freeze();
+            return val;
         }
         if spec.allow_multiple || spec.ty == "string_list" {
             let mut items = Vec::new();
@@ -626,27 +657,27 @@ fn set_setting_with_spec(
         }
         parts.join(",")
     } else if spec.ty == "string_set" {
-        let items = match value {
+        let items: Vec<Value> = match value {
             Value::Set(s) => s.lock().unwrap().elements.clone(),
             Value::List(_) | Value::Tuple(_) => {
                 zel_starlark::eval::builtins::value_to_sequence(value).map_err(|e| e.0)?
             }
-            _ => {
+            other => {
                 return Err(format!(
                     "expected value of type 'set(string)' for {key}, but got {} ({})",
-                    value.repr(),
-                    value.type_name()
+                    other.repr(),
+                    other.type_name()
                 ))
             }
         };
-        let mut parts = Vec::with_capacity(items.len());
+        let mut seen = Vec::new();
         for item in &items {
             let s = validate_scalar_for_spec(key, "string", item, tctx)?;
-            if !parts.contains(&s) {
-                parts.push(s);
+            if !seen.contains(&s) {
+                seen.push(s);
             }
         }
-        parts.join(",")
+        seen.join(",")
     } else {
         validate_scalar_for_spec(key, &spec.ty, value, eff_ctx)?
     };
@@ -666,8 +697,8 @@ fn set_setting_with_spec(
     } else {
         render_java(&def_val, false)?
     };
-    let new_rendered = if spec.allow_multiple || spec.ty == "string_list" {
-        crate::starlark_rule::render_flag_value("string_list", &raw_new)
+    let new_rendered = if spec.allow_multiple || spec.ty == "string_list" || spec.ty == "string_set" {
+        crate::starlark_rule::render_flag_value(&spec.ty, &raw_new)
     } else {
         crate::starlark_rule::render_flag_value(&spec.ty, &raw_new)
     };
@@ -783,6 +814,29 @@ pub fn apply_transition_split_with_resolver(
         // Like Bazel's `PATCH_TRANSITION_KEY`: a split with a single anonymous entry, so that
         // `ctx.attr.<name>` is a list (`target_under_test[0]`).
         return Ok(vec![(Some(String::new()), out)]);
+    }
+    if let Some(Value::String(attr_name)) = s
+        .fields
+        .get("attribute")
+        .filter(|_| s.fields.contains_key("_config_feature_flag_transition"))
+    {
+        let mut out = cfg.clone();
+        if let Some(Value::Struct(attr_st)) = attrs {
+            if let Some(Value::Dict(d)) = attr_st.fields.get(attr_name) {
+                for (k, v) in d.lock().unwrap().items() {
+                    let ck = match &k {
+                        Value::Label(l) => l.canonical_form(),
+                        Value::String(ks) => canonicalize_setting(ks, tctx.as_ref())?,
+                        _ => continue,
+                    };
+                    if let Value::String(vs) = v {
+                        out.flag_values.insert(ck.clone(), vs.clone());
+                        out.transition_changes.insert(ck, vs);
+                    }
+                }
+            }
+        }
+        return Ok(vec![(None, out)]);
     }
     let Some(imp) = s.fields.get("implementation") else {
         // `config.exec()` / `config.target()` / `config.none()` are handled by the caller; a

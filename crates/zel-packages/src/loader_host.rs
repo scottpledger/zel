@@ -156,31 +156,94 @@ impl PackageLoader {
             n if n.starts_with("attr.") => return self.attr_fn(ctx, &n[5..], pos, kw),
             "call:rule" => return self.call_starlark_rule(ctx, state, pos, kw),
             "provider" => return crate::provider::define_provider(ctx, pos, kw),
-            "transition" => {
-                check_kwargs("transition", &kw, &["implementation", "inputs", "outputs"])
-                    .map_err(|e| herr(ctx, e))?;
-                let implementation = arg(&pos, &kw, 0, "implementation")
-                    .cloned()
-                    .ok_or_else(|| {
-                        herr(
-                            ctx,
-                            "transition() missing 1 required positional argument: implementation",
-                        )
-                    })?;
-                let inputs = arg(&pos, &kw, 1, "inputs").cloned().ok_or_else(|| {
-                    herr(ctx, "transition() missing 1 required keyword-only argument: inputs")
-                })?;
-                let outputs = arg(&pos, &kw, 2, "outputs").cloned().ok_or_else(|| {
-                    herr(ctx, "transition() missing 1 required keyword-only argument: outputs")
-                })?;
-                let mut f: BTreeMap<String, Value> = BTreeMap::new();
-                f.insert("implementation".to_string(), implementation);
-                f.insert("inputs".to_string(), inputs);
-                f.insert("outputs".to_string(), outputs);
+            "transition" | "exec_transition" => {
+                let is_exec_tr = name == "exec_transition";
                 let (pkg, mapping) = match ctx.current_label_ctx() {
                     Some((p, m)) => (p, m),
                     None => (owner.clone(), self.cfg.lookup.resolver.mapping(owner.repository())),
                 };
+                if is_exec_tr && pkg.repository().name() != "_builtins" {
+                    return Err(herr(
+                        ctx,
+                        "exec_transition() can only be used in @_builtins".to_string(),
+                    ));
+                }
+                check_kwargs(name, &kw, &["implementation", "inputs", "outputs"])
+                    .map_err(|e| herr(ctx, e))?;
+                let imp = arg(&pos, &kw, 0, "implementation").cloned().ok_or_else(|| {
+                    herr(
+                        ctx,
+                        format!("{name}() missing 1 required positional argument: implementation"),
+                    )
+                })?;
+                let inputs_val = arg(&pos, &kw, 1, "inputs").cloned().ok_or_else(|| {
+                    herr(
+                        ctx,
+                        format!("{name}() missing 1 required keyword-only argument: inputs"),
+                    )
+                })?;
+                let outputs_val = arg(&pos, &kw, 2, "outputs").cloned().ok_or_else(|| {
+                    herr(
+                        ctx,
+                        format!("{name}() missing 1 required keyword-only argument: outputs"),
+                    )
+                })?;
+                let inputs_list = sl_values(&inputs_val)
+                    .map_err(|e| herr(ctx, format!("in call to {name}(), parameter 'inputs' {e}")))?;
+                let outputs_list = sl_values(&outputs_val)
+                    .map_err(|e| herr(ctx, format!("in call to {name}(), parameter 'outputs' {e}")))?;
+                let validate_keys = |keys: &[String], kind_label: &str| -> Result<(), zel_starlark::StarlarkError> {
+                    let mut seen = std::collections::HashSet::new();
+                    for raw in keys {
+                        if !seen.insert(raw.as_str()) {
+                            return Err(herr(
+                                ctx,
+                                format!("duplicate transition {kind_label} '{raw}'"),
+                            ));
+                        }
+                        if let Some(opt) = raw.strip_prefix("//command_line_option:") {
+                            if !is_exec_tr
+                                && (opt.starts_with("experimental_") || opt.starts_with("incompatible_"))
+                                && opt != "incompatible_enable_cc_toolchain_resolution"
+                                && opt != "incompatible_enable_apple_toolchain_resolution"
+                            {
+                                return Err(herr(
+                                    ctx,
+                                    format!(
+                                        "Invalid transition {kind_label} '{raw}'. Cannot transition on --experimental_* or --incompatible_* options"
+                                    ),
+                                ));
+                            }
+                        } else {
+                            let lbl = Label::parse_with_package_context(raw, &pkg, &mapping)
+                                .map_err(|e| herr(ctx, format!("invalid transition {kind_label} '{raw}': {e}")))?;
+                            if raw.starts_with('@')
+                                && !raw.starts_with("@@")
+                                && !raw.starts_with("@//")
+                                && !lbl.repository().is_main()
+                                && lbl.repository().name() != "bazel_tools"
+                                && lbl.repository().name() != "_builtins"
+                                && self.cfg.lookup.resolver.repo_root(lbl.repository()).is_none()
+                            {
+                                let apparent = raw[1..].split("//").next().unwrap_or(&raw[1..]);
+                                return Err(herr(
+                                    ctx,
+                                    format!(
+                                        "invalid transition {kind_label} '{raw}': no repository visible as '@{apparent}' from repository '{}'",
+                                        pkg.repository().canonical_form()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    Ok(())
+                };
+                validate_keys(&inputs_list, "input")?;
+                validate_keys(&outputs_list, "output")?;
+                let mut f: BTreeMap<String, Value> = BTreeMap::new();
+                f.insert("implementation".into(), imp);
+                f.insert("inputs".into(), inputs_val);
+                f.insert("outputs".into(), outputs_val);
                 f.insert("_defining_pkg".into(), Value::String(pkg.canonical_form()));
                 let mut rm = zel_starlark::StarlarkDict::new();
                 for (k, v) in mapping.entries() {
@@ -188,8 +251,42 @@ impl PackageLoader {
                 }
                 f.insert("_repo_map".into(), Value::Dict(Arc::new(Mutex::new(rm))));
                 f.insert("_transition".into(), Value::Bool(true));
+                if is_exec_tr {
+                    f.insert("_exec_transition".into(), Value::Bool(true));
+                }
                 // `StarlarkDefinedConfigTransition.getLocation()` (printed by `cquery --transitions`).
                 f.insert("location".into(), Value::String(fmt_loc(&ctx.last_call_loc)));
+                return Ok(Value::Struct(Arc::new(StructValue::new(f))));
+            }
+            "config_common.config_feature_flag_transition" => {
+                check_kwargs("config_feature_flag_transition", &kw, &["attribute"])
+                    .map_err(|e| herr(ctx, e))?;
+                let attr_val = arg(&pos, &kw, 0, "attribute").ok_or_else(|| {
+                    herr(
+                        ctx,
+                        "config_feature_flag_transition() missing 1 required positional argument: attribute",
+                    )
+                })?;
+                let Value::String(attr_name) = attr_val else {
+                    return Err(herr(
+                        ctx,
+                        type_mismatch("attribute", attr_val, "string", "config_feature_flag_transition"),
+                    ));
+                };
+                let (pkg, mapping) = match ctx.current_label_ctx() {
+                    Some((p, m)) => (p, m),
+                    None => (owner.clone(), self.cfg.lookup.resolver.mapping(owner.repository())),
+                };
+                let mut f: BTreeMap<String, Value> = BTreeMap::new();
+                f.insert("attribute".into(), Value::String(attr_name.clone()));
+                f.insert("_defining_pkg".into(), Value::String(pkg.canonical_form()));
+                let mut rm = zel_starlark::StarlarkDict::new();
+                for (k, v) in mapping.entries() {
+                    let _ = rm.insert(Value::String(k.clone()), Value::String(v.name().to_string()));
+                }
+                f.insert("_repo_map".into(), Value::Dict(Arc::new(Mutex::new(rm))));
+                f.insert("_config_feature_flag_transition".into(), Value::Bool(true));
+                f.insert("_transition".into(), Value::Bool(true));
                 return Ok(Value::Struct(Arc::new(StructValue::new(f))));
             }
             "analysis_test_transition" => {
@@ -241,15 +338,47 @@ impl PackageLoader {
                 return Ok(Value::Struct(Arc::new(StructValue::default())));
             }
             "config_common.toolchain_type" => {
+                check_kwargs("toolchain_type", &kw, &["name", "mandatory"])
+                    .map_err(|e| herr(ctx, e))?;
+                let raw_name = arg(&pos, &kw, 0, "name").ok_or_else(|| {
+                    herr(
+                        ctx,
+                        "toolchain_type() missing 1 required positional argument: name",
+                    )
+                })?;
+                let (pkg, mapping) = match ctx.current_label_ctx() {
+                    Some((p, m)) => (p, m),
+                    None => (owner.clone(), self.cfg.lookup.resolver.mapping(owner.repository())),
+                };
+                let tc_lbl = match raw_name {
+                    Value::Label(l) => l.clone(),
+                    Value::String(s) => Label::parse_with_package_context(s, &pkg, &mapping)
+                        .map_err(|e| {
+                            herr(
+                                ctx,
+                                format!("Unable to parse toolchain_type label '{s}': {e}"),
+                            )
+                        })?,
+                    other => {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch("name", other, "string or Label", "toolchain_type"),
+                        ))
+                    }
+                };
+                let mandatory = match arg(&pos, &kw, 1, "mandatory") {
+                    None => true,
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch("mandatory", other, "bool", "toolchain_type"),
+                        ))
+                    }
+                };
                 let mut f: BTreeMap<String, Value> = BTreeMap::new();
-                if let Some(v) = arg(&pos, &kw, 0, "name") {
-                    f.insert("name".into(), v.clone());
-                }
-                f.insert(
-                    "mandatory".into(),
-                    kw.get("mandatory").cloned().unwrap_or(Value::Bool(true)),
-                );
-                f.insert("_toolchain_type".into(), Value::Bool(true));
+                f.insert("toolchain_type".into(), Value::Label(tc_lbl));
+                f.insert("mandatory".into(), Value::Bool(mandatory));
                 return Ok(Value::Struct(Arc::new(StructValue::new(f))));
             }
             n if n.starts_with("config.") => {
@@ -2450,11 +2579,16 @@ impl PackageLoader {
                     Value::String(s) if s.starts_with('@') || s.starts_with("//") || s.starts_with(':') => {
                         conv_str(s).map(Value::Label).unwrap_or_else(|_| v.clone())
                     }
-                    Value::Struct(st) if st.fields.contains_key("_toolchain_type") => {
+                    Value::Struct(st)
+                        if st.fields.contains_key("toolchain_type")
+                            || st.fields.contains_key("_toolchain_type") =>
+                    {
                         let mut f = st.fields.clone();
-                        if let Some(Value::String(n)) = f.get("name").cloned() {
-                            if let Ok(l) = conv_str(&n) {
-                                f.insert("name".into(), Value::Label(l));
+                        for fnm in ["toolchain_type", "name"] {
+                            if let Some(Value::String(n)) = f.get(fnm).cloned() {
+                                if let Ok(l) = conv_str(&n) {
+                                    f.insert(fnm.into(), Value::Label(l));
+                                }
                             }
                         }
                         Value::Struct(Arc::new(zel_starlark::StructValue::new(f)))

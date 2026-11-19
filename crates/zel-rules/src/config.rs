@@ -49,172 +49,467 @@ fn lbl(l: &Label) -> Value {
 
 // ------------------------------------------------------------------------ config_setting
 
-/// Value of option `name` in `cfg`; `None` if the option is unknown/unset.
-fn option_values(cfg: &zel_analysis::BuildConfigurationKey, name: &str) -> Option<Vec<String>> {
-    let canonical = if name == "c" {
-        "compilation_mode"
-    } else {
-        name
-    };
-    match canonical {
-        "compilation_mode" => Some(vec![cfg.compilation_mode.clone()]),
-        "cpu" => Some(vec![cfg.cpu.clone()]),
-        "platforms" => Some(cfg.platforms.clone()),
-        other => {
-            if let Some(n) = cfg.native.get(other) {
-                if cfg.options.get(other).is_none_or(|raw| raw == &n.raw) {
-                    return match &n.value {
-                        zel_analysis::build_options::ConfigValue::List(l) => Some(l.clone()),
-                        zel_analysis::build_options::ConfigValue::Scalar(s) => {
-                            Some(vec![s.clone()])
-                        }
-                        zel_analysis::build_options::ConfigValue::Null => None,
-                    };
-                }
-            }
-            match cfg.options.get(other) {
-                Some(v) => Some(v.split(',').map(str::to_string).collect()),
-                // An option that was not set has its declared default value
-                // (ConfigSetting compares against the fully-parsed BuildOptions.)
-                None => option_default(other).or_else(|| {
-                    zel_analysis::build_options::find_option(other).and_then(|(_, opt)| {
-                        if opt.default == "null" || opt.default.is_empty() {
-                            None
-                        } else {
-                            Some(vec![opt.default.to_string()])
-                        }
-                    })
-                }),
-            }
-        }
-    }
-}
-
-fn option_default(name: &str) -> Option<Vec<String>> {
+fn command_option_def(name: &str) -> Option<&'static zel_options::OptionDefinition> {
     static MAP: std::sync::OnceLock<
         std::collections::HashMap<&'static str, &'static zel_options::OptionDefinition>,
     > = std::sync::OnceLock::new();
-    let d = MAP
-        .get_or_init(zel_options::flag_tables::get_command_options_map)
-        .get(name)?;
-    if d.allow_multiple {
-        return None;
-    }
-    // The tables record an empty-string default of a String option as "no default".
-    match d.default_value {
-        Some(v) => Some(vec![v.to_string()]),
-        None if matches!(d.option_type, zel_options::types::OptionType::String) => {
-            Some(vec![String::new()])
-        }
-        None => None,
+    MAP.get_or_init(zel_options::flag_tables::get_command_options_map)
+        .get(name)
+        .copied()
+}
+
+fn option_value_to_string(v: &zel_options::types::OptionValue) -> String {
+    use zel_options::types::OptionValue;
+    match v {
+        OptionValue::Label(l) => Label::parse_canonical(l)
+            .map(|p| p.canonical_form())
+            .unwrap_or_else(|_| l.clone()),
+        _ => v.to_string_repr(),
     }
 }
 
-fn parse_bool_str(s: &str) -> Option<bool> {
-    match s.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "t" | "y" => Some(true),
-        "false" | "0" | "no" | "f" | "n" => Some(false),
-        _ => None,
+fn scalar_option_matches(
+    def: &zel_options::OptionDefinition,
+    actual_raw: &str,
+    expected: &zel_options::types::OptionValue,
+) -> bool {
+    use zel_options::types::{OptionType, OptionValue};
+    match zel_options::converters::convert_option(actual_raw, def) {
+        Ok(act) => match (&act, expected) {
+            (OptionValue::String(a), OptionValue::String(b))
+                if matches!(def.option_type, OptionType::Enum(_)) =>
+            {
+                a.eq_ignore_ascii_case(b)
+            }
+            (OptionValue::Label(a), OptionValue::Label(b)) => {
+                option_value_to_string(&act) == option_value_to_string(expected) || a == b
+            }
+            _ => act == *expected,
+        },
+        Err(_) => actual_raw == option_value_to_string(expected),
     }
+}
+
+fn actual_option_list(
+    cfg: &zel_analysis::BuildConfigurationKey,
+    bo: &zel_analysis::build_options::BuildOptions,
+    canonical: &str,
+) -> Vec<String> {
+    if canonical == "platforms" {
+        return cfg.platforms.clone();
+    }
+    if let Some(zel_analysis::build_options::ConfigValue::List(l)) = bo.get(canonical) {
+        if !l.is_empty() || !cfg.options.contains_key(canonical) {
+            return l.clone();
+        }
+    }
+    match cfg.options.get(canonical) {
+        Some(raw) if !raw.is_empty() => raw.split(',').map(str::to_string).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn actual_option_scalar(
+    cfg: &zel_analysis::BuildConfigurationKey,
+    bo: &zel_analysis::build_options::BuildOptions,
+    canonical: &str,
+    def: Option<&zel_options::OptionDefinition>,
+) -> Option<String> {
+    match canonical {
+        "compilation_mode" => return Some(cfg.compilation_mode.clone()),
+        "cpu" => return Some(cfg.cpu.clone()),
+        _ => {}
+    }
+    if let Some(raw) = cfg.options.get(canonical) {
+        return Some(raw.clone());
+    }
+    if let Some(zel_analysis::build_options::ConfigValue::Scalar(s)) = bo.get(canonical) {
+        if s == "null" {
+            return Some(String::new());
+        }
+        return Some(s.clone());
+    }
+    if let Some(d) = def {
+        if let Some(v) = d.default_value {
+            if v == "null" {
+                return Some(String::new());
+            }
+            return Some(v.to_string());
+        }
+        if matches!(d.option_type, zel_options::types::OptionType::String) {
+            return Some(String::new());
+        }
+    }
+    zel_analysis::build_options::find_option(canonical).map(|(_, opt)| {
+        if opt.default == "null" {
+            String::new()
+        } else {
+            opt.default.to_string()
+        }
+    })
+}
+
+fn match_starlark_flag_entry(
+    n: &Nctx,
+    attr_name: &str,
+    raw_label: &Label,
+    expected: &str,
+    seen_flags: &mut std::collections::HashSet<String>,
+    settings: &mut Vec<String>,
+    errors: &mut Vec<String>,
+    matches: &mut bool,
+) -> Result<(), String> {
+    let ct = n.resolver.configured_target(raw_label, n.cfg)?;
+    n.resolver.check_dependency(n.rule, attr_name, &ct)?;
+    let resolved_label = ct.actual_target_label().clone();
+    if !seen_flags.insert(resolved_label.canonical_form()) {
+        errors.push(format!(
+            "flag_values cannot reference the same build setting '{}' more than once",
+            resolved_label.canonical_form()
+        ));
+        *matches = false;
+        return Ok(());
+    }
+    if let Some(Value::ProviderInstance { fields, .. }) = ct.providers.get("FeatureFlagInfo") {
+        if let Some(Value::String(err_msg)) = fields.get("error") {
+            if !err_msg.is_empty() {
+                errors.push(err_msg.clone());
+                *matches = false;
+                return Ok(());
+            }
+        }
+        if let Some(valid @ (Value::List(_) | Value::Tuple(_) | Value::Set(_))) =
+            fields.get("valid_values")
+        {
+            let allowed: Vec<String> = match valid {
+                Value::Set(s) => s
+                    .lock()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect(),
+                _ => zel_starlark::eval::builtins::value_to_sequence(valid)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect(),
+            };
+            if !allowed.is_empty() && !allowed.iter().any(|a| a == expected) {
+                errors.push(format!(
+                    "Error while validating feature flag {}: '{}' is not a valid value (allowed: {:?})",
+                    raw_label.canonical_form(),
+                    expected,
+                    allowed
+                ));
+                *matches = false;
+                return Ok(());
+            }
+        }
+        let actual = fields.get("value").cloned().unwrap_or(Value::None);
+        settings.push(format!(
+            "flag:{}={expected}",
+            resolved_label.canonical_form()
+        ));
+        if actual.as_str() != Some(expected) {
+            *matches = false;
+        }
+        return Ok(());
+    }
+
+    let actual = match ct.providers.get("BuildSettingProvider") {
+        Some(Value::ProviderInstance { fields, .. }) => fields.get("value").cloned(),
+        _ => None,
+    };
+    let Some(actual) = actual else {
+        errors.push(format!(
+            "{} does not have mandatory providers: 'BuildSettingProvider'",
+            raw_label.canonical_form()
+        ));
+        *matches = false;
+        return Ok(());
+    };
+
+    let (norm_expected, matched) = match &actual {
+        Value::Bool(act_b) => match zel_options::convert_boolean(expected) {
+            Ok(exp_b) => (exp_b.to_string(), *act_b == exp_b),
+            Err(e) => {
+                errors.push(format!(
+                    "Error while parsing user-defined flag {}={expected}: {}",
+                    raw_label.canonical_form(),
+                    e.message
+                ));
+                (expected.to_string(), false)
+            }
+        },
+        Value::Int(act_i) => match zel_options::convert_long(expected) {
+            Ok(exp_i) => (exp_i.to_string(), act_i.to_string() == exp_i.to_string()),
+            Err(e) => {
+                errors.push(format!(
+                    "Error while parsing user-defined flag {}={expected}: {}",
+                    raw_label.canonical_form(),
+                    e.message
+                ));
+                (expected.to_string(), false)
+            }
+        },
+        Value::Label(act_lbl) => {
+            let pkg = n.rule.label.package_identifier();
+            let entries = n
+                .resolver
+                .repo_mapping_entries(pkg.repository().name())
+                .into_iter()
+                .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
+                .collect();
+            let mapping = zel_cmdline::RepositoryMapping::new(entries, pkg.repository().clone());
+            match Label::parse_with_package_context(expected, pkg, &mapping) {
+                Ok(exp_lbl) => {
+                    let cf = exp_lbl.canonical_form();
+                    (cf, act_lbl == &exp_lbl)
+                }
+                Err(e) => {
+                    errors.push(format!(
+                        "Error while parsing user-defined flag {}={expected}: {e}",
+                        raw_label.canonical_form()
+                    ));
+                    (expected.to_string(), false)
+                }
+            }
+        }
+        Value::List(_) | Value::Tuple(_) | Value::Set(_) => {
+            let elems: Vec<String> = match &actual {
+                Value::Set(s) => s
+                    .lock()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .filter_map(|x| x.as_str().map(str::to_string))
+                    .collect(),
+                _ => zel_starlark::eval::builtins::value_to_sequence(&actual)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .filter_map(|x| match x {
+                        Value::String(s) => Some(s),
+                        Value::Int(i) => Some(i.to_string()),
+                        Value::Bool(b) => Some(b.to_string()),
+                        Value::Label(l) => Some(l.canonical_form()),
+                        _ => None,
+                    })
+                    .collect(),
+            };
+            let is_repeatable_scalar = n
+                .resolver
+                .rule_instance(&resolved_label)
+                .ok()
+                .flatten()
+                .and_then(|r| {
+                    r.extra
+                        .rule_class
+                        .as_ref()
+                        .and_then(|rc| rc.starlark.as_ref())
+                        .and_then(|sp| sp.kwargs.get("build_setting"))
+                        .and_then(|bs| match bs {
+                            Value::Struct(s) => Some(matches!(
+                                s.fields.get("allow_multiple"),
+                                Some(Value::Bool(true))
+                            )),
+                            _ => None,
+                        })
+                })
+                .unwrap_or(false);
+            if is_repeatable_scalar {
+                (expected.to_string(), elems.iter().any(|x| x == expected))
+            } else {
+                let parts: Vec<&str> = if expected.is_empty() {
+                    Vec::new()
+                } else {
+                    expected.split(',').collect()
+                };
+                if parts.len() > 1 {
+                    errors.push(format!(
+                        "\"{expected}\" not a valid value for flag {}: cannot match multi-element list value in config_setting",
+                        raw_label.canonical_form()
+                    ));
+                    (expected.to_string(), false)
+                } else if parts.is_empty() {
+                    (String::new(), elems.is_empty())
+                } else {
+                    (expected.to_string(), elems.iter().any(|x| x == parts[0]))
+                }
+            }
+        }
+        Value::String(s) => (expected.to_string(), s == expected),
+        _ => (expected.to_string(), false),
+    };
+    settings.push(format!(
+        "flag:{}={norm_expected}",
+        resolved_label.canonical_form()
+    ));
+    if !matched {
+        *matches = false;
+    }
+    Ok(())
 }
 
 pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
     let mut settings: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     let mut matches = true;
-    let mut seen_flag_expectations: BTreeMap<String, String> = BTreeMap::new();
+    let mut seen_flags: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let bo = n.cfg.build_options();
+
+    let mut flag_aliases: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if let Some(zel_analysis::build_options::ConfigValue::List(aliases)) = bo.get("flag_alias") {
+        for entry in aliases {
+            if let Some((alias, target)) = entry.split_once('=') {
+                flag_aliases.insert(alias.to_string(), target.to_string());
+            }
+        }
+    }
 
     if let Some(AttrValue::StrDict(values)) = n.value("values")? {
         for (k, v) in values {
             let key = k.trim_start_matches("--").to_string();
+            if let Some(alias_target) = n
+                .cfg
+                .flag_alias_target(&key)
+                .or_else(|| flag_aliases.get(&key).cloned())
+            {
+                let pkg = n.rule.label.package_identifier();
+                let entries = n
+                    .resolver
+                    .repo_mapping_entries(pkg.repository().name())
+                    .into_iter()
+                    .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
+                    .collect();
+                let mapping =
+                    zel_cmdline::RepositoryMapping::new(entries, pkg.repository().clone());
+                match Label::parse_with_package_context(&alias_target, pkg, &mapping) {
+                    Ok(lbl_target) => {
+                        match_starlark_flag_entry(
+                            n,
+                            ":flag_alias_settings",
+                            &lbl_target,
+                            &v,
+                            &mut seen_flags,
+                            &mut settings,
+                            &mut errors,
+                            &mut matches,
+                        )?;
+                    }
+                    Err(e) => {
+                        errors.push(format!("Error loading flag_alias '{key}': {e}"));
+                        matches = false;
+                    }
+                }
+                continue;
+            }
             if key == "define" {
-                let (dk, dv) = v.split_once('=').unwrap_or((v.as_str(), ""));
-                settings.push(format!("define:{dk}={dv}"));
+                let Some((dk, dv)) = v.split_once('=') else {
+                    errors.push(
+                        "Variable definitions must be in the form of a 'name=value' assignment"
+                            .to_string(),
+                    );
+                    matches = false;
+                    continue;
+                };
+                settings.push(format!("values:define={v}"));
                 if n.cfg.user_defines.get(dk).map(|x| x.as_str()) != Some(dv) {
                     matches = false;
                 }
                 continue;
             }
-            if let Some(alias_target) = n.cfg.flag_alias_target(&key) {
-                let l = Label::parse_canonical(&alias_target).map_err(|e| e.to_string())?;
-                let ct = n.resolver.configured_target(&l, n.cfg)?;
-                let resolved_label = ct.alias_targets.last().unwrap_or(&l).canonical_form();
-                seen_flag_expectations.insert(resolved_label.clone(), v.clone());
-                settings.push(format!("flag:{resolved_label}={v}"));
-                let actual = match ct
-                    .providers
-                    .get("BuildSettingProvider")
-                    .or_else(|| ct.providers.get("FeatureFlagInfo"))
-                {
-                    Some(Value::ProviderInstance { fields, .. }) => fields.get("value").cloned(),
-                    _ => None,
-                };
-                match actual {
-                    Some(act) => {
-                        if !flag_value_matches(&act, &v) {
-                            matches = false;
-                        }
-                    }
-                    None => {
-                        errors.push(format!(
-                            "{} does not have mandatory providers: 'BuildSettingProvider'",
-                            l.canonical_form()
-                        ));
-                        matches = false;
-                    }
-                }
-                continue;
-            }
-            let canonical_key = if key == "c" {
+            let canonical = if key == "c" {
                 "compilation_mode"
             } else {
                 key.as_str()
             };
-            let opt_meta = zel_analysis::build_options::find_option(canonical_key);
-            let norm_v =
-                if opt_meta.is_some_and(|(_, o)| matches!(o.java_type, "boolean" | "Boolean")) {
-                    parse_bool_str(&v)
-                        .map(|b| b.to_string())
-                        .unwrap_or_else(|| v.clone())
-                } else {
-                    v.clone()
-                };
-            settings.push(format!("values:{key}={norm_v}"));
-            match option_values(n.cfg, &key) {
-                Some(vals) => {
-                    let is_bool_opt = opt_meta
-                        .is_some_and(|(_, o)| matches!(o.java_type, "boolean" | "Boolean"))
-                        || (vals.len() == 1 && matches!(vals[0].as_str(), "true" | "false"));
-                    let is_comma_list = opt_meta.is_some_and(|(_, o)| {
-                        o.converter.contains("CommaSeparated")
-                            || o.converter.ends_with("LabelListConverter")
-                            || o.converter.ends_with("LabelOrderedSetConverter")
-                    });
-                    let ok = if is_bool_opt {
-                        match (
-                            vals.first().and_then(|s| parse_bazel_bool(s)),
-                            parse_bazel_bool(&v),
-                        ) {
-                            (Some(a), Some(b)) => a == b,
-                            _ => vals.contains(&v),
-                        }
-                    } else if is_comma_list && v.contains(',') {
-                        v.split(',')
-                            .filter(|p| !p.is_empty())
-                            .all(|p| vals.iter().any(|x| x == p))
-                    } else {
-                        vals.contains(&v)
-                    };
-                    if !ok {
+            let def = command_option_def(canonical);
+            let known = def.is_some()
+                || KNOWN_OPTIONS.contains(&canonical)
+                || zel_analysis::build_options::find_option(canonical).is_some();
+            if !known {
+                errors.push(format!("unknown option: '{key}'"));
+                matches = false;
+                continue;
+            }
+            if let Some(d) = def {
+                let converted = match zel_options::converters::convert_option(&v, d) {
+                    Ok(cv) => cv,
+                    Err(e) => {
+                        errors.push(format!(
+                            "Error while parsing option {key}='{v}': {}",
+                            e.message
+                        ));
                         matches = false;
+                        continue;
+                    }
+                };
+                settings.push(format!(
+                    "values:{canonical}={}",
+                    option_value_to_string(&converted)
+                ));
+                if d.allow_multiple
+                    || matches!(converted, zel_options::types::OptionValue::List(_))
+                {
+                    let act_list = actual_option_list(n.cfg, &bo, canonical);
+                    match &converted {
+                        zel_options::types::OptionValue::List(exp_items) => {
+                            if exp_items.is_empty() {
+                                if !act_list.is_empty() {
+                                    matches = false;
+                                }
+                            } else {
+                                let norm_act: Vec<String> = act_list
+                                    .iter()
+                                    .map(|a| {
+                                        Label::parse_canonical(a)
+                                            .map(|l| l.canonical_form())
+                                            .unwrap_or_else(|_| a.clone())
+                                    })
+                                    .collect();
+                                for exp_item in exp_items {
+                                    let want = option_value_to_string(exp_item);
+                                    if !act_list.contains(&want) && !norm_act.contains(&want) {
+                                        matches = false;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        _ => {
+                            if !act_list
+                                .iter()
+                                .any(|act_elem| scalar_option_matches(d, act_elem, &converted))
+                            {
+                                matches = false;
+                            }
+                        }
+                    }
+                } else {
+                    match actual_option_scalar(n.cfg, &bo, canonical, Some(d)) {
+                        Some(act_raw) => {
+                            if !scalar_option_matches(d, &act_raw, &converted) {
+                                matches = false;
+                            }
+                        }
+                        None => {
+                            if !option_value_to_string(&converted).is_empty() {
+                                matches = false;
+                            }
+                        }
                     }
                 }
-                None => {
-                    let known = KNOWN_OPTIONS.contains(&key.as_str()) || opt_meta.is_some();
-                    if !known {
-                        errors.push(format!("unknown option: '{key}'"));
+            } else {
+                settings.push(format!("values:{canonical}={v}"));
+                match actual_option_scalar(n.cfg, &bo, canonical, None) {
+                    Some(act_raw) => {
+                        if act_raw != v {
+                            matches = false;
+                        }
                     }
-                    matches = false;
+                    None => matches = false,
                 }
             }
         }
@@ -229,77 +524,26 @@ pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
     }
     if let Some(AttrValue::LabelKeyedStrDict(flags)) = n.value("flag_values")? {
         for (l, expected) in flags {
-            let ct = n.resolver.configured_target(&l, n.cfg)?;
-            let resolved_label = ct.alias_targets.last().unwrap_or(&l);
-            // Build settings, and rules providing `config_common.FeatureFlagInfo` (the value of
-            // a feature flag), can be matched by `flag_values`.
-            let actual = match ct
-                .providers
-                .get("BuildSettingProvider")
-                .or_else(|| ct.providers.get("FeatureFlagInfo"))
-            {
-                Some(Value::ProviderInstance { fields, .. }) => fields.get("value").cloned(),
-                _ => None,
-            };
-            let Some(actual) = actual else {
-                errors.push(format!(
-                    "{} does not have mandatory providers: 'BuildSettingProvider'",
-                    l.canonical_form()
-                ));
-                matches = false;
-                continue;
-            };
-            let norm_expected = match &actual {
-                Value::Bool(_) => match parse_bazel_bool(&expected) {
-                    Some(b) => b.to_string(),
-                    None => {
-                        errors.push(format!(
-                            "Error while parsing user-defined configuration value: '{}' cannot be converted to {} type bool",
-                            expected,
-                            l.canonical_form()
-                        ));
-                        matches = false;
-                        continue;
-                    }
-                },
-                Value::Label(_) => {
-                    let pkg = n.rule.label.package_identifier();
-                    let entries = n
-                        .resolver
-                        .repo_mapping_entries(pkg.repository().name())
-                        .into_iter()
-                        .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
-                        .collect();
-                    let mapping =
-                        zel_cmdline::RepositoryMapping::new(entries, pkg.repository().clone());
-                    Label::parse_with_package_context(&expected, pkg, &mapping)
-                        .map(|x| x.canonical_form())
-                        .unwrap_or_else(|_| expected.clone())
-                }
-                _ => expected.clone(),
-            };
-            let flag_canon = resolved_label.canonical_form();
-            if let Some(prev) = seen_flag_expectations.get(&flag_canon) {
-                if prev != &norm_expected {
-                    errors.push(format!(
-                        "Conflicting flag value expectations for '{flag_canon}': '{prev}' and '{norm_expected}'"
-                    ));
-                    matches = false;
-                }
-            } else {
-                seen_flag_expectations.insert(flag_canon.clone(), norm_expected.clone());
-            }
-            settings.push(format!("flag:{flag_canon}={norm_expected}"));
-            if !flag_value_matches(&actual, &norm_expected) {
-                matches = false;
-            }
+            match_starlark_flag_entry(
+                n,
+                "flag_values",
+                &l,
+                &expected,
+                &mut seen_flags,
+                &mut settings,
+                &mut errors,
+                &mut matches,
+            )?;
         }
     }
     let constraint_values = n.labels("constraint_values")?;
     if !constraint_values.is_empty() {
         let platform = crate::toolchain::target_platform(n.cfg, n.resolver, n.acfg)?;
+        let mut seen_settings: BTreeMap<String, Label> = BTreeMap::new();
         for cv in &constraint_values {
             let cv_ct = n.resolver.configured_target(cv, n.cfg)?;
+            n.resolver
+                .check_dependency(n.rule, "constraint_values", &cv_ct)?;
             let Some(Value::ProviderInstance {
                 fields: cv_fields, ..
             }) = cv_ct.providers.get("ConstraintValueInfo")
@@ -313,6 +557,28 @@ pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
                 Some(Value::Label(l)) => l.clone(),
                 _ => cv.clone(),
             };
+            if let Some(Value::ProviderInstance {
+                fields: cs_fields, ..
+            }) = cv_fields.get("constraint")
+            {
+                if let Some(Value::Label(cs_lbl)) = cs_fields.get("label") {
+                    let cs_key = cs_lbl.canonical_form();
+                    if let Some(prev) = seen_settings.get(&cs_key) {
+                        if prev != &real_cv {
+                            errors.push(format!(
+                                "Duplicate constraint values detected: constraint_setting {} has [{}, {}]",
+                                cs_key,
+                                prev.canonical_form(),
+                                real_cv.canonical_form()
+                            ));
+                            matches = false;
+                            continue;
+                        }
+                    } else {
+                        seen_settings.insert(cs_key, real_cv.clone());
+                    }
+                }
+            }
             settings.push(format!("constraint:{}", real_cv.canonical_form()));
             if let Some(Value::List(refs)) = cv_fields.get("refines") {
                 for r in &refs.lock().unwrap().elements {
@@ -341,23 +607,11 @@ pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
         );
     }
     if !errors.is_empty() {
-        let mut ct = base(n);
-        ct.providers.insert(
-            "ConfigMatchingProvider".into(),
-            provider_instance(
-                "ConfigMatchingProvider",
-                vec![
-                    ("matches", Value::Bool(false)),
-                    ("settings", mk_list(vec![])),
-                    (
-                        "errors",
-                        mk_list(errors.into_iter().map(Value::String).collect()),
-                    ),
-                    ("label", lbl(&n.rule.label)),
-                ],
-            ),
-        );
-        return Ok(ct);
+        return Err(format!(
+            "in config_setting rule {}: {}",
+            n.rule.label.canonical_form(),
+            errors.join("; ")
+        ));
     }
     let mut ct = base(n);
     ct.providers.insert(
@@ -403,37 +657,6 @@ const KNOWN_OPTIONS: &[&str] = &[
     "dynamic_mode",
     "collect_code_coverage",
 ];
-
-fn parse_bazel_bool(raw: &str) -> Option<bool> {
-    match raw.to_ascii_lowercase().as_str() {
-        "true" | "1" | "yes" | "t" | "y" => Some(true),
-        "false" | "0" | "no" | "f" | "n" => Some(false),
-        _ => None,
-    }
-}
-
-fn flag_value_matches(actual: &Value, expected: &str) -> bool {
-    match actual {
-        Value::Bool(b) => parse_bazel_bool(expected) == Some(*b),
-        Value::String(s) => s == expected,
-        Value::Int(i) => i.to_string() == expected,
-        Value::Label(l) => {
-            l.canonical_form() == expected
-                || format!("//{}:{}", l.package_name(), l.name()) == expected
-        }
-        Value::List(_) | Value::Tuple(_) => zel_starlark::eval::builtins::value_to_sequence(actual)
-            .map(|v| {
-                v.iter().any(|x| x.as_str() == Some(expected))
-                    || v.iter()
-                        .filter_map(|x| x.as_str())
-                        .collect::<Vec<_>>()
-                        .join(",")
-                        == expected
-            })
-            .unwrap_or(false),
-        _ => false,
-    }
-}
 
 // ------------------------------------------------------------------------ platform rules
 
@@ -525,11 +748,12 @@ pub(crate) fn constraint_value(n: &Nctx) -> Result<ConfiguredTarget, String> {
 }
 
 pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
-    // setting label -> value label
-    let mut constraints: BTreeMap<String, (Label, Label)> = BTreeMap::new();
+    let mut own_entries: Vec<(Value, Value)> = Vec::new();
+    let mut parent_info_val: Option<Value> = None;
+    let mut parent_constraints_val: Option<Value> = None;
     let mut exec_properties: BTreeMap<String, String> = BTreeMap::new();
-    let mut flags: Vec<String> = Vec::new();
     let mut parent_remote_props: Option<String> = None;
+    let mut flags: Vec<String> = Vec::new();
     let core_cfg =
         zel_analysis::BuildConfigurationKey::target(&n.cfg.cpu, "fastbuild").to_core_only();
     let parents = n.labels("parents")?;
@@ -542,31 +766,20 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
     for parent in parents {
         let p = n.resolver.configured_target(&parent, &core_cfg)?;
         n.resolver.check_dependency(n.rule, "parents", &p)?;
-        let Some(Value::ProviderInstance { fields, .. }) = p.providers.get("PlatformInfo") else {
+        let Some(p_info @ Value::ProviderInstance { fields, .. }) = p.providers.get("PlatformInfo")
+        else {
             return Err(format!(
                 "{}: attribute 'parents': '{}' does not have mandatory providers: 'PlatformInfo'",
                 n.rule.label,
                 parent.canonical_form()
             ));
         };
-        if let Some(Value::Dict(d)) = fields.get("constraints") {
-            for (k, v) in d.lock().unwrap().items() {
-                if let (Value::Label(k), Value::Label(v)) = (k, v) {
-                    constraints.insert(k.canonical_form(), (k, v));
-                }
-            }
-        }
+        parent_info_val = Some(p_info.clone());
+        parent_constraints_val = fields.get("constraints").cloned();
         if let Some(Value::Dict(d)) = fields.get("exec_properties") {
             for (k, v) in d.lock().unwrap().items() {
                 if let (Value::String(k), Value::String(v)) = (k, v) {
                     exec_properties.insert(k, v);
-                }
-            }
-        }
-        if let Some(Value::List(parent_flags)) = fields.get("flags") {
-            for elem in &parent_flags.lock().unwrap().elements {
-                if let Value::String(s) = elem {
-                    flags.push(s.clone());
                 }
             }
         }
@@ -575,23 +788,33 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
                 parent_remote_props = Some(rp.clone());
             }
         }
+        if let Some(Value::List(fl)) = fields.get("flags") {
+            for item in &fl.lock().unwrap().elements {
+                if let Some(s) = item.as_str() {
+                    flags.push(s.to_string());
+                }
+            }
+        }
     }
     let mut seen_settings: BTreeMap<String, Label> = BTreeMap::new();
     for raw_cv in n.labels("constraint_values")? {
         let ct = n.resolver.configured_target(&raw_cv, &core_cfg)?;
         n.resolver
             .check_dependency(n.rule, "constraint_values", &ct)?;
-        let Some(Value::ProviderInstance { fields, .. }) = ct.providers.get("ConstraintValueInfo")
+        let Some(cv_info @ Value::ProviderInstance { fields, .. }) =
+            ct.providers.get("ConstraintValueInfo")
         else {
             return Err(format!("{}: attribute 'constraint_values': '{}' does not have mandatory providers: 'ConstraintValueInfo'", n.rule.label, raw_cv.canonical_form()));
         };
-        let setting = match fields.get("constraint") {
-            Some(Value::ProviderInstance { fields, .. }) => match fields.get("label") {
-                Some(Value::Label(l)) => l.clone(),
-                _ => continue,
-            },
-            _ => continue,
+        let Some(setting_info @ Value::ProviderInstance { fields: sf, .. }) =
+            fields.get("constraint")
+        else {
+            continue;
         };
+        let Some(Value::Label(setting)) = sf.get("label") else {
+            continue;
+        };
+        let setting = setting.clone();
         // An alias to a constraint_value stands for the aliased value.
         let cv = match fields.get("label") {
             Some(Value::Label(l)) => l.clone(),
@@ -607,10 +830,13 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
                     cv.canonical_form()
                 ));
             }
-        } else {
-            seen_settings.insert(setting.canonical_form(), cv.clone());
+            continue;
         }
-        constraints.insert(setting.canonical_form(), (setting, cv));
+        seen_settings.insert(setting.canonical_form(), cv);
+        own_entries.push((setting_info.clone(), cv_info.clone()));
+    }
+    if let Some(AttrValue::StrList(own_flags)) = n.value("flags")? {
+        flags.extend(own_flags);
     }
     let own_remote_props = n.string("remote_execution_properties")?;
     let has_own_exec_props =
@@ -644,7 +870,8 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
             }
         }
     }
-    flags.extend(n.strings("flags")?);
+    let constraints_val =
+        zel_analysis::register_constraint_collection(own_entries, parent_constraints_val.as_ref());
     let mut ct = base(n);
     ct.providers.insert(
         "PlatformInfo".into(),
@@ -652,14 +879,11 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
             "PlatformInfo",
             vec![
                 ("label", lbl(&n.rule.label)),
+                ("parent", parent_info_val.unwrap_or(Value::None)),
+                ("constraints", constraints_val),
                 (
-                    "constraints",
-                    mk_dict(
-                        constraints
-                            .values()
-                            .map(|(s, v)| (lbl(s), lbl(v)))
-                            .collect(),
-                    ),
+                    "flags",
+                    mk_list(flags.into_iter().map(Value::String).collect()),
                 ),
                 (
                     "exec_properties",
@@ -671,10 +895,6 @@ pub(crate) fn platform(n: &Nctx) -> Result<ConfiguredTarget, String> {
                     ),
                 ),
                 ("remote_execution_properties", Value::String(remote_props)),
-                (
-                    "flags",
-                    mk_list(flags.into_iter().map(Value::String).collect()),
-                ),
             ],
         ),
     );
@@ -781,66 +1001,106 @@ pub(crate) fn toolchain(n: &Nctx) -> Result<ConfiguredTarget, String> {
             ))
         }
     };
-    let ll = |name: &str| -> Result<Value, String> {
-        Ok(mk_list(n.labels(name)?.iter().map(lbl).collect()))
-    };
     let use_target_exec = n.boolean("use_target_platform_constraints")?;
-    let core_cfg =
-        zel_analysis::BuildConfigurationKey::target(&n.cfg.cpu, "fastbuild").to_core_only();
-    if let Ok(tt_ct) = n.resolver.configured_target(&ty, &core_cfg) {
-        n.resolver
-            .check_dependency(n.rule, "toolchain_type", &tt_ct)?;
-    }
-    let check_dups = |attr_name: &str, labels: &[Label]| -> Result<(), String> {
-        let mut seen: BTreeMap<String, Label> = BTreeMap::new();
-        for raw in labels {
-            let ct = n.resolver.configured_target(raw, &core_cfg)?;
-            if let Some(Value::ProviderInstance { fields, .. }) =
-                ct.providers.get("ConstraintValueInfo")
-            {
-                let setting = match fields.get("constraint") {
-                    Some(Value::ProviderInstance { fields, .. }) => match fields.get("label") {
-                        Some(Value::Label(l)) => l.canonical_form(),
-                        _ => continue,
-                    },
-                    _ => continue,
-                };
-                let cv = match fields.get("label") {
-                    Some(Value::Label(l)) => l.clone(),
-                    _ => raw.clone(),
-                };
-                if let Some(prev) = seen.get(&setting) {
-                    if prev != &cv {
-                        return Err(format!(
-                            "{}: Duplicate constraints detected in {}: constraint_setting {} has [{}, {}]",
-                            n.rule.label,
-                            attr_name,
-                            setting,
-                            prev.canonical_form(),
-                            cv.canonical_form()
-                        ));
-                    }
-                } else {
-                    seen.insert(setting, cv);
-                }
-            }
-        }
-        Ok(())
-    };
     let exec_labels = n.labels("exec_compatible_with")?;
     let target_labels = n.labels("target_compatible_with")?;
-    check_dups("execution constraints", &exec_labels)?;
-    check_dups("target constraints", &target_labels)?;
+    if use_target_exec && (!exec_labels.is_empty() || !target_labels.is_empty()) {
+        return Err(format!(
+            "{}: It is not allowed to specify exec_compatible_with or target_compatible_with when use_target_platform_constraints is True",
+            n.rule.label
+        ));
+    }
+    let core_cfg =
+        zel_analysis::BuildConfigurationKey::target(&n.cfg.cpu, "fastbuild").to_core_only();
+    let tt_ct = n.resolver.configured_target(&ty, &core_cfg)?;
+    n.resolver
+        .check_dependency(n.rule, "toolchain_type", &tt_ct)?;
+    let Some(tt_info @ Value::ProviderInstance { fields: tt_fields, .. }) =
+        tt_ct.providers.get("ToolchainTypeInfo")
+    else {
+        return Err(format!(
+            "{}: attribute 'toolchain_type': '{}' does not have mandatory providers: 'ToolchainTypeInfo'",
+            n.rule.label,
+            ty.canonical_form()
+        ));
+    };
+    let resolved_ty = match tt_fields.get("type_label") {
+        Some(Value::Label(l)) => l.clone(),
+        _ => ty.clone(),
+    };
+    let check_constraints = |attr_key: &str, desc: &str, labels: &[Label]| -> Result<Vec<Value>, String> {
+        let mut seen: BTreeMap<String, Label> = BTreeMap::new();
+        let mut resolved_out = Vec::with_capacity(labels.len());
+        for raw in labels {
+            let ct = n.resolver.configured_target(raw, &core_cfg)?;
+            n.resolver.check_dependency(n.rule, attr_key, &ct)?;
+            let Some(Value::ProviderInstance { fields, .. }) =
+                ct.providers.get("ConstraintValueInfo")
+            else {
+                return Err(format!(
+                    "{}: attribute '{attr_key}': '{}' does not have mandatory providers: 'ConstraintValueInfo'",
+                    n.rule.label,
+                    raw.canonical_form()
+                ));
+            };
+            let setting = match fields.get("constraint") {
+                Some(Value::ProviderInstance { fields, .. }) => match fields.get("label") {
+                    Some(Value::Label(l)) => l.canonical_form(),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            let cv = match fields.get("label") {
+                Some(Value::Label(l)) => l.clone(),
+                _ => raw.clone(),
+            };
+            if let Some(prev) = seen.get(&setting) {
+                if prev != &cv {
+                    return Err(format!(
+                        "{}: Duplicate constraints detected in {}: constraint_setting {} has [{}, {}]",
+                        n.rule.label,
+                        desc,
+                        setting,
+                        prev.canonical_form(),
+                        cv.canonical_form()
+                    ));
+                }
+            } else {
+                seen.insert(setting, cv.clone());
+                resolved_out.push(lbl(&cv));
+            }
+        }
+        Ok(resolved_out)
+    };
+    let exec_cv_list = check_constraints("exec_compatible_with", "execution constraints", &exec_labels)?;
+    let target_cv_list = check_constraints("target_compatible_with", "target constraints", &target_labels)?;
+    let target_setting_labels = n.labels("target_settings")?;
+    for ts in &target_setting_labels {
+        let ts_ct = n.resolver.configured_target(ts, n.cfg)?;
+        n.resolver
+            .check_dependency(n.rule, "target_settings", &ts_ct)?;
+        if !ts_ct.providers.contains_key("ConfigMatchingProvider") {
+            return Err(format!(
+                "{}: attribute 'target_settings': '{}' does not have mandatory providers: 'ConfigMatchingProvider'",
+                n.rule.label,
+                ts.canonical_form()
+            ));
+        }
+    }
     let mut ct = base(n);
     ct.providers.insert(
         "DeclaredToolchainInfo".into(),
         provider_instance(
             "DeclaredToolchainInfo",
             vec![
-                ("toolchain_type", lbl(&ty)),
-                ("exec_compatible_with", ll("exec_compatible_with")?),
-                ("target_compatible_with", ll("target_compatible_with")?),
-                ("target_settings", ll("target_settings")?),
+                ("toolchain_type", lbl(&resolved_ty)),
+                ("toolchain_type_info", tt_info.clone()),
+                ("exec_compatible_with", mk_list(exec_cv_list)),
+                ("target_compatible_with", mk_list(target_cv_list)),
+                (
+                    "target_settings",
+                    mk_list(target_setting_labels.iter().map(lbl).collect()),
+                ),
                 (
                     "use_target_platform_constraints",
                     Value::Bool(use_target_exec),

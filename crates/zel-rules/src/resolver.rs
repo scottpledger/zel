@@ -491,6 +491,82 @@ impl TargetResolver {
         self.me.upgrade().expect("resolver alive")
     }
 
+    fn apply_platform_flags(&self, cfg: &BuildConfigurationKey) -> Option<BuildConfigurationKey> {
+        let plat_raw = cfg.platforms.first()?;
+        let plat_lbl = Label::parse_canonical(plat_raw).ok()?;
+        let core_cfg = BuildConfigurationKey::target(&cfg.cpu, "fastbuild").to_core_only();
+        let plat_ct = self.analyze(&plat_lbl, &core_cfg).ok()?;
+        let zel_starlark::Value::ProviderInstance { fields, .. } =
+            plat_ct.providers.get("PlatformInfo")?
+        else {
+            return None;
+        };
+        let zel_starlark::Value::List(fl) = fields.get("flags")? else {
+            return None;
+        };
+        let flag_strs: Vec<String> = fl
+            .lock()
+            .unwrap()
+            .elements
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        if flag_strs.is_empty() {
+            return None;
+        }
+        let pkg = plat_ct.actual_target_label().package_identifier().clone();
+        let mapping = self.loader.config().lookup.resolver.mapping(pkg.repository());
+        let mut out = cfg.clone();
+        let mut changed = false;
+        for raw_flag in flag_strs {
+            let trimmed = raw_flag.strip_prefix("--").unwrap_or(&raw_flag);
+            let (fk, fv) = match trimmed.split_once('=') {
+                Some((k, v)) => (k, v.to_string()),
+                None => {
+                    if let Some(rest) = trimmed.strip_prefix("no") {
+                        (rest, "false".to_string())
+                    } else {
+                        (trimmed, "true".to_string())
+                    }
+                }
+            };
+            if fk.starts_with("//") || fk.starts_with('@') || fk.starts_with(':') {
+                if let Ok(flbl) = Label::parse_with_package_context(fk, &pkg, &mapping) {
+                    let cf = flbl.canonical_form();
+                    out.flag_values.entry(cf).or_insert_with(|| {
+                        changed = true;
+                        fv
+                    });
+                }
+            } else if fk == "define" {
+                if let Some((dk, dv)) = fv.split_once('=') {
+                    out.user_defines.entry(dk.to_string()).or_insert_with(|| {
+                        changed = true;
+                        dv.to_string()
+                    });
+                }
+            } else if fk == "compilation_mode" || fk == "c" {
+                if !out.native.contains_key("compilation_mode") {
+                    out.compilation_mode = fv;
+                    changed = true;
+                }
+            } else if fk == "cpu" {
+                if !out.native.contains_key("cpu") {
+                    out.cpu = fv;
+                    changed = true;
+                }
+            } else if !out.native.contains_key(fk) && !out.options.contains_key(fk) {
+                out.options.insert(fk.to_string(), fv);
+                changed = true;
+            }
+        }
+        if changed {
+            Some(out)
+        } else {
+            None
+        }
+    }
+
     /// Analyses `label` in `cfg` (memoized).
     pub fn analyze(
         &self,
@@ -526,32 +602,45 @@ impl TargetResolver {
             _ => false,
         });
         let mut adj_cfg;
+        let plat_adj;
         let cfg = if is_noconfig {
             adj_cfg = BuildConfigurationKey::target("noconfig", "fastbuild").to_core_only();
             &adj_cfg
-        } else if !cfg.is_exec && !cfg.core_only {
-            let keep = loaded_target
-                .map(|t| match t {
-                    Target::Rule(r) => {
-                        r.is_test_rule()
-                            || (r.testonly
-                                && cfg.bool_option(
-                                    "experimental_retain_test_configuration_across_testonly",
-                                    false,
-                                ))
-                    }
-                    _ => false,
-                })
-                .unwrap_or(false);
-            if keep != cfg.keep_test {
-                adj_cfg = cfg.clone();
-                adj_cfg.keep_test = keep;
-                &adj_cfg
+        } else {
+            let cfg = if !cfg.core_only && !cfg.platforms.is_empty() {
+                if let Some(c) = self.apply_platform_flags(cfg) {
+                    plat_adj = c;
+                    &plat_adj
+                } else {
+                    cfg
+                }
+            } else {
+                cfg
+            };
+            if !cfg.is_exec && !cfg.core_only {
+                let keep = loaded_target
+                    .map(|t| match t {
+                        Target::Rule(r) => {
+                            r.is_test_rule()
+                                || (r.testonly
+                                    && cfg.bool_option(
+                                        "experimental_retain_test_configuration_across_testonly",
+                                        false,
+                                    ))
+                        }
+                        _ => false,
+                    })
+                    .unwrap_or(false);
+                if keep != cfg.keep_test {
+                    adj_cfg = cfg.clone();
+                    adj_cfg.keep_test = keep;
+                    &adj_cfg
+                } else {
+                    cfg
+                }
             } else {
                 cfg
             }
-        } else {
-            cfg
         };
         let k = key(label, cfg);
         if let Some(c) = self.cache.lock().unwrap().get(&k) {
