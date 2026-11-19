@@ -30,11 +30,14 @@ pub const BAZEL_COMPAT_RELEASE_NAME: &str = "release 9.3.2";
 pub mod action_env;
 pub mod deflate;
 pub mod file_type;
+pub mod jar;
 pub mod java_regex;
 pub mod json;
 pub mod param_escaper;
 pub mod resource_converter;
+pub mod singlejar;
 pub mod terminal;
+pub mod zip;
 
 /// Exit codes shared by Bazel client and server, matching `ExitCode.java`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

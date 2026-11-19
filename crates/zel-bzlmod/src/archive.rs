@@ -1313,19 +1313,31 @@ fn parse_zip(buf: &[u8], archive: &Path) -> Result<Vec<Entry>, String> {
         format!("Zip file '{base}' is malformed. It does not contain an end of central directory record.")
     };
     let eocd = find_zip_eocd(buf).ok_or_else(malformed)?;
+    let disk_num = u16le(buf, eocd + 4)?;
+    let cd_disk = u16le(buf, eocd + 6)?;
+    let disk_entries = u16le(buf, eocd + 8)?;
     let mut total = u16le(buf, eocd + 10)? as u64;
-    let cd_size = u32le(buf, eocd + 12)? as u64;
+    let mut cd_size = u32le(buf, eocd + 12)? as u64;
     let mut cd_off = u32le(buf, eocd + 16)? as u64;
     let mut zip64 = false;
-    if (total == 0xFFFF || cd_off == 0xFFFF_FFFF)
-        && eocd >= 20
-        && buf[eocd - 20..eocd - 16] == [0x50, 0x4b, 0x06, 0x07]
-    {
-        let z64 = u64le(buf, eocd - 20 + 8)? as usize;
-        if buf.get(z64..z64 + 4) == Some(&[0x50, 0x4b, 0x06, 0x06]) {
-            total = u64le(buf, z64 + 32)?;
-            cd_off = u64le(buf, z64 + 48)?;
-            zip64 = true;
+    let maybe_zip64 = disk_num == 0xFFFF
+        || cd_disk == 0xFFFF
+        || disk_entries == 0xFFFF
+        || total == 0xFFFF
+        || cd_size == 0xFFFF_FFFF
+        || cd_off == 0xFFFF_FFFF;
+    if maybe_zip64 && eocd >= 20 && buf[eocd - 20..eocd - 16] == [0x50, 0x4b, 0x06, 0x07] {
+        if let Ok(z64_u64) = u64le(buf, eocd - 20 + 8) {
+            if let Ok(z64) = usize::try_from(z64_u64) {
+                if z64.checked_add(56).is_some_and(|end| end <= buf.len())
+                    && buf.get(z64..z64 + 4) == Some(&[0x50, 0x4b, 0x06, 0x06])
+                {
+                    total = u64le(buf, z64 + 32)?;
+                    cd_size = u64le(buf, z64 + 40)?;
+                    cd_off = u64le(buf, z64 + 48)?;
+                    zip64 = true;
+                }
+            }
         }
     }
     // Java: unless Zip64, trust `eocd - cdSize` when its low 32 bits match the recorded offset and then read
@@ -3022,6 +3034,68 @@ mod corrupt_tests {
         fs::write(d.join("c.7z"), b"7z\xbc\xaf\x27\x1c\0\x04\0\0\0\0").unwrap();
         let e = extract(&d.join("c.7z"), &d.join("o3"), &ExtractOptions::default()).unwrap_err();
         assert!(e.ends_with(": null"), "{e}");
+    }
+
+    #[test]
+    fn zip64_eocd_cd_size_sentinel_and_bad_locator_fallback() {
+        let d = tmpdir("zip64-sentinel");
+        let base = minimal_zip();
+        let eocd = find_zip_eocd(&base).unwrap();
+        let cd_sz = u32le(&base, eocd + 12).unwrap() as u64;
+        let cd_off = u32le(&base, eocd + 16).unwrap() as u64;
+
+        // Archive with ONLY cd_size == 0xFFFF_FFFF in classic EOCD and real values in Zip64 EOCD.
+        let mut z64 = base[..eocd].to_vec();
+        let z64_pos = z64.len() as u64;
+        z64.extend_from_slice(&[0x50, 0x4b, 0x06, 0x06]);
+        z64.extend_from_slice(&44u64.to_le_bytes());
+        z64.extend_from_slice(&45u16.to_le_bytes());
+        z64.extend_from_slice(&45u16.to_le_bytes());
+        z64.extend_from_slice(&0u32.to_le_bytes());
+        z64.extend_from_slice(&0u32.to_le_bytes());
+        z64.extend_from_slice(&1u64.to_le_bytes());
+        z64.extend_from_slice(&1u64.to_le_bytes());
+        z64.extend_from_slice(&cd_sz.to_le_bytes());
+        z64.extend_from_slice(&cd_off.to_le_bytes());
+        // Zip64 EOCD Locator
+        z64.extend_from_slice(&[0x50, 0x4b, 0x06, 0x07]);
+        z64.extend_from_slice(&0u32.to_le_bytes());
+        z64.extend_from_slice(&z64_pos.to_le_bytes());
+        z64.extend_from_slice(&1u32.to_le_bytes());
+        // Classic EOCD with ONLY cd_size == 0xFFFF_FFFF
+        z64.extend_from_slice(&[0x50, 0x4b, 0x05, 0x06, 0, 0, 0, 0, 1, 0, 1, 0]);
+        z64.extend_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
+        z64.extend_from_slice(&(cd_off as u32).to_le_bytes());
+        z64.extend_from_slice(&[0, 0]);
+
+        fs::write(d.join("z64.zip"), &z64).unwrap();
+        extract(
+            &d.join("z64.zip"),
+            &d.join("out1"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(d.join("out1/f")).unwrap(), b"data");
+
+        // Bogus Zip64 locator pointing past EOF must be ignored rather than failing Zip32 read.
+        let mut bogus = base[..eocd].to_vec();
+        bogus.extend_from_slice(&[0x50, 0x4b, 0x06, 0x07]);
+        bogus.extend_from_slice(&0u32.to_le_bytes());
+        bogus.extend_from_slice(&u64::MAX.to_le_bytes());
+        bogus.extend_from_slice(&1u32.to_le_bytes());
+        bogus.extend_from_slice(&[0x50, 0x4b, 0x05, 0x06, 0xFF, 0xFF, 0, 0, 1, 0, 1, 0]);
+        bogus.extend_from_slice(&(cd_sz as u32).to_le_bytes());
+        bogus.extend_from_slice(&(cd_off as u32).to_le_bytes());
+        bogus.extend_from_slice(&[0, 0]);
+
+        fs::write(d.join("bogus.zip"), &bogus).unwrap();
+        extract(
+            &d.join("bogus.zip"),
+            &d.join("out2"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(fs::read(d.join("out2/f")).unwrap(), b"data");
     }
 }
 
