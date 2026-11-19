@@ -55,34 +55,10 @@ pub(crate) fn fixup_for(
                         .map(|v| v.into_iter().collect()),
                 )
             } else {
-                let imports_of = |dev: bool| -> BTreeSet<String> {
-                    usage
-                        .proxies
-                        .iter()
-                        .filter(|p| p.dev_dependency == dev)
-                        .flat_map(|p| p.imports.iter().map(|(_, e)| e.clone()))
-                        .collect()
-                };
-                (
-                    Some(imports_of(false).intersection(all_repos).cloned().collect()),
-                    Some(imports_of(true).intersection(all_repos).cloned().collect()),
-                )
+                (None, None)
             }
         }
-        None => {
-            let imports_of = |dev: bool| -> BTreeSet<String> {
-                usage
-                    .proxies
-                    .iter()
-                    .filter(|p| p.dev_dependency == dev)
-                    .flat_map(|p| p.imports.iter().map(|(_, e)| e.clone()))
-                    .collect()
-            };
-            (
-                Some(imports_of(false).intersection(all_repos).cloned().collect()),
-                Some(imports_of(true).intersection(all_repos).cloned().collect()),
-            )
-        }
+        None => (None, None),
     };
     let (Some(expected), Some(expected_dev)) = (deps, dev_deps) else {
         return Ok(None);

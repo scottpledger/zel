@@ -503,7 +503,7 @@ pub fn validate_repo_rule_call(
         .and_then(|v| v.as_str().map(String::from))
         .unwrap_or_default();
     // Implicit attributes of every rule class; `repo_mapping` is not available to bzlmod repo rule calls.
-    let implicit = ["tags", "visibility"];
+    let implicit = ["tags", "visibility", "deprecation"];
     let mut kw2 = kw.clone();
     for i in implicit {
         kw2.remove(i);
@@ -566,6 +566,147 @@ pub fn validate_repo_rule_call(
     validate_attrs(rule, &defs2, &kw2)
 }
 
+/// Argument validation for a module extension tag call (`TypeCheckedTag.create`):
+/// unlike `repository_rule` calls, tags have NO implicit `name`, `tags`, `visibility`,
+/// `deprecation`, or `repo_mapping` attributes unless explicitly declared in `tag_class(attrs = ...)`.
+pub fn validate_tag_call(
+    tag_name: &str,
+    defs: &[(String, crate::rt::AttrDef)],
+    kw: &BTreeMap<String, Value>,
+    order: &[String],
+) -> Result<(), StarlarkError> {
+    let keys: Vec<&String> = if !order.is_empty() {
+        let mut v: Vec<&String> = order.iter().filter(|k| kw.contains_key(*k)).collect();
+        for k in kw.keys() {
+            if !v.contains(&k) {
+                v.push(k);
+            }
+        }
+        v
+    } else {
+        kw.keys().collect()
+    };
+    for k in keys {
+        if !defs.iter().any(|(n, _)| n == k) {
+            let names: Vec<&str> = defs.iter().map(|(n, _)| n.as_str()).collect();
+            let hint = crate::ctxargs::did_you_mean(k, &names);
+            return err(format!(
+                "in '{tag_name}' tag, unknown attribute '{k}' provided{hint}"
+            ));
+        }
+    }
+    for (k, v) in kw {
+        if matches!(v, Value::None) {
+            continue;
+        }
+        let Some((_, d)) = defs.iter().find(|(n, _)| n == k) else {
+            continue;
+        };
+        if let Some((ty, what, bad)) = repo_attr_type_error(&d.kind, v) {
+            let what = if what == "attribute" {
+                format!("attribute '{k}'")
+            } else {
+                what
+            };
+            let (r, t) = match bad {
+                Some((r, t)) => (r, t),
+                None => (v.repr(), v.type_name().to_string()),
+            };
+            return err(format!(
+                "in '{tag_name}' tag, expected value of type '{ty}' for {what}, but got {r} ({t})"
+            ));
+        }
+    }
+    for (n, d) in defs {
+        match kw.get(n) {
+            None | Some(Value::None) => {
+                if d.mandatory {
+                    return err(format!(
+                        "in '{tag_name}' tag, mandatory attribute '{n}' isn't being specified"
+                    ));
+                }
+            }
+            Some(v) => check_type(tag_name, n, d, v)?,
+        }
+    }
+    Ok(())
+}
+
+/// Validates label syntax and repo visibility on a tag call (`TypeCheckedTag.create`).
+pub fn check_tag_labels(
+    rt: &Arc<Rt>,
+    tag_name: &str,
+    defs: &[(String, crate::rt::AttrDef)],
+    kw: &BTreeMap<String, Value>,
+    owner: &str,
+) -> Result<(), StarlarkError> {
+    for (k, v) in kw {
+        let Some((_, d)) = defs.iter().find(|(n, _)| n == k) else {
+            continue;
+        };
+        let a = AttrVal::from_value(v);
+        let mut raws: Vec<String> = vec![];
+        match (d.kind.as_str(), &a) {
+            ("label", AttrVal::Str(s) | AttrVal::Label(s)) => raws.push(s.clone()),
+            ("label_list", AttrVal::List(l)) => {
+                raws.extend(l.iter().filter_map(|e| e.as_str().map(String::from)))
+            }
+            ("label_keyed_string_dict", AttrVal::Dict(m) | AttrVal::LabelDict(m)) => {
+                raws.extend(m.iter().map(|(k, _)| k.clone()))
+            }
+            ("string_keyed_label_dict", AttrVal::Dict(m)) => {
+                raws.extend(m.iter().filter_map(|(_, e)| e.as_str().map(String::from)))
+            }
+            ("label_list_dict", AttrVal::Dict(m)) => {
+                for (_, e) in m {
+                    if let AttrVal::List(l) = e {
+                        raws.extend(l.iter().filter_map(|e| e.as_str().map(String::from)));
+                    }
+                }
+            }
+            _ => {}
+        }
+        for raw in raws {
+            if !raw.starts_with('@')
+                && !raw.starts_with("//")
+                && !raw.starts_with(':')
+                && raw.contains(':')
+            {
+                return err(format!(
+                    "in '{tag_name}' tag, invalid label '{raw}' in attribute '{k}': invalid target name '{raw}': target names may not contain ':'"
+                ));
+            }
+            let after_repo = match raw.find("//") {
+                Some(i) if raw.starts_with('@') || raw.starts_with("//") => &raw[i + 2..],
+                _ => raw.as_str(),
+            };
+            if let Some((_, name)) = after_repo.split_once(':') {
+                if name.contains(':') {
+                    return err(format!(
+                        "in '{tag_name}' tag, invalid label '{raw}' in attribute '{k}': invalid target name '{name}': target names may not contain ':'"
+                    ));
+                }
+            }
+            if raw.starts_with('@') && !raw.starts_with("@@") {
+                if let Ok((repo, _, _)) = rt.resolve_label(&raw, owner, "") {
+                    if repo.starts_with("[unknown repo") {
+                        let apparent = raw[1..].split("//").next().unwrap_or("");
+                        let who = if owner.is_empty() {
+                            "the root module".to_string()
+                        } else {
+                            format!("module '{owner}'")
+                        };
+                        return err(format!(
+                            "in '{tag_name}' tag, no repository visible as '@{apparent}' to {who}, but referenced by label '{raw}' in attribute '{k}'"
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Label-typed attributes of a repo rule call: target-name syntax and (for calls made from a `MODULE.bazel` file of
 /// `owner`) visibility of the repo a label refers to.
 pub fn check_repo_rule_labels(
@@ -606,6 +747,15 @@ pub fn check_repo_rule_labels(
             _ => {}
         }
         for raw in raws {
+            if !raw.starts_with('@')
+                && !raw.starts_with("//")
+                && !raw.starts_with(':')
+                && raw.contains(':')
+            {
+                return err(format!(
+                    "in call to '{rule}' repo rule with name '{rname}', invalid label '{raw}' in attribute '{k}': invalid target name '{raw}': target names may not contain ':'"
+                ));
+            }
             let after_repo = match raw.find("//") {
                 Some(i) if raw.starts_with('@') || raw.starts_with("//") => &raw[i + 2..],
                 _ => raw.as_str(),
@@ -687,7 +837,9 @@ fn repo_attr_type_error(
                         "label_list_dict" => {
                             matches!(val, AttrVal::List(l) if l.iter().all(|e| matches!(e, AttrVal::Str(_) | AttrVal::Label(_))))
                         }
-                        "string_keyed_label_dict" => matches!(val, AttrVal::Str(_) | AttrVal::Label(_)),
+                        "string_keyed_label_dict" => {
+                            matches!(val, AttrVal::Str(_) | AttrVal::Label(_))
+                        }
                         _ => matches!(val, AttrVal::Str(_)),
                     };
                     if !vok {
@@ -1023,7 +1175,9 @@ impl CtxData {
                 let dir = s_err(rt.fetch_repo(&repo))?;
                 let pkg = l.package_name();
                 let base = if pkg.is_empty() { dir } else { dir.join(pkg) };
-                Ok(base.join(l.name()))
+                let resolved = base.join(l.name());
+                let _ = maybe_watch(rt, self, &resolved, "auto");
+                Ok(resolved)
             }
             other => err(format!(
                 "path() got argument of type '{}', want 'string', 'Label' or 'path'",
@@ -1473,11 +1627,14 @@ fn dispatch_object_inner(
             | "extract"
             | "which"
             | "getenv"
-            | "report_progress"
-            | "load_wasm"
-            | "execute_wasm" => Ok(Value::BuiltinFunction(format!(
+            | "report_progress" => Ok(Value::BuiltinFunction(format!(
                 "host:method:{kind}.{member}"
             ))),
+            "load_wasm" | "execute_wasm" if rt.opts.experimental_repository_ctx_execute_wasm => {
+                Ok(Value::BuiltinFunction(format!(
+                    "host:method:{kind}.{member}"
+                )))
+            }
             "watch" => Ok(Value::BuiltinFunction(format!(
                 "host:method:{kind}.{member}"
             ))),
@@ -1567,7 +1724,11 @@ fn dispatch_object_inner(
                     p.display()
                 ));
             }
-            maybe_watch_tree(rt, &data, &p)?;
+            maybe_watch(rt, &data, &p, "yes")?;
+            if let Some(rel) = repo_cache_friendly_path(rt, &data, &p, "yes")? {
+                let digest = crate::lockfile::compute_dirtree_digest(&p);
+                data.record(format!("DIRTREE:{}", escape_input(&rel)), Some(digest));
+            }
             Ok(Value::None)
         }
         "which" => {
@@ -1581,7 +1742,11 @@ fn dispatch_object_inner(
                 ));
             }
             let path_env = rt.opts.client_env.get("PATH").cloned().unwrap_or_default();
-            for d in path_env.split(':') {
+            let sep = if cfg!(windows) { ';' } else { ':' };
+            for d in path_env.split(sep) {
+                if d.is_empty() || !Path::new(d).is_absolute() {
+                    continue;
+                }
                 let c = Path::new(d).join(&prog);
                 if c.is_file() && is_executable(&c) {
                     return Ok(path_value(&c));
@@ -2068,15 +2233,24 @@ fn dispatch_object_inner(
                     .ok_or_else(|| StarlarkError("patch() missing patch_file".into()))?,
             )?;
             let strip = match arg(args, kwr, 1, "strip") {
-                Some(Value::Int(i)) => i.to_i64().unwrap_or(0),
+                Some(Value::Int(i)) => i
+                    .to_i64()
+                    .and_then(|v| i32::try_from(v).ok())
+                    .ok_or_else(|| {
+                        StarlarkError(format!(
+                            "in call to patch(), parameter 'strip' got {i}, want value in signed 32-bit int range"
+                        ))
+                    })? as i64,
                 _ => 0,
             };
+            let watch = str_arg(&[], kwr, 99, "watch_patch", "auto")?;
+            maybe_watch(rt, &data, &pf, &watch)?;
             let base = match arg(args, kwr, usize::MAX, "directory") {
-                Some(Value::String(d)) if !d.is_empty() => {
-                    data.resolve(rt, &Value::String(d.clone()))?
-                }
-                _ => data.dir.clone(),
+                None => data.dir.clone(),
+                Some(Value::String(d)) if d.is_empty() => data.dir.clone(),
+                Some(d) => data.resolve(rt, d)?,
             };
+            data.check_writable(&base)?;
             s_err(apply_patch(&base, &pf, strip, &rt.opts.client_env))?;
             Ok(Value::None)
         }
@@ -2318,9 +2492,6 @@ fn dispatch_object_inner(
                 return err(
                     "attrs_for_reproducibility can only be specified if reproducible is False",
                 );
-            }
-            if reproducible {
-                *data.reproducible.lock().unwrap() = true;
             }
             let mut fields = BTreeMap::new();
             fields.insert("reproducible".into(), Value::Bool(reproducible));
@@ -2581,22 +2752,6 @@ pub(crate) fn compute_dirtree_digest(p: &Path) -> Result<String, std::io::Error>
     }
 }
 
-/// `watch_tree`: records a `DIRTREE:` recursive directory tree digest input.
-fn maybe_watch_tree(rt: &Rt, data: &CtxData, p: &Path) -> Result<(), StarlarkError> {
-    let Some(rel) = repo_cache_friendly_path(rt, data, p, "yes")? else {
-        return Ok(());
-    };
-    let digest = compute_dirtree_digest(p).map_err(|e| {
-        StarlarkError(format!(
-            "java.io.IOException: {} ({})",
-            p.display(),
-            errno_text(&e)
-        ))
-    })?;
-    data.record(format!("DIRTREE:{}", escape_input(&rel)), Some(digest));
-    Ok(())
-}
-
 fn write_file(p: &Path, content: &[u8], exec: bool) -> Result<(), StarlarkError> {
     if let Some(par) = p.parent() {
         make_dirs(par)?;
@@ -2810,7 +2965,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let data = CtxData {
             kind: CtxKind::Repository,
-            name: "test_repo".into(),
+            name: "test_repo+".into(),
             original_name: "test_repo".into(),
             canonical: "test_repo+".into(),
             dir,
@@ -2864,7 +3019,7 @@ mod tests {
         let _ = std::fs::create_dir_all(&dir);
         let data = CtxData {
             kind: CtxKind::Repository,
-            name: "test_copy".into(),
+            name: "test_copy+".into(),
             original_name: "test_copy".into(),
             canonical: "test_copy+".into(),
             dir: dir.clone(),

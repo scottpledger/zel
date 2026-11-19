@@ -1316,7 +1316,7 @@ impl EvalContext {
         if let Some(frame) = self.thread.current_frame_mut() {
             frame.locals.lock().unwrap().insert(name.to_string(), val);
         } else {
-            if self.top_level_stmt_depth == 0 && !name.starts_with('_') {
+            if self.top_level_stmt_depth == 0 {
                 self.exported_assignments
                     .push((name.to_string(), val.clone()));
             }

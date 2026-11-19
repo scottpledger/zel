@@ -56,13 +56,21 @@ fn raw(parsed: &ParsedCommandOptions, name: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `RepositoryOverrideConverter`'s name check: an apparent name must be a valid user-provided repo name.
+/// `RepositoryOverrideConverter`'s name check: a canonical (`+`) or apparent user-provided repo name.
 fn validate_repo_flag_name(name: &str) -> Result<(), ()> {
     if name.is_empty() || name.starts_with('@') {
         return Err(());
     }
     if name.contains('+') {
-        return Ok(());
+        if name != "."
+            && name != ".."
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+'))
+        {
+            return Ok(());
+        }
+        return Err(());
     }
     let valid_start = name
         .chars()
@@ -345,11 +353,11 @@ impl BzlmodConfig {
                     format!("While parsing option --{n}={v}: {kind} must be of the form '{form}'")
                 })?;
                 if is_repo_name {
-                    validate_repo_flag_name(&a).map_err(|_| {
-                        format!(
+                    if a.contains('+') || validate_repo_flag_name(&a).is_err() {
+                        return Err(format!(
                             "While parsing option --{n}={v}: Invalid repository name given to inject"
-                        )
-                    })?;
+                        ));
+                    }
                 } else {
                     validate_module_flag_name(&a, n, &v)?;
                 }
@@ -1630,7 +1638,7 @@ impl Rt {
 
     /// Whether `canonical` is created by a `local=True` or `configure=True` rule (excluded from vendoring).
     pub fn is_local_repo(self: &Arc<Self>, canonical: &str) -> bool {
-        if self.opts.override_repository.keys().any(|k| k == canonical) {
+        if self.repo_override_for(canonical).ok().flatten().is_some() {
             return true;
         }
         match self.repo_spec_for(canonical) {

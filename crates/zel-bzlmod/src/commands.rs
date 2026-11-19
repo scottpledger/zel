@@ -18,15 +18,28 @@ struct RtProvider {
 
 impl RepoSpecProvider for RtProvider {
     fn repo_spec(&self, canonical: &str) -> Option<RepoSpec> {
-        self.rt.repo_spec_for(canonical).ok().flatten()
+        match self.rt.repo_spec_for(canonical) {
+            Ok(s) => s,
+            Err(e) => {
+                if !e.ends_with("is not defined") {
+                    self.errors.lock().unwrap().push(e);
+                }
+                None
+            }
+        }
     }
     fn external_directory(&self) -> String {
         self.rt.external_dir().display().to_string()
     }
     fn repo_override_path(&self, canonical: &str) -> Option<String> {
         // `--override_repository` makes the repo an override (`RepoDefinitionValue.RepoOverride`).
-        if let Some(p) = self.rt.override_for(canonical) {
-            return Some(p.display().to_string());
+        match self.rt.repo_override_for(canonical) {
+            Ok(Some(p)) => return Some(p.display().to_string()),
+            Ok(None) => {}
+            Err(e) => {
+                self.errors.lock().unwrap().push(e);
+                return None;
+            }
         }
         if canonical == "bazel_tools" {
             if let Some(ib) = crate::session::install_base() {
@@ -1361,7 +1374,10 @@ ext = module_extension(implementation = _ext_impl)
         // sees updated facts != workspace lockfile facts, and fails lockfile check!
         write(&f.ws, "seed.txt", "gamma|delta");
         let out_err = run(&f, "fetch", &["--repo=@r", "--lockfile_mode=error"]);
-        assert_ne!(out_err.exit_code, 0, "expected error when reproducible facts drift");
+        assert_ne!(
+            out_err.exit_code, 0,
+            "expected error when reproducible facts drift"
+        );
         assert!(
             out_err.stderr.contains("facts of the extension")
                 && out_err.stderr.contains("have changed"),

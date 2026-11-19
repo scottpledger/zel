@@ -705,6 +705,9 @@ fn run_file(
     // Export proxy names (`ext = use_extension(...)`): first non-`_` top-level assignment wins.
     let mut s = st.lock().unwrap();
     for (name, v) in &ctx.exported_assignments {
+        if name.starts_with('_') {
+            continue;
+        }
         if let Value::Host(kind, id) = v {
             if kind == "ext_proxy" {
                 if let Some((u, p)) = parse_proxy_id(id) {

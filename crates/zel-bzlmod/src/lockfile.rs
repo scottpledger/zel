@@ -754,7 +754,10 @@ mod tests {
         std::fs::write(tree.join("sub/a.txt"), "v1").unwrap();
         let digest1 = compute_dirtree_digest(&tree);
         let rec_entry = format!("DIRTREE:@@//tree {digest1}");
-        assert_eq!(recorded_inputs_outdated(&[rec_entry.clone()], &env, &d, &d), None);
+        assert_eq!(
+            recorded_inputs_outdated(&[rec_entry.clone()], &env, &d, &d),
+            None
+        );
         std::fs::write(tree.join("sub/a.txt"), "v2").unwrap();
         assert!(recorded_inputs_outdated(&[rec_entry], &env, &d, &d)
             .unwrap()

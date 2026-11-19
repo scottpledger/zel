@@ -489,18 +489,26 @@ fn repo_definition(
             });
         }
     }
-    // Extension-generated repo: `<unique name>+<internal name>`.
+    // Extension-generated repo: `<unique name>+<internal name>` in insertion order.
     let mut original_name = None;
-    for (id, unique) in &insp.extension_unique_names {
+    for id in res.extension_ids() {
+        let Some(unique) = res
+            .extension_unique_names
+            .get(&id)
+            .or_else(|| insp.extension_unique_names.get(&id))
+        else {
+            continue;
+        };
         if let Some(rest) = canonical.strip_prefix(&format!("{unique}+")) {
-            if ext_info
-                .generated_repos(id)
+            let owns = ext_info
+                .generated_repos(&id)
                 .map(|r| r.iter().any(|x| x == rest))
-                .unwrap_or(false)
-            {
-                original_name = Some(rest.to_string());
-                break;
+                .unwrap_or(false);
+            if !owns {
+                return None;
             }
+            original_name = Some(rest.to_string());
+            break;
         }
     }
     let spec = provider.repo_spec(canonical)?;

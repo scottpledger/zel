@@ -50,6 +50,7 @@ pub struct AttrDef {
 pub struct RuleDef {
     pub implementation: Value,
     pub attrs: Vec<(String, AttrDef)>,
+    pub user_has_repo_mapping: bool,
     pub local: bool,
     pub environ: Vec<String>,
     pub configure: bool,
@@ -862,29 +863,36 @@ impl Rt {
                 (crate::hash::sha256_hex(src.as_bytes()), children),
             );
         }
-        for (n, v) in &ctx.globals {
-            if let Value::Host(kind, id) = v {
-                let idx: usize = id.parse().unwrap_or(usize::MAX);
-                match kind.as_str() {
-                    "repository_rule" => {
-                        if let Some(d) = st.rule_defs.get_mut(idx) {
-                            if d.name.is_empty() {
-                                d.name = n.clone();
-                                d.bzl_file = key.to_string();
+        for pass_private in [false, true] {
+            for (n, v) in &ctx.exported_assignments {
+                if n.starts_with('_') != pass_private {
+                    continue;
+                }
+                if let Value::Host(kind, id) = v {
+                    let idx: usize = id.parse().unwrap_or(usize::MAX);
+                    match kind.as_str() {
+                        "repository_rule" => {
+                            if let Some(d) = st.rule_defs.get_mut(idx) {
+                                if d.name.is_empty() {
+                                    d.name = n.clone();
+                                    if d.bzl_file.is_empty() {
+                                        d.bzl_file = key.to_string();
+                                    }
+                                }
                             }
                         }
-                    }
-                    "module_extension" => {
-                        if let Some(d) = st.ext_defs.get_mut(idx) {
-                            if d.name.is_empty() {
-                                d.name = n.clone();
-                            }
-                            if d.bzl_file.is_empty() {
-                                d.bzl_file = key.to_string();
+                        "module_extension" if !pass_private => {
+                            if let Some(d) = st.ext_defs.get_mut(idx) {
+                                if d.name.is_empty() {
+                                    d.name = n.clone();
+                                }
+                                if d.bzl_file.is_empty() {
+                                    d.bzl_file = key.to_string();
+                                }
                             }
                         }
+                        _ => {}
                     }
-                    _ => {}
                 }
             }
         }
@@ -1479,10 +1487,15 @@ impl Rt {
             return err("in call to repository_rule(), parameter 'remotable' is experimental and thus unavailable with the current flags. It may be enabled by setting --experimental_repo_remote_exec");
         }
         let mut attrs = self.attrs_from_kw(kw.get("attrs"))?;
-        if attrs.iter().any(|(n, _)| n == "name") {
-            return err("There is already a built-in attribute 'name' which cannot be overridden");
+        for (n, _) in &attrs {
+            if matches!(n.as_str(), "name" | "tags" | "deprecation" | "visibility") {
+                return err(format!(
+                    "There is already a built-in attribute '{n}' which cannot be overridden"
+                ));
+            }
         }
-        if !attrs.iter().any(|(n, _)| n == "repo_mapping") {
+        let user_has_repo_mapping = attrs.iter().any(|(n, _)| n == "repo_mapping");
+        if !user_has_repo_mapping {
             attrs.push((
                 "repo_mapping".into(),
                 AttrDef {
@@ -1494,15 +1507,36 @@ impl Rt {
                 },
             ));
         }
+        let local = match kw.get("local") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return err(format!(
+                    "in call to repository_rule(), parameter 'local' got value of type '{}', want 'bool'",
+                    other.type_name()
+                ))
+            }
+        };
+        let configure = match kw.get("configure") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return err(format!(
+                    "in call to repository_rule(), parameter 'configure' got value of type '{}', want 'bool'",
+                    other.type_name()
+                ))
+            }
+        };
         let def = RuleDef {
             implementation,
             attrs,
-            local: kw.get("local").map(|v| v.is_truthy()).unwrap_or(false),
+            user_has_repo_mapping,
+            local,
             environ: kw
                 .get("environ")
                 .map(|v| v.to_string_list())
                 .unwrap_or_default(),
-            configure: kw.get("configure").map(|v| v.is_truthy()).unwrap_or(false),
+            configure,
             bzl_file: String::new(),
             name: String::new(),
         };
@@ -1540,6 +1574,49 @@ impl Rt {
                 "module_extension() missing 1 required positional argument: implementation",
             );
         };
+        let os_dependent = match kw.get("os_dependent") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return err(format!(
+                    "in call to module_extension(), parameter 'os_dependent' got value of type '{}', want 'bool'",
+                    other.type_name()
+                ))
+            }
+        };
+        let arch_dependent = match kw.get("arch_dependent") {
+            None => false,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return err(format!(
+                    "in call to module_extension(), parameter 'arch_dependent' got value of type '{}', want 'bool'",
+                    other.type_name()
+                ))
+            }
+        };
+        let facts_version = match kw.get("facts_version") {
+            None => 0u32,
+            Some(Value::Int(i)) => {
+                let v = i
+                    .to_i64()
+                    .and_then(|x| i32::try_from(x).ok())
+                    .ok_or_else(|| {
+                        StarlarkError(format!(
+                            "in call to module_extension(), parameter 'facts_version' got {i}, want value in signed 32-bit int range"
+                        ))
+                    })?;
+                if v < 0 {
+                    return err("facts_version must be non-negative");
+                }
+                v as u32
+            }
+            Some(other) => {
+                return err(format!(
+                    "in call to module_extension(), parameter 'facts_version' got value of type '{}', want 'int'",
+                    other.type_name()
+                ))
+            }
+        };
         let mut tag_classes = vec![];
         if let Some(Value::Dict(d)) = kw.get("tag_classes") {
             for (k, v) in &d.lock().unwrap().entries {
@@ -1556,6 +1633,10 @@ impl Rt {
                 ));
             }
         }
+        let location = location
+            .strip_suffix(":0")
+            .map(String::from)
+            .unwrap_or(location);
         let def = ExtensionDef {
             implementation,
             tag_classes,
@@ -1563,18 +1644,9 @@ impl Rt {
                 .get("environ")
                 .map(|v| v.to_string_list())
                 .unwrap_or_default(),
-            os_dependent: kw
-                .get("os_dependent")
-                .map(|v| v.is_truthy())
-                .unwrap_or(false),
-            arch_dependent: kw
-                .get("arch_dependent")
-                .map(|v| v.is_truthy())
-                .unwrap_or(false),
-            facts_version: match kw.get("facts_version") {
-                Some(Value::Int(i)) => i.to_u64().unwrap_or(0) as u32,
-                _ => 0,
-            },
+            os_dependent,
+            arch_dependent,
+            facts_version,
             bzl_file,
             name: String::new(),
             location,
@@ -1626,6 +1698,13 @@ impl Rt {
                 crate::ctx::check_repo_rule_labels(self, &def.name, &def.attrs, &kw, None)?;
                 let mut attrs: BTreeMap<String, AttrVal> = BTreeMap::new();
                 for (k, v) in &kw {
+                    if matches!(
+                        k.as_str(),
+                        "name" | "tags" | "deprecation" | "visibility"
+                    ) || matches!(v, Value::None)
+                    {
+                        continue;
+                    }
                     attrs.insert(k.clone(), AttrVal::from_value(v));
                 }
                 let call = DeferredRepoCall {
