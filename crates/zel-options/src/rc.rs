@@ -677,33 +677,33 @@ pub fn partition_rc_sources_and_apply(
     let mut rc_sources: Vec<String> = Vec::new();
     let mut overrides: Vec<(usize, String, String)> = Vec::new();
 
-    let parse_override =
-        |clf: &str, raw: &str| -> Result<(usize, String, String), OptionsParsingError> {
-            let colon = raw.find(':');
-            let assign = raw.find('=');
-            let Some(colon) = colon else {
-                return Err(OptionsParsingError::new(format!(
-                    "While parsing option {clf}: {OVERRIDE_MSG}"
-                )));
-            };
-            let Some(assign) = assign.filter(|a| *a > colon + 1) else {
-                return Err(OptionsParsingError::new(format!(
-                    "While parsing option {clf}: {OVERRIDE_MSG}"
-                )));
-            };
-            let Some(idx) =
-                crate::converters::java_integer_value_of(&raw[..colon]).filter(|n| *n >= 0)
-            else {
-                return Err(OptionsParsingError::new(format!(
-                    "While parsing option {clf}: {OVERRIDE_MSG}"
-                )));
-            };
-            Ok((
-                idx as usize,
-                raw[colon + 1..assign].to_string(),
-                raw[assign + 1..].to_string(),
-            ))
+    let parse_override = |clf: &str,
+                          raw: &str|
+     -> Result<(usize, String, String), OptionsParsingError> {
+        let colon = raw.find(':');
+        let assign = raw.find('=');
+        let Some(colon) = colon else {
+            return Err(OptionsParsingError::new(format!(
+                "While parsing option {clf}: {OVERRIDE_MSG}"
+            )));
         };
+        let Some(assign) = assign.filter(|a| *a > colon + 1) else {
+            return Err(OptionsParsingError::new(format!(
+                "While parsing option {clf}: {OVERRIDE_MSG}"
+            )));
+        };
+        let Some(idx) = crate::converters::java_integer_value_of(&raw[..colon]).filter(|n| *n >= 0)
+        else {
+            return Err(OptionsParsingError::new(format!(
+                "While parsing option {clf}: {OVERRIDE_MSG}"
+            )));
+        };
+        Ok((
+            idx as usize,
+            raw[colon + 1..assign].to_string(),
+            raw[assign + 1..].to_string(),
+        ))
+    };
 
     let mut i = 0;
     while i < cmd_line.len() {
@@ -747,7 +747,11 @@ pub fn partition_rc_sources_and_apply(
             )));
         };
         if !opt.is_empty() {
-            rc_config.sections.entry(section).or_default().push((opt, src));
+            rc_config
+                .sections
+                .entry(section)
+                .or_default()
+                .push((opt, src));
         }
     }
 

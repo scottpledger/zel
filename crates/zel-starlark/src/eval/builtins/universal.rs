@@ -459,13 +459,21 @@ pub fn eval_universal_function_in(
                     "name" => Ok(Some(Value::String(l.name().to_string()))),
                     "package" => Ok(Some(Value::String(l.package_name().to_string()))),
                     "repo_name" | "workspace_name" => {
+                        if let Some(msg) = l.repository().not_visible_error_message() {
+                            return Err(StarlarkError(msg));
+                        }
                         Ok(Some(Value::String(l.repository().name().to_string())))
                     }
-                    "workspace_root" => Ok(Some(Value::String(if l.repository().is_main() {
-                        String::new()
-                    } else {
-                        format!("external/{}", l.repository().name())
-                    }))),
+                    "workspace_root" => {
+                        if let Some(msg) = l.repository().not_visible_error_message() {
+                            return Err(StarlarkError(msg));
+                        }
+                        Ok(Some(Value::String(if l.repository().is_main() {
+                            String::new()
+                        } else {
+                            format!("external/{}", l.repository().name())
+                        })))
+                    }
                     _ => match default {
                         Some(d) => Ok(Some(d)),
                         None => {

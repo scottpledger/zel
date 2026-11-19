@@ -861,7 +861,11 @@ fn test_uuid_converter_empty_null_and_signed_long_bounds() {
         &["--invocation_id=ffffffffffffffff-1-1-1-1".to_string()],
     )
     .unwrap_err();
-    assert!(err.message.contains("is not a value UUID"), "{}", err.message);
+    assert!(
+        err.message.contains("is not a value UUID"),
+        "{}",
+        err.message
+    );
 
     // 15 hex digits (within signed i64) is accepted.
     let ok = ParsedCommandOptions::parse_for_command(

@@ -216,7 +216,14 @@ impl ParsedCommandOptions {
 
     /// Parses command-line arguments for a specific command (e.g. "build", "test", "run", "query").
     pub fn parse_for_command(command: &str, args: &[String]) -> Result<Self, OptionsParsingError> {
-        Self::parse_internal(command, args, PriorityCategory::CommandLine, true, true, None)
+        Self::parse_internal(
+            command,
+            args,
+            PriorityCategory::CommandLine,
+            true,
+            true,
+            None,
+        )
     }
 
     /// Parses command-line arguments without `editOptions` or invocation policy (for `canonicalize-flags`).
@@ -364,8 +371,14 @@ impl ParsedCommandOptions {
         };
 
         let priority = OptionPriority::lowest_at_category(initial_priority);
-        let (pre, post) =
-            opts.parse_into(command, effective_args, priority, "command line", None, None)?;
+        let (pre, post) = opts.parse_into(
+            command,
+            effective_args,
+            priority,
+            "command line",
+            None,
+            None,
+        )?;
         opts.pre_double_dash_residue = pre;
         opts.post_double_dash_residue = post;
 

@@ -1850,13 +1850,21 @@ impl EvalContext {
                 "name" => Ok(Value::String(l.name().to_string())),
                 "package" => Ok(Value::String(l.package_name().to_string())),
                 "repo_name" | "workspace_name" => {
+                    if let Some(msg) = l.repository().not_visible_error_message() {
+                        return Err(StarlarkError(format!("{loc}: {msg}")));
+                    }
                     Ok(Value::String(l.repository().name().to_string()))
                 }
-                "workspace_root" => Ok(Value::String(if l.repository().is_main() {
-                    String::new()
-                } else {
-                    format!("external/{}", l.repository().name())
-                })),
+                "workspace_root" => {
+                    if let Some(msg) = l.repository().not_visible_error_message() {
+                        return Err(StarlarkError(format!("{loc}: {msg}")));
+                    }
+                    Ok(Value::String(if l.repository().is_main() {
+                        String::new()
+                    } else {
+                        format!("external/{}", l.repository().name())
+                    }))
+                }
                 "same_package_label" | "relative" | "package_relative" => {
                     Ok(self.bound_method(Value::Label(l.clone()), attr, loc))
                 }
@@ -2593,10 +2601,32 @@ impl EvalContext {
                 }));
             }
             "Label" => {
-                let s = eval_pos
-                    .first()
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("//:default");
+                for k in eval_kw.keys() {
+                    if k != "input" {
+                        return Err(StarlarkError(format!(
+                            "{loc}: Label() got unexpected keyword argument '{k}'"
+                        )));
+                    }
+                }
+                if eval_pos.len() > 1 || (!eval_pos.is_empty() && eval_kw.contains_key("input")) {
+                    return Err(StarlarkError(format!(
+                        "{loc}: Label() accepts no more than 1 positional argument"
+                    )));
+                }
+                let Some(arg) = eval_pos.first().or_else(|| eval_kw.get("input")) else {
+                    return Err(StarlarkError(format!(
+                        "{loc}: Label() missing 1 required positional argument: input"
+                    )));
+                };
+                if let Value::Label(l) = arg {
+                    return Ok(Ok(Value::Label(l.clone())));
+                }
+                let Some(s) = arg.as_str() else {
+                    return Err(StarlarkError(format!(
+                        "{loc}: in call to Label(), parameter 'input' got value of type '{}', want 'string or Label'",
+                        arg.type_name()
+                    )));
+                };
                 let lctx = self.current_module_env().label_ctx.lock().unwrap().clone();
                 let label = match lctx {
                     Some((pkg, mapping)) => {
@@ -2609,9 +2639,9 @@ impl EvalContext {
                                     && apparent != "platforms"
                                 {
                                     let owner = mapping.owner_repo().clone();
-                                    let marker = format!(
-                                        "[unknown repo '{apparent}' requested from @@{}]",
-                                        owner.name()
+                                    let dym = mapping.did_you_mean(apparent);
+                                    let marker = zel_cmdline::RepositoryName::to_non_visible(
+                                        apparent, &owner, &dym,
                                     );
                                     let mut entries: std::collections::HashMap<
                                         String,
@@ -2620,10 +2650,7 @@ impl EvalContext {
                                         .entries()
                                         .map(|(k, v)| (k.clone(), v.clone()))
                                         .collect();
-                                    entries.insert(
-                                        apparent.to_string(),
-                                        zel_cmdline::RepositoryName::create_unvalidated(marker),
-                                    );
+                                    entries.insert(apparent.to_string(), marker);
                                     zel_cmdline::RepositoryMapping::new(entries, owner)
                                 } else {
                                     mapping
@@ -2632,9 +2659,10 @@ impl EvalContext {
                             None => mapping,
                         };
                         Label::parse_with_package_context(s, &pkg, &mapping)
-                            .map_err(|e| StarlarkError(e.to_string()))?
+                            .map_err(|e| StarlarkError(format!("{loc}: {e}")))?
                     }
-                    None => Label::parse_canonical(s).map_err(|e| StarlarkError(e.to_string()))?,
+                    None => Label::parse_canonical(s)
+                        .map_err(|e| StarlarkError(format!("{loc}: {e}")))?,
                 };
                 return Ok(Ok(Value::Label(label)));
             }
@@ -3350,25 +3378,24 @@ impl EvalContext {
                 }
                 "relative" | "package_relative" => {
                     let raw = pos_args.first().and_then(|v| v.as_str()).ok_or_else(|| {
-                        StarlarkError(format!("{loc}: relative() takes a string"))
+                        StarlarkError(format!("{loc}: {method}() takes a string"))
                     })?;
-                    let parsed = if let Some(n) = raw.strip_prefix(':') {
-                        zel_cmdline::Label::create(l.package_identifier().clone(), n)
-                    } else if raw.starts_with("@@") {
-                        zel_cmdline::Label::parse_canonical(raw)
-                    } else if let Some(rest) = raw.strip_prefix("//") {
-                        zel_cmdline::Label::parse_canonical(&format!(
-                            "{}//{rest}",
-                            if l.repository().is_main() {
-                                "@@".to_string()
-                            } else {
-                                format!("@@{}", l.repository().name())
-                            }
-                        ))
-                    } else if raw.starts_with('@') {
+                    let lctx = self.current_module_env().label_ctx.lock().unwrap().clone();
+                    let mapping = match lctx {
+                        Some((pkg, m)) if pkg.repository() == l.repository() => m,
+                        _ => zel_cmdline::RepositoryMapping::always_fallback(),
+                    };
+                    let parsed = if raw.starts_with('@')
+                        && !raw.starts_with("@@")
+                        && mapping.entries().next().is_none()
+                    {
                         zel_cmdline::Label::parse_canonical(&format!("@{raw}"))
                     } else {
-                        zel_cmdline::Label::create(l.package_identifier().clone(), raw)
+                        zel_cmdline::Label::parse_with_package_context(
+                            raw,
+                            l.package_identifier(),
+                            &mapping,
+                        )
                     };
                     parsed
                         .map(zel_cmdline::Label::with_unambiguous_display)
@@ -4048,6 +4075,65 @@ res = f(1, 2)
 "#
             )
             .is_err());
+    }
+
+    #[test]
+    fn test_starlark_label_validation_and_visibility() {
+        let mut ctx = EvalContext::new(PathFragment::create("/workspace/pkg"), None);
+        let pkg = zel_cmdline::PackageIdentifier::create_in_main_repo("pkg").unwrap();
+        let mapping = zel_cmdline::RepositoryMapping::new_ordered(
+            vec![(
+                "rules_rs".to_string(),
+                zel_cmdline::RepositoryName::create("rules_rs+").unwrap(),
+            )],
+            zel_cmdline::RepositoryName::main(),
+        );
+        *ctx.current_module_env().label_ctx.lock().unwrap() = Some((pkg, mapping));
+
+        // `Label(Label)` returns its input unchanged.
+        ctx.eval_str(
+            r#"
+l1 = Label("//pkg:foo")
+l2 = Label(l1)
+same = (l1 == l2)
+"#,
+        )
+        .unwrap();
+        assert_eq!(ctx.globals.get("same"), Some(&Value::Bool(true)));
+
+        // Missing or non-string/non-Label input fails instead of returning `//:default`.
+        assert!(ctx.eval_str("x = Label()").is_err());
+        assert!(ctx.eval_str("x = Label(123)").is_err());
+
+        // `foo:bar` fails as non-absolute label both in `Label()` and `l.relative()`.
+        let err = ctx.eval_str("x = Label('foo:bar')").unwrap_err();
+        assert!(
+            err.0.contains("absolute label must begin with '@' or '//'"),
+            "{}",
+            err.0
+        );
+        let err = ctx.eval_str("x = l1.relative('foo:bar')").unwrap_err();
+        assert!(
+            err.0.contains("absolute label must begin with '@' or '//'"),
+            "{}",
+            err.0
+        );
+
+        // Non-visible repository raises an error on `.repo_name` and `.workspace_root` with did-you-mean.
+        ctx.eval_str("nv = Label('@rules_r//a:b')").unwrap();
+        let err = ctx.eval_str("rn = nv.repo_name").unwrap_err();
+        assert!(
+            err.0.contains("No repository visible as '@rules_r' from main repository (did you mean 'rules_rs'?)"),
+            "got: {}",
+            err.0
+        );
+        let err = ctx.eval_str("wr = nv.workspace_root").unwrap_err();
+        assert!(
+            err.0
+                .contains("No repository visible as '@rules_r' from main repository"),
+            "got: {}",
+            err.0
+        );
     }
 }
 
