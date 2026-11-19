@@ -29,8 +29,10 @@ pub const BAZEL_COMPAT_RELEASE_NAME: &str = "release 9.3.2";
 
 pub mod action_env;
 pub mod deflate;
+pub mod file_type;
 pub mod java_regex;
 pub mod json;
+pub mod param_escaper;
 pub mod resource_converter;
 pub mod terminal;
 
@@ -355,6 +357,80 @@ pub mod md5 {
     }
 }
 
+/// FIPS 180-4 SHA-1 implementation for `DigestHashFunction.SHA1`.
+#[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
+pub mod sha1 {
+    pub fn digest(data: &[u8]) -> [u8; 20] {
+        let mut h0: u32 = 0x67452301;
+        let mut h1: u32 = 0xefcdab89;
+        let mut h2: u32 = 0x98badcfe;
+        let mut h3: u32 = 0x10325476;
+        let mut h4: u32 = 0xc3d2e1f0;
+
+        let bit_len = (data.len() as u64).wrapping_mul(8);
+        let mut msg = data.to_vec();
+        msg.push(0x80);
+        while (msg.len() % 64) != 56 {
+            msg.push(0);
+        }
+        msg.extend_from_slice(&bit_len.to_be_bytes());
+
+        for chunk in msg.chunks_exact(64) {
+            let mut w = [0u32; 80];
+            for (i, word) in chunk.chunks_exact(4).enumerate() {
+                w[i] = u32::from_be_bytes([word[0], word[1], word[2], word[3]]);
+            }
+            for i in 16..80 {
+                w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
+            }
+
+            let mut a = h0;
+            let mut b = h1;
+            let mut c = h2;
+            let mut d = h3;
+            let mut e = h4;
+
+            for (i, &wi) in w.iter().enumerate() {
+                let (f, k) = match i {
+                    0..=19 => ((b & c) | ((!b) & d), 0x5a827999u32),
+                    20..=39 => (b ^ c ^ d, 0x6ed9eba1u32),
+                    40..=59 => ((b & c) | (b & d) | (c & d), 0x8f1bbcdcu32),
+                    _ => (b ^ c ^ d, 0xca62c1d6u32),
+                };
+                let temp = a
+                    .rotate_left(5)
+                    .wrapping_add(f)
+                    .wrapping_add(e)
+                    .wrapping_add(k)
+                    .wrapping_add(wi);
+                e = d;
+                d = c;
+                c = b.rotate_left(30);
+                b = a;
+                a = temp;
+            }
+
+            h0 = h0.wrapping_add(a);
+            h1 = h1.wrapping_add(b);
+            h2 = h2.wrapping_add(c);
+            h3 = h3.wrapping_add(d);
+            h4 = h4.wrapping_add(e);
+        }
+
+        let mut out = [0u8; 20];
+        out[0..4].copy_from_slice(&h0.to_be_bytes());
+        out[4..8].copy_from_slice(&h1.to_be_bytes());
+        out[8..12].copy_from_slice(&h2.to_be_bytes());
+        out[12..16].copy_from_slice(&h3.to_be_bytes());
+        out[16..20].copy_from_slice(&h4.to_be_bytes());
+        out
+    }
+
+    pub fn hex_digest(data: &[u8]) -> String {
+        super::to_hex(&digest(data))
+    }
+}
+
 /// FIPS 180-4 SHA-256 implementation for content digests and action caching.
 #[allow(unknown_lints, clippy::chunks_exact_to_as_chunks)]
 pub mod sha256 {
@@ -546,6 +622,22 @@ mod tests {
         assert_eq!(
             sha256::hex_digest(b"abc"),
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[test]
+    fn test_sha1_test_vectors() {
+        assert_eq!(
+            sha1::hex_digest(b""),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
+        assert_eq!(
+            sha1::hex_digest(b"abc"),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        assert_eq!(
+            sha1::hex_digest(b"The quick brown fox jumps over the lazy dog"),
+            "2fd4e1c67a2d28fced849ee1bb76e7391b93eb12"
         );
     }
 }

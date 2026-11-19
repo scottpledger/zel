@@ -24,8 +24,111 @@ use std::path::Path as StdPath;
 use std::path::PathBuf as StdPathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, RwLock};
-use std::time::UNIX_EPOCH;
-use zel_util::{md5, sha256};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use zel_util::{md5, sha1, sha256, Os};
+
+pub mod digest_utils;
+pub mod fs_utils;
+
+pub use digest_utils::*;
+pub use fs_utils::{
+    file_system_utils, BasicActionInput, FileSystemHandle, Root, SearchPath, VfsPath,
+};
+
+/// Host path normalization policy matching `OsPathPolicy` (`UnixOsPathPolicy` vs
+/// `WindowsOsPathPolicy`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum OsPathPolicy {
+    Unix,
+    Windows,
+}
+
+impl OsPathPolicy {
+    pub const fn host() -> Self {
+        match Os::current() {
+            Os::Windows => Self::Windows,
+            _ => Self::Unix,
+        }
+    }
+
+    pub const fn is_case_sensitive(self) -> bool {
+        matches!(self, Self::Unix)
+    }
+
+    pub const fn separator(self) -> char {
+        match self {
+            Self::Unix => '/',
+            Self::Windows => '\\',
+        }
+    }
+}
+
+/// Iterator over raw path segments matching `com.google.devtools.build.lib.vfs.PathSegmentIterator`:
+/// trailing `/` yields no empty segment, and scanning starts at `start + 1` so an extra `/` at the
+/// start of the next segment stays attached to that segment (`"a//b"` -> `["a", "/b"]`).
+#[derive(Debug, Clone)]
+pub struct PathSegmentIterator<'a> {
+    path: &'a str,
+    start: usize,
+}
+
+impl<'a> PathSegmentIterator<'a> {
+    pub fn new(path: &'a str, drive_str_length: usize) -> Self {
+        Self {
+            path,
+            start: drive_str_length.min(path.len()),
+        }
+    }
+}
+
+impl<'a> Iterator for PathSegmentIterator<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.start >= self.path.len() {
+            return None;
+        }
+        let search_from = (self.start + 1).min(self.path.len());
+        match self.path[search_from..].find('/') {
+            Some(rel_idx) => {
+                let stop = search_from + rel_idx;
+                let seg = &self.path[self.start..stop];
+                self.start = stop + 1;
+                Some(seg)
+            }
+            None => {
+                let seg = &self.path[self.start..];
+                self.start = self.path.len();
+                Some(seg)
+            }
+        }
+    }
+}
+
+/// Output file permission mode matching `com.google.devtools.build.lib.vfs.OutputPermissions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum OutputPermissions {
+    #[default]
+    Readonly,
+    Writable,
+}
+
+impl OutputPermissions {
+    pub const fn from_writable(experimental_writable_outputs: bool) -> Self {
+        if experimental_writable_outputs {
+            Self::Writable
+        } else {
+            Self::Readonly
+        }
+    }
+
+    pub const fn permissions_mode(self) -> u32 {
+        match self {
+            Self::Readonly => 0o555,
+            Self::Writable => 0o755,
+        }
+    }
+}
 
 /// A normalized path fragment matching `com.google.devtools.build.lib.vfs.PathFragment`.
 #[derive(Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -61,14 +164,13 @@ impl PathFragment {
         }
         let bytes = replaced.as_bytes();
 
-        let (prefix, drive_str_len, rest) = if bytes.len() >= 2
+        let (prefix, drive_str_len, rest) = if bytes.len() >= 3
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == b':'
-            && (bytes.len() == 2 || bytes[2] == b'/')
+            && bytes[2] == b'/'
         {
             let drive = (bytes[0] as char).to_ascii_uppercase();
-            let rest_slice = if bytes.len() >= 3 { &replaced[3..] } else { "" };
-            (format!("{drive}:/"), 3u8, rest_slice)
+            (format!("{drive}:/"), 3u8, &replaced[3..])
         } else if let Some(stripped) = replaced.strip_prefix('/') {
             ("/".to_string(), 1u8, stripped)
         } else {
@@ -327,6 +429,268 @@ impl PathFragment {
     pub fn contains_uplevel_references(&self) -> bool {
         self.normalized == ".." || self.normalized.starts_with("../")
     }
+
+    /// Creates a `PathFragment` normalized according to `policy` (`PathFragment.createForOs`).
+    /// On `OsPathPolicy::Unix`, `\` is a regular segment character and `c:/foo` is relative.
+    pub fn create_for_os(raw: &str, policy: OsPathPolicy) -> Self {
+        if policy == OsPathPolicy::Windows {
+            return Self::create(raw);
+        }
+        if raw.is_empty() {
+            return Self::empty();
+        }
+        let (prefix, drive_str_len, rest) = if let Some(stripped) = raw.strip_prefix('/') {
+            ("/", 1u8, stripped)
+        } else {
+            ("", 0u8, raw)
+        };
+        let is_abs = drive_str_len > 0;
+        let mut stack: Vec<&str> = Vec::new();
+        for seg in rest.split('/') {
+            if seg.is_empty() || seg == "." {
+                continue;
+            }
+            if seg == ".." {
+                if let Some(&last) = stack.last() {
+                    if last != ".." {
+                        stack.pop();
+                        continue;
+                    }
+                }
+                if !is_abs {
+                    stack.push("..");
+                }
+            } else {
+                stack.push(seg);
+            }
+        }
+        let joined = stack.join("/");
+        let normalized = if is_abs {
+            format!("{prefix}{joined}")
+        } else {
+            joined
+        };
+        Self {
+            normalized,
+            drive_str_len,
+        }
+    }
+
+    pub fn get_relative_for_os(&self, other: &str, policy: OsPathPolicy) -> Self {
+        let other_frag = Self::create_for_os(other, policy);
+        if other_frag.is_absolute() || self.is_empty() {
+            return other_frag;
+        }
+        if other_frag.is_empty() {
+            return self.clone();
+        }
+        if self.normalized.ends_with('/') {
+            Self::create_for_os(
+                &format!("{}{}", self.normalized, other_frag.normalized),
+                policy,
+            )
+        } else {
+            Self::create_for_os(
+                &format!("{}/{}", self.normalized, other_frag.normalized),
+                policy,
+            )
+        }
+    }
+
+    pub fn get_child(&self, base_name: &str) -> Result<Self, String> {
+        self.get_child_for_os(base_name, OsPathPolicy::host())
+    }
+
+    pub fn get_child_for_os(&self, base_name: &str, policy: OsPathPolicy) -> Result<Self, String> {
+        if base_name.is_empty()
+            || base_name == "."
+            || base_name == ".."
+            || base_name.contains('/')
+            || (policy == OsPathPolicy::Windows && base_name.contains('\\'))
+        {
+            return Err(format!(
+                "baseName must be a non-empty single segment: '{base_name}'"
+            ));
+        }
+        let s = if self.is_empty() {
+            base_name.to_string()
+        } else if self.normalized.ends_with('/') {
+            format!("{}{base_name}", self.normalized)
+        } else {
+            format!("{}/{base_name}", self.normalized)
+        };
+        Ok(Self {
+            normalized: s,
+            drive_str_len: self.drive_str_len,
+        })
+    }
+
+    pub fn drive_str(&self) -> &str {
+        &self.normalized[..self.drive_str_length()]
+    }
+
+    pub fn to_relative(&self) -> Self {
+        Self::create_already_normalized(&self.normalized[self.drive_str_length()..])
+    }
+
+    pub fn strip_components(&self, num: isize) -> Result<Self, String> {
+        if num < 0 {
+            return Err(format!("numSegments must be non-negative: {num}"));
+        }
+        let n = num as usize;
+        let segs = self.segments();
+        if n >= segs.len() {
+            return Ok(Self::empty());
+        }
+        Ok(Self::create_already_normalized(segs[n..].join("/")))
+    }
+
+    pub fn is_single_segment(&self) -> bool {
+        let body = &self.normalized[self.drive_str_length()..];
+        !body.is_empty() && !body.contains('/')
+    }
+
+    pub fn ends_with(&self, other: &PathFragment) -> bool {
+        if other.normalized.len() > self.normalized.len() {
+            return false;
+        }
+        if other.is_absolute() {
+            return self == other;
+        }
+        if other.is_empty() {
+            return true;
+        }
+        let body = &self.normalized[self.drive_str_length()..];
+        if body.len() < other.normalized.len() || !body.ends_with(&other.normalized) {
+            return false;
+        }
+        let prefix_len = body.len() - other.normalized.len();
+        prefix_len == 0 || body.as_bytes()[prefix_len - 1] == b'/'
+    }
+
+    pub fn starts_with_ignoring_case(&self, other: &PathFragment) -> bool {
+        if self.drive_str_len != other.drive_str_len {
+            return false;
+        }
+        if !str_eq_ignore_unicode_case(self.drive_str(), other.drive_str()) {
+            return false;
+        }
+        if other.is_empty() {
+            return true;
+        }
+        let self_segs = self.segments();
+        let other_segs = other.segments();
+        if other_segs.len() > self_segs.len() {
+            return false;
+        }
+        self_segs
+            .iter()
+            .zip(other_segs.iter())
+            .all(|(a, b)| str_eq_ignore_unicode_case(a, b))
+    }
+
+    pub fn file_extension(&self) -> &str {
+        let last_slash = self
+            .normalized
+            .rfind('/')
+            .map(|i| i as isize)
+            .unwrap_or(-1)
+            .max(self.drive_str_length() as isize - 1);
+        match self.normalized.rfind('.') {
+            Some(dot) if (dot as isize) > last_slash => &self.normalized[dot + 1..],
+            _ => "",
+        }
+    }
+
+    pub fn safe_path_string(&self) -> &str {
+        if self.normalized.is_empty() {
+            "."
+        } else {
+            &self.normalized
+        }
+    }
+
+    pub fn callable_path_string(&self) -> String {
+        self.callable_path_string_for_os(OsPathPolicy::host())
+    }
+
+    pub fn callable_path_string_for_os(&self, policy: OsPathPolicy) -> String {
+        if self.normalized.is_empty() {
+            return ".".to_string();
+        }
+        let base = if !self.is_absolute() && self.is_single_segment() {
+            format!("./{}", self.normalized)
+        } else {
+            self.normalized.clone()
+        };
+        if policy == OsPathPolicy::Windows {
+            base.replace('/', "\\")
+        } else {
+            base
+        }
+    }
+
+    pub fn replace_name(&self, new_name: &str) -> Option<Self> {
+        let parent = self.parent_directory()?;
+        Some(parent.get_relative_str(new_name))
+    }
+
+    pub fn raw_segment_iter(raw: &str, drive_str_length: usize) -> PathSegmentIterator<'_> {
+        PathSegmentIterator::new(raw, drive_str_length)
+    }
+
+    pub fn is_normalized_str(raw: &str, policy: OsPathPolicy) -> bool {
+        Self::create_for_os(raw, policy).path_string() == raw
+    }
+
+    pub fn contains_separator_str(raw: &str, policy: OsPathPolicy) -> bool {
+        raw.contains('/') || (policy == OsPathPolicy::Windows && raw.contains('\\'))
+    }
+
+    pub fn contains_uplevel_references_str(raw: &str, policy: OsPathPolicy) -> bool {
+        let sep_pred = |c: char| c == '/' || (policy == OsPathPolicy::Windows && c == '\\');
+        raw.split(sep_pred).any(|seg| seg == "..")
+    }
+
+    pub fn check_all_paths_are_under<'a, I>(
+        paths: I,
+        except_for_under: &PathFragment,
+    ) -> Result<(), String>
+    where
+        I: IntoIterator<Item = &'a PathFragment>,
+    {
+        for p in paths {
+            if !p.starts_with(except_for_under) {
+                return Err(format!("Path '{p}' is not under '{except_for_under}'"));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn str_eq_ignore_unicode_case(a: &str, b: &str) -> bool {
+    let mut ca = a.chars();
+    let mut cb = b.chars();
+    loop {
+        match (ca.next(), cb.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) => {
+                if x == y {
+                    continue;
+                }
+                let xu: Vec<char> = x.to_uppercase().collect();
+                let yu: Vec<char> = y.to_uppercase().collect();
+                if xu != yu {
+                    let xl: Vec<char> = x.to_lowercase().collect();
+                    let yl: Vec<char> = y.to_lowercase().collect();
+                    if xl != yl {
+                        return false;
+                    }
+                }
+            }
+            _ => return false,
+        }
+    }
 }
 
 impl fmt::Debug for PathFragment {
@@ -347,24 +711,72 @@ impl From<&str> for PathFragment {
     }
 }
 
-/// Digest hash function used by the VFS (`SHA-256` or `MD5`).
+/// Digest hash function used by the VFS (`SHA-256`, `SHA-1`, or `MD5`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum DigestHashFunction {
     #[default]
     Sha256,
+    Sha1,
     Md5,
 }
 
 impl DigestHashFunction {
+    pub const fn canonical_name(&self) -> &'static str {
+        match self {
+            Self::Sha256 => "SHA-256",
+            Self::Sha1 => "SHA-1",
+            Self::Md5 => "MD5",
+        }
+    }
+
+    pub const fn names(&self) -> &'static [&'static str] {
+        match self {
+            Self::Sha256 => &["SHA-256", "SHA256"],
+            Self::Sha1 => &["SHA-1", "SHA1"],
+            Self::Md5 => &["MD5"],
+        }
+    }
+
+    pub const fn digest_length(&self) -> usize {
+        match self {
+            Self::Sha256 => 32,
+            Self::Sha1 => 20,
+            Self::Md5 => 16,
+        }
+    }
+
+    /// `DigestHashFunction.DigestFunctionConverter.convert`: matches `SHA-1`/`SHA1` and
+    /// `SHA-256`/`SHA256` with Unicode case folding and returns `"Not a valid hash function."`
+    /// otherwise.
+    pub fn parse_bazel(input: &str) -> Result<Self, &'static str> {
+        for candidate in [Self::Sha1, Self::Sha256] {
+            if candidate
+                .names()
+                .iter()
+                .any(|n| str_eq_ignore_unicode_case(n, input))
+            {
+                return Ok(candidate);
+            }
+        }
+        Err("Not a valid hash function.")
+    }
+
     pub fn hash_bytes(&self, data: &[u8]) -> Vec<u8> {
         match self {
             Self::Sha256 => sha256::digest(data).to_vec(),
+            Self::Sha1 => sha1::digest(data).to_vec(),
             Self::Md5 => md5::digest(data).to_vec(),
         }
     }
 
     pub fn hex_hash_bytes(&self, data: &[u8]) -> String {
         zel_util::to_hex(&self.hash_bytes(data))
+    }
+}
+
+impl fmt::Display for DigestHashFunction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.canonical_name())
     }
 }
 
@@ -377,7 +789,16 @@ pub struct FileStatus {
     pub is_special_file: bool,
     pub size: u64,
     pub last_modified_time_ms: u64,
+    pub last_change_time_ms: u64,
+    pub permissions: i32,
     pub node_id: u64,
+}
+
+impl FileStatus {
+    /// `FileStatus.isFile()`: true for regular files OR special files (FIFOs, sockets, devices).
+    pub const fn is_file_or_special(&self) -> bool {
+        self.is_file || self.is_special_file
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -398,15 +819,106 @@ pub struct Dirent {
 pub trait FileSystem: Send + Sync {
     fn digest_hash_function(&self) -> DigestHashFunction;
     fn stat(&self, path: &PathFragment, follow_symlinks: bool) -> io::Result<FileStatus>;
+    fn stat_nullable(&self, path: &PathFragment, follow_symlinks: bool) -> Option<FileStatus> {
+        self.stat(path, follow_symlinks).ok()
+    }
+    fn stat_if_found(
+        &self,
+        path: &PathFragment,
+        follow_symlinks: bool,
+    ) -> io::Result<Option<FileStatus>> {
+        match self.stat(path, follow_symlinks) {
+            Ok(st) => Ok(Some(st)),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
     fn exists(&self, path: &PathFragment, follow_symlinks: bool) -> bool {
         self.stat(path, follow_symlinks).is_ok()
     }
     fn read_file(&self, path: &PathFragment) -> io::Result<Vec<u8>>;
     fn write_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()>;
+    fn append_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
+        let mut existing = match self.read_file(path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Vec::new(),
+            Err(e) => return Err(e),
+        };
+        existing.extend_from_slice(content);
+        self.write_file(path, &existing)
+    }
     fn create_directory(&self, path: &PathFragment) -> io::Result<bool>;
     fn create_directory_and_parents(&self, path: &PathFragment) -> io::Result<()>;
     fn readdir(&self, path: &PathFragment) -> io::Result<Vec<Dirent>>;
+    fn readdir_with_symlinks(
+        &self,
+        path: &PathFragment,
+        follow_symlinks: bool,
+    ) -> io::Result<Vec<Dirent>> {
+        if !follow_symlinks {
+            return self.readdir(path);
+        }
+        let entries = self.readdir(path)?;
+        let mut out = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let child = path.get_relative_str(&entry.name);
+            let dirent_type = match self.stat_nullable(&child, true) {
+                Some(st) if st.is_directory => DirentType::Directory,
+                Some(st) if st.is_file => DirentType::File,
+                Some(st) if st.is_symlink => DirentType::Symlink,
+                _ => DirentType::Unknown,
+            };
+            out.push(Dirent {
+                name: entry.name,
+                dirent_type,
+            });
+        }
+        Ok(out)
+    }
     fn delete(&self, path: &PathFragment) -> io::Result<bool>;
+    fn delete_trees_below(&self, dir: &PathFragment) -> io::Result<()> {
+        let Some(st) = self.stat_if_found(dir, false)? else {
+            return Ok(());
+        };
+        if !st.is_directory || st.is_symlink {
+            return Ok(());
+        }
+        let entries = match self.readdir(dir) {
+            Ok(e) => e,
+            Err(_) => {
+                let _ = self.chmod(dir, 0o700);
+                self.readdir(dir)?
+            }
+        };
+        for (idx, entry) in entries.into_iter().enumerate() {
+            let child = dir.get_relative_str(&entry.name);
+            if entry.dirent_type == DirentType::Directory {
+                self.delete_trees_below(&child)?;
+            }
+            match self.delete(&child) {
+                Ok(false) if idx == 0 => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("Unlink of '{child}' failed"),
+                    ));
+                }
+                Ok(_) => {}
+                Err(_) if idx == 0 => {
+                    let _ = self.chmod(dir, 0o700);
+                    if entry.dirent_type == DirentType::Directory {
+                        self.delete_trees_below(&child)?;
+                    }
+                    self.delete(&child)?;
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+    fn delete_tree(&self, path: &PathFragment) -> io::Result<bool> {
+        self.delete_trees_below(path)?;
+        self.delete(path)
+    }
     fn rename(&self, source: &PathFragment, target: &PathFragment) -> io::Result<()>;
     fn create_symbolic_link(
         &self,
@@ -414,6 +926,47 @@ pub trait FileSystem: Send + Sync {
         target_fragment: &PathFragment,
     ) -> io::Result<()>;
     fn read_symbolic_link(&self, link_path: &PathFragment) -> io::Result<PathFragment>;
+    fn chmod(&self, _path: &PathFragment, _mode: u32) -> io::Result<()> {
+        Ok(())
+    }
+    fn set_last_modified_time(&self, _path: &PathFragment, _time_ms: i64) -> io::Result<()> {
+        Ok(())
+    }
+    fn create_hard_link(
+        &self,
+        link_path: &PathFragment,
+        original_path: &PathFragment,
+    ) -> io::Result<()> {
+        if !self.exists(original_path, true) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "File \"{}\" linked from \"{}\" does not exist",
+                    original_path.base_name(),
+                    link_path.base_name()
+                ),
+            ));
+        }
+        if self.exists(link_path, false) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("New link path \"{}\" already exists", link_path.base_name()),
+            ));
+        }
+        let content = self.read_file(original_path)?;
+        self.write_file(link_path, &content)
+    }
+    fn get_xattr(
+        &self,
+        _path: &PathFragment,
+        _name: &str,
+        _follow_symlinks: bool,
+    ) -> io::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+    fn get_fast_digest(&self, _path: &PathFragment) -> io::Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
 
     fn get_digest(&self, path: &PathFragment) -> io::Result<Vec<u8>> {
         let bytes = self.read_file(path)?;
@@ -456,15 +1009,29 @@ impl FileSystem for LocalFileSystem {
             .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0);
-        let node_id = {
+        let (ctime, permissions, node_id) = {
             #[cfg(unix)]
             {
                 use std::os::unix::fs::MetadataExt;
-                meta.ino() ^ meta.dev().rotate_left(32)
+                let ctime_ms = if meta.ctime() >= 0 {
+                    (meta.ctime() as u64)
+                        .saturating_mul(1000)
+                        .saturating_add((meta.ctime_nsec().max(0) as u64) / 1_000_000)
+                } else {
+                    0
+                };
+                let perms = (meta.mode() & 0o7777) as i32;
+                let nid = meta.ino() ^ meta.dev().rotate_left(32);
+                (ctime_ms, perms, nid)
             }
             #[cfg(not(unix))]
             {
-                0
+                let perms = if meta.permissions().readonly() {
+                    0o555
+                } else {
+                    0o755
+                };
+                (mtime, perms, 0)
             }
         };
         Ok(FileStatus {
@@ -474,6 +1041,8 @@ impl FileSystem for LocalFileSystem {
             is_special_file: !ft.is_file() && !ft.is_dir() && !ft.is_symlink(),
             size: meta.len(),
             last_modified_time_ms: mtime,
+            last_change_time_ms: ctime,
+            permissions,
             node_id,
         })
     }
@@ -486,13 +1055,25 @@ impl FileSystem for LocalFileSystem {
         fs::write(Self::to_std_path(path), content)
     }
 
+    fn append_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(Self::to_std_path(path))?;
+        f.write_all(content)
+    }
+
     fn create_directory(&self, path: &PathFragment) -> io::Result<bool> {
         let p = Self::to_std_path(path);
-        if p.is_dir() {
-            return Ok(false);
+        match fs::create_dir(&p) {
+            Ok(()) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => match fs::metadata(&p) {
+                Ok(meta) if meta.is_dir() => Ok(false),
+                _ => Err(e),
+            },
+            Err(e) => Err(e),
         }
-        fs::create_dir(&p)?;
-        Ok(true)
     }
 
     fn create_directory_and_parents(&self, path: &PathFragment) -> io::Result<()> {
@@ -531,7 +1112,12 @@ impl FileSystem for LocalFileSystem {
                 }
                 Ok(true)
             }
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(e)
+                if e.kind() == io::ErrorKind::NotFound
+                    || e.kind() == io::ErrorKind::NotADirectory =>
+            {
+                Ok(false)
+            }
             Err(e) => Err(e),
         }
     }
@@ -566,6 +1152,48 @@ impl FileSystem for LocalFileSystem {
         let target = fs::read_link(Self::to_std_path(link_path))?;
         Ok(PathFragment::create(&target.to_string_lossy()))
     }
+
+    fn chmod(&self, path: &PathFragment, mode: u32) -> io::Result<()> {
+        let p = Self::to_std_path(path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&p, fs::Permissions::from_mode(mode & 0o7777))
+        }
+        #[cfg(not(unix))]
+        {
+            let mut perms = fs::metadata(&p)?.permissions();
+            perms.set_readonly((mode & 0o200) == 0);
+            fs::set_permissions(&p, perms)
+        }
+    }
+
+    fn create_hard_link(
+        &self,
+        link_path: &PathFragment,
+        original_path: &PathFragment,
+    ) -> io::Result<()> {
+        if !self.exists(original_path, true) {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "File \"{}\" linked from \"{}\" does not exist",
+                    original_path.base_name(),
+                    link_path.base_name()
+                ),
+            ));
+        }
+        if self.exists(link_path, false) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("New link path \"{}\" already exists", link_path.base_name()),
+            ));
+        }
+        fs::hard_link(
+            Self::to_std_path(original_path),
+            Self::to_std_path(link_path),
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -573,10 +1201,12 @@ enum InMemoryNode {
     File {
         content: Vec<u8>,
         mtime_ms: u64,
+        permissions: i32,
         node_id: u64,
     },
     Directory {
         mtime_ms: u64,
+        permissions: i32,
         node_id: u64,
     },
     Symlink {
@@ -607,6 +1237,7 @@ impl InMemoryFileSystem {
             PathFragment::create("/"),
             InMemoryNode::Directory {
                 mtime_ms: 0,
+                permissions: 0o755,
                 node_id: 1,
             },
         );
@@ -627,11 +1258,12 @@ impl InMemoryFileSystem {
         follow_symlinks: bool,
     ) -> io::Result<PathFragment> {
         let mut depth = 0usize;
-        Self::resolve_path_depth(map, path, follow_symlinks, &mut depth)
+        Self::resolve_path_depth(map, path, path, follow_symlinks, &mut depth)
     }
 
     fn resolve_path_depth(
         map: &BTreeMap<PathFragment, InMemoryNode>,
+        orig_path: &PathFragment,
         path: &PathFragment,
         follow_last: bool,
         depth: &mut usize,
@@ -654,7 +1286,7 @@ impl InMemoryFileSystem {
                     if *depth > 40 {
                         return Err(io::Error::new(
                             io::ErrorKind::InvalidData,
-                            "too many levels of symbolic links",
+                            format!("{orig_path} (Too many levels of symbolic links)"),
                         ));
                     }
                     let next = if target.is_absolute() {
@@ -664,7 +1296,7 @@ impl InMemoryFileSystem {
                     } else {
                         cur.get_relative(target)
                     };
-                    cur = Self::resolve_path_depth(map, &next, true, depth)?;
+                    cur = Self::resolve_path_depth(map, orig_path, &next, true, depth)?;
                 }
             }
         }
@@ -684,6 +1316,7 @@ impl FileSystem for InMemoryFileSystem {
             Some(InMemoryNode::File {
                 content,
                 mtime_ms,
+                permissions,
                 node_id,
             }) => Ok(FileStatus {
                 is_file: true,
@@ -692,15 +1325,23 @@ impl FileSystem for InMemoryFileSystem {
                 is_special_file: false,
                 size: content.len() as u64,
                 last_modified_time_ms: *mtime_ms,
+                last_change_time_ms: *mtime_ms,
+                permissions: *permissions,
                 node_id: *node_id,
             }),
-            Some(InMemoryNode::Directory { mtime_ms, node_id }) => Ok(FileStatus {
+            Some(InMemoryNode::Directory {
+                mtime_ms,
+                permissions,
+                node_id,
+            }) => Ok(FileStatus {
                 is_file: false,
                 is_directory: true,
                 is_symlink: false,
                 is_special_file: false,
                 size: 0,
                 last_modified_time_ms: *mtime_ms,
+                last_change_time_ms: *mtime_ms,
+                permissions: *permissions,
                 node_id: *node_id,
             }),
             Some(InMemoryNode::Symlink {
@@ -714,6 +1355,8 @@ impl FileSystem for InMemoryFileSystem {
                 is_special_file: false,
                 size: target.path_string().len() as u64,
                 last_modified_time_ms: *mtime_ms,
+                last_change_time_ms: *mtime_ms,
+                permissions: 0o777,
                 node_id: *node_id,
             }),
             None => Err(io::Error::new(
@@ -756,6 +1399,7 @@ impl FileSystem for InMemoryFileSystem {
             InMemoryNode::File {
                 content: content.to_vec(),
                 mtime_ms: 0,
+                permissions: 0o644,
                 node_id: id,
             },
         );
@@ -768,6 +1412,17 @@ impl FileSystem for InMemoryFileSystem {
         if let Some(node) = map.get(path) {
             return match node {
                 InMemoryNode::Directory { .. } => Ok(false),
+                InMemoryNode::Symlink { .. } => {
+                    let resolved = Self::resolve_path(&map, path, true)?;
+                    if matches!(map.get(&resolved), Some(InMemoryNode::Directory { .. })) {
+                        Ok(false)
+                    } else {
+                        Err(io::Error::new(
+                            io::ErrorKind::AlreadyExists,
+                            format!("File exists: {path}"),
+                        ))
+                    }
+                }
                 _ => Err(io::Error::new(
                     io::ErrorKind::AlreadyExists,
                     format!("File exists: {path}"),
@@ -787,6 +1442,7 @@ impl FileSystem for InMemoryFileSystem {
             path.clone(),
             InMemoryNode::Directory {
                 mtime_ms: 0,
+                permissions: 0o755,
                 node_id: id,
             },
         );
@@ -884,6 +1540,47 @@ impl FileSystem for InMemoryFileSystem {
             )),
         }
     }
+
+    fn chmod(&self, path: &PathFragment, mode: u32) -> io::Result<()> {
+        let mut map = self.nodes.write().unwrap();
+        let resolved = Self::resolve_path(&map, path, true)?;
+        match map.get_mut(&resolved) {
+            Some(InMemoryNode::File { permissions, .. })
+            | Some(InMemoryNode::Directory { permissions, .. }) => {
+                *permissions = (mode & 0o7777) as i32;
+                Ok(())
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("No such file or directory: {path}"),
+            )),
+        }
+    }
+
+    fn set_last_modified_time(&self, path: &PathFragment, time_ms: i64) -> io::Result<()> {
+        let effective_ms = if time_ms == VfsPath::NOW_SENTINEL_TIME {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or(Duration::ZERO)
+                .as_millis() as u64
+        } else {
+            time_ms.max(0) as u64
+        };
+        let mut map = self.nodes.write().unwrap();
+        let resolved = Self::resolve_path(&map, path, true)?;
+        match map.get_mut(&resolved) {
+            Some(InMemoryNode::File { mtime_ms, .. })
+            | Some(InMemoryNode::Directory { mtime_ms, .. })
+            | Some(InMemoryNode::Symlink { mtime_ms, .. }) => {
+                *mtime_ms = effective_ms;
+                Ok(())
+            }
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("No such file or directory: {path}"),
+            )),
+        }
+    }
 }
 
 /// Root + relative `PathFragment` pair matching `com.google.devtools.build.lib.vfs.RootedPath`.
@@ -891,6 +1588,7 @@ impl FileSystem for InMemoryFileSystem {
 pub struct RootedPath {
     root: PathFragment,
     root_relative_path: PathFragment,
+    is_absolute_root: bool,
 }
 
 impl RootedPath {
@@ -909,11 +1607,51 @@ impl RootedPath {
         Ok(Self {
             root,
             root_relative_path,
+            is_absolute_root: false,
         })
+    }
+
+    /// Constructs a `RootedPath` from a [`Root`] (`PathRoot` or `AbsoluteRoot`).
+    pub fn to_rooted_path_from_root(
+        root: Root,
+        relative_or_abs: PathFragment,
+    ) -> Result<Self, String> {
+        match root {
+            Root::PathRoot(base) => {
+                if relative_or_abs.is_absolute() {
+                    let rel = relative_or_abs.relative_to(&base)?;
+                    Self::to_rooted_path(base, rel)
+                } else {
+                    Self::to_rooted_path(base, relative_or_abs)
+                }
+            }
+            Root::AbsoluteRoot => {
+                if !relative_or_abs.is_absolute() {
+                    return Err(format!(
+                        "AbsoluteRoot requires an absolute path, got '{relative_or_abs}'"
+                    ));
+                }
+                let drive = PathFragment::create_already_normalized(relative_or_abs.drive_str());
+                let rel = relative_or_abs.to_relative();
+                Ok(Self {
+                    root: drive,
+                    root_relative_path: rel,
+                    is_absolute_root: true,
+                })
+            }
+        }
     }
 
     pub fn root(&self) -> &PathFragment {
         &self.root
+    }
+
+    pub fn root_value(&self) -> Root {
+        if self.is_absolute_root {
+            Root::AbsoluteRoot
+        } else {
+            Root::PathRoot(self.root.clone())
+        }
     }
 
     pub fn root_relative_path(&self) -> &PathFragment {
@@ -1049,19 +1787,42 @@ fn segment_wildcard_match(pat: &[u8], text: &[u8]) -> bool {
 /// `FileSymlinkInfiniteExpansionException` / `IOException`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SymlinkError {
-    Cycle { chain: Vec<PathFragment> },
-    InfiniteExpansion { chain: Vec<PathFragment> },
+    Cycle {
+        path_to_cycle: Vec<PathFragment>,
+        chain: Vec<PathFragment>,
+    },
+    InfiniteExpansion {
+        path_to_chain: Vec<PathFragment>,
+        chain: Vec<PathFragment>,
+    },
     Io(String),
+}
+
+impl SymlinkError {
+    /// Fixed exception message matching `FileSymlinkCycleException.getMessage()` /
+    /// `FileSymlinkInfiniteExpansionException.getMessage()`.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::Cycle { .. } => "Symlink cycle",
+            Self::InfiniteExpansion { .. } => "Infinite symlink expansion",
+            Self::Io(m) => m.as_str(),
+        }
+    }
+
+    /// Detailed user-facing message matching `getUserFriendlyMessage()`.
+    pub fn user_friendly_message(&self) -> String {
+        self.to_string()
+    }
 }
 
 impl fmt::Display for SymlinkError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Cycle { chain } => {
+            Self::Cycle { chain, .. } => {
                 let s: Vec<&str> = chain.iter().map(|p| p.path_string()).collect();
                 write!(f, "Symlink cycle: {}", s.join("- > "))
             }
-            Self::InfiniteExpansion { chain } => {
+            Self::InfiniteExpansion { chain, .. } => {
                 let s: Vec<&str> = chain.iter().map(|p| p.path_string()).collect();
                 write!(f, "Infinite symlink expansion: {}", s.join("- > "))
             }
@@ -1108,6 +1869,7 @@ impl SymlinkResolutionState {
                 .position(|p| p == path)
                 .unwrap_or(0);
             return Err(SymlinkError::Cycle {
+                path_to_cycle: self.logical_chain[..pos].to_vec(),
                 chain: self.logical_chain[pos..].to_vec(),
             });
         }
@@ -1118,9 +1880,13 @@ impl SymlinkResolutionState {
                     .iter()
                     .position(|p| p == floor)
                     .unwrap_or(0);
+                let path_to_chain = self.logical_chain[..pos].to_vec();
                 let mut chain = self.logical_chain[pos..].to_vec();
                 chain.push(path.clone());
-                return Err(SymlinkError::InfiniteExpansion { chain });
+                return Err(SymlinkError::InfiniteExpansion {
+                    path_to_chain,
+                    chain,
+                });
             }
         }
         if let Some(ceil) = self.sorted_logical_chain.range(path.clone()..).next() {
@@ -1398,5 +2164,94 @@ mod tests {
         let res = resolve_symlink_chain(&fs, &PathFragment::create("/ws/pkg/anc")).unwrap();
         assert!(res.status.unwrap().is_directory);
         assert!(res.unbounded_ancestor_chain.is_some());
+
+        // Entering a cycle from outside records both path_to_cycle and cycle.
+        fs.create_symbolic_link(
+            &PathFragment::create("/ws/pkg/entry"),
+            &PathFragment::create("a"),
+        )
+        .unwrap();
+        match resolve_symlink_chain(&fs, &PathFragment::create("/ws/pkg/entry")) {
+            Err(SymlinkError::Cycle {
+                path_to_cycle,
+                chain,
+            }) => {
+                assert_eq!(path_to_cycle, vec![PathFragment::create("/ws/pkg/entry")]);
+                assert_eq!(
+                    chain,
+                    vec![
+                        PathFragment::create("/ws/pkg/a"),
+                        PathFragment::create("/ws/pkg/b"),
+                    ]
+                );
+                let cyc = SymlinkError::Cycle {
+                    path_to_cycle,
+                    chain,
+                };
+                assert_eq!(cyc.message(), "Symlink cycle");
+                assert!(cyc.user_friendly_message().starts_with("Symlink cycle: "));
+            }
+            other => panic!("expected Cycle, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_os_path_policy_and_extended_path_fragment_methods() {
+        // On Unix policy, backslashes and `c:/foo` stay literal/relative.
+        let unix_pf = PathFragment::create_for_os("a\\b/c:/foo", OsPathPolicy::Unix);
+        assert!(!unix_pf.is_absolute());
+        assert_eq!(unix_pf.path_string(), "a\\b/c:/foo");
+        assert_eq!(
+            PathFragment::create_for_os("a", OsPathPolicy::Unix)
+                .get_relative_for_os("C:/foo", OsPathPolicy::Unix)
+                .path_string(),
+            "a/C:/foo"
+        );
+        // Bare `C:` without slash is relative even on Windows policy.
+        let bare_drive = PathFragment::create("C:");
+        assert!(!bare_drive.is_absolute());
+        assert_eq!(bare_drive.drive_str_length(), 0);
+
+        let p = PathFragment::create("/a/b/c.tar.gz");
+        assert_eq!(p.file_extension(), "gz");
+        assert!(p.ends_with(&PathFragment::create("b/c.tar.gz")));
+        assert!(!p.ends_with(&PathFragment::create("a/c.tar.gz")));
+        assert!(p.starts_with_ignoring_case(&PathFragment::create("/A/B")));
+        assert_eq!(p.drive_str(), "/");
+        assert_eq!(p.to_relative(), PathFragment::create("a/b/c.tar.gz"));
+        assert_eq!(
+            p.strip_components(2).unwrap(),
+            PathFragment::create("c.tar.gz")
+        );
+        assert!(p.strip_components(-1).is_err());
+        assert_eq!(p.strip_components(10).unwrap(), PathFragment::empty());
+        assert_eq!(
+            p.replace_name("other.txt"),
+            Some(PathFragment::create("/a/b/other.txt"))
+        );
+        assert_eq!(PathFragment::create("/").replace_name("x"), None);
+        assert_eq!(PathFragment::empty().safe_path_string(), ".");
+        assert_eq!(
+            PathFragment::create("tool").callable_path_string_for_os(OsPathPolicy::Unix),
+            "./tool"
+        );
+        assert_eq!(
+            PathFragment::create("tool").callable_path_string_for_os(OsPathPolicy::Windows),
+            ".\\tool"
+        );
+
+        let segs: Vec<&str> = PathFragment::raw_segment_iter("a//b/", 0).collect();
+        assert_eq!(segs, vec!["a", "/b"]);
+
+        assert_eq!(OutputPermissions::Readonly.permissions_mode(), 0o555);
+        assert_eq!(OutputPermissions::Writable.permissions_mode(), 0o755);
+        assert_eq!(
+            DigestHashFunction::parse_bazel("sha1").unwrap(),
+            DigestHashFunction::Sha1
+        );
+        assert_eq!(
+            DigestHashFunction::parse_bazel("MD5"),
+            Err("Not a valid hash function.")
+        );
     }
 }

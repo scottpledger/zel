@@ -432,7 +432,11 @@ impl<'a, 'b> Walker<'a, 'b> {
                     if st.is_directory {
                         if res.is_symlink && res.unbounded_ancestor_chain.is_some() {
                             if let Some(chain) = res.unbounded_ancestor_chain {
-                                return Err(SymlinkError::InfiniteExpansion { chain }.to_string());
+                                return Err(SymlinkError::InfiniteExpansion {
+                                    path_to_chain: Vec::new(),
+                                    chain,
+                                }
+                                .to_string());
                             }
                         }
                         self.handle_directory(segs, frag_idx, rel, visited)?;
@@ -484,7 +488,11 @@ impl<'a, 'b> Walker<'a, 'b> {
                     };
                     if st.is_directory {
                         if let Some(chain) = res.unbounded_ancestor_chain {
-                            return Err(SymlinkError::InfiniteExpansion { chain }.to_string());
+                            return Err(SymlinkError::InfiniteExpansion {
+                                path_to_chain: Vec::new(),
+                                chain,
+                            }
+                            .to_string());
                         }
                         self.handle_directory(segs, frag_idx, rel, visited)?;
                     } else {

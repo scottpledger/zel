@@ -17,7 +17,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use zel_vfs::PathFragment;
+use zel_vfs::{OsPathPolicy, PathFragment};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelSyntaxError(pub String);
@@ -150,24 +150,28 @@ pub mod validator {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct RepositoryName {
     name: String,
+    owner_repo_if_not_visible: Option<String>,
 }
 
 impl RepositoryName {
     pub fn main() -> Self {
         Self {
             name: String::new(),
+            owner_repo_if_not_visible: None,
         }
     }
 
     pub fn bazel_tools() -> Self {
         Self {
             name: "bazel_tools".to_string(),
+            owner_repo_if_not_visible: None,
         }
     }
 
     pub fn builtins() -> Self {
         Self {
             name: "_builtins".to_string(),
+            owner_repo_if_not_visible: None,
         }
     }
 
@@ -175,11 +179,35 @@ impl RepositoryName {
         Self::validate(name)?;
         Ok(Self {
             name: name.to_string(),
+            owner_repo_if_not_visible: None,
         })
     }
 
     pub fn create_unvalidated(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            owner_repo_if_not_visible: None,
+        }
+    }
+
+    /// Creates a non-visible `RepositoryName` matching Bazel's `RepositoryMapping.get(name)`
+    /// fallback when `owner_repo` is present (`@@[unknown repo '<name>' requested from @@<owner>]`).
+    pub fn create_non_visible(
+        apparent_name: impl Into<String>,
+        owner_repo: &RepositoryName,
+    ) -> Self {
+        Self {
+            name: apparent_name.into(),
+            owner_repo_if_not_visible: Some(owner_repo.name.clone()),
+        }
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.owner_repo_if_not_visible.is_none()
+    }
+
+    pub fn owner_repo_if_not_visible(&self) -> Option<&str> {
+        self.owner_repo_if_not_visible.as_deref()
     }
 
     pub fn validate(name: &str) -> Result<(), LabelSyntaxError> {
@@ -207,7 +235,7 @@ impl RepositoryName {
     }
 
     pub fn is_main(&self) -> bool {
-        self.name.is_empty()
+        self.is_visible() && self.name.is_empty()
     }
 
     pub fn name(&self) -> &str {
@@ -215,7 +243,19 @@ impl RepositoryName {
     }
 
     pub fn name_with_at(&self) -> String {
-        format!("@@{}", self.name)
+        if let Some(owner) = &self.owner_repo_if_not_visible {
+            let owner_display = if owner.is_empty() {
+                "@@".to_string()
+            } else {
+                format!("@@{owner}")
+            };
+            format!(
+                "@@[unknown repo '{}' requested from {}]",
+                self.name, owner_display
+            )
+        } else {
+            format!("@@{}", self.name)
+        }
     }
 
     pub fn canonical_form(&self) -> String {
@@ -292,6 +332,19 @@ impl RepositoryMapping {
             .cloned()
             .unwrap_or_else(|| RepositoryName::create_unvalidated(apparent_name))
     }
+
+    /// Strict lookup matching `RepositoryMapping.get(String)` when `ownerRepo != null`:
+    /// returns a non-visible `RepositoryName` (`is_visible() == false`) when `apparent_name` is
+    /// absent from the mapping.
+    pub fn get_strict(&self, apparent_name: &str) -> RepositoryName {
+        if let Some(mapped) = self.entries.get(apparent_name) {
+            return mapped.clone();
+        }
+        if apparent_name.is_empty() {
+            return RepositoryName::main();
+        }
+        RepositoryName::create_non_visible(apparent_name, &self.owner_repo)
+    }
 }
 
 /// Identifies a Bazel package (`RepositoryName` + package `PathFragment`), matching `PackageIdentifier.java`.
@@ -324,6 +377,15 @@ impl PackageIdentifier {
         })
     }
 
+    /// Constructs a `PackageIdentifier` without running `LabelValidator`, matching
+    /// `PackageIdentifier.create(RepositoryName, PathFragment)` in Java.
+    pub fn create_unvalidated(repository: RepositoryName, pkg_fragment: PathFragment) -> Self {
+        Self {
+            repository,
+            pkg_fragment,
+        }
+    }
+
     pub fn create_in_main_repo(pkg: &str) -> Result<Self, LabelSyntaxError> {
         Self::create(RepositoryName::main(), PathFragment::create(pkg))
     }
@@ -342,6 +404,123 @@ impl PackageIdentifier {
             self.repository.canonical_form(),
             self.pkg_fragment
         )
+    }
+
+    /// `PackageIdentifier.getDisplayForm` without leading `//` for main-repo packages.
+    pub fn display_without_slashes(&self) -> String {
+        if self.repository.is_main() {
+            self.pkg_fragment.path_string().to_string()
+        } else {
+            self.canonical_form()
+        }
+    }
+}
+
+/// Error returned by [`RelativePackageNameResolver::resolve`], matching
+/// `com.google.devtools.build.lib.packages.InvalidPackageNameException`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvalidPackageNameError {
+    package_id: PackageIdentifier,
+    message: String,
+}
+
+impl InvalidPackageNameError {
+    pub fn new(package_id: PackageIdentifier, message: impl Into<String>) -> Self {
+        Self {
+            package_id,
+            message: message.into(),
+        }
+    }
+
+    pub fn package_identifier(&self) -> &PackageIdentifier {
+        &self.package_id
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for InvalidPackageNameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "invalid package name '{}': {}",
+            self.package_id.display_without_slashes(),
+            self.message
+        )
+    }
+}
+
+impl std::error::Error for InvalidPackageNameError {}
+
+/// Resolves relative package names against a base `offset` and optional `BUILD`-stripping flag,
+/// matching `com.google.devtools.build.lib.packages.RelativePackageNameResolver`.
+#[derive(Debug, Clone)]
+pub struct RelativePackageNameResolver {
+    offset: PathFragment,
+    discard_build: bool,
+    policy: OsPathPolicy,
+}
+
+impl RelativePackageNameResolver {
+    pub fn new(offset: PathFragment, discard_build: bool) -> Result<Self, String> {
+        Self::new_for_os(offset, discard_build, OsPathPolicy::host())
+    }
+
+    pub fn new_for_os(
+        offset: PathFragment,
+        discard_build: bool,
+        policy: OsPathPolicy,
+    ) -> Result<Self, String> {
+        if offset.contains_uplevel_references() {
+            return Err(format!(
+                "offset may not contain uplevel references: '{offset}'"
+            ));
+        }
+        Ok(Self {
+            offset,
+            discard_build,
+            policy,
+        })
+    }
+
+    pub fn resolve(&self, pkg: &str) -> Result<String, InvalidPackageNameError> {
+        let mut raw = pkg;
+        let mut is_absolute = false;
+        if let Some(stripped) = raw.strip_prefix("//") {
+            raw = stripped;
+            is_absolute = true;
+        } else if raw.starts_with('/') {
+            let unval_id = PackageIdentifier::create_unvalidated(
+                RepositoryName::main(),
+                PathFragment::create_for_os(raw, self.policy),
+            );
+            return Err(InvalidPackageNameError::new(
+                unval_id,
+                "package names may not start with '/'",
+            ));
+        }
+
+        let mut pkg_frag = PathFragment::create_for_os(raw, self.policy);
+        if self.discard_build && pkg_frag.base_name() == "BUILD" {
+            if let Some(parent) = pkg_frag.parent_directory() {
+                pkg_frag = parent;
+            }
+        }
+        if !is_absolute {
+            pkg_frag = self
+                .offset
+                .get_relative_for_os(pkg_frag.path_string(), self.policy);
+        }
+        if pkg_frag.contains_uplevel_references() {
+            let unval_id = PackageIdentifier::create_unvalidated(RepositoryName::main(), pkg_frag);
+            return Err(InvalidPackageNameError::new(
+                unval_id,
+                "package name contains too many '..' segments",
+            ));
+        }
+        Ok(pkg_frag.path_string().to_string())
     }
 }
 
@@ -1402,5 +1581,64 @@ mod tests {
                 .canonical_form(),
             "@@new_repo//p:t"
         );
+        // Non-visible repository formatting matches Bazel's unknown-repo representation.
+        let unmapped = mapping.get_strict("unknown_dep");
+        assert!(!unmapped.is_visible());
+        assert_eq!(
+            unmapped.canonical_form(),
+            "@@[unknown repo 'unknown_dep' requested from @@dep+]"
+        );
+    }
+
+    #[test]
+    fn relative_package_name_resolver_matches_bazel() {
+        assert!(RelativePackageNameResolver::new_for_os(
+            PathFragment::create_for_os("../outside", OsPathPolicy::Unix),
+            true,
+            OsPathPolicy::Unix,
+        )
+        .is_err());
+        let resolver = RelativePackageNameResolver::new_for_os(
+            PathFragment::create_for_os("a/b", OsPathPolicy::Unix),
+            true,
+            OsPathPolicy::Unix,
+        )
+        .unwrap();
+
+        assert_eq!(resolver.resolve("").unwrap(), "a/b");
+        assert_eq!(resolver.resolve("c/BUILD").unwrap(), "a/b/c");
+        assert_eq!(
+            resolver.resolve("c/BUILD.bazel").unwrap(),
+            "a/b/c/BUILD.bazel"
+        );
+        assert_eq!(resolver.resolve("../x").unwrap(), "a/x");
+        assert_eq!(resolver.resolve("//").unwrap(), "");
+        assert_eq!(resolver.resolve("//foo/bar/BUILD").unwrap(), "foo/bar");
+        assert_eq!(resolver.resolve("///abs").unwrap(), "/abs");
+        assert_eq!(resolver.resolve("x\\y").unwrap(), "a/b/x\\y");
+
+        let slash_err = resolver.resolve("/foo").unwrap_err();
+        assert_eq!(slash_err.message(), "package names may not start with '/'");
+        assert_eq!(
+            slash_err
+                .package_identifier()
+                .package_fragment()
+                .path_string(),
+            "/foo"
+        );
+
+        let up_err = resolver.resolve("../../../escape").unwrap_err();
+        assert_eq!(
+            up_err.message(),
+            "package name contains too many '..' segments"
+        );
+
+        let keep_build = RelativePackageNameResolver::new_for_os(
+            PathFragment::create_for_os("a", OsPathPolicy::Unix),
+            false,
+            OsPathPolicy::Unix,
+        )
+        .unwrap();
+        assert_eq!(keep_build.resolve("c/BUILD").unwrap(), "a/c/BUILD");
     }
 }
