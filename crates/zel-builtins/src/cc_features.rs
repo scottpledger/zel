@@ -952,6 +952,15 @@ impl Variables {
             )),
         }
     }
+
+    /// Mirrors `variables.isAvailable(name)` followed by `getVariable(name).getStringValue(name)`
+    /// in Bazel's `CcToolchainVariables`.
+    pub fn get_string_if_available(&self, name: &str, path_of: PathOf) -> Res<Option<String>> {
+        match self.lookup(name, path_of)? {
+            Some(v) => string_value(name, &v).map(Some),
+            None => Ok(None),
+        }
+    }
 }
 
 fn truthy_var(v: &Var) -> bool {

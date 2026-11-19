@@ -397,7 +397,7 @@ fn cc_filtered_compile_argv(
             .map_err(|e| StarlarkError(e.0));
     };
     let re = zel_util::java_regex::Regex::new(pat)
-        .map_err(|e| StarlarkError(format!("invalid copts_filter regex '{pat}': {e}")))?;
+        .map_err(|e| StarlarkError(format!("invalid regular expression '{pat}': {e}")))?;
     let buckets = fc
         .per_feature_command_line(action_name, vars, &path_of)
         .map_err(|e| StarlarkError(e.0))?;
@@ -407,7 +407,7 @@ fn cc_filtered_compile_argv(
             out.extend(flags);
         } else {
             for f in flags {
-                if re.find(&f).is_some() {
+                if !re.full_match(&f) {
                     out.push(f);
                 }
             }
@@ -843,28 +843,8 @@ fn cc_get_link_args(pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
         .and_then(cc_features::variables_of)
         .ok_or_else(|| StarlarkError("get_link_args: invalid build_variables".into()))?;
     let path_of = |v: &Value| artifact_of(v).map(|a| a.exec_path.path_string().to_string());
-    let mut argv = fc.command_line(&action_name, &vars, &path_of).map_err(|e| StarlarkError(e.0))?;
-    let param_type = match cc_kw(pos, kw, 3, "parameter_file_type") {
-        Some(Value::String(s)) => Some(s.clone()),
-        Some(other) => return err(format!("get_link_args: parameter_file_type must be string or None, got {}", other.type_name())),
-        None => None,
-    };
-    let placeholder = argv
-        .iter()
-        .find(|s| s.contains("LINKER_PARAM_FILE_PLACEHOLDER"))
-        .cloned();
-    if let Some(var) = vars.flattened().get("linker_param_file").and_then(|v| {
-        artifact_of(v)
-            .map(|a| a.exec_path.path_string().to_string())
-            .or_else(|| v.as_str().map(str::to_string))
-    }) {
-        argv.retain(|s| !s.contains(&var));
-    } else if placeholder.is_some() {
-        argv.retain(|s| !s.contains("LINKER_PARAM_FILE_PLACEHOLDER"));
-    }
-    let mut builder = ArgsBuilder::default();
-    if let Some(t) = param_type {
-        let format = match t.as_str() {
+    let param_format = match cc_kw(pos, kw, 3, "parameter_file_type") {
+        Some(Value::String(s)) => Some(match s.as_str() {
             "UNQUOTED" => ParamFileFormat::Multiline,
             "GCC_QUOTED" => ParamFileFormat::GccQuoted,
             "SHELL_QUOTED" => ParamFileFormat::Shell,
@@ -874,8 +854,24 @@ fn cc_get_link_args(pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
                     "No enum constant ParameterFile.ParameterFileType.{other}"
                 ))
             }
-        };
-        if let Some(p) = placeholder {
+        }),
+        Some(other) => {
+            return err(format!(
+                "get_link_args: parameter_file_type must be string or None, got {}",
+                other.type_name()
+            ))
+        }
+        None => None,
+    };
+    let mut argv = fc
+        .command_line(&action_name, &vars, &path_of)
+        .map_err(|e| StarlarkError(e.0))?;
+    let mut builder = ArgsBuilder::default();
+    if let Some(format) = param_format {
+        if let Some(p) = argv
+            .iter()
+            .find(|s| s.contains("LINKER_PARAM_FILE_PLACEHOLDER"))
+        {
             let flag_format = p
                 .replace('%', "%%")
                 .replace("LINKER_PARAM_FILE_PLACEHOLDER", "%s");
@@ -889,6 +885,12 @@ fn cc_get_link_args(pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
             });
             builder.format = Some(format);
         }
+    }
+    if let Some(linker_param_file) = vars
+        .get_string_if_available("linker_param_file", &path_of)
+        .map_err(|e| StarlarkError(e.0))?
+    {
+        argv.retain(|s| !s.contains(&linker_param_file));
     }
     builder.args = argv;
     Ok(args_value(builder))
@@ -1109,6 +1111,8 @@ fn cc_expand_and_tokenize(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Strin
 mod cc_native_tests {
     use super::*;
     use crate::ArtifactRoot;
+    use zel_builtins::cc_features::ToolchainFeatures;
+    use zel_starlark::StructValue;
 
     #[test]
     fn is_tree_artifact_matches_bazel_positional_only_signature() {
@@ -1176,6 +1180,321 @@ mod cc_native_tests {
         assert_eq!(
             err_type.0,
             "in call to is_tree_artifact(), parameter 'artifact' got value of type 'string', want 'File'"
+        );
+    }
+
+    fn test_struct(fields: Vec<(&str, Value)>) -> Value {
+        Value::Struct(Arc::new(StructValue::new(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )))
+    }
+
+    #[test]
+    fn copts_filter_drops_full_matches_keeps_others_and_exempts_unfiltered_compile_flags() {
+        let opt_fg = test_struct(vec![(
+            "flags",
+            mk_list(vec![
+                Value::String("-Wall".into()),
+                Value::String("-O2".into()),
+                Value::String("-Werror=return-type".into()),
+                Value::String("-fno-exceptions".into()),
+            ]),
+        )]);
+        let opt_fs = test_struct(vec![
+            ("actions", mk_list(vec![Value::String("c-compile".into())])),
+            ("flag_groups", mk_list(vec![opt_fg])),
+        ]);
+        let opt_feat = test_struct(vec![
+            ("name", Value::String("opt_flags".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![opt_fs])),
+        ]);
+
+        let unfilt_fg = test_struct(vec![(
+            "flags",
+            mk_list(vec![
+                Value::String("-O2".into()),
+                Value::String("--sysroot=/sdk".into()),
+            ]),
+        )]);
+        let unfilt_fs = test_struct(vec![
+            ("actions", mk_list(vec![Value::String("c-compile".into())])),
+            ("flag_groups", mk_list(vec![unfilt_fg])),
+        ]);
+        let unfilt_feat = test_struct(vec![
+            ("name", Value::String("unfiltered_compile_flags".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![unfilt_fs])),
+        ]);
+
+        let tf = Arc::new(
+            ToolchainFeatures::new(&[opt_feat, unfilt_feat], &[], &[], "", &|_| None).unwrap(),
+        );
+        let fc = tf
+            .configure(&tf.default_features_and_action_configs())
+            .unwrap();
+        let vars = cc_features::variables_of(&cc_features::make_variables(None, BTreeMap::new()))
+            .unwrap();
+
+        assert_eq!(
+            cc_filtered_compile_argv(&fc, "c-compile", &vars, None).unwrap(),
+            vec![
+                "-Wall",
+                "-O2",
+                "-Werror=return-type",
+                "-fno-exceptions",
+                "-O2",
+                "--sysroot=/sdk",
+            ]
+        );
+        assert_eq!(
+            cc_filtered_compile_argv(&fc, "c-compile", &vars, Some("")).unwrap(),
+            vec![
+                "-Wall",
+                "-O2",
+                "-Werror=return-type",
+                "-fno-exceptions",
+                "-O2",
+                "--sysroot=/sdk",
+            ]
+        );
+
+        // `CoptsFilter.passesFilter` drops flags matching the whole regex (`!Matcher.matches()`)
+        // while `CompileCommandLine` preserves `unfiltered_compile_flags`.
+        assert_eq!(
+            cc_filtered_compile_argv(&fc, "c-compile", &vars, Some("-O[0-9]|-fno-exceptions"))
+                .unwrap(),
+            vec!["-Wall", "-Werror=return-type", "-O2", "--sysroot=/sdk"]
+        );
+
+        // Substring-only pattern does not drop `-Werror=return-type`; full-string pattern does.
+        assert_eq!(
+            cc_filtered_compile_argv(&fc, "c-compile", &vars, Some("-Werror")).unwrap(),
+            vec![
+                "-Wall",
+                "-O2",
+                "-Werror=return-type",
+                "-fno-exceptions",
+                "-O2",
+                "--sysroot=/sdk",
+            ]
+        );
+        assert_eq!(
+            cc_filtered_compile_argv(&fc, "c-compile", &vars, Some("-Werror.*")).unwrap(),
+            vec!["-Wall", "-O2", "-fno-exceptions", "-O2", "--sysroot=/sdk"]
+        );
+
+        let bad = cc_filtered_compile_argv(&fc, "c-compile", &vars, Some("[unclosed")).unwrap_err();
+        assert!(
+            bad.0.contains("invalid regular expression '[unclosed'"),
+            "{}",
+            bad.0
+        );
+    }
+
+    #[test]
+    fn get_link_args_matches_link_command_line_param_file_and_variable_filtering() {
+        let base_fg = test_struct(vec![(
+            "flags",
+            mk_list(vec![
+                Value::String("-o".into()),
+                Value::String("out/app".into()),
+                Value::String("-lm".into()),
+            ]),
+        )]);
+        let param_fg = test_struct(vec![
+            (
+                "expand_if_available",
+                Value::String("linker_param_file".into()),
+            ),
+            (
+                "flags",
+                mk_list(vec![Value::String("-Wl,@%{linker_param_file}%%1".into())]),
+            ),
+        ]);
+        let link_fs = test_struct(vec![
+            (
+                "actions",
+                mk_list(vec![Value::String("c++-link-executable".into())]),
+            ),
+            ("flag_groups", mk_list(vec![base_fg.clone(), param_fg])),
+        ]);
+        let link_feat = test_struct(vec![
+            ("name", Value::String("link_flags".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![link_fs])),
+        ]);
+        let tf = Arc::new(ToolchainFeatures::new(&[link_feat], &[], &[], "", &|_| None).unwrap());
+        let fc = tf
+            .configure(&tf.default_features_and_action_configs())
+            .unwrap();
+        let fc_val = cc_features::register(cc_features::KIND_FEATURE_CONFIGURATION, fc);
+
+        // 1. Standard rules_cc link: `linker_param_file = "LINKER_PARAM_FILE_PLACEHOLDER"` + `GCC_QUOTED`.
+        let vars_placeholder = cc_features::make_variables(
+            None,
+            BTreeMap::from([(
+                "linker_param_file".to_string(),
+                Value::String("LINKER_PARAM_FILE_PLACEHOLDER".into()),
+            )]),
+        );
+        let res = cc_get_link_args(
+            &[],
+            &BTreeMap::from([
+                (
+                    "action_name".to_string(),
+                    Value::String("c++-link-executable".into()),
+                ),
+                ("feature_configuration".to_string(), fc_val.clone()),
+                ("build_variables".to_string(), vars_placeholder.clone()),
+                (
+                    "parameter_file_type".to_string(),
+                    Value::String("GCC_QUOTED".into()),
+                ),
+            ]),
+        )
+        .unwrap();
+        let built = args_of(&res).unwrap();
+        let built = built.lock().unwrap();
+        assert_eq!(built.args, vec!["-o", "out/app", "-lm"]);
+        let pf = built.param_file.as_ref().expect("expected ParamFileInfo");
+        assert_eq!(pf.flag_format, "-Wl,@%s%%1");
+        assert_eq!(pf.format, ParamFileFormat::GccQuoted);
+        assert!(pf.use_always);
+        drop(built);
+
+        // 2. Toolchain without a param-file feature: `getParamFileInfo()` returns `None` and
+        //    remaining link flags stay inline on `args`.
+        let no_pf_fs = test_struct(vec![
+            (
+                "actions",
+                mk_list(vec![Value::String("c++-link-executable".into())]),
+            ),
+            ("flag_groups", mk_list(vec![base_fg])),
+        ]);
+        let no_pf_feat = test_struct(vec![
+            ("name", Value::String("link_flags_no_pf".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![no_pf_fs])),
+        ]);
+        let no_pf_tf =
+            Arc::new(ToolchainFeatures::new(&[no_pf_feat], &[], &[], "", &|_| None).unwrap());
+        let no_pf_fc = no_pf_tf
+            .configure(&no_pf_tf.default_features_and_action_configs())
+            .unwrap();
+        let no_pf_fc_val = cc_features::register(cc_features::KIND_FEATURE_CONFIGURATION, no_pf_fc);
+        let res_no_pf = cc_get_link_args(
+            &[],
+            &BTreeMap::from([
+                (
+                    "action_name".to_string(),
+                    Value::String("c++-link-executable".into()),
+                ),
+                ("feature_configuration".to_string(), no_pf_fc_val),
+                ("build_variables".to_string(), vars_placeholder.clone()),
+                (
+                    "parameter_file_type".to_string(),
+                    Value::String("GCC_QUOTED".into()),
+                ),
+            ]),
+        )
+        .unwrap();
+        let built_no_pf = args_of(&res_no_pf).unwrap();
+        let built_no_pf = built_no_pf.lock().unwrap();
+        assert!(built_no_pf.param_file.is_none());
+        assert_eq!(built_no_pf.args, vec!["-o", "out/app", "-lm"]);
+        drop(built_no_pf);
+
+        // 3. When `linker_param_file` is not available in `build_variables` (including when
+        //    overridden with `None` in an extension), `getParamCommandLine` does NOT strip a
+        //    literal `"LINKER_PARAM_FILE_PLACEHOLDER"` flag.
+        let lit_fg = test_struct(vec![(
+            "flags",
+            mk_list(vec![
+                Value::String("-o".into()),
+                Value::String("@LINKER_PARAM_FILE_PLACEHOLDER".into()),
+            ]),
+        )]);
+        let lit_fs = test_struct(vec![
+            (
+                "actions",
+                mk_list(vec![Value::String("c++-link-executable".into())]),
+            ),
+            ("flag_groups", mk_list(vec![lit_fg])),
+        ]);
+        let lit_feat = test_struct(vec![
+            ("name", Value::String("literal_pf".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![lit_fs])),
+        ]);
+        let lit_tf =
+            Arc::new(ToolchainFeatures::new(&[lit_feat], &[], &[], "", &|_| None).unwrap());
+        let lit_fc = lit_tf
+            .configure(&lit_tf.default_features_and_action_configs())
+            .unwrap();
+        let lit_fc_val = cc_features::register(cc_features::KIND_FEATURE_CONFIGURATION, lit_fc);
+        let parent_vars = cc_features::variables_of(&vars_placeholder).unwrap();
+        let cleared_vars = cc_features::make_variables(
+            Some(parent_vars),
+            BTreeMap::from([("linker_param_file".to_string(), Value::None)]),
+        );
+        let res_lit = cc_get_link_args(
+            &[],
+            &BTreeMap::from([
+                (
+                    "action_name".to_string(),
+                    Value::String("c++-link-executable".into()),
+                ),
+                ("feature_configuration".to_string(), lit_fc_val.clone()),
+                ("build_variables".to_string(), cleared_vars),
+                (
+                    "parameter_file_type".to_string(),
+                    Value::String("UNQUOTED".into()),
+                ),
+            ]),
+        )
+        .unwrap();
+        let built_lit = args_of(&res_lit).unwrap();
+        let built_lit = built_lit.lock().unwrap();
+        assert_eq!(
+            built_lit.args,
+            vec!["-o", "@LINKER_PARAM_FILE_PLACEHOLDER"]
+        );
+        assert_eq!(
+            built_lit.param_file.as_ref().map(|p| p.flag_format.as_str()),
+            Some("@%s")
+        );
+        drop(built_lit);
+
+        // 4. Non-scalar `linker_param_file` fails expansion just like `getStringValue`.
+        let seq_vars = cc_features::make_variables(
+            None,
+            BTreeMap::from([(
+                "linker_param_file".to_string(),
+                mk_list(vec![Value::String("a".into())]),
+            )]),
+        );
+        let seq_err = cc_get_link_args(
+            &[],
+            &BTreeMap::from([
+                (
+                    "action_name".to_string(),
+                    Value::String("c++-link-executable".into()),
+                ),
+                ("feature_configuration".to_string(), fc_val),
+                ("build_variables".to_string(), seq_vars),
+            ]),
+        )
+        .unwrap_err();
+        assert!(
+            seq_err
+                .0
+                .contains("Cannot expand variable 'linker_param_file': expected string"),
+            "{}",
+            seq_err.0
         );
     }
 }
