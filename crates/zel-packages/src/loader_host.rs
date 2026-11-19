@@ -422,6 +422,8 @@ impl PackageLoader {
                         defined_in: format!("{}//BUILD", owner.canonical_form()),
                         definition_digest: String::new(),
                         definition_stack: r.definition_stack.clone(),
+                        initializers: r.initializers.clone(),
+                        build_setting_flag: r.build_setting_flag,
                     }));
                     let arc = Arc::new(rc);
                     r.class = Some(arc.clone());
