@@ -282,22 +282,136 @@ pub fn parse_linux_sandbox_args(
     Ok(opt)
 }
 
+/// Places `pid` into every cgroup directory passed via `-C` by writing `<pid>` to
+/// `<cgroup_dir>/cgroup.procs` (`MaybeAddChildProcessToCgroup` in `linux-sandbox.cc:131-137`).
+pub fn join_cgroups(cgroups_dirs: &[String], pid: i32) -> Result<(), String> {
+    let content = pid.to_string();
+    for dir in cgroups_dirs {
+        let procs_path = std::path::Path::new(dir).join("cgroup.procs");
+        std::fs::write(&procs_path, &content)
+            .map_err(|e| format!("write '{}': {e}", procs_path.display()))?;
+    }
+    Ok(())
+}
+
+/// Unescapes octal sequences (`\040`, `\011`, `\012`, `\134`) in `/proc/self/mounts` fields,
+/// matching `getmntent(3)`.
+pub fn unescape_mount_path(raw: &str) -> String {
+    let bytes = raw.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\'
+            && i + 3 < bytes.len()
+            && (b'0'..=b'7').contains(&bytes[i + 1])
+            && (b'0'..=b'7').contains(&bytes[i + 2])
+            && (b'0'..=b'7').contains(&bytes[i + 3])
+        {
+            let val =
+                ((bytes[i + 1] - b'0') << 6) | ((bytes[i + 2] - b'0') << 3) | (bytes[i + 3] - b'0');
+            out.push(val);
+            i += 4;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Parses `/proc/self/mounts` entries into `(mount_point, preserved_remount_flags)`, preserving
+/// per-mount flags (`nodev`, `noexec`, `nosuid`, `noatime`, `nodiratime`, `relatime`) alongside
+/// `MS_BIND | MS_REMOUNT` (`MakeFilesystemMostlyReadOnly` in `linux-sandbox-pid1.cc:366-396`).
+pub fn parse_proc_mounts(contents: &str) -> Vec<(String, u64)> {
+    const FLAG_NOSUID: u64 = 2;
+    const FLAG_NODEV: u64 = 4;
+    const FLAG_NOEXEC: u64 = 8;
+    const FLAG_REMOUNT: u64 = 32;
+    const FLAG_NOATIME: u64 = 1024;
+    const FLAG_NODIRATIME: u64 = 2048;
+    const FLAG_BIND: u64 = 4096;
+    const FLAG_RELATIME: u64 = 1 << 21;
+
+    let mut entries = Vec::new();
+    for line in contents.lines() {
+        let mut fields = line.split_whitespace();
+        let Some(_fsname) = fields.next() else {
+            continue;
+        };
+        let Some(mnt_dir_raw) = fields.next() else {
+            continue;
+        };
+        let Some(_fstype) = fields.next() else {
+            continue;
+        };
+        let Some(opts) = fields.next() else {
+            continue;
+        };
+        let mut flags = FLAG_BIND | FLAG_REMOUNT;
+        for tok in opts.split(',') {
+            match tok {
+                "nodev" => flags |= FLAG_NODEV,
+                "noexec" => flags |= FLAG_NOEXEC,
+                "nosuid" => flags |= FLAG_NOSUID,
+                "noatime" => flags |= FLAG_NOATIME,
+                "nodiratime" => flags |= FLAG_NODIRATIME,
+                "relatime" => flags |= FLAG_RELATIME,
+                _ => {}
+            }
+        }
+        entries.push((unescape_mount_path(mnt_dir_raw), flags));
+    }
+    entries
+}
+
+/// Parses the `tty` group GID from `/etc/group` text (`SetupUserNamespace` in `linux-sandbox-pid1.cc:246-257`).
+pub fn lookup_tty_gid_from_etc_group(contents: &str) -> Option<u32> {
+    for line in contents.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let mut parts = line.split(':');
+        if parts.next() == Some("tty") {
+            let _passwd = parts.next();
+            if let Some(gid_str) = parts.next() {
+                if let Ok(gid) = gid_str.parse::<u32>() {
+                    return Some(gid);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Resolves the host `tty` group GID from `/etc/group` (defaulting to `5` if absent).
+pub fn lookup_tty_gid() -> u32 {
+    std::fs::read_to_string("/etc/group")
+        .ok()
+        .and_then(|s| lookup_tty_gid_from_etc_group(&s))
+        .unwrap_or(5)
+}
+
 /// Reads peak memory usage (bytes) from cgroup v2 (`memory.peak`) or v1
 /// (`memory.max_usage_in_bytes`) directories passed via `-C`.
 pub fn read_cgroup_memory_peak_bytes(cgroups_dirs: &[String]) -> Option<i64> {
+    let mut max_bytes: Option<i64> = None;
     for dir in cgroups_dirs {
         let p = std::path::Path::new(dir);
         for file in ["memory.peak", "memory.max_usage_in_bytes"] {
             if let Ok(raw) = std::fs::read_to_string(p.join(file)) {
                 if let Ok(bytes) = raw.trim().parse::<i64>() {
                     if bytes > 0 {
-                        return Some(bytes);
+                        max_bytes = Some(match max_bytes {
+                            Some(prev) => prev.max(bytes),
+                            None => bytes,
+                        });
                     }
                 }
             }
         }
     }
-    None
+    max_bytes
 }
 
 /// Encodes `ExecutionStatistics` with `rusage` and optional cgroup memory peak.
@@ -319,11 +433,12 @@ mod imp {
         effective_redirect_path, open_redirect, reset_child_signals_and_mask, SIGALRM, SIGINT,
         SIGKILL, SIGTERM,
     };
+    use std::collections::HashSet;
     use std::ffi::CString;
     use std::os::raw::{c_char, c_int, c_ulong, c_void};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::io::IntoRawFd;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicI32, Ordering};
     use std::time::{Duration, Instant};
 
@@ -338,12 +453,16 @@ mod imp {
     const MS_NOSUID: c_ulong = 2;
     const MS_NODEV: c_ulong = 4;
     const MS_NOEXEC: c_ulong = 8;
-    const MS_REMOUNT: c_ulong = 32;
     const MS_NOATIME: c_ulong = 1024;
     const MS_BIND: c_ulong = 4096;
     const MS_REC: c_ulong = 16384;
     const MS_PRIVATE: c_ulong = 1 << 18;
     const MNT_DETACH: c_int = 2;
+
+    const SIGPIPE: c_int = 13;
+    const SIGTTIN: c_int = 21;
+    const SIGTTOU: c_int = 22;
+    const SIG_IGN_HANDLER: usize = 1;
 
     const PR_SET_PDEATHSIG: c_int = 1;
     const F_GETFD: c_int = 1;
@@ -403,10 +522,14 @@ mod imp {
         fn unshare(flags: c_int) -> c_int;
         fn fork() -> c_int;
         fn _exit(status: c_int) -> !;
+        fn getpid() -> c_int;
         fn geteuid() -> u32;
         fn getegid() -> u32;
-        fn getppid() -> c_int;
-        fn setsid() -> c_int;
+        fn pipe(pipefd: *mut c_int) -> c_int;
+        fn read(fd: c_int, buf: *mut c_void, count: usize) -> isize;
+        fn write(fd: c_int, buf: *const c_void, count: usize) -> isize;
+        fn setpgid(pid: c_int, pgid: c_int) -> c_int;
+        fn tcsetpgrp(fd: c_int, pgrp: c_int) -> c_int;
         fn umask(mask: u32) -> u32;
         fn chdir(path: *const c_char) -> c_int;
         fn chroot(path: *const c_char) -> c_int;
@@ -432,10 +555,6 @@ mod imp {
         fn wait4(pid: c_int, status: *mut c_int, options: c_int, rusage: *mut Rusage) -> c_int;
         fn socket(domain: c_int, ty: c_int, protocol: c_int) -> c_int;
         fn ioctl(fd: c_int, request: c_ulong, ...) -> c_int;
-        fn posix_openpt(flags: c_int) -> c_int;
-        fn grantpt(fd: c_int) -> c_int;
-        fn unlockpt(fd: c_int) -> c_int;
-        fn ptsname(fd: c_int) -> *const c_char;
     }
 
     static OUTER_SIG: AtomicI32 = AtomicI32::new(0);
@@ -464,6 +583,34 @@ mod imp {
             .map_err(|_| format!("path contains NUL: {}", p.display()))
     }
 
+    fn normalize_mnt_key(p: &str) -> String {
+        let trimmed = p.trim_end_matches('/');
+        if trimmed.is_empty() {
+            "/".to_string()
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    fn insert_writable_mount(writable_mounts: &mut HashSet<String>, path: &str) {
+        writable_mounts.insert(normalize_mnt_key(path));
+        if let Ok(canon) = std::fs::canonicalize(path) {
+            writable_mounts.insert(normalize_mnt_key(&canon.to_string_lossy()));
+        }
+    }
+
+    fn to_hermetic_paths(sbx: &str, raw_path: &str) -> (PathBuf, String) {
+        let norm_raw = normalize_mnt_key(raw_path);
+        if norm_raw == sbx || norm_raw == "/" {
+            return (PathBuf::from(sbx), "/".to_string());
+        }
+        if let Some(rel) = norm_raw.strip_prefix(sbx).and_then(|r| r.strip_prefix('/')) {
+            return (PathBuf::from(&norm_raw), format!("/{rel}"));
+        }
+        let rel = norm_raw.trim_start_matches('/');
+        (Path::new(sbx).join(rel), format!("/{rel}"))
+    }
+
     unsafe fn ensure_standard_fds() {
         let devnull = c"/dev/null".as_ptr();
         for fd in 0..=2 {
@@ -482,6 +629,7 @@ mod imp {
         host_gid: u32,
         fake_root: bool,
         fake_username: bool,
+        tty_gid: Option<u32>,
     ) -> Result<(), String> {
         let inner_uid = if fake_root {
             0
@@ -490,7 +638,11 @@ mod imp {
         } else {
             host_uid
         };
-        let inner_gid = if fake_root {
+        // Per `SetupUserNamespace` (`linux-sandbox-pid1.cc:246-257`), `-P` overrides `inner_gid`
+        // to the `tty` group regardless of `-R` / `-U`.
+        let inner_gid = if let Some(gid) = tty_gid {
+            gid
+        } else if fake_root {
             0
         } else if fake_username {
             65534
@@ -538,46 +690,195 @@ mod imp {
         Ok(())
     }
 
-    unsafe fn setup_pty() -> Result<(), String> {
-        const TIOCSCTTY: c_ulong = 0x540E;
-        let master = posix_openpt(O_RDWR);
-        if master < 0 {
-            return Err(format!(
-                "posix_openpt failed: {}",
-                std::io::Error::last_os_error()
-            ));
+    unsafe fn ensure_mount_target(src_p: &Path, dst_p: &Path) {
+        if !dst_p.exists() {
+            if src_p.is_dir() {
+                let _ = std::fs::create_dir_all(dst_p);
+            } else {
+                if let Some(parent) = dst_p.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::File::create(dst_p);
+            }
         }
-        if grantpt(master) < 0 || unlockpt(master) < 0 {
-            let err = std::io::Error::last_os_error();
-            let _ = close(master);
-            return Err(format!("grantpt/unlockpt failed: {err}"));
+    }
+
+    unsafe fn setup_hermetic_dev(sbx: &Path) -> Result<(), String> {
+        let dev_dir = sbx.join("dev");
+        std::fs::create_dir_all(&dev_dir)
+            .map_err(|e| format!("mkdir {}: {e}", dev_dir.display()))?;
+        for dev_name in ["null", "random", "urandom", "zero", "full", "ptmx"] {
+            let host_dev = PathBuf::from(format!("/dev/{dev_name}"));
+            if std::fs::symlink_metadata(&host_dev).is_err() {
+                continue;
+            }
+            let dst_dev = dev_dir.join(dev_name);
+            if !dst_dev.exists() {
+                let _ = std::fs::File::create(&dst_dev);
+            }
+            let cs = cpath(&host_dev)?;
+            let cd = cpath(&dst_dev)?;
+            if mount(
+                cs.as_ptr(),
+                cd.as_ptr(),
+                std::ptr::null(),
+                MS_BIND,
+                std::ptr::null(),
+            ) < 0
+            {
+                return Err(format!(
+                    "bind mount /dev/{dev_name} -> {}: {}",
+                    dst_dev.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
         }
-        let slave_ptr = ptsname(master);
-        if slave_ptr.is_null() {
-            let err = std::io::Error::last_os_error();
-            let _ = close(master);
-            return Err(format!("ptsname failed: {err}"));
+        if Path::new("/dev/pts").is_dir() {
+            let dst_pts = dev_dir.join("pts");
+            let _ = std::fs::create_dir_all(&dst_pts);
+            let cd = cpath(&dst_pts)?;
+            let _ = mount(
+                c"/dev/pts".as_ptr(),
+                cd.as_ptr(),
+                std::ptr::null(),
+                MS_BIND | MS_REC,
+                std::ptr::null(),
+            );
         }
-        let _ = setsid();
-        let slave = open(slave_ptr, O_RDWR);
-        if slave < 0 {
-            let err = std::io::Error::last_os_error();
-            let _ = close(master);
-            return Err(format!("open(pts) failed: {err}"));
+        let dst_shm = dev_dir.join("shm");
+        if std::fs::create_dir_all(&dst_shm).is_ok() {
+            let cd = cpath(&dst_shm)?;
+            let fstype = c"tmpfs".as_ptr();
+            let mode = c"mode=1777".as_ptr() as *const c_void;
+            if mount(fstype, cd.as_ptr(), fstype, MS_NOSUID | MS_NODEV, mode) < 0 {
+                return Err(format!(
+                    "mount tmpfs on {}: {}",
+                    dst_shm.display(),
+                    std::io::Error::last_os_error()
+                ));
+            }
         }
-        let _ = ioctl(slave, TIOCSCTTY, 0);
-        for fd in 0..=2 {
-            let _ = dup2(slave, fd);
+        for (target, link_name) in [
+            ("/proc/self/fd", "fd"),
+            ("/proc/self/fd/0", "stdin"),
+            ("/proc/self/fd/1", "stdout"),
+            ("/proc/self/fd/2", "stderr"),
+        ] {
+            let link_path = dev_dir.join(link_name);
+            if std::fs::symlink_metadata(&link_path).is_err() {
+                let _ = std::os::unix::fs::symlink(target, &link_path);
+            }
         }
-        if slave > 2 {
-            let _ = close(slave);
-        }
-        let _ = close(master);
         Ok(())
     }
 
-    unsafe fn run_pid1(opt: &LinuxSandboxOptions) -> ! {
-        if prctl(PR_SET_PDEATHSIG, SIGKILL as usize, 0, 0, 0) < 0 || getppid() == 1 {
+    /// Remounts every mount in `/proc/self/mounts` not in `writable_mounts` with `MS_RDONLY`,
+    /// retrying `EBUSY` up to 5 times and ignoring benign overlapped/pseudo-mount errors
+    /// (`MakeFilesystemMostlyReadOnly` in `linux-sandbox-pid1.cc:365-453`).
+    unsafe fn make_filesystem_mostly_read_only(
+        writable_mounts: &HashSet<String>,
+    ) -> Result<(), String> {
+        const EPERM: i32 = 1;
+        const ENOENT: i32 = 2;
+        const EACCES: i32 = 13;
+        const EBUSY: i32 = 16;
+        const ENODEV: i32 = 19;
+        const EINVAL: i32 = 22;
+        const EROFS: i32 = 30;
+        const ESTALE: i32 = 116;
+
+        let raw_mounts = std::fs::read_to_string("/proc/self/mounts")
+            .map_err(|e| format!("read /proc/self/mounts: {e}"))?;
+        for (mnt_dir, base_flags) in parse_proc_mounts(&raw_mounts) {
+            let key = normalize_mnt_key(&mnt_dir);
+            if writable_mounts.contains(&key) {
+                continue;
+            }
+            let Ok(cmnt) = cstr(&mnt_dir) else {
+                continue;
+            };
+            let flags = (base_flags as c_ulong) | MS_RDONLY;
+            let mut rc: c_int = -1;
+            let mut last_err = std::io::Error::last_os_error();
+            for attempt in 0..5 {
+                rc = mount(
+                    std::ptr::null(),
+                    cmnt.as_ptr(),
+                    std::ptr::null(),
+                    flags,
+                    std::ptr::null(),
+                );
+                if rc == 0 {
+                    break;
+                }
+                last_err = std::io::Error::last_os_error();
+                if last_err.raw_os_error() != Some(EBUSY) || attempt == 4 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            if rc < 0 {
+                match last_err.raw_os_error() {
+                    Some(EACCES | EPERM | EINVAL | ENOENT | ESTALE | ENODEV | EROFS) => {}
+                    _ => {
+                        return Err(format!(
+                            "remount({}, MS_RDONLY) failed: {last_err}",
+                            mnt_dir
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    unsafe fn run_pid1(
+        opt: &LinuxSandboxOptions,
+        pipe_from_child: [c_int; 2],
+        pipe_to_child: [c_int; 2],
+    ) -> ! {
+        let _ = close(pipe_from_child[0]);
+        let _ = close(pipe_to_child[1]);
+        let _ = signal(SIGPIPE, SIG_IGN_HANDLER);
+        if !opt.persistent_process && prctl(PR_SET_PDEATHSIG, SIGKILL as usize, 0, 0, 0) < 0 {
+            let _ = close(pipe_from_child[1]);
+            let _ = close(pipe_to_child[0]);
+            _exit(1);
+        }
+        let _ = setpgid(0, 0);
+        // Two-pipe handshake with the outer supervisor (`SpawnPid1` / `SetupSelfDestruction` in
+        // `linux-sandbox.cc:170-217` and `linux-sandbox-pid1.cc:180-199`): proves the parent was
+        // still alive after `PR_SET_PDEATHSIG` was armed (`getppid()` inside a new PID namespace
+        // is `0`, not the outer supervisor's host PID).
+        let ready: u8 = b'R';
+        let wrote = write(
+            pipe_from_child[1],
+            (&ready as *const u8).cast::<c_void>(),
+            1,
+        );
+        let _ = close(pipe_from_child[1]);
+        if wrote != 1 {
+            let _ = close(pipe_to_child[0]);
+            _exit(1);
+        }
+        let mut go: u8 = 0;
+        let got = read(pipe_to_child[0], (&mut go as *mut u8).cast::<c_void>(), 1);
+        let _ = close(pipe_to_child[0]);
+        if got != 1 {
+            _exit(1);
+        }
+
+        // Create private mount, IPC, UTS, and optional network namespaces inside `pid1` so the
+        // outer supervisor process remains in the host mount namespace when writing `-S` stats.
+        let mut inner_ns = CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWUTS;
+        if opt.create_netns != NetworkNamespace::NoNetns {
+            inner_ns |= CLONE_NEWNET;
+        }
+        if unshare(inner_ns) < 0 {
+            eprintln!(
+                "linux-sandbox-pid1: unshare(mnt/ipc/uts/net): {}",
+                std::io::Error::last_os_error()
+            );
             _exit(1);
         }
 
@@ -615,91 +916,15 @@ mod imp {
             }
         }
 
-        for (src, dst) in &opt.bind_mounts {
-            let src_p = Path::new(src);
-            let dst_p = Path::new(dst);
-            if !dst_p.exists() {
-                if src_p.is_dir() {
-                    let _ = std::fs::create_dir_all(dst_p);
-                } else {
-                    if let Some(parent) = dst_p.parent() {
-                        let _ = std::fs::create_dir_all(parent);
-                    }
-                    let _ = std::fs::File::create(dst_p);
-                }
-            }
-            let (Ok(cs), Ok(cd)) = (cpath(src_p), cpath(dst_p)) else {
-                _exit(1);
-            };
-            if mount(
-                cs.as_ptr(),
-                cd.as_ptr(),
-                std::ptr::null(),
-                MS_BIND | MS_REC,
-                std::ptr::null(),
-            ) < 0
-            {
-                eprintln!(
-                    "linux-sandbox-pid1: bind mount {} -> {}: {}",
-                    src,
-                    dst,
-                    std::io::Error::last_os_error()
-                );
-                _exit(1);
-            }
-        }
+        let default_cwd = std::env::current_dir()
+            .ok()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "/".to_string());
+        let host_wd = opt.working_dir.as_deref().unwrap_or(&default_cwd);
 
-        for tmpfs_dir in &opt.tmpfs_dirs {
-            let p = Path::new(tmpfs_dir);
-            let _ = std::fs::create_dir_all(p);
-            let Ok(cd) = cpath(p) else {
-                _exit(1);
-            };
-            let fstype = c"tmpfs".as_ptr();
-            if mount(
-                fstype,
-                cd.as_ptr(),
-                fstype,
-                MS_NOSUID | MS_NODEV | MS_NOATIME,
-                std::ptr::null(),
-            ) < 0
-            {
-                eprintln!(
-                    "linux-sandbox-pid1: tmpfs mount {}: {}",
-                    tmpfs_dir,
-                    std::io::Error::last_os_error()
-                );
-                _exit(1);
-            }
-        }
-
-        for w in &opt.writable_files {
-            let wp = Path::new(w);
-            if wp.exists() {
-                if let Ok(cw) = cpath(wp) {
-                    let _ = mount(
-                        cw.as_ptr(),
-                        cw.as_ptr(),
-                        std::ptr::null(),
-                        MS_BIND | MS_REC,
-                        std::ptr::null(),
-                    );
-                    let _ = mount(
-                        cw.as_ptr(),
-                        cw.as_ptr(),
-                        std::ptr::null(),
-                        MS_BIND | MS_REMOUNT,
-                        std::ptr::null(),
-                    );
-                    let _ = MS_RDONLY;
-                }
-            }
-        }
-
-        if let Some(sbx) = &opt.hermetic_sandbox_dir {
-            let sp = Path::new(sbx);
-            let proc_in_sbx = sp.join("proc");
-            let _ = std::fs::create_dir_all(&proc_in_sbx);
+        let target_cwd = if let Some(sbx_raw) = &opt.hermetic_sandbox_dir {
+            let sbx = normalize_mnt_key(sbx_raw);
+            let sp = Path::new(&sbx);
             let Ok(cs) = cpath(sp) else {
                 _exit(1);
             };
@@ -717,6 +942,177 @@ mod imp {
                 );
                 _exit(1);
             }
+
+            if let Err(e) = setup_hermetic_dev(sp) {
+                eprintln!("linux-sandbox-pid1: {e}");
+                _exit(1);
+            }
+
+            let proc_in_sbx = sp.join("proc");
+            let sys_in_sbx = sp.join("sys");
+            let _ = std::fs::create_dir_all(&proc_in_sbx);
+            let _ = std::fs::create_dir_all(&sys_in_sbx);
+            if let Ok(cp) = cpath(&proc_in_sbx) {
+                if opt.persistent_process {
+                    if Path::new("/proc").is_dir() {
+                        let _ = mount(
+                            c"/proc".as_ptr(),
+                            cp.as_ptr(),
+                            std::ptr::null(),
+                            MS_BIND | MS_REC,
+                            std::ptr::null(),
+                        );
+                    }
+                } else if mount(
+                    c"proc".as_ptr(),
+                    cp.as_ptr(),
+                    c"proc".as_ptr(),
+                    MS_NOSUID | MS_NODEV | MS_NOEXEC,
+                    std::ptr::null(),
+                ) < 0
+                {
+                    eprintln!(
+                        "linux-sandbox-pid1: mount proc on {}: {}",
+                        proc_in_sbx.display(),
+                        std::io::Error::last_os_error()
+                    );
+                    _exit(1);
+                }
+            }
+            if let Ok(csys) = cpath(&sys_in_sbx) {
+                if opt.create_netns != NetworkNamespace::NoNetns {
+                    let _ = mount(
+                        c"none".as_ptr(),
+                        csys.as_ptr(),
+                        c"sysfs".as_ptr(),
+                        MS_NOEXEC | MS_NOSUID | MS_NODEV | MS_RDONLY,
+                        std::ptr::null(),
+                    );
+                } else if Path::new("/sys").is_dir() {
+                    let _ = mount(
+                        c"/sys".as_ptr(),
+                        csys.as_ptr(),
+                        std::ptr::null(),
+                        MS_BIND | MS_REC,
+                        std::ptr::null(),
+                    );
+                }
+            }
+
+            let mut writable_mounts = HashSet::new();
+            writable_mounts.insert("/proc".to_string());
+            writable_mounts.insert("/dev/shm".to_string());
+            if opt.enable_pty {
+                writable_mounts.insert("/dev/pts".to_string());
+            }
+
+            for (src, dst) in &opt.bind_mounts {
+                let src_p = Path::new(src);
+                let (host_dst, _in_sbx_dst) = to_hermetic_paths(&sbx, dst);
+                ensure_mount_target(src_p, &host_dst);
+                let (Ok(cs_m), Ok(cd_m)) = (cpath(src_p), cpath(&host_dst)) else {
+                    _exit(1);
+                };
+                if mount(
+                    cs_m.as_ptr(),
+                    cd_m.as_ptr(),
+                    std::ptr::null(),
+                    MS_BIND | MS_REC,
+                    std::ptr::null(),
+                ) < 0
+                {
+                    eprintln!(
+                        "linux-sandbox-pid1: bind mount {} -> {}: {}",
+                        src,
+                        host_dst.display(),
+                        std::io::Error::last_os_error()
+                    );
+                    _exit(1);
+                }
+            }
+
+            for tmpfs_dir in &opt.tmpfs_dirs {
+                let (host_tmpfs, in_sbx_tmpfs) = to_hermetic_paths(&sbx, tmpfs_dir);
+                let _ = std::fs::create_dir_all(&host_tmpfs);
+                let Ok(cd_t) = cpath(&host_tmpfs) else {
+                    _exit(1);
+                };
+                let fstype = c"tmpfs".as_ptr();
+                if mount(
+                    fstype,
+                    cd_t.as_ptr(),
+                    fstype,
+                    MS_NOSUID | MS_NODEV | MS_NOATIME,
+                    std::ptr::null(),
+                ) < 0
+                {
+                    eprintln!(
+                        "linux-sandbox-pid1: tmpfs mount {}: {}",
+                        host_tmpfs.display(),
+                        std::io::Error::last_os_error()
+                    );
+                    _exit(1);
+                }
+                writable_mounts.insert(in_sbx_tmpfs);
+            }
+
+            let in_sbx_wd = if let Some(explicit_wd) = &opt.working_dir {
+                let (host_wd_p, inner_wd) = to_hermetic_paths(&sbx, explicit_wd);
+                if inner_wd != "/" {
+                    let _ = std::fs::create_dir_all(&host_wd_p);
+                    let Ok(cwd_c) = cpath(&host_wd_p) else {
+                        _exit(1);
+                    };
+                    if mount(
+                        cwd_c.as_ptr(),
+                        cwd_c.as_ptr(),
+                        std::ptr::null(),
+                        MS_BIND | MS_REC,
+                        std::ptr::null(),
+                    ) < 0
+                    {
+                        eprintln!(
+                            "linux-sandbox-pid1: bind mount working dir {}: {}",
+                            host_wd_p.display(),
+                            std::io::Error::last_os_error()
+                        );
+                        _exit(1);
+                    }
+                }
+                writable_mounts.insert(inner_wd.clone());
+                inner_wd
+            } else {
+                "/".to_string()
+            };
+
+            for w in &opt.writable_files {
+                let (host_w, in_sbx_w) = to_hermetic_paths(&sbx, w);
+                if std::fs::symlink_metadata(&host_w).is_ok() {
+                    if let Ok(cw) = cpath(&host_w) {
+                        if mount(
+                            cw.as_ptr(),
+                            cw.as_ptr(),
+                            std::ptr::null(),
+                            MS_BIND | MS_REC,
+                            std::ptr::null(),
+                        ) < 0
+                        {
+                            eprintln!(
+                                "linux-sandbox-pid1: writable bind mount {}: {}",
+                                host_w.display(),
+                                std::io::Error::last_os_error()
+                            );
+                            _exit(1);
+                        }
+                    }
+                    if let Ok(canon) = std::fs::canonicalize(&host_w) {
+                        let (_, canon_inner) = to_hermetic_paths(&sbx, &canon.to_string_lossy());
+                        writable_mounts.insert(canon_inner);
+                    }
+                }
+                writable_mounts.insert(in_sbx_w);
+            }
+
             if chdir(cs.as_ptr()) < 0 {
                 eprintln!(
                     "linux-sandbox-pid1: chdir({sbx}): {}",
@@ -727,6 +1123,7 @@ mod imp {
             let dot = c".".as_ptr();
             let pivoted = SYS_PIVOT_ROOT > 0 && syscall(SYS_PIVOT_ROOT, dot, dot) == 0;
             if pivoted {
+                let _ = chroot(dot);
                 let _ = umount2(dot, MNT_DETACH);
             } else if chroot(dot) < 0 {
                 eprintln!(
@@ -736,32 +1133,147 @@ mod imp {
                 _exit(1);
             }
             let _ = chdir(root_c);
-        }
 
-        if !opt.persistent_process && Path::new("/proc").is_dir() {
-            let proc_c = c"/proc".as_ptr();
-            let proc_fs = c"proc".as_ptr();
-            let _ = mount(
-                proc_fs,
-                proc_c,
-                proc_fs,
-                MS_NOSUID | MS_NODEV | MS_NOEXEC,
-                std::ptr::null(),
-            );
-        }
-
-        if let Some(wd) = &opt.working_dir {
-            let Ok(cwd_c) = cstr(wd) else {
-                _exit(1);
-            };
-            if chdir(cwd_c.as_ptr()) < 0 {
-                eprintln!(
-                    "linux-sandbox-pid1: chdir({wd}): {}",
-                    std::io::Error::last_os_error()
-                );
+            if let Err(e) = make_filesystem_mostly_read_only(&writable_mounts) {
+                eprintln!("linux-sandbox-pid1: {e}");
                 _exit(1);
             }
+            in_sbx_wd
+        } else {
+            let mut writable_mounts = HashSet::new();
+            writable_mounts.insert("/proc".to_string());
+            if opt.enable_pty {
+                writable_mounts.insert("/dev/pts".to_string());
+            }
+
+            for (src, dst) in &opt.bind_mounts {
+                let src_p = Path::new(src);
+                let dst_p = Path::new(dst);
+                ensure_mount_target(src_p, dst_p);
+                let (Ok(cs), Ok(cd)) = (cpath(src_p), cpath(dst_p)) else {
+                    _exit(1);
+                };
+                if mount(
+                    cs.as_ptr(),
+                    cd.as_ptr(),
+                    std::ptr::null(),
+                    MS_BIND | MS_REC,
+                    std::ptr::null(),
+                ) < 0
+                {
+                    eprintln!(
+                        "linux-sandbox-pid1: bind mount {} -> {}: {}",
+                        src,
+                        dst,
+                        std::io::Error::last_os_error()
+                    );
+                    _exit(1);
+                }
+            }
+
+            for tmpfs_dir in &opt.tmpfs_dirs {
+                let p = Path::new(tmpfs_dir);
+                let _ = std::fs::create_dir_all(p);
+                let Ok(cd) = cpath(p) else {
+                    _exit(1);
+                };
+                let fstype = c"tmpfs".as_ptr();
+                if mount(
+                    fstype,
+                    cd.as_ptr(),
+                    fstype,
+                    MS_NOSUID | MS_NODEV | MS_NOATIME,
+                    std::ptr::null(),
+                ) < 0
+                {
+                    eprintln!(
+                        "linux-sandbox-pid1: tmpfs mount {}: {}",
+                        tmpfs_dir,
+                        std::io::Error::last_os_error()
+                    );
+                    _exit(1);
+                }
+                insert_writable_mount(&mut writable_mounts, tmpfs_dir);
+            }
+
+            let wd_path = Path::new(host_wd);
+            if wd_path.exists() {
+                let Ok(cwd_c) = cpath(wd_path) else {
+                    _exit(1);
+                };
+                if mount(
+                    cwd_c.as_ptr(),
+                    cwd_c.as_ptr(),
+                    std::ptr::null(),
+                    MS_BIND | MS_REC,
+                    std::ptr::null(),
+                ) < 0
+                {
+                    eprintln!(
+                        "linux-sandbox-pid1: bind mount working dir {host_wd}: {}",
+                        std::io::Error::last_os_error()
+                    );
+                    _exit(1);
+                }
+                insert_writable_mount(&mut writable_mounts, host_wd);
+            }
+
+            for w in &opt.writable_files {
+                let wp = Path::new(w);
+                if std::fs::symlink_metadata(wp).is_ok() {
+                    let Ok(cw) = cpath(wp) else {
+                        _exit(1);
+                    };
+                    if mount(
+                        cw.as_ptr(),
+                        cw.as_ptr(),
+                        std::ptr::null(),
+                        MS_BIND | MS_REC,
+                        std::ptr::null(),
+                    ) < 0
+                    {
+                        eprintln!(
+                            "linux-sandbox-pid1: writable bind mount {w}: {}",
+                            std::io::Error::last_os_error()
+                        );
+                        _exit(1);
+                    }
+                    insert_writable_mount(&mut writable_mounts, w);
+                }
+            }
+
+            if !opt.persistent_process && Path::new("/proc").is_dir() {
+                let proc_c = c"/proc".as_ptr();
+                let proc_fs = c"proc".as_ptr();
+                let _ = mount(
+                    proc_fs,
+                    proc_c,
+                    proc_fs,
+                    MS_NOSUID | MS_NODEV | MS_NOEXEC,
+                    std::ptr::null(),
+                );
+            }
+
+            if let Err(e) = make_filesystem_mostly_read_only(&writable_mounts) {
+                eprintln!("linux-sandbox-pid1: {e}");
+                _exit(1);
+            }
+            host_wd.to_string()
+        };
+
+        let Ok(cwd_c) = cstr(&target_cwd) else {
+            _exit(1);
+        };
+        if chdir(cwd_c.as_ptr()) < 0 {
+            eprintln!(
+                "linux-sandbox-pid1: chdir({target_cwd}): {}",
+                std::io::Error::last_os_error()
+            );
+            _exit(1);
         }
+
+        let _ = signal(SIGTTIN, SIG_IGN_HANDLER);
+        let _ = signal(SIGTTOU, SIG_IGN_HANDLER);
 
         let cmd_pid = fork();
         if cmd_pid < 0 {
@@ -772,16 +1284,10 @@ mod imp {
             _exit(1);
         }
         if cmd_pid == 0 {
+            let _ = setpgid(0, 0);
+            let _ = tcsetpgrp(0, getpid());
             reset_child_signals_and_mask();
             umask(0o022);
-            if opt.enable_pty {
-                if let Err(e) = setup_pty() {
-                    eprintln!("linux-sandbox-pid1: {e}");
-                    _exit(1);
-                }
-            } else {
-                let _ = setsid();
-            }
             let c_args: Vec<CString> = opt
                 .args
                 .iter()
@@ -856,15 +1362,18 @@ mod imp {
             }
         }
 
+        let outer_pid = unsafe { getpid() };
+        // Place this sandbox supervisor (and therefore its forked `pid1` and `cmd_pid` children)
+        // into all requested `-C` cgroups while still in the host user, mount, and PID namespaces.
+        join_cgroups(&opt.cgroups_dirs, outer_pid)?;
+        let tty_gid = opt.enable_pty.then(lookup_tty_gid);
+
         let host_uid = unsafe { geteuid() };
         let host_gid = unsafe { getegid() };
 
-        let mut ns_flags = CLONE_NEWUSER | CLONE_NEWNS | CLONE_NEWIPC | CLONE_NEWUTS;
+        let mut ns_flags = CLONE_NEWUSER;
         if !opt.persistent_process {
             ns_flags |= CLONE_NEWPID;
-        }
-        if opt.create_netns != NetworkNamespace::NoNetns {
-            ns_flags |= CLONE_NEWNET;
         }
 
         if unsafe { unshare(ns_flags) } < 0 {
@@ -873,24 +1382,79 @@ mod imp {
                 std::io::Error::last_os_error()
             ));
         }
-        write_proc_id_maps(host_uid, host_gid, opt.fake_root, opt.fake_username)?;
+        write_proc_id_maps(
+            host_uid,
+            host_gid,
+            opt.fake_root,
+            opt.fake_username,
+            tty_gid,
+        )?;
 
         unsafe {
+            let _ = signal(SIGTTIN, SIG_IGN_HANDLER);
+            let _ = signal(SIGTTOU, SIG_IGN_HANDLER);
             let _ = signal(SIGALRM, on_outer_sig as *const () as usize);
             let _ = signal(SIGTERM, on_outer_sig as *const () as usize);
             let _ = signal(SIGINT, on_outer_sig as *const () as usize);
         }
 
-        let started = Instant::now();
-        let pid1 = unsafe { fork() };
-        if pid1 < 0 {
+        let mut pipe_from_child = [-1_i32; 2];
+        let mut pipe_to_child = [-1_i32; 2];
+        if unsafe { pipe(pipe_from_child.as_mut_ptr()) } < 0 {
             return Err(format!(
-                "fork pid1 failed: {}",
+                "pipe(from_child) failed: {}",
                 std::io::Error::last_os_error()
             ));
         }
+        if unsafe { pipe(pipe_to_child.as_mut_ptr()) } < 0 {
+            unsafe {
+                let _ = close(pipe_from_child[0]);
+                let _ = close(pipe_from_child[1]);
+            }
+            return Err(format!(
+                "pipe(to_child) failed: {}",
+                std::io::Error::last_os_error()
+            ));
+        }
+
+        let started = Instant::now();
+        let pid1 = unsafe { fork() };
+        if pid1 < 0 {
+            let err = std::io::Error::last_os_error();
+            unsafe {
+                let _ = close(pipe_from_child[0]);
+                let _ = close(pipe_from_child[1]);
+                let _ = close(pipe_to_child[0]);
+                let _ = close(pipe_to_child[1]);
+            }
+            return Err(format!("fork pid1 failed: {err}"));
+        }
         if pid1 == 0 {
-            unsafe { run_pid1(opt) }
+            unsafe { run_pid1(opt, pipe_from_child, pipe_to_child) }
+        }
+
+        unsafe {
+            let _ = close(pipe_from_child[1]);
+            let _ = close(pipe_to_child[0]);
+            let _ = signal(SIGPIPE, SIG_IGN_HANDLER);
+            let mut ready: u8 = 0;
+            loop {
+                let n = read(
+                    pipe_from_child[0],
+                    (&mut ready as *mut u8).cast::<c_void>(),
+                    1,
+                );
+                if n < 0
+                    && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted
+                {
+                    continue;
+                }
+                break;
+            }
+            let _ = close(pipe_from_child[0]);
+            let go: u8 = b'G';
+            let _ = write(pipe_to_child[1], (&go as *const u8).cast::<c_void>(), 1);
+            let _ = close(pipe_to_child[1]);
         }
 
         let timeout = (opt.timeout_secs > 0).then(|| Duration::from_secs(opt.timeout_secs as u64));
@@ -1091,6 +1655,70 @@ mod tests {
         let decoded = ResourceUsage::decode_execution_statistics(&encoded).unwrap();
         assert_eq!(decoded.utime_sec, 2);
         assert_eq!(decoded.maxrss, 10240);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn join_cgroups_mounts_parsing_and_tty_gid_lookup() {
+        let dir = std::env::temp_dir().join(format!("zel-ls-join-cg-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let cg1 = dir.join("cg1");
+        let cg2 = dir.join("cg2");
+        std::fs::create_dir_all(&cg1).unwrap();
+        std::fs::create_dir_all(&cg2).unwrap();
+
+        join_cgroups(
+            &[
+                cg1.to_string_lossy().into_owned(),
+                cg2.to_string_lossy().into_owned(),
+            ],
+            4242,
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(cg1.join("cgroup.procs")).unwrap(),
+            "4242"
+        );
+        assert_eq!(
+            std::fs::read_to_string(cg2.join("cgroup.procs")).unwrap(),
+            "4242"
+        );
+        assert!(join_cgroups(&[dir.join("missing").to_string_lossy().into_owned()], 4242).is_err());
+
+        std::fs::write(cg1.join("memory.peak"), "4096000\n").unwrap();
+        std::fs::write(cg2.join("memory.max_usage_in_bytes"), "8192000\n").unwrap();
+        assert_eq!(
+            read_cgroup_memory_peak_bytes(&[
+                cg1.to_string_lossy().into_owned(),
+                cg2.to_string_lossy().into_owned(),
+            ]),
+            Some(8_192_000)
+        );
+
+        assert_eq!(
+            unescape_mount_path(r"/mnt/with\040space\134slash"),
+            r"/mnt/with space\slash"
+        );
+        let parsed = parse_proc_mounts(
+            "/dev/sda1 / ext4 rw,relatime 0 0\n\
+             devpts /dev/pts devpts rw,nosuid,noexec,relatime 0 0\n\
+             tmpfs /mnt/my\\040tmp tmpfs rw,nodev,noatime 0 0\n",
+        );
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(parsed[0].0, "/");
+        assert_ne!(parsed[0].1 & (1 << 21), 0); // MS_RELATIME
+        assert_eq!(parsed[1].0, "/dev/pts");
+        assert_ne!(parsed[1].1 & 2, 0); // MS_NOSUID
+        assert_ne!(parsed[1].1 & 8, 0); // MS_NOEXEC
+        assert_eq!(parsed[2].0, "/mnt/my tmp");
+        assert_ne!(parsed[2].1 & 4, 0); // MS_NODEV
+        assert_ne!(parsed[2].1 & 1024, 0); // MS_NOATIME
+
+        assert_eq!(
+            lookup_tty_gid_from_etc_group("root:x:0:\ntty:x:5:syslog\nnogroup:x:65534:\n"),
+            Some(5)
+        );
+
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

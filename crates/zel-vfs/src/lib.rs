@@ -1052,11 +1052,10 @@ impl FileSystem for LocalFileSystem {
 
     fn write_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
         let p = Self::to_std_path(path);
-        // `blaze_util::WriteFile`: unlink any existing file or symlink first so a symlink at `p`
-        // is replaced rather than followed.
-        if fs::symlink_metadata(&p).is_ok_and(|m| !m.is_dir()) {
-            let _ = fs::remove_file(&p);
-        }
+        // `blaze_util::WriteFile` (`file_posix.cc` / `file_windows.cc`): unlink any existing
+        // regular file, symlink, or Windows directory junction/reparse point before opening so
+        // links are replaced rather than followed while real directories are left untouched.
+        unlink_path_for_write(&p);
         fs::write(&p, content)
     }
 
@@ -1111,9 +1110,15 @@ impl FileSystem for LocalFileSystem {
         match fs::symlink_metadata(&p) {
             Ok(meta) => {
                 #[cfg(windows)]
-                if meta.file_type().is_symlink() {
-                    fs::remove_dir(&p).or_else(|_| fs::remove_file(&p))?;
-                    return Ok(true);
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+                    if meta.file_type().is_symlink()
+                        || (meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                    {
+                        fs::remove_dir(&p).or_else(|_| fs::remove_file(&p))?;
+                        return Ok(true);
+                    }
                 }
                 if meta.is_dir() {
                     fs::remove_dir(&p)?;
@@ -1226,6 +1231,83 @@ impl FileSystem for LocalFileSystem {
             ));
         }
         fs::hard_link(canon_orig, dst)
+    }
+}
+
+/// Windows attribute classification for `blaze_util::UnlinkPathW` (`file_windows.cc:372-389`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsUnlinkAction {
+    /// Non-reparse directory: never unlink before `WriteFile`.
+    SkipDirectory,
+    /// Directory junction or directory symlink (`FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT`):
+    /// remove the link itself via `RemoveDirectoryW` (`std::fs::remove_dir`).
+    RemoveDirReparsePoint,
+    /// Regular file or file symlink: remove via `DeleteFileW` (`std::fs::remove_file`).
+    RemoveFile,
+}
+
+/// Classifies how `UnlinkPathW` handles a path with Win32 `dwFileAttributes` and `FileType::is_symlink()`.
+pub fn classify_windows_unlink(file_attributes: u32, is_symlink: bool) -> WindowsUnlinkAction {
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x0010;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+    if (file_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 {
+        if (file_attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 || is_symlink {
+            WindowsUnlinkAction::RemoveDirReparsePoint
+        } else {
+            WindowsUnlinkAction::SkipDirectory
+        }
+    } else {
+        WindowsUnlinkAction::RemoveFile
+    }
+}
+
+/// Unlinks `path` if it is a regular file, symlink, or Windows directory junction/reparse point,
+/// leaving real directories untouched (`blaze_util::UnlinkPath` in `file_posix.cc` / `file_windows.cc`).
+pub fn unlink_path_for_write(path: &StdPath) -> bool {
+    let Ok(meta) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+        let attrs = meta.file_attributes();
+        match classify_windows_unlink(attrs, meta.file_type().is_symlink()) {
+            WindowsUnlinkAction::SkipDirectory => false,
+            WindowsUnlinkAction::RemoveDirReparsePoint => fs::remove_dir(path)
+                .or_else(|_| fs::remove_file(path))
+                .is_ok(),
+            WindowsUnlinkAction::RemoveFile => {
+                if meta.permissions().readonly()
+                    && !meta.file_type().is_symlink()
+                    && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) == 0
+                {
+                    let mut perms = meta.permissions();
+                    #[allow(clippy::permissions_set_readonly_false)]
+                    perms.set_readonly(false);
+                    let _ = fs::set_permissions(path, perms);
+                }
+                fs::remove_file(path)
+                    .or_else(|e| {
+                        if meta.file_type().is_symlink()
+                            || (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                        {
+                            fs::remove_dir(path)
+                        } else {
+                            Err(e)
+                        }
+                    })
+                    .is_ok()
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if meta.is_dir() {
+            false
+        } else {
+            fs::remove_file(path).is_ok()
+        }
     }
 }
 
@@ -2649,11 +2731,27 @@ mod tests {
             &dir.join("target_dir")
         ));
 
+        let lfs = LocalFileSystem::default();
+        // Writing to a directory junction/symlink replaces the link itself without touching target_dir.
+        let dir_link_frag = PathFragment::create(&dir_link.to_string_lossy());
+        lfs.write_file(&dir_link_frag, b"replaced_dir_link")
+            .unwrap();
+        assert_eq!(fs::read(dir.join("target_dir/inside")).unwrap(), b"ok");
+        assert_eq!(fs::read(&dir_link).unwrap(), b"replaced_dir_link");
+        assert!(!fs::symlink_metadata(&dir_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        // Writing to a real directory fails and never deletes the directory or its children.
+        let real_dir_frag = PathFragment::create(&dir.join("target_dir").to_string_lossy());
+        assert!(lfs.write_file(&real_dir_frag, b"bad").is_err());
+        assert_eq!(fs::read(dir.join("target_dir/inside")).unwrap(), b"ok");
+
         #[cfg(unix)]
         {
             let file_link = dir.join("file_link");
             std::os::unix::fs::symlink(dir.join("protected"), &file_link).unwrap();
-            let lfs = LocalFileSystem::default();
             let frag = PathFragment::create(&file_link.to_string_lossy());
             lfs.write_file(&frag, b"replaced").unwrap();
             assert_eq!(fs::read(dir.join("protected")).unwrap(), b"keep");
@@ -2663,6 +2761,28 @@ mod tests {
                 .file_type()
                 .is_symlink());
         }
+
+        // Verify `UnlinkPathW` Windows attribute classification across junctions, real dirs, and files.
+        assert_eq!(
+            classify_windows_unlink(0x0010, false),
+            WindowsUnlinkAction::SkipDirectory
+        );
+        assert_eq!(
+            classify_windows_unlink(0x0010 | 0x0400, false),
+            WindowsUnlinkAction::RemoveDirReparsePoint
+        );
+        assert_eq!(
+            classify_windows_unlink(0x0010 | 0x0400, true),
+            WindowsUnlinkAction::RemoveDirReparsePoint
+        );
+        assert_eq!(
+            classify_windows_unlink(0x0080, false),
+            WindowsUnlinkAction::RemoveFile
+        );
+        assert_eq!(
+            classify_windows_unlink(0x0400, true),
+            WindowsUnlinkAction::RemoveFile
+        );
 
         let _ = fs::remove_dir_all(&dir);
     }

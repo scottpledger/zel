@@ -257,11 +257,9 @@ pub fn perform_exec_request(pending: &PendingExec) -> i32 {
     };
     if let Some(sp) = &req.script_path {
         let path = lossy(&sp.script_path);
-        // `blaze_util::WriteFile(..., 0755)`: unlink any existing file or symlink first so a
-        // destination symlink is replaced rather than followed, and apply `0755 & ~umask`.
-        if std::fs::symlink_metadata(&path).is_ok_and(|m| !m.is_dir()) {
-            let _ = std::fs::remove_file(&path);
-        }
+        // `blaze_util::WriteFile(..., 0755)`: unlink any existing file, symlink, or Windows
+        // directory junction/reparse point first so links are replaced rather than followed.
+        zel_vfs::unlink_path_for_write(std::path::Path::new(&path));
         let write_res = {
             let mut oo = std::fs::OpenOptions::new();
             oo.write(true).create(true).truncate(true);
@@ -1617,5 +1615,43 @@ mod tests {
         assert!(String::from_utf8_lossy(&err).contains("ran out of memory and crashed."));
         assert!(!ob.join("blaze_oomed").exists());
         let _ = std::fs::remove_dir_all(&ob);
+    }
+
+    #[test]
+    fn script_path_replaces_directory_junction_or_symlink_without_touching_target() {
+        let dir = std::env::temp_dir().join(format!("zel-script-junc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let target_dir = dir.join("target_dir");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        std::fs::write(target_dir.join("keep.txt"), b"intact").unwrap();
+
+        let script_link = dir.join("run_script.sh");
+        zel_vfs::create_directory_junction_or_symlink(&target_dir, &script_link).unwrap();
+
+        let pending = PendingExec {
+            request: zel_proto::command_server::ExecRequest {
+                script_path: Some(zel_proto::command_server::ScriptPath {
+                    script_path: script_link.to_string_lossy().into_owned().into_bytes(),
+                    script_contents: b"#!/bin/sh\necho ok\n".to_vec(),
+                }),
+                ..Default::default()
+            },
+            paths: ExecPathContext::default(),
+        };
+        assert_eq!(perform_exec_request(&pending), 0);
+        assert_eq!(
+            std::fs::read(&script_link).unwrap(),
+            b"#!/bin/sh\necho ok\n"
+        );
+        assert_eq!(
+            std::fs::read(target_dir.join("keep.txt")).unwrap(),
+            b"intact"
+        );
+        assert!(!std::fs::symlink_metadata(&script_link)
+            .unwrap()
+            .file_type()
+            .is_symlink());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

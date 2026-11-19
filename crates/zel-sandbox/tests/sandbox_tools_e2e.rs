@@ -88,9 +88,17 @@ fn standalone_linux_sandbox_probe_and_isolation() {
     std::fs::create_dir_all(dir.join("work")).unwrap();
     std::fs::create_dir_all(dir.join("tmp_mnt")).unwrap();
 
+    let host_supports_userns = Command::new("unshare")
+        .args(["-Urpf", "/bin/true"])
+        .status()
+        .is_ok_and(|s| s.success());
     // If user namespaces are disabled by host sysctl/secpolicy in container, probe gracefully reports it.
-    if let Err(_unsupported) = zel_sandbox::linux::probe_linux_sandbox(ls, Some(&dir), 5) {
+    if let Err(err) = zel_sandbox::linux::probe_linux_sandbox(ls, Some(&dir), 5) {
         let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            !host_supports_userns,
+            "host supports unprivileged userns (`unshare -Urpf /bin/true` succeeded), so `probe_linux_sandbox` must succeed too, got: {err}"
+        );
         return;
     }
 
@@ -125,6 +133,194 @@ fn standalone_linux_sandbox_probe_and_isolation() {
     assert!(captured.contains("host=localhost"), "{captured}");
     assert!(captured.contains("uid=65534"), "{captured}");
     assert!(stats_file.exists());
+
+    // 1. Non-hermetic read-only enforcement: non-`-w` host paths and `-M/-m` bind mounts reject
+    // writes with EROFS, while `-W`, `-w`, and `-e` accept writes, and `-C` writes `cgroup.procs`.
+    let ro_sibling = dir.join("ro_sibling");
+    let ro_bind_src = dir.join("ro_bind_src");
+    let ro_bind_dst = dir.join("ro_bind_dst");
+    let rw_extra = dir.join("rw_extra");
+    let cg_dir = dir.join("fake_cgroup");
+    std::fs::create_dir_all(&ro_sibling).unwrap();
+    std::fs::create_dir_all(&ro_bind_src).unwrap();
+    std::fs::create_dir_all(&ro_bind_dst).unwrap();
+    std::fs::create_dir_all(&rw_extra).unwrap();
+    std::fs::create_dir_all(&cg_dir).unwrap();
+    std::fs::write(ro_bind_src.join("in.txt"), "immutable\n").unwrap();
+    std::fs::write(cg_dir.join("memory.peak"), "16777216\n").unwrap(); // 16 MiB = 16384 KiB
+
+    let out_ro = dir.join("ro_check.txt");
+    let stats_cg = dir.join("stats_cg.pb");
+    let script = format!(
+        "set -e; \
+         echo work_ok > work_file; \
+         echo rw_ok > {rw}/rw_file; \
+         echo tmp_ok > {tmp}/tmp_file; \
+         if touch {sib}/nope 2>/dev/null; then echo SIBLING_WRITABLE; exit 11; fi; \
+         if touch {mnt}/nope 2>/dev/null; then echo BIND_WRITABLE; exit 12; fi; \
+         if touch /dev/pts/nope 2>/dev/null; then echo PTS_WRITABLE_WITHOUT_P; exit 13; fi; \
+         cat {mnt}/in.txt",
+        rw = rw_extra.display(),
+        tmp = dir.join("tmp_mnt").display(),
+        sib = ro_sibling.display(),
+        mnt = ro_bind_dst.display(),
+    );
+    let st = Command::new(ls)
+        .args([
+            "-W",
+            dir.join("work").to_str().unwrap(),
+            "-w",
+            rw_extra.to_str().unwrap(),
+            "-e",
+            dir.join("tmp_mnt").to_str().unwrap(),
+            "-M",
+            ro_bind_src.to_str().unwrap(),
+            "-m",
+            ro_bind_dst.to_str().unwrap(),
+            "-C",
+            cg_dir.to_str().unwrap(),
+            "-l",
+            out_ro.to_str().unwrap(),
+            "-S",
+            stats_cg.to_str().unwrap(),
+            "--",
+            "/bin/sh",
+            "-c",
+            &script,
+        ])
+        .status()
+        .unwrap();
+    assert!(st.success(), "{st:?}");
+    assert_eq!(std::fs::read_to_string(&out_ro).unwrap(), "immutable\n");
+    assert_eq!(
+        std::fs::read_to_string(dir.join("work/work_file")).unwrap(),
+        "work_ok\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(rw_extra.join("rw_file")).unwrap(),
+        "rw_ok\n"
+    );
+    assert!(!ro_sibling.join("nope").exists());
+    assert!(!ro_bind_src.join("nope").exists());
+
+    let procs_written = std::fs::read_to_string(cg_dir.join("cgroup.procs")).unwrap();
+    assert!(
+        procs_written.trim().parse::<u32>().is_ok_and(|p| p > 0),
+        "expected valid pid in cgroup.procs, got {procs_written:?}"
+    );
+    let decoded_stats = zel_sandbox::process_wrapper::ResourceUsage::decode_execution_statistics(
+        &std::fs::read(&stats_cg).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(decoded_stats.maxrss, 16384);
+
+    // Invalid `-C` cgroup directory fails fast before running the command.
+    let bad_cg = Command::new(ls)
+        .args([
+            "-W",
+            dir.join("work").to_str().unwrap(),
+            "-C",
+            dir.join("missing_cgroup_dir").to_str().unwrap(),
+            "--",
+            "/bin/true",
+        ])
+        .output()
+        .unwrap();
+    assert!(!bad_cg.status.success(), "{bad_cg:?}");
+
+    // 2. Hermetic (`-h`) read-only enforcement: sandbox root `/` and `-M/-m` bind mounts are
+    // remounted read-only (`EROFS`), while `-W` and `-w` remain writable.
+    let sbx = dir.join("hermetic_root");
+    let sbx_work = sbx.join("work");
+    let sbx_rw = sbx.join("rw_out");
+    let sbx_ro_inside = sbx.join("ro_inside");
+    std::fs::create_dir_all(&sbx_work).unwrap();
+    std::fs::create_dir_all(&sbx_rw).unwrap();
+    std::fs::create_dir_all(&sbx_ro_inside).unwrap();
+
+    let mut hermetic_args: Vec<String> = vec![
+        "-h".into(),
+        sbx.to_str().unwrap().into(),
+        "-W".into(),
+        sbx_work.to_str().unwrap().into(),
+        "-w".into(),
+        sbx_rw.to_str().unwrap().into(),
+        "-M".into(),
+        ro_bind_src.to_str().unwrap().into(),
+        "-m".into(),
+        "/mounted_ro".into(),
+    ];
+    for sys_dir in ["/bin", "/usr", "/lib", "/lib64"] {
+        if std::path::Path::new(sys_dir).exists() {
+            hermetic_args.push("-M".into());
+            hermetic_args.push(sys_dir.into());
+        }
+    }
+    hermetic_args.extend([
+        "--".into(),
+        "/bin/sh".into(),
+        "-c".into(),
+        "set -e; \
+         echo h_work > h_file; \
+         echo h_rw > /rw_out/out_file; \
+         if touch /root_nope 2>/dev/null; then echo ROOT_WRITABLE; exit 21; fi; \
+         if touch /ro_inside/nope 2>/dev/null; then echo RO_INSIDE_WRITABLE; exit 22; fi; \
+         if touch /mounted_ro/nope 2>/dev/null; then echo MOUNTED_RO_WRITABLE; exit 23; fi; \
+         test \"$(cat /mounted_ro/in.txt)\" = immutable"
+            .into(),
+    ]);
+    let h_out = Command::new(ls).args(&hermetic_args).output().unwrap();
+    assert!(
+        h_out.status.success(),
+        "hermetic failed: status={:?} stderr={}",
+        h_out.status,
+        String::from_utf8_lossy(&h_out.stderr)
+    );
+    assert_eq!(
+        std::fs::read_to_string(sbx_work.join("h_file")).unwrap(),
+        "h_work\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sbx_rw.join("out_file")).unwrap(),
+        "h_rw\n"
+    );
+    assert!(!sbx.join("root_nope").exists());
+    assert!(!sbx_ro_inside.join("nope").exists());
+    assert!(!ro_bind_src.join("nope").exists());
+
+    // 3. `-P` (`enable_pty`): maps inner gid to `tty`, keeps `/dev/pts` writable, preserves
+    // stdout/stderr without EIO/SIGHUP, and allows pseudoterminals to be opened and used.
+    let expected_tty_gid = zel_sandbox::linux_sandbox::lookup_tty_gid();
+    let pty_out = Command::new(ls)
+        .args([
+            "-W",
+            dir.join("work").to_str().unwrap(),
+            "-U",
+            "-P",
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo gid=$(id -g); \
+             if command -v python3 >/dev/null 2>&1; then \
+               python3 -c 'import os, pty; m, s = pty.openpty(); assert os.isatty(s); os.write(s, b\"pty_ping\\n\"); data = os.read(m, 64); os.close(s); os.close(m); print(\"pty_ok=\" + data.decode().strip())'; \
+             fi",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        pty_out.status.success(),
+        "pty failed: status={:?} stderr={}",
+        pty_out.status,
+        String::from_utf8_lossy(&pty_out.stderr)
+    );
+    let pty_stdout = String::from_utf8_lossy(&pty_out.stdout);
+    assert!(
+        pty_stdout.contains(&format!("gid={expected_tty_gid}")),
+        "{pty_stdout}"
+    );
+    if pty_stdout.contains("pty_ok=") {
+        assert!(pty_stdout.contains("pty_ok=pty_ping"), "{pty_stdout}");
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
