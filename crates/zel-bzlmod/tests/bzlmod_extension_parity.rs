@@ -397,13 +397,9 @@ ext = module_extension(implementation = _ext_impl)
 
 #[cfg(unix)]
 fn write_executable_script(path: &std::path::Path, content: &[u8]) {
-    use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
 
-    let mut file = std::fs::File::create(path).unwrap();
-    file.write_all(content).unwrap();
-    file.sync_all().unwrap();
-    drop(file);
+    std::fs::write(path, content).unwrap();
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
 }
 

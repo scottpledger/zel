@@ -2769,26 +2769,13 @@ fn write_file(p: &Path, content: &[u8], exec: bool) -> Result<(), StarlarkError>
             let _ = std::fs::remove_file(p);
         }
     }
-    {
-        use std::io::Write;
-        let mut f = std::fs::File::create(p).map_err(|e| {
-            StarlarkError(format!(
-                "java.io.IOException: {} ({})",
-                p.display(),
-                errno_text(&e)
-            ))
-        })?;
-        f.write_all(content).map_err(|e| {
-            StarlarkError(format!(
-                "java.io.IOException: {} ({})",
-                p.display(),
-                errno_text(&e)
-            ))
-        })?;
-        if exec {
-            let _ = f.sync_data();
-        }
-    }
+    std::fs::write(p, content).map_err(|e| {
+        StarlarkError(format!(
+            "java.io.IOException: {} ({})",
+            p.display(),
+            errno_text(&e)
+        ))
+    })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;

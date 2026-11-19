@@ -949,7 +949,6 @@ default login defuser password defpass
                 b"#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer RETRY_OK\"]}}'\n",
             )
             .unwrap();
-            file.sync_all().unwrap();
             std::fs::set_permissions(&helper_writer, std::fs::Permissions::from_mode(0o755))
                 .unwrap();
             barrier_writer.wait();
