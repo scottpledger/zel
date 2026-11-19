@@ -349,7 +349,13 @@ impl Rt {
             let s = RepoSpec::new(
                 LOCAL_BZL,
                 "local_repository",
-                vec![("path".into(), AttrVal::Str(p.display().to_string()))],
+                vec![(
+                    "path".into(),
+                    AttrVal::Str(crate::session::format_option_path_fragment(
+                        &p,
+                        cfg!(windows),
+                    )),
+                )],
             );
             spec = Some(s);
         } else if canonical == "bazel_tools" {
