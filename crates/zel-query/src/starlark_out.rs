@@ -825,7 +825,6 @@ pub(crate) fn run(
         }
 
         let is_unconfigured_target = n.cfg.is_none()
-            || n.aspect.is_some()
             || matches!(
                 info.as_ref().map(|i| &i.target),
                 Some(

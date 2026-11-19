@@ -2470,7 +2470,7 @@ fn query_build_xml_proto_and_subgraph_shortcuts() {
         ),
     ]);
 
-    // build formatter: default package_group in source order, None -> null, single //conditions:default collapsed
+    // build formatter: default package_group in source order, None -> None, single //conditions:default collapsed
     let b_out = q(&ws, "//pkg:pg + //pkg:r + //pkg:r_sel", |_, f| {
         f.output = "build".into();
     });
@@ -2481,7 +2481,8 @@ fn query_build_xml_proto_and_subgraph_shortcuts() {
         "{b_str}"
     );
     assert!(b_str.contains("note = \"plain\","), "{b_str}");
-    assert!(b_str.contains("\"//pkg:c1\": null"), "{b_str}");
+    assert!(b_str.contains("\"//pkg:c1\": None"), "{b_str}");
+    assert!(!b_str.contains(": null"), "{b_str}");
 
     // xml formatter: NUL char produces Bazel DOM error placeholder, display_full_kind does not alter class
     let xml_out = q(&ws, "//pkg:r_nul", |_, f| {
@@ -2729,4 +2730,227 @@ fn cquery_and_aquery_formatters_skyframe_state_and_starlark_validation() {
     let sky_str = String::from_utf8_lossy(&aq_sky.stdout);
     assert!(sky_str.contains("mnemonic: \"Genrule\""), "{sky_str}");
     assert!(!sky_str.contains("mnemonic: \"FileWrite\""), "{sky_str}");
+}
+
+#[test]
+fn build_output_formatter_starlark_none_in_select_and_bare_omission() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        (
+            "pkg/defs.bzl",
+            concat!(
+                "def _impl(ctx):\n",
+                "    return []\n",
+                "my_rule = rule(\n",
+                "    implementation = _impl,\n",
+                "    attrs = {\n",
+                "        'tool': attr.label(),\n",
+                "    },\n",
+                ")\n",
+            ),
+        ),
+        (
+            "pkg/BUILD",
+            concat!(
+                "load('//pkg:defs.bzl', 'my_rule')\n",
+                "config_setting(name = 'on_linux', values = {'cpu': 'k8'})\n",
+                "my_rule(name = 'dep_t')\n",
+                "my_rule(name = 'bare_none', tool = None)\n",
+                "my_rule(\n",
+                "    name = 'sel_none',\n",
+                "    tool = select({'//pkg:on_linux': '//pkg:dep_t', '//conditions:default': None}),\n",
+                ")\n",
+            ),
+        ),
+    ]);
+
+    let q_out = q(&ws, "//pkg:bare_none + //pkg:sel_none", |_, f| {
+        f.output = "build".into();
+    });
+    assert_eq!(q_out.exit_code, 0, "{:?}", q_out.stderr);
+    let q_str = String::from_utf8_lossy(&q_out.stdout);
+    // Starlark `None` inside `select({...})` must render as valid Starlark `None`, never `null`.
+    assert!(q_str.contains("\"//conditions:default\": None"), "{q_str}");
+    assert!(!q_str.contains("null"), "{q_str}");
+    // Bare `tool = None` leaves the attribute unset (`possible_values` is empty), so `outputRule` omits it.
+    let bare_block = q_str
+        .split("my_rule(")
+        .find(|s| s.contains("name = \"bare_none\""))
+        .expect("bare_none rule block");
+    assert!(!bare_block.contains("tool ="), "{bare_block}");
+
+    // In `cquery --output=build` when the resolved `select` branch is `None`, the attribute is also omitted.
+    let cq_out = ws.post("//pkg:sel_none", |_, _, popts| {
+        popts.output = "build".into();
+    });
+    assert_eq!(cq_out.exit_code, 0, "{:?}", cq_out.stderr);
+    let cq_str = String::from_utf8_lossy(&cq_out.stdout);
+    assert!(!cq_str.contains("null"), "{cq_str}");
+    assert!(!cq_str.contains("tool = None"), "{cq_str}");
+}
+
+#[test]
+fn proto_output_aspect_rule_inputs_and_attributes_dedup() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        ("t/shared.sh", "#!/bin/sh\n"),
+        ("t/only_asp.sh", "#!/bin/sh\n"),
+        (
+            "t/BUILD",
+            concat!(
+                "sh_binary(name = 'shared', srcs = ['shared.sh'])\n",
+                "sh_binary(name = 'only_asp', srcs = ['only_asp.sh'])\n",
+            ),
+        ),
+        (
+            "pkg/defs.bzl",
+            concat!(
+                "def _asp_impl(target, ctx):\n",
+                "    return []\n",
+                "asp_one = aspect(\n",
+                "    implementation = _asp_impl,\n",
+                "    attrs = {\n",
+                "        '_dup': attr.label(default = '//t:only_asp'),\n",
+                "        '_shared': attr.label(default = '//t:shared'),\n",
+                "    },\n",
+                ")\n",
+                "asp_two = aspect(\n",
+                "    implementation = _asp_impl,\n",
+                "    attrs = {\n",
+                "        '_dup': attr.label(default = '//t:only_asp'),\n",
+                "        '_also': attr.label(default = '//t:only_asp'),\n",
+                "    },\n",
+                ")\n",
+                "def _rule_impl(ctx):\n",
+                "    return []\n",
+                "leaf = rule(implementation = _rule_impl)\n",
+                "holder = rule(\n",
+                "    implementation = _rule_impl,\n",
+                "    attrs = {\n",
+                "        'deps': attr.label_list(aspects = [asp_one, asp_two]),\n",
+                "        'direct': attr.label(),\n",
+                "    },\n",
+                ")\n",
+            ),
+        ),
+        (
+            "pkg/BUILD",
+            concat!(
+                "load('//pkg:defs.bzl', 'leaf', 'holder')\n",
+                "leaf(name = 'l')\n",
+                "holder(name = 'h', deps = [':l'], direct = '//t:shared')\n",
+            ),
+        ),
+    ]);
+
+    let out_no_src = q(&ws, "//pkg:h", |_, f| {
+        f.output = "streamed_jsonproto".into();
+        f.proto_include_attribute_source_aspects = false;
+    });
+    assert_eq!(out_no_src.exit_code, 0, "{:?}", out_no_src.stderr);
+    let json_no_src = String::from_utf8_lossy(&out_no_src.stdout);
+    // `//t:only_asp` is referenced by three aspect attributes across `asp_one` and `asp_two`,
+    // and must be deduplicated to a single entry in the aspect `rule_input` pass.
+    let ri_section = json_no_src
+        .split("\"ruleInput\":[")
+        .nth(1)
+        .and_then(|s| s.split(']').next())
+        .expect("ruleInput array");
+    let ri_items: Vec<&str> = ri_section
+        .split(',')
+        .map(|s| s.trim().trim_matches('"'))
+        .collect();
+    assert_eq!(
+        ri_items.iter().filter(|&&x| x == "//t:only_asp").count(),
+        1,
+        "aspect rule_input pass must deduplicate repeated aspect labels: {ri_items:?}"
+    );
+    // `//t:shared` is both an aspect dep and a direct rule dep; matching Bazel's two-pass
+    // `ProtoOutputFormatter`, it appears once in the aspect pass and once in the sorted rule pass.
+    assert_eq!(
+        ri_items.iter().filter(|&&x| x == "//t:shared").count(),
+        2,
+        "two-pass rule_input emission matches ProtoOutputFormatter: {ri_items:?}"
+    );
+    // Identical `$dup` aspect `Attribute` protos are deduplicated when `source_aspect_name` is omitted.
+    assert_eq!(
+        json_no_src.matches("\"name\":\"$dup\"").count(),
+        1,
+        "identical serialized aspect attributes must be deduplicated: {json_no_src}"
+    );
+
+    // With `--proto:include_attribute_source_aspects`, `source_aspect_name` differs so both `$dup`
+    // attributes remain distinct.
+    let out_with_src = q(&ws, "//pkg:h", |_, f| {
+        f.output = "streamed_jsonproto".into();
+        f.proto_include_attribute_source_aspects = true;
+    });
+    let json_with_src = String::from_utf8_lossy(&out_with_src.stdout);
+    assert_eq!(
+        json_with_src.matches("\"name\":\"$dup\"").count(),
+        2,
+        "{json_with_src}"
+    );
+}
+
+#[test]
+fn cquery_starlark_build_options_returns_dict_for_configured_aspect() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        ("pkg/src.txt", "x\n"),
+        (
+            "pkg/defs.bzl",
+            concat!(
+                "MyInfo = provider()\n",
+                "def _asp_impl(target, ctx):\n",
+                "    return [MyInfo()]\n",
+                "my_asp = aspect(implementation = _asp_impl)\n",
+                "def _rule_impl(ctx):\n",
+                "    return []\n",
+                "leaf_rule = rule(implementation = _rule_impl, attrs = {'srcs': attr.label_list(allow_files = True)})\n",
+                "top_rule = rule(implementation = _rule_impl, attrs = {'deps': attr.label_list(aspects = [my_asp])})\n",
+            ),
+        ),
+        (
+            "pkg/BUILD",
+            concat!(
+                "load('//pkg:defs.bzl', 'leaf_rule', 'top_rule')\n",
+                "exports_files(['src.txt'])\n",
+                "leaf_rule(name = 'leaf', srcs = ['src.txt'])\n",
+                "top_rule(name = 'top', deps = [':leaf'])\n",
+            ),
+        ),
+    ]);
+
+    let res = ws.post("deps(//pkg:top)", |_, _, popts| {
+        popts.explicit_aspects = true;
+        popts.output = "starlark".into();
+        popts.starlark_expr =
+            "str(target.label) + '|' + str(providers(target) == None) + '|' + str(build_options(target) != None)"
+                .into();
+    });
+    assert_eq!(res.exit_code, 0, "{:?}", res.stderr);
+    let out_lines: Vec<String> = String::from_utf8_lossy(&res.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect();
+    // For `//pkg:leaf`, there are two nodes under `--experimental_explicit_aspects`:
+    // 1. ConfiguredTarget `//pkg:leaf`: `providers(target) == None` is False, `build_options(target) != None` is True
+    // 2. AspectKey `my_asp of //pkg:leaf`: `providers(target) == None` is True, `build_options(target) != None` is True!
+    assert!(
+        out_lines.contains(&"@@//pkg:leaf|False|True".to_string())
+            || out_lines.contains(&"//pkg:leaf|False|True".to_string()),
+        "{out_lines:?}"
+    );
+    assert!(
+        out_lines.contains(&"@@//pkg:leaf|True|True".to_string())
+            || out_lines.contains(&"//pkg:leaf|True|True".to_string()),
+        "configured aspect node must have non-None build_options(target): {out_lines:?}"
+    );
+    // Source file `//pkg:src.txt` is null-configured, so `build_options(target)` is `None`.
+    assert!(
+        out_lines.contains(&"@@//pkg:src.txt|False|False".to_string())
+            || out_lines.contains(&"//pkg:src.txt|False|False".to_string()),
+        "{out_lines:?}"
+    );
 }

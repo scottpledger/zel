@@ -595,7 +595,7 @@ pub fn repr_value(v: &AttrValue) -> String {
         ),
         AttrValue::Label(l) | AttrValue::Output(l) => match l {
             Some(l) => starlark_quote(&lp(l)),
-            None => "null".to_string(),
+            None => "None".to_string(),
         },
         AttrValue::LabelList(l) | AttrValue::OutputList(l) => {
             repr_list(l, |l| starlark_quote(&lp(l)))
@@ -691,10 +691,6 @@ fn build_rule(info: &TInfo, rule: &zel_packages::RuleInstance, lt: &str) -> Stri
             continue;
         }
         if !a.explicit {
-            continue;
-        }
-        if matches!(a.value, AttrValue::Label(None) | AttrValue::Output(None)) {
-            out.push_str(&format!("  {} = null,{lt}", shown));
             continue;
         }
         let vals = possible_values(&a.value);
@@ -2248,6 +2244,7 @@ pub fn try_target_proto_ex(
             };
             if !aspect_attr_list.is_empty() {
                 let mut asp_msgs: Vec<(String, Msg)> = Vec::new();
+                let mut seen_asp_attr_bytes: BTreeSet<Vec<u8>> = BTreeSet::new();
                 for (src_asp, mut asp_entry) in aspect_attr_list.iter().cloned() {
                     if !((opts.proto_default_values || asp_entry.explicit) && pred(&asp_entry.name))
                     {
@@ -2269,7 +2266,9 @@ pub fn try_target_proto_ex(
                         flattened(asp_entry.ty, values)
                     };
                     let msg = attribute_proto_with_aspect(&asp_entry, v.as_ref(), None, src_opt);
-                    asp_msgs.push((asp_entry.name.clone(), msg));
+                    if seen_asp_attr_bytes.insert(msg.encode()) {
+                        asp_msgs.push((asp_entry.name.clone(), msg));
+                    }
                 }
                 asp_msgs.sort_by(|a, b| a.0.cmp(&b.0));
                 for (_, msg) in asp_msgs {
@@ -2324,12 +2323,15 @@ pub fn try_target_proto_ex(
                 r.rmsg(4, "attribute", sh);
             }
             if opts.proto_rule_inputs_and_outputs {
+                let mut aspect_seen: BTreeSet<Label> = BTreeSet::new();
                 for (_, asp_entry) in &aspect_attr_list {
                     if asp_entry.nodep && asp_entry.name != "visibility" {
                         continue;
                     }
                     for l in asp_entry.value.labels() {
-                        r.rstr(5, "rule_input", lp(&l));
+                        if aspect_seen.insert(l.clone()) {
+                            r.rstr(5, "rule_input", lp(&l));
+                        }
                     }
                 }
                 let mut inputs: Vec<Label> =
