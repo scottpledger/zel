@@ -617,8 +617,10 @@ impl ReapiClient {
         Ok(())
     }
 
-    /// `GetTree` with pagination. Returns a `Tree` whose root is the directory with `root` digest.
+    /// `GetTree` server-streaming RPC with pagination. Returns a `Tree` whose root is the
+    /// directory with `root` digest.
     pub fn get_tree(&self, root: &Digest, meta: &ActionMeta) -> Result<Tree> {
+        let opts = self.opts(meta, true);
         let mut dirs: Vec<Directory> = Vec::new();
         let mut token = String::new();
         loop {
@@ -628,14 +630,29 @@ impl ReapiClient {
                 page_size: 0,
                 page_token: token.clone(),
                 digest_function: self.cfg.digest_fn.proto_value(),
-            };
-            let r: GetTreeResponse =
-                self.unary(&self.cache, &format!("{CAS}GetTree"), &req, meta)?;
-            dirs.extend(r.directories);
-            if r.next_page_token.is_empty() {
+            }
+            .encode_to_vec();
+            let (call_dirs, next_token) = self.cfg.retry.run(|| {
+                let mut stream_dirs = Vec::new();
+                let mut last_token = String::new();
+                self.cache
+                    .server_stream(&format!("{CAS}GetTree"), &req, &opts, &mut |m| {
+                        let r = GetTreeResponse::decode(&m)
+                            .map_err(|e| GrpcStatus::new(code::INTERNAL, e.to_string()))?;
+                        stream_dirs.extend(r.directories);
+                        if !r.next_page_token.is_empty() {
+                            last_token = r.next_page_token;
+                        }
+                        Ok(())
+                    })?;
+                Ok((stream_dirs, last_token))
+            })?;
+            let made_progress = !call_dirs.is_empty();
+            dirs.extend(call_dirs);
+            if next_token.is_empty() || (!made_progress && next_token == token) {
                 break;
             }
-            token = r.next_page_token;
+            token = next_token;
         }
         let pos = dirs
             .iter()
@@ -990,6 +1007,54 @@ mod tests {
             |e| matches!(e, crate::merkle::TreeEntry::File { path, .. } if path == "a/b/c.txt")
         ));
         assert_eq!(tree.root.unwrap(), t.root);
+    }
+
+    #[test]
+    fn get_tree_streams_multiple_responses_per_call_and_paginates() {
+        let s = FakeReapiServer::new();
+        // Single RPC stream yielding multiple GetTreeResponse frames (no next_page_token).
+        s.configure(|c| {
+            c.get_tree_stream_batch_size = 1;
+            c.get_tree_page_size = 0;
+        });
+        let c = client_for(&s, false);
+        let comp = crate::merkle::MerkleTreeComputer::new(DigestFn::Sha256);
+        let t = comp
+            .build(&[
+                crate::merkle::MerkleInput::bytes("a/b/c.txt", b"c".to_vec(), false),
+                crate::merkle::MerkleInput::bytes("a/d/e.txt", b"e".to_vec(), false),
+                crate::merkle::MerkleInput::bytes("f.txt", b"f".to_vec(), false),
+            ])
+            .unwrap();
+        c.ensure_blobs_present(&t.blobs, &meta()).unwrap();
+        let tree = c.get_tree(&t.root_digest, &meta()).unwrap();
+        assert_eq!(
+            s.request_count("GetTree"),
+            1,
+            "single server-streaming RPC delivered all directories across multiple frames"
+        );
+        assert_eq!(tree.root.as_ref().unwrap(), &t.root);
+        let entries = crate::merkle::flatten_tree(&tree, DigestFn::Sha256).unwrap();
+        let file_count = entries
+            .iter()
+            .filter(|e| matches!(e, crate::merkle::TreeEntry::File { .. }))
+            .count();
+        assert_eq!(file_count, 3);
+        assert_eq!(tree.children.len(), 3);
+
+        // Combined multi-frame streaming + next_page_token pagination + transient retry.
+        s.configure(|c| {
+            c.get_tree_stream_batch_size = 1;
+            c.get_tree_page_size = 2;
+        });
+        s.inject_fault("GetTree", GrpcStatus::new(code::UNAVAILABLE, "flaky"));
+        let tree2 = c.get_tree(&t.root_digest, &meta()).unwrap();
+        assert!(
+            s.request_count("GetTree") >= 4,
+            "multi-frame streaming combined with next_page_token pagination and retry"
+        );
+        let entries2 = crate::merkle::flatten_tree(&tree2, DigestFn::Sha256).unwrap();
+        assert_eq!(entries2, entries);
     }
 
     #[test]

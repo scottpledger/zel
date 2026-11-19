@@ -432,14 +432,17 @@ impl RemoteSpawnRunner {
                 props.insert(name.to_string(), v.clone());
             }
         }
-        if !props.is_empty() {
-            command.platform = Some(Platform {
+        let platform = if props.is_empty() {
+            None
+        } else {
+            Some(Platform {
                 properties: props
                     .into_iter()
                     .map(|(name, value)| PlatformProperty { name, value })
                     .collect(),
-            });
-        }
+            })
+        };
+        command.platform = platform.clone();
         let command_bytes = command.encode_to_vec();
         let command_digest = self.opts.digest_fn.digest(&command_bytes);
         let salt = CacheSalt {
@@ -461,7 +464,7 @@ impl RemoteSpawnRunner {
             timeout,
             do_not_cache: !may_be_cached_remotely(spawn),
             salt,
-            platform: None,
+            platform,
         };
         let action_bytes = action.encode_to_vec();
         let action_digest = self.opts.digest_fn.digest(&action_bytes);

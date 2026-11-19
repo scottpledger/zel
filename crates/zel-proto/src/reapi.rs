@@ -251,8 +251,8 @@ message!(Directory {
     1 files: Vec<FileNode>, 2 directories: Vec<DirectoryNode>, 3 symlinks: Vec<SymlinkNode>,
     5 node_properties: Option<NodeProperties>,
 });
-message!(PlatformProperty { 1 name: String, 2 value: String });
-message!(Platform { 1 properties: Vec<PlatformProperty> });
+message!(#[derive(Eq)] PlatformProperty { 1 name: String, 2 value: String });
+message!(#[derive(Eq)] Platform { 1 properties: Vec<PlatformProperty> });
 message!(EnvironmentVariable { 1 name: String, 2 value: String });
 message!(Command {
     1 arguments: Vec<String>,
