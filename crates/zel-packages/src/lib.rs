@@ -73,6 +73,8 @@ pub struct RuleExtra {
     pub own_features: Option<AttrValue>,
     /// The `package(features = [...])` tokens of the package declaring this rule.
     pub pkg_features: Vec<String>,
+    /// The `package(default_hdrs_check = ...)` value of the package declaring this rule, if set.
+    pub pkg_default_hdrs_check: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

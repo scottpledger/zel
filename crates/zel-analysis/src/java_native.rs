@@ -204,6 +204,7 @@ fn param_info() -> crate::action::ParamFileInfo {
         use_always: true,
         leading_args: 0,
         flag_groups: Vec::new(),
+        explicit_path: None,
     }
 }
 
@@ -664,7 +665,7 @@ fn java_register_compile(
         arguments.push(CommandLineArgs { args: rest.to_vec(), param_file: None });
     }
     arguments.push(CommandLineArgs { args: flag_line, param_file: Some(param_info()) });
-    let classpath_arg_index = arguments.len();
+    let classpath_arg_index = arguments.iter().filter(|a| a.param_file.is_some()).count();
     if !classpath.is_empty() || mode != "OFF" {
         let mut cpl = JCmd::default();
         cpl.exec_paths("--classpath", &classpath);
@@ -1198,6 +1199,7 @@ fn java_resource_jar_action(
                     use_always: false,
                     leading_args: 0,
                     flag_groups: Vec::new(),
+                    explicit_path: None,
                 }),
             }],
             shell_command: None,

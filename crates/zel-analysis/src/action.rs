@@ -50,7 +50,7 @@ impl Default for ResourceSet {
 /// Parameter-file formats (`ParameterFileType`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParamFileFormat {
-    /// One shell-quoted argument per whitespace-separated token, on one line per arg.
+    /// One shell-quoted argument per whitespace-separated token, on one line per arg (`SHELL_QUOTED`).
     Shell,
     /// One raw argument per line (`UNQUOTED`).
     Multiline,
@@ -76,6 +76,8 @@ pub struct ParamFileInfo {
     /// Slice ranges `(start, end)` in `CommandLineArgs.args` recorded by each `Args.add*` call,
     /// used by `ParamFileFormat::FlagPerLine` to join `flag` and `rest` as `flag=rest`.
     pub flag_groups: Vec<(usize, usize)>,
+    /// Optional explicit parameter file path (e.g. `<output>.params` for `CppCompileAction`).
+    pub explicit_path: Option<String>,
 }
 
 impl Default for ParamFileInfo {
@@ -86,6 +88,7 @@ impl Default for ParamFileInfo {
             use_always: false,
             leading_args: 0,
             flag_groups: Vec::new(),
+            explicit_path: None,
         }
     }
 }
@@ -199,6 +202,16 @@ impl FileContent {
             }
         }
     }
+}
+
+/// Escapes one argument for [`ParamFileFormat::GccQuoted`] (`GccParamFileEscaper.escapeString`).
+pub fn gcc_escape(s: &str) -> String {
+    zel_util::param_escaper::gcc_escape_param(s)
+}
+
+/// Escapes one argument for [`ParamFileFormat::Windows`] (`WindowsParamFileEscaper.escapeString`).
+pub fn windows_escape(s: &str) -> String {
+    zel_util::param_escaper::windows_escape_param(s)
 }
 
 /// Renders a parameter file body (`ParameterFile.writeContent`).
@@ -409,6 +422,88 @@ pub fn propagate_rule_tags(
     }
 }
 
+/// Applies `--modify_execution_info` regex modifiers (`ExecutionRequirementsModifier`) to `reqs`.
+pub fn apply_modify_execution_info_to_map(
+    cfg: &crate::BuildConfigurationKey,
+    mnemonic: &str,
+    reqs: &mut BTreeMap<String, String>,
+) {
+    let bo = cfg.build_options();
+    let entries: Vec<String> = match bo.get("modify_execution_info") {
+        Some(crate::build_options::ConfigValue::List(vs)) => vs.clone(),
+        Some(crate::build_options::ConfigValue::Scalar(s)) if !s.is_empty() => vec![s.clone()],
+        _ => cfg
+            .options
+            .get("modify_execution_info")
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .into_iter()
+            .collect(),
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let additive = cfg.bool_option("incompatible_modify_execution_info_additive", true);
+    let active_entries: &[String] = if additive {
+        entries.as_slice()
+    } else {
+        &entries[entries.len() - 1..]
+    };
+    for entry in active_entries {
+        let raw = entry
+            .strip_prefix("ExecutionInfoModifier{option=")
+            .and_then(|s| s.split_once(", expressions=[").map(|(opt, _)| opt))
+            .unwrap_or(entry.as_str());
+        let mut current_matches = false;
+        for part in raw.split(',').filter(|s| !s.is_empty()) {
+            let bytes = part.as_bytes();
+            let mut eq_idx: Option<usize> = None;
+            for i in (1..bytes.len().saturating_sub(2)).rev() {
+                if bytes[i] == b'='
+                    && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-')
+                    && i + 2 < bytes.len()
+                {
+                    eq_idx = Some(i);
+                    break;
+                }
+            }
+            if let Some(i) = eq_idx {
+                let pat = &part[..i];
+                let spec_item = &part[i + 1..];
+                current_matches =
+                    zel_util::java_regex::Regex::new(pat).is_ok_and(|re| re.full_match(mnemonic));
+                if current_matches {
+                    apply_exec_info_spec_item(spec_item, reqs);
+                }
+            } else if let Some((pat, spec_item)) = part.split_once('=') {
+                current_matches =
+                    zel_util::java_regex::Regex::new(pat).is_ok_and(|re| re.full_match(mnemonic));
+                if current_matches {
+                    apply_exec_info_spec_item(spec_item, reqs);
+                }
+            } else if current_matches {
+                apply_exec_info_spec_item(part, reqs);
+            }
+        }
+    }
+}
+
+fn apply_exec_info_spec_item(item: &str, reqs: &mut BTreeMap<String, String>) {
+    if let Some(rem) = item.strip_prefix('-') {
+        reqs.remove(rem);
+    } else {
+        let body = item.strip_prefix('+').unwrap_or(item);
+        match body.split_once(':') {
+            Some((k, v)) => {
+                reqs.insert(k.to_string(), v.to_string());
+            }
+            None => {
+                reqs.insert(body.to_string(), String::new());
+            }
+        }
+    }
+}
+
 type LoweredParamFile = (usize, String, Vec<u8>, crate::ParamFileWriteSpec);
 
 impl Action {
@@ -441,6 +536,11 @@ impl Action {
         }
     }
 
+    /// Applies `--modify_execution_info` regex rules (`ExecutionRequirementsModifier`) to `reqs`.
+    pub fn apply_modify_execution_info(&mut self, cfg: &crate::BuildConfigurationKey) {
+        apply_modify_execution_info_to_map(cfg, &self.mnemonic, &mut self.execution_requirements);
+    }
+
     /// Computes the action's environment from the configuration of its owner
     /// (`SpawnAction.createActionEnvironment`): with `use_default_shell_env` the configuration's
     /// action environment (`--action_env`, or `--host_action_env` in exec configurations, plus the
@@ -454,46 +554,7 @@ impl Action {
             self.use_default_shell_env,
             &self.env,
         ));
-        if let Some(crate::build_options::ConfigValue::List(mods)) =
-            cfg.native.get("modify_execution_info").map(|n| &n.value)
-        {
-            if !mods.is_empty() {
-                let additive = cfg.bool_option("incompatible_modify_execution_info_additive", true);
-                let slice: &[String] = if additive {
-                    mods.as_slice()
-                } else {
-                    &mods[mods.len() - 1..]
-                };
-                for rendered in slice {
-                    let raw = rendered
-                        .strip_prefix("ExecutionInfoModifier{option=")
-                        .and_then(|s| s.split_once(", expressions=[").map(|(opt, _)| opt))
-                        .unwrap_or(rendered.as_str());
-                    for spec in raw.split(',').filter(|s| !s.is_empty()) {
-                        let Some((pat, rest)) = spec.rsplit_once('=') else {
-                            continue;
-                        };
-                        let (remove, key) = if let Some(k) = rest.strip_prefix('-') {
-                            (true, k)
-                        } else if let Some(k) = rest.strip_prefix('+') {
-                            (false, k)
-                        } else {
-                            continue;
-                        };
-                        if let Ok(re) = zel_util::java_regex::Regex::new(pat) {
-                            if re.full_match(&self.mnemonic) {
-                                if remove {
-                                    self.execution_requirements.remove(key);
-                                } else {
-                                    self.execution_requirements
-                                        .insert(key.to_string(), String::new());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        self.apply_modify_execution_info(cfg);
     }
 
     pub fn primary_output(&self) -> Option<&Artifact> {
@@ -777,8 +838,14 @@ impl Action {
                         .sum();
                     if pf.use_always || total > DEFAULT_PARAM_FILE_THRESHOLD {
                         argv.extend(a.args[..lead].iter().cloned());
-                        let path = format!("{primary}-{spilled_idx}.params");
-                        spilled_idx += 1;
+                        let path = match &pf.explicit_path {
+                            Some(ep) => ep.clone(),
+                            None => {
+                                let p = format!("{primary}-{spilled_idx}.params");
+                                spilled_idx += 1;
+                                p
+                            }
+                        };
                         let formatted = crate::args::format_arg(&pf.flag_format, &path)
                             .unwrap_or_else(|_| pf.flag_format.replace("%s", &path));
                         argv.push(formatted);
@@ -1518,6 +1585,7 @@ mod tests {
                         use_always: true,
                         leading_args: 0,
                         flag_groups: Vec::new(),
+                        explicit_path: None,
                     }),
                 }],
                 shell_command: None,
@@ -1735,6 +1803,7 @@ mod tests {
                             use_always: true,
                             leading_args: 0,
                             flag_groups: vec![(0, 2), (2, 3), (3, 5)],
+                            explicit_path: None,
                         }),
                     },
                 ],
@@ -1802,6 +1871,7 @@ mod tests {
                             use_always: true,
                             leading_args: 0,
                             flag_groups: groups,
+                            explicit_path: None,
                         }),
                     }],
                     shell_command: None,
@@ -1876,6 +1946,7 @@ mod tests {
                             format: ParamFileFormat::FlagPerLine,
                             leading_args: 0,
                             flag_groups: groups,
+                            explicit_path: None,
                         }),
                     }],
                     shell_command: None,
@@ -1979,6 +2050,7 @@ mod tests {
                         format: ParamFileFormat::FlagPerLine,
                         leading_args: 0,
                         flag_groups: Vec::new(),
+                        explicit_path: None,
                     }),
                 }],
                 shell_command: None,
@@ -2074,6 +2146,7 @@ mod tests {
                         format: ParamFileFormat::FlagPerLine,
                         leading_args: 0,
                         flag_groups: vec![(0, 1), (1, 2), (2, 3), (3, 5)],
+                        explicit_path: None,
                     }),
                 }],
                 shell_command: None,

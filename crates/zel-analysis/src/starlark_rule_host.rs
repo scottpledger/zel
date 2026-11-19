@@ -11,6 +11,20 @@ fn dispatch(
     mut pos: Vec<Value>,
     kw: BTreeMap<String, Value>,
 ) -> HostResult {
+    if name == "builtins.cc_common.check_experimental_cc_shared_library" {
+        let enabled = crate::fragments::Opts::new(&st.cfg).b("experimental_cc_shared_library", true);
+        return if enabled {
+            Ok(Value::None)
+        } else {
+            err("Target/Rule requires --experimental_cc_shared_library to be enabled")
+        };
+    }
+    if name == "builtins.cc_common.incompatible_disable_objc_library_transition" {
+        return Ok(Value::Bool(
+            crate::fragments::Opts::new(&st.cfg)
+                .b("incompatible_disable_objc_library_transition", true),
+        ));
+    }
     if let Some(r) = cc_native(st, ctx, name, &pos, &kw) {
         return r;
     }

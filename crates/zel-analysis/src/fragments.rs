@@ -46,13 +46,13 @@ fn f(name: &str, v: Value) -> (String, Value) {
     (name.to_string(), v)
 }
 
-struct Opts<'a> {
-    cfg: &'a BuildConfigurationKey,
+pub(crate) struct Opts<'a> {
+    pub(crate) cfg: &'a BuildConfigurationKey,
     bo: crate::build_options::BuildOptions,
 }
 
 impl<'a> Opts<'a> {
-    fn new(cfg: &'a BuildConfigurationKey) -> Self {
+    pub(crate) fn new(cfg: &'a BuildConfigurationKey) -> Self {
         Self {
             cfg,
             bo: cfg.build_options(),
@@ -105,7 +105,7 @@ impl<'a> Opts<'a> {
         }
     }
 
-    fn b(&self, k: &str, d: bool) -> bool {
+    pub(crate) fn b(&self, k: &str, d: bool) -> bool {
         if let Some(v) = self.cfg.options.get(k) {
             return match v.to_ascii_lowercase().as_str() {
                 "1" | "true" | "yes" | "t" | "y" => true,
@@ -164,7 +164,7 @@ impl<'a> Opts<'a> {
     }
 
     /// Repeatable flag list without comma-splitting (`--protocopt`, `--javacopt`, `--jvmopt`, etc.).
-    fn list_unsplit(&self, k: &str) -> Vec<String> {
+    pub(crate) fn list_unsplit(&self, k: &str) -> Vec<String> {
         if let Some(crate::build_options::ConfigValue::List(vs)) = self.bo.get(k) {
             return vs.clone();
         }
@@ -380,6 +380,24 @@ pub fn fragment(name: &str, cfg: &BuildConfigurationKey) -> Option<Value> {
     fragment_checked(name, cfg).ok().flatten()
 }
 
+/// Parses Bazel's `--grte_top` (`LibcTopLabelConverter`): `"default"` or `""` -> `None`,
+/// otherwise must start with `//` or `@` and rewrites target name to `:everything`.
+pub fn parse_libc_top_label(raw: &str) -> Result<Option<Label>, String> {
+    if raw.is_empty() || raw == "default" {
+        return Ok(None);
+    }
+    if !raw.starts_with("//") && !raw.starts_with('@') {
+        return Err(format!(
+            "Invalid --grte_top value '{raw}': label must start with '//' or '@'"
+        ));
+    }
+    let lbl = Label::parse_canonical(raw)
+        .map_err(|e| format!("Invalid --grte_top label '{raw}': {e}"))?;
+    let rewritten = Label::create(lbl.package_identifier().clone(), "everything")
+        .map_err(|e| format!("Invalid --grte_top label '{raw}': {e}"))?;
+    Ok(Some(rewritten))
+}
+
 /// Checked variant of [`fragment`] that surfaces invalid fragment option errors.
 pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Option<Value>, String> {
     let o = Opts::new(cfg);
@@ -392,6 +410,7 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
             let fission_active = fission.iter().any(|m| m == mode || m == "yes")
                 && !fission.iter().any(|m| m == "no");
             let omitfp = o.b("experimental_omitfp", false);
+            let raw_copts = o.list_unsplit("copt");
             let mut copts: Vec<Value> = Vec::new();
             if omitfp {
                 copts.extend(
@@ -403,16 +422,85 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     .map(sv),
                 );
             }
-            copts.extend(o.list("copt").into_iter().map(Value::String));
-            let _fdo_path = Value::None;
+            copts.extend(raw_copts.iter().cloned().map(Value::String));
+            let mut linkopts: Vec<Value> =
+                o.list_unsplit("linkopt").into_iter().map(Value::String).collect();
+            if omitfp {
+                linkopts.push(sv("-Wl,--eh-frame-hdr"));
+            }
+
+            let fdo_instrument = o.raw("fdo_instrument").filter(|s| !s.is_empty());
+            let cs_fdo_instrument = o.raw("cs_fdo_instrument").filter(|s| !s.is_empty());
+            let fdo_optimize_raw = o.raw("fdo_optimize").filter(|s| !s.is_empty());
+            let fdo_profile = o.label("fdo_profile");
+            let cs_fdo_profile = o.label("cs_fdo_profile");
+            let cs_fdo_abs = o.raw("cs_fdo_absolute_path").filter(|s| !s.is_empty());
+            let prop_cc = o
+                .raw("propeller_optimize_absolute_cc_profile")
+                .filter(|s| !s.is_empty());
+            let prop_ld = o
+                .raw("propeller_optimize_absolute_ld_profile")
+                .filter(|s| !s.is_empty());
+
+            if fdo_instrument.is_some() && cs_fdo_instrument.is_some() {
+                return Err("Cannot instrument both regular and CS FDO".into());
+            }
+            if fdo_optimize_raw.is_some() && !matches!(fdo_profile, Value::None) {
+                return Err("Cannot --fdo_optimize and --fdo_profile at the same time".into());
+            }
+            let any_fdo_opt = fdo_optimize_raw.is_some()
+                || !matches!(fdo_profile, Value::None)
+                || !matches!(cs_fdo_profile, Value::None)
+                || cs_fdo_abs.is_some();
+            if (fdo_instrument.is_some() || cs_fdo_instrument.is_some()) && any_fdo_opt {
+                return Err("Cannot instrument and optimize for FDO at the same time".into());
+            }
+            if fdo_instrument.is_some() && !raw_copts.iter().any(|c| c == "-Wno-error") {
+                return Err("Cannot instrument FDO without --copt=-Wno-error".into());
+            }
+
+            let (fdo_optimize_val, fdo_path_val) = match &fdo_optimize_raw {
+                Some(s) if s.starts_with("//") || s.starts_with('@') => {
+                    let lbl = Label::parse_canonical(s)
+                        .map_err(|e| format!("Invalid --fdo_optimize label '{s}': {e}"))?;
+                    (Value::Label(lbl), Value::None)
+                }
+                Some(s) => (Value::None, sv(s)),
+                None => (Value::None, Value::None),
+            };
+            let propeller_optimize = if prop_cc.is_some()
+                || prop_ld.is_some()
+                || fdo_instrument.is_some()
+                || cs_fdo_instrument.is_some()
+            {
+                Value::None
+            } else {
+                o.label("propeller_optimize")
+            };
+            let xbinary_fdo = if fdo_optimize_raw.is_some()
+                || !matches!(fdo_profile, Value::None)
+                || fdo_instrument.is_some()
+                || cs_fdo_instrument.is_some()
+            {
+                Value::None
+            } else {
+                o.label("xbinary_fdo")
+            };
+            let libc_top_val = match o.raw("grte_top") {
+                Some(raw) => parse_libc_top_label(&raw)?
+                    .map(Value::Label)
+                    .unwrap_or(Value::None),
+                None => Value::None,
+            };
+
             mk(vec![
                 // Struct fields.
                 f("copts", mk_list(copts)),
-                f("cxxopts", o.list_v("cxxopt")),
-                f("conlyopts", o.list_v("conlyopt")),
-                f("objccopts", o.list_v("objccopt")),
-                f("linkopts", o.list_v("linkopt")),
-                f("lto_backend_options", o.list_v("ltobackendopt")),
+                f("cxxopts", o.list_unsplit_v("cxxopt")),
+                f("conlyopts", o.list_unsplit_v("conlyopt")),
+                f("objccopts", o.list_unsplit_v("objccopt")),
+                f("linkopts", mk_list(linkopts)),
+                f("lto_backend_options", o.list_unsplit_v("ltobackendopt")),
                 f(
                     "_dont_enable_host_nonhost",
                     Value::Bool(o.b(
@@ -421,14 +509,14 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     )),
                 ),
                 f("custom_malloc", o.label("custom_malloc")),
-                f("fdo_optimize", Value::None),
+                f("fdo_optimize", fdo_optimize_val),
                 f("fdo_prefetch_hints", o.label("fdo_prefetch_hints")),
-                f("fdo_profile", o.label("fdo_profile")),
-                f("cs_fdo_profile", o.label("cs_fdo_profile")),
-                f("propeller_optimize", o.label("propeller_optimize")),
-                f("xbinary_fdo", o.label("xbinary_fdo")),
+                f("fdo_profile", fdo_profile),
+                f("cs_fdo_profile", cs_fdo_profile),
+                f("propeller_optimize", propeller_optimize),
+                f("xbinary_fdo", xbinary_fdo),
                 f("memprof_profile", o.label("memprof_profile")),
-                f("libc_top", o.label("grte_top")),
+                f("libc_top", libc_top_val.clone()),
                 f("proto_profile_path", o.opt_s("proto_profile_path")),
                 f(
                     "apple_generate_dsym",
@@ -444,7 +532,7 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                 ),
                 // Methods.
                 m("compilation_mode", sv(mode)),
-                m("lto_index_options", o.list_v("ltoindexopt")),
+                m("lto_index_options", o.list_unsplit_v("ltoindexopt")),
                 m("minimum_os_version", o.opt_s("minimum_os_version")),
                 m(
                     "dynamic_mode",
@@ -463,12 +551,27 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     "interface_shared_objects",
                     Value::Bool(o.b("interface_shared_objects", true)),
                 ),
-                m("fdo_path", Value::None),
-                m("cs_fdo_path", Value::None),
-                m("fdo_instrument", Value::None),
-                m("cs_fdo_instrument", Value::None),
-                m("propeller_optimize_absolute_cc_profile", Value::None),
-                m("propeller_optimize_absolute_ld_profile", Value::None),
+                m("fdo_path", fdo_path_val),
+                m(
+                    "cs_fdo_path",
+                    cs_fdo_abs.map(|s| sv(&s)).unwrap_or(Value::None),
+                ),
+                m(
+                    "fdo_instrument",
+                    fdo_instrument.map(|s| sv(&s)).unwrap_or(Value::None),
+                ),
+                m(
+                    "cs_fdo_instrument",
+                    cs_fdo_instrument.map(|s| sv(&s)).unwrap_or(Value::None),
+                ),
+                m(
+                    "propeller_optimize_absolute_cc_profile",
+                    prop_cc.map(|s| sv(&s)).unwrap_or(Value::None),
+                ),
+                m(
+                    "propeller_optimize_absolute_ld_profile",
+                    prop_ld.map(|s| sv(&s)).unwrap_or(Value::None),
+                ),
                 m("_fdo_prefetch_hints_label", o.label("fdo_prefetch_hints")),
                 m(
                     "use_llvm_coverage_map_format",
@@ -478,8 +581,14 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     "generate_llvm_lcov",
                     Value::Bool(o.b("experimental_generate_llvm_lcov", false)),
                 ),
-                m("incompatible_use_specific_tool_files", Value::Bool(true)),
-                m("include_scanning", Value::Bool(false)),
+                m(
+                    "incompatible_use_specific_tool_files",
+                    Value::Bool(o.b("incompatible_use_specific_tool_files", true)),
+                ),
+                m(
+                    "include_scanning",
+                    Value::Bool(o.b("include_scanning", false)),
+                ),
                 m(
                     "should_generate_dotd_files",
                     Value::Bool(o.b("cc_dotd_files", true)),
@@ -492,7 +601,10 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     "objc_enable_binary_stripping",
                     Value::Bool(o.b("objc_enable_binary_stripping", false)),
                 ),
-                m("experimental_cc_implementation_deps", Value::Bool(true)),
+                m(
+                    "experimental_cc_implementation_deps",
+                    Value::Bool(o.b("experimental_cc_implementation_deps", true)),
+                ),
                 m(
                     "experimental_cpp_modules",
                     Value::Bool(o.b("experimental_cpp_modules", false)),
@@ -522,9 +634,12 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                 ),
                 m("build_test_dwp", Value::Bool(o.b("build_test_dwp", false))),
                 m("should_strip_binaries", Value::Bool(strip_binaries)),
-                m("strip_opts", o.list_v("stripopt")),
-                m("grte_top", o.label("grte_top")),
-                m("disable_nocopts", Value::Bool(true)),
+                m("strip_opts", o.list_unsplit_v("stripopt")),
+                m("grte_top", libc_top_val),
+                m(
+                    "disable_nocopts",
+                    Value::Bool(o.b("incompatible_disable_nocopts", true)),
+                ),
             ])
         }
         "platform" => {
@@ -929,7 +1044,18 @@ pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey)
         ("proto", "proto_toolchain_for_j2objc") => {
             opt("proto_toolchain_for_j2objc").or_else(|| tools("tools/j2objc:j2objc_proto_toolchain"))
         }
-        ("cpp", "libc_top") => opt("grte_top"),
+        ("cpp", "crosstool_top") => {
+            if o.has_explicit("crosstool_top")
+                || !o.b("incompatible_enable_cc_toolchain_resolution", true)
+            {
+                opt("crosstool_top")
+            } else {
+                None
+            }
+        }
+        ("cpp", "libc_top") => o
+            .raw("grte_top")
+            .and_then(|raw| parse_libc_top_label(&raw).ok().flatten()),
         ("cpp", "zipper") => {
             let fdo = [
                 "fdo_optimize",
@@ -1129,5 +1255,54 @@ mod tests {
             direct_dependencies_violation_msg(&lbl),
             "--direct_dependencies_violation_msg=%s is imported, but //pkg:my_proto doesn't directly depend on a proto_library that 'srcs' it."
         );
+    }
+
+    #[test]
+    fn cpp_fragment_unsplit_opts_grte_top_and_fdo_validation() {
+        let mut cfg = BuildConfigurationKey::default();
+        cfg.native.insert(
+            "copt".into(),
+            crate::NativeSetting {
+                raw: "-Wl,-rpath,/opt".into(),
+                value: crate::build_options::ConfigValue::List(vec!["-Wl,-rpath,/opt".into()]),
+            },
+        );
+        set_scalar(&mut cfg, "experimental_omitfp", "true");
+        set_scalar(&mut cfg, "grte_top", "//sysroot/glibc:custom");
+        let cpp = fragment_checked("cpp", &cfg).unwrap().unwrap();
+        assert_eq!(
+            struct_field(&cpp, "copts"),
+            &mk_list(vec![
+                sv("-fomit-frame-pointer"),
+                sv("-fasynchronous-unwind-tables"),
+                sv("-DNO_FRAME_POINTER"),
+                sv("-Wl,-rpath,/opt"),
+            ])
+        );
+        assert_eq!(
+            struct_field(&cpp, "linkopts"),
+            &mk_list(vec![sv("-Wl,--eh-frame-hdr")])
+        );
+        assert_eq!(
+            struct_field(&cpp, "libc_top"),
+            &Value::Label(Label::parse_canonical("@@//sysroot/glibc:everything").unwrap())
+        );
+
+        set_scalar(&mut cfg, "grte_top", "default");
+        let cpp_def = fragment_checked("cpp", &cfg).unwrap().unwrap();
+        assert_eq!(struct_field(&cpp_def, "libc_top"), &Value::None);
+
+        let mut fdo_bad = BuildConfigurationKey::default();
+        set_scalar(&mut fdo_bad, "fdo_instrument", "prof");
+        assert!(fragment_checked("cpp", &fdo_bad).is_err());
+
+        fdo_bad.native.insert(
+            "copt".into(),
+            crate::NativeSetting {
+                raw: "-Wno-error".into(),
+                value: crate::build_options::ConfigValue::List(vec!["-Wno-error".into()]),
+            },
+        );
+        assert!(fragment_checked("cpp", &fdo_bad).is_ok());
     }
 }

@@ -415,6 +415,7 @@ impl CtxState {
         if self.inputs.allow_tags_propagation && matches!(a.kind, ActionKind::Spawn { .. }) {
             crate::action::propagate_rule_tags(&self.rule, &mut a.execution_requirements);
         }
+        a.apply_modify_execution_info(&self.cfg);
         a.apply_configuration_env(&self.cfg);
         a.inputs = dedup(std::mem::take(&mut a.inputs));
         self.graph

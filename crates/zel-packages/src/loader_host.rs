@@ -2045,6 +2045,7 @@ impl PackageLoader {
                 pkg_default_attrs,
                 own_features,
                 pkg_features: s.args.features.clone(),
+                pkg_default_hdrs_check: s.args.default_hdrs_check.clone(),
             },
         };
         for ol in out_labels {
@@ -2294,7 +2295,9 @@ impl PackageLoader {
                 }
             }
         }
-        if let Some(d @ Value::UserFunction(_)) = s.fields.get("default") {
+        if let Some(d @ (Value::UserFunction(_) | Value::BuiltinFunction(_))) =
+            s.fields.get("default")
+        {
             a.computed_default = Some(d.clone());
         }
         if let Some(d) = s.fields.get("default") {

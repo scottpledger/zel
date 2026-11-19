@@ -1166,6 +1166,70 @@ pub fn path_digest(
     res
 }
 
+/// Decodes raw `.d` bytes as ISO-8859-1 (`Latin-1`), matching Bazel's `DepsScanner`.
+pub fn decode_latin1(bytes: &[u8]) -> String {
+    bytes.iter().map(|&b| b as char).collect()
+}
+
+/// Filters MSVC `/showIncludes` lines (`ShowIncludesFilter`) from `stdout`, returning
+/// `(filtered_stdout, discovered_headers)`.
+pub fn filter_msvc_show_includes(stdout: &[u8], prefix: &str) -> (Vec<u8>, Vec<String>) {
+    let pfx = if prefix.is_empty() {
+        "Note: including file:"
+    } else {
+        prefix
+    };
+    let mut filtered = Vec::with_capacity(stdout.len());
+    let mut headers = Vec::new();
+    for chunk in stdout.split_inclusive(|&b| b == b'\n') {
+        let line_no_eol = chunk
+            .strip_suffix(b"\r\n")
+            .or_else(|| chunk.strip_suffix(b"\n"))
+            .unwrap_or(chunk);
+        let decoded = decode_latin1(line_no_eol);
+        if let Some(rest) = decoded.strip_prefix(pfx) {
+            let hdr = rest.trim();
+            if !hdr.is_empty() {
+                headers.push(hdr.to_string());
+            }
+        } else {
+            filtered.extend_from_slice(chunk);
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    headers.retain(|h| seen.insert(h.clone()));
+    (filtered, headers)
+}
+
+/// Normalizes a header path from `.d` or `/showIncludes` (`HeaderDiscovery`), returning `None`
+/// for `.cppmap` files, built-in system headers outside `execroot`, or paths escaping `execroot`.
+pub fn normalize_discovered_header(dep: &str, execroot_str: &str) -> Option<String> {
+    let unified = dep.replace('\\', "/");
+    let er = execroot_str.replace('\\', "/");
+    let er_slash = format!("{}/", er.trim_end_matches('/'));
+    let rel = if let Some(s) = unified.strip_prefix(&er_slash) {
+        s.to_string()
+    } else if let Some(s) = unified.strip_prefix("/proc/self/cwd/") {
+        s.to_string()
+    } else {
+        unified
+    };
+    if rel.starts_with('/')
+        || (rel.len() >= 2 && rel.as_bytes()[0].is_ascii_alphabetic() && rel.as_bytes()[1] == b':')
+    {
+        return None;
+    }
+    let frag = zel_vfs::PathFragment::create(&rel);
+    let norm = frag.path_string();
+    if norm.is_empty() || norm == "." || norm.starts_with("../") || norm == ".." {
+        return None;
+    }
+    if norm.ends_with(".cppmap") {
+        return None;
+    }
+    Some(norm.to_string())
+}
+
 /// Parses a Makefile-style dependency file (`.d`, as written by `gcc -MD`) into the prerequisite
 /// paths (`CppCompileAction.discoverInputsFromDotdFiles`): the target before the first
 /// unescaped `:` is dropped, `\\`-newline continuations and `\\ ` escapes are handled.
@@ -2639,6 +2703,28 @@ pub fn execute_action_with(
         }
     }
 
+    let is_cc_compile = matches!(
+        action.mnemonic(),
+        "CppCompile" | "ObjcCompile" | "CppLinkstampCompile" | "CppCompileHeader"
+    );
+    let mut show_includes_headers: Vec<String> = Vec::new();
+    if is_cc_compile {
+        let prefix = if let ActionAnalysisMetadata::SpawnAction { env, .. } = action {
+            env.get("MSVC_SHOWINCLUDES_PREFIX")
+                .map(String::as_str)
+                .unwrap_or("Note: including file:")
+        } else {
+            "Note: including file:"
+        };
+        if !outcome.stdout.is_empty() {
+            let (filtered_out, hdrs) = filter_msvc_show_includes(&outcome.stdout, prefix);
+            if !hdrs.is_empty() {
+                outcome.stdout = filtered_out;
+                show_includes_headers = hdrs;
+            }
+        }
+    }
+
     for out_art in &outputs {
         let out_path = execroot.get_relative(&out_art.exec_path);
         // Outputs of a remote/disk cache hit are only materialized when needed.
@@ -2647,6 +2733,16 @@ pub fn execute_action_with(
             .as_ref()
             .and_then(|r| r.remote.as_ref())
             .is_some_and(|r| r.is_pending_output(out_art.exec_path.path_string()));
+        if !pending
+            && is_cc_compile
+            && out_art.exec_path.path_string().ends_with(".gcno")
+            && !fs.exists(&out_path, true)
+        {
+            if let Some(parent) = out_path.parent_directory() {
+                let _ = fs.create_directory_and_parents(&parent);
+            }
+            let _ = fs.write_file(&out_path, b"");
+        }
         if !pending && !fs.exists(&out_path, !out_art.is_unresolved_symlink) {
             return Ok(fail(
                 vec![
@@ -2711,20 +2807,27 @@ pub fn execute_action_with(
     }
 
     // Record the action in the cache (`ActionCacheChecker.updateActionCache`): output digests and
-    // the metadata digest over declared + discovered inputs (from `.d` depfiles).
+    // the metadata digest over declared + discovered inputs (from `.d` depfiles and `/showIncludes`).
     if let Some(primary) = outputs.first() {
         let mut discovered: Vec<String> = Vec::new();
         if let ActionAnalysisMetadata::SpawnAction { .. } = action {
+            for hdr in &show_includes_headers {
+                if let Some(rel) = normalize_discovered_header(hdr, execroot.path_string()) {
+                    if !declared_inputs.contains(&rel) {
+                        discovered.push(rel);
+                    }
+                }
+            }
             for o in &outputs {
                 if o.exec_path.path_string().ends_with(".d") {
                     if let Ok(b) = fs.read_file(&execroot.get_relative(&o.exec_path)) {
-                        for dep in parse_depfile(&String::from_utf8_lossy(&b)) {
-                            let rel = dep
-                                .strip_prefix(&format!("{}/", execroot.path_string()))
-                                .map(|s| s.to_string())
-                                .unwrap_or(dep);
-                            if !declared_inputs.contains(&rel) && !rel.starts_with('/') {
-                                discovered.push(rel);
+                        for dep in parse_depfile(&decode_latin1(&b)) {
+                            if let Some(rel) =
+                                normalize_discovered_header(&dep, execroot.path_string())
+                            {
+                                if !declared_inputs.contains(&rel) {
+                                    discovered.push(rel);
+                                }
                             }
                         }
                     }
@@ -3309,5 +3412,39 @@ mod tests {
                 "--header\n{tree_exec}/a.txt\n{tree_exec}/b.txt\n'{tree_exec}/nested/with space.txt'\n"
             )
         );
+    }
+
+    #[test]
+    fn msvc_show_includes_and_latin1_depfile_header_discovery() {
+        let raw_stdout = b"Note: including file:   C:\\execroot\\pkg\\hdr.h\r\nreal warning\r\nNote: including file: C:\\Program Files\\MSVC\\stdio.h\r\n";
+        let (filtered, hdrs) = filter_msvc_show_includes(raw_stdout, "Note: including file:");
+        assert_eq!(filtered, b"real warning\r\n");
+        assert_eq!(
+            hdrs,
+            vec![
+                r"C:\execroot\pkg\hdr.h".to_string(),
+                r"C:\Program Files\MSVC\stdio.h".to_string(),
+            ]
+        );
+        assert_eq!(
+            normalize_discovered_header(r"C:\execroot\pkg\sub\..\hdr.h", r"C:\execroot"),
+            Some("pkg/hdr.h".to_string())
+        );
+        assert_eq!(
+            normalize_discovered_header(r"C:\Program Files\MSVC\stdio.h", r"C:\execroot"),
+            None
+        );
+        assert_eq!(
+            normalize_discovered_header("/execroot/pkg/mod.cppmap", "/execroot"),
+            None
+        );
+
+        let latin1_d = b"out.o: pkg/caf\xe9.h /usr/include/stdlib.h\n";
+        let parsed = parse_depfile(&decode_latin1(latin1_d));
+        assert_eq!(
+            normalize_discovered_header(&parsed[0], "/execroot"),
+            Some("pkg/caf\u{e9}.h".to_string())
+        );
+        assert_eq!(normalize_discovered_header(&parsed[1], "/execroot"), None);
     }
 }

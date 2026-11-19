@@ -872,6 +872,25 @@ fn computed_default_value(
     resolver: &Arc<dyn DepResolver>,
     sibling_repository_layout: bool,
 ) -> Result<AttrValue, String> {
+    if let Value::BuiltinFunction(bn) = f {
+        if bn == "cc_internal.stl_computed_default_fn" {
+            let has_stl_tag = rule
+                .attrs
+                .get("tags")
+                .is_some_and(|v| {
+                    zel_builtins::cc_features::items(v)
+                        .iter()
+                        .any(|t| t.as_str() == Some("__CC_STL__"))
+                });
+            return if has_stl_tag {
+                Ok(AttrValue::Label(None))
+            } else {
+                let lbl = Label::parse_canonical("@@//third_party/stl")
+                    .map_err(|e| e.to_string())?;
+                Ok(AttrValue::Label(Some(lbl)))
+            };
+        }
+    }
     let Value::UserFunction(def) = f else { return Err(format!("attribute '{name}': invalid computed default")) };
     let mut kw = BTreeMap::new();
     if let Value::Struct(s) = raw_attrs {

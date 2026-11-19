@@ -19,8 +19,8 @@ fn flag_native(name: &str) -> Option<Value> {
         "java_common_internal_do_not_use.incompatible_disable_non_executable_java_binary" => {
             Value::Bool(false)
         }
-        "cc_common.check_experimental_cc_shared_library" => Value::Bool(true),
-        "cc_common.incompatible_disable_objc_library_transition" => Value::Bool(false),
+        "cc_common.check_experimental_cc_shared_library" => Value::Bool(false),
+        "cc_common.incompatible_disable_objc_library_transition" => Value::Bool(true),
         "cc_common.add_go_exec_groups_to_binary_rules" => Value::Bool(false),
         "cc_common.do_not_use_tools_cpp_compiler_present" => Value::Bool(false),
         "py_builtins.is_bzlmod_enabled" => Value::Bool(true),
