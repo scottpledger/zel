@@ -917,4 +917,59 @@ default login defuser password defpass
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_helper_retries_transient_etxtbsy() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Barrier};
+
+        let dir = std::env::temp_dir().join(format!(
+            "zel-netrc-etxtbsy-unit-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let helper = dir.join("helper.sh");
+
+        let barrier = Arc::new(Barrier::new(2));
+        let barrier_writer = Arc::clone(&barrier);
+        let helper_writer = helper.clone();
+
+        let writer = std::thread::spawn(move || {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .truncate(true)
+                .write(true)
+                .open(&helper_writer)
+                .unwrap();
+            file.write_all(
+                b"#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer RETRY_OK\"]}}'\n",
+            )
+            .unwrap();
+            file.sync_all().unwrap();
+            std::fs::set_permissions(&helper_writer, std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+            barrier_writer.wait();
+            std::thread::sleep(std::time::Duration::from_millis(25));
+            drop(file);
+        });
+
+        barrier.wait();
+        let hdrs = resolve_auth_headers(
+            "https://example.com/modules/a/1.0/MODULE.bazel",
+            &[("example.com".to_string(), helper)],
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        writer.join().unwrap();
+        assert_eq!(
+            hdrs,
+            vec![("Authorization".to_string(), "Bearer RETRY_OK".to_string())]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

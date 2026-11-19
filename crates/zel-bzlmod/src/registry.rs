@@ -307,7 +307,7 @@ fn curl_once(
         cmd.arg("-H").arg(format!("{k}: {v}"));
     }
     cmd.arg(url);
-    let out = cmd.output().map_err(|e| (false, e.to_string()))?;
+    let out = crate::output_retry_etxtbsy(&mut cmd).map_err(|e| (false, e.to_string()))?;
     if !out.status.success() {
         // Mirror the Java connector: unknown host and certificate problems are permanent, everything else
         // (refused, reset, timeout, ...) is an IOException that is retried.

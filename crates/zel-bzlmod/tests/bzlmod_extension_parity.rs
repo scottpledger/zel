@@ -169,13 +169,10 @@ fn netrc_and_credential_helper_auth_headers() {
     #[cfg(unix)]
     {
         let helper = dir.join("helper.sh");
-        std::fs::write(
+        write_executable_script(
             &helper,
-            "#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer TOKEN\"]}}'\n",
-        )
-        .unwrap();
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+            b"#!/bin/sh\necho '{\"headers\":{\"Authorization\":[\"Bearer TOKEN\"]}}'\n",
+        );
         let hdrs2 = resolve_auth_headers(
             "https://example.com/modules/a/1.0/MODULE.bazel",
             &[("example.com".to_string(), helper)],
@@ -396,4 +393,88 @@ ext = module_extension(implementation = _ext_impl)
     }
 
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[cfg(unix)]
+fn write_executable_script(path: &std::path::Path, content: &[u8]) {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    let mut file = std::fs::File::create(path).unwrap();
+    file.write_all(content).unwrap();
+    file.sync_all().unwrap();
+    drop(file);
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_credential_helper_creation_and_subprocess_spawning() {
+    use std::os::unix::process::CommandExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Barrier;
+
+    let dir = std::env::temp_dir().join(format!("zel-netrc-concurrent-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let worker_threads = 4usize;
+    let forker_threads = 4usize;
+    let barrier = Arc::new(Barrier::new(worker_threads + forker_threads));
+    let mut handles = Vec::new();
+
+    // Background threads using `pre_exec` force `fork()` + `execve()` (rather than `posix_spawn`),
+    // reproducing the exact Linux multi-threaded write-fd inheritance race that triggers `ETXTBSY`.
+    for _ in 0..forker_threads {
+        let stop = Arc::clone(&stop);
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            while !stop.load(Ordering::Relaxed) {
+                let mut cmd = std::process::Command::new("/bin/sh");
+                cmd.args(["-c", ":"]);
+                // SAFETY: no-op `pre_exec` closure is async-signal-safe; used solely to force `fork()`.
+                unsafe {
+                    cmd.pre_exec(|| Ok(()));
+                }
+                let status = cmd.status().unwrap();
+                assert!(status.success());
+            }
+        }));
+    }
+
+    for tid in 0..worker_threads {
+        let dir = dir.clone();
+        let barrier = Arc::clone(&barrier);
+        handles.push(std::thread::spawn(move || {
+            barrier.wait();
+            let env = BTreeMap::new();
+            for iter in 0..20usize {
+                let helper = dir.join(format!("helper-{tid}-{iter}.sh"));
+                let expected = format!("Bearer TOK_{tid}_{iter}");
+                let script = format!(
+                    "#!/bin/sh\necho '{{\"headers\":{{\"Authorization\":[\"{expected}\"]}}}}'\n"
+                );
+                write_executable_script(&helper, script.as_bytes());
+                let hdrs = resolve_auth_headers(
+                    "https://example.com/modules/a/1.0/MODULE.bazel",
+                    &[("example.com".to_string(), helper)],
+                    &env,
+                )
+                .unwrap();
+                assert_eq!(hdrs, vec![("Authorization".to_string(), expected)]);
+            }
+        }));
+    }
+
+    for h in handles.drain(forker_threads..) {
+        h.join().unwrap();
+    }
+    stop.store(true, Ordering::Relaxed);
+    for h in handles {
+        h.join().unwrap();
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
 }
