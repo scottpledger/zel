@@ -758,3 +758,142 @@ fn outer_cancel_while_remote_waits_for_local_done_prevents_remote_publish() {
         "cancelled dynamic spawn must not publish remote outputs after waiting on local_done"
     );
 }
+
+#[test]
+fn bwob_zero_remote_cache_ttl_succeeds_post_execution_and_reexecutes_next_invocation() {
+    use zel_analysis::{ActionAnalysisMetadata, Artifact};
+    use zel_cmdline::Label;
+    use zel_exec::action_cache::CompactPersistentActionCache;
+    use zel_exec::{execute_action_with, ExecOptions};
+
+    let root = tmp("bwob_zero_ttl");
+    let server = FakeReapiServer::new();
+    install_executor(&server, "from-remote", 0);
+    let opts = StrategyOptions {
+        spawn_strategy: vec!["remote".into()],
+        ..Default::default()
+    };
+    let rt_zero = runtime(
+        &root,
+        &server,
+        true,
+        &[
+            "--remote_download_outputs=minimal",
+            "--experimental_remote_cache_ttl=0s",
+        ],
+        opts.clone(),
+        DynamicOptions::default(),
+    );
+
+    let owner = Label::parse_canonical("//t:t").unwrap();
+    let out_art = Artifact::derived(
+        "k8-fastbuild",
+        PathFragment::create("out/a.txt"),
+        owner.clone(),
+    );
+    let action = ActionAnalysisMetadata::SpawnAction {
+        owner,
+        mnemonic: "Gen".into(),
+        progress_message: "Doing Gen //t:t".into(),
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!("echo from-local > {}", out_art.exec_path),
+        ],
+        env: BTreeMap::new(),
+        inherited_env: Default::default(),
+        unset_env: Default::default(),
+        inputs: vec![],
+        outputs: vec![out_art.clone()],
+        execution_info: BTreeMap::new(),
+        tools: Vec::new(),
+        java_compile: None,
+    };
+
+    let fs = LocalFileSystem::default();
+    let er = execroot(&root);
+    let ac = CompactPersistentActionCache::new();
+    let exec_opts_zero = ExecOptions {
+        runtime: Some(rt_zero),
+        ..Default::default()
+    };
+
+    // First build with `--experimental_remote_cache_ttl=0s`: post-execution output check must
+    // succeed even though `expires_at <= now` and the output is unmaterialized on disk.
+    let first = execute_action_with(&action, &er, &fs, &ac, &Reporter::new(), &exec_opts_zero)
+        .expect("execute_action_with");
+    assert!(
+        first.failure.is_none(),
+        "unexpected failure: {:?}",
+        first.failure
+    );
+    assert!(!first.cache_hit);
+    assert!(
+        !root
+            .join("ob/execroot/_main")
+            .join(out_art.exec_path.path_string())
+            .exists(),
+        "minimal mode must keep output unmaterialized"
+    );
+    let recorded = ac
+        .get_entry(out_art.exec_path.path_string())
+        .expect("action cache entry recorded");
+    assert!(
+        !recorded.files[out_art.exec_path.path_string()].is_empty(),
+        "recorded remote digest must be non-empty even when ttl=0s"
+    );
+
+    // Subsequent check with `ttl=0s`: expired remote metadata is not trusted by
+    // `ActionCacheChecker.mustExecute`, so the action is not skipped as `UpToDate`.
+    let second = execute_action_with(&action, &er, &fs, &ac, &Reporter::new(), &exec_opts_zero)
+        .expect("second execute_action_with");
+    assert!(second.failure.is_none());
+    assert!(
+        !second.cache_hit,
+        "expired remote metadata must not satisfy pre-execution local action cache check"
+    );
+
+    // Contrast with a positive TTL (`3h`): first run populates lazy metadata with unexpired TTL,
+    // and the second run is skipped as `UpToDate` via `ActionCacheChecker`.
+    let rt_alive = runtime(
+        &root,
+        &server,
+        true,
+        &[
+            "--remote_download_outputs=minimal",
+            "--experimental_remote_cache_ttl=3h",
+        ],
+        opts,
+        DynamicOptions::default(),
+    );
+    let ac_alive = CompactPersistentActionCache::new();
+    let exec_opts_alive = ExecOptions {
+        runtime: Some(rt_alive),
+        ..Default::default()
+    };
+    let alive1 = execute_action_with(
+        &action,
+        &er,
+        &fs,
+        &ac_alive,
+        &Reporter::new(),
+        &exec_opts_alive,
+    )
+    .unwrap();
+    assert!(alive1.failure.is_none());
+    assert!(!alive1.cache_hit);
+    let alive2 = execute_action_with(
+        &action,
+        &er,
+        &fs,
+        &ac_alive,
+        &Reporter::new(),
+        &exec_opts_alive,
+    )
+    .unwrap();
+    assert!(alive2.failure.is_none());
+    assert!(
+        alive2.cache_hit,
+        "unexpired remote metadata must hit local action cache"
+    );
+}

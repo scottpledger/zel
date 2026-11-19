@@ -816,7 +816,23 @@ struct Queue {
     requests: Vec<Vec<u8>>,
     closed: bool,
     half_closed: bool,
+    finished: bool,
     acked: i64,
+}
+
+struct WorkerExitGuard(Arc<Shared>);
+
+impl Drop for WorkerExitGuard {
+    fn drop(&mut self) {
+        let mut q = self.0.q.lock().unwrap();
+        // Mirror `BuildEventServiceUploader` (`closeFuture.addListener(() ->
+        // halfCloseFuture.setFuture(closeFuture))`): ensure `half_closed` and `finished` are set
+        // whenever the uploader finishes, errors during lifecycle/open_bidi, or panics so
+        // `fully_async` `close()` can never block indefinitely.
+        q.half_closed = true;
+        q.finished = true;
+        self.0.cv.notify_all();
+    }
 }
 
 struct Shared {
@@ -860,13 +876,21 @@ impl BesTransport {
             close_called: AtomicBool::new(false),
         });
         let worker_cfg = cfg;
+        let worker_shared = shared.clone();
         let h = std::thread::Builder::new()
             .name("bes-upload".into())
             .spawn(move || {
-                let r = run_uploader(&worker_cfg, &channel, &shared);
+                let _exit_guard = WorkerExitGuard(worker_shared.clone());
+                let r = run_uploader(&worker_cfg, &channel, &worker_shared);
                 let _ = tx.send(r);
             })
             .ok();
+        if h.is_none() {
+            let mut q = shared.q.lock().unwrap();
+            q.half_closed = true;
+            q.finished = true;
+            shared.cv.notify_all();
+        }
         *t.worker.lock().unwrap() = h;
         t
     }
@@ -1004,8 +1028,6 @@ fn run_bidi_stream(
                             break Some(bytes);
                         }
                         if q.closed {
-                            q.half_closed = true;
-                            send_shared.cv.notify_all();
                             break None;
                         }
                         q = send_shared.cv.wait(q).unwrap();
@@ -1017,6 +1039,9 @@ fn run_bidi_stream(
                     }
                     None => {
                         send_bidi.close_send()?;
+                        let mut q = send_shared.q.lock().unwrap();
+                        q.half_closed = true;
+                        send_shared.cv.notify_all();
                         return Ok(idx as i64);
                     }
                 }
@@ -1172,10 +1197,11 @@ impl BuildEventTransport for BesTransport {
                 return Ok(());
             }
             BesUploadMode::FullyAsync => {
-                // Wait only for half-close (bounded by timeout if set), then detach worker.
+                // Wait only for half-close or worker termination (bounded by timeout if set),
+                // then detach worker.
                 let deadline = self.cfg.timeout.map(|t| Instant::now() + t);
                 let mut q = self.shared.q.lock().unwrap();
-                while !q.half_closed {
+                while !q.half_closed && !q.finished {
                     if let Some(dl) = deadline {
                         let now = Instant::now();
                         if now >= dl {
@@ -1265,8 +1291,10 @@ mod tests {
     struct FakeBes {
         stream_reqs: Arc<Mutex<Vec<Vec<u8>>>>,
         lifecycle: Arc<Mutex<Vec<Vec<u8>>>>,
+        fail_lifecycle_perm_denied: Arc<Mutex<bool>>,
         fail_first_stream: Arc<Mutex<bool>>,
         fail_stream_perm_denied: Arc<Mutex<bool>>,
+        fail_stream_immediately: Arc<Mutex<bool>>,
         bad_ack_seq: Arc<Mutex<Option<i64>>>,
         headers: Arc<Mutex<Vec<(String, String)>>>,
     }
@@ -1298,9 +1326,29 @@ mod tests {
             let mut headers = Vec::new();
             let mut parser = MessageParser::default();
             let mut msgs = Vec::new();
+            let reject_early = *self.fail_stream_immediately.lock().unwrap();
             loop {
                 match st.recv(None) {
-                    Ok(Event::Headers(h)) => headers = h,
+                    Ok(Event::Headers(h)) => {
+                        headers = h;
+                        let p = headers
+                            .iter()
+                            .find(|kv| kv.0 == ":path")
+                            .map(|kv| kv.1.as_str())
+                            .unwrap_or("");
+                        if reject_early && p == PUBLISH_STREAM {
+                            let _ = st.send_headers(
+                                &[
+                                    (":status".to_string(), "200".to_string()),
+                                    ("content-type".to_string(), "application/grpc".to_string()),
+                                    ("grpc-status".to_string(), "7".to_string()),
+                                    ("grpc-message".to_string(), "denied early".to_string()),
+                                ],
+                                true,
+                            );
+                            return;
+                        }
+                    }
                     Ok(Event::Data(d)) => {
                         parser.push(&d);
                         while let Ok(Some(m)) = parser.next() {
@@ -1322,6 +1370,18 @@ mod tests {
                 ("content-type".to_string(), "application/grpc".to_string()),
             ];
             if path == PUBLISH_LIFECYCLE {
+                if *self.fail_lifecycle_perm_denied.lock().unwrap() {
+                    let _ = st.send_headers(
+                        &[
+                            (":status".to_string(), "200".to_string()),
+                            ("content-type".to_string(), "application/grpc".to_string()),
+                            ("grpc-status".to_string(), "7".to_string()),
+                            ("grpc-message".to_string(), "lifecycle denied".to_string()),
+                        ],
+                        true,
+                    );
+                    return;
+                }
                 self.lifecycle.lock().unwrap().push(msgs[0].clone());
                 let _ = st.send_headers(&ok_headers, false);
                 let _ = st.send_data(&frame_message(&[]), false, None);
@@ -1761,5 +1821,41 @@ mod tests {
             crate::exec_log::execution_flags(&exec_info),
             (false, true, false)
         );
+    }
+
+    #[test]
+    fn fully_async_close_never_hangs_on_lifecycle_or_open_stream_failure() {
+        let run_case = |srv: FakeBes| {
+            let channel = Arc::new(Channel::new(Arc::new(Conn2(srv)), 1, vec![]));
+            let mut c = cfg();
+            c.upload_mode = BesUploadMode::FullyAsync;
+            c.timeout = None; // unset `--bes_timeout` (default `0s`)
+
+            let (done_tx, done_rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let t = BesTransport::start(c, channel);
+                t.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+                let res = t.close();
+                drain_previous_uploads();
+                let _ = done_tx.send(res);
+            });
+            let res = done_rx.recv_timeout(Duration::from_secs(3)).expect(
+                "fully_async close() must not block forever when worker errors before half-close",
+            );
+            assert!(
+                res.is_ok(),
+                "fully_async close() must ignore upload errors: {res:?}"
+            );
+        };
+
+        // Failure during initial `PublishLifecycleEvent` before `run_bidi_stream` is ever reached.
+        let srv_lc = FakeBes::default();
+        *srv_lc.fail_lifecycle_perm_denied.lock().unwrap() = true;
+        run_case(srv_lc);
+
+        // Failure on `PublishBuildToolEventStream` before the writer completes client half-close.
+        let srv_stream = FakeBes::default();
+        *srv_stream.fail_stream_immediately.lock().unwrap() = true;
+        run_case(srv_stream);
     }
 }

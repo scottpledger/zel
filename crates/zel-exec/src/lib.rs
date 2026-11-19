@@ -1504,49 +1504,68 @@ pub fn execute_action_with(
         .filter(|a| a.is_source && !a.is_tree_artifact && !a.is_unresolved_symlink)
         .map(|a| (a.exec_path.path_string(), a))
         .collect();
-    let md_digest_of = |discovered: &[String]| -> String {
-        let mut all: Vec<(String, Option<String>)> = Vec::new();
-        for p in declared_inputs.iter().chain(discovered.iter()) {
-            let lookup_derived = || {
-                path_digest(digest, fs, &execroot.get_relative_str(p)).or_else(|| {
-                    opts.runtime
-                        .as_ref()
-                        .and_then(|rt| rt.remote.as_ref())
-                        .and_then(|r| r.pending_output_digest(p))
-                })
-            };
-            let d = if constant_metadata_paths.contains(p.as_str())
-                || p == "bazel-out/volatile-status.txt"
-            {
-                let target = execroot.get_relative_str(p);
-                fs.exists(&target, true)
-                    .then(|| "CONSTANT_METADATA".to_string())
-            } else if let Some(fc) = &opts.file_cache {
-                if let Some(src_art) = source_by_exec.get(p.as_str()) {
-                    match fc.get_artifact_metadata(src_art) {
-                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                        Err(file_cache::FileCacheError::Directory(_)) => lookup_derived(),
-                        Err(_) => None,
-                    }
-                } else if !p.starts_with("bazel-out/") {
-                    match fc.get_input_metadata(&PathFragment::create(p)) {
-                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                        Err(file_cache::FileCacheError::Directory(_)) => lookup_derived(),
-                        Err(_) => None,
-                    }
+    let lookup_remote = |rel: &str, check_ttl: bool| -> Option<String> {
+        opts.runtime
+            .as_ref()
+            .and_then(|rt| rt.remote.as_ref())
+            .and_then(|r| {
+                if check_ttl {
+                    r.pending_output_digest(rel)
                 } else {
-                    lookup_derived()
+                    r.remote_output_digest(rel)
+                }
+            })
+    };
+    let has_remote_tree = |rel: &str| -> bool {
+        opts.runtime
+            .as_ref()
+            .and_then(|rt| rt.remote.as_ref())
+            .is_some_and(|r| r.has_pending_tree_entries(rel))
+    };
+    let input_digest_with = |p: &str, check_ttl: bool| -> Option<String> {
+        let lookup_derived = || {
+            if has_remote_tree(p) {
+                lookup_remote(p, check_ttl)
+            } else {
+                path_digest(digest, fs, &execroot.get_relative_str(p))
+                    .or_else(|| lookup_remote(p, check_ttl))
+            }
+        };
+        if constant_metadata_paths.contains(p) || p == "bazel-out/volatile-status.txt" {
+            let target = execroot.get_relative_str(p);
+            fs.exists(&target, true)
+                .then(|| "CONSTANT_METADATA".to_string())
+        } else if let Some(fc) = &opts.file_cache {
+            if let Some(src_art) = source_by_exec.get(p) {
+                match fc.get_artifact_metadata(src_art) {
+                    Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                    Err(file_cache::FileCacheError::Directory(_)) => lookup_derived(),
+                    Err(_) => None,
+                }
+            } else if !p.starts_with("bazel-out/") {
+                match fc.get_input_metadata(&PathFragment::create(p)) {
+                    Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                    Err(file_cache::FileCacheError::Directory(_)) => lookup_derived(),
+                    Err(_) => None,
                 }
             } else {
                 lookup_derived()
-            };
-            all.push((p.clone(), d));
+            }
+        } else {
+            lookup_derived()
+        }
+    };
+    let md_digest_with = |discovered: &[String], check_ttl: bool| -> String {
+        let mut all: Vec<(String, Option<String>)> = Vec::new();
+        for p in declared_inputs.iter().chain(discovered.iter()) {
+            all.push((p.clone(), input_digest_with(p, check_ttl)));
         }
         all.extend(tool_rf_entries.iter().cloned());
         all.sort();
         all.dedup();
         action_cache.compute_md_digest(&all)
     };
+    let md_digest_of = |discovered: &[String]| -> String { md_digest_with(discovered, true) };
 
     let is_busted = if let Some(bust_target) = &opts.bust_action_caches {
         let owner_canon = action.owner().canonical_form();
@@ -1567,21 +1586,20 @@ pub fn execute_action_with(
             }
         );
 
-    let out_digest = |o: &Artifact| -> Option<String> {
+    let out_digest_with = |o: &Artifact, check_ttl: bool| -> Option<String> {
         let p = abs(&o.exec_path);
+        let rel = o.exec_path.path_string();
         if o.is_unresolved_symlink {
             fs.read_symbolic_link(&p)
                 .ok()
                 .map(|t| digest.hex(t.path_string().as_bytes()))
+        } else if has_remote_tree(rel) {
+            lookup_remote(rel, check_ttl)
         } else {
-            path_digest(digest, fs, &p).or_else(|| {
-                opts.runtime
-                    .as_ref()
-                    .and_then(|rt| rt.remote.as_ref())
-                    .and_then(|r| r.pending_output_digest(o.exec_path.path_string()))
-            })
+            path_digest(digest, fs, &p).or_else(|| lookup_remote(rel, check_ttl))
         }
     };
+    let out_digest = |o: &Artifact| -> Option<String> { out_digest_with(o, true) };
     // Cache check (`ActionCacheChecker.mustExecute`): every output must exist and match the
     // recorded digest, and the action key / inputs (incl. discovered inputs) must be unchanged.
     if let Some(primary) = outputs.first() {
@@ -1729,7 +1747,7 @@ pub fn execute_action_with(
         .map(|p| {
             let abs_in = execroot.get_relative_str(p);
             invalidate_computed_digest(abs_in.path_string());
-            (p.clone(), input_digest_of(p))
+            (p.clone(), input_digest_with(p, false))
         })
         .collect();
 
@@ -2758,12 +2776,14 @@ pub fn execute_action_with(
 
     for out_art in &outputs {
         let out_path = execroot.get_relative(&out_art.exec_path);
-        // Outputs of a remote/disk cache hit are only materialized when needed.
+        // Outputs of a remote/disk cache hit or remote execution in BwoB mode exist in the
+        // remote output table regardless of `--experimental_remote_cache_ttl` (which governs
+        // subsequent `ActionCacheChecker` reuse rather than post-execution existence).
         let pending = opts
             .runtime
             .as_ref()
             .and_then(|r| r.remote.as_ref())
-            .is_some_and(|r| r.is_remote_output_valid(out_art.exec_path.path_string()));
+            .is_some_and(|r| r.is_pending_output(out_art.exec_path.path_string()));
         if !pending
             && is_cc_compile
             && out_art.exec_path.path_string().ends_with(".gcno")
@@ -2874,7 +2894,7 @@ pub fn execute_action_with(
                 invalidate_computed_digest(p.path_string());
                 (
                     o.exec_path.path_string().to_string(),
-                    out_digest(o).unwrap_or_default(),
+                    out_digest_with(o, false).unwrap_or_default(),
                 )
             })
             .collect();
@@ -2883,8 +2903,17 @@ pub fn execute_action_with(
                 .iter()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
+            if declared_inputs
+                .iter()
+                .any(|p| p.as_str() == "bazel-out/volatile-status.txt")
+            {
+                all.push((
+                    "bazel-out/volatile-status.txt".to_string(),
+                    input_digest_with("bazel-out/volatile-status.txt", false),
+                ));
+            }
             for p in &discovered {
-                all.push((p.clone(), input_digest_of(p)));
+                all.push((p.clone(), input_digest_with(p, false)));
             }
             all.extend(tool_rf_entries.iter().cloned());
             all.sort();
