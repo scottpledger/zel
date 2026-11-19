@@ -1330,13 +1330,26 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
             }
         }
         // Vendor registry files fetched over the network.
+        let registries_dir = vendor_dir.join("_registries");
         for (url, hash) in &session.resolution.registry_file_hashes {
             if url.starts_with("file://") || hash.is_none() {
                 continue;
             }
+            let Some(rel) = registry_vendor_rel_path(url) else {
+                continue;
+            };
+            if rel.is_absolute()
+                || !rel
+                    .components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_)))
+            {
+                continue;
+            }
+            let p = registries_dir.join(&rel);
+            if !p.starts_with(&registries_dir) {
+                continue;
+            }
             if let Ok(Some(b)) = crate::registry::fetch_url(url, 3) {
-                let rel = registry_vendor_rel_path(url);
-                let p = vendor_dir.join("_registries").join(rel);
                 if let Some(par) = p.parent() {
                     let _ = std::fs::create_dir_all(par);
                 }
@@ -1445,8 +1458,10 @@ impl Rt {
 }
 
 /// Formats a remote registry URL into its relative path under `<vendor_dir>/_registries`
-/// (`<lowercased_host>/<percent_decoded_path>`, stripping `:port`, `?query`, and `#fragment`).
-fn registry_vendor_rel_path(url: &str) -> PathBuf {
+/// (`<lowercased_host>/<url_decoded_path>`, stripping `:port`, `?query`, and `#fragment`),
+/// returning `None` if the host or decoded path is empty, contains NUL or a drive prefix, or
+/// attempts to traverse above `<lowercased_host>`.
+fn registry_vendor_rel_path(url: &str) -> Option<PathBuf> {
     let after_scheme = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
     let no_frag = after_scheme
         .split_once('#')
@@ -1458,7 +1473,7 @@ fn registry_vendor_rel_path(url: &str) -> PathBuf {
         .rsplit_once('@')
         .map(|(_, hp)| hp)
         .unwrap_or(authority);
-    let host = if host_port.starts_with('[') {
+    let raw_host = if host_port.starts_with('[') {
         host_port
             .split_once(']')
             .map(|(h, _)| format!("{h}]"))
@@ -1469,23 +1484,71 @@ fn registry_vendor_rel_path(url: &str) -> PathBuf {
             .map(|(h, _)| h)
             .unwrap_or(host_port)
             .to_string()
+    };
+    let host = percent_decode_str(&raw_host, false).to_ascii_lowercase();
+    if host.is_empty()
+        || host == "."
+        || host == ".."
+        || host.contains(['/', '\\', '\0'])
+        || is_windows_drive_segment(&host)
+        || !is_single_normal_component(&host)
+    {
+        return None;
     }
-    .to_ascii_lowercase();
-    let mut out = PathBuf::from(host);
-    for seg in path.split('/') {
-        let decoded = percent_decode_str(seg);
-        if !decoded.is_empty() && decoded != "." && decoded != ".." {
-            out.push(decoded);
+
+    let decoded_path = percent_decode_str(path, true);
+    if decoded_path.contains('\0') {
+        return None;
+    }
+
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in decoded_path.split(['/', '\\']) {
+        if seg.is_empty() || seg == "." {
+            continue;
         }
+        if seg == ".." {
+            segs.pop()?;
+            continue;
+        }
+        if is_windows_drive_segment(seg) || !is_single_normal_component(seg) {
+            return None;
+        }
+        segs.push(seg);
     }
-    out
+    if segs.is_empty() {
+        return None;
+    }
+
+    let mut out = PathBuf::from(host);
+    for seg in segs {
+        out.push(seg);
+    }
+    Some(out)
 }
 
-fn percent_decode_str(s: &str) -> String {
+fn is_windows_drive_segment(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':'
+}
+
+fn is_single_normal_component(s: &str) -> bool {
+    let mut comps = Path::new(s).components();
+    matches!(
+        (comps.next(), comps.next()),
+        (Some(std::path::Component::Normal(_)), None)
+    )
+}
+
+fn percent_decode_str(s: &str, plus_as_space: bool) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
+        if plus_as_space && bytes[i] == b'+' {
+            out.push(b' ');
+            i += 1;
+            continue;
+        }
         if bytes[i] == b'%' && i + 2 < bytes.len() {
             if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
                 out.push((hi << 4) | lo);
@@ -1578,7 +1641,70 @@ mod repo_env_tests {
             registry_vendor_rel_path(
                 "https://BCR.Bazel.Build:8443/modules/foo%2Bbar/1.0/source.json?tok=1#frag"
             ),
-            PathBuf::from("bcr.bazel.build/modules/foo+bar/1.0/source.json")
+            Some(PathBuf::from(
+                "bcr.bazel.build/modules/foo+bar/1.0/source.json"
+            ))
         );
+        assert_eq!(
+            registry_vendor_rel_path("https://bcr.bazel.build/modules/foo+bar/1.0/source.json"),
+            Some(PathBuf::from(
+                "bcr.bazel.build/modules/foo bar/1.0/source.json"
+            ))
+        );
+    }
+
+    #[test]
+    fn registry_vendor_rel_path_confines_encoded_separators_traversal_and_drives() {
+        let registries_dir = PathBuf::from("/tmp/vendor/_registries");
+
+        let slash_rel = registry_vendor_rel_path("https://example.com/%2fetc%2fpasswd")
+            .expect("encoded leading slash should remain confined under host");
+        assert!(!slash_rel.is_absolute(), "{slash_rel:?}");
+        assert_eq!(slash_rel, PathBuf::from("example.com/etc/passwd"));
+        assert_eq!(
+            registries_dir.join(&slash_rel),
+            PathBuf::from("/tmp/vendor/_registries/example.com/etc/passwd")
+        );
+
+        let backslash_rel = registry_vendor_rel_path("https://example.com/%5cetc%5cpasswd")
+            .expect("encoded backslash should split into normal relative components");
+        assert!(!backslash_rel.is_absolute(), "{backslash_rel:?}");
+        assert_eq!(backslash_rel, PathBuf::from("example.com/etc/passwd"));
+        assert_eq!(
+            registries_dir.join(&backslash_rel),
+            PathBuf::from("/tmp/vendor/_registries/example.com/etc/passwd")
+        );
+
+        let in_bounds =
+            registry_vendor_rel_path("https://example.com/modules/old/%2e%2e/foo/1.0/source.json")
+                .expect("in-bounds parent segment within host should normalize cleanly");
+        assert_eq!(
+            in_bounds,
+            PathBuf::from("example.com/modules/foo/1.0/source.json")
+        );
+        assert!(in_bounds
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_))));
+
+        for escaping_or_invalid in [
+            "https://example.com/%2e%2e/etc/passwd",
+            "https://example.com/modules/%2e%2e/%2e%2e/etc/passwd",
+            "https://example.com/a%2f..%2f..%2fetc%2fpasswd",
+            "https://example.com/a%5c..%5c..%5cetc%5cpasswd",
+            "https://%2e%2e/etc/passwd",
+            "https://../etc/passwd",
+            "https:///etc/passwd",
+            "https://example.com/C:%2fWindows%2fSystem32",
+            "https://example.com/c:%5cWindows%5cSystem32",
+            "https://example.com/D:secret.json",
+            "https://example.com/modules/foo%00bar/source.json",
+            "https://example.com/",
+        ] {
+            assert_eq!(
+                registry_vendor_rel_path(escaping_or_invalid),
+                None,
+                "expected None for {escaping_or_invalid}"
+            );
+        }
     }
 }
