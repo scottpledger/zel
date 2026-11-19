@@ -786,6 +786,7 @@ fn channel_for(addr: &str, timeout: Duration) -> Option<Channel> {
             host: host.to_string(),
             port: port.parse().ok()?,
             connect_timeout: timeout,
+            authority_override: None,
         }),
         1,
         vec![],

@@ -1022,27 +1022,29 @@ fn try_compress_block(block: &[u8]) -> Option<Vec<u8>> {
         let h = hash4(ip);
         let cand = table[h];
         table[h] = ip;
-        if cand != usize::MAX && ip > cand && ip - cand <= (1 << 17) {
-            if block[cand..cand + 4] == block[ip..ip + 4] {
-                let max_ml = (block.len() - ip).min(131074);
-                let mut mlen = 4usize;
-                while mlen < max_ml && block[cand + mlen] == block[ip + mlen] {
-                    mlen += 1;
-                }
-                let llen = ip - anchor;
-                lits.extend_from_slice(&block[anchor..ip]);
-                seqs.push(Seq {
-                    llen: llen as u32,
-                    offset: (ip - cand) as u32,
-                    mlen: mlen as u32,
-                });
-                ip += mlen;
-                anchor = ip;
-                if ip < limit {
-                    table[hash4(ip - 1)] = ip - 1;
-                }
-                continue;
+        if cand != usize::MAX
+            && ip > cand
+            && ip - cand <= (1 << 17)
+            && block[cand..cand + 4] == block[ip..ip + 4]
+        {
+            let max_ml = (block.len() - ip).min(131074);
+            let mut mlen = 4usize;
+            while mlen < max_ml && block[cand + mlen] == block[ip + mlen] {
+                mlen += 1;
             }
+            let llen = ip - anchor;
+            lits.extend_from_slice(&block[anchor..ip]);
+            seqs.push(Seq {
+                llen: llen as u32,
+                offset: (ip - cand) as u32,
+                mlen: mlen as u32,
+            });
+            ip += mlen;
+            anchor = ip;
+            if ip < limit {
+                table[hash4(ip - 1)] = ip - 1;
+            }
+            continue;
         }
         ip += 1;
     }
@@ -1285,7 +1287,12 @@ mod tests {
         // Repetitive text must genuinely shrink.
         let rep = b"bazel remote execution zstd bytestream chunk ".repeat(1_000);
         let comp = compress(&rep);
-        assert!(comp.len() * 4 < rep.len(), "{} vs {}", comp.len(), rep.len());
+        assert!(
+            comp.len() * 4 < rep.len(),
+            "{} vs {}",
+            comp.len(),
+            rep.len()
+        );
     }
 
     #[test]

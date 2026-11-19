@@ -228,6 +228,7 @@ message!(Duration { 1 seconds: i64, 2 nanos: i32 });
 message!(UInt32Value { 1 value: u32 });
 message!(
     /// `google.protobuf.Any`.
+    #[derive(Eq)]
     AnyMsg { 1 type_url: String, 2 value: Vec<u8> }
 );
 message!(
@@ -375,16 +376,22 @@ message!(GetTreeResponse { 1 directories: Vec<Directory>, 2 next_page_token: Str
 message!(GetCapabilitiesRequest { 1 instance_name: String });
 message!(SemVer { 1 major: i32, 2 minor: i32, 3 patch: i32, 4 prerelease: String });
 message!(ActionCacheUpdateCapabilities { 1 update_enabled: bool });
+message!(PriorityRange { 1 min_priority: i32, 2 max_priority: i32 });
+message!(PriorityCapabilities { 1 priorities: Vec<PriorityRange> });
 message!(CacheCapabilities {
     1 digest_functions: Vec<i32>,
     2 action_cache_update_capabilities: Option<ActionCacheUpdateCapabilities>,
+    3 cache_priority_capabilities: Option<PriorityCapabilities>,
     4 max_batch_total_size_bytes: i64,
     5 symlink_absolute_path_strategy: i32,
     6 supported_compressors: Vec<i32>,
     7 supported_batch_update_compressors: Vec<i32>,
 });
 message!(ExecutionCapabilities {
-    1 digest_function: i32, 2 exec_enabled: bool, 4 supported_node_properties: Vec<String>,
+    1 digest_function: i32,
+    2 exec_enabled: bool,
+    3 execution_priority_capabilities: Option<PriorityCapabilities>,
+    4 supported_node_properties: Vec<String>,
     5 digest_functions: Vec<i32>,
 });
 message!(ServerCapabilities {
