@@ -169,7 +169,7 @@ def create_library_to_link(
             resolved_symlink_interface_library = interface_library
             if interface_library_symlink_path:
                 if interface_library.short_path.startswith("_solib_"):
-                    fail("dynamic_library must not be a symbolic link in the solib directory. Got '%s'" % dynamic_library.short_path)
+                    fail("interface_library must not be a symbolic link in the solib directory. Got '%s'" % interface_library.short_path)
                 interface_library = _cc_internal.dynamic_library_symlink2(actions, interface_library, cc_toolchain._solib_dir, interface_library_symlink_path)
             else:
                 interface_library = _cc_internal.dynamic_library_symlink(actions, interface_library, cc_toolchain._solib_dir, True, True)

@@ -3168,6 +3168,111 @@ bad_ext_ltl(name = "bad_ext_case")
 }
 
 #[test]
+fn builtin_cc_common_create_library_to_link_rejects_solib_interface_library() {
+    let ws = LocalWs::new(
+        "solib-iface",
+        &[
+            ("tc_helpers.bzl", CC_COMMON_TEST_HELPERS_BZL),
+            (
+                "defs.bzl",
+                r#"
+load(":tc_helpers.bzl", "make_cc_toolchain")
+
+def _make_tc_and_fc(ctx):
+    tc = make_cc_toolchain(
+        ctx,
+        cpu = "k8",
+        feature_names = ["supports_dynamic_linker", "supports_interface_shared_libraries"],
+        enabled_features = ["supports_dynamic_linker", "supports_interface_shared_libraries"],
+    )
+    fc = cc_common.configure_features(ctx = ctx, cc_toolchain = tc)
+    return tc, fc
+
+def _solib_iface_only_impl(ctx):
+    tc, fc = _make_tc_and_fc(ctx)
+    raw_iface = ctx.actions.declare_file("libonly.ifso")
+    ctx.actions.write(raw_iface, "ifso")
+    first = cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        interface_library = raw_iface,
+    )
+    # Passing the _solib_ symlink back with dynamic_library = None and custom interface_library_symlink_path.
+    cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        interface_library = first.interface_library,
+        interface_library_symlink_path = "custom/libonly.ifso",
+    )
+    return []
+
+def _solib_iface_with_valid_dyn_impl(ctx):
+    tc, fc = _make_tc_and_fc(ctx)
+    raw_dyn = ctx.actions.declare_file("libvalid.so")
+    raw_iface = ctx.actions.declare_file("libbad.ifso")
+    ctx.actions.write(raw_dyn, "so")
+    ctx.actions.write(raw_iface, "ifso")
+    first = cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        interface_library = raw_iface,
+    )
+    # Both dynamic_library (valid) and interface_library (_solib_ symlink) are set:
+    # the error must name interface_library and libbad.ifso, not dynamic_library or libvalid.so.
+    cc_common.create_library_to_link(
+        actions = ctx.actions,
+        feature_configuration = fc,
+        cc_toolchain = tc,
+        dynamic_library = raw_dyn,
+        interface_library = first.interface_library,
+        interface_library_symlink_path = "custom/libbad.ifso",
+    )
+    return []
+
+solib_iface_only = rule(implementation = _solib_iface_only_impl, fragments = ["cpp"])
+solib_iface_with_valid_dyn = rule(implementation = _solib_iface_with_valid_dyn_impl, fragments = ["cpp"])
+"#,
+            ),
+            (
+                "BUILD",
+                r#"
+load(":defs.bzl", "solib_iface_only", "solib_iface_with_valid_dyn")
+solib_iface_only(name = "iface_only")
+solib_iface_with_valid_dyn(name = "iface_with_dyn")
+"#,
+            ),
+        ],
+    );
+
+    let err_only = ws.analyze("//:iface_only").unwrap_err();
+    assert!(
+        err_only.contains(
+            "interface_library must not be a symbolic link in the solib directory. Got '_solib_k8/_U_S_S_Ciface_Uonly___U/libonly.ifso'"
+        ),
+        "expected solib interface_library error when dynamic_library is None, got: {err_only}"
+    );
+    assert!(
+        !err_only.contains("NoneType"),
+        "unexpected NoneType crash: {err_only}"
+    );
+
+    let err_both = ws.analyze("//:iface_with_dyn").unwrap_err();
+    assert!(
+        err_both.contains(
+            "interface_library must not be a symbolic link in the solib directory. Got '_solib_k8/_U_S_S_Ciface_Uwith_Udyn___U/libbad.ifso'"
+        ),
+        "expected solib interface_library error naming libbad.ifso when both are set, got: {err_both}"
+    );
+    assert!(
+        !err_both.contains("libvalid.so"),
+        "error message named dynamic_library instead of interface_library: {err_both}"
+    );
+}
+
+#[test]
 fn builtin_cc_common_link_windows_dll_and_interface_library_workflow() {
     let ws = LocalWs::new(
         "win-dll",
