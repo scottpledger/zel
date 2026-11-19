@@ -309,13 +309,44 @@ rust_test(
 
 rust_library(
     name = "zel_sandbox",
-    srcs = glob(["zel-sandbox/src/**/*.rs"]),
+    srcs = glob(
+        ["zel-sandbox/src/**/*.rs"],
+        exclude = ["zel-sandbox/src/bin/**"],
+    ),
     crate_name = "zel_sandbox",
     edition = "2021",
     deps = [
         ":zel_proto",
         ":zel_util",
         ":zel_vfs",
+    ],
+)
+
+rust_binary(
+    name = "zel-test-worker",
+    srcs = ["zel-sandbox/src/bin/zel-test-worker.rs"],
+    edition = "2021",
+    deps = [
+        ":zel_proto",
+        ":zel_sandbox",
+    ],
+)
+
+rust_binary(
+    name = "zel-process-wrapper",
+    srcs = ["zel-sandbox/src/bin/zel-process-wrapper.rs"],
+    edition = "2021",
+    deps = [
+        ":zel_sandbox",
+    ],
+)
+
+rust_binary(
+    name = "zel-linux-sandbox",
+    srcs = ["zel-sandbox/src/bin/zel-linux-sandbox.rs"],
+    edition = "2021",
+    deps = [
+        ":zel_sandbox",
     ],
 )
 

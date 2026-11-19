@@ -16,6 +16,7 @@
 //! Mirrors `src/main/java/com/google/devtools/build/lib/sandbox` and `worker`.
 
 pub mod linux;
+pub mod linux_sandbox;
 pub mod process_wrapper;
 pub mod sandbox;
 pub mod worker;

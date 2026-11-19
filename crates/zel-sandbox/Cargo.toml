@@ -17,3 +17,7 @@ path = "src/bin/zel-test-worker.rs"
 [[bin]]
 name = "zel-process-wrapper"
 path = "src/bin/zel-process-wrapper.rs"
+
+[[bin]]
+name = "zel-linux-sandbox"
+path = "src/bin/zel-linux-sandbox.rs"
