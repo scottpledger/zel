@@ -252,18 +252,18 @@ impl Value {
             | Self::Label(_)
             | Self::Depset(_)
             | Self::UserFunction(_)
-            | Self::BuiltinFunction(_)
             | Self::Provider { .. }
             | Self::RuleCallable { .. } => true,
             Self::Tuple(items) => items.iter().all(|x| x.is_hashable()),
-            Self::Struct(s) => s.fields.values().all(|x| x.is_immutable()),
-            Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_immutable()),
+            Self::Struct(s) => s.fields.values().all(|x| x.is_hashable()),
+            Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_hashable()),
             Self::Host(k, id) => HOST_IS_IMMUTABLE.get().map(|f| f(k, id)).unwrap_or(true),
             Self::List(_)
             | Self::Dict(_)
             | Self::Set(_)
             | Self::Range(_)
-            | Self::SelectorList(_) => false,
+            | Self::SelectorList(_)
+            | Self::BuiltinFunction(_) => false,
         }
     }
 
