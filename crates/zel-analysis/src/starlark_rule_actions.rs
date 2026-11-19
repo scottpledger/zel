@@ -1535,7 +1535,7 @@ fn run_action(
         None => None,
     };
     if let Some(tc_v) = get("toolchain") {
-        let k = transform_toolchain_key(st, tc_v)?;
+        let k = transform_toolchain_key(st, ctx, tc_v)?;
         let matches_key = |m: &BTreeMap<String, Value>| {
             m.contains_key(&k)
                 || (k.starts_with("//") && m.keys().any(|c| c.starts_with("@@") && c.ends_with(&k)))

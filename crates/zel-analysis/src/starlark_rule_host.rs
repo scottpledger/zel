@@ -43,10 +43,10 @@ fn dispatch(
         return host_method(st, ctx, kind, method, &recv, &pos, &kw);
     }
     if let Some(kind) = name.strip_prefix("index:") {
-        return host_index(st, kind, &pos[0], &pos[1]);
+        return host_index(st, ctx, kind, &pos[0], &pos[1]);
     }
     if let Some(kind) = name.strip_prefix("contains:") {
-        return host_contains(st, kind, &pos[0], &pos[1]);
+        return host_contains(st, ctx, kind, &pos[0], &pos[1]);
     }
     if name == "call:subrule" {
         return call_subrule(st, ctx, pos, kw);
@@ -557,7 +557,51 @@ fn has_toolchain_context(st: &CtxState) -> bool {
         .is_some_and(|v| !v.is_empty())
 }
 
-fn transform_toolchain_key(st: &CtxState, key: &Value) -> Result<String, StarlarkError> {
+fn parse_bzl_or_rule_label(
+    st: &CtxState,
+    ctx: &EvalContext,
+    raw: &str,
+) -> Result<String, StarlarkError> {
+    if let Some((pkg, mapping)) = ctx.current_label_ctx() {
+        return zel_cmdline::Label::parse_with_package_context(raw, &pkg, &mapping)
+            .map(|l| l.canonical_form())
+            .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")));
+    }
+    if let Some(bzl_lbl) = st
+        .rule
+        .extra
+        .rule_class
+        .as_ref()
+        .and_then(|rc| rc.starlark.as_ref())
+        .and_then(|sp| Label::parse_canonical(&sp.defined_in).ok())
+    {
+        let owner = bzl_lbl.package_identifier();
+        let entries = st
+            .inputs
+            .resolver
+            .repo_mapping_entries(owner.repository().name());
+        let mut map = std::collections::HashMap::new();
+        for (a, c) in entries {
+            if let Ok(rn) = zel_cmdline::RepositoryName::create(&c) {
+                map.insert(a, rn);
+            }
+        }
+        let mapping = zel_cmdline::RepositoryMapping::new(map, owner.repository().clone());
+        return zel_cmdline::Label::parse_with_package_context(raw, owner, &mapping)
+            .map(|l| l.canonical_form())
+            .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")));
+    }
+    let rm = st.repo_mapping();
+    crate::location::parse_label_with_mapping(raw, st.label.package_identifier(), Some(&rm))
+        .map(|l| l.canonical_form())
+        .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")))
+}
+
+fn transform_toolchain_key(
+    st: &CtxState,
+    ctx: &EvalContext,
+    key: &Value,
+) -> Result<String, StarlarkError> {
     match key {
         Value::Label(l) => Ok(l.canonical_form()),
         Value::ProviderInstance { provider_name, fields } if provider_name == "ToolchainTypeInfo" => {
@@ -573,21 +617,11 @@ fn transform_toolchain_key(st: &CtxState, key: &Value) -> Result<String, Starlar
         {
             match s.fields.get("toolchain_type").or_else(|| s.fields.get("name")) {
                 Some(Value::Label(l)) => Ok(l.canonical_form()),
-                Some(Value::String(raw)) => {
-                    let rm = st.repo_mapping();
-                    crate::location::parse_label_with_mapping(raw, st.label.package_identifier(), Some(&rm))
-                        .map(|l| l.canonical_form())
-                        .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")))
-                }
+                Some(Value::String(raw)) => parse_bzl_or_rule_label(st, ctx, raw),
                 _ => err("invalid toolchain type key"),
             }
         }
-        Value::String(raw) => {
-            let rm = st.repo_mapping();
-            let parsed = crate::location::parse_label_with_mapping(raw, st.label.package_identifier(), Some(&rm))
-                .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")))?;
-            Ok(parsed.canonical_form())
-        }
+        Value::String(raw) => parse_bzl_or_rule_label(st, ctx, raw),
         o => err(format!(
             "Toolchains only supports indexing by toolchain type, got {} instead",
             o.type_name()
@@ -953,7 +987,13 @@ fn target_attr(ct: &Arc<ConfiguredTarget>, attr: &str) -> HostResult {
     }
 }
 
-fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> HostResult {
+fn host_index(
+    _st: &Arc<CtxState>,
+    ctx: &EvalContext,
+    kind: &str,
+    recv: &Value,
+    key: &Value,
+) -> HostResult {
     match kind {
         "target" => {
             let ct = target_of(recv).ok_or_else(|| StarlarkError("invalid Target".into()))?;
@@ -988,7 +1028,7 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
             if !has_toolchain_context(st) {
                 return err("Toolchains are not valid in this context");
             }
-            let k = transform_toolchain_key(st, key)?;
+            let k = transform_toolchain_key(st, ctx, key)?;
             let k = if k.starts_with("//") {
                 st.inputs.toolchains.keys().find(|c| c.starts_with("@@") && c.ends_with(&k)).cloned().unwrap_or(k)
             } else {
@@ -1025,7 +1065,7 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
         }
         "exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return err("invalid exec group toolchains") };
-            let k = transform_toolchain_key(_st, key)?;
+            let k = transform_toolchain_key(_st, ctx, key)?;
             let tcs = _st.inputs.exec_group_toolchains.get(group).cloned().unwrap_or_default();
             tcs.get(&k).cloned().ok_or_else(|| {
                 StarlarkError(format!(
@@ -1040,7 +1080,7 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
             if _st.base_toolchains.is_empty() {
                 return err("Toolchains are not valid in this context");
             }
-            let k = transform_toolchain_key(_st, key)?;
+            let k = transform_toolchain_key(_st, ctx, key)?;
             let k = if k.starts_with("//") {
                 _st.base_toolchains.keys().find(|c| c.starts_with("@@") && c.ends_with(&k)).cloned().unwrap_or(k)
             } else {
@@ -1077,7 +1117,7 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
         }
         "rule_exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return err("invalid exec group toolchains") };
-            let k = transform_toolchain_key(_st, key)?;
+            let k = transform_toolchain_key(_st, ctx, key)?;
             let tcs = _st.base_exec_group_toolchains.get(group).cloned().unwrap_or_default();
             tcs.get(&k).cloned().ok_or_else(|| {
                 StarlarkError(format!(
@@ -1092,7 +1132,13 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
     }
 }
 
-fn host_contains(st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> HostResult {
+fn host_contains(
+    st: &Arc<CtxState>,
+    ctx: &EvalContext,
+    kind: &str,
+    recv: &Value,
+    key: &Value,
+) -> HostResult {
     match kind {
         "target" => {
             let ct = target_of(recv).ok_or_else(|| StarlarkError("invalid Target".into()))?;
@@ -1113,7 +1159,7 @@ fn host_contains(st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> H
             if !has_toolchain_context(st) {
                 return err("Toolchains are not valid in this context");
             }
-            let k = transform_toolchain_key(st, key)?;
+            let k = transform_toolchain_key(st, ctx, key)?;
             let k = if k.starts_with("//") {
                 st.inputs
                     .toolchains
@@ -1129,20 +1175,20 @@ fn host_contains(st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> H
         "exec_groups" => Ok(Value::Bool(matches!(key, Value::String(n) if st.exec_groups.contains(n)))),
         "exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return Ok(Value::Bool(false)) };
-            let k = transform_toolchain_key(st, key)?;
+            let k = transform_toolchain_key(st, ctx, key)?;
             Ok(Value::Bool(st.inputs.exec_group_toolchains.get(group).map(|m| m.contains_key(&k)).unwrap_or(false)))
         }
         "rule_toolchains" => {
             if st.base_toolchains.is_empty() {
                 return Ok(Value::Bool(false));
             }
-            let k = transform_toolchain_key(st, key)?;
+            let k = transform_toolchain_key(st, ctx, key)?;
             Ok(Value::Bool(st.base_toolchains.contains_key(&k)))
         }
         "rule_exec_groups" => Ok(Value::Bool(matches!(key, Value::String(n) if st.base_exec_groups.contains(n)))),
         "rule_exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return Ok(Value::Bool(false)) };
-            let k = transform_toolchain_key(st, key)?;
+            let k = transform_toolchain_key(st, ctx, key)?;
             Ok(Value::Bool(st.base_exec_group_toolchains.get(group).map(|m| m.contains_key(&k)).unwrap_or(false)))
         }
         other => err(format!("type '{other}' is not iterable")),
