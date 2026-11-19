@@ -1995,3 +1995,248 @@ filegroup(name = "f", features = ["a", "-repo_on"])
         vec!["//:.hidden.txt", "//:@at.txt", "//:;semi.txt"]
     );
 }
+
+#[test]
+fn starlark_config_rule_inheritance_and_symbolic_macro_finalizers() {
+    // 1. `config.string_set`, `repeatable=True` validation, `config.exec(exec_group=...)` type check,
+    // and mandatory `build_setting_default` on string/string_set settings.
+    let bad_rep = Ws::new(&[
+        ("BUILD", "load(':b.bzl', 's')"),
+        (
+            "b.bzl",
+            "s = rule(implementation = lambda ctx: [], build_setting = config.string_list(repeatable = True))",
+        ),
+    ]);
+    assert!(bad_rep.try_load("").unwrap_err().events.iter().any(|e| e
+        .message
+        .contains("'repeatable' can only be set for a setting with 'flag = True'")));
+
+    let bad_exec = Ws::new(&[
+        ("BUILD", "load(':b.bzl', 'r')"),
+        (
+            "b.bzl",
+            "r = rule(implementation = lambda ctx: [], attrs = {'dep': attr.label(cfg = config.exec(exec_group = 123))})",
+        ),
+    ]);
+    assert!(bad_exec
+        .try_load("")
+        .unwrap_err()
+        .events
+        .iter()
+        .any(|e| e.message.contains("exec_group")));
+
+    let bad_test_name = Ws::new(&[
+        ("BUILD", "load(':b.bzl', 'not_suffixed')"),
+        (
+            "b.bzl",
+            "not_suffixed = rule(implementation = lambda ctx: [], test = True)",
+        ),
+    ]);
+    assert!(bad_test_name
+        .try_load("")
+        .unwrap_err()
+        .message
+        .contains("test rule class names must end with '_test'"));
+
+    let ws_set = Ws::new(&[
+        (
+            "BUILD",
+            "load(':b.bzl', 'ss_flag')\nss_flag(name = 'present', build_setting_default = ['b', 'a', 'b'])\nss_flag(name = 'missing')",
+        ),
+        (
+            "b.bzl",
+            "ss_flag = rule(implementation = lambda ctx: [], build_setting = config.string_set(flag = True, repeatable = True))",
+        ),
+    ]);
+    let p_set = ws_set.load("");
+    assert!(p_set.contains_errors);
+    assert!(errors(&p_set)
+        .join("\n")
+        .contains("missing value for mandatory attribute 'build_setting_default'"));
+    assert_eq!(
+        rule(&p_set, "present").attr_or_default("build_setting_default"),
+        Some(AttrValue::StrList(vec!["b".to_string(), "a".to_string()]))
+    );
+    assert!(
+        rule(&p_set, "present")
+            .extra
+            .rule_class
+            .as_ref()
+            .unwrap()
+            .starlark
+            .as_ref()
+            .unwrap()
+            .build_setting_flag
+    );
+
+    // 2. `rule(parent = ..., extendable = ..., initializer = ...)`.
+    let ws_ext = Ws::new(&[
+        (
+            "BUILD",
+            "load(':r.bzl', 'child_rule')\nchild_rule(name = 'c', extra = 'hi')",
+        ),
+        (
+            "r.bzl",
+            r#"
+def _base_init(name, base_val = "from_base", **kwargs):
+    return {"base_val": base_val + "_init"}
+
+base_rule = rule(
+    implementation = lambda ctx: [],
+    attrs = {"base_val": attr.string()},
+    initializer = _base_init,
+    extendable = True,
+)
+
+def _child_init(name, extra = "", **kwargs):
+    return {"extra": extra + "!"}
+
+child_rule = rule(
+    implementation = lambda ctx: [],
+    parent = base_rule,
+    attrs = {"extra": attr.string()},
+    initializer = _child_init,
+)
+"#,
+        ),
+    ]);
+    let p_ext = ws_ext.load("");
+    assert!(!p_ext.contains_errors, "{:?}", errors(&p_ext));
+    let c = rule(&p_ext, "c");
+    assert_eq!(
+        c.attr_or_default("base_val"),
+        Some(AttrValue::Str("from_base_init".to_string()))
+    );
+    assert_eq!(
+        c.attr_or_default("extra"),
+        Some(AttrValue::Str("hi!".to_string()))
+    );
+
+    // 3. Synchronous symbolic macros, `finalizer = True`, `existing_rules()`, recursion,
+    // `inherit_attrs`, and macro-scoped default visibility.
+    let ws_fin = Ws::new(&[
+        (
+            "BUILD",
+            r#"
+package(default_visibility = ["//visibility:public"])
+load(":m.bzl", "gen_m", "fin_m")
+fin_m(name = "fin")
+gen_m(name = "early")
+SEEN_IN_BUILD = list(existing_rules().keys())
+filegroup(name = "seen_" + "_".join(SEEN_IN_BUILD))
+"#,
+        ),
+        (
+            "m.bzl",
+            r#"
+def _gen(name, visibility, **kwargs):
+    native.filegroup(name = name, **kwargs)
+
+gen_m = macro(
+    implementation = _gen,
+    inherit_attrs = native.filegroup,
+)
+
+def _fin(name, visibility):
+    keys = sorted(native.existing_rules().keys())
+    native.filegroup(name = name + "_" + "_".join(keys))
+
+fin_m = macro(
+    implementation = _fin,
+    finalizer = True,
+)
+"#,
+        ),
+    ]);
+    let p_fin = ws_fin.load("");
+    assert!(!p_fin.contains_errors, "{:?}", errors(&p_fin));
+    // `gen_m` expanded synchronously, so `existing_rules()` in BUILD saw `early` before `fin_m` ran!
+    assert!(p_fin.targets.contains_key("seen_early"));
+    // `fin_m` ran after BUILD finished, so it saw both `early` and `seen_early`.
+    assert!(p_fin.targets.contains_key("fin_early_seen_early"));
+    // `early` inside `gen_m` omitted `visibility`, so it defaults to macro definition package, not public.
+    assert_eq!(
+        rule(&p_fin, "early").visibility,
+        vec!["//:__pkg__".to_string()]
+    );
+
+    // Non-finalizer macro calling `existing_rules()` and recursive macro both fail cleanly.
+    let ws_bad_macro = Ws::new(&[
+        (
+            "BUILD",
+            "load(':m.bzl', 'bad_er', 'rec_m')\nbad_er(name = 'a')\nrec_m(name = 'b')",
+        ),
+        (
+            "m.bzl",
+            r#"
+def _bad_er(name, visibility):
+    native.existing_rules()
+
+bad_er = macro(implementation = _bad_er)
+
+def _rec(name, visibility):
+    rec_m(name = name + "_sub")
+
+rec_m = macro(implementation = _rec)
+"#,
+        ),
+    ]);
+    let p_bad_m = ws_bad_macro.load("");
+    assert!(p_bad_m.contains_errors);
+    let joined = errors(&p_bad_m).join("\n");
+    assert!(joined.contains(
+        "existing_rules() can only be used while evaluating a BUILD file or a rule finalizer"
+    ));
+    assert!(joined.contains("is recursive"));
+
+    // 4. `test_suite` implicit tests match `timeout` (`short` from `size = 'small'`) and `flaky`.
+    let ws_suite = Ws::new(&[
+        (
+            "BUILD",
+            r#"
+load(":t.bzl", "my_test")
+my_test(name = "fast_test", size = "small")
+my_test(name = "slow_test", size = "large")
+test_suite(name = "short_only", tags = ["short", "noflaky", ""])
+"#,
+        ),
+        (
+            "t.bzl",
+            "my_test = rule(implementation = lambda ctx: [], test = True)",
+        ),
+    ]);
+    let p_suite = ws_suite.load("");
+    assert!(!p_suite.contains_errors, "{:?}", errors(&p_suite));
+    assert!(rule(&p_suite, "short_only").testonly);
+    assert_eq!(
+        rule(&p_suite, "short_only")
+            .extra
+            .attr_values
+            .get("$implicit_tests"),
+        Some(&AttrValue::LabelList(vec![Label::parse_canonical(
+            "//:fast_test"
+        )
+        .unwrap()]))
+    );
+
+    // 5. `PackageSpec` pins `//visibility` and `//conditions` to main repo even inside external repo,
+    // and `package(default_package_metadata = [], default_applicable_licenses = [...])` is rejected.
+    let ext_repo = zel_cmdline::RepositoryName::create("ext+").unwrap();
+    let spec = crate::pkg_spec::PackageSpec::parse(
+        &zel_cmdline::RepositoryMapping::always_fallback(),
+        &ext_repo,
+        "//visibility:__pkg__",
+    )
+    .unwrap();
+    assert_eq!(
+        spec,
+        crate::pkg_spec::PackageSpec::Single(
+            PackageIdentifier::create_in_main_repo("visibility").unwrap()
+        )
+    );
+    let dup_meta = Ws::new(&[(
+        "BUILD",
+        "package(default_package_metadata = [], default_applicable_licenses = ['//:lic'])",
+    )]);
+    assert!(dup_meta.load("").contains_errors);
+}

@@ -67,6 +67,10 @@ pub struct StarlarkRuleSpec {
     pub definition_digest: String,
     /// Instantiation/definition stack of the rule definition itself (`file:line:col in fn`).
     pub definition_stack: Vec<(String, String)>,
+    /// `rule(..., initializer = ...)` chain in parent-to-child order.
+    pub initializers: Vec<Value>,
+    /// Whether `build_setting` has `flag = True` (false when `flag = False` or omitted).
+    pub build_setting_flag: bool,
 }
 
 impl RuleClass {
@@ -328,15 +332,28 @@ fn apply_gen(rc: &mut RuleClass, defs: &[GenAttr], user: Vec<Attribute>) {
         a.nodep = g.nodep;
         a.nodep_set = Some(g.nodep_set);
         a.tool_dep = Some(g.tool);
-        a.proto_type = Some(g.ty);
-        a.order_independent = g.ordered;
+        if placed && g.name == "build_setting_default" {
+            if a.proto_type.is_none() {
+                a.proto_type = Some(match a.ty {
+                    AttrType::Int => "INTEGER",
+                    AttrType::Bool => "BOOLEAN",
+                    AttrType::StringList => "STRING_LIST",
+                    _ => g.ty,
+                });
+            }
+        } else if !user_defined {
+            a.proto_type = Some(g.ty);
+        }
+        a.order_independent = a.order_independent || g.ordered;
         if let D::RuleBased(src) = &g.default {
             a.rule_based_default = Some((*src).to_string());
         }
         if !user_defined && (!placed || a.ty == want) {
             a.mandatory = a.mandatory || g.mandatory;
-            if let Some(d) = gen_default(&g.default, a.ty) {
-                a.default = Some(d);
+            if !a.mandatory {
+                if let Some(d) = gen_default(&g.default, a.ty) {
+                    a.default = Some(d);
+                }
             }
         }
         order.push(g.name.to_string());

@@ -146,6 +146,9 @@ struct RuleDef {
     outputs: Vec<(String, String)>,
     outputs_fn: Option<Value>,
     build_setting: bool,
+    build_setting_flag: bool,
+    extendable: bool,
+    initializers: Vec<Value>,
     class: Option<Arc<RuleClass>>,
     implementation: Value,
     kwargs: BTreeMap<String, Value>,
@@ -157,6 +160,7 @@ struct MacroDef {
     name: Option<String>,
     attrs: Vec<Attribute>,
     implementation: Value,
+    finalizer: bool,
     /// Package of the `.bzl` file that defined the macro.
     def_pkg: PackageIdentifier,
     /// `file:line:col` of the statement that defined the macro (`macro(...)` call).
@@ -235,8 +239,10 @@ struct PackageState {
     contains_errors: bool,
     glob_io_error: Option<String>,
     macro_queue: std::collections::VecDeque<MacroCall>,
-    /// Stack of `(macro instance name, defining package)` for the macro being expanded.
-    macro_stack: Vec<(String, PackageIdentifier)>,
+    /// Stack of `(macro instance name, defining package, is_finalizer)` for the macro being expanded.
+    macro_stack: Vec<(String, PackageIdentifier, bool)>,
+    /// Active `macro_id` chain for direct/indirect symbolic-macro recursion detection.
+    macro_call_ids: Vec<usize>,
     /// Parallel to `macro_stack`: (BUILD/caller call site, macro symbol name, macro definition location, main_submacro_defined).
     macro_frames: Vec<(String, String, String, bool)>,
     /// Explicit label values passed to top-level symbolic macro instances (for assumed input files).
@@ -360,6 +366,7 @@ fn install_analysis_modules(ctx: &mut EvalContext) {
             ("bool", host("config.bool")),
             ("string", host("config.string")),
             ("string_list", host("config.string_list")),
+            ("string_set", host("config.string_set")),
             ("exec", host("config.exec")),
             ("target", host("config.target")),
             ("none", host("config.none")),
@@ -652,6 +659,7 @@ impl PackageLoader {
             glob_io_error: None,
             macro_queue: Default::default(),
             macro_stack: Vec::new(),
+            macro_call_ids: Vec::new(),
             macro_frames: Vec::new(),
             top_level_macro_labels: Vec::new(),
             macro_violations: BTreeMap::new(),
@@ -693,7 +701,7 @@ impl PackageLoader {
             st.args.default_testonly = Some(true);
         }
         // repo() defaults from REPO.bazel apply to every package of the repository.
-        match eval_repo_file_checked(self.fs(), &repo_root) {
+        match eval_repo_file_checked(self.fs(), &repo_root, id.repository(), &st.mapping) {
             Ok(Some((_, repo_args))) => {
                 st.args.merge_from(&repo_args);
             }
@@ -825,7 +833,8 @@ impl PackageLoader {
                 }
             }
         }
-        let macro_ok = if run_macros {
+        let run_finalizers = run_macros && !state.lock().unwrap().contains_errors;
+        let macro_ok = if run_finalizers {
             ctx.captured_prints = Some(Vec::new());
             let ok = self.run_macro_queue(&mut ctx, &state);
             if let Some(prints) = ctx.captured_prints.take() {
@@ -840,7 +849,7 @@ impl PackageLoader {
             }
             ok
         } else {
-            false
+            run_macros && !state.lock().unwrap().contains_errors
         };
         // Materialize assumed input files even on partial packages (`Package.java`).
         self.finish_package(&state, run_macros && macro_ok);
@@ -1611,7 +1620,7 @@ impl PackageLoader {
                             if let Some(r) = reg.rules.get_mut(idx) {
                                 if r.name.is_none() {
                                     if !crate::rule_class::is_valid_rule_class_name(k)
-                                        || (!r.test && k.ends_with("_test"))
+                                        || (r.test != k.ends_with("_test"))
                                     {
                                         return Err(BzlError {
                                             events,
@@ -1619,6 +1628,8 @@ impl PackageLoader {
                                                 "Invalid rule class name '{k}'{}",
                                                 if !r.test && k.ends_with("_test") {
                                                     ", non-test rule class names must not end with '_test'"
+                                                } else if r.test && !k.ends_with("_test") {
+                                                    ", test rule class names must end with '_test'"
                                                 } else {
                                                     ""
                                                 }
@@ -1753,6 +1764,8 @@ impl PackageLoader {
                                                 hex
                                             },
                                             definition_stack: r.definition_stack.clone(),
+                                            initializers: r.initializers.clone(),
+                                            build_setting_flag: r.build_setting_flag,
                                         }));
                                     r.class = Some(Arc::new(rc));
                                 }
@@ -1895,15 +1908,22 @@ fn parse_load_label(
 
 /// Parses `REPO.bazel` for `ignore_directories()`.
 pub fn parse_repo_file(fs: &dyn FileSystem, repo_root: &PathFragment) -> Option<RepoFile> {
-    eval_repo_file_checked(fs, repo_root)
-        .ok()
-        .flatten()
-        .map(|(file, _)| file)
+    eval_repo_file_checked(
+        fs,
+        repo_root,
+        &RepositoryName::main(),
+        &RepositoryMapping::always_fallback(),
+    )
+    .ok()
+    .flatten()
+    .map(|(file, _)| file)
 }
 
 fn eval_repo_file_checked(
     fs: &dyn FileSystem,
     repo_root: &PathFragment,
+    repo: &RepositoryName,
+    repo_mapping: &RepositoryMapping,
 ) -> Result<Option<(RepoFile, PackageArgs)>, String> {
     let path = repo_root.get_relative_str("REPO.bazel");
     let bytes = match fs.read_file(&path) {
@@ -1933,7 +1953,9 @@ fn eval_repo_file_checked(
         Value::BuiltinFunction("host:ignore_directories".into()),
     );
     let o2 = Arc::clone(&out);
-    let main = PackageIdentifier::create_in_main_repo("").map_err(|e| e.to_string())?;
+    let root_pkg = PackageIdentifier::create(repo.clone(), PathFragment::empty())
+        .map_err(|e| e.to_string())?;
+    let mapping = repo_mapping.clone();
     ctx.host = Some(Arc::new(move |_ctx, name, pos, kw| match name {
         "ignore_directories" => {
             let mut g = o2.lock().unwrap();
@@ -1942,10 +1964,41 @@ fn eval_repo_file_checked(
                     "'ignored_directories()' can only be called once".into(),
                 ));
             }
+            check_kwargs("ignore_directories", &kw, &["dirs"]).map_err(StarlarkError)?;
+            if pos.len() > 1 {
+                return Err(StarlarkError(format!(
+                    "ignore_directories() accepts no more than 1 positional argument but got {}",
+                    pos.len()
+                )));
+            }
+            if !pos.is_empty() && kw.contains_key("dirs") {
+                return Err(StarlarkError(
+                    "ignore_directories() got multiple values for argument 'dirs'".into(),
+                ));
+            }
             let dirs = pos.first().or_else(|| kw.get("dirs")).ok_or_else(|| {
-                StarlarkError("ignore_directories() missing required argument 'dirs'".into())
+                StarlarkError(
+                    "ignore_directories() missing 1 required positional argument: dirs".into(),
+                )
             })?;
-            let list = sl_values(dirs).map_err(StarlarkError)?;
+            let items = zel_starlark::eval::builtins::value_to_sequence(dirs).map_err(|_| {
+                StarlarkError(format!(
+                    "in call to ignore_directories(), parameter 'dirs' got value of type '{}', want 'sequence'",
+                    dirs.type_name()
+                ))
+            })?;
+            let mut list = Vec::with_capacity(items.len());
+            for (idx, item) in items.into_iter().enumerate() {
+                match item {
+                    Value::String(s) => list.push(s),
+                    other => {
+                        return Err(StarlarkError(format!(
+                            "at index {idx} of dirs, got element of type {}, want string",
+                            other.type_name()
+                        )))
+                    }
+                }
+            }
             g.file.ignored_directories = list;
             g.ignore_called = true;
             Ok(Value::None)
@@ -1972,9 +2025,8 @@ fn eval_repo_file_checked(
                     "at least one argument must be given to the 'repo' function".into(),
                 ));
             }
-            let mapping = RepositoryMapping::always_fallback();
             let cctx = ConvertCtx {
-                pkg: &main,
+                pkg: &root_pkg,
                 mapping: &mapping,
                 rule_class: "repo",
             };
@@ -2053,16 +2105,26 @@ fn apply_package_args(
                 _ => unreachable!(),
             },
             "licenses" => match convert_plain(v, AttrType::StringList, k, cctx)? {
-                AttrValue::StrList(l) => args.licenses = parse_license_strings(&l, cctx)?,
+                AttrValue::StrList(l) => {
+                    args.licenses = parse_license_strings(&l, cctx)?;
+                    args.licenses_set = true;
+                }
                 _ => unreachable!(),
             },
-            "default_compatible_with" => args.default_compatible_with = label_list(k, v)?,
-            "default_restricted_to" => args.default_restricted_to = label_list(k, v)?,
+            "default_compatible_with" => {
+                args.default_compatible_with = label_list(k, v)?;
+                args.default_compatible_with_set = true;
+            }
+            "default_restricted_to" => {
+                args.default_restricted_to = label_list(k, v)?;
+                args.default_restricted_to_set = true;
+            }
             "default_applicable_licenses" | "default_package_metadata" => {
-                if !args.default_package_metadata.is_empty() {
+                if args.default_package_metadata_set {
                     return Err("Can not set both default_package_metadata and default_applicable_licenses. Move all declarations to default_package_metadata.".to_string());
                 }
                 args.default_package_metadata = label_list(k, v)?;
+                args.default_package_metadata_set = true;
             }
             "default_hdrs_check" => match convert_plain(v, AttrType::String, k, cctx)? {
                 AttrValue::Str(s) => args.default_hdrs_check = Some(s),
