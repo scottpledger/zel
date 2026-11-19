@@ -835,10 +835,12 @@ fn action_attr(act: &Arc<Action>, attr: &str) -> HostResult {
             ActionKind::Spawn { arguments, .. } => {
                 let mut list = Vec::with_capacity(arguments.len());
                 for ca in arguments {
-                    let mut b = ArgsBuilder::default();
-                    b.args = ca.args.clone();
-                    b.param_file = ca.param_file.clone();
-                    b.format = ca.param_file.as_ref().map(|p| p.format);
+                    let b = ArgsBuilder {
+                        args: ca.args.clone(),
+                        param_file: ca.param_file.clone(),
+                        format: ca.param_file.as_ref().map(|p| p.format),
+                        ..Default::default()
+                    };
                     list.push(args_value(b));
                 }
                 Ok(mk_list(list))

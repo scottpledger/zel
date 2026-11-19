@@ -3393,16 +3393,14 @@ impl PackageLoader {
                             }
                         }
                     }
-                } else {
-                    if !matches!(attr.ty, AttrType::Label | AttrType::LabelList) {
-                        return Err(herr(
-                            ctx,
-                            format!(
-                                "Aspect attribute '{k}' has unsupported type '{}'; private attributes must be label or label_list",
-                                attr.ty.name()
-                            ),
-                        ));
-                    }
+                } else if !matches!(attr.ty, AttrType::Label | AttrType::LabelList) {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "Aspect attribute '{k}' has unsupported type '{}'; private attributes must be label or label_list",
+                            attr.ty.name()
+                        ),
+                    ));
                 }
                 attrs.push(attr);
             }

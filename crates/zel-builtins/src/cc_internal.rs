@@ -867,11 +867,13 @@ mod tests {
 
     #[test]
     fn check_toplevel_and_dotted_version_and_cc_flags() {
-        let mut ctx = zel_starlark::EvalContext::default();
-        ctx.host = Some(Arc::new(|_ctx, name, pos, kw| {
-            crate::call(name, pos, kw)
-                .unwrap_or_else(|| Err(StarlarkError(format!("unknown host {name}"))))
-        }));
+        let mut ctx = zel_starlark::EvalContext {
+            host: Some(Arc::new(|_ctx, name, pos, kw| {
+                crate::call(name, pos, kw)
+                    .unwrap_or_else(|| Err(StarlarkError(format!("unknown host {name}"))))
+            })),
+            ..Default::default()
+        };
         ctx.globals.insert(
             "check_toplevel".into(),
             Value::BuiltinFunction("host:cc_internal.check_toplevel".into()),

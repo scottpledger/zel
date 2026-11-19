@@ -353,7 +353,7 @@ fn apply_aspect_path(
                 current_ct.actual_target_label(),
                 params,
             );
-            if let Some(dyn_list) = eval_dynamic_attr_aspects(d_item, &item_pctx).map_err(&wrap)? {
+            if let Some(dyn_list) = eval_dynamic_attr_aspects(d_item, &item_pctx).map_err(wrap)? {
                 dynamic_attrs_map.insert(d_item.id, dyn_list);
             }
         }
