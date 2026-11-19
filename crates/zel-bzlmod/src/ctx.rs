@@ -660,14 +660,15 @@ fn repo_attr_type_error(
     };
     let ok_scalar = |a: &AttrVal, want: &str| match want {
         "string" => matches!(a, AttrVal::Str(_) | AttrVal::Label(_)),
-        "int" => matches!(a, AttrVal::Int(_)),
+        "int" => matches!(a, AttrVal::Int(_) | AttrVal::BigInt(_)),
         _ => true,
     };
     match elem {
         None => {
             let good = match kind {
-                "int" => matches!(a, AttrVal::Int(_)),
+                "int" => matches!(a, AttrVal::Int(_) | AttrVal::BigInt(_)),
                 "bool" => matches!(a, AttrVal::Bool(_) | AttrVal::Int(0) | AttrVal::Int(1)),
+                "string" => matches!(a, AttrVal::Str(_)),
                 _ => matches!(a, AttrVal::Str(_) | AttrVal::Label(_)),
             };
             if good {
@@ -680,10 +681,14 @@ fn repo_attr_type_error(
             AttrVal::Dict(entries) | AttrVal::LabelDict(entries) => {
                 for (_, val) in entries {
                     let vok = match kind {
-                        "string_list_dict" | "label_list_dict" => {
+                        "string_list_dict" => {
+                            matches!(val, AttrVal::List(l) if l.iter().all(|e| matches!(e, AttrVal::Str(_))))
+                        }
+                        "label_list_dict" => {
                             matches!(val, AttrVal::List(l) if l.iter().all(|e| matches!(e, AttrVal::Str(_) | AttrVal::Label(_))))
                         }
-                        _ => matches!(val, AttrVal::Str(_) | AttrVal::Label(_)),
+                        "string_keyed_label_dict" => matches!(val, AttrVal::Str(_) | AttrVal::Label(_)),
+                        _ => matches!(val, AttrVal::Str(_)),
                     };
                     if !vok {
                         return Some((
@@ -700,7 +705,12 @@ fn repo_attr_type_error(
         Some(el) => match &a {
             AttrVal::List(l) => {
                 for e in l {
-                    if !ok_scalar(e, el) {
+                    let scalar_ok = if kind == "string_list" {
+                        matches!(e, AttrVal::Str(_))
+                    } else {
+                        ok_scalar(e, el)
+                    };
+                    if !scalar_ok {
                         return Some((
                             el.to_string(),
                             "list element".to_string(),
@@ -725,7 +735,7 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
     };
     match d.kind.as_str() {
         "string" => {
-            if !matches!(a, AttrVal::Str(_) | AttrVal::Label(_)) {
+            if !matches!(a, AttrVal::Str(_)) {
                 return bad("string");
             }
             if !d.values.is_empty() && !d.values.contains(&a) {
@@ -738,7 +748,7 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
             }
         }
         "int" => {
-            if !matches!(a, AttrVal::Int(_)) {
+            if !matches!(a, AttrVal::Int(_) | AttrVal::BigInt(_)) {
                 return bad("int");
             }
         }
@@ -754,7 +764,9 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
                 }
                 for e in l {
                     let ok = if d.kind == "int_list" {
-                        matches!(e, AttrVal::Int(_))
+                        matches!(e, AttrVal::Int(_) | AttrVal::BigInt(_))
+                    } else if d.kind == "string_list" {
+                        matches!(e, AttrVal::Str(_))
                     } else {
                         matches!(e, AttrVal::Str(_) | AttrVal::Label(_))
                     };
@@ -765,7 +777,11 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
             }
             _ => return bad(&d.kind),
         },
-        "string_dict" | "string_list_dict" | "label_keyed_string_dict" => {
+        "string_dict"
+        | "string_list_dict"
+        | "label_keyed_string_dict"
+        | "string_keyed_label_dict"
+        | "label_list_dict" => {
             if !matches!(a, AttrVal::Dict(_) | AttrVal::LabelDict(_)) {
                 return bad(&d.kind);
             }
@@ -1171,15 +1187,18 @@ pub(crate) fn facts_op(name: &str, pos: &[Value]) -> Result<Value, StarlarkError
         return err("missing receiver");
     };
     let j = crate::json::Json::parse(id).unwrap_or(crate::json::Json::Null);
-    let dict = crate::json::json_to_starlark(&j);
+    let dict = crate::json::json_to_starlark_facts(&j);
     if name.starts_with("debugprint:") {
         return Ok(str_value(format!("Facts({})", dict.repr())));
     }
+    let Some(key_val) = pos.get(1) else {
+        return err("missing key");
+    };
     let Some(Value::String(k)) = pos.get(1) else {
         return if name.starts_with("contains:") {
             Ok(Value::Bool(false))
         } else {
-            err("Facts keys must be strings")
+            err(format!("key {} not found in Facts", key_val.repr()))
         };
     };
     let Value::Dict(d) = &dict else {
@@ -1306,19 +1325,12 @@ fn dispatch_object_inner(
             if !is_method {
                 return Ok(Value::BuiltinFunction("host:method:Facts.get".into()));
             }
-            let key = pos
-                .get(1)
-                .or_else(|| kw.get("key"))
-                .cloned()
-                .unwrap_or(Value::None);
-            let default = pos
-                .get(2)
-                .or_else(|| kw.get("default"))
-                .cloned()
-                .unwrap_or(Value::None);
-            let Value::String(_) = key else {
-                return err("Facts.get: key must be a string");
-            };
+            let b = crate::ctxargs::bind_raw("get", "key! default", args, &kw)?;
+            let key = b.get("key").cloned().unwrap_or(Value::None);
+            let default = b.get("default").cloned().unwrap_or(Value::None);
+            if !matches!(key, Value::String(_)) {
+                return Ok(default);
+            }
             return Ok(facts_op("index:Facts", &[pos[0].clone(), key]).unwrap_or(default));
         }
         return err(format!("'Facts' value has no field or method '{member}'"));
@@ -2560,39 +2572,13 @@ fn maybe_watch_dirents(rt: &Rt, data: &CtxData, p: &Path, mode: &str) -> Result<
     Ok(())
 }
 
-/// `DirectoryTreeDigestValue`: recursively hashes sorted directory entries (name, kind, regular
-/// file SHA-256 / symlink target / subdirectory tree digest).
+/// `DirectoryTreeDigestValue`: delegates to [`crate::lockfile::compute_dirtree_digest`].
 pub(crate) fn compute_dirtree_digest(p: &Path) -> Result<String, std::io::Error> {
-    let mut entries: Vec<(String, std::fs::DirEntry)> = Vec::new();
-    for entry in std::fs::read_dir(p)? {
-        let entry = entry?;
-        entries.push((entry.file_name().to_string_lossy().into_owned(), entry));
+    match crate::lockfile::compute_dirtree_digest(p).as_str() {
+        "ENOENT" => Err(std::io::Error::from(std::io::ErrorKind::NotFound)),
+        "NOT_DIR" => Err(std::io::Error::from(std::io::ErrorKind::InvalidInput)),
+        digest => Ok(digest.to_string()),
     }
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 3);
-    for (name, entry) in entries {
-        let ft = entry.file_type()?;
-        parts.push(name);
-        let child = entry.path();
-        if ft.is_symlink() {
-            parts.push("SYM".to_string());
-            let target = std::fs::read_link(&child)?;
-            parts.push(target.to_string_lossy().into_owned());
-        } else if ft.is_dir() {
-            parts.push("DIR".to_string());
-            parts.push(compute_dirtree_digest(&child)?);
-        } else if ft.is_file() {
-            parts.push("FILE".to_string());
-            let bytes = std::fs::read(&child)?;
-            parts.push(crate::hash::sha256_hex(&bytes));
-        } else {
-            parts.push("SPECIAL".to_string());
-            parts.push(String::new());
-        }
-    }
-    Ok(crate::hash::Fingerprint::new()
-        .add_strings(&parts)
-        .hex_digest())
 }
 
 /// `watch_tree`: records a `DIRTREE:` recursive directory tree digest input.

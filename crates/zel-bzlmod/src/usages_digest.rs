@@ -72,7 +72,8 @@ fn json_attr(out: &mut String, v: &AttrVal) {
         AttrVal::None => out.push_str("null"),
         AttrVal::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         AttrVal::Int(i) => out.push_str(&i.to_string()),
-        AttrVal::Float(f) => out.push_str(&f.to_string()),
+        AttrVal::BigInt(i) => out.push_str(&i.to_string()),
+        AttrVal::Float(f) => out.push_str(&crate::json::format_json_float(*f)),
         AttrVal::Str(s) => json_str(out, &attr_string(s)),
         AttrVal::Label(s) => json_str(out, s),
         AttrVal::List(l) => {
@@ -296,5 +297,11 @@ mod tests {
         assert_eq!(attr_string("@@x//:y"), "'@@x//:y'");
         assert_eq!(attr_string("'q'"), "''q''");
         assert_eq!(attr_string("plain"), "plain");
+        let mut lbl_out = String::new();
+        json_attr(&mut lbl_out, &AttrVal::Label("@@//:target".into()));
+        assert_eq!(lbl_out, "\"@@//:target\"");
+        let mut str_out = String::new();
+        json_attr(&mut str_out, &AttrVal::Str("@@//:target".into()));
+        assert_eq!(str_out, "\"'@@//:target'\"");
     }
 }

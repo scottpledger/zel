@@ -3,13 +3,40 @@
 use std::fmt::Write;
 use zel_starlark::Value;
 
+/// Formats a finite `f64` for JSON so integer-valued floats always retain `.0` or an exponent,
+/// matching Bazel's `json.encode` / `FactsAdapter` so round-trip decoding stays a float.
+pub fn format_json_float(f: f64) -> String {
+    let s = format!("{f:?}");
+    if !s.contains('.') && !s.contains('e') && !s.contains('E') && f.is_finite() {
+        format!("{s}.0")
+    } else {
+        s
+    }
+}
+
 pub fn json_to_starlark(j: &Json) -> Value {
+    json_to_starlark_ext(j, false)
+}
+
+pub fn json_to_starlark_facts(j: &Json) -> Value {
+    json_to_starlark_ext(j, true)
+}
+
+fn json_to_starlark_ext(j: &Json, freeze_and_sort: bool) -> Value {
     match j {
         Json::Null => Value::None,
         Json::Bool(b) => Value::Bool(*b),
         Json::Num(n) => {
-            if let Ok(i) = n.parse::<i64>() {
-                Value::Int(zel_starlark::BigInt::from_i64(i))
+            if !n.contains('.') && !n.contains('e') && !n.contains('E') {
+                if let Ok(i) = n.parse::<i64>() {
+                    Value::Int(zel_starlark::BigInt::from_i64(i))
+                } else if let Ok(bi) = zel_starlark::BigInt::from_str_radix(n, 10) {
+                    Value::Int(bi)
+                } else if let Ok(f) = n.parse::<f64>() {
+                    Value::Float(f)
+                } else {
+                    Value::String(n.clone())
+                }
             } else if let Ok(f) = n.parse::<f64>() {
                 Value::Float(f)
             } else {
@@ -18,29 +45,114 @@ pub fn json_to_starlark(j: &Json) -> Value {
         }
         Json::Str(s) => Value::String(s.clone()),
         Json::Arr(a) => {
-            let items: Vec<Value> = a.iter().map(json_to_starlark).collect();
-            Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-                zel_starlark::StarlarkList::new(items),
-            )))
+            let items: Vec<Value> = a
+                .iter()
+                .map(|x| json_to_starlark_ext(x, freeze_and_sort))
+                .collect();
+            let mut list = zel_starlark::StarlarkList::new(items);
+            if freeze_and_sort {
+                list.freeze();
+            }
+            Value::List(std::sync::Arc::new(std::sync::Mutex::new(list)))
         }
         Json::Obj(o) => {
-            let mut entries = Vec::new();
-            for (k, v) in o {
-                entries.push((Value::String(k.clone()), json_to_starlark(v)));
+            let mut pairs: Vec<(&String, &Json)> = o.iter().map(|(k, v)| (k, v)).collect();
+            if freeze_and_sort {
+                pairs.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
             }
-            Value::Dict(std::sync::Arc::new(std::sync::Mutex::new(
-                zel_starlark::StarlarkDict::from_entries(entries).unwrap_or_default(),
-            )))
+            let mut entries = Vec::with_capacity(pairs.len());
+            for (k, v) in pairs {
+                entries.push((
+                    Value::String(k.clone()),
+                    json_to_starlark_ext(v, freeze_and_sort),
+                ));
+            }
+            let mut dict = zel_starlark::StarlarkDict::from_entries(entries).unwrap_or_default();
+            if freeze_and_sort {
+                dict.freeze();
+            }
+            Value::Dict(std::sync::Arc::new(std::sync::Mutex::new(dict)))
         }
     }
+}
+
+/// Validates and encodes a `module_ctx.extension_metadata(facts = ...)` value per `Facts.java`:
+/// root must be a dict, all dict keys must be strings, dict keys are sorted in UTF-16 order,
+/// container depth is capped at 7, full `BigInt` precision is preserved, and floats must be finite.
+pub fn validate_and_encode_facts(v: &Value) -> Result<Json, zel_starlark::StarlarkError> {
+    fn walk(v: &Value, depth: usize) -> Result<Json, zel_starlark::StarlarkError> {
+        let err = |m: String| Err(zel_starlark::StarlarkError(m));
+        match v {
+            Value::None => Ok(Json::Null),
+            Value::Bool(b) => Ok(Json::Bool(*b)),
+            Value::Int(i) => Ok(Json::Num(i.to_string())),
+            Value::Float(f) => {
+                if !f.is_finite() {
+                    return err(format!("cannot encode non-finite float {f:?} in facts"));
+                }
+                Ok(Json::Num(format_json_float(*f)))
+            }
+            Value::String(s) => Ok(Json::Str(s.clone())),
+            Value::List(l) => {
+                if depth >= 7 {
+                    return err("Facts nesting depth exceeds maximum of 7".to_string());
+                }
+                let elems = l.lock().unwrap().elements.clone();
+                let mut arr = Vec::with_capacity(elems.len());
+                for x in &elems {
+                    arr.push(walk(x, depth + 1)?);
+                }
+                Ok(Json::Arr(arr))
+            }
+            Value::Tuple(t) => {
+                if depth >= 7 {
+                    return err("Facts nesting depth exceeds maximum of 7".to_string());
+                }
+                let mut arr = Vec::with_capacity(t.len());
+                for x in t.iter() {
+                    arr.push(walk(x, depth + 1)?);
+                }
+                Ok(Json::Arr(arr))
+            }
+            Value::Dict(d) => {
+                if depth >= 7 {
+                    return err("Facts nesting depth exceeds maximum of 7".to_string());
+                }
+                let entries = d.lock().unwrap().entries.clone();
+                let mut obj = Vec::with_capacity(entries.len());
+                for (k, val) in &entries {
+                    let Value::String(ks) = k else {
+                        return err(format!(
+                            "Facts dict keys must be strings, got '{}'",
+                            k.type_name()
+                        ));
+                    };
+                    obj.push((ks.clone(), walk(val, depth + 1)?));
+                }
+                obj.sort_by(|a, b| a.0.encode_utf16().cmp(b.0.encode_utf16()));
+                Ok(Json::Obj(obj))
+            }
+            other => err(format!(
+                "Facts values must be JSON-like (None, bool, int, float, string, list, tuple, or dict), got '{}'",
+                other.type_name()
+            )),
+        }
+    }
+    if !matches!(v, Value::Dict(_)) {
+        return Err(zel_starlark::StarlarkError(format!(
+            "in call to extension_metadata(), parameter 'facts' got value of type '{}', want 'dict or NoneType'",
+            v.type_name()
+        )));
+    }
+    walk(v, 0)
 }
 
 pub fn starlark_to_json(v: &Value) -> Json {
     match v {
         Value::None => Json::Null,
         Value::Bool(b) => Json::Bool(*b),
-        Value::Int(i) => Json::int(i.to_i64().unwrap_or(0)),
-        Value::Float(f) => Json::Num(f.to_string()),
+        Value::Int(i) => Json::Num(i.to_string()),
+        Value::Float(f) => Json::Num(format_json_float(*f)),
         Value::String(s) => Json::Str(s.clone()),
         Value::List(l) => {
             let guard = l.lock().unwrap();

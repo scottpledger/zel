@@ -93,13 +93,22 @@ pub struct ExtensionMetadata {
     pub facts: Option<crate::json::Json>,
 }
 
+#[derive(Clone, Debug)]
+pub struct UsedLockExt {
+    pub key: String,
+    pub factors: String,
+    pub entry: crate::lockfile::LockExt,
+    pub facts: Option<crate::json::Json>,
+    pub facts_version: i64,
+}
+
 #[derive(Default)]
 pub struct LockState {
     pub mode: Option<crate::lockfile::LockfileMode>,
     pub workspace: crate::lockfile::Lockfile,
     pub hidden: crate::lockfile::Lockfile,
-    /// Entries (extension key, factors, entry) produced or reused in this session.
-    pub used: Vec<(String, String, crate::lockfile::LockExt)>,
+    /// Entries (extension key, factors, entry, facts) produced or reused in this session.
+    pub used: Vec<UsedLockExt>,
 }
 
 pub struct Rt {
@@ -123,6 +132,7 @@ pub(crate) struct DeferredRepoCall {
 pub(crate) struct RtState {
     pub rule_defs: Vec<RuleDef>,
     pub ext_defs: Vec<ExtensionDef>,
+    pub ext_metadatas: Vec<ExtensionMetadata>,
     pub tag_class_defs: Vec<Vec<(String, AttrDef)>>,
     pub bzl_cache: HashMap<String, BTreeMap<String, Value>>,
     pub loading: Vec<String>,
@@ -1086,38 +1096,114 @@ impl Rt {
                 Ok(Value::Host("tag_class".into(), (st.tag_class_defs.len() - 1).to_string()))
             }
             "extension_metadata" => {
-                let deps_val = kw.get("root_module_direct_deps");
-                let dev_val = kw.get("root_module_direct_dev_deps");
+                for k in kw.keys() {
+                    if !matches!(
+                        k.as_str(),
+                        "root_module_direct_deps"
+                            | "root_module_direct_dev_deps"
+                            | "reproducible"
+                            | "facts"
+                    ) {
+                        return err(format!(
+                            "extension_metadata() got unexpected keyword argument '{k}'"
+                        ));
+                    }
+                }
+                if pos.len() > 2 {
+                    return err(format!(
+                        "extension_metadata() accepts no more than 2 positional arguments but got {}",
+                        pos.len()
+                    ));
+                }
+                if pos.first().is_some() && kw.contains_key("root_module_direct_deps") {
+                    return err(
+                        "extension_metadata() got multiple values for parameter 'root_module_direct_deps'",
+                    );
+                }
+                if pos.get(1).is_some() && kw.contains_key("root_module_direct_dev_deps") {
+                    return err(
+                        "extension_metadata() got multiple values for parameter 'root_module_direct_dev_deps'",
+                    );
+                }
+                let deps_val = pos.first().or_else(|| kw.get("root_module_direct_deps"));
+                let dev_val = pos
+                    .get(1)
+                    .or_else(|| kw.get("root_module_direct_dev_deps"));
                 let deps_is_none = deps_val.is_none() || matches!(deps_val, Some(Value::None));
                 let dev_is_none = dev_val.is_none() || matches!(dev_val, Some(Value::None));
                 let is_all = |v: Option<&Value>| matches!(v, Some(Value::String(s)) if s == "all");
-                let is_empty_list = |v: Option<&Value>| matches!(v, Some(Value::List(l)) if l.lock().unwrap().elements.is_empty());
+                let is_empty_seq = |v: Option<&Value>| match v {
+                    Some(Value::List(l)) => l.lock().unwrap().elements.is_empty(),
+                    Some(Value::Tuple(t)) => t.is_empty(),
+                    _ => false,
+                };
                 let (deps_is_all, dev_is_all) = (is_all(deps_val), is_all(dev_val));
+                let extract_strict_string_seq =
+                    |label: &str, v: Option<&Value>| -> Result<Vec<String>, StarlarkError> {
+                        let Some(val) = v else {
+                            return Ok(vec![]);
+                        };
+                        let elems: Vec<Value> = match val {
+                            Value::List(l) => l.lock().unwrap().elements.clone(),
+                            Value::Tuple(t) => t.clone(),
+                            other => {
+                                return err(format!(
+                                    "in call to extension_metadata(), parameter '{label}' got value of type '{}', want 'NoneType, string, or sequence'",
+                                    other.type_name()
+                                ))
+                            }
+                        };
+                        let mut out = Vec::with_capacity(elems.len());
+                        for (idx, elem) in elems.into_iter().enumerate() {
+                            match elem {
+                                Value::String(s) => out.push(s),
+                                other => {
+                                    return err(format!(
+                                        "at index {idx} of {label}, got element of type {}, want string",
+                                        other.type_name()
+                                    ))
+                                }
+                            }
+                        }
+                        Ok(out)
+                    };
                 // `ModuleExtensionMetadata.create` checks, in this order.
                 #[allow(clippy::nonminimal_bool)]
-                if !(deps_is_none && dev_is_none) && !(deps_is_all && is_empty_list(dev_val)) && !(dev_is_all && is_empty_list(deps_val)) {
+                if !(deps_is_none && dev_is_none)
+                    && !(deps_is_all && is_empty_seq(dev_val))
+                    && !(dev_is_all && is_empty_seq(deps_val))
+                {
                     if deps_is_all || dev_is_all {
                         return err("if one of root_module_direct_deps and root_module_direct_dev_deps is \"all\", the other must be an empty list");
                     }
-                    if matches!(deps_val, Some(Value::String(_))) || matches!(dev_val, Some(Value::String(_))) {
+                    if matches!(deps_val, Some(Value::String(_)))
+                        || matches!(dev_val, Some(Value::String(_)))
+                    {
                         return err("root_module_direct_deps and root_module_direct_dev_deps must be None, \"all\", or a list of strings");
                     }
                     if deps_is_none != dev_is_none {
                         return err("root_module_direct_deps and root_module_direct_dev_deps must both be specified or both be unspecified");
                     }
                     let mut seen: Vec<String> = vec![];
-                    for (label, v, check_overlap) in [("root_module_direct_deps", deps_val, false), ("root_module_direct_dev_deps", dev_val, true)] {
-                        let items = v.map(|v| v.to_string_list()).unwrap_or_default();
+                    for (label, v, check_overlap) in [
+                        ("root_module_direct_deps", deps_val, false),
+                        ("root_module_direct_dev_deps", dev_val, true),
+                    ] {
+                        let items = extract_strict_string_seq(label, v)?;
                         let mut own: Vec<String> = vec![];
                         for dep in items {
                             let valid = !dep.is_empty()
                                 && dep.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-                                && dep.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
+                                && dep
+                                    .chars()
+                                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
                             if !valid {
                                 return err(format!("in {label}: invalid user-provided repo name '{dep}': valid names may contain only A-Z, a-z, 0-9, '-', '_', '.', and must start with a letter or a number"));
                             }
                             if check_overlap && seen.contains(&dep) {
-                                return err(format!("in {label}: entry '{dep}' is also in root_module_direct_deps"));
+                                return err(format!(
+                                    "in {label}: entry '{dep}' is also in root_module_direct_deps"
+                                ));
                             }
                             if own.contains(&dep) {
                                 return err(format!("in {label}: duplicate entry '{dep}'"));
@@ -1129,11 +1215,25 @@ impl Rt {
                         }
                     }
                 }
-                let list = |k: &str| -> Result<Option<Vec<String>>, StarlarkError> {
-                    match kw.get(k) {
+                let reproducible = match kw.get("reproducible") {
+                    None => false,
+                    Some(Value::Bool(b)) => *b,
+                    Some(other) => {
+                        return err(format!(
+                            "in call to extension_metadata(), parameter 'reproducible' got value of type '{}', want 'bool'",
+                            other.type_name()
+                        ))
+                    }
+                };
+                let facts = match kw.get("facts") {
+                    None | Some(Value::None) => None,
+                    Some(v) => Some(crate::json::validate_and_encode_facts(v)?),
+                };
+                let list_val = |label: &str, v: Option<&Value>| -> Result<Option<Vec<String>>, StarlarkError> {
+                    match v {
                         None | Some(Value::None) => Ok(None),
                         Some(Value::String(s)) if s == "all" => Ok(None),
-                        Some(v) => Ok(Some(v.to_string_list())),
+                        Some(_) => Ok(Some(extract_strict_string_seq(label, v)?)),
                     }
                 };
                 let use_all = if deps_is_all {
@@ -1143,26 +1243,29 @@ impl Rt {
                 } else {
                     "NO"
                 };
-                let facts = kw.get("facts").map(crate::json::starlark_to_json);
                 let m = ExtensionMetadata {
                     use_all: use_all.to_string(),
                     use_all_repos: use_all != "NO",
                     // `ModuleExtensionMetadata.create(null, null, UseAllRepos.*)`: the explicit lists are dropped with "all".
-                    explicit_root_direct_deps: if use_all != "NO" { None } else { list("root_module_direct_deps")? },
-                    explicit_root_direct_dev_deps: if use_all != "NO" { None } else { list("root_module_direct_dev_deps")? },
-                    reproducible: kw.get("reproducible").map(|v| v.is_truthy()).unwrap_or(false),
+                    explicit_root_direct_deps: if use_all != "NO" {
+                        None
+                    } else {
+                        list_val("root_module_direct_deps", deps_val)?
+                    },
+                    explicit_root_direct_dev_deps: if use_all != "NO" {
+                        None
+                    } else {
+                        list_val("root_module_direct_dev_deps", dev_val)?
+                    },
+                    reproducible,
                     facts,
                 };
-                let facts_str = m.facts.as_ref().map(|f| f.to_compact()).unwrap_or_else(|| "-".into());
-                let json = format!(
-                    "{}|{}|{}|{}|{}",
-                    m.use_all,
-                    m.reproducible,
-                    m.explicit_root_direct_deps.as_ref().map(|v| v.join(",")).unwrap_or_else(|| "-".into()),
-                    m.explicit_root_direct_dev_deps.as_ref().map(|v| v.join(",")).unwrap_or_else(|| "-".into()),
-                    facts_str
-                );
-                Ok(Value::Host("extension_metadata".into(), json))
+                let mut st = self.state.lock().unwrap();
+                st.ext_metadatas.push(m);
+                Ok(Value::Host(
+                    "extension_metadata".into(),
+                    (st.ext_metadatas.len() - 1).to_string(),
+                ))
             }
             "Label" | "Label_" => {
                 let raw = match pos.first() {
@@ -1731,6 +1834,19 @@ impl Rt {
     /// `BazelLockFileModule.combineModuleExtensions`.
     pub fn compute_lockfiles(&self) -> (crate::lockfile::Lockfile, crate::lockfile::Lockfile) {
         use crate::lockfile::*;
+        let same_factor_deps = |f1: &str, f2: &str| -> bool {
+            let shape = |f: &str| {
+                (
+                    f.split(',').any(|p| p.starts_with("os:")),
+                    f.split(',').any(|p| p.starts_with("arch:")),
+                )
+            };
+            shape(f1) == shape(f2)
+        };
+        let is_non_empty_facts = |j: &crate::json::Json| -> bool {
+            !matches!(j, crate::json::Json::Null)
+                && !matches!(j, crate::json::Json::Obj(o) if o.is_empty())
+        };
         let l = self.lock.lock().unwrap();
         let res = &self.resolution;
         let live: std::collections::HashSet<String> = res
@@ -1742,6 +1858,7 @@ impl Rt {
         let mut ws = Lockfile::default();
         let mut hid = Lockfile::default();
         // BazelLockFileModule drops `file:` registry hashes (commit 9d961b96f5).
+        // Hidden lockfile never records registryFileHashes or selectedYankedVersions.
         ws.registry_file_hashes = res
             .registry_file_hashes
             .iter()
@@ -1749,27 +1866,71 @@ impl Rt {
             .map(|(u, h)| (u.clone(), h.clone()))
             .collect();
         ws.selected_yanked_versions = res.selected_yanked_versions.clone();
-        ws.facts = l.workspace.facts.clone();
-        ws.facts_versions = l.workspace.facts_versions.clone();
-        hid.registry_file_hashes = ws.registry_file_hashes.clone();
+        for (id, f) in &l.workspace.facts {
+            if live.contains(id) && is_non_empty_facts(f) {
+                ws.facts.insert(id.clone(), f.clone());
+            }
+        }
+        for (id, ver) in &l.workspace.facts_versions {
+            if ws.facts.contains_key(id) && *ver != 0 {
+                ws.facts_versions.insert(id.clone(), *ver);
+            }
+        }
+        for (id, f) in &l.hidden.facts {
+            if live.contains(id) && is_non_empty_facts(f) {
+                hid.facts.insert(id.clone(), f.clone());
+            }
+        }
+        for (id, ver) in &l.hidden.facts_versions {
+            if hid.facts.contains_key(id) && *ver != 0 {
+                hid.facts_versions.insert(id.clone(), *ver);
+            }
+        }
         for (id, m) in &l.workspace.module_extensions {
             if live.contains(id) {
-                ws.module_extensions.insert(id.clone(), m.clone());
+                let kept: BTreeMap<String, LockExt> = m
+                    .iter()
+                    .filter(|(_, e)| !e.reproducible())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !kept.is_empty() {
+                    ws.module_extensions.insert(id.clone(), kept);
+                }
             }
         }
         for (id, m) in &l.hidden.module_extensions {
             if live.contains(id) {
-                hid.module_extensions.insert(id.clone(), m.clone());
+                let kept: BTreeMap<String, LockExt> = m
+                    .iter()
+                    .filter(|(_, e)| e.reproducible())
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if !kept.is_empty() {
+                    hid.module_extensions.insert(id.clone(), kept);
+                }
             }
         }
-        for (id, factors, e) in &l.used {
-            let (target, other) = if e.reproducible() {
+        for u in &l.used {
+            let id = &u.key;
+            if !live.contains(id) {
+                continue;
+            }
+            // Drop stale factor entries whose os/arch dependency shape no longer matches.
+            for map in [&mut ws.module_extensions, &mut hid.module_extensions] {
+                if let Some(m) = map.get_mut(id) {
+                    m.retain(|old_f, _| same_factor_deps(old_f, &u.factors));
+                    if m.is_empty() {
+                        map.remove(id);
+                    }
+                }
+            }
+            let (target, other) = if u.entry.reproducible() {
                 (&mut hid, &mut ws)
             } else {
                 (&mut ws, &mut hid)
             };
             if let Some(m) = other.module_extensions.get_mut(id) {
-                m.remove(factors);
+                m.remove(&u.factors);
                 if m.is_empty() {
                     other.module_extensions.remove(id);
                 }
@@ -1778,8 +1939,40 @@ impl Rt {
                 .module_extensions
                 .entry(id.clone())
                 .or_default()
-                .insert(factors.clone(), e.clone());
+                .insert(u.factors.clone(), u.entry.clone());
+
+            match u.facts.as_ref().filter(|f| is_non_empty_facts(f)) {
+                Some(f) => {
+                    ws.facts.insert(id.clone(), f.clone());
+                    if u.facts_version != 0 {
+                        ws.facts_versions.insert(id.clone(), u.facts_version);
+                    } else {
+                        ws.facts_versions.remove(id);
+                    }
+                    if u.entry.reproducible() {
+                        hid.facts.insert(id.clone(), f.clone());
+                        if u.facts_version != 0 {
+                            hid.facts_versions.insert(id.clone(), u.facts_version);
+                        } else {
+                            hid.facts_versions.remove(id);
+                        }
+                    } else {
+                        hid.facts.remove(id);
+                        hid.facts_versions.remove(id);
+                    }
+                }
+                None => {
+                    ws.facts.remove(id);
+                    ws.facts_versions.remove(id);
+                    hid.facts.remove(id);
+                    hid.facts_versions.remove(id);
+                }
+            }
         }
+        ws.facts_versions
+            .retain(|k, v| ws.facts.contains_key(k) && *v != 0);
+        hid.facts_versions
+            .retain(|k, v| hid.facts.contains_key(k) && *v != 0);
         (ws, hid)
     }
 }

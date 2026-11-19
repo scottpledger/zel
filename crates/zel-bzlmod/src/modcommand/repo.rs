@@ -115,6 +115,10 @@ pub fn serialize_repo_definition_as_proto(
                         attr_pb.set_enum("type", "INTEGER");
                         attr_pb.set_int("int_value", *i);
                     }
+                    crate::model::AttrVal::BigInt(i) => {
+                        attr_pb.set_enum("type", "INTEGER");
+                        attr_pb.set_int("int_value", i.to_i64().unwrap_or(0));
+                    }
                     crate::model::AttrVal::Bool(b) => {
                         attr_pb.set_enum("type", "BOOLEAN");
                         attr_pb.set_bool("boolean_value", *b);

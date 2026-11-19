@@ -18,6 +18,7 @@ fn marker_attribute_json(value: &AttrVal) -> crate::json::Json {
     use crate::json::Json;
     match value {
         AttrVal::Int(i) => Json::Obj(vec![("v".to_string(), Json::int(*i))]),
+        AttrVal::BigInt(i) => Json::Obj(vec![("v".to_string(), Json::Num(i.to_string()))]),
         AttrVal::List(values) => Json::Arr(values.iter().map(marker_attribute_json).collect()),
         AttrVal::Dict(entries) => Json::Obj(
             entries
@@ -1402,6 +1403,13 @@ impl Rt {
             .unwrap()
             .mode
             .unwrap_or(crate::lockfile::LockfileMode::Off);
+        let normalize_facts = |f: Option<&crate::json::Json>| -> Option<crate::json::Json> {
+            f.filter(|j| {
+                !matches!(j, crate::json::Json::Null)
+                    && !matches!(j, crate::json::Json::Obj(o) if o.is_empty())
+            })
+            .cloned()
+        };
         if mode != crate::lockfile::LockfileMode::Off {
             let existing = {
                 let l = self.lock.lock().unwrap();
@@ -1410,15 +1418,17 @@ impl Rt {
                     .get(&lock_key)
                     .and_then(|m| m.get(&factors))
                     .cloned()
+                    .map(|le| (le, false))
                     .or_else(|| {
                         l.hidden
                             .module_extensions
                             .get(&lock_key)
                             .and_then(|m| m.get(&factors))
                             .cloned()
+                            .map(|le| (le, true))
                     })
             };
-            if let Some(le) = existing {
+            if let Some((le, from_hidden)) = existing {
                 let mut diffs: Vec<String> = vec![];
                 if le.bzl_transitive_digest != bzl_digest {
                     diffs.push(format!("the implementation of the extension '{ext_display}' or one of its transitive .bzl files has changed"));
@@ -1440,12 +1450,44 @@ impl Rt {
                         "an input to the extension '{ext_display}' changed: {r}"
                     ));
                 }
+                if from_hidden || le.reproducible() {
+                    let l = self.lock.lock().unwrap();
+                    let ws_facts = normalize_facts(l.workspace.facts.get(&lock_key));
+                    let hid_facts = normalize_facts(l.hidden.facts.get(&lock_key));
+                    if from_hidden && ws_facts != hid_facts {
+                        diffs.push(format!(
+                            "the facts of the extension '{ext_display}' have changed"
+                        ));
+                    }
+                }
                 if diffs.is_empty() {
-                    self.lock.lock().unwrap().used.push((
-                        lock_key.clone(),
-                        factors.clone(),
-                        le.clone(),
-                    ));
+                    if matches!(
+                        mode,
+                        crate::lockfile::LockfileMode::Update
+                            | crate::lockfile::LockfileMode::Refresh
+                    ) {
+                        let mut l = self.lock.lock().unwrap();
+                        let reused_facts = normalize_facts(
+                            l.workspace
+                                .facts
+                                .get(&lock_key)
+                                .or_else(|| l.hidden.facts.get(&lock_key)),
+                        );
+                        let reused_ver = l
+                            .workspace
+                            .facts_versions
+                            .get(&lock_key)
+                            .or_else(|| l.hidden.facts_versions.get(&lock_key))
+                            .copied()
+                            .unwrap_or(def.facts_version as i64);
+                        l.used.push(crate::rt::UsedLockExt {
+                            key: lock_key.clone(),
+                            factors: factors.clone(),
+                            entry: le.clone(),
+                            facts: reused_facts,
+                            facts_version: reused_ver,
+                        });
+                    }
                     return Ok(crate::lockfile::result_from_lock(&le));
                 }
                 if mode == crate::lockfile::LockfileMode::Error && !le.reproducible() {
@@ -1465,14 +1507,26 @@ impl Rt {
         let dir = self.opts.output_base.join("modextwd").join(&unique);
         let facts_value = {
             let l = self.lock.lock().unwrap();
-            let stored_ver = l
-                .workspace
-                .facts_versions
-                .get(&lock_key)
-                .copied()
-                .unwrap_or(0);
-            if stored_ver == def.facts_version as i64 {
-                if let Some(f) = l.workspace.facts.get(&lock_key) {
+            if let Some(f) = l.workspace.facts.get(&lock_key) {
+                let stored_ver = l
+                    .workspace
+                    .facts_versions
+                    .get(&lock_key)
+                    .copied()
+                    .unwrap_or(0);
+                if stored_ver == def.facts_version as i64 {
+                    crate::ctx::facts_value(f)
+                } else {
+                    crate::ctx::facts_value(&crate::json::Json::Obj(vec![]))
+                }
+            } else if let Some(f) = l.hidden.facts.get(&lock_key) {
+                let stored_ver = l
+                    .hidden
+                    .facts_versions
+                    .get(&lock_key)
+                    .copied()
+                    .unwrap_or(0);
+                if stored_ver == def.facts_version as i64 {
                     crate::ctx::facts_value(f)
                 } else {
                     crate::ctx::facts_value(&crate::json::Json::Obj(vec![]))
@@ -1714,37 +1768,9 @@ impl Rt {
         };
         if let Value::Host(k, s) = ret {
             if k == "extension_metadata" {
-                let parts: Vec<&str> = s.split('|').collect();
-                let parse_list = |p: &str| {
-                    if p == "-" {
-                        None
-                    } else {
-                        Some(
-                            p.split(',')
-                                .filter(|x| !x.is_empty())
-                                .map(String::from)
-                                .collect::<Vec<_>>(),
-                        )
-                    }
-                };
-                let ua = parts.first().copied().unwrap_or("NO").to_string();
-                let facts_json = parts.get(4).and_then(|p| {
-                    if *p == "-" {
-                        None
-                    } else {
-                        crate::json::Json::parse(p).ok()
-                    }
-                });
-                let explicit_deps = parts.get(2).and_then(|p| parse_list(p));
-                let explicit_dev_deps = parts.get(3).and_then(|p| parse_list(p));
-                out.metadata = Some(ExtensionMetadata {
-                    use_all_repos: ua != "NO",
-                    use_all: ua,
-                    reproducible: parts.get(1) == Some(&"true"),
-                    explicit_root_direct_deps: explicit_deps,
-                    explicit_root_direct_dev_deps: explicit_dev_deps,
-                    facts: facts_json,
-                });
+                if let Ok(idx) = s.parse::<usize>() {
+                    out.metadata = self.state.lock().unwrap().ext_metadatas.get(idx).cloned();
+                }
             }
         }
         if let Some(meta) = &out.metadata {
@@ -1795,17 +1821,32 @@ impl Rt {
         }
         out.recorded_file_inputs = file_inputs.lock().unwrap().clone();
         let reproducible = out.metadata.as_ref().is_some_and(|m| m.reproducible);
-        if mode == crate::lockfile::LockfileMode::Error && !reproducible {
-            return Err(format!(
-                "The module extension '{ext_display}'{} does not exist in the lockfile",
-                if factors == "general" {
-                    String::new()
-                } else {
-                    format!(" for platform {factors}")
-                }
-            ));
+        let new_facts = normalize_facts(out.metadata.as_ref().and_then(|m| m.facts.as_ref()));
+        if mode == crate::lockfile::LockfileMode::Error {
+            if !reproducible {
+                return Err(format!(
+                    "The module extension '{ext_display}'{} does not exist in the lockfile",
+                    if factors == "general" {
+                        String::new()
+                    } else {
+                        format!(" for platform {factors}")
+                    }
+                ));
+            }
+            let existing_ws_facts = {
+                let l = self.lock.lock().unwrap();
+                normalize_facts(l.workspace.facts.get(&lock_key))
+            };
+            if new_facts != existing_ws_facts {
+                return Err(format!(
+                    "MODULE.bazel.lock is no longer up-to-date because the facts of the extension '{ext_display}' have changed. Please run `bazel mod deps --lockfile_mode=update` to update your lockfile."
+                ));
+            }
         }
-        if mode != crate::lockfile::LockfileMode::Off {
+        if matches!(
+            mode,
+            crate::lockfile::LockfileMode::Update | crate::lockfile::LockfileMode::Refresh
+        ) {
             let inputs: Vec<String> = rec
                 .lock()
                 .unwrap()
@@ -1840,28 +1881,13 @@ impl Rt {
                     .as_ref()
                     .and_then(crate::lockfile::metadata_to_lock),
             };
-            self.lock
-                .lock()
-                .unwrap()
-                .used
-                .push((lock_key.clone(), factors, le));
-            if def.facts_version > 0
-                || out
-                    .metadata
-                    .as_ref()
-                    .and_then(|m| m.facts.as_ref())
-                    .is_some()
-            {
-                let mut l = self.lock.lock().unwrap();
-                if let Some(facts) = out.metadata.as_ref().and_then(|m| m.facts.clone()) {
-                    l.workspace.facts.insert(lock_key.clone(), facts);
-                }
-                if def.facts_version > 0 {
-                    l.workspace
-                        .facts_versions
-                        .insert(lock_key, def.facts_version as i64);
-                }
-            }
+            self.lock.lock().unwrap().used.push(crate::rt::UsedLockExt {
+                key: lock_key,
+                factors,
+                entry: le,
+                facts: new_facts,
+                facts_version: def.facts_version as i64,
+            });
         }
         Ok(out)
     }

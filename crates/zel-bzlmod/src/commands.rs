@@ -1307,4 +1307,74 @@ filegroup(
         );
         assert_eq!(out_vendor.exit_code, 0, "{}", out_vendor.stderr);
     }
+
+    #[test]
+    fn extension_facts_pipe_freezing_reproducible_and_lockfile_error_mode() {
+        let f = fixture(
+            "facts_repro",
+            r#"
+module(name = "root", version = "0.1")
+ext = use_extension("//:ext.bzl", "ext")
+use_repo(ext, "r")
+"#,
+        );
+        write(&f.ws, "BUILD.bazel", "");
+        write(&f.ws, "seed.txt", "alpha|beta");
+        write(
+            &f.ws,
+            "ext.bzl",
+            r#"
+def _r_impl(rctx):
+    rctx.file("BUILD.bazel", "")
+    rctx.file("out.txt", rctx.attr.val)
+r_rule = repository_rule(implementation = _r_impl, attrs = {"val": attr.string()})
+
+def _ext_impl(mctx):
+    prev = mctx.facts.get("pipe_key", "none")
+    # Non-string key on Facts.get returns default rather than failing.
+    assert_none = mctx.facts.get(123, "fallback")
+    if assert_none != "fallback":
+        fail("expected fallback for non-string Facts.get key")
+    seed = mctx.read(mctx.path(Label("//:seed.txt"))).strip()
+    r_rule(name = "r", val = prev + "->" + seed)
+    return mctx.extension_metadata(
+        ["r"],
+        [],
+        reproducible = True,
+        facts = {"pipe_key": seed, "num_float": 3.0, "nested": ["x", "y"]},
+    )
+
+ext = module_extension(implementation = _ext_impl)
+"#,
+        );
+        let out = run(&f, "fetch", &["--repo=@r", "--lockfile_mode=update"]);
+        assert_eq!(out.exit_code, 0, "{}", out.stderr);
+        assert_eq!(
+            std::fs::read_to_string(f.ob.join("external/+ext+r/out.txt")).unwrap(),
+            "none->alpha|beta"
+        );
+        let lock_text = std::fs::read_to_string(f.ws.join("MODULE.bazel.lock")).unwrap();
+        assert!(lock_text.contains("\"alpha|beta\""), "{lock_text}");
+        assert!(lock_text.contains("3.0"), "{lock_text}");
+
+        // Modify watched seed.txt: under --lockfile_mode=error, reproducible extension re-runs,
+        // sees updated facts != workspace lockfile facts, and fails lockfile check!
+        write(&f.ws, "seed.txt", "gamma|delta");
+        let out_err = run(&f, "fetch", &["--repo=@r", "--lockfile_mode=error"]);
+        assert_ne!(out_err.exit_code, 0, "expected error when reproducible facts drift");
+        assert!(
+            out_err.stderr.contains("facts of the extension")
+                && out_err.stderr.contains("have changed"),
+            "{}",
+            out_err.stderr
+        );
+
+        // Under --lockfile_mode=update, previous facts ("alpha|beta") were read despite `|` and updated.
+        let out_upd = run(&f, "fetch", &["--repo=@r", "--lockfile_mode=update"]);
+        assert_eq!(out_upd.exit_code, 0, "{}", out_upd.stderr);
+        assert_eq!(
+            std::fs::read_to_string(f.ob.join("external/+ext+r/out.txt")).unwrap(),
+            "alpha|beta->gamma|delta"
+        );
+    }
 }

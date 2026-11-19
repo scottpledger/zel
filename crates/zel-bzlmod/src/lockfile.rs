@@ -354,7 +354,12 @@ impl Lockfile {
     pub fn read(path: &Path, mode: LockfileMode) -> Result<Lockfile, String> {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
-            Err(_) => return Ok(Lockfile::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Lockfile::default()),
+            Err(e) => {
+                return Err(format!(
+                    "Failed to read and parse the MODULE.bazel.lock file with error: {e}. Try deleting it and rerun the build."
+                ))
+            }
         };
         let version = text
             .split("\"lockFileVersion\"")
@@ -458,6 +463,57 @@ pub fn escape_unescape_roundtrip_for_tests(s: &str) -> bool {
     unescape_input(&crate::ctx::escape_input(s)).as_deref() == Some(s)
 }
 
+/// Computes a deterministic recursive digest of a directory tree (`DIRTREE:` recorded input),
+/// covering directory structure, symlink targets (without following symlinks), and file contents.
+pub fn compute_dirtree_digest(root: &std::path::Path) -> String {
+    let meta = match std::fs::symlink_metadata(root) {
+        Ok(m) => m,
+        Err(_) => return "ENOENT".to_string(),
+    };
+    if !meta.file_type().is_dir() {
+        return "NOT_DIR".to_string();
+    }
+    let mut fp = crate::hash::Fingerprint::new();
+    fn walk(dir: &std::path::Path, rel_prefix: &str, fp: &mut crate::hash::Fingerprint) {
+        let mut entries: Vec<(String, std::path::PathBuf)> = std::fs::read_dir(dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, path) in entries {
+            let rel = if rel_prefix.is_empty() {
+                name
+            } else {
+                format!("{rel_prefix}/{name}")
+            };
+            let Ok(m) = std::fs::symlink_metadata(&path) else {
+                fp.add_string(&format!("ERR:{rel}"));
+                continue;
+            };
+            let ft = m.file_type();
+            if ft.is_symlink() {
+                let target = std::fs::read_link(&path)
+                    .map(|t| t.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                fp.add_string(&format!("SYM:{rel}:{target}"));
+            } else if ft.is_dir() {
+                fp.add_string(&format!("DIR:{rel}"));
+                walk(&path, &rel, fp);
+            } else {
+                let h = std::fs::read(&path)
+                    .map(|b| crate::hash::sha256_hex(&b))
+                    .unwrap_or_default();
+                fp.add_string(&format!("FILE:{rel}:{h}"));
+            }
+        }
+    }
+    walk(root, "", &mut fp);
+    fp.hex_digest()
+}
+
 /// Checks recorded inputs (`ENV:`, `FILE:`, `DIRENTS:`, `DIRTREE:`, and `REPO_MAPPING:`) against
 /// the current state; returns the description of the first change.
 pub fn recorded_inputs_outdated(
@@ -494,11 +550,13 @@ pub fn recorded_inputs_outdated_with_lookup(
         }
     };
     for i in inputs {
-        let (input, value) = i.split_once(' ').unwrap_or((i.as_str(), ""));
-        let Some(input) = unescape_input(input) else {
+        let Some((raw_input, raw_value)) = i.split_once(' ') else {
             return Some("malformed recorded input".into());
         };
-        let value = unescape_input(value);
+        let Some(input) = unescape_input(raw_input) else {
+            return Some("malformed recorded input".into());
+        };
+        let value = unescape_input(raw_value);
         if let Some(name) = input.strip_prefix("ENV:") {
             let cur = env.get(name).cloned();
             if cur != value {
@@ -556,8 +614,8 @@ pub fn recorded_inputs_outdated_with_lookup(
             let Some(path) = resolve(p) else {
                 return Some("malformed recorded input".into());
             };
-            let cur = crate::ctx::compute_dirtree_digest(&path).ok();
-            if cur != value {
+            let cur = compute_dirtree_digest(&path);
+            if matches!(cur.as_str(), "ENOENT" | "NOT_DIR") || Some(&cur) != value.as_ref() {
                 return Some(format!("directory tree at {p} changed"));
             }
         } else if let Some(spec) = input.strip_prefix("REPO_MAPPING:") {
@@ -588,6 +646,8 @@ pub fn recorded_inputs_outdated_with_lookup(
                     ));
                 }
             }
+        } else {
+            return Some("malformed recorded input".into());
         }
     }
     None
@@ -677,6 +737,28 @@ mod tests {
         assert!(Lockfile::read(&p, LockfileMode::Update)
             .unwrap_err()
             .contains("merge conflict"));
+        // Reading a directory instead of a missing file must report an error rather than empty Lockfile.
+        let dir_as_lock = d.join("dir_lock");
+        std::fs::create_dir_all(&dir_as_lock).unwrap();
+        assert!(Lockfile::read(&dir_as_lock, LockfileMode::Update)
+            .unwrap_err()
+            .contains("Failed to read and parse the MODULE.bazel.lock file"));
+        // Malformed recorded input without space is flagged outdated, and DIRTREE detects file edits.
+        let env = BTreeMap::new();
+        assert_eq!(
+            recorded_inputs_outdated(&["NO_SPACE_HERE".into()], &env, &d, &d),
+            Some("malformed recorded input".into())
+        );
+        let tree = d.join("tree");
+        std::fs::create_dir_all(tree.join("sub")).unwrap();
+        std::fs::write(tree.join("sub/a.txt"), "v1").unwrap();
+        let digest1 = compute_dirtree_digest(&tree);
+        let rec_entry = format!("DIRTREE:@@//tree {digest1}");
+        assert_eq!(recorded_inputs_outdated(&[rec_entry.clone()], &env, &d, &d), None);
+        std::fs::write(tree.join("sub/a.txt"), "v2").unwrap();
+        assert!(recorded_inputs_outdated(&[rec_entry], &env, &d, &d)
+            .unwrap()
+            .contains("directory tree"));
     }
 
     #[test]
