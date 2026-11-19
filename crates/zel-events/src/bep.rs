@@ -390,14 +390,40 @@ fn convert_file_msg(f: &Msg, path_conversion: bool, bytestream_prefix: Option<&s
     }
     if path_conversion {
         if let Some(prefix) = bytestream_prefix.filter(|p| !p.is_empty()) {
+            if uri.starts_with("bytestream://") {
+                return c;
+            }
+            let p = prefix.trim_end_matches('/');
             let digest = c.get_str("digest").to_string();
             if !digest.is_empty() {
                 let len = c.get_i64("length");
-                let p = prefix.trim_end_matches('/');
                 c.clear("uri");
                 c.set_str("uri", format!("bytestream://{p}/blobs/{digest}/{len}"));
                 return c;
             }
+            // For `ActionExecuted`, `TestResult`, `TestSummary`, and `BuildToolLogs` (where the
+            // `File` proto does not pre-populate `digest`), `ByteStreamBuildEventArtifactUploader`
+            // hashes the referenced local file on disk (`readPathMetadata` -> `digestUtil.compute`).
+            // When the local file cannot be hashed (missing, directory, or unreadable),
+            // `PathConverterImpl.apply` returns `null` so `File.uri` is omitted rather than
+            // exposing a `file://` URI pointing at the builder's local disk.
+            let local_path = if let Some(decoded) = file_uri_to_local_path(&uri) {
+                Some(decoded)
+            } else if !uri.contains("://") {
+                Some(uri)
+            } else {
+                // Non-local URI scheme (e.g. pre-uploaded `https://` in `BuildToolLogs.futureUris`).
+                return c;
+            };
+            c.clear("uri");
+            if let Some(lp) = local_path {
+                if let Ok((len, hex_digest)) =
+                    zel_util::sha256::hash_file(std::path::Path::new(&lp))
+                {
+                    c.set_str("uri", format!("bytestream://{p}/blobs/{hex_digest}/{len}"));
+                }
+            }
+            return c;
         }
         if !uri.contains("://") {
             c.clear("uri");
@@ -1526,6 +1552,41 @@ impl BepBuilder {
         end_millis: i64,
         failure_detail: Option<&zel_proto::failure_details::FailureDetail>,
     ) -> BuildEventNode {
+        Self::action_executed_with_primary_output_path(
+            primary_output,
+            None,
+            label,
+            config_id,
+            mnemonic,
+            success,
+            exit_code,
+            stdout,
+            stderr,
+            command_line,
+            start_millis,
+            end_millis,
+            failure_detail,
+        )
+    }
+
+    /// `ActionExecuted` with optional local `primary_output_path` populated on `primary_output`
+    /// when `success` is `true` (`ActionExecutedEvent.asStreamProto`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn action_executed_with_primary_output_path(
+        primary_output: &str,
+        primary_output_path: Option<&str>,
+        label: &str,
+        config_id: &str,
+        mnemonic: &str,
+        success: bool,
+        exit_code: i32,
+        stdout: Option<&[u8]>,
+        stderr: Option<&[u8]>,
+        command_line: &[String],
+        start_millis: i64,
+        end_millis: i64,
+        failure_detail: Option<&zel_proto::failure_details::FailureDetail>,
+    ) -> BuildEventNode {
         let mut a = Msg::new("build_event_stream.ActionExecuted");
         a.set_bool("success", success);
         a.set_str("type", mnemonic);
@@ -1536,6 +1597,13 @@ impl BepBuilder {
                 file.set_str("name", f);
                 file.set_bytes("contents", b.to_vec());
                 a.set_msg(f, file);
+            }
+        }
+        if success {
+            if let Some(p) = primary_output_path.filter(|p| !p.is_empty()) {
+                let mut po = a.new_child("primary_output");
+                po.set_str("uri", file_uri(p));
+                a.set_msg("primary_output", po);
             }
         }
         for c in command_line {
@@ -2915,5 +2983,200 @@ mod tests {
             assert!(as_local.contains("file:///tmp/test.log"), "{as_local}");
             assert!(!as_local.contains("bytestream://"), "{as_local}");
         }
+    }
+
+    #[test]
+    fn bep_bytestream_hashes_local_files_and_omits_uri_without_digest() {
+        let dir = std::env::temp_dir().join(format!("zel-bep-bs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let primary_path = dir.join("out bin.txt");
+        let test_log_path = dir.join("test.log");
+        let fail_log_path = dir.join("fail.log");
+        let tool_log_path = dir.join("command.profile.gz");
+        std::fs::write(&primary_path, b"primary-bytes").unwrap();
+        std::fs::write(&test_log_path, b"passed-log").unwrap();
+        std::fs::write(&fail_log_path, b"failed-log").unwrap();
+        std::fs::write(&tool_log_path, b"profile-bytes").unwrap();
+
+        let expected_uri = |content: &[u8]| -> String {
+            format!(
+                "bytestream://cas.example.com:9092/inst/blobs/{}/{}",
+                zel_util::sha256::hex_digest(content),
+                content.len()
+            )
+        };
+        let prefix = Some("cas.example.com:9092/inst");
+
+        // 1. ActionExecuted built via `action_executed_with_primary_output_path` (no pre-set digest)
+        let ae_proto = BepBuilder::action_executed_with_primary_output_path(
+            "bazel-out/out bin.txt",
+            Some(primary_path.to_str().unwrap()),
+            "//pkg:gen",
+            "cfg",
+            "Genrule",
+            true,
+            0,
+            Some(b"inline-stdout"),
+            None,
+            &["/bin/sh".into()],
+            1000,
+            1010,
+            None,
+        )
+        .to_proto(false);
+        let ae_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &ae_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            ae_json.contains(&expected_uri(b"primary-bytes")),
+            "{ae_json}"
+        );
+        assert!(!ae_json.contains("file://"), "{ae_json}");
+
+        // 2. TestResult built via `BepBuilder::test_result` (calls `BepBuilder::file` with None digest)
+        let tr_proto = BepBuilder::test_result(
+            "//pkg:t",
+            "cfg",
+            0,
+            0,
+            1,
+            "PASSED",
+            false,
+            1000,
+            25,
+            &[(
+                "test.log".to_string(),
+                file_uri(test_log_path.to_str().unwrap()),
+            )],
+            "local",
+            0,
+        )
+        .to_proto(false);
+        let tr_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &tr_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(tr_json.contains(&expected_uri(b"passed-log")), "{tr_json}");
+        assert!(!tr_json.contains("file://"), "{tr_json}");
+
+        // 3. TestSummary built via `BepBuilder::test_summary` (`passed` and `failed` logs)
+        let ts_proto = BepBuilder::test_summary(
+            "//pkg:t",
+            "cfg",
+            "FLAKY",
+            1,
+            0,
+            2,
+            &[(
+                "test.log".to_string(),
+                test_log_path.to_string_lossy().into_owned(),
+            )],
+            &[(
+                "fail.log".to_string(),
+                fail_log_path.to_string_lossy().into_owned(),
+            )],
+            0,
+            1000,
+            1050,
+            50,
+            vec![],
+        )
+        .to_proto(false);
+        let ts_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &ts_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(ts_json.contains(&expected_uri(b"passed-log")), "{ts_json}");
+        assert!(ts_json.contains(&expected_uri(b"failed-log")), "{ts_json}");
+        assert!(!ts_json.contains("file://"), "{ts_json}");
+
+        // 4. BuildToolLogs built via `BepBuilder::build_tool_logs` and `build_tool_logs_entries`
+        let btl_proto = BepBuilder::build_tool_logs(&[(
+            "command.profile.gz".to_string(),
+            tool_log_path.to_string_lossy().into_owned(),
+        )])
+        .to_proto(true);
+        let btl_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &btl_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            btl_json.contains(&expected_uri(b"profile-bytes")),
+            "{btl_json}"
+        );
+        assert!(!btl_json.contains("file://"), "{btl_json}");
+
+        let btl_entries_proto = BepBuilder::build_tool_logs_entries(&[
+            BepLogFile::LocalPath {
+                name: "command.profile.gz".to_string(),
+                path: tool_log_path.to_string_lossy().into_owned(),
+            },
+            BepLogFile::Contents {
+                name: "inline.txt".to_string(),
+                contents: b"abc".to_vec(),
+            },
+        ])
+        .to_proto(true);
+        let btl_entries_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &btl_entries_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            btl_entries_json.contains(&expected_uri(b"profile-bytes")),
+            "{btl_entries_json}"
+        );
+        assert!(!btl_entries_json.contains("file://"), "{btl_entries_json}");
+
+        // 5. Missing / unhashed local file with no digest: `ByteStreamBuildEventArtifactUploader`
+        //    `PathConverter.apply` returns `null`, so `uri` is omitted instead of keeping `file://`.
+        let missing_path = dir.join("does_not_exist.txt");
+        let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
+        ns.set_msg(
+            "files",
+            BepBuilder::file(
+                "does_not_exist.txt",
+                missing_path.to_str().unwrap(),
+                &[],
+                None,
+                None,
+            ),
+        );
+        let missing_proto =
+            BuildEventNode::new(ids::named_set("m"), vec![], "named_set_of_files", ns)
+                .to_proto(false);
+        let missing_json = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &missing_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            missing_json.contains("\"name\":\"does_not_exist.txt\""),
+            "{missing_json}"
+        );
+        assert!(!missing_json.contains("file://"), "{missing_json}");
+        assert!(!missing_json.contains("bytestream://"), "{missing_json}");
+        assert!(!missing_json.contains("\"uri\""), "{missing_json}");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

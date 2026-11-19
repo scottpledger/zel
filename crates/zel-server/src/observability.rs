@@ -207,6 +207,7 @@ struct ActionObserver {
     bep: bool,
     publish_all: bool,
     config_id: std::sync::Mutex<String>,
+    execroot: std::sync::Mutex<String>,
     exec_log: Option<ExecutionLogWriter>,
     include_label: bool,
     /// Finished action spans for `action count` counters, `BuildMetrics`, and critical path.
@@ -271,6 +272,25 @@ impl ActionListener for ActionObserver {
         });
         if self.bep && (!r.success || self.publish_all) {
             let cfg = self.config_id.lock().unwrap().clone();
+            let po_path = if r.success {
+                let er = self.execroot.lock().unwrap().clone();
+                let rel = a
+                    .outputs
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(a.id.as_str());
+                if !er.is_empty() && !rel.is_empty() {
+                    let candidate = format!("{er}/{rel}");
+                    std::fs::metadata(&candidate)
+                        .ok()
+                        .filter(|m| m.is_file())
+                        .map(|_| candidate)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             let fd = (!r.success).then(|| {
                 FailureDetail::new(
                     r.error.clone().unwrap_or_else(|| {
@@ -282,8 +302,9 @@ impl ActionListener for ActionObserver {
                     }),
                 )
             });
-            reporter.post_bep_node(BepBuilder::action_executed(
+            reporter.post_bep_node(BepBuilder::action_executed_with_primary_output_path(
                 &a.id,
+                po_path.as_deref(),
                 &a.owner,
                 &cfg,
                 &a.mnemonic,
@@ -491,6 +512,7 @@ impl BuildObserver {
             bep: bep_enabled,
             publish_all: bep_opts.publish_all_actions,
             config_id: std::sync::Mutex::new("none".to_string()),
+            execroot: std::sync::Mutex::new(String::new()),
             exec_log,
             include_label: false,
             spans: Default::default(),
@@ -727,6 +749,7 @@ impl BuildObserver {
         let cfg_id = bep_config_id(&self.command, cpu, mode);
         self.reporter.set_default_config_id(&cfg_id);
         *self.actions.config_id.lock().unwrap() = cfg_id.clone();
+        *self.actions.execroot.lock().unwrap() = execroot.to_string();
         let root_labels: Vec<String> = configured
             .iter()
             .map(|c| c.label.canonical_form())
@@ -853,18 +876,12 @@ impl BuildObserver {
                                 BepBuilder::file_without_uri(&rest, &prefix)
                             } else {
                                 let full_path = format!("{execroot}/{p}");
-                                let (len, dig) =
-                                    if self.bep_opts.remote_bytestream_uri_prefix.is_some() {
-                                        match std::fs::read(&full_path) {
-                                            Ok(bytes) => (
-                                                Some(bytes.len() as i64),
-                                                Some(zel_util::sha256::hex_digest(&bytes)),
-                                            ),
-                                            Err(_) => (None, None),
-                                        }
-                                    } else {
-                                        (None, None)
-                                    };
+                                let (len, dig) = match zel_util::sha256::hash_file(
+                                    std::path::Path::new(&full_path),
+                                ) {
+                                    Ok((bytes_len, hex)) => (Some(bytes_len as i64), Some(hex)),
+                                    Err(_) => (None, None),
+                                };
                                 BepBuilder::file(&rest, &full_path, &prefix, len, dig.as_deref())
                             }
                         })
@@ -1775,7 +1792,8 @@ mod tests {
             "{json}"
         );
         assert!(
-            json.contains("\"action\":{\"success\":true,\"type\":\"Genrule\""),
+            json.contains("\"action\":{\"success\":true,\"primaryOutput\":{\"uri\":\"file://")
+                && json.contains("\"type\":\"Genrule\""),
             "{json}"
         );
         // Execution logs: JSON lines and a zstd-framed compact log.
@@ -1847,6 +1865,116 @@ mod tests {
             bad.contains("\"spawn\":{\"code\":\"NON_ZERO_EXIT\"}"),
             "{bad}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bep_bytestream_end_to_end_build_and_test() {
+        let root = std::env::temp_dir().join(format!("zel-obs-bs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let ws = root.join("ws");
+        std::fs::create_dir_all(ws.join("p")).unwrap();
+        std::fs::write(ws.join("MODULE.bazel"), "module(name = \"w\")\n").unwrap();
+        std::fs::write(
+            ws.join("p/defs.bzl"),
+            concat!(
+                "def _t_impl(ctx):\n",
+                "    exe = ctx.actions.declare_file(ctx.label.name + '.sh')\n",
+                "    ctx.actions.write(exe, '#!/bin/sh\\necho test-run-ok\\nexit 0\\n', is_executable = True)\n",
+                "    return [DefaultInfo(executable = exe)]\n",
+                "my_test = rule(implementation = _t_impl, test = True)\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            ws.join("p/BUILD"),
+            concat!(
+                "load('//p:defs.bzl', 'my_test')\n",
+                "genrule(name='out', outs=['out.txt'], cmd='printf gen-payload > $@')\n",
+                "my_test(name='ok_test')\n",
+            ),
+        )
+        .unwrap();
+
+        let rt = runtime(&root, &ws);
+        let r = |n: &str| root.join(n).to_str().unwrap().to_string();
+
+        // 1. Even without a remote prefix, `NamedSetOfFiles` populates `digest` and `length`
+        //    (`TargetCompleteEvent.newFile`).
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "build",
+                &format!("--build_event_json_file={}", r("local_bep.json")),
+                "//p:out",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let local_bep = std::fs::read_to_string(root.join("local_bep.json")).unwrap();
+        let expected_hash = zel_util::sha256::hex_digest(b"gen-payload");
+        assert!(
+            local_bep.contains(&format!("\"digest\":\"{expected_hash}\"")),
+            "{local_bep}"
+        );
+        assert!(local_bep.contains("\"length\":\"11\""), "{local_bep}");
+
+        // 2. With `--remote_bytestream_uri_prefix`, `NamedSetOfFiles`, `ActionExecuted`,
+        //    `TestResult`, and `TestSummary` all emit `bytestream://` URIs and zero `file://` URIs.
+        let (code, err, _) = run(
+            &rt,
+            &[
+                "test",
+                "--nocache_test_results",
+                "--build_event_publish_all_actions",
+                "--remote_bytestream_uri_prefix=cas.example.com:9092/main",
+                &format!("--build_event_json_file={}", r("remote_bep.json")),
+                "//p:out",
+                "//p:ok_test",
+            ],
+        );
+        assert_eq!(code, 0, "{err}");
+        let remote_bep = std::fs::read_to_string(root.join("remote_bep.json")).unwrap();
+        assert!(
+            remote_bep.contains(&format!(
+                "bytestream://cas.example.com:9092/main/blobs/{expected_hash}/11"
+            )),
+            "{remote_bep}"
+        );
+        assert!(!remote_bep.contains("file://"), "{remote_bep}");
+        let mut saw_action_bs = false;
+        let mut saw_test_result_bs = false;
+        let mut saw_test_summary_bs = false;
+        for line in remote_bep.lines() {
+            if line.contains("\"action\":{") && line.contains("\"type\":\"Genrule\"") {
+                saw_action_bs |= line.contains(
+                    &format!(
+                        "\"primaryOutput\":{{\"uri\":\"bytestream://cas.example.com:9092/main/blobs/{expected_hash}/11\"}}"
+                    ),
+                );
+            }
+            if line.contains("\"testResult\":{") {
+                saw_test_result_bs |=
+                    line.contains("bytestream://cas.example.com:9092/main/blobs/");
+            }
+            if line.contains("\"testSummary\":{") {
+                saw_test_summary_bs |=
+                    line.contains("bytestream://cas.example.com:9092/main/blobs/");
+            }
+        }
+        assert!(
+            saw_action_bs,
+            "ActionExecuted missing bytestream primaryOutput: {remote_bep}"
+        );
+        assert!(
+            saw_test_result_bs,
+            "TestResult missing bytestream testActionOutput: {remote_bep}"
+        );
+        assert!(
+            saw_test_summary_bs,
+            "TestSummary missing bytestream log: {remote_bep}"
+        );
+
         let _ = std::fs::remove_dir_all(&root);
     }
 }

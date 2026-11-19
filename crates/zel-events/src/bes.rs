@@ -52,6 +52,7 @@ pub struct BesConfig {
     pub build_id: String,
     pub invocation_id: String,
     pub command_name: String,
+    pub remote_bytestream_uri_prefix: Option<String>,
 }
 
 impl BesConfig {
@@ -76,6 +77,7 @@ impl BesConfig {
             build_id: build_id.to_string(),
             invocation_id: invocation_id.to_string(),
             command_name: command.to_string(),
+            remote_bytestream_uri_prefix: o.remote_bytestream_uri_prefix.clone(),
         })
     }
 
@@ -388,12 +390,17 @@ impl BuildEventTransport for BesTransport {
     }
 
     fn send(&self, event: &Msg) {
+        let converted = crate::bep::apply_file_path_conversion(
+            event,
+            true,
+            self.cfg.remote_bytestream_uri_prefix.as_deref(),
+        );
         let mut q = self.shared.q.lock().unwrap();
         if q.closed {
             return;
         }
         let seq = q.requests.len() as i64 + 1;
-        let req = stream_request(&self.cfg, seq, Some(event)).encode_to_vec();
+        let req = stream_request(&self.cfg, seq, Some(&converted)).encode_to_vec();
         q.requests.push(req);
         *self.started.lock().unwrap() = true;
         self.shared.cv.notify_all();
