@@ -129,6 +129,7 @@ fn make_writable_tree(p: &Path) {
             }
         }
         #[cfg(not(unix))]
+        #[allow(clippy::permissions_set_readonly_false)]
         {
             let mut perms = md.permissions();
             if perms.readonly() {

@@ -335,8 +335,7 @@ pub fn ensure_output_base_layout(
         // tools there); keep the link from dangling so tools can be installed into it.
         let _ = std::fs::create_dir_all(ib);
         let link = output_base.join("install");
-        let cur = std::fs::read_link(&link).ok();
-        if cur.as_deref() != Some(ib) {
+        if !zel_vfs::junction_or_symlink_points_to(&link, ib) {
             #[cfg(windows)]
             let _ = std::fs::remove_dir(&link).or_else(|_| std::fs::remove_file(&link));
             #[cfg(not(windows))]
@@ -604,9 +603,41 @@ mod tests {
         for d in ["execroot", "external", "server", "action_cache"] {
             assert!(ob.join(d).is_dir(), "{d}");
         }
+        let install_link = ob.join("install");
+        assert!(zel_vfs::junction_or_symlink_points_to(&install_link, &ib));
         #[cfg(unix)]
-        assert_eq!(std::fs::read_link(ob.join("install")).unwrap(), ib);
+        {
+            use std::os::unix::fs::PermissionsExt;
+            // Making `ob` read-only proves a repeat `ensure_output_base_layout` with the same
+            // `install_base` leaves `ob/install` untouched rather than unlinking & recreating it.
+            std::fs::set_permissions(&ob, std::fs::Permissions::from_mode(0o555)).unwrap();
+            ensure_output_base_layout(&ob, Some(&ib)).unwrap();
+            std::fs::set_permissions(&ob, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(not(unix))]
+        {
+            let created_before = std::fs::symlink_metadata(&install_link)
+                .unwrap()
+                .created()
+                .ok();
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            ensure_output_base_layout(&ob, Some(&ib)).unwrap();
+            let created_after = std::fs::symlink_metadata(&install_link)
+                .unwrap()
+                .created()
+                .ok();
+            if let (Some(b), Some(a)) = (created_before, created_after) {
+                assert_eq!(b, a, "matching install junction must not be recreated");
+            }
+        }
+        // Changing `install_base` replaces the stale `install` link/junction.
+        let ib2 = root.join("install_base_v2");
+        std::fs::create_dir_all(&ib2).unwrap();
+        ensure_output_base_layout(&ob, Some(&ib2)).unwrap();
+        assert!(zel_vfs::junction_or_symlink_points_to(&install_link, &ib2));
+        assert!(!zel_vfs::junction_or_symlink_points_to(&install_link, &ib));
         ensure_output_base_layout(&ob, Some(&ib)).unwrap();
+        assert!(zel_vfs::junction_or_symlink_points_to(&install_link, &ib));
         write_command_log(&ob, b"out\n", b"err\n").unwrap();
         assert_eq!(
             std::fs::read_to_string(ob.join("command.log")).unwrap(),

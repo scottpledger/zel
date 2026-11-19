@@ -179,6 +179,7 @@ pub fn set_executable_mode(path: &Path) -> io::Result<()> {
         std::fs::set_permissions(path, perms)?;
     }
     #[cfg(not(unix))]
+    #[allow(clippy::permissions_set_readonly_false)]
     {
         let mut perms = md.permissions();
         if perms.readonly() {
@@ -637,7 +638,8 @@ pub fn sync_symlink_tree(
 
     fn ensure_symlink(link: &Path, target: &PathFragment) -> io::Result<()> {
         if let Ok(existing) = std::fs::read_link(link) {
-            let existing_frag = PathFragment::create(&existing.to_string_lossy());
+            let raw = existing.to_string_lossy();
+            let existing_frag = PathFragment::create(zel_vfs::strip_windows_nt_prefix(&raw));
             let target_frag = PathFragment::create(target.path_string());
             if existing_frag == target_frag {
                 return Ok(());

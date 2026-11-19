@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 use zel_options::StartupOptions;
 use zel_proto::command_server::{
     CancelRequest, PingRequest, PingResponse, RunRequest, RunResponse, ServerInfo,
+    TerminalSizeRequest, TerminalSizeResponse,
 };
 use zel_remote::grpc::{CallOptions, Channel, GrpcStatus};
 use zel_remote::transport::TcpConnector;
@@ -354,11 +355,6 @@ fn current_tty() -> Option<String> {
             Some(s)
         }
     }
-}
-
-#[cfg(not(unix))]
-fn current_tty() -> Option<String> {
-    None
 }
 
 fn read_lock_owner(file: &mut File) -> String {
@@ -803,6 +799,42 @@ pub fn ping(info: &ServerInfo, timeout: Duration) -> bool {
     }
 }
 
+/// `UpdateTerminalSize` RPC: forwards updated `(columns, rows)` for an in-flight `command_id`.
+pub fn update_terminal_size(
+    info: &ServerInfo,
+    command_id: &str,
+    columns: i32,
+    rows: i32,
+    timeout: Duration,
+) -> Result<TerminalSizeResponse, GrpcStatus> {
+    let Some(ch) = channel_for(&info.address, timeout) else {
+        return Err(GrpcStatus {
+            code: 14,
+            message: "failed to connect to server".into(),
+        });
+    };
+    let req = TerminalSizeRequest {
+        cookie: info.request_cookie.clone(),
+        command_id: command_id.to_string(),
+        columns,
+        rows,
+    };
+    let r = ch.unary(
+        &format!("{SERVICE}UpdateTerminalSize"),
+        &req.encode_to_vec(),
+        &CallOptions {
+            timeout: Some(timeout),
+            ..Default::default()
+        },
+    );
+    ch.close();
+    let bytes = r?;
+    TerminalSizeResponse::decode(&bytes).map_err(|e| GrpcStatus {
+        code: 13,
+        message: e.to_string(),
+    })
+}
+
 const POST_SHUTDOWN_GRACE_SECS: u64 = 60;
 const POST_KILL_GRACE_SECS: u64 = 10;
 
@@ -949,7 +981,7 @@ pub fn ensure_correct_running_version(
         .map(|t| paths_equivalent(&t, ib))
         .unwrap_or(false);
     #[cfg(windows)]
-    let link_ok = link.exists() && paths_equivalent(&link, ib);
+    let link_ok = zel_vfs::junction_or_symlink_points_to(&link, ib);
     #[cfg(all(not(unix), not(windows)))]
     let link_ok = {
         let _ = &link;
@@ -1346,6 +1378,7 @@ pub fn run_command(
     let sigint_base = sys::SIGINT_COUNT.load(Ordering::SeqCst);
     let sigterm_base = sys::SIGTERM_COUNT.load(Ordering::SeqCst);
     let sigquit_base = sys::SIGQUIT_COUNT.load(Ordering::SeqCst);
+    let sigwinch_base = sys::SIGWINCH_COUNT.load(Ordering::SeqCst);
     let command_id = Arc::new(Mutex::new(String::new()));
     CANCEL_WATCH_STOP.store(false, Ordering::SeqCst);
     let watcher = {
@@ -1355,6 +1388,7 @@ pub fn run_command(
             let mut cancelled = false;
             let mut announced = false;
             let mut forwarded_sigquit = 0usize;
+            let mut forwarded_sigwinch = 0usize;
             while !CANCEL_WATCH_STOP.load(Ordering::SeqCst) {
                 let sigint_n = sys::SIGINT_COUNT
                     .load(Ordering::SeqCst)
@@ -1365,10 +1399,29 @@ pub fn run_command(
                 let sigquit_n = sys::SIGQUIT_COUNT
                     .load(Ordering::SeqCst)
                     .saturating_sub(sigquit_base);
+                let sigwinch_n = sys::SIGWINCH_COUNT
+                    .load(Ordering::SeqCst)
+                    .saturating_sub(sigwinch_base);
 
                 if sigquit_n > forwarded_sigquit {
                     forwarded_sigquit = sigquit_n;
                     sys::send_signal(info.pid, sys::SIGQUIT);
+                }
+
+                if sigwinch_n > forwarded_sigwinch {
+                    let cid = id.lock().unwrap().clone();
+                    if !cid.is_empty() {
+                        forwarded_sigwinch = sigwinch_n;
+                        let fd = if sys::is_tty(2) { 2 } else { 1 };
+                        let (cols, rows) = sys::terminal_size(fd);
+                        let _ = update_terminal_size(
+                            &info,
+                            &cid,
+                            cols as i32,
+                            rows as i32,
+                            Duration::from_secs(5),
+                        );
+                    }
                 }
 
                 if sigint_n >= 3 {

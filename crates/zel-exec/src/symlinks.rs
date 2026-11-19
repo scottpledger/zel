@@ -127,24 +127,7 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
         let _ = std::fs::create_dir_all(target);
         if let Ok(m) = &existing {
             if m.file_type().is_symlink() {
-                if std::fs::read_link(lp)
-                    .map(|t| {
-                        #[cfg(windows)]
-                        {
-                            let ts = t.to_string_lossy();
-                            let stripped = ts
-                                .strip_prefix(r"\??\")
-                                .or_else(|| ts.strip_prefix(r"\\?\"))
-                                .unwrap_or(&ts);
-                            Path::new(stripped) == Path::new(target)
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            t == Path::new(target)
-                        }
-                    })
-                    .unwrap_or(false)
-                {
+                if zel_vfs::junction_or_symlink_points_to(lp, Path::new(target)) {
                     continue;
                 }
                 #[cfg(windows)]

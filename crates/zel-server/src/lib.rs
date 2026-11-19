@@ -189,6 +189,15 @@ pub(crate) fn command_elapsed_secs() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// Snapshot of the latest `UpdateTerminalSize` RPC handled by the daemon.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TerminalSizeUpdate {
+    pub command_id: String,
+    pub columns: usize,
+    pub rows: usize,
+    pub ui_width: Option<usize>,
+}
+
 pub struct BlazeRuntime {
     pub dirs: BlazeDirectories,
     pub fs: Arc<dyn FileSystem>,
@@ -216,6 +225,8 @@ pub struct BlazeRuntime {
     /// The previous analysis' top-level `BuildOptions` (`SkyframeBuildView.originalConfigurationOptions`)
     /// and whether it asked to discard the analysis cache (`skyframeAnalysisWasDiscarded`).
     pub last_build_options: Mutex<Option<analysis_phase::AnalysisCacheState>>,
+    /// Most recent `UpdateTerminalSize` applied by the daemon.
+    pub last_terminal_size: Mutex<Option<TerminalSizeUpdate>>,
     /// Skyframe's in-memory action nodes: the configuration fingerprint of the last execution
     /// phase and the outputs of the actions that completed under it (such actions are not
     /// re-evaluated, so they do not count in the `INFO: N processes` summary).
@@ -272,6 +283,7 @@ impl BlazeRuntime {
             client_env: Mutex::new(Arc::new(BTreeMap::new())),
             last_resolver: Mutex::new(None),
             last_build_options: Mutex::new(None),
+            last_terminal_size: Mutex::new(None),
             eval_memo: Mutex::new((String::new(), Default::default(), false)),
         }
     }

@@ -2280,6 +2280,11 @@ impl UiEventHandler {
         self.s.out.err(&t.buf);
     }
 
+    /// Current terminal width in columns (for tests and resize inspection).
+    pub fn terminal_width(&self) -> usize {
+        self.s.state.lock().unwrap().terminal_width
+    }
+
     /// Current plain-text progress bar (for tests and `--progress_in_terminal_title`).
     pub fn progress_text(&self, short: bool) -> String {
         let mut st = self.s.state.lock().unwrap();

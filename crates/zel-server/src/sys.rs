@@ -150,7 +150,7 @@ extern "system" fn console_ctrl_handler(ctrl_type: u32) -> i32 {
     }
 }
 
-/// Unblocks `SIGINT`, `SIGTERM`, `SIGQUIT`, and `SIGPIPE` in the current thread's signal mask.
+/// Unblocks `SIGINT`, `SIGTERM`, `SIGQUIT`, `SIGPIPE`, and `SIGWINCH` in the current thread's signal mask.
 pub fn unblock_client_signals() {
     #[cfg(unix)]
     unsafe {
@@ -160,7 +160,7 @@ pub fn unblock_client_signals() {
         const SIG_UNBLOCK: i32 = 1;
         let mut set: SigSet = std::mem::zeroed();
         sigemptyset(&mut set);
-        for s in [SIGINT, SIGTERM, SIGQUIT, SIGPIPE] {
+        for s in [SIGINT, SIGTERM, SIGQUIT, SIGPIPE, SIGWINCH] {
             sigaddset(&mut set, s);
         }
         sigprocmask(SIG_UNBLOCK, &set, std::ptr::null_mut());
@@ -474,10 +474,14 @@ pub fn is_tty(fd: i32) -> bool {
     }
 }
 
-/// Terminal width of `fd` (TIOCGWINSZ), falling back to `$COLUMNS`, then 80.
-pub fn terminal_columns(fd: i32) -> usize {
+/// Terminal `(columns, rows)` of `fd` (`TIOCGWINSZ`), falling back to `$COLUMNS`/`$LINES`, then `(80, 24)`.
+pub fn terminal_size(fd: i32) -> (usize, usize) {
     #[cfg(not(unix))]
     let _ = fd;
+    #[allow(unused_mut)]
+    let mut cols: Option<usize> = None;
+    #[allow(unused_mut)]
+    let mut rows: Option<usize> = None;
     #[cfg(unix)]
     {
         #[repr(C)]
@@ -494,15 +498,37 @@ pub fn terminal_columns(fd: i32) -> usize {
         const TIOCGWINSZ: u64 = 0x5413;
         let mut ws = Winsize::default();
         let rc = unsafe { ioctl(fd, TIOCGWINSZ, &mut ws as *mut Winsize) };
-        if rc == 0 && ws.col > 0 {
-            return ws.col as usize;
+        if rc == 0 {
+            if ws.col > 0 {
+                cols = Some(ws.col as usize);
+            }
+            if ws.row > 0 {
+                rows = Some(ws.row as usize);
+            }
         }
     }
-    std::env::var("COLUMNS")
-        .ok()
-        .and_then(|c| c.parse().ok())
-        .filter(|c| *c > 0)
-        .unwrap_or(80)
+    let cols = cols
+        .or_else(|| {
+            std::env::var("COLUMNS")
+                .ok()
+                .and_then(|c| c.parse().ok())
+                .filter(|&c| c > 0)
+        })
+        .unwrap_or(80);
+    let rows = rows
+        .or_else(|| {
+            std::env::var("LINES")
+                .ok()
+                .and_then(|r| r.parse().ok())
+                .filter(|&r| r > 0)
+        })
+        .unwrap_or(24);
+    (cols, rows)
+}
+
+/// Terminal width of `fd` (`TIOCGWINSZ`), falling back to `$COLUMNS`, then 80.
+pub fn terminal_columns(fd: i32) -> usize {
+    terminal_size(fd).0
 }
 
 #[cfg(unix)]

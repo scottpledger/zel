@@ -863,10 +863,9 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     // `blaze_util::MakeCanonical(output_base.c_str())` after `PrepareDirectories`.
     let output_base = std::fs::canonicalize(raw_output_base.path_string())
         .map(|c| {
-            let s = c.to_string_lossy();
-            #[cfg(windows)]
-            let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-            PathFragment::create(&s)
+            let raw = c.to_string_lossy();
+            let s: &str = zel_vfs::strip_windows_nt_prefix(&raw);
+            PathFragment::create(s)
         })
         .unwrap_or(raw_output_base);
 

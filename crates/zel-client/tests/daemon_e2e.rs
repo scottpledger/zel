@@ -391,6 +391,26 @@ fn missing_or_stale_install_symlink_restarts_server_and_batch_kills_daemon() {
             assert_eq!(unsafe { flock(lock.as_raw_fd(), 8) }, 0);
         }
     }
+    #[cfg(windows)]
+    {
+        let install_link = e.ob.join("install");
+        assert!(
+            zel_vfs::junction_or_symlink_points_to(&install_link, &e.root.join("install")),
+            "install junction must point to install_base"
+        );
+        fs::remove_dir(&install_link)
+            .or_else(|_| fs::remove_file(&install_link))
+            .unwrap();
+        let o2 = e.run(&[], &["version"]);
+        assert_eq!(o2.status.code(), Some(0), "{}", s(&o2.stderr));
+        let pid2 = e.pid().expect("new daemon pid");
+        assert_ne!(pid2, _pid1, "missing install junction must restart server");
+        assert!(
+            zel_vfs::junction_or_symlink_points_to(&install_link, &e.root.join("install")),
+            "install junction must be recreated"
+        );
+        assert!(wait_dead(_pid1, 10));
+    }
     let pid_before_batch = e.pid().expect("daemon pid before batch");
 
     // --batch kills any running daemon on this output_base.
@@ -423,4 +443,209 @@ fn missing_or_stale_install_symlink_restarts_server_and_batch_kills_daemon() {
         "{}",
         s(&es_running.stderr)
     );
+}
+
+#[test]
+fn update_terminal_size_rpc_validates_cookie_and_returns_response_cookie() {
+    use zel_client::daemon_client::update_terminal_size;
+    use zel_proto::command_server::ServerInfo;
+
+    let e = Env::new("term-size-rpc");
+    let o = e.run(&[], &["version"]);
+    assert_eq!(o.status.code(), Some(0), "{}", s(&o.stderr));
+
+    let raw = fs::read(e.ob.join("server/server_info.rawproto")).unwrap();
+    let info = ServerInfo::decode(&raw).unwrap();
+
+    let mut bad_info = info.clone();
+    bad_info.request_cookie = "wrong-cookie".to_string();
+    let err = update_terminal_size(&bad_info, "1-1", 120, 40, Duration::from_secs(5))
+        .expect_err("mismatched cookie must fail");
+    assert_eq!(err.code, 7, "{err:?}");
+
+    let ok = update_terminal_size(&info, "1-1", 120, 40, Duration::from_secs(5))
+        .expect("valid cookie must succeed");
+    assert_eq!(ok.cookie, info.response_cookie);
+}
+
+#[cfg(unix)]
+#[test]
+fn sigwinch_forwards_terminal_size_to_running_daemon_command() {
+    use std::net::TcpListener;
+    use std::sync::Arc;
+    use zel_client::daemon_client::run_command;
+    use zel_proto::command_server::{RunRequest, ServerInfo};
+    use zel_server::create_default_runtime;
+    use zel_server::daemon::{serve_grpc, DaemonConfig};
+    use zel_vfs::PathFragment;
+
+    let root = std::env::temp_dir().join(format!("zel-sigwinch-e2e-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let ws = root.join("ws");
+    let ob = root.join("ob");
+    let ib = root.join("ib");
+    let our = root.join("our");
+    fs::create_dir_all(ws.join("pkg")).unwrap();
+    fs::create_dir_all(&ib).unwrap();
+    fs::write(ws.join("WORKSPACE"), "workspace(name = \"sigwinch_ws\")\n").unwrap();
+
+    let started_marker = root.join("action_started");
+    let release_gate = root.join("release_gate");
+    fs::write(
+        ws.join("pkg/BUILD"),
+        format!(
+            "genrule(\n    name = \"wait_gate\",\n    outs = [\"out.txt\"],\n    cmd = \"echo 1 > '{started}'; while [ ! -f '{gate}' ]; do sleep 0.05; done; echo ok > $@\",\n    local = True,\n)\n",
+            started = started_marker.display(),
+            gate = release_gate.display(),
+        ),
+    )
+    .unwrap();
+
+    let rt = create_default_runtime(
+        PathFragment::create(&ws.to_string_lossy()),
+        PathFragment::create(&ob.to_string_lossy()),
+        PathFragment::create(&ib.to_string_lossy()),
+        PathFragment::create(&our.to_string_lossy()),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap().to_string();
+    let req_cookie = "req-cookie-sigwinch".to_string();
+    let resp_cookie = "resp-cookie-sigwinch".to_string();
+
+    let rt_srv = Arc::clone(&rt);
+    let req_c = req_cookie.clone();
+    let resp_c = resp_cookie.clone();
+    let srv_thread = std::thread::spawn(move || {
+        serve_grpc(
+            listener,
+            rt_srv,
+            DaemonConfig {
+                request_cookie: req_c,
+                response_cookie: resp_c,
+                max_idle_secs: 0,
+                shutdown_on_low_sys_mem: false,
+                idle_server_tasks: false,
+            },
+        )
+    });
+
+    let prev_cols = std::env::var("COLUMNS").ok();
+    let prev_lines = std::env::var("LINES").ok();
+    std::env::set_var("COLUMNS", "137");
+    std::env::set_var("LINES", "49");
+    let fd = if zel_server::sys::is_tty(2) { 2 } else { 1 };
+    let (expected_cols, expected_rows) = zel_server::sys::terminal_size(fd);
+
+    let info = ServerInfo {
+        pid: std::process::id() as i32,
+        address: addr,
+        request_cookie: req_cookie,
+        response_cookie: resp_cookie,
+    };
+
+    let info_run = info.clone();
+    let client_thread = std::thread::spawn(move || {
+        let req = RunRequest {
+            arg: vec![
+                b"build".to_vec(),
+                b"--noenable_bzlmod".to_vec(),
+                b"--spawn_strategy=local".to_vec(),
+                b"--terminal_columns=61".to_vec(),
+                b"//pkg:wait_gate".to_vec(),
+            ],
+            block_for_lock: true,
+            client_description: format!("pid={}", std::process::id()),
+            ..Default::default()
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let outcome = run_command(
+            &info_run,
+            &req,
+            &mut out,
+            &mut err,
+            Duration::from_secs(5),
+            None,
+        );
+        (outcome, out, err)
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while !started_marker.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for genrule action to start"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    // Deliver a real OS SIGWINCH to this process while `run_command` is streaming `Run`.
+    assert!(zel_server::sys::send_signal(
+        std::process::id() as i32,
+        zel_server::sys::SIGWINCH
+    ));
+
+    let resize_deadline = Instant::now() + Duration::from_secs(5);
+    let recorded = loop {
+        if let Some(rec) = rt.last_terminal_size.lock().unwrap().clone() {
+            break rec;
+        }
+        assert!(
+            Instant::now() < resize_deadline,
+            "timed out waiting for SIGWINCH to forward UpdateTerminalSize to daemon"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    };
+
+    assert!(
+        !recorded.command_id.is_empty(),
+        "command_id must be non-empty"
+    );
+    assert_eq!(
+        recorded.columns, expected_cols,
+        "columns forwarded via UpdateTerminalSize"
+    );
+    assert_eq!(
+        recorded.rows, expected_rows,
+        "rows forwarded via UpdateTerminalSize"
+    );
+    assert_eq!(
+        recorded.ui_width,
+        Some(expected_cols),
+        "in-flight UiEventHandler width must update from 61 to {expected_cols}"
+    );
+
+    fs::write(&release_gate, b"go\n").unwrap();
+    let (outcome, _out, err) = client_thread.join().unwrap();
+    assert!(outcome.abrupt.is_none(), "{:?}", outcome.abrupt);
+    assert_eq!(outcome.response.exit_code, 0, "{}", s(&err));
+
+    // Shut down the in-process daemon cleanly.
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let shut_req = RunRequest {
+        arg: vec![b"shutdown".to_vec()],
+        block_for_lock: true,
+        client_description: "shutdown".into(),
+        ..Default::default()
+    };
+    let _ = run_command(
+        &info,
+        &shut_req,
+        &mut out,
+        &mut err,
+        Duration::from_secs(5),
+        None,
+    );
+    let _ = srv_thread.join();
+
+    match prev_cols {
+        Some(v) => std::env::set_var("COLUMNS", v),
+        None => std::env::remove_var("COLUMNS"),
+    }
+    match prev_lines {
+        Some(v) => std::env::set_var("LINES", v),
+        None => std::env::remove_var("LINES"),
+    }
+    let _ = fs::remove_dir_all(&root);
 }

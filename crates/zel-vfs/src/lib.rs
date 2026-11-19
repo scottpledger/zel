@@ -19,7 +19,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::fs;
 use std::io;
-#[cfg(unix)]
 use std::path::Path as StdPath;
 use std::path::PathBuf as StdPathBuf;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
@@ -1178,13 +1177,8 @@ impl FileSystem for LocalFileSystem {
 
     fn read_symbolic_link(&self, link_path: &PathFragment) -> io::Result<PathFragment> {
         let target = fs::read_link(Self::to_std_path(link_path))?;
-        let s = target.to_string_lossy();
-        #[cfg(windows)]
-        let s = s
-            .strip_prefix(r"\??\")
-            .or_else(|| s.strip_prefix(r"\\?\"))
-            .unwrap_or(&s);
-        Ok(PathFragment::create(&s))
+        let raw = target.to_string_lossy();
+        Ok(PathFragment::create(strip_windows_nt_prefix(&raw)))
     }
 
     fn chmod(&self, path: &PathFragment, mode: u32) -> io::Result<()> {
@@ -1232,6 +1226,77 @@ impl FileSystem for LocalFileSystem {
             ));
         }
         fs::hard_link(canon_orig, dst)
+    }
+}
+
+/// Strips Windows NT object (`\??\`) or extended-length (`\\?\`) prefixes returned by
+/// `std::fs::read_link` on NTFS directory junctions and symlinks.
+pub fn strip_windows_nt_prefix(raw: &str) -> &str {
+    raw.strip_prefix(r"\??\")
+        .or_else(|| raw.strip_prefix(r"\\?\"))
+        .unwrap_or(raw)
+}
+
+/// Compares a raw `read_link` target string against an expected path string, accounting for
+/// Windows `\??\` / `\\?\` junction prefixes, `/` vs `\` separators, trailing slashes, and
+/// case-insensitivity when `windows_semantics` is true (`CompareAbsolutePaths` parity).
+pub fn link_target_matches_str(
+    actual_link_target: &str,
+    expected_target: &str,
+    windows_semantics: bool,
+) -> bool {
+    if !windows_semantics {
+        return actual_link_target == expected_target;
+    }
+    let norm = |s: &str| -> String {
+        let mut stripped = strip_windows_nt_prefix(s).replace('\\', "/");
+        if stripped.len() >= 4 && stripped[..4].eq_ignore_ascii_case("unc/") {
+            stripped = format!("//{}", &stripped[4..]);
+        }
+        let trimmed = if stripped.len() > 3 && stripped.ends_with('/') {
+            stripped.trim_end_matches('/')
+        } else {
+            &stripped
+        };
+        trimmed.to_ascii_lowercase()
+    };
+    norm(actual_link_target) == norm(expected_target)
+}
+
+/// Returns `true` if `link` is a symlink or NTFS junction whose target matches `expected_target`.
+pub fn junction_or_symlink_points_to(link: &StdPath, expected_target: &StdPath) -> bool {
+    let Ok(actual) = fs::read_link(link) else {
+        return false;
+    };
+    #[cfg(not(windows))]
+    {
+        actual == expected_target
+    }
+    #[cfg(windows)]
+    {
+        let abs_expected = if expected_target.is_absolute() {
+            expected_target.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|cwd| cwd.join(expected_target))
+                .unwrap_or_else(|_| expected_target.to_path_buf())
+        };
+        let actual_s = actual.to_string_lossy();
+        if link_target_matches_str(&actual_s, &expected_target.to_string_lossy(), true)
+            || link_target_matches_str(&actual_s, &abs_expected.to_string_lossy(), true)
+        {
+            return true;
+        }
+        let actual_clean = StdPath::new(strip_windows_nt_prefix(&actual_s));
+        match (
+            fs::canonicalize(actual_clean),
+            fs::canonicalize(&abs_expected),
+        ) {
+            (Ok(ca), Ok(ce)) => {
+                link_target_matches_str(&ca.to_string_lossy(), &ce.to_string_lossy(), true)
+            }
+            _ => false,
+        }
     }
 }
 
@@ -2571,6 +2636,18 @@ mod tests {
         let dir_link = dir.join("dir_link");
         create_directory_junction_or_symlink(&dir.join("target_dir"), &dir_link).unwrap();
         assert_eq!(fs::read(dir_link.join("inside")).unwrap(), b"ok");
+        assert!(junction_or_symlink_points_to(
+            &dir_link,
+            &dir.join("target_dir")
+        ));
+        assert!(!junction_or_symlink_points_to(
+            &dir_link,
+            &dir.join("other_dir")
+        ));
+        assert!(!junction_or_symlink_points_to(
+            &dir.join("target_dir"),
+            &dir.join("target_dir")
+        ));
 
         #[cfg(unix)]
         {
@@ -2588,5 +2665,44 @@ mod tests {
         }
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn windows_nt_junction_prefix_and_link_target_matching() {
+        assert_eq!(
+            strip_windows_nt_prefix(r"\??\C:\Users\runner\install_base"),
+            r"C:\Users\runner\install_base"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix(r"\\?\C:\Users\runner\install_base"),
+            r"C:\Users\runner\install_base"
+        );
+        assert_eq!(strip_windows_nt_prefix("/tmp/install"), "/tmp/install");
+
+        assert!(link_target_matches_str(
+            r"\??\C:\Users\Runner\AppData\Local\zel\install\abc123",
+            r"C:\Users\Runner\AppData\Local\zel\install\abc123",
+            true,
+        ));
+        assert!(link_target_matches_str(
+            r"\\?\c:\users\runner\install\abc123\",
+            "C:/Users/Runner/install/abc123",
+            true,
+        ));
+        assert!(link_target_matches_str(
+            r"\??\UNC\fileserver\share\install",
+            r"\\fileserver\share\install\",
+            true,
+        ));
+        assert!(!link_target_matches_str(
+            r"\??\C:\Users\Runner\install\abc123",
+            r"C:\Users\Runner\install\def456",
+            true,
+        ));
+        assert!(!link_target_matches_str(
+            "/tmp/InstallBase",
+            "/tmp/installbase",
+            false,
+        ));
     }
 }
