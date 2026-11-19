@@ -3681,3 +3681,97 @@ filegroup(
         .unwrap();
     assert!(no_iface_fg.default_info.files.is_empty());
 }
+
+#[test]
+fn cc_internal_is_tree_artifact_analysis_time_parity() {
+    let ws = LocalWs::new(
+        "is-tree-artifact",
+        &[
+            (
+                "defs.bzl",
+                r#"
+ProbeInfo = provider(fields = ["is_tree", "is_reg"])
+
+def _ok_impl(ctx):
+    cc_internal = cc_common.internal_DO_NOT_USE()
+    tree_dir = ctx.actions.declare_directory(ctx.label.name + "_tree")
+    ctx.actions.run_shell(outputs = [tree_dir], command = "mkdir -p " + tree_dir.path)
+    reg_file = ctx.actions.declare_file(ctx.label.name + ".cc")
+    ctx.actions.write(output = reg_file, content = "")
+    return [
+        DefaultInfo(files = depset([tree_dir, reg_file])),
+        ProbeInfo(
+            is_tree = cc_internal.is_tree_artifact(tree_dir),
+            is_reg = cc_internal.is_tree_artifact(reg_file),
+        ),
+    ]
+
+probe_ok = rule(implementation = _ok_impl)
+
+def _bad_named_artifact_impl(ctx):
+    cc_internal = cc_common.internal_DO_NOT_USE()
+    tree_dir = ctx.actions.declare_directory(ctx.label.name + "_tree")
+    ctx.actions.run_shell(outputs = [tree_dir], command = "mkdir -p " + tree_dir.path)
+    cc_internal.is_tree_artifact(artifact = tree_dir)
+    return []
+
+probe_bad_named_artifact = rule(implementation = _bad_named_artifact_impl)
+
+def _bad_unknown_kw_impl(ctx):
+    cc_internal = cc_common.internal_DO_NOT_USE()
+    tree_dir = ctx.actions.declare_directory(ctx.label.name + "_tree")
+    ctx.actions.run_shell(outputs = [tree_dir], command = "mkdir -p " + tree_dir.path)
+    cc_internal.is_tree_artifact(file = tree_dir)
+    return []
+
+probe_bad_unknown_kw = rule(implementation = _bad_unknown_kw_impl)
+"#,
+            ),
+            (
+                "BUILD",
+                r#"
+load(":defs.bzl", "probe_ok", "probe_bad_named_artifact", "probe_bad_unknown_kw")
+
+probe_ok(name = "ok")
+probe_bad_named_artifact(name = "bad_named_artifact")
+probe_bad_unknown_kw(name = "bad_unknown_kw")
+"#,
+            ),
+        ],
+    );
+
+    let ok_ct = ws.analyze("//:ok").unwrap();
+    let zel_starlark::Value::ProviderInstance { fields, .. } =
+        &ok_ct.providers["//:defs.bzl%ProbeInfo"]
+    else {
+        panic!("expected ProbeInfo provider");
+    };
+    assert_eq!(
+        fields.get("is_tree"),
+        Some(&zel_starlark::Value::Bool(true))
+    );
+    assert_eq!(
+        fields.get("is_reg"),
+        Some(&zel_starlark::Value::Bool(false))
+    );
+
+    let err_named = ws
+        .analyze("//:bad_named_artifact")
+        .expect_err("named `artifact = ...` must be rejected as positional-only");
+    let msg_named = err_named.to_string();
+    assert!(
+        msg_named.contains(
+            "is_tree_artifact() got named argument for positional-only parameter 'artifact'"
+        ),
+        "unexpected error for named `artifact`: {msg_named}"
+    );
+
+    let err_unknown = ws
+        .analyze("//:bad_unknown_kw")
+        .expect_err("unknown keyword `file = ...` must be rejected");
+    let msg_unknown = err_unknown.to_string();
+    assert!(
+        msg_unknown.contains("is_tree_artifact() got unexpected keyword argument 'file'"),
+        "unexpected error for unknown keyword `file`: {msg_unknown}"
+    );
+}
