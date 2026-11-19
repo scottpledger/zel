@@ -852,13 +852,20 @@ impl BuildObserver {
                             } else if a.is_unresolved_symlink {
                                 BepBuilder::file_without_uri(&rest, &prefix)
                             } else {
-                                BepBuilder::file(
-                                    &rest,
-                                    &format!("{execroot}/{p}"),
-                                    &prefix,
-                                    None,
-                                    None,
-                                )
+                                let full_path = format!("{execroot}/{p}");
+                                let (len, dig) =
+                                    if self.bep_opts.remote_bytestream_uri_prefix.is_some() {
+                                        match std::fs::read(&full_path) {
+                                            Ok(bytes) => (
+                                                Some(bytes.len() as i64),
+                                                Some(zel_util::sha256::hex_digest(&bytes)),
+                                            ),
+                                            Err(_) => (None, None),
+                                        }
+                                    } else {
+                                        (None, None)
+                                    };
+                                BepBuilder::file(&rest, &full_path, &prefix, len, dig.as_deref())
                             }
                         })
                         .collect();
@@ -1302,7 +1309,13 @@ impl BuildObserver {
                 if let Some(raw) = path {
                     let resolved = resolve_bep_path(raw);
                     let pf = PathFragment::create(&resolved);
-                    match r.force_write_bep_file_with_conversion(fs, &pf, fmt, conv) {
+                    match r.force_write_bep_file_with_options(
+                        fs,
+                        &pf,
+                        fmt,
+                        conv,
+                        self.bep_opts.remote_bytestream_uri_prefix.as_deref(),
+                    ) {
                         Ok(()) => {
                             wrote_any_bep_file = wrote_any_bep_file || fs.exists(&pf, true);
                         }

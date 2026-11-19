@@ -712,13 +712,27 @@ impl Reporter {
         format: bep::BepFormat,
         path_conversion: bool,
     ) -> io::Result<()> {
+        self.force_write_bep_file_with_options(fs, path, format, path_conversion, None)
+    }
+
+    /// Writes BEP lines regardless of deferral, honoring `path_conversion` and optional
+    /// remote `bytestream_prefix`.
+    pub fn force_write_bep_file_with_options(
+        &self,
+        fs: &dyn FileSystem,
+        path: &PathFragment,
+        format: bep::BepFormat,
+        path_conversion: bool,
+        bytestream_prefix: Option<&str>,
+    ) -> io::Result<()> {
         self.finish_bep();
         let mut out = Vec::new();
         for ev in self.bep_history() {
-            out.extend(bep::serialize_event_with_conversion(
+            out.extend(bep::serialize_event_with_options(
                 format,
                 &ev,
                 path_conversion,
+                bytestream_prefix,
             ));
         }
         fs.write_file(path, &out)

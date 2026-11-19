@@ -317,22 +317,31 @@ pub enum BepFormat {
 
 /// Serializes one event in the given file format.
 pub fn serialize_event(format: BepFormat, event: &Msg) -> Vec<u8> {
-    serialize_event_with_conversion(format, event, true)
+    serialize_event_with_options(format, event, true, None)
 }
 
-/// Serializes one event, optionally omitting `file://` URI conversion (`--nobuild_event_*_file_path_conversion`).
+/// Serializes one event, honoring `--build_event_*_file_path_conversion`.
 pub fn serialize_event_with_conversion(
     format: BepFormat,
     event: &Msg,
     path_conversion: bool,
 ) -> Vec<u8> {
-    let rewritten;
-    let ev = if path_conversion {
-        event
-    } else {
-        rewritten = strip_file_uris(event);
-        &rewritten
-    };
+    serialize_event_with_options(format, event, path_conversion, None)
+}
+
+/// Serializes one event, applying Bazel's BEP `PathConverter` semantics:
+/// when `path_conversion` is `true` and `bytestream_prefix` is configured, files carrying a digest
+/// use `bytestream://<prefix>/blobs/<digest>/<length>` (`ByteStreamBuildEventArtifactUploader`);
+/// when `path_conversion` is `false` (or no remote uploader is active), `LocalFilesArtifactUploader`
+/// semantics apply (`file://` URIs for regular files and omitted `uri` on `directory_output`).
+pub fn serialize_event_with_options(
+    format: BepFormat,
+    event: &Msg,
+    path_conversion: bool,
+    bytestream_prefix: Option<&str>,
+) -> Vec<u8> {
+    let rewritten = apply_file_path_conversion(event, path_conversion, bytestream_prefix);
+    let ev = &rewritten;
     match format {
         BepFormat::Json => {
             let mut s = ev.to_json();
@@ -350,7 +359,7 @@ pub fn serialize_event_with_conversion(
     }
 }
 
-/// Decodes a `file://` URI back into a raw filesystem path (`PathConverter.NO_CONVERSION`).
+/// Decodes a `file://` URI back into a raw filesystem path.
 pub fn file_uri_to_local_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
     let bytes = rest.as_bytes();
@@ -373,21 +382,65 @@ pub fn file_uri_to_local_path(uri: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-fn rewrite_file_msg(f: &Msg) -> Msg {
+fn convert_file_msg(f: &Msg, path_conversion: bool, bytestream_prefix: Option<&str>) -> Msg {
     let mut c = f.clone();
-    let uri = c.get_str("uri");
-    if let Some(raw) = file_uri_to_local_path(uri) {
+    let uri = c.get_str("uri").to_string();
+    if uri.is_empty() {
+        return c;
+    }
+    if path_conversion {
+        if let Some(prefix) = bytestream_prefix.filter(|p| !p.is_empty()) {
+            let digest = c.get_str("digest").to_string();
+            if !digest.is_empty() {
+                let len = c.get_i64("length");
+                let p = prefix.trim_end_matches('/');
+                c.clear("uri");
+                c.set_str("uri", format!("bytestream://{p}/blobs/{digest}/{len}"));
+                return c;
+            }
+        }
+        if !uri.contains("://") {
+            c.clear("uri");
+            c.set_str("uri", file_uri(&uri));
+        }
+    } else if uri.starts_with("file://") {
+        // `LocalFilesArtifactUploader` (`FileLocalPathConverter`) always emits `file://` URIs.
+    } else if !uri.contains("://") {
         c.clear("uri");
-        c.set_str("uri", raw);
+        c.set_str("uri", file_uri(&uri));
+    } else {
+        // Remote URI (e.g. `bytestream://`) with `--nobuild_event_*_file_path_conversion`:
+        // `LocalFilesArtifactUploader` never emits remote URIs.
+        c.clear("uri");
     }
     c
 }
 
-fn rewrite_repeated_files(parent: &mut Msg, field: &str) {
+fn convert_singular_file(
+    parent: &mut Msg,
+    field: &str,
+    path_conversion: bool,
+    bytestream_prefix: Option<&str>,
+) {
+    if let Some(f) = parent.get_msg(field).cloned() {
+        parent.clear(field);
+        parent.set_msg(
+            field,
+            convert_file_msg(&f, path_conversion, bytestream_prefix),
+        );
+    }
+}
+
+fn convert_repeated_files(
+    parent: &mut Msg,
+    field: &str,
+    path_conversion: bool,
+    bytestream_prefix: Option<&str>,
+) {
     let files: Vec<Msg> = parent
         .get_msgs(field)
         .into_iter()
-        .map(rewrite_file_msg)
+        .map(|f| convert_file_msg(f, path_conversion, bytestream_prefix))
         .collect();
     if !files.is_empty() {
         parent.clear(field);
@@ -397,22 +450,46 @@ fn rewrite_repeated_files(parent: &mut Msg, field: &str) {
     }
 }
 
-fn strip_file_uris(event: &Msg) -> Msg {
+/// Applies Bazel BEP `PathConverter` rules across every `build_event_stream.File` in `event`.
+pub fn apply_file_path_conversion(
+    event: &Msg,
+    path_conversion: bool,
+    bytestream_prefix: Option<&str>,
+) -> Msg {
     let mut ev = event.clone();
     if let Some(ns) = ev.get_msg("named_set_of_files").cloned() {
         let mut ns = ns;
-        rewrite_repeated_files(&mut ns, "files");
+        convert_repeated_files(&mut ns, "files", path_conversion, bytestream_prefix);
+        ev.clear("named_set_of_files");
         ev.set_msg("named_set_of_files", ns);
+    }
+    if let Some(ae) = ev.get_msg("action").cloned() {
+        let mut ae = ae;
+        convert_singular_file(&mut ae, "stdout", path_conversion, bytestream_prefix);
+        convert_singular_file(&mut ae, "stderr", path_conversion, bytestream_prefix);
+        convert_singular_file(
+            &mut ae,
+            "primary_output",
+            path_conversion,
+            bytestream_prefix,
+        );
+        ev.clear("action");
+        ev.set_msg("action", ae);
     }
     if let Some(tc) = ev.get_msg("completed").cloned() {
         let mut tc = tc;
-        rewrite_repeated_files(&mut tc, "important_output");
+        convert_repeated_files(
+            &mut tc,
+            "important_output",
+            path_conversion,
+            bytestream_prefix,
+        );
         let groups: Vec<Msg> = tc
             .get_msgs("output_group")
             .into_iter()
             .map(|g| {
                 let mut g = g.clone();
-                rewrite_repeated_files(&mut g, "inline_files");
+                convert_repeated_files(&mut g, "inline_files", path_conversion, bytestream_prefix);
                 g
             })
             .collect();
@@ -422,22 +499,48 @@ fn strip_file_uris(event: &Msg) -> Msg {
                 tc.set_msg("output_group", g);
             }
         }
+        let dirs: Vec<Msg> = tc
+            .get_msgs("directory_output")
+            .into_iter()
+            .map(|d| {
+                let mut d = d.clone();
+                // Per `build_event_stream.proto` and both `LocalFilesArtifactUploader` and
+                // `ByteStreamBuildEventArtifactUploader`, `directory_output` entries never carry `uri`.
+                d.clear("uri");
+                d
+            })
+            .collect();
+        if !dirs.is_empty() {
+            tc.clear("directory_output");
+            for d in dirs {
+                tc.set_msg("directory_output", d);
+            }
+        }
+        ev.clear("completed");
         ev.set_msg("completed", tc);
     }
     if let Some(btl) = ev.get_msg("build_tool_logs").cloned() {
         let mut btl = btl;
-        rewrite_repeated_files(&mut btl, "log");
+        convert_repeated_files(&mut btl, "log", path_conversion, bytestream_prefix);
+        ev.clear("build_tool_logs");
         ev.set_msg("build_tool_logs", btl);
     }
     if let Some(tr) = ev.get_msg("test_result").cloned() {
         let mut tr = tr;
-        rewrite_repeated_files(&mut tr, "test_action_output");
+        convert_repeated_files(
+            &mut tr,
+            "test_action_output",
+            path_conversion,
+            bytestream_prefix,
+        );
+        ev.clear("test_result");
         ev.set_msg("test_result", tr);
     }
     if let Some(ts) = ev.get_msg("test_summary").cloned() {
         let mut ts = ts;
-        rewrite_repeated_files(&mut ts, "passed");
-        rewrite_repeated_files(&mut ts, "failed");
+        convert_repeated_files(&mut ts, "passed", path_conversion, bytestream_prefix);
+        convert_repeated_files(&mut ts, "failed", path_conversion, bytestream_prefix);
+        ev.clear("test_summary");
         ev.set_msg("test_summary", ts);
     }
     ev
@@ -448,6 +551,7 @@ pub struct FileTransport {
     format: BepFormat,
     label: String,
     path_conversion: bool,
+    bytestream_prefix: Option<String>,
     sink: Mutex<Box<dyn Write + Send>>,
     error: Mutex<Option<String>>,
 }
@@ -463,10 +567,21 @@ impl FileTransport {
         path_conversion: bool,
         sink: Box<dyn Write + Send>,
     ) -> Self {
+        Self::new_with_options(format, label, path_conversion, None, sink)
+    }
+
+    pub fn new_with_options(
+        format: BepFormat,
+        label: impl Into<String>,
+        path_conversion: bool,
+        bytestream_prefix: Option<String>,
+        sink: Box<dyn Write + Send>,
+    ) -> Self {
         Self {
             format,
             label: label.into(),
             path_conversion,
+            bytestream_prefix,
             sink: Mutex::new(sink),
             error: Mutex::new(None),
         }
@@ -482,16 +597,26 @@ impl FileTransport {
         path: &str,
         path_conversion: bool,
     ) -> std::io::Result<Self> {
+        Self::open_with_options(format, path, path_conversion, None)
+    }
+
+    pub fn open_with_options(
+        format: BepFormat,
+        path: &str,
+        path_conversion: bool,
+        bytestream_prefix: Option<String>,
+    ) -> std::io::Result<Self> {
         if let Some(parent) = std::path::Path::new(path).parent() {
             if !parent.as_os_str().is_empty() {
                 std::fs::create_dir_all(parent)?;
             }
         }
         let f = std::fs::File::create(path)?;
-        Ok(Self::new_with_conversion(
+        Ok(Self::new_with_options(
             format,
             path,
             path_conversion,
+            bytestream_prefix,
             Box::new(f),
         ))
     }
@@ -508,7 +633,12 @@ impl BuildEventTransport for FileTransport {
     }
 
     fn send(&self, event: &Msg) {
-        let bytes = serialize_event_with_conversion(self.format, event, self.path_conversion);
+        let bytes = serialize_event_with_options(
+            self.format,
+            event,
+            self.path_conversion,
+            self.bytestream_prefix.as_deref(),
+        );
         let mut sink = self.sink.lock().unwrap();
         if let Err(e) = sink.write_all(&bytes).and_then(|_| sink.flush()) {
             *self.error.lock().unwrap() = Some(format!("{}: {e}", self.label));
@@ -2007,6 +2137,9 @@ pub struct BepOptions {
     pub bes_keywords: Vec<String>,
     pub bes_lifecycle_events: bool,
     pub project_id: Option<String>,
+    /// Remote ByteStream URI prefix (`<authority>[/<instance>]`) used when
+    /// `--build_event_*_file_path_conversion` is enabled (`ByteStreamBuildEventArtifactUploader`).
+    pub remote_bytestream_uri_prefix: Option<String>,
 }
 
 fn parse_bazel_bool(raw: Option<&str>, default: bool) -> bool {
@@ -2017,6 +2150,50 @@ fn parse_bazel_bool(raw: Option<&str>, default: bool) -> bool {
         "0" | "false" | "f" | "no" | "n" => false,
         "1" | "true" | "t" | "yes" | "y" => true,
         _ => default,
+    }
+}
+
+fn extract_remote_authority(endpoint: &str) -> Option<&str> {
+    let s = endpoint.trim();
+    if s.is_empty() || s.starts_with("unix:") {
+        return None;
+    }
+    let after_scheme = match s.split_once("://") {
+        Some((_, rest)) => rest,
+        None => s,
+    };
+    let authority = after_scheme.split('/').next().unwrap_or("").trim();
+    (!authority.is_empty()).then_some(authority)
+}
+
+fn compute_remote_bytestream_prefix(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
+    let respect_no_cache = parse_bazel_bool(
+        get("incompatible_remote_build_event_upload_respect_no_cache").as_deref(),
+        false,
+    );
+    let upload_local = parse_bazel_bool(get("remote_upload_local_results").as_deref(), true);
+    if respect_no_cache && !upload_local {
+        return None;
+    }
+    if let Some(explicit) = get("remote_bytestream_uri_prefix")
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(explicit);
+    }
+    let endpoint = get("remote_cache")
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| get("remote_executor").filter(|s| !s.trim().is_empty()))?;
+    let authority = extract_remote_authority(&endpoint)?;
+    let instance = get("remote_instance_name")
+        .unwrap_or_default()
+        .trim()
+        .trim_matches('/')
+        .to_string();
+    if instance.is_empty() {
+        Some(authority.to_string())
+    } else {
+        Some(format!("{authority}/{instance}"))
     }
 }
 
@@ -2079,6 +2256,7 @@ impl BepOptions {
             bes_keywords: get_all("bes_keywords"),
             bes_lifecycle_events: b("bes_lifecycle_events", true),
             project_id: nonempty(get("project_id")),
+            remote_bytestream_uri_prefix: compute_remote_bytestream_prefix(get),
         }
     }
 
@@ -2111,9 +2289,14 @@ impl BepOptions {
         ] {
             if let Some(p) = path {
                 v.push(
-                    FileTransport::open_with_conversion(fmt, p, conv)
-                        .map(|t| Arc::new(t) as Arc<dyn BuildEventTransport>)
-                        .map_err(|e| format!("Cannot open {p}: {e}")),
+                    FileTransport::open_with_options(
+                        fmt,
+                        p,
+                        conv,
+                        self.remote_bytestream_uri_prefix.clone(),
+                    )
+                    .map(|t| Arc::new(t) as Arc<dyn BuildEventTransport>)
+                    .map_err(|e| format!("Cannot open {p}: {e}")),
                 );
             }
         }
@@ -2549,6 +2732,188 @@ mod tests {
         ))
         .unwrap();
         assert!(with_conv.contains("file:///tmp/a%20b.txt"));
-        assert!(no_conv.contains("\"/tmp/a b.txt\"") && !no_conv.contains("file://"));
+        // `--nobuild_event_*_file_path_conversion` selects `LocalFilesArtifactUploader`, which
+        // always uses the `file://` URI scheme rather than remote `bytestream://` URIs.
+        assert!(no_conv.contains("file:///tmp/a%20b.txt"));
+    }
+
+    #[test]
+    fn bep_file_path_conversion_across_all_file_bearing_events() {
+        let remote_flags: std::collections::HashMap<&str, &str> = [
+            ("remote_cache", "grpc://cas.example.com:9092"),
+            ("remote_instance_name", "main"),
+        ]
+        .into_iter()
+        .collect();
+        let opts =
+            BepOptions::from_flags(&|k| remote_flags.get(k).map(|v| v.to_string()), &|_| vec![]);
+        assert_eq!(
+            opts.remote_bytestream_uri_prefix.as_deref(),
+            Some("cas.example.com:9092/main")
+        );
+        let prefix = opts.remote_bytestream_uri_prefix.as_deref();
+
+        // 1. ActionExecuted: singular stdout, stderr, primary_output (plus inline contents without uri)
+        let mut ae = Msg::new("build_event_stream.ActionExecuted");
+        ae.set_bool("success", true);
+        ae.set_str("type", "Genrule");
+        ae.set_msg(
+            "stdout",
+            BepBuilder::file("stdout", "/tmp/act out.log", &[], Some(11), Some("aaa111")),
+        );
+        let mut inline_stderr = Msg::new("build_event_stream.File");
+        inline_stderr.set_str("name", "stderr");
+        inline_stderr.set_bytes("contents", b"warn".to_vec());
+        ae.set_msg("stderr", inline_stderr);
+        ae.set_msg(
+            "primary_output",
+            BepBuilder::file(
+                "out.bin",
+                "/tmp/out bin",
+                &["bazel-out".into()],
+                Some(42),
+                Some("bbb222"),
+            ),
+        );
+        let ae_proto = BuildEventNode::new(
+            ids::action_completed("bazel-out/out.bin", "//pkg:t", "cfg"),
+            vec![],
+            "action",
+            ae,
+        )
+        .to_proto(false);
+
+        let ae_remote = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &ae_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            ae_remote.contains("bytestream://cas.example.com:9092/main/blobs/aaa111/11"),
+            "{ae_remote}"
+        );
+        assert!(
+            ae_remote.contains("bytestream://cas.example.com:9092/main/blobs/bbb222/42"),
+            "{ae_remote}"
+        );
+
+        let ae_local = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &ae_proto,
+            false,
+            prefix,
+        ))
+        .unwrap();
+        assert!(ae_local.contains("file:///tmp/act%20out.log"), "{ae_local}");
+        assert!(ae_local.contains("file:///tmp/out%20bin"), "{ae_local}");
+        assert!(!ae_local.contains("bytestream://"), "{ae_local}");
+
+        // 2. TargetComplete: inline_files, important_output, and directory_output (which must never carry uri)
+        let inline_file = BepBuilder::file("f.txt", "/tmp/f.txt", &[], Some(5), Some("ccc333"));
+        let mut dir_with_accidental_uri =
+            BepBuilder::file_without_uri("tree_dir", &["bazel-out".into()]);
+        dir_with_accidental_uri.set_str("uri", "file:///tmp/tree_dir");
+        let mut tc_node = BepBuilder::target_completed_with_groups(
+            "//pkg:t",
+            "cfg",
+            None,
+            true,
+            &[BepOutputGroup {
+                name: "default".into(),
+                file_sets: vec![],
+                inline_files: vec![inline_file.clone()],
+                incomplete: false,
+            }],
+            &[dir_with_accidental_uri],
+            &[],
+            None,
+        );
+        if let Some(mut tc_body) = tc_node.payload.get_msg("completed").cloned() {
+            tc_body.set_msg("important_output", inline_file);
+            tc_node.payload.clear("completed");
+            tc_node.payload.set_msg("completed", tc_body);
+        }
+        let tc_proto = tc_node.to_proto(false);
+
+        let tc_remote = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &tc_proto,
+            true,
+            prefix,
+        ))
+        .unwrap();
+        assert!(
+            tc_remote.contains("bytestream://cas.example.com:9092/main/blobs/ccc333/5"),
+            "{tc_remote}"
+        );
+        assert!(!tc_remote.contains("tree_dir\",\"uri\""), "{tc_remote}");
+        assert!(!tc_remote.contains("file:///tmp/tree_dir"), "{tc_remote}");
+
+        let tc_local = String::from_utf8(serialize_event_with_options(
+            BepFormat::Json,
+            &tc_proto,
+            false,
+            prefix,
+        ))
+        .unwrap();
+        assert!(tc_local.contains("file:///tmp/f.txt"), "{tc_local}");
+        assert!(!tc_local.contains("bytestream://"), "{tc_local}");
+        assert!(!tc_local.contains("file:///tmp/tree_dir"), "{tc_local}");
+
+        // 3. NamedSetOfFiles, BuildToolLogs, TestResult, and TestSummary
+        let log_file = BepBuilder::file("test.log", "/tmp/test.log", &[], Some(9), Some("ddd444"));
+        let mut tr = Msg::new("build_event_stream.TestResult");
+        tr.set_enum("status", "PASSED");
+        tr.set_msg("test_action_output", log_file.clone());
+        let tr_proto = BuildEventNode::new(
+            ids::test_result("//pkg:test", "cfg", 0, 0, 1),
+            vec![],
+            "test_result",
+            tr,
+        )
+        .to_proto(false);
+        let mut ts = Msg::new("build_event_stream.TestSummary");
+        ts.set_enum("overall_status", "PASSED");
+        ts.set_msg("passed", log_file.clone());
+        let ts_proto = BuildEventNode::new(
+            ids::test_summary("//pkg:test", "cfg"),
+            vec![],
+            "test_summary",
+            ts,
+        )
+        .to_proto(false);
+        let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
+        ns.set_msg("files", log_file.clone());
+        let ns_proto = BuildEventNode::new(ids::named_set("0"), vec![], "named_set_of_files", ns)
+            .to_proto(false);
+        let mut btl = Msg::new("build_event_stream.BuildToolLogs");
+        btl.set_msg("log", log_file);
+        let btl_proto = BuildEventNode::new(ids::build_tool_logs(), vec![], "build_tool_logs", btl)
+            .to_proto(true);
+
+        for proto in [&ns_proto, &tr_proto, &ts_proto, &btl_proto] {
+            let as_remote = String::from_utf8(serialize_event_with_options(
+                BepFormat::Json,
+                proto,
+                true,
+                prefix,
+            ))
+            .unwrap();
+            assert!(
+                as_remote.contains("bytestream://cas.example.com:9092/main/blobs/ddd444/9"),
+                "{as_remote}"
+            );
+            let as_local = String::from_utf8(serialize_event_with_options(
+                BepFormat::Json,
+                proto,
+                false,
+                prefix,
+            ))
+            .unwrap();
+            assert!(as_local.contains("file:///tmp/test.log"), "{as_local}");
+            assert!(!as_local.contains("bytestream://"), "{as_local}");
+        }
     }
 }
