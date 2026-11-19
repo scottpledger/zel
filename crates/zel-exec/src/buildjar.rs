@@ -20,7 +20,7 @@ use crate::java_compile::{
     encode_jdeps, fields, normalize_jdeps_path, parse_jdeps, push_bytes_field, push_varint_field,
     Dependency, DependencyKind, Jdeps,
 };
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,9 +31,9 @@ use zel_util::zip::ZipReader;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum StrictDepsMode {
+    #[default]
     Off,
     Warn,
-    #[default]
     Error,
 }
 
@@ -1147,12 +1147,14 @@ fn invoke_system_javac(
     }
 
     if vanilla {
-        // VanillaJavaBuilder drops Note: deprecated/unchecked/sun.proprietary lines.
+        // VanillaJavaBuilder drops Note: deprecated/unchecked and compiler.warn.sun.proprietary.
         stderr = stderr
             .lines()
             .filter(|l| {
                 !l.starts_with("Note: ")
-                    && !l.contains("sun.misc.Unsafe is internal proprietary API")
+                    && !l.contains(
+                        " is internal proprietary API and may be removed in a future release",
+                    )
             })
             .collect::<Vec<_>>()
             .join("\n");
@@ -1205,15 +1207,23 @@ fn invoke_system_javac(
 }
 
 fn extract_warning_category(line: &str) -> Option<&str> {
-    let idx = line.find("warning: [")?;
-    let rest = &line[idx + "warning: [".len()..];
-    let end = rest.find(']')?;
-    let cat = &rest[..end];
-    if cat.is_empty() {
-        None
-    } else {
-        Some(cat)
+    if let Some(idx) = line.find("warning: [") {
+        let rest = &line[idx + "warning: [".len()..];
+        if let Some(end) = rest.find(']') {
+            let cat = &rest[..end];
+            if !cat.is_empty() {
+                return Some(cat);
+            }
+        }
     }
+    // `FormattedDiagnostic`: `compiler.warn.sun.proprietary` omits `[category]` in javac output
+    // and maps to lint option `"sunapi"`.
+    if line.contains("warning: ")
+        && line.contains(" is internal proprietary API and may be removed in a future release")
+    {
+        return Some("sunapi");
+    }
+    None
 }
 
 fn should_fall_back(status: &BlazeJavacStatus, diagnostics: &str) -> bool {
@@ -1273,6 +1283,639 @@ fn write_gensrc_jar(req: &JavaLibraryBuildRequest) -> io::Result<()> {
     Ok(())
 }
 
+#[derive(Default)]
+struct ClassFileRefs {
+    const_classes: HashSet<String>,
+    descriptor_classes: HashSet<String>,
+    api_surface_classes: HashSet<String>,
+}
+
+fn normalize_internal_class_ref(raw: &str) -> Option<String> {
+    let trimmed = raw.trim_start_matches('[');
+    let internal = if trimmed.len() != raw.len() {
+        trimmed.strip_prefix('L')?.strip_suffix(';')?
+    } else {
+        trimmed
+    };
+    if internal.is_empty() || internal.starts_with('[') {
+        None
+    } else {
+        Some(internal.to_string())
+    }
+}
+
+fn collect_descriptor_types(desc: &str, out: &mut HashSet<String>) {
+    let bytes = desc.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'(' | b')' | b'[' | b'+' | b'-' | b'*' | b'^' | b':' => i += 1,
+            b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b'V' => i += 1,
+            b'T' => {
+                i += 1;
+                while i < bytes.len() && bytes[i] != b';' {
+                    i += 1;
+                }
+                if i < bytes.len() {
+                    i += 1;
+                }
+            }
+            b'L' => {
+                i += 1;
+                let mut current = String::new();
+                while i < bytes.len() {
+                    match bytes[i] {
+                        b';' => {
+                            if !current.is_empty() {
+                                out.insert(current);
+                            }
+                            i += 1;
+                            break;
+                        }
+                        b'<' => {
+                            if !current.is_empty() {
+                                out.insert(current.clone());
+                            }
+                            let mut depth = 1usize;
+                            i += 1;
+                            let arg_start = i;
+                            while i < bytes.len() && depth > 0 {
+                                match bytes[i] {
+                                    b'<' => depth += 1,
+                                    b'>' => depth -= 1,
+                                    _ => {}
+                                }
+                                i += 1;
+                            }
+                            let arg_end = i.saturating_sub(1);
+                            if arg_end > arg_start {
+                                collect_descriptor_types(&desc[arg_start..arg_end], out);
+                            }
+                            if i < bytes.len() && bytes[i] == b'.' {
+                                current.push('$');
+                                i += 1;
+                            }
+                        }
+                        ch => {
+                            current.push(ch as char);
+                            i += 1;
+                        }
+                    }
+                }
+            }
+            _ => i += 1,
+        }
+    }
+}
+
+fn read_u16_be(bytes: &[u8], pos: &mut usize) -> Option<u16> {
+    let slice = bytes.get(*pos..*pos + 2)?;
+    *pos += 2;
+    Some(u16::from_be_bytes([slice[0], slice[1]]))
+}
+
+fn read_u32_be(bytes: &[u8], pos: &mut usize) -> Option<u32> {
+    let slice = bytes.get(*pos..*pos + 4)?;
+    *pos += 4;
+    Some(u32::from_be_bytes([slice[0], slice[1], slice[2], slice[3]]))
+}
+
+fn parse_classfile_refs(bytes: &[u8]) -> ClassFileRefs {
+    let mut out = ClassFileRefs::default();
+    if bytes.len() < 10 || &bytes[0..4] != b"\xCA\xFE\xBA\xBE" {
+        return out;
+    }
+    let mut pos = 8usize;
+    let Some(cp_count) = read_u16_be(bytes, &mut pos) else {
+        return out;
+    };
+    let cap = cp_count as usize;
+    let mut utf8_pool: Vec<Option<String>> = vec![None; cap];
+    let mut class_name_slot: Vec<Option<u16>> = vec![None; cap];
+    let mut string_literal_utf8: HashSet<u16> = HashSet::new();
+    let mut code_desc_utf8: Vec<u16> = Vec::new();
+
+    let mut idx = 1usize;
+    while idx < cap {
+        let Some(&tag) = bytes.get(pos) else {
+            return out;
+        };
+        pos += 1;
+        match tag {
+            1 => {
+                let Some(len) = read_u16_be(bytes, &mut pos) else {
+                    return out;
+                };
+                let end = pos + len as usize;
+                let Some(raw) = bytes.get(pos..end) else {
+                    return out;
+                };
+                pos = end;
+                utf8_pool[idx] = Some(String::from_utf8_lossy(raw).into_owned());
+                idx += 1;
+            }
+            3 | 4 => {
+                if bytes.len() < pos + 4 {
+                    return out;
+                }
+                pos += 4;
+                idx += 1;
+            }
+            5 | 6 => {
+                if bytes.len() < pos + 8 {
+                    return out;
+                }
+                pos += 8;
+                idx += 2;
+            }
+            7 => {
+                let Some(ni) = read_u16_be(bytes, &mut pos) else {
+                    return out;
+                };
+                class_name_slot[idx] = Some(ni);
+                idx += 1;
+            }
+            8 => {
+                let Some(si) = read_u16_be(bytes, &mut pos) else {
+                    return out;
+                };
+                string_literal_utf8.insert(si);
+                idx += 1;
+            }
+            9 | 10 | 11 | 17 | 18 => {
+                if bytes.len() < pos + 4 {
+                    return out;
+                }
+                pos += 4;
+                idx += 1;
+            }
+            12 => {
+                let Some(_name_idx) = read_u16_be(bytes, &mut pos) else {
+                    return out;
+                };
+                let Some(desc_idx) = read_u16_be(bytes, &mut pos) else {
+                    return out;
+                };
+                code_desc_utf8.push(desc_idx);
+                idx += 1;
+            }
+            15 => {
+                if bytes.len() < pos + 3 {
+                    return out;
+                }
+                pos += 3;
+                idx += 1;
+            }
+            16 => {
+                let Some(desc_idx) = read_u16_be(bytes, &mut pos) else {
+                    return out;
+                };
+                code_desc_utf8.push(desc_idx);
+                idx += 1;
+            }
+            19 | 20 => {
+                if bytes.len() < pos + 2 {
+                    return out;
+                }
+                pos += 2;
+                idx += 1;
+            }
+            _ => return out,
+        }
+    }
+
+    for ni in class_name_slot.iter().flatten() {
+        if let Some(Some(s)) = utf8_pool.get(*ni as usize) {
+            if let Some(norm) = normalize_internal_class_ref(s) {
+                out.const_classes.insert(norm);
+            }
+        }
+    }
+    for di in code_desc_utf8 {
+        if let Some(Some(s)) = utf8_pool.get(di as usize) {
+            collect_descriptor_types(s, &mut out.descriptor_classes);
+        }
+    }
+
+    // Parse class header, fields, methods, and Signature / Annotation attributes for API surface.
+    let scan_attrs = |pos: &mut usize, surface: &mut HashSet<String>| -> Option<()> {
+        let acount = read_u16_be(bytes, pos)?;
+        for _ in 0..acount {
+            let aname_idx = read_u16_be(bytes, pos)?;
+            let alen = read_u32_be(bytes, pos)? as usize;
+            let body = bytes.get(*pos..*pos + alen)?;
+            *pos += alen;
+            let aname = utf8_pool
+                .get(aname_idx as usize)
+                .and_then(|o| o.as_deref())
+                .unwrap_or("");
+            if aname == "Signature" && body.len() >= 2 {
+                let sig_idx = u16::from_be_bytes([body[0], body[1]]) as usize;
+                if let Some(Some(sig)) = utf8_pool.get(sig_idx) {
+                    collect_descriptor_types(sig, surface);
+                }
+            } else if aname.contains("Annotations") {
+                for (slot, entry) in utf8_pool.iter().enumerate() {
+                    if string_literal_utf8.contains(&(slot as u16)) {
+                        continue;
+                    }
+                    if let Some(s) = entry {
+                        if s.starts_with('L') && s.ends_with(';') && !s.contains(' ') {
+                            collect_descriptor_types(s, surface);
+                        }
+                    }
+                }
+            }
+        }
+        Some(())
+    };
+
+    let _ = (|| -> Option<()> {
+        let _access = read_u16_be(bytes, &mut pos)?;
+        let _this_cls = read_u16_be(bytes, &mut pos)?;
+        let super_cls = read_u16_be(bytes, &mut pos)? as usize;
+        if let Some(Some(ni)) = class_name_slot.get(super_cls) {
+            if let Some(Some(s)) = utf8_pool.get(*ni as usize) {
+                if let Some(norm) = normalize_internal_class_ref(s) {
+                    out.api_surface_classes.insert(norm);
+                }
+            }
+        }
+        let icount = read_u16_be(bytes, &mut pos)?;
+        for _ in 0..icount {
+            let iface_cls = read_u16_be(bytes, &mut pos)? as usize;
+            if let Some(Some(ni)) = class_name_slot.get(iface_cls) {
+                if let Some(Some(s)) = utf8_pool.get(*ni as usize) {
+                    if let Some(norm) = normalize_internal_class_ref(s) {
+                        out.api_surface_classes.insert(norm);
+                    }
+                }
+            }
+        }
+        let fcount = read_u16_be(bytes, &mut pos)?;
+        for _ in 0..fcount {
+            let _fa = read_u16_be(bytes, &mut pos)?;
+            let _fn_idx = read_u16_be(bytes, &mut pos)?;
+            let fd_idx = read_u16_be(bytes, &mut pos)? as usize;
+            if let Some(Some(s)) = utf8_pool.get(fd_idx) {
+                collect_descriptor_types(s, &mut out.api_surface_classes);
+            }
+            scan_attrs(&mut pos, &mut out.api_surface_classes)?;
+        }
+        let mcount = read_u16_be(bytes, &mut pos)?;
+        for _ in 0..mcount {
+            let _ma = read_u16_be(bytes, &mut pos)?;
+            let _mn_idx = read_u16_be(bytes, &mut pos)?;
+            let md_idx = read_u16_be(bytes, &mut pos)? as usize;
+            if let Some(Some(s)) = utf8_pool.get(md_idx) {
+                collect_descriptor_types(s, &mut out.api_surface_classes);
+            }
+            scan_attrs(&mut pos, &mut out.api_surface_classes)?;
+        }
+        scan_attrs(&mut pos, &mut out.api_surface_classes)?;
+        Some(())
+    })();
+
+    out.descriptor_classes
+        .extend(out.api_surface_classes.iter().cloned());
+    out
+}
+
+struct SourceImportSummary {
+    explicit_imports: Vec<String>,
+    wildcard_packages: HashSet<String>,
+    identifiers: HashSet<String>,
+    exempt_own_prefixes: HashSet<String>,
+}
+
+fn scan_sources_for_strict_deps(
+    sources: &[PathBuf],
+    source_gen_dir: &Path,
+) -> io::Result<SourceImportSummary> {
+    let mut summary = SourceImportSummary {
+        explicit_imports: Vec::new(),
+        wildcard_packages: HashSet::new(),
+        identifiers: HashSet::new(),
+        exempt_own_prefixes: HashSet::new(),
+    };
+    let mut all_sources: Vec<(PathBuf, bool)> =
+        sources.iter().cloned().map(|p| (p, false)).collect();
+    let mut gen_files = Vec::new();
+    collect_files_with_ext(source_gen_dir, "java", &mut gen_files)?;
+    for g in gen_files {
+        all_sources.push((g, true));
+    }
+
+    for (src_path, generated) in &all_sources {
+        let raw = std::fs::read_to_string(src_path).unwrap_or_default();
+        let is_dagger_or_hilt_exempt = raw.contains("dagger.internal.codegen.ComponentProcessor")
+            || raw.contains("dagger.hilt.processor.internal.root.RootProcessor");
+        if is_dagger_or_hilt_exempt {
+            let unit = scan_java_compilation_unit(src_path, String::new(), *generated);
+            let pkg_prefix = unit
+                .pkg
+                .as_deref()
+                .filter(|p| !p.is_empty())
+                .map(|p| format!("{}/", p.replace('.', "/")))
+                .unwrap_or_default();
+            for tl in unit.top_level {
+                summary
+                    .exempt_own_prefixes
+                    .insert(format!("{pkg_prefix}{tl}"));
+            }
+            continue;
+        }
+
+        let stripped = strip_java_comments_and_strings(&raw);
+        let unit = scan_java_compilation_unit(src_path, String::new(), *generated);
+        if let Some(pkg) = &unit.pkg {
+            if !pkg.is_empty() {
+                summary.wildcard_packages.insert(pkg.clone());
+            }
+        }
+
+        // Parse `import [static] foo.bar.Baz;` and `import [static] foo.bar.*;`.
+        for stmt in stripped.split(';') {
+            let trimmed = stmt.trim();
+            let Some(rest) = trimmed.strip_prefix("import") else {
+                continue;
+            };
+            if !rest.starts_with(char::is_whitespace) {
+                continue;
+            }
+            let rest = rest.trim_start();
+            let (is_static, target) = if let Some(after_static) = rest.strip_prefix("static") {
+                if after_static.starts_with(char::is_whitespace) {
+                    (true, after_static.trim())
+                } else {
+                    (false, rest)
+                }
+            } else {
+                (false, rest)
+            };
+            let clean: String = target.chars().filter(|c| !c.is_whitespace()).collect();
+            if let Some(pkg_wild) = clean.strip_suffix(".*") {
+                if is_static {
+                    summary.explicit_imports.push(pkg_wild.to_string());
+                } else {
+                    summary.wildcard_packages.insert(pkg_wild.to_string());
+                }
+            } else if !clean.is_empty() {
+                summary.explicit_imports.push(clean.clone());
+                if is_static {
+                    if let Some((owner_cls, _member)) = clean.rsplit_once('.') {
+                        summary.explicit_imports.push(owner_cls.to_string());
+                    }
+                }
+            }
+        }
+
+        let mut cur = String::new();
+        for ch in stripped.chars() {
+            if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+                cur.push(ch);
+            } else if !cur.is_empty() {
+                summary.identifiers.insert(std::mem::take(&mut cur));
+            }
+        }
+        if !cur.is_empty() {
+            summary.identifiers.insert(cur);
+        }
+    }
+
+    Ok(summary)
+}
+
+fn resolve_dotted_to_internal(
+    dotted: &str,
+    class_owner: &HashMap<String, (usize, String)>,
+) -> Option<String> {
+    let slash = dotted.replace('.', "/");
+    if class_owner.contains_key(&slash) {
+        return Some(slash);
+    }
+    // Nested class imports (`pkg.Outer.Inner` -> `pkg/Outer$Inner`).
+    let mut candidate = slash;
+    while let Some(pos) = candidate.rfind('/') {
+        candidate.replace_range(pos..=pos, "$");
+        if class_owner.contains_key(&candidate) {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+fn collect_used_classpath_jars(
+    req: &JavaLibraryBuildRequest,
+    active_cp: &[PathBuf],
+    sources: &[PathBuf],
+) -> io::Result<Vec<(PathBuf, DependencyKind)>> {
+    if sources.is_empty() || active_cp.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut class_files = Vec::new();
+    collect_files_with_ext(&req.class_dir, "class", &mut class_files)?;
+    let mut own_classes = HashSet::new();
+    for cf in &class_files {
+        if let Ok(rel) = cf.strip_prefix(&req.class_dir) {
+            let s = rel
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
+                .join("/");
+            if let Some(stem) = s.strip_suffix(".class") {
+                own_classes.insert(stem.to_string());
+            }
+        }
+    }
+
+    let mut jar_readers: Vec<Option<ZipReader>> = Vec::with_capacity(active_cp.len());
+    // Maps internal class name (`"dep/Greeting"`) -> `(jar_idx_in_active_cp, zip_entry_name)`.
+    let mut class_owner: HashMap<String, (usize, String)> = HashMap::new();
+    let mut pkg_to_classes: HashMap<String, Vec<(String, usize, String)>> = HashMap::new();
+
+    for (idx, jar_path) in active_cp.iter().enumerate() {
+        let Ok(reader) = ZipReader::open(jar_path) else {
+            jar_readers.push(None);
+            continue;
+        };
+        for entry in reader.entries() {
+            let Some(raw_stem) = entry.name.strip_suffix(".class") else {
+                continue;
+            };
+            if raw_stem == "module-info" {
+                continue;
+            }
+            let stem = if let Some(rest) = raw_stem.strip_prefix("META-INF/versions/") {
+                let Some((_, versioned)) = rest.split_once('/') else {
+                    continue;
+                };
+                versioned
+            } else if raw_stem.starts_with("META-INF/") {
+                continue;
+            } else {
+                raw_stem
+            };
+            if own_classes.contains(stem) {
+                continue;
+            }
+            if !class_owner.contains_key(stem) {
+                class_owner.insert(stem.to_string(), (idx, entry.name.clone()));
+                if !stem.contains('$') {
+                    let (pkg, simple) = match stem.rsplit_once('/') {
+                        Some((p, s)) => (p.replace('/', "."), s.to_string()),
+                        None => (String::new(), stem.to_string()),
+                    };
+                    pkg_to_classes
+                        .entry(pkg)
+                        .or_default()
+                        .push((simple, idx, stem.to_string()));
+                }
+            }
+        }
+        jar_readers.push(Some(reader));
+    }
+
+    if class_owner.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let src_summary = scan_sources_for_strict_deps(sources, &req.source_gen_dir)?;
+    let mut jar_kind: HashMap<usize, DependencyKind> = HashMap::new();
+    let mut bfs_classes: VecDeque<String> = VecDeque::new();
+    let mut seen_bfs: HashSet<String> = HashSet::new();
+
+    let mut mark_class = |cls: &str, kind: DependencyKind| {
+        if let Some(&(jar_idx, _)) = class_owner.get(cls) {
+            let entry = jar_kind.entry(jar_idx).or_insert(kind);
+            if kind == DependencyKind::Explicit {
+                *entry = DependencyKind::Explicit;
+            }
+            if seen_bfs.insert(cls.to_string()) {
+                bfs_classes.push_back(cls.to_string());
+            }
+        }
+    };
+
+    let mut resolved_explicit_imports: HashSet<String> = HashSet::new();
+    for imp in &src_summary.explicit_imports {
+        if let Some(internal) = resolve_dotted_to_internal(imp, &class_owner) {
+            mark_class(&internal, DependencyKind::Explicit);
+            resolved_explicit_imports.insert(internal);
+        }
+    }
+    for wpkg in &src_summary.wildcard_packages {
+        if let Some(entries) = pkg_to_classes.get(wpkg) {
+            for (simple, _idx, internal) in entries {
+                if src_summary.identifiers.contains(simple) {
+                    mark_class(internal, DependencyKind::Explicit);
+                    resolved_explicit_imports.insert(internal.clone());
+                }
+            }
+        }
+    }
+
+    for cf in &class_files {
+        let own_stem = cf
+            .strip_prefix(&req.class_dir)
+            .ok()
+            .map(|r| {
+                r.components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/")
+            })
+            .and_then(|s| s.strip_suffix(".class").map(str::to_string))
+            .unwrap_or_default();
+        let is_exempt = src_summary.exempt_own_prefixes.iter().any(|prefix| {
+            own_stem == *prefix
+                || own_stem
+                    .strip_prefix(prefix)
+                    .is_some_and(|rest| rest.starts_with('$'))
+        });
+
+        let Ok(bytes) = std::fs::read(cf) else {
+            continue;
+        };
+        let refs = parse_classfile_refs(&bytes);
+        if is_exempt {
+            for c in refs
+                .const_classes
+                .iter()
+                .chain(refs.descriptor_classes.iter())
+            {
+                mark_class(c, DependencyKind::Implicit);
+            }
+            continue;
+        }
+        for c in &refs.const_classes {
+            mark_class(c, DependencyKind::Explicit);
+        }
+        for c in &refs.descriptor_classes {
+            let simple = c.rsplit('/').next().unwrap_or(c);
+            let outer = simple.split('$').next().unwrap_or(simple);
+            let kind = if resolved_explicit_imports.contains(c)
+                || src_summary.identifiers.contains(simple)
+                || src_summary.identifiers.contains(outer)
+            {
+                DependencyKind::Explicit
+            } else {
+                DependencyKind::Implicit
+            };
+            mark_class(c, kind);
+        }
+    }
+
+    // Traverse API surface (supertypes, interfaces, member/generic/annotation signatures) of
+    // referenced classpath classes to record `IMPLICIT` transitive jars (`ImplicitDependencyExtractor`).
+    while let Some(cls) = bfs_classes.pop_front() {
+        let Some((jar_idx, entry_name)) = class_owner.get(&cls).cloned() else {
+            continue;
+        };
+        let Some(Some(reader)) = jar_readers.get(jar_idx) else {
+            continue;
+        };
+        let Some(entry) = reader.get_entry(&entry_name) else {
+            continue;
+        };
+        let Ok(bytes) = reader.read_entry_bytes(entry, false) else {
+            continue;
+        };
+        let refs = parse_classfile_refs(&bytes);
+        for sup in &refs.api_surface_classes {
+            if let Some(&(sup_idx, _)) = class_owner.get(sup) {
+                jar_kind.entry(sup_idx).or_insert(DependencyKind::Implicit);
+                if seen_bfs.insert(sup.clone()) {
+                    bfs_classes.push_back(sup.clone());
+                }
+            }
+        }
+    }
+
+    // Emit used jars in `req.class_path` order (`DependencyModule.emitDependencyInformation`).
+    let mut by_norm_path: HashMap<String, DependencyKind> = HashMap::new();
+    for (idx, kind) in jar_kind {
+        let norm = normalize_jdeps_path(&active_cp[idx].to_string_lossy());
+        let slot = by_norm_path.entry(norm).or_insert(kind);
+        if kind == DependencyKind::Explicit {
+            *slot = DependencyKind::Explicit;
+        }
+    }
+
+    let mut ordered = Vec::new();
+    let mut emitted = HashSet::new();
+    for cp_jar in &req.class_path {
+        let norm = normalize_jdeps_path(&cp_jar.to_string_lossy());
+        if let Some(&kind) = by_norm_path.get(&norm) {
+            if emitted.insert(norm) {
+                ordered.push((cp_jar.clone(), kind));
+            }
+        }
+    }
+    Ok(ordered)
+}
+
 /// Runs `SimpleJavaLibraryBuilder` or `ReducedClasspathJavaLibraryBuilder` (`BazelJavaBuilder`).
 pub fn run_bazel_java_builder(
     javac_bin: &str,
@@ -1282,24 +1925,28 @@ pub fn run_bazel_java_builder(
     let mut reduced_len = full_len;
     let mut fallback_used = false;
 
-    let sources = prepare_source_compilation(req)?;
+    let mut active_sources = prepare_source_compilation(req)?;
+    let mut active_cp: Vec<PathBuf> = req.class_path.clone();
     let (mut status, mut diag_output) = match req.reduce_classpath_mode {
-        ReduceClasspathMode::JavaBuilderReduced if !sources.is_empty() => {
+        ReduceClasspathMode::JavaBuilderReduced if !active_sources.is_empty() => {
             let reduced_cp =
                 compute_strict_classpath(&req.class_path, &req.direct_jars, &req.deps_artifacts)?;
             reduced_len = reduced_cp.len();
-            let (st1, out1) = invoke_system_javac(javac_bin, req, &reduced_cp, &sources, false)?;
+            let (st1, out1) =
+                invoke_system_javac(javac_bin, req, &reduced_cp, &active_sources, false)?;
             if should_fall_back(&st1, &out1) {
                 fallback_used = true;
-                let retry_sources = prepare_source_compilation(req)?;
-                invoke_system_javac(javac_bin, req, &req.class_path, &retry_sources, false)?
+                active_sources = prepare_source_compilation(req)?;
+                active_cp = req.class_path.clone();
+                invoke_system_javac(javac_bin, req, &active_cp, &active_sources, false)?
             } else {
+                active_cp = reduced_cp;
                 (st1, out1)
             }
         }
         ReduceClasspathMode::BazelReduced => {
             let (st1, out1) =
-                invoke_system_javac(javac_bin, req, &req.class_path, &sources, false)?;
+                invoke_system_javac(javac_bin, req, &req.class_path, &active_sources, false)?;
             if should_fall_back(&st1, &out1) {
                 (BlazeJavacStatus::RequiresFallback, String::new())
             } else {
@@ -1309,9 +1956,40 @@ pub fn run_bazel_java_builder(
         ReduceClasspathMode::None
         | ReduceClasspathMode::BazelFallback
         | ReduceClasspathMode::JavaBuilderReduced => {
-            invoke_system_javac(javac_bin, req, &req.class_path, &sources, false)?
+            invoke_system_javac(javac_bin, req, &req.class_path, &active_sources, false)?
         }
     };
+
+    let mut used_jars: Vec<(PathBuf, DependencyKind)> = Vec::new();
+    if status == BlazeJavacStatus::Ok && !active_sources.is_empty() {
+        used_jars = collect_used_classpath_jars(req, &active_cp, &active_sources)?;
+        let unescaped_label = req.target_label.as_deref().map(|l| {
+            l.strip_prefix("@@")
+                .map(|r| format!("@{r}"))
+                .unwrap_or_else(|| l.to_string())
+        });
+        match check_strict_java_deps(
+            req.strict_java_deps,
+            unescaped_label.as_deref(),
+            &req.fix_deps_tool,
+            &req.direct_jars,
+            &used_jars,
+        ) {
+            Ok(warnings) => {
+                for w in warnings {
+                    diag_output.push_str(&w);
+                    diag_output.push('\n');
+                }
+            }
+            Err(errors) => {
+                status = BlazeJavacStatus::Error;
+                for e in errors {
+                    diag_output.push_str(&e);
+                    diag_output.push('\n');
+                }
+            }
+        }
+    }
 
     if status == BlazeJavacStatus::Ok {
         write_output_jars(req)?;
@@ -1332,12 +2010,12 @@ pub fn run_bazel_java_builder(
         } else {
             Vec::new()
         };
-        let deps: Vec<Dependency> = if status == BlazeJavacStatus::Ok && !sources.is_empty() {
-            req.direct_jars
+        let deps: Vec<Dependency> = if status == BlazeJavacStatus::Ok {
+            used_jars
                 .iter()
-                .map(|p| Dependency {
+                .map(|(p, kind)| Dependency {
                     path: p.to_string_lossy().into_owned(),
-                    kind: DependencyKind::Explicit,
+                    kind: *kind,
                     locations: vec![],
                 })
                 .collect()
@@ -1362,7 +2040,7 @@ pub fn run_bazel_java_builder(
 
     if let Some(mf_out) = &req.output_manifest_proto {
         let mut units = Vec::new();
-        for src in &sources {
+        for src in &active_sources {
             let rel = src
                 .strip_prefix(&req.work_dir)
                 .unwrap_or(src)
@@ -1806,6 +2484,325 @@ mod tests {
         let app_jdeps = parse_jdeps(&std::fs::read(d.join("libapp.jdeps")).unwrap()).unwrap();
         assert_eq!(app_jdeps.contained_packages, vec!["app"]);
         assert_eq!(app_jdeps.success, Some(true));
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn werror_promotes_sunapi_and_respects_category_exclusions() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            return;
+        }
+        let d = tmp_dir("werror_sunapi");
+        std::fs::create_dir_all(d.join("p")).unwrap();
+        std::fs::write(
+            d.join("p/UnsafeUser.java"),
+            "package p; public class UnsafeUser { sun.misc.Unsafe u; }\n",
+        )
+        .unwrap();
+
+        // 1. Bare `-Werror` normalizes to `-Werror:all` and promotes `compiler.warn.sun.proprietary` (`sunapi`).
+        let opts_err = OptionsParser::parse(
+            &d,
+            [
+                "--output",
+                "u1.jar",
+                "--sources",
+                "p/UnsafeUser.java",
+                "--javacopts",
+                "-Werror",
+                "--",
+            ],
+        )
+        .unwrap();
+        let req_err = JavaLibraryBuildRequest::from_options(opts_err, &d, false, None).unwrap();
+        let res_err = run_bazel_java_builder("javac", &req_err).unwrap();
+        assert!(
+            !res_err.is_ok(),
+            "expected -Werror failure: {}",
+            res_err.output
+        );
+        assert!(
+            res_err
+                .output
+                .contains("error: warnings found and -Werror specified"),
+            "{}",
+            res_err.output
+        );
+        assert!(!d.join("u1.jar").exists());
+
+        // 2. `-Werror` followed by `-Werror:-sunapi` disables `sunapi` promotion and succeeds!
+        let opts_ok = OptionsParser::parse(
+            &d,
+            [
+                "--output",
+                "u2.jar",
+                "--sources",
+                "p/UnsafeUser.java",
+                "--javacopts",
+                "-Werror",
+                "-Werror:-sunapi",
+                "--",
+            ],
+        )
+        .unwrap();
+        let req_ok = JavaLibraryBuildRequest::from_options(opts_ok, &d, false, None).unwrap();
+        let res_ok = run_bazel_java_builder("javac", &req_ok).unwrap();
+        assert!(res_ok.is_ok(), "{}", res_ok.output);
+        assert!(d.join("u2.jar").exists());
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn strict_deps_enforces_indirect_errors_and_jdeps_tracks_explicit_implicit_and_unused() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            return;
+        }
+        let d = tmp_dir("strict_e2e");
+        std::fs::create_dir_all(d.join("ind")).unwrap();
+        std::fs::create_dir_all(d.join("dir")).unwrap();
+        std::fs::create_dir_all(d.join("unused")).unwrap();
+        std::fs::create_dir_all(d.join("app")).unwrap();
+
+        // 1. Build `libind.jar` (`ind.Base`).
+        std::fs::write(
+            d.join("ind/Base.java"),
+            "package ind; public class Base {}\n",
+        )
+        .unwrap();
+        let ind_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libind.jar",
+                    "--target_label",
+                    "//ind:base",
+                    "--sources",
+                    "ind/Base.java",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(run_bazel_java_builder("javac", &ind_req).unwrap().is_ok());
+
+        // 2. Build `libdir.jar` (`dir.Sub extends ind.Base`) and `libunused.jar` (`unused.Extra`).
+        std::fs::write(
+            d.join("dir/Sub.java"),
+            "package dir; public class Sub extends ind.Base {}\n",
+        )
+        .unwrap();
+        let dir_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libdir.jar",
+                    "--output_deps_proto",
+                    "libdir.jdeps",
+                    "--target_label",
+                    "//dir:sub",
+                    "--sources",
+                    "dir/Sub.java",
+                    "--classpath",
+                    "libind.jar",
+                    "--direct_dependencies",
+                    "libind.jar",
+                    "--strict_java_deps",
+                    "ERROR",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(run_bazel_java_builder("javac", &dir_req).unwrap().is_ok());
+
+        std::fs::write(
+            d.join("unused/Extra.java"),
+            "package unused; public class Extra {}\n",
+        )
+        .unwrap();
+        let unused_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libunused.jar",
+                    "--target_label",
+                    "//unused:extra",
+                    "--sources",
+                    "unused/Extra.java",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(run_bazel_java_builder("javac", &unused_req)
+            .unwrap()
+            .is_ok());
+
+        // 3. Direct reference to `ind.Base` without `libind.jar` in `--direct_dependencies` fails
+        // under `--strict_java_deps ERROR` and warns under `--strict_java_deps WARN`.
+        std::fs::write(
+            d.join("app/Bad.java"),
+            "package app; public class Bad { public ind.Base b = new ind.Base(); }\n",
+        )
+        .unwrap();
+        let bad_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libbad.jar",
+                    "--output_deps_proto",
+                    "libbad.jdeps",
+                    "--target_label",
+                    "//app:bad",
+                    "--sources",
+                    "app/Bad.java",
+                    "--classpath",
+                    "libdir.jar",
+                    "libind.jar",
+                    "--direct_dependencies",
+                    "libdir.jar",
+                    "--strict_java_deps",
+                    "ERROR",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        let bad_res = run_bazel_java_builder("javac", &bad_req).unwrap();
+        assert!(!bad_res.is_ok(), "expected strict deps failure");
+        assert!(
+            bad_res.output.contains("[error] [strict]")
+                && bad_res.output.contains("add_dep //ind:base //app:bad"),
+            "{}",
+            bad_res.output
+        );
+        assert!(!d.join("libbad.jar").exists());
+        let bad_jdeps = parse_jdeps(&std::fs::read(d.join("libbad.jdeps")).unwrap()).unwrap();
+        assert_eq!(bad_jdeps.success, Some(false));
+
+        let warn_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libwarn.jar",
+                    "--target_label",
+                    "//app:bad",
+                    "--sources",
+                    "app/Bad.java",
+                    "--classpath",
+                    "libdir.jar",
+                    "libind.jar",
+                    "--direct_dependencies",
+                    "libdir.jar",
+                    "--strict_java_deps",
+                    "WARN",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        let warn_res = run_bazel_java_builder("javac", &warn_req).unwrap();
+        assert!(warn_res.is_ok(), "{}", warn_res.output);
+        assert!(
+            warn_res.output.contains("[warning] [strict]"),
+            "{}",
+            warn_res.output
+        );
+        assert!(d.join("libwarn.jar").exists());
+
+        // 4. Referencing only `dir.Sub` (`Sub extends ind.Base`) with unused `libunused.jar` in
+        // `--direct_dependencies` succeeds under `ERROR`, marks `libdir.jar` EXPLICIT + `libind.jar`
+        // IMPLICIT, omits `libunused.jar`, and downstream `compute_strict_classpath` drops `libunused.jar`.
+        std::fs::write(
+            d.join("app/Good.java"),
+            "package app; public class Good { public dir.Sub s = new dir.Sub(); }\n",
+        )
+        .unwrap();
+        let good_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libgood.jar",
+                    "--output_deps_proto",
+                    "libgood.jdeps",
+                    "--target_label",
+                    "//app:good",
+                    "--sources",
+                    "app/Good.java",
+                    "--classpath",
+                    "libdir.jar",
+                    "libunused.jar",
+                    "libind.jar",
+                    "--direct_dependencies",
+                    "libdir.jar",
+                    "libunused.jar",
+                    "--strict_java_deps",
+                    "ERROR",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        let good_res = run_bazel_java_builder("javac", &good_req).unwrap();
+        assert!(good_res.is_ok(), "{}", good_res.output);
+        let good_jdeps = parse_jdeps(&std::fs::read(d.join("libgood.jdeps")).unwrap()).unwrap();
+        assert_eq!(
+            good_jdeps.dependencies.len(),
+            2,
+            "{:?}",
+            good_jdeps.dependencies
+        );
+        assert!(good_jdeps.dependencies[0].path.ends_with("libdir.jar"));
+        assert_eq!(good_jdeps.dependencies[0].kind, DependencyKind::Explicit);
+        assert!(good_jdeps.dependencies[1].path.ends_with("libind.jar"));
+        assert_eq!(good_jdeps.dependencies[1].kind, DependencyKind::Implicit);
+
+        let full_downstream = vec![
+            d.join("libgood.jar"),
+            d.join("libdir.jar"),
+            d.join("libunused.jar"),
+            d.join("libind.jar"),
+        ];
+        let shrunk = compute_strict_classpath(
+            &full_downstream,
+            &[d.join("libgood.jar")],
+            &[d.join("libgood.jdeps")],
+        )
+        .unwrap();
+        assert_eq!(
+            shrunk,
+            vec![
+                d.join("libgood.jar"),
+                d.join("libdir.jar"),
+                d.join("libind.jar"),
+            ]
+        );
 
         let _ = std::fs::remove_dir_all(&d);
     }

@@ -24,7 +24,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use zel_util::jar::{java_string_hash_code, utf16_cmp};
 use zel_util::java_regex::Regex;
 
@@ -238,13 +239,15 @@ pub struct TestInstant {
 
 impl TestInstant {
     pub fn now() -> Self {
+        static MONO_EPOCH: OnceLock<Instant> = OnceLock::new();
+        let monotonic_nanos = MONO_EPOCH.get_or_init(Instant::now).elapsed().as_nanos();
         let wall = match SystemTime::now().duration_since(UNIX_EPOCH) {
             Ok(d) => d.as_millis() as i64,
             Err(e) => -(e.duration().as_millis() as i64),
         };
         Self {
             wall_millis: wall,
-            monotonic_nanos: 0,
+            monotonic_nanos,
         }
     }
 }
@@ -348,11 +351,11 @@ impl TestDescription {
     }
 
     pub fn is_suite(&self) -> bool {
-        !self.children.is_empty() || self.method_name.is_none()
+        !self.children.is_empty()
     }
 
     pub fn is_test(&self) -> bool {
-        self.children.is_empty() && self.method_name.is_some()
+        self.children.is_empty()
     }
 
     pub fn collect_leaf_tests(&self, out: &mut Vec<TestDescription>) {
@@ -1023,10 +1026,11 @@ impl TestCaseNode {
                 self.parent_suite_name.clone(),
             ),
         };
-        let status = if self.state == TestCaseState::Initial {
-            TestCaseState::Filtered
-        } else {
-            self.state
+        let status = match self.state {
+            TestCaseState::Initial => TestCaseState::Filtered,
+            TestCaseState::Pending => TestCaseState::Cancelled,
+            TestCaseState::Started => TestCaseState::Interrupted,
+            other => other,
         };
         let num_tests = i32::from(status != TestCaseState::Filtered);
         let num_failures =
@@ -1288,7 +1292,9 @@ impl TestSuiteModel {
     ) -> Result<Self, String> {
         let sharding_filter = if sharding_env.is_sharding_enabled() {
             let mut leaves = Vec::new();
-            root_description.collect_leaf_tests(&mut leaves);
+            if root_description.is_suite() {
+                root_description.collect_leaf_tests(&mut leaves);
+            }
             sharding_env.touch_shard_file()?;
             let raw_filter = sharding_filters.create_sharding_filter(sharding_env, &leaves)?;
             Some(Box::new(SuiteTrimmingFilter::new(raw_filter)) as Box<dyn TestFilter>)
@@ -1296,15 +1302,21 @@ impl TestSuiteModel {
             None
         };
 
-        let top_desc = TestDescription::suite(suite_name, root_description.children.clone());
-        let mut root = TestSuiteNode::new(top_desc, properties);
+        let top_children = if root_description.is_suite() {
+            vec![root_description.clone()]
+        } else {
+            Vec::new()
+        };
+        let top_desc = TestDescription::suite(suite_name, top_children);
+        let mut root = TestSuiteNode::new(top_desc, properties.clone());
         if root_description.is_suite() {
-            for child in &root_description.children {
-                if let Some(node) =
-                    Self::build_child(child, suite_name, sharding_filter.as_deref())?
-                {
-                    root.children.push(node);
+            if let Some(mut node) =
+                Self::build_child(root_description, suite_name, sharding_filter.as_deref())?
+            {
+                if let SuiteChild::Suite(ref mut s) = node {
+                    s.properties = properties;
                 }
+                root.children.push(node);
             }
         }
 
@@ -1557,6 +1569,7 @@ impl BazelTestRunner {
         let sharding_env = ShardingEnvironment::from_map(env, sharding_strategy_prop);
         let sharding_filters = ShardingFilters::default();
 
+        let suite_start_instant = TestInstant::now();
         let mut model = TestSuiteModel::build(
             suite_name,
             root_description,
@@ -1597,7 +1610,7 @@ impl BazelTestRunner {
         // - If sharding is enabled, allow no-op pass so shards with 0 matching tests do not fail!
         // - Otherwise, synthesize JUnit's `"No tests found matching ..."` failure.
         if has_user_filter && runnable_count == 0 && !sharding_env.is_sharding_enabled() {
-            let now = TestInstant::now();
+            let end_now = TestInstant::now();
             let filter_err = TestDescription::leaf(
                 "org.junit.runner.manipulation.Filter",
                 "initializationError",
@@ -1616,14 +1629,16 @@ impl BazelTestRunner {
             );
             let mut err_case =
                 TestCaseNode::new(filter_err, "org.junit.runner.manipulation.Filter");
+            err_case.started(suite_start_instant);
             err_case.test_failure(
                 FailureRecord::new(
                     "java.lang.Exception",
                     Some(msg.clone()),
                     format!("java.lang.Exception: {msg}\n"),
                 ),
-                now,
+                end_now,
             );
+            err_case.finished(end_now);
             err_suite.children.push(SuiteChild::Case(err_case));
             model.root.children.push(SuiteChild::Suite(err_suite));
             Self::flush_xml(&model, cfg.xml_output_path.as_deref());
@@ -1634,9 +1649,11 @@ impl BazelTestRunner {
         model.test_run_started();
 
         let mut leaves = Vec::new();
-        root_description.collect_leaf_tests(&mut leaves);
+        if root_description.is_suite() {
+            root_description.collect_leaf_tests(&mut leaves);
+        }
         let mut any_failed = false;
-        let mut clock_nanos = 0u128;
+        let mut clock_nanos = suite_start_instant.monotonic_nanos;
 
         for leaf in &leaves {
             let should_exec = match model.find_case_mut(leaf) {
@@ -1889,8 +1906,7 @@ mod tests {
 
         let t1 = TestDescription::leaf("pkg.SampleTest", "testA");
         let t2 = TestDescription::leaf("pkg.SampleTest", "testB");
-        let cls = TestDescription::suite("pkg.SampleTest", vec![t1.clone(), t2.clone()]);
-        let root = TestDescription::suite("pkg.SampleTest", vec![cls]);
+        let root = TestDescription::suite("pkg.SampleTest", vec![t1.clone(), t2.clone()]);
 
         // 1. Missing suite -> exit 2.
         assert_eq!(
@@ -1974,7 +1990,14 @@ mod tests {
 
         // 4. Fail-fast stops after the first failing test!
         let mut ran = 0usize;
-        let env_ff = BTreeMap::from([("TESTBRIDGE_TEST_RUNNER_FAIL_FAST".into(), "1".into())]);
+        let xml_ff = d.join("failfast.xml");
+        let env_ff = BTreeMap::from([
+            ("TESTBRIDGE_TEST_RUNNER_FAIL_FAST".into(), "1".into()),
+            (
+                "XML_OUTPUT_FILE".into(),
+                xml_ff.to_string_lossy().into_owned(),
+            ),
+        ]);
         let rc_ff = BazelTestRunner::run_suite(
             Some("pkg.SampleTest"),
             true,
@@ -1994,7 +2017,116 @@ mod tests {
         .unwrap();
         assert_eq!(rc_ff, EXIT_CODE_TEST_FAILURE);
         assert_eq!(ran, 1, "fail-fast must stop after first failure");
+        let ff_xml = std::fs::read_to_string(&xml_ff).unwrap();
+        assert!(
+            ff_xml.contains("<testsuite name='pkg.SampleTest'")
+                && ff_xml.contains("tests='2' failures='1' errors='0'")
+                && ff_xml.contains("<testcase name='testA' classname='pkg.SampleTest'")
+                && ff_xml
+                    .contains("<testcase name='testB' classname='pkg.SampleTest' time='0.0' />"),
+            "{ff_xml}"
+        );
 
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn test_suite_model_single_class_nested_suite_and_ignored_class_xml() {
+        // 1. Standard single JUnit test class (`Description("pkg.SampleTest", [testA, testB])`)
+        // emits one `<testsuite name='pkg.SampleTest'>` containing both `<testcase>` elements.
+        let t1 = TestDescription::leaf("pkg.SampleTest", "testA");
+        let t2 = TestDescription::leaf("pkg.SampleTest", "testB");
+        let class_desc = TestDescription::suite("pkg.SampleTest", vec![t1.clone(), t2.clone()]);
+        let sharding_env = ShardingEnvironment::from_map(&BTreeMap::new(), None);
+        let sharding_filters = ShardingFilters::default();
+        let mut model = TestSuiteModel::build(
+            "pkg.SampleTest",
+            &class_desc,
+            BTreeMap::from([("propK".into(), "propV".into())]),
+            &sharding_env,
+            &sharding_filters,
+        )
+        .unwrap();
+        assert_eq!(model.root.children.len(), 1);
+        model.test_run_started();
+        let t0 = TestInstant::now();
+        if let Some(c) = model.find_case_mut(&t1) {
+            c.started(t0);
+            c.finished(TestInstant {
+                wall_millis: t0.wall_millis + 10,
+                monotonic_nanos: t0.monotonic_nanos + 10_000_000,
+            });
+        }
+        // Leave `t2` in `Pending` (unrun, as after orderly fail-fast): `build_result` maps it to
+        // `Cancelled` with `interval: None` and `was_run() == false`.
+        let top_res = model.root.build_result();
+        assert_eq!(top_res.children.len(), 1);
+        let suite_res = &top_res.children[0];
+        assert_eq!(suite_res.name, "pkg.SampleTest");
+        assert_eq!(suite_res.num_tests, 2);
+        assert_eq!(suite_res.num_failures, 0);
+        assert_eq!(suite_res.children[0].status, TestCaseState::Completed);
+        assert!(suite_res.children[0].status.was_run());
+        assert_eq!(suite_res.children[1].status, TestCaseState::Cancelled);
+        assert!(!suite_res.children[1].status.was_run());
+        assert!(suite_res.children[1].interval.is_none());
+
+        let xml = model.write_as_xml_once().unwrap();
+        assert!(xml.contains("<testsuite name='pkg.SampleTest'"), "{xml}");
+        assert!(
+            xml.contains("<property name='propK' value='propV' />"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<testcase name='testA' classname='pkg.SampleTest' time='0.01' />"),
+            "{xml}"
+        );
+        assert!(
+            xml.contains("<testcase name='testB' classname='pkg.SampleTest' time='0.0' />"),
+            "{xml}"
+        );
+        let parsed = parse_test_xml(&xml).unwrap().unwrap();
+        assert_eq!(parsed.child.len(), 1);
+        assert_eq!(parsed.child[0].name.as_deref(), Some("pkg.SampleTest"));
+        assert_eq!(parsed.child[0].child.len(), 2);
+
+        // 2. `@Ignore` / childless class description builds an empty model (`num_tests == 0`).
+        let ignored_cls = TestDescription::suite("pkg.IgnoredTest", vec![]);
+        let empty_model = TestSuiteModel::build(
+            "pkg.IgnoredTest",
+            &ignored_cls,
+            BTreeMap::new(),
+            &sharding_env,
+            &sharding_filters,
+        )
+        .unwrap();
+        let empty_res = empty_model.root.build_result();
+        assert!(empty_res.children.is_empty());
+        assert_eq!(empty_res.num_tests, 0);
+
+        // 3. Unfinished `Started` case maps to `Interrupted`.
+        let mut started_only = TestCaseNode::new(t1, "pkg.SampleTest");
+        started_only.pending();
+        started_only.started(t0);
+        let started_res = started_only.build_result();
+        assert_eq!(started_res.status, TestCaseState::Interrupted);
+        assert!(started_res.status.was_run());
+    }
+
+    #[test]
+    fn test_instant_now_records_monotonic_elapsed_duration() {
+        let start = TestInstant::now();
+        std::thread::sleep(Duration::from_millis(8));
+        let end = TestInstant::now();
+        assert!(
+            end.monotonic_nanos > start.monotonic_nanos,
+            "start={start:?} end={end:?}"
+        );
+        let iv = TestInterval::new(start, end).unwrap();
+        assert!(
+            iv.duration_millis() >= 5,
+            "duration={}ms",
+            iv.duration_millis()
+        );
     }
 }
