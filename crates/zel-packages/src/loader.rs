@@ -58,6 +58,8 @@ pub struct LoaderConfig {
     pub check_bzl_visibility: bool,
     /// `--experimental_enable_scl_dialect` (default `true` in Bazel 9).
     pub experimental_enable_scl_dialect: bool,
+    /// `--incompatible_use_cc_configure_from_rules_cc` (default `false` in Bazel 9).
+    pub incompatible_use_cc_configure_from_rules_cc: bool,
     /// Handler for host calls that belong to an embedding runtime (Bzlmod repository rules and
     /// `repository_ctx`/`module_ctx` methods called from helper `.bzl` files evaluated here).
     /// Consulted first for names accepted by [`is_external_host_call`].
@@ -108,6 +110,7 @@ impl LoaderConfig {
             experimental_bzl_visibility: true,
             check_bzl_visibility: true,
             experimental_enable_scl_dialect: true,
+            incompatible_use_cc_configure_from_rules_cc: false,
             external_host: None,
             bzl_override: None,
             sibling_repository_layout: false,
@@ -1086,6 +1089,13 @@ impl PackageLoader {
         ctx.globals.insert(
             "visibility".to_string(),
             Value::BuiltinFunction("host:visibility".to_string()),
+        );
+        ctx.globals.insert(
+            "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc".to_string(),
+            Value::BuiltinFunction(
+                "host:__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc"
+                    .to_string(),
+            ),
         );
         // Native `cc_common`: rules_cc's Starlark is layered on `cc_common.internal_DO_NOT_USE()`.
         let mut cc_common = BTreeMap::new();

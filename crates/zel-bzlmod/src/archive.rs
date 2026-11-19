@@ -662,6 +662,39 @@ pub(crate) struct Deprefixed {
     pub(crate) skip: bool,
 }
 
+/// Strips `prefix` from a symlink target when applicable (`StripPrefixedPath.maybeDeprefixSymlinkTarget`).
+pub(crate) fn maybe_deprefix_symlink(
+    target: &str,
+    prefix: &[String],
+    strip_components: usize,
+    root: &Path,
+) -> String {
+    if target.starts_with('/') {
+        let tdp = deprefix(target, prefix, strip_components);
+        return join_rel(root, &tdp.segs).to_string_lossy().to_string();
+    }
+    let segs = normalize(target);
+    let stripped = if strip_components != 0
+        && segs.len() >= strip_components
+        && !segs.iter().take(strip_components).any(|s| s == "..")
+    {
+        segs[strip_components..].to_vec()
+    } else if !prefix.is_empty() && segs.len() >= prefix.len() && segs[..prefix.len()] == *prefix {
+        segs[prefix.len()..].to_vec()
+    } else {
+        segs
+    };
+    if stripped.is_empty() {
+        if target.is_empty() {
+            String::new()
+        } else {
+            ".".to_string()
+        }
+    } else {
+        stripped.join("/")
+    }
+}
+
 pub(crate) fn deprefix(name: &str, prefix: &[String], strip_components: usize) -> Deprefixed {
     let segs = normalize(name);
     if strip_components != 0 {
@@ -971,13 +1004,14 @@ fn extract_entries(
                             target
                         ));
                     }
-                    let tdp = deprefix(target, &prefix_segs, opts.strip_components);
-                    join_rel(root, &tdp.segs).to_string_lossy().to_string()
+                    maybe_deprefix_symlink(target, &prefix_segs, opts.strip_components, root)
                 } else {
+                    let rewritten =
+                        maybe_deprefix_symlink(target, &prefix_segs, opts.strip_components, root);
                     if noun == "zip" {
                         // check for escaping the extraction root for zip archives
                         let mut depth = rel.len() as i64 - 1;
-                        for seg in target.split('/') {
+                        for seg in rewritten.split('/') {
                             match seg {
                                 "" | "." => {}
                                 ".." => {
@@ -995,7 +1029,7 @@ fn extract_entries(
                             }
                         }
                     }
-                    target.clone()
+                    rewritten
                 };
                 symlinks.push((out_path, final_target));
             }
@@ -3275,6 +3309,25 @@ mod corrupt_tests {
         )
         .unwrap();
         assert_eq!(fs::read(d.join("out2/f")).unwrap(), b"data");
+    }
+
+    #[test]
+    fn deprefix_relative_and_absolute_symlink_targets() {
+        let root = Path::new("/extract/root");
+        let prefix = vec!["foo".to_string()];
+        assert_eq!(
+            maybe_deprefix_symlink("foo/bar/baz.h", &prefix, 0, root),
+            "bar/baz.h"
+        );
+        assert_eq!(maybe_deprefix_symlink("foo/a/../b", &prefix, 0, root), "b");
+        assert_eq!(
+            maybe_deprefix_symlink("../sibling", &prefix, 0, root),
+            "../sibling"
+        );
+        assert_eq!(
+            maybe_deprefix_symlink("/foo/include/hdr.h", &prefix, 0, root),
+            "/extract/root/include/hdr.h"
+        );
     }
 }
 

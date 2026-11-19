@@ -73,7 +73,8 @@ fn json_attr(out: &mut String, v: &AttrVal) {
         AttrVal::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
         AttrVal::Int(i) => out.push_str(&i.to_string()),
         AttrVal::Float(f) => out.push_str(&f.to_string()),
-        AttrVal::Str(s) | AttrVal::Label(s) => json_str(out, &attr_string(s)),
+        AttrVal::Str(s) => json_str(out, &attr_string(s)),
+        AttrVal::Label(s) => json_str(out, s),
         AttrVal::List(l) => {
             out.push('[');
             for (i, x) in l.iter().enumerate() {
@@ -91,6 +92,18 @@ fn json_attr(out: &mut String, v: &AttrVal) {
                     out.push(',');
                 }
                 json_str(out, &attr_string(k));
+                out.push(':');
+                json_attr(out, x);
+            }
+            out.push('}');
+        }
+        AttrVal::LabelDict(d) => {
+            out.push('{');
+            for (i, (k, x)) in d.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                json_str(out, k);
                 out.push(':');
                 json_attr(out, x);
             }

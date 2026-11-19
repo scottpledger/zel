@@ -725,3 +725,68 @@ fn execute_response_without_action_result_fails_instead_of_default_exit_0() {
     );
     assert_eq!(fb.n.load(Ordering::SeqCst), 0);
 }
+
+#[test]
+fn local_spawns_bypass_cache_nonzero_cache_entries_ignored_and_reapi_v2_range() {
+    let server = FakeReapiServer::new();
+    // Server advertising REAPI 2.2..=2.10 must be accepted within client 2.0..=2.11 range.
+    server.configure(|c| {
+        c.low_api_version = zel_proto::reapi::SemVer {
+            major: 2,
+            minor: 2,
+            patch: 0,
+            prerelease: String::new(),
+        };
+        c.high_api_version = zel_proto::reapi::SemVer {
+            major: 2,
+            minor: 10,
+            patch: 0,
+            prerelease: String::new(),
+        };
+    });
+    let ws = tmp("local_nocache");
+    let dc = tmp("local_nocache_dc");
+    std::fs::write(ws.join("in.txt"), "hello").unwrap();
+
+    // `local` execution requirement must not read or populate disk/remote caches.
+    let dcs = format!("--disk_cache={}", dc.display());
+    let fb = counting();
+    let r = runner(
+        &server,
+        false,
+        &["--remote_download_outputs=all", &dcs],
+        fb.clone(),
+    );
+    let mut local_spawn = spawn(&["sh", "-c", "echo v > out.txt"], &["in.txt"], &["out.txt"]);
+    local_spawn.execution_info.insert("local".into(), "".into());
+    assert!(!crate::spawn_runner::may_be_cached(&local_spawn));
+    assert_eq!(run(&r, &local_spawn, &ws).runner_name, "local");
+    assert_eq!(run(&r, &local_spawn, &ws).runner_name, "local");
+    assert_eq!(fb.n.load(Ordering::SeqCst), 2);
+    assert_eq!(server.ac_count(), 0);
+
+    // Remote cache hit with `--disk_cache` populates the disk action cache so an offline runner hits disk.
+    let cacheable = spawn(
+        &["sh", "-c", "echo cached > c.txt"],
+        &["in.txt"],
+        &["c.txt"],
+    );
+    let r_seed = runner(
+        &server,
+        false,
+        &["--remote_download_outputs=all"],
+        counting(),
+    );
+    assert_eq!(run(&r_seed, &cacheable, &ws).runner_name, "local");
+    std::fs::remove_file(ws.join("c.txt")).unwrap();
+    assert_eq!(run(&r, &cacheable, &ws).runner_name, "remote cache hit");
+    std::fs::remove_file(ws.join("c.txt")).unwrap();
+    let offline_opts =
+        RemoteOptions::from_source(&options_from_args(&["--remote_download_outputs=all", &dcs]))
+            .unwrap();
+    let r_offline = RemoteSpawnRunner::new(offline_opts, None, counting()).unwrap();
+    assert_eq!(
+        run(&r_offline, &cacheable, &ws).runner_name,
+        "disk cache hit"
+    );
+}

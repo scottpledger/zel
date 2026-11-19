@@ -158,6 +158,29 @@ impl Netrc {
         None
     }
 
+    /// Loads `.netrc` using `NETRC`, `HOME/.netrc`, or `USERPROFILE/.netrc` from `client_env`
+    /// only, without falling back to the server process environment.
+    pub fn load_from_client_env_only(client_env: &BTreeMap<String, String>) -> Option<Self> {
+        let get =
+            |k: &str| -> Option<String> { client_env.get(k).filter(|v| !v.is_empty()).cloned() };
+        if let Some(p) = get("NETRC").map(PathBuf::from).filter(|p| p.exists()) {
+            return Self::from_file(&p).ok();
+        }
+        if let Some(p) = get("HOME")
+            .map(|h| PathBuf::from(h).join(".netrc"))
+            .filter(|p| p.exists())
+        {
+            return Self::from_file(&p).ok();
+        }
+        if let Some(p) = get("USERPROFILE")
+            .map(|h| PathBuf::from(h).join(".netrc"))
+            .filter(|p| p.exists())
+        {
+            return Self::from_file(&p).ok();
+        }
+        None
+    }
+
     /// Look up credential for a host.
     pub fn get_credential(&self, host: &str) -> Option<&NetrcMachine> {
         self.machines.get(host).or(self.default_machine.as_ref())
@@ -334,7 +357,8 @@ pub fn resolve_credential_helper_headers(
     }
 }
 
-/// Resolves fallback `.netrc` `Authorization` header for `url` from `NETRC` / `HOME`.
+/// Resolves fallback `.netrc` `Authorization` header for `url` (`Basic base64(login:password)`
+/// using empty login when `login` is omitted, matching Bazel's `NetrcCredentials`).
 pub fn resolve_netrc_headers(
     url: &str,
     client_env: &BTreeMap<String, String>,
@@ -343,12 +367,9 @@ pub fn resolve_netrc_headers(
     if let Some(netrc) = Netrc::load_from_env(client_env) {
         if let Some(m) = netrc.get_credential(host) {
             if let Some(pwd) = &m.password {
-                if let Some(login) = &m.login {
-                    let b64 = crate::hash::base64_encode(format!("{login}:{pwd}").as_bytes());
-                    return vec![("Authorization".to_string(), format!("Basic {b64}"))];
-                } else {
-                    return vec![("Authorization".to_string(), format!("Bearer {pwd}"))];
-                }
+                let login = m.login.as_deref().unwrap_or("");
+                let b64 = crate::hash::base64_encode(format!("{login}:{pwd}").as_bytes());
+                return vec![("Authorization".to_string(), format!("Basic {b64}"))];
             }
         }
     }
@@ -507,6 +528,101 @@ default login defuser password defpass
         assert_eq!(
             hdrs_fallback,
             vec![("Authorization".to_string(), format!("Basic {expected_b64}"))]
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn credential_helper_get_subcommand_scope_specificity_and_netrc_basic_without_login() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("zel-netrc-parity-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let make_helper = |name: &str, token: &str| -> PathBuf {
+            let p = dir.join(name);
+            // Fails unless invoked with `get` as $1!
+            let script = format!(
+                "#!/bin/sh\nif [ \"$1\" != \"get\" ]; then echo \"missing get\" >&2; exit 2; fi\ncat >/dev/null\necho '{{\"headers\":{{\"Authorization\":[\"Bearer {token}\"]}}}}'\n"
+            );
+            std::fs::write(&p, script).unwrap();
+            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            p
+        };
+
+        let h_default = make_helper("h_default.sh", "tok-default");
+        let h_short_wild = make_helper("h_short.sh", "tok-short-wild");
+        let h_long_wild = make_helper("h_long.sh", "tok-long-wild");
+        let h_exact = make_helper("h_exact.sh", "tok-exact");
+
+        // Exact host beats wildcard even when wildcard is listed later; longer wildcard beats shorter.
+        let helpers = vec![
+            (String::new(), h_default),
+            ("a.sub.example.com".to_string(), h_exact),
+            ("*.sub.example.com".to_string(), h_long_wild),
+            ("*.example.com".to_string(), h_short_wild),
+        ];
+        let empty_env = BTreeMap::new();
+        assert_eq!(
+            resolve_credential_helper_headers(
+                "https://a.sub.example.com/pkg.tgz",
+                &helpers,
+                &empty_env
+            )
+            .unwrap(),
+            Some(vec![(
+                "Authorization".to_string(),
+                "Bearer tok-exact".to_string()
+            )])
+        );
+        assert_eq!(
+            resolve_credential_helper_headers(
+                "https://b.sub.example.com/pkg.tgz",
+                &helpers,
+                &empty_env
+            )
+            .unwrap(),
+            Some(vec![(
+                "Authorization".to_string(),
+                "Bearer tok-long-wild".to_string()
+            )])
+        );
+        assert_eq!(
+            resolve_credential_helper_headers("https://example.com/pkg.tgz", &helpers, &empty_env)
+                .unwrap(),
+            Some(vec![(
+                "Authorization".to_string(),
+                "Bearer tok-short-wild".to_string()
+            )])
+        );
+        assert_eq!(
+            resolve_credential_helper_headers(
+                "https://unmatched.org/pkg.tgz",
+                &helpers,
+                &empty_env
+            )
+            .unwrap(),
+            Some(vec![(
+                "Authorization".to_string(),
+                "Bearer tok-default".to_string()
+            )])
+        );
+
+        // .netrc without `login` encodes Basic `:password` (`OmZvb2Jhcg==` for `foobar`), not Bearer.
+        let netrc_path = dir.join(".netrc");
+        std::fs::write(&netrc_path, "machine basic.example.com password foobar\n").unwrap();
+        let mut env = BTreeMap::new();
+        env.insert("NETRC".to_string(), netrc_path.display().to_string());
+        assert!(Netrc::load_from_client_env_only(&BTreeMap::new()).is_none());
+        assert!(Netrc::load_from_client_env_only(&env).is_some());
+        assert_eq!(
+            resolve_netrc_headers("https://basic.example.com/archive.tar.gz", &env),
+            vec![(
+                "Authorization".to_string(),
+                "Basic OmZvb2Jhcg==".to_string()
+            )]
         );
 
         let _ = std::fs::remove_dir_all(&dir);

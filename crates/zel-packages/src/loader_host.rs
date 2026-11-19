@@ -127,6 +127,15 @@ impl PackageLoader {
                 zel_starlark::StarlarkList::new(Vec::new()),
             ))));
         }
+        if name == "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc" {
+            if self.cfg.incompatible_use_cc_configure_from_rules_cc {
+                return Err(herr(
+                    ctx,
+                    "Incompatible flag --incompatible_use_cc_configure_from_rules_cc has been flipped. Please use cc_configure and related logic from https://github.com/bazelbuild/rules_cc. See https://github.com/bazelbuild/bazel/issues/10134 for details and migration instructions.",
+                ));
+            }
+            return Ok(Value::None);
+        }
         if name == "visibility" {
             return self.set_bzl_visibility(ctx, state, bzl_init, owner, pos, kw);
         }

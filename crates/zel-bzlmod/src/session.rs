@@ -191,10 +191,25 @@ impl BzlmodConfig {
         output_base: &Path,
         client_env: BTreeMap<String, String>,
     ) -> Result<Self, String> {
+        let cwd = parsed
+            .get_str("client_cwd")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| workspace.to_path_buf());
         let user_home = resolve_user_home(&client_env);
         let windows_mode = cfg!(windows);
         let abs = |p: &str| -> PathBuf {
-            expand_option_path(p, workspace, user_home.as_deref(), windows_mode)
+            if p == "%workspace%"
+                || p.starts_with("%workspace%/")
+                || (windows_mode && p.starts_with("%workspace%\\"))
+                || p == "~"
+                || p.starts_with("~/")
+                || (windows_mode && p.starts_with("~\\"))
+            {
+                expand_option_path(p, workspace, user_home.as_deref(), windows_mode)
+            } else {
+                expand_option_path(p, &cwd, user_home.as_deref(), windows_mode)
+            }
         };
         let mode_str = |n: &str, d: &str| {
             parsed.get_str(n).map(String::from).unwrap_or_else(|| {

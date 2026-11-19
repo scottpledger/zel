@@ -232,6 +232,12 @@ impl ReapiClient {
 
     /// `RemoteServerCapabilities.checkClientServerCompatibility`.
     pub fn check_compatibility(&self, need_exec: bool) -> Result<()> {
+        self.check_compatibility_with_warning(need_exec).map(|_| ())
+    }
+
+    /// Checks client/server REAPI v2 compatibility (`2.0..=2.11`), returning `Ok(Some(warning))`
+    /// when falling back to the server's `deprecated_api_version`.
+    pub fn check_compatibility_with_warning(&self, need_exec: bool) -> Result<Option<String>> {
         let caps = self.capabilities()?;
         let lo = caps.low_api_version.clone().unwrap_or(SemVer {
             major: 2,
@@ -241,12 +247,53 @@ impl ReapiClient {
             major: 2,
             ..Default::default()
         });
-        let cmp = |a: &SemVer, b: (i32, i32)| (a.major, a.minor).cmp(&b);
-        if cmp(&lo, (2, 0)) == std::cmp::Ordering::Greater || (hi.major, hi.minor) < (2, 0) {
-            return Err(RemoteError::Other(format!(
-                "Server does not support REAPI v2.0 (supports {}.{} - {}.{})",
-                lo.major, lo.minor, hi.major, hi.minor
-            )));
+        let cmp_semver = |a: &SemVer, b: &SemVer| -> std::cmp::Ordering {
+            match (a.major, a.minor, a.patch).cmp(&(b.major, b.minor, b.patch)) {
+                std::cmp::Ordering::Equal => {
+                    match (a.prerelease.is_empty(), b.prerelease.is_empty()) {
+                        (true, true) => std::cmp::Ordering::Equal,
+                        (true, false) => std::cmp::Ordering::Greater,
+                        (false, true) => std::cmp::Ordering::Less,
+                        (false, false) => a.prerelease.cmp(&b.prerelease),
+                    }
+                }
+                ord => ord,
+            }
+        };
+        let client_lo = SemVer {
+            major: 2,
+            minor: 0,
+            patch: 0,
+            prerelease: String::new(),
+        };
+        let client_hi = SemVer {
+            major: 2,
+            minor: 11,
+            patch: 0,
+            prerelease: String::new(),
+        };
+        let overlaps = |srv_lo: &SemVer, srv_hi: &SemVer| -> bool {
+            cmp_semver(srv_lo, &client_hi) != std::cmp::Ordering::Greater
+                && cmp_semver(srv_hi, &client_lo) != std::cmp::Ordering::Less
+        };
+        let mut warning = None;
+        if !overlaps(&lo, &hi) {
+            let dep_ok = caps
+                .deprecated_api_version
+                .as_ref()
+                .filter(|d| (d.major, d.minor, d.patch) != (0, 0, 0) || !d.prerelease.is_empty())
+                .filter(|d| overlaps(d, &hi));
+            if let Some(dep) = dep_ok {
+                warning = Some(format!(
+                    "The remote server's preferred REAPI version {}.{} is higher than 2.11; falling back to deprecated API version {}.{}",
+                    lo.major, lo.minor, dep.major, dep.minor
+                ));
+            } else {
+                return Err(RemoteError::Other(format!(
+                    "Server REAPI version range {}.{} - {}.{} is not compatible with supported REAPI 2.0 - 2.11",
+                    lo.major, lo.minor, hi.major, hi.minor
+                )));
+            }
         }
         let want = self.cfg.digest_fn.enum_value();
         let cc = caps.cache_capabilities.clone().unwrap_or_default();
@@ -274,7 +321,7 @@ impl ReapiClient {
                 ));
             }
         }
-        Ok(())
+        Ok(warning)
     }
 
     pub fn remote_cache_supports_update(&self) -> bool {

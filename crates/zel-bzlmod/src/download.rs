@@ -828,7 +828,12 @@ impl UrlRewriter {
             for (_, re, repl) in &self.rewrites {
                 if let Some(caps) = re.full_match(&without_scheme) {
                     matched = true;
-                    let s = format!("{}://{}", parsed.scheme, expand_replacement(repl, &caps));
+                    let expanded = expand_replacement(repl, &caps);
+                    let s = if expanded.starts_with("http://") || expanded.starts_with("https://") {
+                        expanded
+                    } else {
+                        format!("{}://{}", parsed.scheme, expanded)
+                    };
                     if !candidates.contains(&s) {
                         candidates.push(s);
                     }

@@ -30,6 +30,12 @@ fn marker_attribute_json(value: &AttrVal) -> crate::json::Json {
                 })
                 .collect(),
         ),
+        AttrVal::LabelDict(entries) => Json::Obj(
+            entries
+                .iter()
+                .map(|(key, value)| (key.clone(), marker_attribute_json(value)))
+                .collect(),
+        ),
         value => value.to_json(),
     }
 }
@@ -243,6 +249,22 @@ impl Rt {
             }
         }
         Err(format!("Repository '@@{canonical}' is not defined"))
+    }
+
+    fn original_name_for(&self, canonical: &str, given_name: &str) -> String {
+        let res = &self.resolution;
+        if res
+            .canonical_repo_names
+            .contains_key(&canonical.to_string())
+        {
+            return canonical.to_string();
+        }
+        for unique in res.extension_unique_names.values() {
+            if let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) {
+                return exported.to_string();
+            }
+        }
+        given_name.to_string()
     }
 
     /// The repo in whose context label-valued attributes of `canonical`'s rule are resolved:
@@ -662,13 +684,14 @@ impl Rt {
                 ))
             }
         };
-        let _given_name = spec
+        let given_name = spec
             .attrs
             .iter()
             .find(|(k, _)| k == "name")
             .and_then(|(_, v)| v.as_str())
             .unwrap_or(canonical)
             .to_string();
+        let original_name = self.original_name_for(canonical, &given_name);
         let mut attrs = spec.attrs.clone();
         attrs.retain(|(k, _)| k != "name");
         let mut defs = def.attrs.clone();
@@ -702,6 +725,7 @@ impl Rt {
         let data = CtxData {
             kind: CtxKind::Repository,
             name: canonical.to_string(),
+            original_name,
             canonical: canonical.to_string(),
             dir: match (
                 dir.parent().and_then(|p| crate::canonical_no_unc(p).ok()),
@@ -858,6 +882,21 @@ impl Rt {
                             u.proxies.first().map(|p| p.location.clone()).unwrap_or_else(|| mk.to_string()),
                             crate::ctxargs::did_you_mean(&exported, &names)
                         ));
+                    }
+                }
+                if mk.is_root() {
+                    for (exported, ov) in &u.repo_overrides {
+                        if ov.must_exist && !result.generated.iter().any(|(n, _)| n == exported) {
+                            let names: Vec<&str> =
+                                result.generated.iter().map(|(n, _)| n.as_str()).collect();
+                            let (r, p, f) = parse_bzl_label(&id.bzl_file);
+                            let ext_id = format!("@@{r}//{p}:{f}%{}", id.name);
+                            return Err(format!(
+                                "ERROR: module extension {ext_id} does not generate repository \"{exported}\", yet it is overridden via override_repo() at {}. Use inject_repo() instead to inject a new repository.{}",
+                                ov.location,
+                                crate::ctxargs::did_you_mean(exported, &names)
+                            ));
+                        }
                     }
                 }
             }
@@ -1405,6 +1444,7 @@ impl Rt {
         let data = CtxData {
             kind: CtxKind::Module,
             name: id.name.clone(),
+            original_name: id.name.clone(),
             canonical: unique.clone(),
             dir: dir.clone(),
             attr: Value::None,
@@ -1576,7 +1616,10 @@ impl Rt {
                             })
                             .collect::<Result<Vec<_>, _>>()?,
                     ),
-                    ("label_keyed_string_dict", AttrVal::Dict(entries)) => AttrVal::Dict(
+                    (
+                        "label_keyed_string_dict",
+                        AttrVal::Dict(entries) | AttrVal::LabelDict(entries),
+                    ) => AttrVal::LabelDict(
                         entries
                             .into_iter()
                             .map(|(ek, ev)| {
@@ -3033,5 +3076,99 @@ my_ext = _make_ext()
             normalize_windows_starlark_path(r"\\?\UNC\server\share\dir\a.txt"),
             "//server/share/dir/a.txt"
         );
+    }
+
+    #[test]
+    fn original_name_override_repo_must_exist_and_label_dict_attrs() {
+        let base = tmpdir("fetch_parity_ext");
+        let ws = base.join("ws");
+        write(&ws, "BUILD", "");
+        write(
+            &ws,
+            "defs.bzl",
+            r#"
+__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc()
+
+def _r_impl(rctx):
+    keys = [str(k) for k in rctx.attr.lksd.keys()]
+    vals = [str(x) for x in rctx.attr.lld.get("grp", [])]
+    rctx.file("BUILD", "")
+    rctx.file("info.txt", "name=" + rctx.name + "\norig=" + rctx.original_name + "\nlksd=" + ",".join(keys) + "\nlld=" + ",".join(vals) + "\n")
+
+my_repo = repository_rule(
+    implementation = _r_impl,
+    attrs = {
+        "lksd": attr.label_keyed_string_dict(),
+        "lld": attr.label_list_dict(),
+    },
+)
+
+def _ext_impl(mctx):
+    my_repo(
+        name = "bar",
+        lksd = {Label("//:t1"): "v1"},
+        lld = {"grp": ["//:t2"]},
+    )
+
+ext = module_extension(implementation = _ext_impl)
+"#,
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\next = use_extension('//:defs.bzl', 'ext')\nuse_repo(ext, 'bar')\n",
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res,
+        );
+        let repo_dir = rt.fetch_repo("+ext+bar").unwrap();
+        let info = std::fs::read_to_string(repo_dir.join("info.txt")).unwrap();
+        assert!(info.contains("name=+ext+bar\n"), "{info}");
+        assert!(info.contains("orig=bar\n"), "{info}");
+        assert!(info.contains("lksd=@@//:t1\n"), "{info}");
+        assert!(info.contains("lld=@@//:t2\n"), "{info}");
+
+        // `override_repo` targeting a repository not generated by the extension must fail.
+        let ws_bad = base.join("ws_bad_override");
+        write(&ws_bad, "BUILD", "");
+        write(
+            &ws_bad,
+            "defs.bzl",
+            &std::fs::read_to_string(ws.join("defs.bzl")).unwrap(),
+        );
+        write(&ws_bad, "other/MODULE.bazel", "module(name='other')\n");
+        write(
+            &ws_bad,
+            "MODULE.bazel",
+            "module(name='root')\nlocal_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'local_repository')\nlocal_repository(name='local_rep', path='other')\next = use_extension('//:defs.bzl', 'ext')\noverride_repo(ext, nonexistent='local_rep')\nuse_repo(ext, 'bar')\n",
+        );
+        let mut o_bad = ResolveOptions::new(&ws_bad);
+        o_bad.check_direct_dependencies = CheckMode::Off;
+        let res_bad = Arc::new(resolve(&o_bad).unwrap());
+        let rt_bad = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob_bad"),
+                workspace_root: ws_bad,
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res_bad,
+        );
+        let err = rt_bad.fetch_repo("+ext+bar").unwrap_err();
+        assert!(
+            err.contains("does not generate repository \"nonexistent\", yet it is overridden via override_repo()"),
+            "{err}"
+        );
+        assert!(err.contains("Use inject_repo() instead"), "{err}");
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

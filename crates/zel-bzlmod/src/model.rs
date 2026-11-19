@@ -121,6 +121,8 @@ pub enum AttrVal {
     Label(String),
     List(Vec<AttrVal>),
     Dict(Vec<(String, AttrVal)>),
+    /// A `Label`-keyed dict (`label_keyed_string_dict`) where keys are canonical `@@...` labels.
+    LabelDict(Vec<(String, AttrVal)>),
 }
 
 impl AttrVal {
@@ -134,7 +136,7 @@ impl AttrVal {
             AttrVal::Str(_) => "string",
             AttrVal::Label(_) => "Label",
             AttrVal::List(_) => "list",
-            AttrVal::Dict(_) => "dict",
+            AttrVal::Dict(_) | AttrVal::LabelDict(_) => "dict",
         }
     }
 
@@ -148,7 +150,7 @@ impl AttrVal {
                 .unwrap_or_else(|| AttrVal::Str(i.to_string())),
             Value::Float(f) => AttrVal::Float(*f),
             Value::String(s) => AttrVal::Str(s.clone()),
-            Value::Label(l) => AttrVal::Label(l.canonical_form()),
+            Value::Label(l) => AttrVal::Label(l.unambiguous_canonical_form()),
             Value::List(l) => AttrVal::List(
                 l.lock()
                     .unwrap()
@@ -158,14 +160,30 @@ impl AttrVal {
                     .collect(),
             ),
             Value::Tuple(t) => AttrVal::List(t.iter().map(Self::from_value).collect()),
-            Value::Dict(d) => AttrVal::Dict(
-                d.lock()
-                    .unwrap()
+            Value::Dict(d) => {
+                let guard = d.lock().unwrap();
+                let is_label_dict = !guard.entries.is_empty()
+                    && guard
+                        .entries
+                        .iter()
+                        .all(|(k, _)| matches!(k, Value::Label(_)));
+                let entries: Vec<(String, AttrVal)> = guard
                     .entries
                     .iter()
-                    .map(|(k, v)| (k.to_string(), Self::from_value(v)))
-                    .collect(),
-            ),
+                    .map(|(k, v)| {
+                        let key = match k {
+                            Value::Label(l) => l.unambiguous_canonical_form(),
+                            other => other.to_string(),
+                        };
+                        (key, Self::from_value(v))
+                    })
+                    .collect();
+                if is_label_dict {
+                    AttrVal::LabelDict(entries)
+                } else {
+                    AttrVal::Dict(entries)
+                }
+            }
             other => AttrVal::Str(other.to_string()),
         }
     }
@@ -179,7 +197,9 @@ impl AttrVal {
             AttrVal::Int(i) => Value::Int(BigInt::from_i64(*i)),
             AttrVal::Float(f) => Value::Float(*f),
             AttrVal::Str(s) => Value::String(s.clone()),
-            AttrVal::Label(s) => Value::String(s.clone()),
+            AttrVal::Label(s) => zel_cmdline::Label::parse_canonical(s)
+                .map(Value::Label)
+                .unwrap_or_else(|_| Value::String(s.clone())),
             AttrVal::List(l) => Value::List(Arc::new(Mutex::new(StarlarkList::new(
                 l.iter().map(|x| x.to_value()).collect(),
             )))),
@@ -187,6 +207,16 @@ impl AttrVal {
                 let mut dict = StarlarkDict::new();
                 for (k, v) in d {
                     let _ = dict.insert(Value::String(k.clone()), v.to_value());
+                }
+                Value::Dict(Arc::new(Mutex::new(dict)))
+            }
+            AttrVal::LabelDict(d) => {
+                let mut dict = StarlarkDict::new();
+                for (k, v) in d {
+                    let key = zel_cmdline::Label::parse_canonical(k)
+                        .map(Value::Label)
+                        .unwrap_or_else(|_| Value::String(k.clone()));
+                    let _ = dict.insert(key, v.to_value());
                 }
                 Value::Dict(Arc::new(Mutex::new(dict)))
             }
@@ -209,6 +239,9 @@ impl AttrVal {
                     .map(|(k, v)| (escape_attr_string(k), v.to_json()))
                     .collect(),
             ),
+            AttrVal::LabelDict(d) => {
+                Json::Obj(d.iter().map(|(k, v)| (k.clone(), v.to_json())).collect())
+            }
         }
     }
 
@@ -223,11 +256,21 @@ impl AttrVal {
             Json::Str(s) if s.starts_with("@@") => AttrVal::Label(s.clone()),
             Json::Str(s) => AttrVal::Str(unescape_attr_string(s)),
             Json::Arr(a) => AttrVal::List(a.iter().map(Self::from_json).collect()),
-            Json::Obj(o) => AttrVal::Dict(
-                o.iter()
-                    .map(|(k, v)| (unescape_attr_string(k), Self::from_json(v)))
-                    .collect(),
-            ),
+            Json::Obj(o) => {
+                if !o.is_empty() && o.iter().all(|(k, _)| k.starts_with("@@")) {
+                    AttrVal::LabelDict(
+                        o.iter()
+                            .map(|(k, v)| (k.clone(), Self::from_json(v)))
+                            .collect(),
+                    )
+                } else {
+                    AttrVal::Dict(
+                        o.iter()
+                            .map(|(k, v)| (unescape_attr_string(k), Self::from_json(v)))
+                            .collect(),
+                    )
+                }
+            }
         }
     }
 
@@ -281,6 +324,17 @@ impl AttrVal {
                 "{{{}}}",
                 d.iter()
                     .map(|(k, v)| format!("{}: {}", AttrVal::Str(k.clone()).repr(), v.repr()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            AttrVal::LabelDict(d) => format!(
+                "{{{}}}",
+                d.iter()
+                    .map(|(k, v)| format!(
+                        "Label({}): {}",
+                        AttrVal::Str(k.clone()).repr(),
+                        v.repr()
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             ),

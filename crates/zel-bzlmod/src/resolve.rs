@@ -994,21 +994,41 @@ fn select(
 }
 
 fn bazel_version_satisfies(cur: &str, constraint: &str) -> bool {
-    fn parse(v: &str) -> Vec<u64> {
-        v.split(|c: char| !c.is_ascii_digit())
-            .filter(|x| !x.is_empty())
-            .filter_map(|x| x.parse().ok())
-            .collect()
-    }
-    let cmp = |a: &[u64], b: &[u64]| {
-        for (x, y) in a.iter().zip(b.iter()) {
-            if x != y {
-                return x.cmp(y);
+    // Mirrors Bazel's `BazelModuleResolutionFunction.checkBazelCompatibility`:
+    // Extract `<major>.<minor>.<patch>` and treat `-pre...` as a prerelease (`-1 < 0`),
+    // while `rc...` or any other suffix compares equal (`0`) to the release `<major>.<minor>.<patch>`.
+    fn parse(v: &str) -> Option<(u64, u64, u64, i8)> {
+        let v = v.trim();
+        let bytes = v.as_bytes();
+        let mut i = 0;
+        let mut nums = [0u64; 3];
+        for (idx, slot) in nums.iter_mut().enumerate() {
+            if idx > 0 {
+                if bytes.get(i) != Some(&b'.') {
+                    return None;
+                }
+                i += 1;
             }
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i == start {
+                return None;
+            }
+            *slot = v[start..i].parse().ok()?;
         }
-        a.len().cmp(&b.len())
+        let suffix = &v[i..];
+        let pre_rank = if suffix.starts_with("-pre") {
+            -1i8
+        } else {
+            0i8
+        };
+        Some((nums[0], nums[1], nums[2], pre_rank))
+    }
+    let Some(cur_v) = parse(cur) else {
+        return true;
     };
-    let cur_v = parse(cur);
     let (op, rest) = if let Some(r) = constraint.strip_prefix(">=") {
         (">=", r)
     } else if let Some(r) = constraint.strip_prefix("<=") {
@@ -1022,8 +1042,10 @@ fn bazel_version_satisfies(cur: &str, constraint: &str) -> bool {
     } else {
         return true;
     };
-    let want = parse(rest);
-    let o = cmp(&cur_v, &want);
+    let Some(want) = parse(rest) else {
+        return true;
+    };
+    let o = cur_v.cmp(&want);
     match op {
         ">=" => o != std::cmp::Ordering::Less,
         "<=" => o != std::cmp::Ordering::Greater,
@@ -2075,5 +2097,15 @@ mod tests {
                 "@@//:fix.patch".into()
             )]))
         );
+    }
+
+    #[test]
+    fn bazel_compatibility_handles_prerelease_and_rc_suffixes() {
+        assert!(!bazel_version_satisfies("6.4.0-pre-1", ">=6.4.0"));
+        assert!(bazel_version_satisfies("5.1.4-pre.20220421.3", "<=5.1.4"));
+        assert!(bazel_version_satisfies("6.4.0rc1", ">=6.4.0"));
+        assert!(bazel_version_satisfies("6.4.0rc1", "<=6.4.0"));
+        assert!(!bazel_version_satisfies("6.4.0rc1", "-6.4.0"));
+        assert!(bazel_version_satisfies("6.4.0", "-6.4.0-pre.1"));
     }
 }

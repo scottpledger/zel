@@ -1624,9 +1624,10 @@ fn dispatch_inner(
                 ))
             })?;
             // Overrides of non-root modules are ignored, so their patch labels are not checked.
+            let root_apparent = s.repo_name.as_deref().unwrap_or(s.name.as_str());
             if s.opts_key.is_root() {
                 for p in &patches {
-                    validate_patch_label(p)?;
+                    validate_patch_label(p, root_apparent)?;
                 }
             }
             add_override(
@@ -1683,18 +1684,23 @@ fn dispatch_inner(
             if !a.pos.is_empty() {
                 return err("archive_override() takes only module_name positionally");
             }
+            let root_apparent = s
+                .repo_name
+                .as_deref()
+                .unwrap_or(s.name.as_str())
+                .to_string();
             let mut spec_attrs = vec![];
             let mut has_urls = false;
             for (k, v) in attrs {
                 if k == "url" || k == "urls" {
                     has_urls = true;
                 }
-                if k == "patches" {
-                    let l: Vec<AttrVal> = v
-                        .str_list()
-                        .into_iter()
-                        .map(|p| AttrVal::Str(patch_label_to_canonical(&p)))
-                        .collect();
+                if k == "patches" && s.opts_key.is_root() {
+                    let mut l: Vec<AttrVal> = Vec::new();
+                    for p in v.str_list() {
+                        validate_patch_label(&p, &root_apparent)?;
+                        l.push(AttrVal::Str(patch_label_to_canonical(&p, &root_apparent)));
+                    }
                     spec_attrs.push((k, AttrVal::List(l)));
                 } else {
                     spec_attrs.push((k, v));
@@ -1711,6 +1717,11 @@ fn dispatch_inner(
             nonmodule(&mut s);
             let module_name = a.req_str("module_name", false)?;
             validate_module_name(&module_name)?;
+            let root_apparent = s
+                .repo_name
+                .as_deref()
+                .unwrap_or(s.name.as_str())
+                .to_string();
             let mut spec_attrs = vec![];
             let mut has_remote = false;
             for (k, v) in drain_kw_ordered(&mut a.kw, &ctx.call_kw_order) {
@@ -1721,12 +1732,12 @@ fn dispatch_inner(
                     has_remote = true;
                 }
                 let v = AttrVal::from_value(&v);
-                if k == "patches" {
-                    let l: Vec<AttrVal> = v
-                        .str_list()
-                        .into_iter()
-                        .map(|p| AttrVal::Str(patch_label_to_canonical(&p)))
-                        .collect();
+                if k == "patches" && s.opts_key.is_root() {
+                    let mut l: Vec<AttrVal> = Vec::new();
+                    for p in v.str_list() {
+                        validate_patch_label(&p, &root_apparent)?;
+                        l.push(AttrVal::Str(patch_label_to_canonical(&p, &root_apparent)));
+                    }
                     spec_attrs.push((k, AttrVal::List(l)));
                 } else {
                     spec_attrs.push((k, v));
@@ -1767,17 +1778,26 @@ fn dispatch_inner(
     }
 }
 
-fn validate_patch_label(raw: &str) -> Result<(), StarlarkError> {
+fn validate_patch_label(raw: &str, root_apparent: &str) -> Result<(), StarlarkError> {
     if raw.starts_with("//")
         || raw.starts_with("@//")
         || raw.starts_with("@@//")
         || raw.starts_with(':')
     {
         Ok(())
-    } else if raw.starts_with('@') {
-        let repo = raw.trim_start_matches('@').split("//").next().unwrap_or("");
+    } else if raw.starts_with('@') && !raw.starts_with("@@") {
+        let repo = raw[1..].split("//").next().unwrap_or("");
+        if (!root_apparent.is_empty() && repo == root_apparent) || repo == "bazel_tools" {
+            Ok(())
+        } else {
+            err(format!(
+                "no repo visible as '@{repo}' here (patch label '{raw}' must refer to the root module)"
+            ))
+        }
+    } else if let Some(rest) = raw.strip_prefix("@@") {
+        let repo = rest.split("//").next().unwrap_or("");
         err(format!(
-            "no repo visible as '@{repo}' here (patch label '{raw}' must refer to the root module)"
+            "no repo visible as '@@{repo}' here (patch label '{raw}' must refer to the root module)"
         ))
     } else {
         err(format!(
@@ -1786,7 +1806,31 @@ fn validate_patch_label(raw: &str) -> Result<(), StarlarkError> {
     }
 }
 
-fn patch_label_to_canonical(raw: &str) -> String {
+fn patch_label_to_canonical(raw: &str, root_apparent: &str) -> String {
+    let stripped_root;
+    let raw = if !root_apparent.is_empty() {
+        if let Some(rest) = raw.strip_prefix(&format!("@{root_apparent}//")) {
+            stripped_root = format!("//{rest}");
+            stripped_root.as_str()
+        } else if raw == format!("@{root_apparent}") {
+            stripped_root = format!("//:{root_apparent}");
+            stripped_root.as_str()
+        } else {
+            raw
+        }
+    } else {
+        raw
+    };
+    if let Some(rest) = raw.strip_prefix("@bazel_tools//") {
+        let (pkg, name) = match rest.split_once(':') {
+            Some((p, n)) => (p.to_string(), n.to_string()),
+            None => (
+                rest.to_string(),
+                rest.rsplit('/').next().unwrap_or("").to_string(),
+            ),
+        };
+        return format!("@@bazel_tools+//{pkg}:{name}");
+    }
     let r = raw.trim_start_matches('@');
     let r = if let Some(x) = r.strip_prefix("//") {
         format!("//{x}")
@@ -1803,7 +1847,7 @@ fn patch_label_to_canonical(raw: &str) -> String {
         };
         format!("@@//{pkg}:{name}")
     } else {
-        format!("@@//{}", r.trim_start_matches(':').replace("//", ""))
+        format!("@@//:{}", r.trim_start_matches(':').replace("//", ""))
     }
 }
 
