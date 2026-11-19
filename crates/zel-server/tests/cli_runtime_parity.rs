@@ -577,6 +577,63 @@ fn canonicalize_flags_for_command_aliases_and_policy_bool() {
     ]);
     assert_eq!(r_pol.code, 0, "{}", r_pol.err);
     assert!(r_pol.out.contains("test_output"), "{}", r_pol.out);
+
+    // `.bazelrc` overrides (`--rc_source` + `--default_override`) configure `canonicalize-flags`
+    // (`--for_command`, `--experimental_include_default_values`, `--flag_alias`, and pre-`--`
+    // `--config`) without leaking unconditional `build` options into stdout.
+    let r_rc_default = w.run(&[
+        "canonicalize-flags",
+        "--rc_source=/ws/.bazelrc",
+        "--default_override=0:canonicalize-flags=--for_command=test",
+        "--default_override=0:common=--experimental_include_default_values=false",
+        "--default_override=0:build=--flag_alias=mf=//p:my_flag",
+        "--default_override=0:build=--jobs=8",
+        "--",
+        "--mf=d",
+        "--test_output=errors",
+    ]);
+    assert_eq!(r_rc_default.code, 0, "{}", r_rc_default.err);
+    assert_eq!(
+        r_rc_default.out.lines().collect::<Vec<_>>(),
+        vec!["--test_output=errors"]
+    );
+
+    let r_rc_nondefault = w.run(&[
+        "canonicalize-flags",
+        "--rc_source=/ws/.bazelrc",
+        "--default_override=0:canonicalize-flags:t=--for_command=test",
+        "--default_override=0:build=--flag_alias=mf=//p:my_flag",
+        "--config=t",
+        "--",
+        "--mf=custom",
+        "--test_output=errors",
+        "--config=unexpanded",
+    ]);
+    assert_eq!(r_rc_nondefault.code, 0, "{}", r_rc_nondefault.err);
+    assert!(
+        r_rc_nondefault.out.contains("--//p:my_flag=custom")
+            && r_rc_nondefault.out.contains("--test_output=errors")
+            && r_rc_nondefault.out.contains("--config=unexpanded"),
+        "out={} err={}",
+        r_rc_nondefault.out,
+        r_rc_nondefault.err
+    );
+
+    let r_bad_alias = w.run(&[
+        "canonicalize-flags",
+        "--rc_source=/ws/.bazelrc",
+        "--default_override=0:test=--flag_alias=mf=//p:my_flag",
+        "--",
+        "--mf=custom",
+    ]);
+    assert_eq!(r_bad_alias.code, 2, "{}", r_bad_alias.err);
+    assert!(
+        r_bad_alias.err.contains(
+            "disallowed. --flag_alias only supports these commands: build, common, always"
+        ),
+        "{}",
+        r_bad_alias.err
+    );
 }
 
 #[test]

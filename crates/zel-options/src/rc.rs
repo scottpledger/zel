@@ -747,6 +747,13 @@ pub fn partition_rc_sources_and_apply(
             )));
         };
         if !opt.is_empty() {
+            if (opt == "--flag_alias" || opt.starts_with("--flag_alias="))
+                && !matches!(section.as_str(), "build" | "common" | "always")
+            {
+                return Err(OptionsParsingError::new(format!(
+                    "{src}: \"{section} {opt}\" disallowed. --flag_alias only supports these commands: build, common, always"
+                )));
+            }
             rc_config
                 .sections
                 .entry(section)

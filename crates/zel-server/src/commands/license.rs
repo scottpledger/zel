@@ -373,11 +373,22 @@ impl BlazeRuntime {
         stderr: &mut Vec<u8>,
     ) -> ExitCode {
         let mut rc_cfg = zel_options::BazelrcConfig::default();
-        let args_owned = match zel_options::rc::partition_rc_sources_and_apply(&mut rc_cfg, args) {
+        let partitioned = match zel_options::rc::partition_rc_sources_and_apply(&mut rc_cfg, args) {
             Ok(v) => v,
             Err(e) => {
                 writeln_bytes(stderr, &e.format_bazel_error());
                 return ExitCode::COMMAND_LINE_ERROR;
+            }
+        };
+        let args_owned = if rc_cfg.sections.is_empty() {
+            partitioned
+        } else {
+            match zel_options::expand_command_args(&rc_cfg, "canonicalize-flags", &partitioned) {
+                Ok((expanded, _)) => expanded,
+                Err(e) => {
+                    writeln_bytes(stderr, &e.format_bazel_error());
+                    return ExitCode::COMMAND_LINE_ERROR;
+                }
             }
         };
         let args: &[String] = &args_owned;
@@ -498,8 +509,8 @@ impl BlazeRuntime {
                 )
             {
                 if !parsed_after.raw_starlark_args.is_empty() && self.in_workspace() {
-                    let loader = self.make_loader(&parsed_after);
-                    let rel = self.command_relative_dir(&parsed_after);
+                    let loader = self.make_loader(&parsed_cmd);
+                    let rel = self.command_relative_dir(&parsed_cmd);
                     match self.parse_and_validate_starlark_options(
                         &parsed_after,
                         &loader,

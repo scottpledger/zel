@@ -934,15 +934,60 @@ fn test_command_line_option_pseudo_package_rewrites_to_native() {
 
 #[test]
 fn test_default_override_applies_rc_options_and_validates_two_token_form() {
+    // `--rc_source` / `--default_override` apply to `canonicalize-flags` itself (including
+    // `--for_command`, `--flag_alias`, and pre-`--` `--config` expansions) and are NOT emitted
+    // as canonicalized residue flags (`CanonicalizeCommand.exec` + `BlazeOptionHandler`).
     let flags = zel_options::canonicalize_flags(&[
-        "--for_command=build".to_string(),
-        "--".to_string(),
         "--rc_source=/path/to/.bazelrc".to_string(),
+        "--default_override=0:canonicalize-flags=--for_command=cquery".to_string(),
         "--default_override=0:build=--jobs=8".to_string(),
-        "-k".to_string(),
+        "--default_override=0:build=--flag_alias=drink=//pkg:type".to_string(),
+        "--default_override=0:common=--flag_alias=snack=//pkg:food".to_string(),
+        "--".to_string(),
+        "--output=label".to_string(),
+        "--drink=coffee".to_string(),
+        "--snack=tea".to_string(),
     ])
     .unwrap();
-    assert_eq!(flags, vec!["--jobs=8", "--keep_going=1"]);
+    assert_eq!(
+        flags,
+        vec!["--output=label", "--//pkg:type=coffee", "--//pkg:food=tea",]
+    );
+
+    // Pre-`--` `--config` expands against `rc_cfg`, while `--config` after `--` stays unexpanded.
+    let cfg_flags = zel_options::canonicalize_flags(&[
+        "--rc_source=/path/to/.bazelrc".to_string(),
+        "--default_override=0:canonicalize-flags:q=--for_command=query".to_string(),
+        "--default_override=0:build:opt=-c".to_string(),
+        "--default_override=0:build:opt=opt".to_string(),
+        "--config=q".to_string(),
+        "--".to_string(),
+        "--output=label".to_string(),
+        "--config=opt".to_string(),
+    ])
+    .unwrap();
+    assert_eq!(cfg_flags, vec!["--output=label", "--config=opt"]);
+
+    // `--flag_alias` in `.bazelrc` is disallowed outside `build`, `common`, and `always`.
+    for disallowed in [
+        "0:test=--flag_alias=drink=//pkg:type",
+        "0:build:foo=--flag_alias=drink=//pkg:type",
+    ] {
+        let err = zel_options::canonicalize_flags(&[
+            "--rc_source=/path/to/.bazelrc".to_string(),
+            format!("--default_override={disallowed}"),
+            "--".to_string(),
+            "--drink=coffee".to_string(),
+        ])
+        .unwrap_err();
+        assert!(
+            err.message.contains(
+                "disallowed. --flag_alias only supports these commands: build, common, always"
+            ),
+            "{}",
+            err.message
+        );
+    }
 
     // Two-token --default_override with invalid format fails.
     let bad = zel_options::canonicalize_flags(&[
