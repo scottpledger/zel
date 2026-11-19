@@ -37,6 +37,43 @@ fn dispatch(
     if name == "call:subrule" {
         return call_subrule(st, ctx, pos, kw);
     }
+    if name == "call:pkg_spec_contains" {
+        let encoded = match pos.first() {
+            Some(Value::Host(k, s)) if k == "pkg_spec_contains" => s.as_str(),
+            _ => "",
+        };
+        let target_val = pos.get(1).or_else(|| kw.get("target")).ok_or_else(|| {
+            StarlarkError("contains() missing 1 required positional argument: target".into())
+        })?;
+        let target_label = match target_val {
+            Value::Label(l) => l.clone(),
+            Value::String(s) => {
+                let rm = st.repo_mapping();
+                crate::location::parse_label_with_mapping(
+                    s,
+                    st.label.package_identifier(),
+                    Some(&rm),
+                )
+                .map_err(|e| StarlarkError(format!("invalid label '{s}': {e}")))?
+            }
+            other => {
+                return err(format!(
+                    "in call to contains(), parameter 'target' got value of type '{}', want 'Label or string'",
+                    other.type_name()
+                ))
+            }
+        };
+        let contents = zel_packages::pkg_spec::PackageGroupContents::decode_canonical(encoded);
+        return Ok(Value::Bool(
+            contents.contains(target_label.package_identifier()),
+        ));
+    }
+    if name == "proto_common_do_not_use.incompatible_enable_proto_toolchain_resolution" {
+        return Ok(Value::Bool(true));
+    }
+    if name == "proto_common_do_not_use.external_proto_infos" {
+        return Ok(mk_list(Vec::new()));
+    }
     if name.starts_with("call:") && name != "call:provider" && name != "call:provider_raw" {
         return err(format!("'{}' object is not callable", pos.first().map(|v| v.type_name()).unwrap_or("host_object")));
     }

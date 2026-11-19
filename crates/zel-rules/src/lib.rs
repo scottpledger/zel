@@ -185,6 +185,44 @@ pub fn analyze_target_with(
                     }
                 }
             }
+            let encoded_specs = if let Some(loader) = resolver.package_loader() {
+                zel_packages::pkg_spec::resolve_package_group(label, &mut |g| {
+                    let pkg = loader
+                        .load_package(g.package_identifier())
+                        .map_err(|e| e.to_string())?;
+                    let raw_pkgs = match pkg.targets.get(g.name()) {
+                        Some(Target::PackageGroup { packages, .. }) => packages.clone(),
+                        _ => Vec::new(),
+                    };
+                    let repo = g.package_identifier().repository();
+                    let entries = resolver.repo_mapping_entries(repo.name());
+                    let mut map = std::collections::HashMap::new();
+                    for (a, c) in entries {
+                        if let Ok(rn) = zel_cmdline::RepositoryName::create(&c) {
+                            map.insert(a, rn);
+                        }
+                    }
+                    let mapping = zel_cmdline::RepositoryMapping::new(map, repo.clone());
+                    let mut parsed = Vec::with_capacity(raw_pkgs.len());
+                    for raw in &raw_pkgs {
+                        if let Ok(spec) =
+                            zel_packages::pkg_spec::PackageSpec::parse(&mapping, repo, raw)
+                        {
+                            parsed.push(spec);
+                        }
+                    }
+                    let incs = pkg
+                        .group_includes
+                        .get(g.name())
+                        .cloned()
+                        .unwrap_or_default();
+                    Ok((parsed, incs))
+                })
+                .map(|c| c.encode_canonical())
+                .unwrap_or_default()
+            } else {
+                String::new()
+            };
             let mut ct =
                 ConfiguredTarget::new(label.clone(), config.clone(), "package_group".to_string());
             ct.providers.insert(
@@ -200,7 +238,13 @@ pub fn analyze_target_with(
                 "PackageSpecificationInfo".into(),
                 zel_analysis::starlark_rule::provider_instance(
                     "PackageSpecificationInfo",
-                    vec![("label", Value::Label(label.clone()))],
+                    vec![
+                        ("label", Value::Label(label.clone())),
+                        (
+                            "contains",
+                            Value::Host("pkg_spec_contains".into(), encoded_specs),
+                        ),
+                    ],
                 ),
             );
             Ok(ct)

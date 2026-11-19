@@ -985,6 +985,10 @@ impl PackageLoader {
                     .into(),
             ),
         );
+        pcdnu.insert(
+            "external_proto_infos".to_string(),
+            Value::BuiltinFunction("host:proto_common_do_not_use.external_proto_infos".into()),
+        );
         ctx.globals.insert(
             "proto_common_do_not_use".to_string(),
             Value::Struct(Arc::new(StructValue::new(pcdnu))),

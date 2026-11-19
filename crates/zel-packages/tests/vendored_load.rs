@@ -38,8 +38,22 @@ fn loader() -> Option<Arc<PackageLoader>> {
         RepositoryName::create("protobuf").unwrap(),
     );
     apparent.insert(
+        "proto_bazel_features".into(),
+        RepositoryName::create("bazel_features").unwrap(),
+    );
+    apparent.insert(
         "abseil-cpp".into(),
         RepositoryName::create("abseil-cpp").unwrap(),
+    );
+    let bt_dir = std::env::temp_dir().join(format!("zel-vendored-bt-{}", std::process::id()));
+    zel_bazel_tools::materialize(&bt_dir).unwrap();
+    external.insert(
+        "bazel_tools".into(),
+        PathFragment::create(&bt_dir.to_string_lossy()),
+    );
+    apparent.insert(
+        "bazel_tools".into(),
+        RepositoryName::create("bazel_tools").unwrap(),
     );
     let main = PathFragment::create(
         &std::env::temp_dir()
@@ -88,6 +102,23 @@ fn probe_entry_points() {
             "java_proto_library",
         ),
         ("@@protobuf//bazel:py_proto_library.bzl", "py_proto_library"),
+        ("@@rules_proto//proto:defs.bzl", "proto_library"),
+        (
+            "@@bazel_tools//third_party/grpc/bazel:protobuf.bzl",
+            "get_plugin_args",
+        ),
+        (
+            "@@bazel_tools//third_party/grpc/bazel:generate_cc.bzl",
+            "generate_cc",
+        ),
+        (
+            "@@bazel_tools//third_party/grpc/bazel:cc_grpc_library.bzl",
+            "cc_grpc_library",
+        ),
+        (
+            "@@bazel_tools//third_party/grpc:build_defs.bzl",
+            "grpc_cc_library",
+        ),
     ];
     match l.builtins_error() {
         None => eprintln!("OK   @_builtins exports.bzl"),

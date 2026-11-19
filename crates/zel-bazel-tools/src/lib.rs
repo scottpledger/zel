@@ -81,6 +81,15 @@ mod tests {
         assert!(read("MODULE.bazel").is_some());
         let b = std::str::from_utf8(read("tools/cpp/BUILD").unwrap()).unwrap();
         assert!(b.contains("toolchain_type(name = \"toolchain_type\")"));
+        assert!(read("third_party/ijar/classfile.cc").is_some());
+        assert!(read("third_party/ijar/ijar.cc").is_some());
+        assert!(read("third_party/grpc/BUILD").is_some());
+        assert!(read("third_party/grpc/build_defs.bzl").is_some());
+        assert!(read("third_party/grpc/bazel/BUILD").is_some());
+        assert!(read("third_party/grpc/bazel/protobuf.bzl").is_some());
+        assert!(read("third_party/grpc/bazel/generate_cc.bzl").is_some());
+        assert!(read("third_party/grpc/bazel/cc_grpc_library.bzl").is_some());
+        assert!(read("third_party/protobuf/BUILD").is_some());
     }
 
     #[test]

@@ -22,6 +22,8 @@ exported_toplevels = {
     "proto_common_do_not_use": struct(
         INCOMPATIBLE_ENABLE_PROTO_TOOLCHAIN_RESOLUTION =
             _builtins.toplevel.proto_common_do_not_use.incompatible_enable_proto_toolchain_resolution(),
+        external_proto_infos =
+            _builtins.toplevel.proto_common_do_not_use.external_proto_infos,
     ),
 }
 

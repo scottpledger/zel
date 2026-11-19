@@ -120,6 +120,11 @@ impl PackageLoader {
         if name == "proto_common_do_not_use.incompatible_enable_proto_toolchain_resolution" {
             return Ok(Value::Bool(true));
         }
+        if name == "proto_common_do_not_use.external_proto_infos" {
+            return Ok(Value::List(Arc::new(Mutex::new(
+                zel_starlark::StarlarkList::new(Vec::new()),
+            ))));
+        }
         if name == "visibility" {
             return Ok(Value::None);
         }

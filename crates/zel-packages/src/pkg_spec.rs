@@ -172,6 +172,75 @@ impl PackageGroupContents {
         }
         positive
     }
+
+    /// Serializes canonicalized specs so `PackageSpecificationInfo.contains` can evaluate them.
+    pub fn encode_canonical(&self) -> String {
+        fn enc_pos(spec: &PackageSpec) -> String {
+            match spec {
+                PackageSpec::AllPackages => "*".to_string(),
+                PackageSpec::NoPackages => "-".to_string(),
+                PackageSpec::Single(id) => format!(
+                    "S\t{}\t{}",
+                    id.repository().name(),
+                    id.package_fragment().path_string()
+                ),
+                PackageSpec::AllBeneath(id) => format!(
+                    "B\t{}\t{}",
+                    id.repository().name(),
+                    id.package_fragment().path_string()
+                ),
+                PackageSpec::Negative(inner) => enc_pos(inner),
+            }
+        }
+        let mut lines = Vec::with_capacity(self.specs.len());
+        for s in &self.specs {
+            match s {
+                PackageSpec::Negative(inner) => lines.push(format!("-\t{}", enc_pos(inner))),
+                other => lines.push(format!("+\t{}", enc_pos(other))),
+            }
+        }
+        lines.join("\n")
+    }
+
+    /// Reconstructs [`PackageGroupContents`] from [`Self::encode_canonical`].
+    pub fn decode_canonical(encoded: &str) -> Self {
+        fn dec_pos(rest: &str) -> Option<PackageSpec> {
+            if rest == "*" {
+                return Some(PackageSpec::AllPackages);
+            }
+            if rest == "-" {
+                return Some(PackageSpec::NoPackages);
+            }
+            let mut parts = rest.splitn(3, '\t');
+            let kind = parts.next()?;
+            let repo_raw = parts.next()?;
+            let pkg_raw = parts.next()?;
+            let repo = if repo_raw.is_empty() {
+                RepositoryName::main()
+            } else {
+                RepositoryName::create_unvalidated(repo_raw)
+            };
+            let id = PackageIdentifier::create(repo, PathFragment::create(pkg_raw)).ok()?;
+            match kind {
+                "S" => Some(PackageSpec::Single(id)),
+                "B" => Some(PackageSpec::AllBeneath(id)),
+                _ => None,
+            }
+        }
+        let mut specs = Vec::new();
+        for line in encoded.lines() {
+            if let Some(rest) = line.strip_prefix("+\t") {
+                if let Some(s) = dec_pos(rest) {
+                    specs.push(s);
+                }
+            } else if let Some(rest) = line.strip_prefix("-\t") {
+                if let Some(s) = dec_pos(rest) {
+                    specs.push(PackageSpec::Negative(Box::new(s)));
+                }
+            }
+        }
+        Self { specs }
+    }
 }
 
 /// Resolves the transitive contents of the package group `group`, following `includes`.

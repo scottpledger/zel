@@ -29,7 +29,7 @@ fn fetch_all_repos_from_vendored_registry() {
     std::fs::create_dir_all(&ws).unwrap();
     std::fs::write(
         ws.join("MODULE.bazel"),
-        "module(name = \"probe\")\nbazel_dep(name = \"rules_cc\", version = \"0.2.17\")\nbazel_dep(name = \"rules_java\", version = \"9.1.0\")\nbazel_dep(name = \"rules_python\", version = \"1.7.0\")\nbazel_dep(name = \"protobuf\", version = \"33.4\")\nbazel_dep(name = \"platforms\", version = \"1.0.0\")\n",
+        "module(name = \"probe\")\nbazel_dep(name = \"rules_cc\", version = \"0.2.17\")\nbazel_dep(name = \"rules_java\", version = \"9.1.0\")\nbazel_dep(name = \"rules_python\", version = \"1.7.0\")\nbazel_dep(name = \"protobuf\", version = \"33.4\")\nbazel_dep(name = \"rules_proto\", version = \"7.1.0\")\nbazel_dep(name = \"platforms\", version = \"1.0.0\")\n",
     )
     .unwrap();
     let ob = tmp.join("zel-probe-ob");
@@ -127,6 +127,23 @@ fn fetch_all_repos_from_vendored_registry() {
         (
             "@@protobuf+//bazel:py_proto_library.bzl",
             "py_proto_library",
+        ),
+        ("@@rules_proto+//proto:defs.bzl", "proto_library"),
+        (
+            "@@bazel_tools//third_party/grpc/bazel:protobuf.bzl",
+            "get_plugin_args",
+        ),
+        (
+            "@@bazel_tools//third_party/grpc/bazel:generate_cc.bzl",
+            "generate_cc",
+        ),
+        (
+            "@@bazel_tools//third_party/grpc/bazel:cc_grpc_library.bzl",
+            "cc_grpc_library",
+        ),
+        (
+            "@@bazel_tools//third_party/grpc:build_defs.bzl",
+            "grpc_cc_library",
         ),
     ];
     let mut ok = 0;

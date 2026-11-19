@@ -3775,3 +3775,59 @@ probe_bad_unknown_kw(name = "bad_unknown_kw")
         "unexpected error for unknown keyword `file`: {msg_unknown}"
     );
 }
+
+#[test]
+fn package_specification_info_contains_matches_specs_and_includes() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+CheckInfo = provider(fields = ["results"])
+
+def _check_impl(ctx):
+    ps = ctx.attr.group[PackageSpecificationInfo]
+    return [CheckInfo(results = [
+        ps.contains(Label("//allowed/sub:tgt")),
+        ps.contains("//allowed/secret:tgt"),
+        ps.contains("//extra:tgt"),
+        ps.contains("//other:tgt"),
+    ])]
+
+check_group = rule(
+    implementation = _check_impl,
+    attrs = {"group": attr.label(providers = [PackageSpecificationInfo])},
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "check_group")
+
+package_group(
+    name = "inc",
+    packages = ["//extra"],
+)
+
+package_group(
+    name = "grp",
+    packages = ["//allowed/...", "-//allowed/secret/..."],
+    includes = [":inc"],
+)
+
+check_group(name = "chk", group = ":grp")
+"#,
+        ),
+    ]);
+    let ct = ws.analyze("//:chk").unwrap();
+    let Some(Value::ProviderInstance { fields, .. }) = ct.providers.get("//:defs.bzl%CheckInfo")
+    else {
+        panic!("expected CheckInfo");
+    };
+    let got: Vec<bool> = zel_starlark::eval::builtins::value_to_sequence(&fields["results"])
+        .unwrap()
+        .into_iter()
+        .map(|v| matches!(v, Value::Bool(true)))
+        .collect();
+    assert_eq!(got, vec![true, false, true, false]);
+}
