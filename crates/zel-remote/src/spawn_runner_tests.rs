@@ -431,11 +431,35 @@ fn download_all_mode_downloads_everything_minimal_does_not() {
     );
     run(&r, &s, &ws);
     assert!(!ws.join("o").exists());
-    // Test actions always get their outputs.
+    // In minimal mode, TestRunner outputs are NOT downloaded (unlike toplevel mode).
     let mut t = spawn(&["upper", "a", "t.log"], &["a"], &["t.log"]);
     t.mnemonic = "TestRunner".into();
     run(&r, &t, &ws);
+    assert!(!ws.join("t.log").exists());
+
+    // In toplevel mode, TestRunner outputs ARE downloaded.
+    let r_top = runner(
+        &server,
+        true,
+        &["--remote_download_outputs=toplevel"],
+        counting(),
+    );
+    run(&r_top, &t, &ws);
     assert!(ws.join("t.log").exists());
+
+    // --remote_download_regex forces download even in minimal mode.
+    let r_re = runner(
+        &server,
+        true,
+        &[
+            "--remote_download_outputs=minimal",
+            "--remote_download_regex=.*\\.keep",
+        ],
+        counting(),
+    );
+    let sk = spawn(&["upper", "a", "kept.keep"], &["a"], &["kept.keep"]);
+    run(&r_re, &sk, &ws);
+    assert!(ws.join("kept.keep").exists());
 }
 
 #[test]
@@ -717,7 +741,7 @@ fn execute_response_without_action_result_fails_instead_of_default_exit_0() {
     let r = runner(&server, true, &["--noremote_local_fallback"], fb.clone());
     let res = run(&r, &spawn(&["t"], &["i"], &[]), &ws);
     assert_eq!(res.status, SpawnStatus::ExecutionFailed);
-    assert_ne!(res.exit_code, 0);
+    assert_eq!(res.exit_code, REMOTE_ERROR_EXIT_CODE);
     assert!(
         String::from_utf8_lossy(&res.stderr).contains("no result"),
         "{}",
@@ -789,4 +813,283 @@ fn local_spawns_bypass_cache_nonzero_cache_entries_ignored_and_reapi_v2_range() 
         run(&r_offline, &cacheable, &ws).runner_name,
         "disk cache hit"
     );
+}
+
+#[test]
+fn cached_nonzero_exit_or_missing_output_reruns_with_skip_cache_lookup() {
+    let server = FakeReapiServer::new();
+    install_upper(&server);
+    let ws = tmp("stale-ac");
+    std::fs::write(ws.join("a.txt"), "fresh").unwrap();
+    let s = spawn(&["upper", "a.txt", "out.txt"], &["a.txt"], &["out.txt"]);
+
+    // Run once to populate AC, then poison AC with exit_code = 7.
+    let fb = counting();
+    let r = runner(
+        &server,
+        true,
+        &["--remote_download_outputs=all"],
+        fb.clone(),
+    );
+    assert_eq!(run(&r, &s, &ws).status, SpawnStatus::Success);
+    assert_eq!(server.executions(), 1);
+
+    server.poison_all_ac(ActionResult {
+        exit_code: 7,
+        stderr_raw: b"poisoned\n".to_vec(),
+        ..Default::default()
+    });
+    std::fs::remove_file(ws.join("out.txt")).unwrap();
+
+    // Cached non-zero exit_code must be treated as a silent cache miss and re-executed with
+    // skip_cache_lookup = true!
+    let res = run(&r, &s, &ws);
+    assert_eq!(res.status, SpawnStatus::Success);
+    assert_eq!(res.runner_name, "remote");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out.txt")).unwrap(),
+        "FRESH"
+    );
+    assert_eq!(server.executions(), 2);
+
+    // Poison AC with exit_code = 0 but missing declared output -> also silent cache miss!
+    server.poison_all_ac(ActionResult {
+        exit_code: 0,
+        output_files: vec![],
+        ..Default::default()
+    });
+    std::fs::remove_file(ws.join("out.txt")).unwrap();
+    let res2 = run(&r, &s, &ws);
+    assert_eq!(res2.status, SpawnStatus::Success);
+    assert_eq!(
+        std::fs::read_to_string(ws.join("out.txt")).unwrap(),
+        "FRESH"
+    );
+    assert_eq!(server.executions(), 3);
+}
+
+#[test]
+fn failed_non_cached_remote_action_downloads_all_outputs_even_in_minimal_mode_and_timeout_is_142() {
+    let server = FakeReapiServer::new();
+    server.set_executor(|ctx| {
+        let out = ctx.server.put_blob(b"diagnostic-data");
+        Ok(ActionResult {
+            exit_code: 2,
+            output_files: vec![OutputFile {
+                path: "diag.out".into(),
+                digest: Some(out),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+    });
+    let ws = tmp("fail-min");
+    std::fs::write(ws.join("i"), "x").unwrap();
+    let r = runner(
+        &server,
+        true,
+        &["--remote_download_outputs=minimal"],
+        counting(),
+    );
+    let s = spawn(&["tool"], &["i"], &["diag.out"]);
+    let res = run(&r, &s, &ws);
+    assert_eq!((res.status, res.exit_code), (SpawnStatus::NonZeroExit, 2));
+    assert_eq!(
+        std::fs::read_to_string(ws.join("diag.out")).unwrap(),
+        "diagnostic-data",
+        "failed non-cached remote action must download all outputs even in minimal mode"
+    );
+
+    // Action timeout returns exit code 142 (128 + SIGALRM).
+    server.set_executor(|_| Err(crate::grpc::GrpcStatus::new(4, "timed out")));
+    let res_to = run(&r, &s, &ws);
+    assert_eq!(
+        (res_to.status, res_to.exit_code),
+        (SpawnStatus::Timeout, TIMEOUT_EXIT_CODE)
+    );
+}
+
+#[test]
+fn scrubbing_config_omits_inputs_rewrites_args_salts_key_and_forces_local_with_cross_ws_hit() {
+    let server = FakeReapiServer::new();
+    install_upper(&server);
+    let cfg_dir = tmp("scrub-cfg");
+    let cfg_path = cfg_dir.join("scrub.textproto");
+    std::fs::write(
+        &cfg_path,
+        r#"
+        rules {
+          matcher { mnemonic: "Gen" }
+          transform {
+            omitted_inputs: "secret\\.txt"
+            arg_replacements { source: "/ws[12]/" target: "/scrubbed/" }
+            salt: "v1-salt"
+          }
+        }
+        "#,
+    )
+    .unwrap();
+    let scrub_flag = format!(
+        "--experimental_remote_scrubbing_config={}",
+        cfg_path.display()
+    );
+
+    let ws1 = tmp("scrub-ws1");
+    let ws2 = tmp("scrub-ws2");
+    std::fs::write(ws1.join("in.txt"), "shared").unwrap();
+    std::fs::write(ws2.join("in.txt"), "shared").unwrap();
+    // Different secret.txt contents and different /ws1/ vs /ws2/ arg paths!
+    std::fs::write(ws1.join("secret.txt"), "machine-1-secret").unwrap();
+    std::fs::write(ws2.join("secret.txt"), "machine-2-different-secret").unwrap();
+
+    let s1 = spawn(
+        &["sh", "-c", "echo /ws1/ && cat in.txt > out.txt"],
+        &["in.txt", "secret.txt"],
+        &["out.txt"],
+    );
+    let s2 = spawn(
+        &["sh", "-c", "echo /ws2/ && cat in.txt > out.txt"],
+        &["in.txt", "secret.txt"],
+        &["out.txt"],
+    );
+
+    let fb1 = counting();
+    let r1 = runner(
+        &server,
+        true,
+        &["--remote_download_outputs=all", &scrub_flag],
+        fb1.clone(),
+    );
+    assert!(!r1.can_exec(&s1), "scrubbed spawn cannot execute remotely");
+    let res1 = run(&r1, &s1, &ws1);
+    assert_eq!(res1.status, SpawnStatus::Success);
+    assert_eq!(
+        fb1.n.load(Ordering::SeqCst),
+        1,
+        "scrubbed spawn ran locally"
+    );
+    assert_eq!(server.executions(), 0);
+    assert!(r1.take_warnings().iter().any(|w| w.contains("scrubbed")));
+
+    // Second workspace with different secret.txt and /ws2/ arg hits the remote cache!
+    let fb2 = counting();
+    let r2 = runner(
+        &server,
+        false,
+        &["--remote_download_outputs=all", &scrub_flag],
+        fb2.clone(),
+    );
+    let res2 = run(&r2, &s2, &ws2);
+    assert_eq!(res2.runner_name, "remote cache hit");
+    assert_eq!(fb2.n.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        std::fs::read_to_string(ws2.join("out.txt")).unwrap(),
+        "shared"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn bwob_materializes_symlink_chains_up_to_32_hops_and_rejects_loops() {
+    let server = FakeReapiServer::new();
+    server.set_executor(|ctx| {
+        let d = ctx.server.put_blob(b"chain-payload");
+        Ok(ActionResult {
+            output_files: vec![OutputFile {
+                path: "real.bin".into(),
+                digest: Some(d),
+                is_executable: true,
+                ..Default::default()
+            }],
+            output_symlinks: vec![
+                OutputSymlink {
+                    path: "hop1.bin".into(),
+                    target: "real.bin".into(),
+                    node_properties: None,
+                },
+                OutputSymlink {
+                    path: "hop2.bin".into(),
+                    target: "hop1.bin".into(),
+                    node_properties: None,
+                },
+            ],
+            ..Default::default()
+        })
+    });
+    let ws = tmp("sym-hops");
+    std::fs::write(ws.join("i"), "x").unwrap();
+    let r = runner(
+        &server,
+        true,
+        &["--remote_download_outputs=minimal"],
+        counting(),
+    );
+    let s = spawn(&["tool"], &["i"], &["real.bin", "hop1.bin", "hop2.bin"]);
+    let res = run(&r, &s, &ws);
+    assert_eq!(res.status, SpawnStatus::Success);
+    assert!(!ws.join("real.bin").exists());
+    assert!(ws
+        .join("hop2.bin")
+        .symlink_metadata()
+        .unwrap()
+        .file_type()
+        .is_symlink());
+
+    // Materializing `hop2.bin` follows `hop2.bin -> hop1.bin -> real.bin` and downloads `real.bin`!
+    assert_eq!(r.materialize(&["hop2.bin".to_string()], &ws).unwrap(), 1);
+    assert_eq!(
+        std::fs::read_to_string(ws.join("real.bin")).unwrap(),
+        "chain-payload"
+    );
+
+    // Self-looping symlink fails after 32 hops instead of infinite recursion.
+    std::os::unix::fs::symlink("loop.bin", ws.join("loop.bin")).unwrap();
+    let err = r.materialize(&["loop.bin".to_string()], &ws).unwrap_err();
+    assert!(err.contains("Too many levels of symbolic links"), "{err}");
+}
+
+#[cfg(unix)]
+#[test]
+fn credential_helper_failure_aborts_spawn_even_in_remote_spawn_cache_mode() {
+    let server = FakeReapiServer::new();
+    let ws = tmp("cred-fail");
+    std::fs::write(ws.join("i"), "x").unwrap();
+    let bad_helper = ws.join("bad-helper.sh");
+    std::fs::write(&bad_helper, "#!/bin/sh\necho 'auth broken' >&2\nexit 1\n").unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&bad_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let creds: Arc<dyn crate::credentials::CallCredentialsProvider> =
+        Arc::new(crate::credentials::CredentialHelperProvider::from_specs(
+            &[bad_helper.to_string_lossy().into_owned()],
+            None,
+            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(60),
+        ));
+    let ch = Arc::new(crate::grpc::Channel::with_config(
+        server.connector(),
+        crate::grpc::ChannelConfig {
+            tls: false,
+            max_connections: 1,
+            max_concurrency_per_connection: 100,
+            default_metadata: vec![],
+            credentials: Some(creds),
+            auth_uri: "grpc://fake.reapi.local:443".into(),
+        },
+    ));
+    let client = Arc::new(crate::reapi_client::ReapiClient::new(
+        ch,
+        None,
+        Default::default(),
+    ));
+    let opts = RemoteOptions::from_source(&options_from_args(&[])).unwrap();
+    // Construct runner directly without pre-check so lookup_cache exercises credential helper failure.
+    let mut no_check_opts = opts;
+    no_check_opts.accept_cached = true;
+    // check_compatibility itself also fails with CredentialHelper error:
+    let init_err = RemoteSpawnRunner::new(no_check_opts.clone(), Some(client.clone()), counting())
+        .err()
+        .unwrap();
+    assert!(init_err.contains("Credential helper"), "{init_err}");
 }

@@ -13,10 +13,10 @@
 // limitations under the License.
 
 //! An in-process fake Remote Execution API v2 server (Capabilities, ContentAddressableStorage,
-//! ByteStream, ActionCache, Execution, Operations) speaking real gRPC over real HTTP/2 framing,
-//! via either an in-memory pipe (no network permissions needed) or TCP. Intended for tests of
-//! the REAPI client and of anything built on it (e.g. the remote spawn runner).
+//! ByteStream including zstd `compressed-blobs`, ActionCache, Execution, Operations) speaking
+//! real gRPC over real HTTP/2 framing, via either an in-memory pipe or TCP / Unix / TLS.
 
+use crate::digest::DigestFn;
 use crate::grpc::{frame_message, percent_encode, GrpcStatus, MessageParser};
 use crate::hpack::Header;
 use crate::http2::{Conn, Event, LocalSettings, Stream};
@@ -25,7 +25,7 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::{Arc, Mutex};
 use zel_proto::reapi::*;
-use zel_util::sha256;
+use zel_util::{base64_encode, sha256};
 
 pub const CAS: &str = "/build.bazel.remote.execution.v2.ContentAddressableStorage/";
 pub const AC: &str = "/build.bazel.remote.execution.v2.ActionCache/";
@@ -54,9 +54,12 @@ pub type Executor = dyn Fn(&ExecContext<'_>) -> Result<ActionResult, GrpcStatus>
 pub struct FakeConfig {
     pub exec_enabled: bool,
     pub update_enabled: bool,
+    pub omit_update_capabilities: bool,
     pub max_batch_total_size_bytes: i64,
     pub high_api_version: SemVer,
     pub low_api_version: SemVer,
+    pub deprecated_api_version: Option<SemVer>,
+    pub omit_api_versions: bool,
     pub instance_name: String,
     /// ByteStream read chunk size.
     pub read_chunk: usize,
@@ -65,8 +68,15 @@ pub struct FakeConfig {
     pub drop_execute_stream_after_first_op: bool,
     /// When set, `GetTree` splits each page into streamed `GetTreeResponse` batches of this size.
     pub get_tree_stream_batch_size: usize,
+    /// When set, Execute ends cleanly (OK status) after sending the first incomplete operation.
+    pub clean_eof_after_first_op: bool,
+    /// When set, Execute ends cleanly (OK status) with zero operations.
+    pub clean_eof_without_op: bool,
     pub get_tree_page_size: usize,
     pub advertise_digest_functions: Vec<i32>,
+    pub supported_compressors: Vec<i32>,
+    /// Optional symlink_absolute_path_strategy value on CacheCapabilities.
+    pub symlink_absolute_path_strategy: i32,
     /// When set, Execute returns an `ExecuteResponse` with `result: None` and OK status.
     pub omit_action_result: bool,
 }
@@ -76,6 +86,7 @@ impl Default for FakeConfig {
         Self {
             exec_enabled: true,
             update_enabled: true,
+            omit_update_capabilities: false,
             max_batch_total_size_bytes: 4 << 20,
             high_api_version: SemVer {
                 major: 2,
@@ -89,12 +100,25 @@ impl Default for FakeConfig {
                 patch: 0,
                 prerelease: String::new(),
             },
+            deprecated_api_version: None,
+            omit_api_versions: false,
             instance_name: String::new(),
             read_chunk: 64 * 1024,
             drop_execute_stream_after_first_op: false,
             get_tree_stream_batch_size: 0,
+            clean_eof_after_first_op: false,
+            clean_eof_without_op: false,
             get_tree_page_size: 0,
-            advertise_digest_functions: vec![digest_function::SHA256],
+            advertise_digest_functions: vec![
+                digest_function::SHA256,
+                digest_function::SHA1,
+                digest_function::MD5,
+                digest_function::SHA384,
+                digest_function::SHA512,
+                digest_function::BLAKE3,
+            ],
+            supported_compressors: vec![0, 1], // IDENTITY, ZSTD
+            symlink_absolute_path_strategy: 0,
             omit_action_result: false,
         }
     }
@@ -111,6 +135,8 @@ struct Inner {
     next_op: u64,
     executions: usize,
     cas_writes: usize,
+    compressed_bytestream_writes: usize,
+    compressed_bytestream_reads: usize,
     /// Digests (hash) whose next BatchRead/Read is reported missing (to simulate eviction).
     evict_on_read: Vec<String>,
     /// Blobs reported present by the next FindMissingBlobs but dropped right afterwards.
@@ -133,6 +159,27 @@ impl Default for FakeReapiServer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn verify_blob_hash(hash: &str, data: &[u8], df_proto: i32) -> bool {
+    if let Some(df) = DigestFn::from_proto(df_proto) {
+        if df.hash(data) == hash {
+            return true;
+        }
+    }
+    for df in [
+        DigestFn::Sha256,
+        DigestFn::Md5,
+        DigestFn::Sha1,
+        DigestFn::Blake3,
+        DigestFn::Sha384,
+        DigestFn::Sha512,
+    ] {
+        if hash.len() == df.hex_len() && df.hash(data) == hash {
+            return true;
+        }
+    }
+    false
 }
 
 impl FakeReapiServer {
@@ -200,12 +247,29 @@ impl FakeReapiServer {
         d
     }
 
+    pub fn put_blob_with(&self, df: DigestFn, data: &[u8]) -> Digest {
+        let d = df.digest(data);
+        self.sh
+            .inner
+            .lock()
+            .unwrap()
+            .cas
+            .insert(d.hash.clone(), data.to_vec());
+        d
+    }
+
     pub fn get_blob(&self, d: &Digest) -> Option<Vec<u8>> {
         self.sh.inner.lock().unwrap().cas.get(&d.hash).cloned()
     }
 
     pub fn remove_blob(&self, d: &Digest) {
         self.sh.inner.lock().unwrap().cas.remove(&d.hash);
+    }
+
+    pub fn poison_all_ac(&self, bad: ActionResult) {
+        for v in self.sh.inner.lock().unwrap().ac.values_mut() {
+            *v = bad.clone();
+        }
     }
 
     pub fn blob_count(&self) -> usize {
@@ -243,6 +307,14 @@ impl FakeReapiServer {
 
     pub fn cas_write_count(&self) -> usize {
         self.sh.inner.lock().unwrap().cas_writes
+    }
+
+    pub fn compressed_bytestream_writes(&self) -> usize {
+        self.sh.inner.lock().unwrap().compressed_bytestream_writes
+    }
+
+    pub fn compressed_bytestream_reads(&self) -> usize {
+        self.sh.inner.lock().unwrap().compressed_bytestream_reads
     }
 
     /// Request headers of the last call to `method_suffix`.
@@ -300,8 +372,7 @@ impl FakeReapiServer {
         });
     }
 
-    /// A ready-to-use REAPI client talking to this server over in-memory connections (the
-    /// executor endpoint is the same server when `exec` is true).
+    /// A ready-to-use REAPI client talking to this server over in-memory connections.
     pub fn client(&self, exec: bool) -> crate::reapi_client::ReapiClient {
         use crate::grpc::{Channel, RetryPolicy};
         use crate::reapi_client::{ReapiClient, ReapiConfig};
@@ -321,8 +392,6 @@ impl FakeReapiServer {
     pub fn connector(&self) -> Arc<dyn Connector> {
         Arc::new(FakeConnector(self.clone()))
     }
-
-    // ---------------------------------------------------------------- request handling
 
     fn handle_stream(&self, st: Stream) {
         let mut headers: Vec<Header> = Vec::new();
@@ -377,20 +446,38 @@ impl FakeReapiServer {
             let caps = ServerCapabilities {
                 cache_capabilities: Some(CacheCapabilities {
                     digest_functions: cfg.advertise_digest_functions.clone(),
-                    action_cache_update_capabilities: Some(ActionCacheUpdateCapabilities {
-                        update_enabled: cfg.update_enabled,
-                    }),
+                    action_cache_update_capabilities: if cfg.omit_update_capabilities {
+                        None
+                    } else {
+                        Some(ActionCacheUpdateCapabilities {
+                            update_enabled: cfg.update_enabled,
+                        })
+                    },
                     max_batch_total_size_bytes: cfg.max_batch_total_size_bytes,
+                    supported_compressors: cfg.supported_compressors.clone(),
+                    symlink_absolute_path_strategy: cfg.symlink_absolute_path_strategy,
                     ..Default::default()
                 }),
                 execution_capabilities: Some(ExecutionCapabilities {
-                    digest_function: digest_function::SHA256,
+                    digest_function: *cfg
+                        .advertise_digest_functions
+                        .first()
+                        .unwrap_or(&digest_function::SHA256),
+                    digest_functions: cfg.advertise_digest_functions.clone(),
                     exec_enabled: cfg.exec_enabled,
                     ..Default::default()
                 }),
-                low_api_version: Some(cfg.low_api_version.clone()),
-                high_api_version: Some(cfg.high_api_version.clone()),
-                ..Default::default()
+                deprecated_api_version: cfg.deprecated_api_version.clone(),
+                low_api_version: if cfg.omit_api_versions {
+                    None
+                } else {
+                    Some(cfg.low_api_version.clone())
+                },
+                high_api_version: if cfg.omit_api_versions {
+                    None
+                } else {
+                    Some(cfg.high_api_version.clone())
+                },
             };
             return Ok(vec![caps.encode_to_vec()]);
         }
@@ -401,7 +488,7 @@ impl FakeReapiServer {
                 let missing: Vec<Digest> = r
                     .blob_digests
                     .iter()
-                    .filter(|d| !g.cas.contains_key(&d.hash))
+                    .filter(|d| d.size_bytes > 0 && !g.cas.contains_key(&d.hash))
                     .cloned()
                     .collect();
                 let forget: Vec<String> = g.forget_after_find_missing.clone();
@@ -423,14 +510,21 @@ impl FakeReapiServer {
                 if cfg.max_batch_total_size_bytes > 0 && total > cfg.max_batch_total_size_bytes {
                     return Err(GrpcStatus::new(3, "batch too large"));
                 }
+                let df_proto = r.digest_function;
                 let mut resp = BatchUpdateBlobsResponse::default();
                 let mut g = self.sh.inner.lock().unwrap();
                 for item in r.requests {
                     let d = item.digest.clone().unwrap_or_default();
-                    let ok = sha256::hex_digest(&item.data) == d.hash
-                        && item.data.len() as i64 == d.size_bytes;
+                    let decoded = if item.compressor == 1 {
+                        zel_util::zstd::decompress(&item.data)
+                            .map_err(|e| GrpcStatus::new(3, format!("bad zstd: {e}")))?
+                    } else {
+                        item.data
+                    };
+                    let ok = decoded.len() as i64 == d.size_bytes
+                        && verify_blob_hash(&d.hash, &decoded, df_proto);
                     let status = if ok {
-                        g.cas.insert(d.hash.clone(), item.data);
+                        g.cas.insert(d.hash.clone(), decoded);
                         g.cas_writes += 1;
                         RpcStatus::default()
                     } else {
@@ -449,6 +543,7 @@ impl FakeReapiServer {
             }
             Some("BatchReadBlobs") => {
                 let r = BatchReadBlobsRequest::decode(first).map_err(bad)?;
+                let want_zstd = r.acceptable_compressors.contains(&1);
                 let mut resp = BatchReadBlobsResponse::default();
                 let mut g = self.sh.inner.lock().unwrap();
                 for d in r.digests {
@@ -458,10 +553,17 @@ impl FakeReapiServer {
                         .position(|h| *h == d.hash)
                         .map(|i| g.evict_on_read.remove(i))
                         .is_some();
-                    let (data, status) = match g.cas.get(&d.hash) {
-                        Some(b) if !evicted => (b.clone(), RpcStatus::default()),
+                    let (data, compressor, status) = match g.cas.get(&d.hash) {
+                        Some(b) if !evicted => {
+                            if want_zstd && !b.is_empty() {
+                                (zel_util::zstd::compress(b), 1, RpcStatus::default())
+                            } else {
+                                (b.clone(), 0, RpcStatus::default())
+                            }
+                        }
                         _ => (
                             vec![],
+                            0,
                             RpcStatus {
                                 code: 5,
                                 message: "not found".into(),
@@ -472,7 +574,7 @@ impl FakeReapiServer {
                     resp.responses.push(BatchReadBlobsResponseItem {
                         digest: Some(d),
                         data,
-                        compressor: 0,
+                        compressor,
                         status: Some(status),
                     });
                 }
@@ -485,9 +587,14 @@ impl FakeReapiServer {
                 let mut dirs = Vec::new();
                 let mut stack = vec![root];
                 while let Some(d) = stack.pop() {
-                    let blob = g.cas.get(&d.hash).ok_or_else(|| {
-                        GrpcStatus::new(5, format!("missing directory {}", d.hash))
-                    })?;
+                    let empty = Vec::new();
+                    let blob = match g.cas.get(&d.hash) {
+                        Some(b) => b,
+                        None if d.size_bytes == 0 => &empty,
+                        None => {
+                            return Err(GrpcStatus::new(5, format!("missing directory {}", d.hash)))
+                        }
+                    };
                     let dir = Directory::decode(blob).map_err(bad)?;
                     for sub in &dir.directories {
                         stack.push(sub.digest.clone().unwrap_or_default());
@@ -548,7 +655,7 @@ impl FakeReapiServer {
                 };
             }
             Some("UpdateActionResult") => {
-                if !cfg.update_enabled {
+                if !cfg.update_enabled || cfg.omit_update_capabilities {
                     return Err(GrpcStatus::new(7, "action cache updates disabled"));
                 }
                 let r = UpdateActionResultRequest::decode(first).map_err(bad)?;
@@ -563,7 +670,7 @@ impl FakeReapiServer {
         match path.strip_prefix(BYTESTREAM) {
             Some("Read") => {
                 let r = ReadRequest::decode(first).map_err(bad)?;
-                let (_inst, hash, size) = parse_blob_resource(&r.resource_name, false)?;
+                let (_inst, hash, size, compressed) = parse_blob_resource(&r.resource_name, false)?;
                 let mut g = self.sh.inner.lock().unwrap();
                 let evicted = g
                     .evict_on_read
@@ -578,11 +685,17 @@ impl FakeReapiServer {
                 if blob.len() as i64 != size {
                     return Err(GrpcStatus::new(5, "size mismatch"));
                 }
+                let wire_bytes = if compressed {
+                    g.compressed_bytestream_reads += 1;
+                    zel_util::zstd::compress(&blob)
+                } else {
+                    blob
+                };
                 let off = r.read_offset.max(0) as usize;
-                if off > blob.len() {
+                if off > wire_bytes.len() {
                     return Err(GrpcStatus::new(11, "offset out of range"));
                 }
-                let mut data = &blob[off..];
+                let mut data = &wire_bytes[off..];
                 if r.read_limit > 0 && (r.read_limit as usize) < data.len() {
                     data = &data[..r.read_limit as usize];
                 }
@@ -612,18 +725,29 @@ impl FakeReapiServer {
                     data.extend(w.data);
                     finished = w.finish_write;
                 }
-                let (_inst, hash, size) = parse_blob_resource(&resource, true)?;
+                let (_inst, hash, size, compressed) = parse_blob_resource(&resource, true)?;
                 if !finished {
                     return Err(GrpcStatus::new(3, "missing finish_write"));
                 }
-                if data.len() as i64 != size || sha256::hex_digest(&data) != hash {
+                let raw_data = if compressed {
+                    zel_util::zstd::decompress(&data)
+                        .map_err(|e| GrpcStatus::new(3, format!("bad zstd upload: {e}")))?
+                } else {
+                    data
+                };
+                if raw_data.len() as i64 != size || !verify_blob_hash(&hash, &raw_data, 0) {
                     return Err(GrpcStatus::new(3, "digest mismatch"));
                 }
                 let mut g = self.sh.inner.lock().unwrap();
-                g.cas.insert(hash, data);
+                g.cas.insert(hash, raw_data);
                 g.cas_writes += 1;
+                if compressed {
+                    g.compressed_bytestream_writes += 1;
+                }
+                // REAPI servers return -1 for compressed uploads and full size for uncompressed.
+                let committed = if compressed { -1 } else { size };
                 return Ok(vec![WriteResponse {
-                    committed_size: size,
+                    committed_size: committed,
                 }
                 .encode_to_vec()]);
             }
@@ -656,6 +780,9 @@ impl FakeReapiServer {
         cfg: &FakeConfig,
         st: &Stream,
     ) -> Result<Vec<Vec<u8>>, GrpcStatus> {
+        if cfg.clean_eof_without_op {
+            return Ok(vec![]);
+        }
         let action_digest = r.action_digest.clone().unwrap_or_default();
         let name = {
             let mut g = self.sh.inner.lock().unwrap();
@@ -676,7 +803,6 @@ impl FakeReapiServer {
             metadata: Some(meta(execution_stage::QUEUED)),
             ..Default::default()
         }];
-        // Cache lookup.
         let cached = if r.skip_cache_lookup {
             None
         } else {
@@ -722,8 +848,10 @@ impl FakeReapiServer {
             ..Default::default()
         });
         self.sh.inner.lock().unwrap().ops.insert(name, ops.clone());
+        if cfg.clean_eof_after_first_op {
+            return Ok(vec![ops[0].encode_to_vec()]);
+        }
         if cfg.drop_execute_stream_after_first_op {
-            // Stream the first op, then break the stream with UNAVAILABLE.
             let _ = st.send_headers(
                 &[
                     (":status".into(), "200".into()),
@@ -786,10 +914,8 @@ impl FakeReapiServer {
                 };
             };
             let rd = action.input_root_digest.clone().unwrap_or_default();
-            // Like real servers, verify the whole input tree is present in the CAS.
             let mut stack = vec![rd];
             while let Some(d) = stack.pop() {
-                // The empty blob is implicitly present in every CAS.
                 let empty = Vec::new();
                 let b = match g.cas.get(&d.hash) {
                     Some(b) => b,
@@ -855,7 +981,7 @@ impl FakeReapiServer {
                 status: Some(RpcStatus {
                     code: e.code,
                     message: e.message,
-                    details: vec![],
+                    details: e.details,
                 }),
                 ..Default::default()
             },
@@ -863,31 +989,67 @@ impl FakeReapiServer {
     }
 }
 
-fn parse_blob_resource(res: &str, write: bool) -> Result<(String, String, i64), GrpcStatus> {
+/// Parses `[instance/]uploads/{uuid}/(blobs|compressed-blobs/{comp})/[{fn}/]{hash}/{size}` or
+/// `[instance/](blobs|compressed-blobs/{comp})/[{fn}/]{hash}/{size}`.
+fn parse_blob_resource(res: &str, write: bool) -> Result<(String, String, i64, bool), GrpcStatus> {
     let parts: Vec<&str> = res.split('/').collect();
-    let marker = if write { "uploads" } else { "blobs" };
-    let pos = parts
-        .iter()
-        .position(|p| *p == marker)
-        .ok_or_else(|| GrpcStatus::new(3, format!("bad resource name {res}")))?;
-    let inst = parts[..pos].join("/");
-    let rest = &parts[pos + 1..];
-    let rest: Vec<&str> = if write {
-        // uploads/{uuid}/blobs/{hash}/{size}[/extra]
-        if rest.len() < 4 || rest[1] != "blobs" {
+    if write {
+        let pos = parts
+            .iter()
+            .position(|p| *p == "uploads")
+            .ok_or_else(|| GrpcStatus::new(3, format!("bad resource name {res}")))?;
+        let inst = parts[..pos].join("/");
+        let rest = &parts[pos + 1..];
+        if rest.len() < 4 {
             return Err(GrpcStatus::new(3, "bad upload resource"));
         }
-        rest[2..].to_vec()
+        let (compressed, after_kind) = if rest[1] == "blobs" {
+            (false, &rest[2..])
+        } else if rest[1] == "compressed-blobs" {
+            if rest.len() < 5 || rest[2] != "zstd" {
+                return Err(GrpcStatus::new(3, "unsupported upload compressor"));
+            }
+            (true, &rest[3..])
+        } else {
+            return Err(GrpcStatus::new(3, "bad upload resource kind"));
+        };
+        let (hash, size_str) = extract_hash_and_size(after_kind)?;
+        let size: i64 = size_str
+            .parse()
+            .map_err(|_| GrpcStatus::new(3, "bad size"))?;
+        Ok((inst, hash, size, compressed))
     } else {
-        rest.to_vec()
-    };
-    if rest.len() < 2 {
+        let pos = parts
+            .iter()
+            .position(|p| *p == "blobs" || *p == "compressed-blobs")
+            .ok_or_else(|| GrpcStatus::new(3, format!("bad resource name {res}")))?;
+        let inst = parts[..pos].join("/");
+        let (compressed, after_kind) = if parts[pos] == "blobs" {
+            (false, &parts[pos + 1..])
+        } else {
+            if parts.len() < pos + 4 || parts[pos + 1] != "zstd" {
+                return Err(GrpcStatus::new(3, "unsupported read compressor"));
+            }
+            (true, &parts[pos + 2..])
+        };
+        let (hash, size_str) = extract_hash_and_size(after_kind)?;
+        let size: i64 = size_str
+            .parse()
+            .map_err(|_| GrpcStatus::new(3, "bad size"))?;
+        Ok((inst, hash, size, compressed))
+    }
+}
+
+fn extract_hash_and_size<'a>(seg: &'a [&'a str]) -> Result<(String, &'a str), GrpcStatus> {
+    if seg.len() < 2 {
         return Err(GrpcStatus::new(3, "bad blob resource"));
     }
-    let size: i64 = rest[1]
-        .parse()
-        .map_err(|_| GrpcStatus::new(3, "bad size"))?;
-    Ok((inst, rest[0].to_string(), size))
+    // Optional non-old-style digest function prefix (`blake3/{hash}/{size}`).
+    if seg.len() >= 3 && seg[0] == "blake3" {
+        Ok((seg[1].to_string(), seg[2]))
+    } else {
+        Ok((seg[0].to_string(), seg[1]))
+    }
 }
 
 /// Writes a complete gRPC response (headers + messages + trailers) onto `st`.
@@ -906,15 +1068,26 @@ fn respond(st: &Stream, res: Result<Vec<Vec<u8>>, GrpcStatus>) -> io::Result<()>
             }
             st.send_headers(&[("grpc-status".into(), "0".into())], true)
         }
-        Err(e) => st.send_headers(
-            &[
+        Err(e) => {
+            let mut hdrs: Vec<Header> = vec![
                 (":status".into(), "200".into()),
                 ("content-type".into(), "application/grpc".into()),
                 ("grpc-status".into(), e.code.to_string()),
                 ("grpc-message".into(), percent_encode(&e.message)),
-            ],
-            true,
-        ),
+            ];
+            if !e.details.is_empty() {
+                let rpc_st = RpcStatus {
+                    code: e.code,
+                    message: e.message.clone(),
+                    details: e.details.clone(),
+                };
+                hdrs.push((
+                    "grpc-status-details-bin".into(),
+                    base64_encode(&rpc_st.encode_to_vec()),
+                ));
+            }
+            st.send_headers(&hdrs, true)
+        }
     }
 }
 

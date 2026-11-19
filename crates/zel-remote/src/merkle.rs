@@ -14,12 +14,13 @@
 
 //! Merkle tree construction (`merkletree/MerkleTreeComputer.java`): turns a set of spawn inputs
 //! into REAPI `Directory` protos whose children are sorted by name, with the input root digest and
-//! the set of blobs needed in the CAS. Also the inverse (`Tree` flattening) for output directories.
+//! the set of positive-size blobs needed in the CAS. Also the inverse (`Tree` flattening) and
+//! `UploadManifest`-compatible output directory `Tree` construction.
 
 use crate::digest::DigestFn;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::UNIX_EPOCH;
 use zel_proto::reapi::*;
@@ -54,7 +55,7 @@ pub struct MerkleInput {
     /// Path relative to the input root, `/`-separated.
     pub path: String,
     pub kind: InputKind,
-    /// Optional REAPI node properties (e.g. `--remote_...` mtime / unix mode).
+    /// Optional REAPI node properties (e.g. mtime / unix mode).
     pub node_properties: Option<NodeProperties>,
 }
 
@@ -111,7 +112,7 @@ impl BlobSource {
 pub struct MerkleTree {
     pub root_digest: Digest,
     pub root: Directory,
-    /// All blobs (directories + files) needed in the CAS to execute with this input root.
+    /// All non-empty blobs (directories + files with `size_bytes > 0`) needed in the CAS.
     pub blobs: BTreeMap<Digest, BlobSource>,
     pub input_files: usize,
     pub input_bytes: i64,
@@ -124,7 +125,7 @@ struct DirBuilder {
     symlinks: BTreeMap<String, SymlinkNode>,
 }
 
-/// Computes Merkle trees, caching file digests by (path, size, mtime).
+/// Computes Merkle trees, caching file digests by `(path, size, mtime)`.
 pub struct MerkleTreeComputer {
     pub digest_fn: DigestFn,
     cache: Mutex<HashMap<(PathBuf, u64, u128), Digest>>,
@@ -157,6 +158,15 @@ impl MerkleTreeComputer {
     }
 
     pub fn build(&self, inputs: &[MerkleInput]) -> io::Result<MerkleTree> {
+        if inputs.is_empty() {
+            return Ok(MerkleTree {
+                root_digest: self.digest_fn.digest(b""),
+                root: Directory::default(),
+                blobs: BTreeMap::new(),
+                input_files: 0,
+                input_bytes: 0,
+            });
+        }
         let mut root = DirBuilder::default();
         let mut blobs: BTreeMap<Digest, BlobSource> = BTreeMap::new();
         let mut input_files = 0usize;
@@ -248,8 +258,12 @@ impl MerkleTreeComputer {
                     if cur.dirs.contains_key(&name) || cur.symlinks.contains_key(&name) {
                         return Err(bad(format!("conflicting inputs at {}", inp.path)));
                     }
-                    if let Some(src) = src {
-                        blobs.entry(digest).or_insert(src);
+                    // Empty blobs (size 0) are implicitly present in every REAPI CAS and are
+                    // omitted from `MerkleTree.blobs` (matching Bazel's MerkleTreeComputer).
+                    if digest.size_bytes > 0 {
+                        if let Some(src) = src {
+                            blobs.entry(digest).or_insert(src);
+                        }
                     }
                     cur.files.insert(name, node);
                 }
@@ -282,7 +296,9 @@ impl MerkleTreeComputer {
         dir.symlinks = b.symlinks.values().cloned().collect();
         let bytes = dir.encode_to_vec();
         let digest = self.digest_fn.digest(&bytes);
-        blobs.insert(digest.clone(), BlobSource::Bytes(bytes));
+        if digest.size_bytes > 0 {
+            blobs.insert(digest.clone(), BlobSource::Bytes(bytes));
+        }
         (dir, digest)
     }
 }
@@ -308,6 +324,8 @@ pub enum TreeEntry {
 /// in depth-first order. Errors on missing children or cycles/over-deep recursion.
 pub fn flatten_tree(tree: &Tree, digest_fn: DigestFn) -> Result<Vec<TreeEntry>, String> {
     let mut by_digest: HashMap<String, &Directory> = HashMap::new();
+    let empty_dir = Directory::default();
+    by_digest.insert(digest_fn.hash(b""), &empty_dir);
     for c in &tree.children {
         by_digest.insert(digest_fn.hash(&c.encode_to_vec()), c);
     }
@@ -358,69 +376,146 @@ pub fn flatten_tree(tree: &Tree, digest_fn: DigestFn) -> Result<Vec<TreeEntry>, 
     Ok(out)
 }
 
-/// Builds a REAPI `Tree` from a local directory (used when uploading output directories).
+/// Builds a REAPI `Tree` from a local directory (`UploadManifest` rules: `is_executable = true`
+/// on every regular file, non-dangling absolute symlinks followed, dangling absolute symlinks
+/// rejected unless `allow_absolute_symlinks`, special files rejected as `InvalidData`).
 pub fn tree_from_local_dir(
-    dir: &std::path::Path,
+    dir: &Path,
     digest_fn: DigestFn,
     blobs: &mut BTreeMap<Digest, BlobSource>,
 ) -> io::Result<Tree> {
+    tree_from_local_dir_ext(dir, digest_fn, false, blobs)
+}
+
+pub fn tree_from_local_dir_ext(
+    dir: &Path,
+    digest_fn: DigestFn,
+    allow_absolute_symlinks: bool,
+    blobs: &mut BTreeMap<Digest, BlobSource>,
+) -> io::Result<Tree> {
     fn rec(
-        dir: &std::path::Path,
+        dir: &Path,
         f: DigestFn,
+        allow_abs: bool,
         blobs: &mut BTreeMap<Digest, BlobSource>,
         children: &mut Vec<Directory>,
     ) -> io::Result<Directory> {
         let mut d = Directory::default();
-        let mut names: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
-        names.sort_by_key(|e| e.file_name());
-        for e in names {
+        let mut entries: Vec<_> = std::fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+        // Sort by UTF-16 code units of entry name (matching Java String.compareTo).
+        entries.sort_by(|a, b| {
+            let na = a.file_name().to_string_lossy().into_owned();
+            let nb = b.file_name().to_string_lossy().into_owned();
+            na.encode_utf16().cmp(nb.encode_utf16())
+        });
+        for e in entries {
             let name = e.file_name().to_string_lossy().into_owned();
             let path = e.path();
             let ft = e.file_type()?;
             if ft.is_symlink() {
-                let target = std::fs::read_link(&path)?.to_string_lossy().into_owned();
+                let target_pb = std::fs::read_link(&path)?;
+                let target_str = target_pb.to_string_lossy().into_owned();
+                if target_pb.is_absolute() {
+                    match std::fs::metadata(&path) {
+                        Ok(target_md) if target_md.is_dir() => {
+                            let sub = rec(&path, f, allow_abs, blobs, children)?;
+                            let bytes = sub.encode_to_vec();
+                            let dg = f.digest(&bytes);
+                            if dg.size_bytes > 0 {
+                                blobs.insert(dg.clone(), BlobSource::Bytes(bytes));
+                            }
+                            children.push(sub);
+                            d.directories.push(DirectoryNode {
+                                name,
+                                digest: Some(dg),
+                            });
+                            continue;
+                        }
+                        Ok(target_md) if target_md.is_file() => {
+                            let data = std::fs::read(&path)?;
+                            let dg = f.digest(&data);
+                            if dg.size_bytes > 0 {
+                                blobs
+                                    .entry(dg.clone())
+                                    .or_insert(BlobSource::File(path.clone()));
+                            }
+                            d.files.push(FileNode {
+                                name,
+                                digest: Some(dg),
+                                is_executable: true,
+                                node_properties: None,
+                            });
+                            continue;
+                        }
+                        Ok(_) => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!("Illegal special output file {}", path.display()),
+                            ));
+                        }
+                        Err(_) if !allow_abs => {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "{} is a dangling absolute symbolic link (-> {}), disallowed by remote cache",
+                                    path.display(),
+                                    target_str
+                                ),
+                            ));
+                        }
+                        Err(_) => {}
+                    }
+                }
                 d.symlinks.push(SymlinkNode {
                     name,
-                    target,
+                    target: target_str,
                     node_properties: None,
                 });
             } else if ft.is_dir() {
-                let sub = rec(&path, f, blobs, children)?;
+                let sub = rec(&path, f, allow_abs, blobs, children)?;
                 let bytes = sub.encode_to_vec();
                 let dg = f.digest(&bytes);
-                blobs.insert(dg.clone(), BlobSource::Bytes(bytes));
+                if dg.size_bytes > 0 {
+                    blobs.insert(dg.clone(), BlobSource::Bytes(bytes));
+                }
                 children.push(sub);
                 d.directories.push(DirectoryNode {
                     name,
                     digest: Some(dg),
                 });
-            } else {
+            } else if ft.is_file() {
                 let data = std::fs::read(&path)?;
                 let dg = f.digest(&data);
-                blobs
-                    .entry(dg.clone())
-                    .or_insert(BlobSource::File(path.clone()));
-                #[cfg(unix)]
-                let exec = {
-                    use std::os::unix::fs::PermissionsExt;
-                    std::fs::metadata(&path)?.permissions().mode() & 0o100 != 0
-                };
-                #[cfg(not(unix))]
-                let exec = false;
+                if dg.size_bytes > 0 {
+                    blobs
+                        .entry(dg.clone())
+                        .or_insert(BlobSource::File(path.clone()));
+                }
+                // UploadManifest sets `is_executable = true` on all uploaded regular files.
                 d.files.push(FileNode {
                     name,
                     digest: Some(dg),
-                    is_executable: exec,
+                    is_executable: true,
                     node_properties: None,
                 });
+            } else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Illegal special output file {}", path.display()),
+                ));
             }
         }
         Ok(d)
     }
     let mut children = Vec::new();
-    let root = rec(dir, digest_fn, blobs, &mut children)?;
-    // Deduplicate children by digest, as Bazel does.
-    let mut seen = std::collections::HashSet::new();
+    let root = rec(
+        dir,
+        digest_fn,
+        allow_absolute_symlinks,
+        blobs,
+        &mut children,
+    )?;
+    let mut seen = HashSet::new();
     children.retain(|c| seen.insert(digest_fn.hash(&c.encode_to_vec())));
     Ok(Tree {
         root: Some(root),
@@ -433,34 +528,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn nested_tree_has_sorted_children_and_stable_digest() {
+    fn nested_tree_has_sorted_children_omits_empty_blobs_and_has_stable_digest() {
         let c = MerkleTreeComputer::new(DigestFn::Sha256);
+        assert!(c.build(&[]).unwrap().blobs.is_empty());
+
         let inputs = vec![
             MerkleInput::bytes("b/z.txt", b"zz".to_vec(), false),
             MerkleInput::bytes("a.txt", b"a".to_vec(), true),
+            MerkleInput::bytes("empty_file.txt", Vec::new(), false),
             MerkleInput::bytes("b/c/d.txt", b"d".to_vec(), false),
             MerkleInput::symlink("lnk", "a.txt"),
             MerkleInput::empty_dir("empty"),
         ];
         let t = c.build(&inputs).unwrap();
-        assert_eq!(t.root.files.len(), 1);
+        assert_eq!(t.root.files.len(), 2);
         assert!(t.root.files[0].is_executable);
         let names: Vec<_> = t.root.directories.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["b", "empty"]);
         assert_eq!(t.root.symlinks[0].target, "a.txt");
-        assert_eq!(t.input_files, 3);
+        assert_eq!(t.input_files, 4);
         // Order of inputs must not change the digest.
         let mut rev = inputs.clone();
         rev.reverse();
         assert_eq!(c.build(&rev).unwrap().root_digest, t.root_digest);
-        // Root digest equals the digest of the serialized root directory.
         assert_eq!(
             t.root_digest,
             DigestFn::Sha256.digest(&t.root.encode_to_vec())
         );
         assert!(t.blobs.contains_key(&t.root_digest));
-        // Empty directory blob is the empty message.
-        assert!(t.blobs.contains_key(&DigestFn::Sha256.digest(b"")));
+        // Empty blob (size 0) is omitted from MerkleTree.blobs!
+        assert!(!t.blobs.contains_key(&DigestFn::Sha256.digest(b"")));
     }
 
     #[test]
@@ -493,15 +590,15 @@ mod tests {
         std::fs::create_dir_all(tmp.join("sub/deep")).unwrap();
         std::fs::write(tmp.join("a"), b"A").unwrap();
         std::fs::write(tmp.join("sub/deep/b"), b"B").unwrap();
-        std::fs::write(tmp.join("sub/b2"), b"B").unwrap(); // same content twice
+        std::fs::write(tmp.join("sub/b2"), b"B").unwrap();
         #[cfg(unix)]
         std::os::unix::fs::symlink("a", tmp.join("link")).unwrap();
         let mut blobs = BTreeMap::new();
         let tree = tree_from_local_dir(&tmp, DigestFn::Sha256, &mut blobs).unwrap();
         let entries = flatten_tree(&tree, DigestFn::Sha256).unwrap();
-        assert!(entries
-            .iter()
-            .any(|e| matches!(e, TreeEntry::File { path, .. } if path == "sub/deep/b")));
+        assert!(entries.iter().any(
+            |e| matches!(e, TreeEntry::File { path, executable: true, .. } if path == "sub/deep/b")
+        ));
         assert!(entries
             .iter()
             .any(|e| matches!(e, TreeEntry::Directory { path } if path == "sub/deep")));
