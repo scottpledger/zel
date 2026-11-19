@@ -196,20 +196,27 @@ fn helper_matches_host(scope: &str, host: &str) -> bool {
     }
 }
 
-fn run_credential_helper(helper: &Path, url: &str) -> Result<Vec<(String, String)>, String> {
+fn run_credential_helper(
+    helper: &Path,
+    url: &str,
+    client_env: &BTreeMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
     use std::io::Write;
     use std::process::{Command, Stdio};
-    let mut child = Command::new(helper)
+    let mut cmd = Command::new(helper);
+    cmd.arg("get")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| {
-            format!(
-                "Failed to invoke credential helper {}: {e}",
-                helper.display()
-            )
-        })?;
+        .stderr(Stdio::piped());
+    if !client_env.is_empty() {
+        cmd.envs(client_env);
+    }
+    let mut child = cmd.spawn().map_err(|e| {
+        format!(
+            "Failed to invoke credential helper {}: {e}",
+            helper.display()
+        )
+    })?;
     if let Some(mut stdin) = child.stdin.take() {
         let escaped = url.replace('\\', "\\\\").replace('"', "\\\"");
         let _ = write!(stdin, "{{\"uri\":\"{escaped}\"}}");
@@ -258,8 +265,8 @@ fn run_credential_helper(helper: &Path, url: &str) -> Result<Vec<(String, String
     Ok(result)
 }
 
-/// Resolves auth headers for `url` using `--credential_helper` (highest priority) or `.netrc`.
-pub fn resolve_auth_headers(
+/// Resolves headers for `url` from configured `--credential_helper` entries, if any match.
+pub fn resolve_credential_helper_headers(
     url: &str,
     helpers: &[(String, PathBuf)],
     client_env: &BTreeMap<String, String>,
@@ -281,25 +288,44 @@ pub fn resolve_auth_headers(
             }
         }
         if let Some(helper) = best {
-            let hdrs = run_credential_helper(helper, url)?;
-            if !hdrs.is_empty() {
-                return Ok(hdrs);
-            }
+            return run_credential_helper(helper, url, client_env);
         }
     }
+    Ok(Vec::new())
+}
+
+/// Resolves fallback `.netrc` `Authorization` header for `url` from `NETRC` / `HOME`.
+pub fn resolve_netrc_headers(
+    url: &str,
+    client_env: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let host = url_host(url);
     if let Some(netrc) = Netrc::load_from_env(client_env) {
         if let Some(m) = netrc.get_credential(host) {
             if let Some(pwd) = &m.password {
                 if let Some(login) = &m.login {
                     let b64 = crate::hash::base64_encode(format!("{login}:{pwd}").as_bytes());
-                    return Ok(vec![("Authorization".to_string(), format!("Basic {b64}"))]);
+                    return vec![("Authorization".to_string(), format!("Basic {b64}"))];
                 } else {
-                    return Ok(vec![("Authorization".to_string(), format!("Bearer {pwd}"))]);
+                    return vec![("Authorization".to_string(), format!("Bearer {pwd}"))];
                 }
             }
         }
     }
-    Ok(Vec::new())
+    Vec::new()
+}
+
+/// Resolves auth headers for `url` using `--credential_helper` (highest priority) or `.netrc`.
+pub fn resolve_auth_headers(
+    url: &str,
+    helpers: &[(String, PathBuf)],
+    client_env: &BTreeMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
+    let hdrs = resolve_credential_helper_headers(url, helpers, client_env)?;
+    if !hdrs.is_empty() {
+        return Ok(hdrs);
+    }
+    Ok(resolve_netrc_headers(url, client_env))
 }
 
 fn parse_machine_tokens(

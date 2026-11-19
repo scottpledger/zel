@@ -138,11 +138,12 @@ pub(crate) struct RtState {
     /// bzl key -> (sha256 of source, keys of directly loaded bzl files)
     pub bzl_deps: HashMap<String, (String, Vec<String>)>,
     /// Memoized transitive `.bzl` digests, parsed load lists, load-graph repo mappings, and
-    /// repository rule metadata `(local, environ)` for the lifetime of this `Rt`.
+    /// repository rule metadata `(local, configure, environ)` for the lifetime of this `Rt`.
     pub bzl_transitive_digests: HashMap<String, Vec<u8>>,
     pub bzl_load_mappings: HashMap<String, Vec<(String, String, String)>>,
     pub bzl_loads_cache: HashMap<String, Vec<String>>,
-    pub rule_meta_cache: HashMap<(String, String), (bool, Vec<String>)>,
+    pub rule_meta_cache: HashMap<(String, String), (bool, bool, Vec<String>)>,
+    pub force_configure: bool,
     /// Package loader used for `.bzl` files that do not define repository rules / extensions
     /// (rule definitions such as rules_cc, which need the full rule-building builtins).
     pub loader: Option<Arc<zel_packages::PackageLoader>>,
@@ -1545,8 +1546,50 @@ impl Rt {
     }
 }
 
+/// Normalizes a Windows filesystem path string to Bazel's `PathFragment` / `StarlarkPath`
+/// display form: strips extended-length `\\?\` prefixes, converts `\` to `/`, and uppercases
+/// a leading drive letter (`c:\foo\bar` -> `C:/foo/bar`).
+pub fn normalize_windows_starlark_path(raw: &str) -> String {
+    let stripped = if let Some(rest) = raw
+        .strip_prefix(r"\\?\UNC\")
+        .or_else(|| raw.strip_prefix("//?/UNC/"))
+    {
+        format!("//{rest}")
+    } else if let Some(rest) = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix("//?/"))
+    {
+        rest.to_string()
+    } else {
+        raw.to_string()
+    };
+    let mut s = stripped.replace('\\', "/");
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && (bytes.len() == 2 || bytes[2] == b'/')
+    {
+        let upper = (bytes[0] as char).to_ascii_uppercase();
+        s.replace_range(0..1, &upper.to_string());
+    }
+    while s.len() > 3
+        && s.as_bytes()
+            .get(0..3)
+            .is_some_and(|p| p[0].is_ascii_alphabetic() && p[1] == b':' && p[2] == b'/')
+        && s.ends_with('/')
+    {
+        s.pop();
+    }
+    s
+}
+
 pub fn path_value(p: &Path) -> Value {
-    Value::Host("path".into(), p.display().to_string())
+    #[cfg(windows)]
+    let formatted = normalize_windows_starlark_path(&p.display().to_string());
+    #[cfg(not(windows))]
+    let formatted = p.display().to_string();
+    Value::Host("path".into(), formatted)
 }
 
 /// `Label()` apparent-name lookups made while a `.bzl` file loads (no extension running):

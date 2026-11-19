@@ -361,6 +361,12 @@ impl Rt {
             return Err(format!("Repository '@@{canonical}' has no repo spec (is the module a non-registry override with a missing source?)"));
         };
         let is_local = self.is_local_rule(&spec);
+        let is_configure = self.is_configure_rule(&spec);
+        let force_configure = is_configure && self.state.lock().unwrap().force_configure;
+        // `RepositoryFetchFunction.shouldUseCachedRepoContents`: when fetching is enabled
+        // (`!nofetch`), `local = True` repository rules always bypass cached repo contents.
+        let can_use_cached =
+            !self.opts.force && !force_configure && (!is_local || self.opts.nofetch);
         let fp = self.predeclared_input_hash(canonical, &spec);
         let marker_ok = |m: &str| {
             marker_is_current(
@@ -371,7 +377,7 @@ impl Rt {
                 &self.external_dir(),
             )
         };
-        if !self.opts.force && dir.exists() {
+        if can_use_cached && dir.exists() {
             if let Ok(m) = std::fs::read_to_string(&marker) {
                 if marker_ok(&m) {
                     return Ok(());
@@ -380,7 +386,7 @@ impl Rt {
         }
         // Repo contents cache lookup?
         if let Some(rcc_dir) = &self.opts.repo_contents_cache {
-            if !self.opts.force && !is_local {
+            if can_use_cached && !is_local {
                 let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
                 let candidates = cache.get_candidate_repos(&fp);
                 for cand in candidates {
@@ -421,7 +427,7 @@ impl Rt {
                         }
                         return Ok(());
                     }
-                } else if vdir.is_dir() && !self.opts.force && !is_local {
+                } else if vdir.is_dir() && can_use_cached && !is_local && !is_configure {
                     let vmarker = v.join(format!("@{canonical}.marker"));
                     let up_to_date = std::fs::read_to_string(&vmarker)
                         .map(|m| marker_ok(&m))
@@ -482,9 +488,7 @@ impl Rt {
 
         // `RepositoryFetchFunction`: reproducible non-local repos get their symlinks replanted (absolute targets under
         // the external root become relative) before they may enter the repo contents cache.
-        if is_reproducible
-            && !(spec.rule_name == "local_repository" || spec.rule_name == "new_local_repository")
-        {
+        if is_reproducible && !is_local {
             if let Err(e) =
                 replant_symlinks_relative(dir, &self.opts.workspace_root, &self.external_dir())
             {
@@ -493,53 +497,71 @@ impl Rt {
                 ));
             }
         }
-        // If repo_contents_cache is enabled, cache reproducible repos
-        if is_reproducible {
+        // If repo_contents_cache is enabled, cache reproducible non-local repos.
+        if is_reproducible && !is_local {
             if let Some(rcc_dir) = &self.opts.repo_contents_cache {
-                let is_local = spec.rule_name == "local_repository"
-                    || spec.rule_name == "new_local_repository";
-                if !is_local {
-                    let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
-                    let _ = cache.move_to_cache(dir, &marker, &fp);
-                }
+                let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
+                let _ = cache.move_to_cache(dir, &marker, &fp);
             }
         }
         Ok(())
     }
 
-    fn rule_meta(self: &Arc<Self>, spec: &RepoSpec) -> Option<(bool, Vec<String>)> {
+    pub(crate) fn rule_meta_result(
+        self: &Arc<Self>,
+        spec: &RepoSpec,
+    ) -> Result<Option<(bool, bool, Vec<String>)>, String> {
         let (repo, pkg, name) = parse_bzl_label(&spec.bzl_file);
         let key = format!("@@{repo}//{pkg}:{name}");
         let cache_key = (key.clone(), spec.rule_name.clone());
         if let Some(cached) = self.state.lock().unwrap().rule_meta_cache.get(&cache_key) {
-            return Some(cached.clone());
+            return Ok(Some(cached.clone()));
         }
-        let ctx = self.eval_bzl_fresh(&key, &repo, &pkg, &name).ok()?;
+        let ctx = self
+            .eval_bzl_fresh(&key, &repo, &pkg, &name)
+            .map_err(|e| e.to_string())?;
         let meta = match ctx.globals.get(&spec.rule_name) {
             Some(Value::Host(k, id)) if k == "repository_rule" => {
                 let st = self.state.lock().unwrap();
-                let def = st.rule_defs.get(id.parse::<usize>().ok()?)?;
-                (def.local, def.environ.clone())
+                let Some(idx) = id.parse::<usize>().ok() else {
+                    return Ok(None);
+                };
+                let Some(def) = st.rule_defs.get(idx) else {
+                    return Ok(None);
+                };
+                (def.local, def.configure, def.environ.clone())
             }
-            _ => return None,
+            _ => return Ok(None),
         };
         self.state
             .lock()
             .unwrap()
             .rule_meta_cache
             .insert(cache_key, meta.clone());
-        Some(meta)
+        Ok(Some(meta))
+    }
+
+    pub(crate) fn rule_meta(
+        self: &Arc<Self>,
+        spec: &RepoSpec,
+    ) -> Option<(bool, bool, Vec<String>)> {
+        self.rule_meta_result(spec).ok().flatten()
     }
 
     fn rule_environ(self: &Arc<Self>, spec: &RepoSpec) -> Option<Vec<String>> {
-        self.rule_meta(spec).map(|(_, environ)| environ)
+        self.rule_meta(spec).map(|(_, _, environ)| environ)
     }
 
-    fn is_local_rule(self: &Arc<Self>, spec: &RepoSpec) -> bool {
+    pub(crate) fn is_local_rule(self: &Arc<Self>, spec: &RepoSpec) -> bool {
         if spec.rule_name == "local_repository" || spec.rule_name == "new_local_repository" {
             return true;
         }
-        self.rule_meta(spec).is_some_and(|(local, _)| local)
+        self.rule_meta(spec).is_some_and(|(local, _, _)| local)
+    }
+
+    pub(crate) fn is_configure_rule(self: &Arc<Self>, spec: &RepoSpec) -> bool {
+        self.rule_meta(spec)
+            .is_some_and(|(_, configure, _)| configure)
     }
 
     /// `RepositoryFetchFunction`: a fetched repo needs a boundary file; a symlinked repo root (think
@@ -2747,12 +2769,23 @@ my_ext = _make_ext()
         let nlr1 = rt1.fetch_repo("+new_local_repository+nlr").unwrap();
         assert!(base.join("ob/external/@bazel_tools.marker").exists());
 
-        // Plant a sentinel file inside both repos; a second Rt session with unchanged inputs must
-        // hit the marker cache and preserve the existing materialized directories.
+        // Plant a sentinel file inside both repos: `bazel_tools` reuses its marker when fetching
+        // is enabled, whereas `local = True` repos (`new_local_repository`) bypass cached repo
+        // contents whenever fetching is enabled (`shouldUseCachedRepoContents`) and only reuse
+        // their on-disk materialization under `--nofetch`.
         let bt_sentinel = bt1.join(".zel_marker_sentinel");
         let nlr_sentinel = nlr1.join(".zel_marker_sentinel");
         std::fs::write(&bt_sentinel, "kept").unwrap();
         std::fs::write(&nlr_sentinel, "kept").unwrap();
+
+        let mut nofetch_opts = opts.clone();
+        nofetch_opts.nofetch = true;
+        let rt_nofetch = Rt::new(nofetch_opts, res.clone());
+        let nlr_nofetch = rt_nofetch.fetch_repo("+new_local_repository+nlr").unwrap();
+        assert!(
+            nlr_nofetch.join(".zel_marker_sentinel").exists(),
+            "local = True repo should reuse existing materialization under --nofetch"
+        );
 
         let rt2 = Rt::new(opts, res);
         let bt2 = rt2.fetch_repo("bazel_tools").unwrap();
@@ -2762,8 +2795,195 @@ my_ext = _make_ext()
             "bazel_tools should reuse cached materialization when marker matches"
         );
         assert!(
-            nlr2.join(".zel_marker_sentinel").exists(),
-            "new_local_repository should reuse cached materialization when watched inputs are unchanged"
+            !nlr2.join(".zel_marker_sentinel").exists(),
+            "local = True repo must skip cached repo contents when fetching is enabled"
+        );
+    }
+
+    #[test]
+    fn custom_local_and_bazel_tools_configure_rules_honor_caching_and_vendoring_flags() {
+        let base = tmpdir("custom_local_and_xcode_cfg");
+        let ws = base.join("ws");
+        let rcc = base.join("rcc");
+        let vendor = base.join("vendor");
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name='root')\n",
+                "android_sdk_proxy = use_extension('@bazel_tools//tools/android:android_extensions.bzl', 'android_sdk_proxy_extensions')\n",
+                "use_repo(android_sdk_proxy, 'android_external')\n",
+                "xcode_autoconf = use_repo_rule('@bazel_tools//tools/osx:xcode_configure.bzl', 'xcode_autoconf')\n",
+                "xcode_autoconf(name='local_config_xcode')\n",
+            ),
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let opts = ExternalOptions {
+            output_base: base.join("ob"),
+            workspace_root: ws.clone(),
+            repo_contents_cache: Some(rcc.clone()),
+            vendor_dir: Some(vendor.clone()),
+            client_env: std::env::vars().collect(),
+            ..Default::default()
+        };
+        let rt1 = Rt::new(opts.clone(), res.clone());
+        let root_map = res.repo_mapping(&ModuleKey::root());
+        let android_canon = root_map.get("android_external").unwrap().as_str();
+        let xcode_canon = root_map.get("local_config_xcode").unwrap().as_str();
+
+        // `android_external_repository` has `local = True`: recognized as local, excluded from
+        // vendoring, kept out of `repo_contents_cache`, and refetched when fetching is enabled.
+        assert!(rt1.is_local_repo(android_canon));
+        assert!(!rt1.is_configure_repo(android_canon).unwrap());
+        let adir1 = rt1.fetch_repo(android_canon).unwrap();
+        assert!(adir1.join("BUILD").exists());
+        assert!(
+            !adir1.is_symlink(),
+            "local = True repo must not be moved into repo_contents_cache"
+        );
+        std::fs::write(adir1.join(".sentinel"), "1").unwrap();
+
+        let rt2 = Rt::new(opts, res);
+        let adir2 = rt2.fetch_repo(android_canon).unwrap();
+        assert!(
+            !adir2.join(".sentinel").exists(),
+            "android_external_repository (local = True) must refetch when fetching is enabled"
+        );
+
+        // `xcode_autoconf` in `@bazel_tools//tools/osx:xcode_configure.bzl` sets `configure = True`:
+        // `is_configure_repo` and `is_local_repo` (vendoring exclusion) must both return true.
+        assert!(
+            rt2.is_configure_repo(xcode_canon).unwrap(),
+            "configure = True rule in @bazel_tools must be recognized by is_configure_repo"
+        );
+        assert!(
+            rt2.is_local_repo(xcode_canon),
+            "configure = True rule in @bazel_tools must be excluded from vendoring"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn http_file_non_ascii_downloaded_path_and_sha512_remote_file_integrity() {
+        let base = tmpdir("http_file_non_ascii");
+        let ws = base.join("ws");
+        let payload = base.join("blob.bin");
+        std::fs::write(&payload, b"non-ascii-ok").unwrap();
+        let sha512_sri = format!(
+            "sha512-{}",
+            crate::hash::base64_encode(&crate::hash::sha512(b"non-ascii-ok"))
+        );
+
+        let mut tar_bytes = Vec::new();
+        {
+            let mut hdr = vec![0u8; 512];
+            hdr[..5].copy_from_slice(b"a.txt");
+            hdr[100..108].copy_from_slice(b"0000644\0");
+            hdr[108..116].copy_from_slice(b"0000000\0");
+            hdr[116..124].copy_from_slice(b"0000000\0");
+            hdr[124..136].copy_from_slice(b"00000000002\0");
+            hdr[136..148].copy_from_slice(b"00000000000\0");
+            hdr[148..156].copy_from_slice(b"        ");
+            hdr[156] = b'0';
+            hdr[257..263].copy_from_slice(b"ustar\0");
+            hdr[263..265].copy_from_slice(b"00");
+            let sum: u32 = hdr.iter().map(|&b| b as u32).sum();
+            hdr[148..156].copy_from_slice(format!("{:06o}\0 ", sum).as_bytes());
+            tar_bytes.extend_from_slice(&hdr);
+            tar_bytes.extend_from_slice(b"hi");
+            tar_bytes.extend(vec![0u8; 510]);
+            tar_bytes.extend(vec![0u8; 1024]);
+        }
+        let archive_path = base.join("pkg.tar");
+        std::fs::write(&archive_path, &tar_bytes).unwrap();
+        let archive_sha512 = format!(
+            "sha512-{}",
+            crate::hash::base64_encode(&crate::hash::sha512(&tar_bytes))
+        );
+
+        write(
+            &ws,
+            "MODULE.bazel",
+            &format!(
+                concat!(
+                    "module(name='root')\n",
+                    "http_file = use_repo_rule('@bazel_tools//tools/build_defs/repo:http.bzl', 'http_file')\n",
+                    "http_archive = use_repo_rule('@bazel_tools//tools/build_defs/repo:http.bzl', 'http_archive')\n",
+                    "http_file(\n",
+                    "    name = 'umlaut_file',\n",
+                    "    urls = ['{blob_url}'],\n",
+                    "    integrity = '{blob_sri}',\n",
+                    "    downloaded_file_path = 'fübar.bin',\n",
+                    ")\n",
+                    "http_archive(\n",
+                    "    name = 'sha512_arch',\n",
+                    "    urls = ['{arch_url}'],\n",
+                    "    integrity = '{arch_sri}',\n",
+                    "    build_file_content = 'exports_files([\"extra.bin\"])\\n',\n",
+                    "    remote_file_urls = {{'extra.bin': ['{blob_url}']}},\n",
+                    "    remote_file_integrity = {{'extra.bin': '{blob_sri}'}},\n",
+                    ")\n",
+                ),
+                blob_url = file_url(&payload),
+                blob_sri = sha512_sri,
+                arch_url = file_url(&archive_path),
+                arch_sri = archive_sha512,
+            ),
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rcc = base.join("rcc");
+        let opts = ExternalOptions {
+            output_base: base.join("ob"),
+            workspace_root: ws,
+            repo_contents_cache: Some(rcc.clone()),
+            ..Default::default()
+        };
+        let rt = Rt::new(opts, res.clone());
+        let root_map = res.repo_mapping(&ModuleKey::root());
+
+        let hf_canon = root_map.get("umlaut_file").unwrap().as_str();
+        let hf_dir = rt.fetch_repo(hf_canon).unwrap();
+        let build_text = std::fs::read_to_string(hf_dir.join("file/BUILD")).unwrap();
+        assert!(
+            build_text.contains("\"fübar.bin\""),
+            "http_file BUILD must contain unescaped UTF-8 filename, got: {build_text}"
+        );
+        assert!(!build_text.contains("\\u{"), "{build_text}");
+        assert_eq!(
+            std::fs::read(hf_dir.join("file/fübar.bin")).unwrap(),
+            b"non-ascii-ok"
+        );
+
+        // `sha512_arch` has matching SHA-512 `remote_file_integrity`, so `http_archive` returns
+        // `reproducible = True` and moves the fetched repo into `repo_contents_cache`.
+        let ha_canon = root_map.get("sha512_arch").unwrap().as_str();
+        let ha_dir = rt.fetch_repo(ha_canon).unwrap();
+        assert!(
+            ha_dir.is_symlink(),
+            "http_archive with matching SHA-512 remote_file_integrity must stay reproducible and enter repo_contents_cache"
+        );
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn windows_starlark_path_normalization_uses_slashes_and_uppercase_drive() {
+        use crate::rt::normalize_windows_starlark_path;
+        assert_eq!(
+            normalize_windows_starlark_path(r"c:\Users\alice\repo\file.txt"),
+            "C:/Users/alice/repo/file.txt"
+        );
+        assert_eq!(
+            normalize_windows_starlark_path(r"\\?\d:\bazel\external\foo\"),
+            "D:/bazel/external/foo"
+        );
+        assert_eq!(normalize_windows_starlark_path(r"e:\"), "E:/");
+        assert_eq!(
+            normalize_windows_starlark_path(r"\\?\UNC\server\share\dir\a.txt"),
+            "//server/share/dir/a.txt"
         );
     }
 }

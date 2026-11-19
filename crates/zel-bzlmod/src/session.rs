@@ -113,6 +113,16 @@ impl BzlmodConfig {
                 workspace.join(rest)
             } else if p == "%workspace%" {
                 workspace.to_path_buf()
+            } else if let Some(rest) = p.strip_prefix("~/") {
+                if let Some(home) = client_env
+                    .get("HOME")
+                    .cloned()
+                    .or_else(|| std::env::var("HOME").ok())
+                {
+                    PathBuf::from(home).join(rest)
+                } else {
+                    workspace.join(p)
+                }
             } else {
                 let pb = PathBuf::from(p);
                 if pb.is_absolute() {
@@ -519,10 +529,13 @@ impl Session {
             let rt = Rt::new(boot_opts.clone(), empty);
             let canonical = format!("{name}+");
             let dir = rt.repo_dir(&canonical);
+            let is_local = rt.is_local_rule(spec);
+            let can_use_cached = !boot_opts.force && (!is_local || boot_opts.nofetch);
             let fp = rt.predeclared_input_hash(&canonical, spec);
             let marker = rt.external_dir().join(format!("@{canonical}.marker"));
             let _ = std::fs::create_dir_all(rt.external_dir());
-            if dir.exists()
+            if can_use_cached
+                && dir.exists()
                 && std::fs::read_to_string(&marker)
                     .map(|m| {
                         crate::fetch::marker_is_current(
@@ -534,12 +547,11 @@ impl Session {
                         )
                     })
                     .unwrap_or(false)
-                && !boot_opts.force
             {
                 return Ok(dir);
             }
             if let Some(rcc_dir) = &boot_opts.repo_contents_cache {
-                if !boot_opts.force {
+                if can_use_cached && !is_local {
                     let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
                     let candidates = cache.get_candidate_repos(&fp);
                     for cand in candidates {
@@ -583,7 +595,7 @@ impl Session {
                 marker_text.push_str(&format!("{k} {val}\n"));
             }
             std::fs::write(&marker, &marker_text).map_err(|e| e.to_string())?;
-            if is_reproducible {
+            if is_reproducible && !is_local {
                 if let Some(rcc_dir) = &boot_opts.repo_contents_cache {
                     let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
                     let _ = cache.move_to_cache(&dir, &marker, &fp);
@@ -893,6 +905,9 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
     };
     let mut err = warn_lines(&session.warnings);
     let rt = session.rt.clone();
+    if configure {
+        rt.state.lock().unwrap().force_configure = true;
+    }
     let result: Result<String, (i32, String)> = (|| {
         if !targets.is_empty() {
             return fetch_targets(&session, &targets, &working_dir_rel)
@@ -1386,73 +1401,23 @@ impl Rt {
         v
     }
 
-    /// Whether `canonical` is created by a `local=True`-like rule (excluded from vendoring).
+    /// Whether `canonical` is created by a `local=True` or `configure=True` rule (excluded from vendoring).
     pub fn is_local_repo(self: &Arc<Self>, canonical: &str) -> bool {
         if self.opts.override_repository.keys().any(|k| k == canonical) {
             return true;
         }
         match self.repo_spec_for(canonical) {
-            Ok(Some(s)) => {
-                if matches!(
-                    s.rule_name.as_str(),
-                    "local_repository" | "new_local_repository"
-                ) && s.bzl_file.contains("bazel_tools")
-                {
-                    return true;
-                }
-                let (repo, pkg, name) = {
-                    let r = s.bzl_file.trim_start_matches('@');
-                    let (repo, rest) = r.split_once("//").unwrap_or((r, ""));
-                    let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
-                    (repo.to_string(), pkg.to_string(), name.to_string())
-                };
-                let key = format!("@@{repo}//{pkg}:{name}");
-                match self.eval_bzl_fresh(&key, &repo, &pkg, &name) {
-                    Ok(c) => match c.globals.get(&s.rule_name) {
-                        Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => id
-                            .parse::<usize>()
-                            .ok()
-                            .map(|i| {
-                                let d = &self.state.lock().unwrap().rule_defs[i];
-                                d.local || d.configure
-                            })
-                            .unwrap_or(false),
-                        _ => false,
-                    },
-                    Err(_) => false,
-                }
-            }
+            Ok(Some(s)) => self.is_local_rule(&s) || self.is_configure_rule(&s),
             _ => false,
         }
     }
 
     pub fn is_configure_repo(self: &Arc<Self>, canonical: &str) -> Result<bool, String> {
-        match self.repo_spec_for(canonical) {
-            Ok(Some(s)) => {
-                if s.bzl_file.contains("bazel_tools") {
-                    return Ok(false);
-                }
-                let (repo, pkg, name) = {
-                    let r = s.bzl_file.trim_start_matches('@');
-                    let (repo, rest) = r.split_once("//").unwrap_or((r, ""));
-                    let (pkg, name) = rest.split_once(':').unwrap_or(("", rest));
-                    (repo.to_string(), pkg.to_string(), name.to_string())
-                };
-                let key = format!("@@{repo}//{pkg}:{name}");
-                let c = self
-                    .eval_bzl_fresh(&key, &repo, &pkg, &name)
-                    .map_err(|e| e.to_string())?;
-                Ok(match c.globals.get(&s.rule_name) {
-                    Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => id
-                        .parse::<usize>()
-                        .ok()
-                        .map(|i| self.state.lock().unwrap().rule_defs[i].configure)
-                        .unwrap_or(false),
-                    _ => false,
-                })
-            }
-            Ok(None) => Ok(false),
-            Err(e) => Err(e),
+        match self.repo_spec_for(canonical)? {
+            Some(s) => Ok(self
+                .rule_meta_result(&s)?
+                .is_some_and(|(_, configure, _)| configure)),
+            None => Ok(false),
         }
     }
 }
