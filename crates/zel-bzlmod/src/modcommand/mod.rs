@@ -489,9 +489,9 @@ fn repo_definition(
             });
         }
     }
-    // Extension-generated repo: `<unique name>+<internal name>` in insertion order.
-    let mut original_name = None;
-    for id in res.extension_ids() {
+    // Extension-generated repo: `<unique name>+<internal name>`, preferring longest `<unique>+`.
+    let mut best_ext: Option<(usize, ExtensionId, &str)> = None;
+    for id in res.extension_ids().into_iter().chain(insp.extension_ids()) {
         let Some(unique) = res
             .extension_unique_names
             .get(&id)
@@ -499,17 +499,29 @@ fn repo_definition(
         else {
             continue;
         };
-        if let Some(rest) = canonical.strip_prefix(&format!("{unique}+")) {
-            let owns = ext_info
-                .generated_repos(&id)
-                .map(|r| r.iter().any(|x| x == rest))
-                .unwrap_or(false);
-            if !owns {
-                return None;
-            }
-            original_name = Some(rest.to_string());
-            break;
+        let Some(rest) = canonical
+            .strip_prefix(unique.as_str())
+            .and_then(|s| s.strip_prefix('+'))
+        else {
+            continue;
+        };
+        if best_ext
+            .as_ref()
+            .map_or(true, |(len, _, _)| unique.len() > *len)
+        {
+            best_ext = Some((unique.len(), id, rest));
         }
+    }
+    let mut original_name = None;
+    if let Some((_, id, rest)) = best_ext {
+        let owns = ext_info
+            .generated_repos(&id)
+            .map(|r| r.iter().any(|x| x == rest))
+            .unwrap_or(false);
+        if !owns {
+            return None;
+        }
+        original_name = Some(rest.to_string());
     }
     let spec = provider.repo_spec(canonical)?;
     Some(RepoDefinition::Found {

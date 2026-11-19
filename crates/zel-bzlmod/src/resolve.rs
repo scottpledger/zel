@@ -2005,6 +2005,34 @@ impl Resolution {
         out
     }
 
+    /// Finds the `(ExtensionId, exported_repo_name)` whose `<unique>+` prefix matches `canonical`,
+    /// preferring the longest `<unique>+` prefix so innate `_name` repo-rule proxies or overlapping
+    /// unique names cannot shadow isolated `+_name+<module>+<version>+<usage>+` extension repos.
+    pub fn extension_for_canonical<'a>(
+        &self,
+        canonical: &'a str,
+    ) -> Option<(ExtensionId, &'a str)> {
+        let mut best: Option<(usize, ExtensionId, &'a str)> = None;
+        for id in self.extension_ids() {
+            let Some(unique) = self.extension_unique_names.get(&id) else {
+                continue;
+            };
+            let Some(rest) = canonical
+                .strip_prefix(unique.as_str())
+                .and_then(|s| s.strip_prefix('+'))
+            else {
+                continue;
+            };
+            if best
+                .as_ref()
+                .map_or(true, |(len, _, _)| unique.len() > *len)
+            {
+                best = Some((unique.len(), id, rest));
+            }
+        }
+        best.map(|(_, id, rest)| (id, rest))
+    }
+
     /// Toolchain target patterns of all modules (canonical `@@repo//...` form), in dep graph order
     /// with the root module first (`register_toolchains`).
     pub fn registered_toolchains(&self) -> Vec<String> {

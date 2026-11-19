@@ -294,20 +294,12 @@ impl Rt {
     ///   passed to the repo rule.
     pub(crate) fn original_name_for(&self, canonical: &str, spec: &RepoSpec) -> String {
         let res = &self.resolution;
-        if res
-            .canonical_repo_names
-            .contains_key(&canonical.to_string())
-        {
+        if res.canonical_repo_names.contains_key(canonical) {
             return canonical.to_string();
         }
-        for id in res.extension_ids() {
-            let Some(unique) = res.extension_unique_names.get(&id) else {
-                continue;
-            };
-            if let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) {
-                if !exported.is_empty() {
-                    return exported.to_string();
-                }
+        if let Some((_, exported)) = res.extension_for_canonical(canonical) {
+            if !exported.is_empty() {
+                return exported.to_string();
             }
         }
         spec.attrs
@@ -329,14 +321,8 @@ impl Rt {
             let m = res.dep_graph.get(k).unwrap();
             return Ok(m.repo_spec.clone());
         }
-        // Extension-generated: first matching `{unique}+` prefix in insertion order owns it.
-        for id in res.extension_ids() {
-            let Some(unique) = res.extension_unique_names.get(&id) else {
-                continue;
-            };
-            let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) else {
-                continue;
-            };
+        // Extension-generated: longest matching `{unique}+` prefix owns it.
+        if let Some((id, exported)) = res.extension_for_canonical(canonical) {
             let result = self.eval_extension(&id)?;
             if let Some((_, spec)) = result.generated.iter().find(|(n, _)| n == exported) {
                 return Ok(Some(spec.clone()));
@@ -356,13 +342,7 @@ impl Rt {
         {
             return canonical.to_string();
         }
-        for id in res.extension_ids() {
-            let Some(unique) = res.extension_unique_names.get(&id) else {
-                continue;
-            };
-            let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) else {
-                continue;
-            };
+        if let Some((id, exported)) = res.extension_for_canonical(canonical) {
             if id.is_innate() {
                 for (mk, u) in res.usages_of(&id) {
                     let declares = u.tags.iter().any(|t| {
@@ -3558,7 +3538,7 @@ inspect_repo(name = "via_use_repo_rule")
         let reg = base.join("reg");
         std::fs::create_dir_all(&reg).unwrap();
         let mut o = ResolveOptions::new(&ws);
-        o.registries = vec![format!("file://{}", reg.display())];
+        o.registries = vec![crate::file_url_for_path(&reg)];
         o.check_direct_dependencies = CheckMode::Off;
         let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
         let rcc = base.join("rcc");
@@ -3578,6 +3558,10 @@ inspect_repo(name = "via_use_repo_rule")
         assert!(
             !dir1.symlink_metadata().unwrap().file_type().is_symlink(),
             "non-reproducible repo must not be moved to repo_contents_cache"
+        );
+        assert!(
+            !rcc.exists() || std::fs::read_dir(&rcc).unwrap().count() == 0,
+            "repo_contents_cache must remain empty when repo_metadata is discarded"
         );
 
         // Marker must contain `DIRTREE:` watch; modifying a nested file must trigger refetch.
@@ -3648,11 +3632,11 @@ inspect_repo(name = "via_use_repo_rule")
             "modules/foo/1.0/source.json",
             &format!(
                 "{{\"type\": \"local_path\", \"path\": \"{}\"}}\n",
-                foo_src.display()
+                foo_src.to_string_lossy().replace('\\', "/")
             ),
         );
         let mut o = ResolveOptions::new(&ws);
-        o.registries = vec![format!("file://{}", reg.display())];
+        o.registries = vec![crate::file_url_for_path(&reg)];
         o.check_direct_dependencies = CheckMode::Off;
         o.isolated_extension_usages = true;
         let res = Arc::new(resolve(&o).unwrap());
@@ -3763,5 +3747,111 @@ inspect_repo(name = "via_use_repo_rule")
         );
         // `@bazel_tools` ignores apparent overrides.
         assert_eq!(rt.repo_override_for("bazel_tools").unwrap(), None);
+    }
+
+    #[test]
+    fn overlapping_extension_unique_name_prefix_resolves_isolated_and_proxy_repos() {
+        let base = tmpdir("ext_unique_prefix");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "defs.bzl",
+            concat!(
+                "def _r(rctx):\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('orig.txt', rctx.original_name)\n",
+                "_tool = repository_rule(implementation = _r)\n",
+                "def _tool_ext(mctx):\n",
+                "    _tool(name = 'artifact')\n",
+                "tool = module_extension(implementation = _tool_ext)\n",
+                "def _maven_ext(mctx):\n",
+                "    _tool(name = 'core')\n",
+                "maven = module_extension(implementation = _maven_ext)\n",
+                "def _maven_install_ext(mctx):\n",
+                "    _tool(name = 'jar')\n",
+                "maven_install = module_extension(implementation = _maven_install_ext)\n",
+            ),
+        );
+        // `use_repo_rule('//:defs.bzl', '_tool')` receives unique name `+_tool` (prefix `+_tool+`),
+        // which is a prefix of isolated `use_extension('//:defs.bzl', 'tool', isolate = True)`
+        // whose unique name in the root module is `+_tool+++iso_ext` (prefix `+_tool+++iso_ext+`).
+        write(
+            &ws,
+            "MODULE.bazel",
+            concat!(
+                "module(name = 'root')\n",
+                "proxy = use_repo_rule('//:defs.bzl', '_tool')\n",
+                "proxy(name = 'direct_repo')\n",
+                "iso_ext = use_extension('//:defs.bzl', 'tool', isolate = True)\n",
+                "use_repo(iso_ext, 'artifact')\n",
+                "m1 = use_extension('//:defs.bzl', 'maven')\n",
+                "use_repo(m1, 'core')\n",
+                "m2 = use_extension('//:defs.bzl', 'maven_install')\n",
+                "use_repo(m2, 'jar')\n",
+            ),
+        );
+        let reg = base.join("reg");
+        std::fs::create_dir_all(&reg).unwrap();
+        let mut o = ResolveOptions::new(&ws);
+        o.registries = vec![crate::file_url_for_path(&reg)];
+        o.check_direct_dependencies = CheckMode::Off;
+        o.isolated_extension_usages = true;
+        let res = Arc::new(resolve(&o).unwrap());
+
+        let root_map: BTreeMap<String, String> = res
+            .repo_mapping_ordered(&crate::model::ModuleKey::root())
+            .into_iter()
+            .collect();
+        assert_eq!(root_map.get("direct_repo").unwrap(), "+_tool+direct_repo");
+        assert_eq!(
+            root_map.get("artifact").unwrap(),
+            "+_tool+++iso_ext+artifact"
+        );
+
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                ..Default::default()
+            },
+            res,
+        );
+        let direct_dir = rt.fetch_repo("+_tool+direct_repo").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(direct_dir.join("orig.txt")).unwrap(),
+            "direct_repo"
+        );
+        let iso_dir = rt.fetch_repo("+_tool+++iso_ext+artifact").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(iso_dir.join("orig.txt")).unwrap(),
+            "artifact"
+        );
+        let mi_dir = rt.fetch_repo("+maven_install+jar").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(mi_dir.join("orig.txt")).unwrap(),
+            "jar"
+        );
+
+        let reg_arg = format!("--registry={}", crate::file_url_for_path(&reg));
+        let out = crate::commands::run_bzlmod_command(
+            "mod",
+            &[
+                "show_repo".to_string(),
+                "--experimental_isolated_extension_usages".to_string(),
+                "--check_direct_dependencies=off".to_string(),
+                "--lockfile_mode=off".to_string(),
+                reg_arg,
+                "@@+_tool+++iso_ext+artifact".to_string(),
+            ],
+            &ws,
+            &base.join("ob_mod"),
+        );
+        assert_eq!(out.exit_code, 0, "stderr: {}", out.stderr);
+        assert!(
+            out.stdout.contains("original_name = \"artifact\""),
+            "stdout: {}",
+            out.stdout
+        );
     }
 }
