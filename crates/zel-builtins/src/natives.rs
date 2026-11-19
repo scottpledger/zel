@@ -137,6 +137,15 @@ pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkE
             Ok(Value::Dict(Arc::new(std::sync::Mutex::new(d))))
         }
         "cc_common.empty_variables" => Ok(cc_features::make_variables(None, Default::default())),
+        "cc_common.legacy_cc_flags_make_variable_do_not_use" => {
+            let tc = kwv("cc_toolchain", 0)
+                .ok_or_else(|| StarlarkError("cc_toolchain is required".into()))?;
+            let val = match cc_features::field(&tc, "_legacy_cc_flags_make_variable") {
+                Some(Value::String(s)) => s,
+                _ => String::new(),
+            };
+            Ok(Value::String(val))
+        }
         "apple_common.dotted_version" => dotted_version(&pos),
         n => err(format!(
             "{n} is not implemented yet in zel (native part of Bazel's builtins; see crates/zel-builtins)"

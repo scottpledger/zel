@@ -12,7 +12,7 @@ use zel_vfs::PathFragment;
 
 pub(crate) const BUILTINS_REPO: &str = "_builtins";
 
-/// Methods of `_builtins.internal.cc_common` (`CcModule.java`), not yet ported.
+/// Methods of `_builtins.internal.cc_common` (`CcModule.java`).
 const CC_COMMON_NATIVES: &[&str] = &[
     "get_tool_for_action",
     "get_execution_requirements",
@@ -25,7 +25,9 @@ const CC_COMMON_NATIVES: &[&str] = &[
     "incompatible_disable_objc_library_transition",
     "add_go_exec_groups_to_binary_rules",
     "get_tool_requirement_for_action",
+    "create_compile_action",
     "implementation_deps_allowed_by_allowlist",
+    "register_swig_action",
     "do_not_use_tools_cpp_compiler_present",
 ];
 

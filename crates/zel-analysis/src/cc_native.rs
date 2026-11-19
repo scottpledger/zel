@@ -51,6 +51,12 @@ fn cc_native(
         "solib_symlink_action" => cc_solib_symlink_action(st, pos, kw),
         "absolute_symlink" => cc_absolute_symlink(st, pos, kw),
         "check_toplevel" => Ok(Value::None),
+        "is_tree_artifact" => Ok(Value::Bool(
+            cc_kw(pos, kw, 0, "file")
+                .and_then(artifact_of)
+                .map(|a| a.is_tree_artifact)
+                .unwrap_or(false),
+        )),
         "expand_and_tokenize" => cc_expand_and_tokenize(st, pos, kw),
         "per_file_copts" | "collect_per_file_lto_backend_opts" => Ok(mk_list(vec![])),
         _ => return None,
