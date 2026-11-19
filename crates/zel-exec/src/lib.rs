@@ -238,6 +238,7 @@ enum Branch {
 struct Race {
     winner: Mutex<Option<Branch>>,
     local_cancel: zel_sandbox::process_wrapper::CancelFlag,
+    outer_cancel: Option<zel_sandbox::process_wrapper::CancelFlag>,
     remote_cancelled: AtomicBool,
     local_done: (Mutex<bool>, Condvar),
     outcome: Mutex<RaceOutcome>,
@@ -254,6 +255,11 @@ struct RaceOutcome {
 
 impl Race {
     fn is_cancelled(&self, b: Branch) -> bool {
+        if self.outer_cancel.as_ref().is_some_and(|c| c.is_cancelled()) {
+            self.local_cancel.cancel();
+            self.remote_cancelled.store(true, Ordering::SeqCst);
+            return true;
+        }
         match b {
             Branch::Local => self.local_cancel.is_cancelled(),
             Branch::Remote => self.remote_cancelled.load(Ordering::SeqCst),
@@ -538,6 +544,48 @@ impl ExecRuntime {
         fs: &dyn FileSystem,
         reporter: &Reporter,
     ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
+        self.execute_opt_with_hooks(
+            spawn,
+            strategy_description,
+            progress_event,
+            execroot,
+            fs,
+            reporter,
+            &Default::default(),
+        )
+    }
+
+    pub fn execute_with_hooks(
+        self: &Arc<Self>,
+        spawn: &Spawn,
+        description: &str,
+        execroot: &PathFragment,
+        fs: &dyn FileSystem,
+        reporter: &Reporter,
+        hooks: &zel_sandbox::ExecHooks,
+    ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
+        self.execute_opt_with_hooks(
+            spawn,
+            Some(description),
+            Some(description),
+            execroot,
+            fs,
+            reporter,
+            hooks,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_opt_with_hooks(
+        self: &Arc<Self>,
+        spawn: &Spawn,
+        strategy_description: Option<&str>,
+        progress_event: Option<&str>,
+        execroot: &PathFragment,
+        fs: &dyn FileSystem,
+        reporter: &Reporter,
+        hooks: &zel_sandbox::ExecHooks,
+    ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
         if self.remote.is_none() {
             if let Some(e) = self.remote_setup_error.clone() {
                 return Err(format!(
@@ -562,51 +610,23 @@ impl ExecRuntime {
         }
         let chosen = strategies.remove(0);
         if chosen == strategy::StrategyKind::Dynamic {
-            return self.exec_dynamic(spawn, execroot, fs);
-        }
-        self.run_strategy(chosen, spawn, execroot, fs, &Default::default())
-    }
-
-    pub fn execute_with_hooks(
-        self: &Arc<Self>,
-        spawn: &Spawn,
-        description: &str,
-        execroot: &PathFragment,
-        fs: &dyn FileSystem,
-        reporter: &Reporter,
-        hooks: &zel_sandbox::ExecHooks,
-    ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
-        if self.remote.is_none() {
-            if let Some(e) = self.remote_setup_error.clone() {
-                return Err(format!(
-                    "Failed to query remote execution capabilities: {e}"
-                ));
-            }
-        }
-        let (mut strategies, progress) = self.registry.resolve_opt(spawn, Some(description))?;
-        if let Some(p) = progress {
-            reporter.handle(Event {
-                kind: zel_events::EventKind::Progress,
-                location: None,
-                message: p,
-                tag: None,
-            });
-        }
-        let chosen = strategies.remove(0);
-        if chosen == strategy::StrategyKind::Dynamic {
-            return self.exec_dynamic(spawn, execroot, fs);
+            return self.exec_dynamic_with_hooks(spawn, execroot, fs, hooks);
         }
         self.run_strategy(chosen, spawn, execroot, fs, hooks)
     }
 
     /// `DynamicSpawnStrategy.exec`: runs the local and the remote strategy of the spawn in
     /// parallel; the first branch to finish publishes its outputs and cancels the other.
-    fn exec_dynamic(
+    fn exec_dynamic_with_hooks(
         self: &Arc<Self>,
         spawn: &Spawn,
         execroot: &PathFragment,
         fs: &dyn FileSystem,
+        outer_hooks: &zel_sandbox::ExecHooks,
     ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
+        if outer_hooks.is_cancelled() {
+            return Ok(Err(zel_sandbox::cancelled_error()));
+        }
         let local = self.registry.dynamic_can_exec_local(spawn);
         let remote = self.registry.dynamic_can_exec_remote(spawn);
         let (local, remote) = match (local, remote) {
@@ -617,17 +637,14 @@ impl ExecRuntime {
                 ));
             }
             // `maybeExecuteNonDynamically`.
-            (None, Some(r)) => {
-                return self.run_strategy(r, spawn, execroot, fs, &Default::default())
-            }
-            (Some(l), None) => {
-                return self.run_strategy(l, spawn, execroot, fs, &Default::default())
-            }
+            (None, Some(r)) => return self.run_strategy(r, spawn, execroot, fs, outer_hooks),
+            (Some(l), None) => return self.run_strategy(l, spawn, execroot, fs, outer_hooks),
             (Some(l), Some(r)) => (l, r),
         };
         let race = Arc::new(Race {
             winner: Mutex::new(None),
             local_cancel: Default::default(),
+            outer_cancel: outer_hooks.cancel.clone(),
             remote_cancelled: AtomicBool::new(false),
             local_done: (Mutex::new(false), Condvar::new()),
             outcome: Mutex::new(RaceOutcome::default()),
@@ -635,14 +652,36 @@ impl ExecRuntime {
             ignore_local_signals: self.dynamic.ignore_local_signals.clone(),
             cancel_remote_on_local_win: self.dynamic.cancel_remote_branch_on_local_win,
         });
-        let local_lockfree = self.dynamic.local_lockfree_output;
+        let local_lockfree =
+            self.dynamic.local_lockfree_output || outer_hooks.local_lockfree_output;
         let hooks_for = |b: Branch| {
-            let race = race.clone();
+            let race_lock = race.clone();
+            let outer_lock = outer_hooks.lock_outputs.clone();
+            let stream_out = if b == Branch::Local {
+                outer_hooks.stream_out.as_ref().map(|cb| {
+                    let cb = cb.clone();
+                    let race_stream = race.clone();
+                    let wrapped: zel_sandbox::StreamOutHook = Arc::new(move |chunk: &[u8]| {
+                        if !race_stream.is_cancelled(Branch::Local) {
+                            cb(chunk);
+                        }
+                    });
+                    wrapped
+                })
+            } else {
+                None
+            };
             zel_sandbox::ExecHooks {
                 cancel: (b == Branch::Local).then(|| race.local_cancel.clone()),
-                lock_outputs: Some(Arc::new(move |code| race.lock(b, code))),
+                lock_outputs: Some(Arc::new(move |code| {
+                    if !race_lock.lock(b, code) {
+                        return false;
+                    }
+                    outer_lock.as_ref().is_none_or(|f| f(code))
+                })),
+                runfiles_updater: outer_hooks.runfiles_updater.clone(),
                 local_lockfree_output: b == Branch::Local && local_lockfree,
-                ..Default::default()
+                stream_out,
             }
         };
         // Remote branch: detached (an in-flight RPC cannot be interrupted).
@@ -665,6 +704,25 @@ impl ExecRuntime {
             });
         }
         std::thread::scope(|scope| {
+            if let Some(outer_c) = outer_hooks.cancel.clone() {
+                let race_watch = race.clone();
+                scope.spawn(move || {
+                    let mut guard = race_watch.outcome.lock().unwrap();
+                    while guard.result.is_none() && guard.finished < 2 {
+                        if outer_c.is_cancelled() {
+                            race_watch.local_cancel.cancel();
+                            race_watch.remote_cancelled.store(true, Ordering::SeqCst);
+                            race_watch.changed.notify_all();
+                            break;
+                        }
+                        let (next_guard, _) = race_watch
+                            .changed
+                            .wait_timeout(guard, std::time::Duration::from_millis(5))
+                            .unwrap();
+                        guard = next_guard;
+                    }
+                });
+            }
             let hooks = hooks_for(Branch::Local);
             let race2 = race.clone();
             scope.spawn(move || {
@@ -696,8 +754,11 @@ impl ExecRuntime {
                 race2.deliver(Branch::Local, r);
             });
             let mut o = race.outcome.lock().unwrap();
-            while o.result.is_none() && o.finished < 2 {
+            while o.result.is_none() && o.finished < 2 && !outer_hooks.is_cancelled() {
                 o = race.changed.wait(o).unwrap();
+            }
+            if outer_hooks.is_cancelled() && o.result.is_none() {
+                return Ok(Err(zel_sandbox::cancelled_error()));
             }
             match o.result.take() {
                 Some((_, r)) => Ok(r),

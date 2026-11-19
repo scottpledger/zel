@@ -149,6 +149,22 @@ impl PartialEq for CancelFlag {
     }
 }
 
+/// Live output chunk callback invoked while the wrapped process writes to stdout/stderr.
+#[derive(Clone)]
+pub struct StreamOutCallback(pub crate::StreamOutHook);
+
+impl std::fmt::Debug for StreamOutCallback {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StreamOutCallback(..)")
+    }
+}
+
+impl PartialEq for StreamOutCallback {
+    fn eq(&self, o: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &o.0)
+    }
+}
+
 /// Parsed `process-wrapper` command line (`struct Options` in `process-wrapper-options.h`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessWrapperOptions {
@@ -165,6 +181,8 @@ pub struct ProcessWrapperOptions {
     pub cancel: Option<CancelFlag>,
     /// Close child stdin (`/dev/null`) instead of inheriting the parent's stdin (`LocalSpawnRunner`).
     pub close_stdin: bool,
+    /// Optional live output sink receiving stdout/stderr chunks while the child is running.
+    pub stream_out: Option<StreamOutCallback>,
 }
 
 impl Default for ProcessWrapperOptions {
@@ -180,6 +198,7 @@ impl Default for ProcessWrapperOptions {
             args: Vec::new(),
             cancel: None,
             close_stdin: false,
+            stream_out: None,
         }
     }
 }
@@ -669,17 +688,37 @@ pub fn run(
         let mut v = Vec::new();
         if capture_out {
             let mut p = child.stdout.take().unwrap();
+            let stream_cb = opt.stream_out.clone();
             v.push(std::thread::spawn(move || {
                 let mut b = Vec::new();
-                let _ = p.read_to_end(&mut b);
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = p.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    b.extend_from_slice(&chunk[..n]);
+                    if let Some(cb) = &stream_cb {
+                        (cb.0)(&chunk[..n]);
+                    }
+                }
                 b
             }));
         }
         if capture_err {
             let mut p = child.stderr.take().unwrap();
+            let stream_cb = opt.stream_out.clone();
             v.push(std::thread::spawn(move || {
                 let mut b = Vec::new();
-                let _ = p.read_to_end(&mut b);
+                let mut chunk = [0u8; 4096];
+                while let Ok(n) = p.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    b.extend_from_slice(&chunk[..n]);
+                    if let Some(cb) = &stream_cb {
+                        (cb.0)(&chunk[..n]);
+                    }
+                }
                 b
             }));
         }

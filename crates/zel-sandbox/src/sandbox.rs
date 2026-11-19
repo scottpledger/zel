@@ -2044,6 +2044,10 @@ impl SandboxRunner {
             args: argv.clone(),
             cancel: hooks.cancel.clone(),
             close_stdin: true,
+            stream_out: hooks
+                .stream_out
+                .clone()
+                .map(process_wrapper::StreamOutCallback),
             ..Default::default()
         };
         let cwd = layout.sandbox_exec_root.to_string_lossy().into_owned();

@@ -1271,9 +1271,6 @@ pub fn execute_spawn_local_with(
 
     if matches!(parsed_timeout, Some(s) if s < 0) {
         if hooks.local_lockfree_output && !hooks.lock(142) {
-            for out in &spawn.outputs {
-                let _ = delete_tree(Path::new(execroot.get_relative(out).path_string()));
-            }
             return Err(cancelled_error());
         }
         return Ok(mk(SpawnStatus::Timeout, 142, Vec::new(), Vec::new()));
@@ -1333,6 +1330,10 @@ pub fn execute_spawn_local_with(
         args,
         cancel: hooks.cancel.clone(),
         close_stdin: true,
+        stream_out: hooks
+            .stream_out
+            .clone()
+            .map(process_wrapper::StreamOutCallback),
         ..Default::default()
     };
     let _ = &mut env;
@@ -1340,9 +1341,6 @@ pub fn execute_spawn_local_with(
         Ok(o) => o,
         Err(e) => {
             if hooks.is_cancelled() {
-                for out in &spawn.outputs {
-                    let _ = delete_tree(Path::new(execroot.get_relative(out).path_string()));
-                }
                 return Err(cancelled_error());
             }
             return Ok(mk(
@@ -1354,8 +1352,13 @@ pub fn execute_spawn_local_with(
         }
     };
     if o.cancelled || (hooks.local_lockfree_output && !hooks.lock(o.termination.exit_code())) {
-        for out in &spawn.outputs {
-            let _ = delete_tree(Path::new(execroot.get_relative(out).path_string()));
+        if hooks.local_lockfree_output {
+            for out in &spawn.outputs {
+                let _ = delete_tree(Path::new(execroot.get_relative(out).path_string()));
+            }
+            for dir in &spawn.output_dirs {
+                let _ = delete_tree(Path::new(execroot.get_relative(dir).path_string()));
+            }
         }
         return Err(cancelled_error());
     }

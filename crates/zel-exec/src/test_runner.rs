@@ -995,6 +995,18 @@ fn run_attempt(
             }
             if !streamed_any.load(std::sync::atomic::Ordering::SeqCst) {
                 write_writable_file(&live_log_path, &log)?;
+            } else {
+                let raw_len = r.stdout.len() + r.stderr.len();
+                if log.len() > raw_len {
+                    use std::io::Write;
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&live_log_path)
+                    {
+                        let _ = f.write_all(&log[raw_len..]);
+                        let _ = f.flush();
+                    }
+                }
             }
             if let Some(st) = streamer.take() {
                 st.close()?;

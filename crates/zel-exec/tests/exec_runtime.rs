@@ -1049,3 +1049,121 @@ fn strategy_regexp_exemptions_salt_timeout_and_catastrophic_file_write() {
     st2.close().unwrap();
     assert_eq!(collected2.lock().unwrap().as_slice(), b"raw-without-header");
 }
+
+#[test]
+fn streamed_test_output_emits_live_chunks_before_child_exits_and_posts_progress() {
+    use std::os::unix::fs::PermissionsExt;
+    use zel_exec::test_runner::{install_test_setup, run_test_in, TestBaseEnv, TestExec, TestSpec};
+
+    let w = ws("live-stream-test");
+    let er = std::path::Path::new(w.execroot.path_string());
+    let rf = er.join("bin/live.runfiles/_main");
+    std::fs::create_dir_all(&rf).unwrap();
+    let gate = er.join("release_child.gate");
+    let exe = er.join("bin/live");
+    let script = format!(
+        "#!/bin/sh\necho LIVE_STREAM_LINE\nwhile [ ! -f '{}' ]; do sleep 0.02; done\necho AFTER_GATE_LINE\n",
+        gate.display()
+    );
+    std::fs::write(&exe, script).unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let setup = er.join("test-setup.sh");
+    install_test_setup(&setup).unwrap();
+
+    let spec = TestSpec {
+        label: "//pkg:live".into(),
+        exe_runfiles_path: exe.to_string_lossy().into_owned(),
+        exe_path: exe,
+        runfiles_dir: er.join("bin/live.runfiles"),
+        exec_root: er.to_path_buf(),
+        workspace_name: "_main".into(),
+        test_log_dir: er.join("testlogs/pkg/live"),
+        size: "small".into(),
+        timeout_secs: 30,
+        shard_count: 0,
+        runs_per_test: 1,
+        flaky_attempts: 1,
+        runs_per_test_detects_flakes: false,
+        run_under: None,
+        args: vec![],
+        env: BTreeMap::new(),
+        base_env: TestBaseEnv {
+            action_env: zel_util::action_env::EnvConfig::default().action_environment(false),
+            ..Default::default()
+        },
+        test_filter: None,
+        coverage: false,
+        coverage_script: None,
+        lcov_merger: None,
+        coverage_manifest: None,
+        zip_undeclared_outputs: false,
+        setup_script: setup,
+        kill_delay_ms: Some(200),
+        test_tmpdir: None,
+        check_sharding_support: false,
+    };
+
+    let rt = runtime(
+        &w,
+        StrategyOptions::from_raw(&["local".into()], &[], &[], &[]).unwrap(),
+        4.0,
+    );
+    let rep = Reporter::new();
+    let live_buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+    let live_buf_sink = live_buf.clone();
+
+    std::thread::scope(|scope| {
+        let test_handle = scope.spawn(|| {
+            let te = TestExec {
+                runtime: &rt,
+                reporter: &rep,
+                inputs: vec![],
+                execution_info: BTreeMap::new(),
+                resources: zel_exec::resources::ResourceSet::default(),
+                announce_subcommands: false,
+                config_checksum: "deadbeef".into(),
+                cache_results: false,
+                streamed_out: Some(Arc::new(move |chunk: &[u8]| {
+                    live_buf_sink.lock().unwrap().extend_from_slice(chunk);
+                })),
+            };
+            run_test_in(&spec, Some(&te)).unwrap()
+        });
+
+        // Wait for LIVE_STREAM_LINE to arrive BEFORE releasing the gate file (proving live streaming
+        // happens while the test subprocess is still running, not buffered until exit).
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let got = String::from_utf8_lossy(&live_buf.lock().unwrap()).into_owned();
+            if got.contains("LIVE_STREAM_LINE\n") {
+                assert!(
+                    !got.contains("AFTER_GATE_LINE"),
+                    "gate has not been touched yet: {got}"
+                );
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for live streamed output while child was running; got={got:?}"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+
+        std::fs::write(&gate, b"go").unwrap();
+        let res = test_handle.join().unwrap();
+        assert!(res.status.is_passed(), "{:?}", res.status);
+    });
+
+    let final_streamed = String::from_utf8_lossy(&live_buf.lock().unwrap()).into_owned();
+    assert_eq!(
+        final_streamed, "LIVE_STREAM_LINE\nAFTER_GATE_LINE\n",
+        "streamed body must strip setup header and avoid duplicating live chunks: {final_streamed:?}"
+    );
+    let events = rep.events();
+    assert!(
+        events.iter().any(|ev| {
+            ev.kind == zel_events::EventKind::Progress && ev.message == "Testing //pkg:live"
+        }),
+        "streamed TestRunner must still emit Progress event: {events:?}"
+    );
+}
