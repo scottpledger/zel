@@ -246,9 +246,90 @@ pub fn create_spawn_action_environment(
 }
 
 /// `BazelRuleClassProvider.pathOrDefault` for non-Windows hosts (Bazel 9.3.2).
-pub fn default_path_for_os(_os: &str) -> &'static str {
-    // 9.3.2 includes /usr/local/bin on every non-Windows OS (python3 on macOS lives there, #8536).
-    "/bin:/usr/bin:/usr/local/bin"
+pub fn default_path_for_os(os: &str) -> &'static str {
+    if os.eq_ignore_ascii_case("windows") {
+        ";C:\\Windows;C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0"
+    } else {
+        // 9.3.2 includes /usr/local/bin on every non-Windows OS (python3 on macOS lives there, #8536).
+        "/bin:/usr/bin:/usr/local/bin"
+    }
+}
+
+/// `BazelRuleClassProvider.pathOrDefault(os, clientPath, sh)` across all supported hosts,
+/// honoring `SYSTEMROOT` (defaulting to `C:\Windows`), shell parent directories (including
+/// MSYS `bin` / `usr/bin` siblings), and optional client `PATH` on Windows.
+pub fn path_or_default(
+    os: &str,
+    client_path: Option<&str>,
+    shell_executable: Option<&str>,
+    system_root: Option<&str>,
+) -> String {
+    if !os.eq_ignore_ascii_case("windows") {
+        return default_path_for_os(os).to_string();
+    }
+
+    let mut new_path = String::new();
+    if let Some(sh) = shell_executable.filter(|s| !s.is_empty()) {
+        let mut norm = sh.replace('\\', "/");
+        while norm.contains("//") {
+            norm = norm.replace("//", "/");
+        }
+        let trimmed = norm.trim_end_matches('/');
+        if let Some(idx) = trimmed.rfind('/') {
+            let parent = &trimmed[..idx];
+            if !parent.is_empty() {
+                new_path.push_str(parent);
+                if let Some(base) = parent.strip_suffix("/usr/bin") {
+                    new_path.push(';');
+                    new_path.push_str(base);
+                    new_path.push_str("/bin");
+                } else if parent == "usr/bin" {
+                    new_path.push_str(";bin");
+                } else if let Some(base) = parent.strip_suffix("/bin") {
+                    new_path.push(';');
+                    new_path.push_str(base);
+                    new_path.push_str("/usr/bin");
+                } else if parent == "bin" {
+                    new_path.push_str(";usr/bin");
+                }
+                new_path = new_path.replace('/', "\\");
+            }
+        }
+    }
+
+    let root = system_root
+        .filter(|s| !s.is_empty())
+        .unwrap_or("C:\\Windows");
+    new_path.push_str(&format!(
+        ";{root};{root}\\System32;{root}\\System32\\WindowsPowerShell\\v1.0"
+    ));
+    if let Some(cp) = client_path {
+        new_path.push(';');
+        new_path.push_str(cp);
+    }
+    new_path
+}
+
+/// Resolves the effective shell executable matching `ShellConfiguration` /
+/// `BazelRuleClassProvider.SHELL_EXECUTABLE`: explicit `--shell_executable` wins, followed by
+/// `BAZEL_SH`, followed by the OS default (`/usr/local/bin/bash` on FreeBSD/OpenBSD,
+/// `c:/msys64/usr/bin/bash.exe` on Windows, `/bin/bash` elsewhere).
+pub fn resolve_shell_executable(
+    explicit_shell: Option<&str>,
+    bazel_sh: Option<&str>,
+    os: &str,
+) -> String {
+    if let Some(s) = explicit_shell.filter(|s| !s.is_empty()) {
+        return s.to_string();
+    }
+    if let Some(s) = bazel_sh.filter(|s| !s.is_empty()) {
+        return s.to_string();
+    }
+    match os.to_ascii_lowercase().as_str() {
+        "freebsd" | "openbsd" => "/usr/local/bin/bash".to_string(),
+        "windows" => "c:/msys64/usr/bin/bash.exe".to_string(),
+        _ => "/bin/bash".to_string(),
+    }
 }
 
 /// The default `PATH` of strict actions on this host.
@@ -797,5 +878,55 @@ mod tests {
         );
         assert_eq!(parse_client_env_arg("--client_env=A"), None);
         assert_eq!(parse_client_env_arg("--other=A=b"), None);
+    }
+
+    #[test]
+    fn windows_path_or_default_and_shell_executable_resolution() {
+        assert_eq!(
+            path_or_default("linux", Some("/custom"), Some("/usr/bin/zsh"), None),
+            "/bin:/usr/bin:/usr/local/bin"
+        );
+        assert_eq!(
+            path_or_default("windows", None, None, None),
+            ";C:\\Windows;C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0"
+        );
+        assert_eq!(
+            path_or_default("windows", Some("C:/mypath"), None, Some("D:\\Win")),
+            ";D:\\Win;D:\\Win\\System32;D:\\Win\\System32\\WindowsPowerShell\\v1.0;C:/mypath"
+        );
+        assert_eq!(
+            path_or_default("windows", None, Some("D:/foo/shell"), None),
+            "D:\\foo;C:\\Windows;C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0"
+        );
+        assert_eq!(
+            path_or_default("windows", None, Some("C:/msys64/usr/bin/bash.exe"), None),
+            "C:\\msys64\\usr\\bin;C:\\msys64\\bin;C:\\Windows;C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0"
+        );
+        assert_eq!(
+            path_or_default("windows", None, Some("C:/msys64/bin/bash.exe"), None),
+            "C:\\msys64\\bin;C:\\msys64\\usr\\bin;C:\\Windows;C:\\Windows\\System32;C:\\Windows\\System32\\WindowsPowerShell\\v1.0"
+        );
+
+        assert_eq!(resolve_shell_executable(None, None, "linux"), "/bin/bash");
+        assert_eq!(
+            resolve_shell_executable(None, None, "freebsd"),
+            "/usr/local/bin/bash"
+        );
+        assert_eq!(
+            resolve_shell_executable(None, None, "openbsd"),
+            "/usr/local/bin/bash"
+        );
+        assert_eq!(
+            resolve_shell_executable(None, None, "windows"),
+            "c:/msys64/usr/bin/bash.exe"
+        );
+        assert_eq!(
+            resolve_shell_executable(None, Some("/opt/sh"), "freebsd"),
+            "/opt/sh"
+        );
+        assert_eq!(
+            resolve_shell_executable(Some("/explicit/sh"), Some("/opt/sh"), "windows"),
+            "/explicit/sh"
+        );
     }
 }

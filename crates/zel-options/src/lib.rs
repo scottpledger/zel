@@ -45,6 +45,7 @@ pub use converters::{
     convert_compilation_mode, convert_double, convert_duration, convert_enum, convert_flag_alias,
     convert_int, convert_long, convert_option, convert_tristate, convert_value, expand_tilde_path,
 };
+pub use converters_ext::ExecutionInfoModifier;
 pub use definition::{OptionDefinition, OptionValueDescription};
 pub use error::OptionsParsingError;
 pub use flag_tables::{
@@ -61,8 +62,8 @@ pub use parser::{
 };
 pub use priority::{OptionPriority, PriorityCategory};
 pub use rc::{
-    discover_and_load_rc_files, get_command_ancestry, partition_rc_sources_and_apply,
-    tokenize_rc_line, BazelrcConfig,
+    discover_and_load_rc_files, eval_bazel_version_condition, get_command_ancestry,
+    partition_rc_sources_and_apply, tokenize_rc_line, BazelrcConfig, SemVer,
 };
 pub use semantics_info::starlark_semantics_string;
 pub use spellcheck::{did_you_mean, edit_distance, suggest};

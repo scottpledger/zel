@@ -550,6 +550,13 @@ pub(crate) fn convert_custom_with_home(
             }
         }
         "RemoteDurationConverter" => Ok(OptionValue::Duration(convert_remote_duration(raw)?)),
+        "CommaSeparatedOptionListConverter" => {
+            if raw == "null" {
+                Ok(OptionValue::List(Vec::new()))
+            } else {
+                Ok(string_list(convert_comma_list(raw)))
+            }
+        }
         "CommaSeparatedNonEmptyOptionListConverter" => Ok(string_list(split_list_non_empty(
             raw,
             ',',

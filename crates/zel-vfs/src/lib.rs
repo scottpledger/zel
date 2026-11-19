@@ -1183,27 +1183,35 @@ impl FileSystem for LocalFileSystem {
                 ),
             ));
         }
-        if self.exists(link_path, false) {
+        let dst = Self::to_std_path(link_path);
+        if fs::symlink_metadata(&dst).is_ok() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 format!("New link path \"{}\" already exists", link_path.base_name()),
             ));
         }
-        fs::hard_link(
-            Self::to_std_path(original_path),
-            Self::to_std_path(link_path),
-        )
+        let canon_orig = fs::canonicalize(Self::to_std_path(original_path))?;
+        if fs::metadata(&canon_orig)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                format!("Cannot hard link a directory: {original_path}"),
+            ));
+        }
+        fs::hard_link(canon_orig, dst)
     }
+}
+
+#[derive(Debug)]
+struct InMemoryFileData {
+    content: Vec<u8>,
+    mtime_ms: u64,
+    permissions: i32,
+    node_id: u64,
 }
 
 #[derive(Debug, Clone)]
 enum InMemoryNode {
-    File {
-        content: Vec<u8>,
-        mtime_ms: u64,
-        permissions: i32,
-        node_id: u64,
-    },
+    File(Arc<RwLock<InMemoryFileData>>),
     Directory {
         mtime_ms: u64,
         permissions: i32,
@@ -1313,22 +1321,20 @@ impl FileSystem for InMemoryFileSystem {
         let map = self.nodes.read().unwrap();
         let resolved = Self::resolve_path(&map, path, follow_symlinks)?;
         match map.get(&resolved) {
-            Some(InMemoryNode::File {
-                content,
-                mtime_ms,
-                permissions,
-                node_id,
-            }) => Ok(FileStatus {
-                is_file: true,
-                is_directory: false,
-                is_symlink: false,
-                is_special_file: false,
-                size: content.len() as u64,
-                last_modified_time_ms: *mtime_ms,
-                last_change_time_ms: *mtime_ms,
-                permissions: *permissions,
-                node_id: *node_id,
-            }),
+            Some(InMemoryNode::File(data)) => {
+                let d = data.read().unwrap();
+                Ok(FileStatus {
+                    is_file: true,
+                    is_directory: false,
+                    is_symlink: false,
+                    is_special_file: false,
+                    size: d.content.len() as u64,
+                    last_modified_time_ms: d.mtime_ms,
+                    last_change_time_ms: d.mtime_ms,
+                    permissions: d.permissions,
+                    node_id: d.node_id,
+                })
+            }
             Some(InMemoryNode::Directory {
                 mtime_ms,
                 permissions,
@@ -1370,7 +1376,7 @@ impl FileSystem for InMemoryFileSystem {
         let map = self.nodes.read().unwrap();
         let resolved = Self::resolve_path(&map, path, true)?;
         match map.get(&resolved) {
-            Some(InMemoryNode::File { content, .. }) => Ok(content.clone()),
+            Some(InMemoryNode::File(data)) => Ok(data.read().unwrap().content.clone()),
             Some(InMemoryNode::Directory { .. }) => Err(io::Error::new(
                 io::ErrorKind::IsADirectory,
                 format!("Is a directory: {path}"),
@@ -1394,14 +1400,20 @@ impl FileSystem for InMemoryFileSystem {
                 ));
             }
         }
+        if let Ok(resolved) = Self::resolve_path(&map, path, true) {
+            if let Some(InMemoryNode::File(existing)) = map.get(&resolved) {
+                existing.write().unwrap().content = content.to_vec();
+                return Ok(());
+            }
+        }
         map.insert(
             path.clone(),
-            InMemoryNode::File {
+            InMemoryNode::File(Arc::new(RwLock::new(InMemoryFileData {
                 content: content.to_vec(),
                 mtime_ms: 0,
                 permissions: 0o644,
                 node_id: id,
-            },
+            }))),
         );
         Ok(())
     }
@@ -1483,7 +1495,7 @@ impl FileSystem for InMemoryFileSystem {
         for (k, node) in map.iter() {
             if k != &resolved && k.parent_directory().as_ref() == Some(&resolved) {
                 let dirent_type = match node {
-                    InMemoryNode::File { .. } => DirentType::File,
+                    InMemoryNode::File(_) => DirentType::File,
                     InMemoryNode::Directory { .. } => DirentType::Directory,
                     InMemoryNode::Symlink { .. } => DirentType::Symlink,
                 };
@@ -1545,8 +1557,11 @@ impl FileSystem for InMemoryFileSystem {
         let mut map = self.nodes.write().unwrap();
         let resolved = Self::resolve_path(&map, path, true)?;
         match map.get_mut(&resolved) {
-            Some(InMemoryNode::File { permissions, .. })
-            | Some(InMemoryNode::Directory { permissions, .. }) => {
+            Some(InMemoryNode::File(data)) => {
+                data.write().unwrap().permissions = (mode & 0o7777) as i32;
+                Ok(())
+            }
+            Some(InMemoryNode::Directory { permissions, .. }) => {
                 *permissions = (mode & 0o7777) as i32;
                 Ok(())
             }
@@ -1569,8 +1584,11 @@ impl FileSystem for InMemoryFileSystem {
         let mut map = self.nodes.write().unwrap();
         let resolved = Self::resolve_path(&map, path, true)?;
         match map.get_mut(&resolved) {
-            Some(InMemoryNode::File { mtime_ms, .. })
-            | Some(InMemoryNode::Directory { mtime_ms, .. })
+            Some(InMemoryNode::File(data)) => {
+                data.write().unwrap().mtime_ms = effective_ms;
+                Ok(())
+            }
+            Some(InMemoryNode::Directory { mtime_ms, .. })
             | Some(InMemoryNode::Symlink { mtime_ms, .. }) => {
                 *mtime_ms = effective_ms;
                 Ok(())
@@ -1580,6 +1598,69 @@ impl FileSystem for InMemoryFileSystem {
                 format!("No such file or directory: {path}"),
             )),
         }
+    }
+
+    fn create_hard_link(
+        &self,
+        link_path: &PathFragment,
+        original_path: &PathFragment,
+    ) -> io::Result<()> {
+        let mut map = self.nodes.write().unwrap();
+        if map.contains_key(link_path) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                format!("New link path \"{}\" already exists", link_path.base_name()),
+            ));
+        }
+        if let Some(parent) = link_path.parent_directory() {
+            let resolved_parent = Self::resolve_path(&map, &parent, true)?;
+            match map.get(&resolved_parent) {
+                Some(InMemoryNode::Directory { .. }) => {}
+                Some(_) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotADirectory,
+                        format!("Not a directory: {parent}"),
+                    ));
+                }
+                None => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        format!("Parent directory does not exist: {parent}"),
+                    ));
+                }
+            }
+        }
+        let resolved_orig = Self::resolve_path(&map, original_path, true).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                format!(
+                    "File \"{}\" linked from \"{}\" does not exist",
+                    original_path.base_name(),
+                    link_path.base_name()
+                ),
+            )
+        })?;
+        let shared = match map.get(&resolved_orig) {
+            Some(InMemoryNode::File(data)) => Arc::clone(data),
+            Some(InMemoryNode::Directory { .. }) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("Cannot hard link a directory: {original_path}"),
+                ));
+            }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!(
+                        "File \"{}\" linked from \"{}\" does not exist",
+                        original_path.base_name(),
+                        link_path.base_name()
+                    ),
+                ));
+            }
+        };
+        map.insert(link_path.clone(), InMemoryNode::File(shared));
+        Ok(())
     }
 }
 
@@ -2253,5 +2334,51 @@ mod tests {
             DigestHashFunction::parse_bazel("MD5"),
             Err("Not a valid hash function.")
         );
+    }
+
+    #[test]
+    fn test_hard_links_in_memory_and_local() {
+        let fs = InMemoryFileSystem::default();
+        let dir = PathFragment::create("/ws/hl");
+        fs.create_directory_and_parents(&dir).unwrap();
+        let orig = dir.get_relative_str("orig.txt");
+        let sym = dir.get_relative_str("sym.txt");
+        let link = dir.get_relative_str("link.txt");
+        fs.write_file(&orig, b"hello").unwrap();
+        fs.create_symbolic_link(&sym, &PathFragment::create("orig.txt"))
+            .unwrap();
+        // Hard-linking through a symlink links to the underlying file inode.
+        fs.create_hard_link(&link, &sym).unwrap();
+        assert_eq!(
+            fs.stat(&orig, false).unwrap().node_id,
+            fs.stat(&link, false).unwrap().node_id
+        );
+        assert_eq!(fs.read_file(&link).unwrap(), b"hello");
+        // Existing target or directory original is rejected.
+        assert!(fs.create_hard_link(&link, &orig).is_err());
+        assert!(fs
+            .create_hard_link(&dir.get_relative_str("dir_link"), &dir)
+            .is_err());
+        // Deleting the original leaves the hard link intact.
+        fs.delete(&orig).unwrap();
+        assert!(!fs.exists(&orig, false));
+        assert_eq!(fs.read_file(&link).unwrap(), b"hello");
+
+        let tmp = std::env::temp_dir().join(format!("zel_vfs_hl_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let lfs = LocalFileSystem::default();
+        let l_orig = PathFragment::create(&tmp.join("a.txt").to_string_lossy());
+        let l_link = PathFragment::create(&tmp.join("b.txt").to_string_lossy());
+        lfs.write_file(&l_orig, b"world").unwrap();
+        lfs.create_hard_link(&l_link, &l_orig).unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            lfs.stat(&l_orig, false).unwrap().node_id,
+            lfs.stat(&l_link, false).unwrap().node_id
+        );
+        lfs.delete(&l_orig).unwrap();
+        assert_eq!(lfs.read_file(&l_link).unwrap(), b"world");
+        let _ = fs::remove_dir_all(&tmp);
     }
 }

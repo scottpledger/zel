@@ -98,17 +98,28 @@ fn valid_module_name(name: &str) -> bool {
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(c))
 }
 
+fn expand_tilde_override_path(name: &str, path: &str) -> String {
+    if path.starts_with("~/") {
+        if let Ok(home) = std::env::var("HOME").or_else(|_| std::env::var("USERPROFILE")) {
+            if !home.is_empty() {
+                return format!("{name}={}", path.replace('~', &home));
+            }
+        }
+    }
+    format!("{name}={path}")
+}
+
 fn repository_injection(raw: &str) -> R {
-    if !raw.contains('=') {
+    let Some(i) = raw.find('=') else {
         return Err(err(
             "Repository injections must be of the form 'repository-name=path'",
         ));
-    }
-    let name = &raw[..raw.find('=').unwrap()];
+    };
+    let (name, path) = (&raw[..i], &raw[i + 1..]);
     if !valid_user_provided_repo_name(name) {
         return Err(err("Invalid repository name given to inject"));
     }
-    ok(raw)
+    ok(&expand_tilde_override_path(name, path))
 }
 
 fn repository_override(raw: &str) -> R {
@@ -117,7 +128,7 @@ fn repository_override(raw: &str) -> R {
             "Repository overrides must be of the form 'repository-name=path'",
         ));
     };
-    let name = &raw[..i];
+    let (name, path) = (&raw[..i], &raw[i + 1..]);
     let apparent = !name.is_empty() && !name.contains('+');
     let valid = if apparent {
         valid_user_provided_repo_name(name)
@@ -127,7 +138,7 @@ fn repository_override(raw: &str) -> R {
     if !valid {
         return Err(err("Invalid repository name given to override"));
     }
-    ok(raw)
+    ok(&expand_tilde_override_path(name, path))
 }
 
 /// `RepositoryOptions.parseModuleNameAndPath`.
@@ -137,13 +148,13 @@ fn module_name_and_path(raw: &str, kind: &str) -> R {
             "{kind} must be of the form 'module-name=path'"
         )));
     };
-    let name = &raw[..i];
+    let (name, path) = (&raw[..i], &raw[i + 1..]);
     if !valid_module_name(name) {
         return Err(err(format!(
             "invalid module name '{name}': valid names must 1) only contain lowercase letters (a-z), digits (0-9), dots (.), hyphens (-), and underscores (_); 2) begin with a lowercase letter; 3) end with a lowercase letter or digit."
         )));
     }
-    ok(raw)
+    ok(&expand_tilde_override_path(name, path))
 }
 
 /// `ClientOptions.OptionOverrideConverter`.
@@ -459,30 +470,111 @@ fn libc_top_label(raw: &str) -> R {
     ok(raw)
 }
 
-/// `ExecutionInfoModifier.Converter`.
-fn modify_execution_info(raw: &str) -> R {
-    if raw.is_empty() {
-        return ok(raw);
+/// One compiled `<pattern>=<+|-><key>` expression from `--modify_execution_info`.
+#[derive(Debug, Clone)]
+struct ExecutionInfoModifierEntry {
+    pattern: String,
+    regex: zel_util::java_regex::Regex,
+    remove: bool,
+    key: String,
+}
+
+impl PartialEq for ExecutionInfoModifierEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.pattern == other.pattern && self.remove == other.remove && self.key == other.key
     }
-    for spec in raw.split(',') {
-        // `^(?<pattern>.+)=(?<sign>[+-])(?<key>.+)$`: greedy pattern, so the *last* `=[+-]` with a non-empty key.
-        let bytes = spec.as_bytes();
-        let mut found: Option<usize> = None;
-        for i in (1..bytes.len().saturating_sub(2)).rev() {
-            if bytes[i] == b'='
-                && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-')
-                && i + 2 < bytes.len()
-            {
-                found = Some(i);
-                break;
+}
+
+impl Eq for ExecutionInfoModifierEntry {}
+
+/// Compiled `--modify_execution_info` modifier matching Bazel's `ExecutionInfoModifier`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ExecutionInfoModifier {
+    entries: Vec<ExecutionInfoModifierEntry>,
+}
+
+impl ExecutionInfoModifier {
+    pub fn parse(raw: &str) -> Result<Self, OptionsParsingError> {
+        if raw.is_empty() {
+            return Ok(Self::default());
+        }
+        let mut entries = Vec::new();
+        for spec in raw.split(',') {
+            let bytes = spec.as_bytes();
+            let mut found: Option<usize> = None;
+            for i in (1..bytes.len().saturating_sub(2)).rev() {
+                if bytes[i] == b'='
+                    && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-')
+                    && i + 2 < bytes.len()
+                {
+                    found = Some(i);
+                    break;
+                }
+            }
+            let Some(i) = found else {
+                return Err(err(format!("malformed expression '{spec}'")));
+            };
+            let pat = &spec[..i];
+            let regex = zel_util::java_regex::Regex::new(pat)
+                .map_err(|m| err(format!("Not a valid regular expression: {m}")))?;
+            let remove = bytes[i + 1] == b'-';
+            let key = spec[i + 2..].to_string();
+            entries.push(ExecutionInfoModifierEntry {
+                pattern: pat.to_string(),
+                regex,
+                remove,
+                key,
+            });
+        }
+        Ok(Self { entries })
+    }
+
+    /// Combines multiple `--modify_execution_info` flag occurrences according to
+    /// `--incompatible_modify_execution_info_additive` (default `true`).
+    pub fn from_flag_values<I, S>(values: I, additive: bool) -> Result<Self, OptionsParsingError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let raw_list: Vec<S> = values.into_iter().collect();
+        if raw_list.is_empty() {
+            return Ok(Self::default());
+        }
+        if !additive {
+            return Self::parse(raw_list.last().unwrap().as_ref());
+        }
+        let mut combined = Vec::new();
+        for raw in raw_list {
+            let parsed = Self::parse(raw.as_ref())?;
+            combined.extend(parsed.entries);
+        }
+        Ok(Self { entries: combined })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn matches(&self, mnemonic: &str) -> bool {
+        self.entries.iter().any(|e| e.regex.full_match(mnemonic))
+    }
+
+    pub fn apply(&self, mnemonic: &str, info: &mut std::collections::BTreeMap<String, String>) {
+        for e in &self.entries {
+            if e.regex.full_match(mnemonic) {
+                if e.remove {
+                    info.remove(&e.key);
+                } else {
+                    info.insert(e.key.clone(), String::new());
+                }
             }
         }
-        let Some(i) = found else {
-            return Err(err(format!("malformed expression '{spec}'")));
-        };
-        java_pattern_check(&spec[..i])
-            .map_err(|m| err(format!("Not a valid regular expression: {m}")))?;
     }
+}
+
+/// `ExecutionInfoModifier.Converter`.
+fn modify_execution_info(raw: &str) -> R {
+    ExecutionInfoModifier::parse(raw)?;
     ok(raw)
 }
 
