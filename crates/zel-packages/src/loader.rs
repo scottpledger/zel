@@ -1070,12 +1070,39 @@ impl PackageLoader {
             ),
         );
         pcdnu.insert(
+            "INCOMPATIBLE_ENABLE_PROTO_TOOLCHAIN_RESOLUTION".to_string(),
+            Value::Bool(true),
+        );
+        pcdnu.insert(
             "external_proto_infos".to_string(),
             Value::BuiltinFunction("host:proto_common_do_not_use.external_proto_infos".into()),
+        );
+        pcdnu.insert(
+            "ProtoLangToolchainInfo".to_string(),
+            crate::provider::proto_lang_toolchain_info_provider(),
+        );
+        pcdnu.insert(
+            "direct_dependencies_violation_msg".to_string(),
+            Value::BuiltinFunction(
+                "host:proto_common_do_not_use.direct_dependencies_violation_msg".into(),
+            ),
         );
         ctx.globals.insert(
             "proto_common_do_not_use".to_string(),
             Value::Struct(Arc::new(StructValue::new(pcdnu))),
+        );
+        let mut proto_common = BTreeMap::new();
+        proto_common.insert(
+            "ProtoLangToolchainInfo".to_string(),
+            crate::provider::proto_lang_toolchain_info_provider(),
+        );
+        proto_common.insert(
+            "INCOMPATIBLE_ENABLE_PROTO_TOOLCHAIN_RESOLUTION".to_string(),
+            Value::Bool(true),
+        );
+        ctx.globals.insert(
+            "proto_common".to_string(),
+            Value::Struct(Arc::new(StructValue::new(proto_common))),
         );
         ctx.globals
             .entry("exec_transition".to_string())
@@ -1940,6 +1967,7 @@ impl PackageLoader {
             zel_util::sha256::digest(&fp)
         };
         // Export rules/macros: assign names by variable.
+        let mut provider_replacements: Vec<(String, Value)> = Vec::new();
         {
             let mut reg = self.registry.lock().unwrap();
             for (k, v) in &ctx.globals {
@@ -2115,7 +2143,11 @@ impl PackageLoader {
                             }
                         }
                         "provider" => {
-                            crate::provider::export_provider(idx, k, &label.canonical_form());
+                            if let Some(shared) =
+                                crate::provider::export_provider(idx, k, &label.canonical_form())
+                            {
+                                provider_replacements.push((k.clone(), shared));
+                            }
                         }
                         "aspect" => {
                             crate::aspect::export_aspect(idx, k, &label.canonical_form());
@@ -2124,6 +2156,9 @@ impl PackageLoader {
                     }
                 }
             }
+        }
+        for (k, shared) in provider_replacements {
+            ctx.globals.insert(k, shared);
         }
         let mut exports = BTreeMap::new();
         for (k, v) in &ctx.globals {

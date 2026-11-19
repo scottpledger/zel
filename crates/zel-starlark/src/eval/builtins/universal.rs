@@ -979,36 +979,129 @@ pub fn compare_values(a: &Value, b: &Value) -> Result<Ordering, StarlarkError> {
     }
 }
 
+/// Parse a `DottedVersion` string (`DottedVersion.java`) into `(first_num, alpha, second_num)`
+/// components, stopping at a descriptive component matching `(?i)^[a-z][a-z0-9_]*$` (after at
+/// least one numeric component) and stripping trailing `(0, "", 0)` components.
+pub fn parse_dotted_version(raw: &str) -> Result<Vec<(i32, String, i32)>, String> {
+    let illegal = || {
+        format!(
+            "Dotted version components must all start with the form \\d+([a-z0-9]*?)?(\\d+)? but got '{raw}'"
+        )
+    };
+    if raw.is_empty() || raw.ends_with('.') {
+        return Err(illegal());
+    }
+    let mut out: Vec<(i32, String, i32)> = Vec::new();
+    for comp in raw.split('.') {
+        let mut cs = comp.chars();
+        let descriptive = cs.next().is_some_and(|c| c.is_ascii_alphabetic())
+            && cs.all(|c| c.is_ascii_alphanumeric() || c == '_');
+        if descriptive {
+            if out.is_empty() {
+                return Err(illegal());
+            }
+            break;
+        }
+        let b = comp.as_bytes();
+        if b.is_empty()
+            || !b[0].is_ascii_digit()
+            || !comp.chars().all(|c| c.is_ascii_alphanumeric())
+        {
+            return Err(illegal());
+        }
+        let lead_len = comp.bytes().take_while(|c| c.is_ascii_digit()).count();
+        let first_num = comp[..lead_len].parse::<i32>().map_err(|_| illegal())?;
+        let rem = &comp[lead_len..];
+        let (alpha, second_num) = if rem.is_empty() {
+            (String::new(), 0i32)
+        } else {
+            let last_alpha = rem
+                .rfind(|c: char| c.is_ascii_alphabetic())
+                .ok_or_else(illegal)?;
+            let alpha_part = rem[..=last_alpha].to_string();
+            let tail_digits = &rem[last_alpha + 1..];
+            let sec = if tail_digits.is_empty() {
+                0i32
+            } else {
+                tail_digits.parse::<i32>().map_err(|_| illegal())?
+            };
+            (alpha_part, sec)
+        };
+        out.push((first_num, alpha, second_num));
+    }
+    if out.is_empty() {
+        return Err(illegal());
+    }
+    while out.last().is_some_and(|c| c.0 == 0 && c.1.is_empty() && c.2 == 0) {
+        out.pop();
+    }
+    Ok(out)
+}
+
+/// Canonical `(first_num, alpha, second_num)` components for comparison/equality/hashing.
+pub fn dotted_version_canonical_components(v: &str) -> Vec<(i32, String, i32)> {
+    if let Ok(c) = parse_dotted_version(v) {
+        return c;
+    }
+    let mut fallback: Vec<(i32, String, i32)> = v
+        .split('.')
+        .map(|c| {
+            let digits: String = c.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+            let rest: String = c.chars().skip(digits.len()).collect();
+            (digits.parse().unwrap_or(0), rest, 0)
+        })
+        .collect();
+    while fallback
+        .last()
+        .is_some_and(|c| c.0 == 0 && c.1.is_empty() && c.2 == 0)
+    {
+        fallback.pop();
+    }
+    fallback
+}
+
+/// `DottedVersion.compareTo` returning signed comparison delta.
+pub fn dotted_version_compare_to(a: &str, b: &str) -> i64 {
+    let x = dotted_version_canonical_components(a);
+    let y = dotted_version_canonical_components(b);
+    for i in 0..x.len().max(y.len()) {
+        let ca = x.get(i).cloned().unwrap_or((0, String::new(), 0));
+        let cb = y.get(i).cloned().unwrap_or((0, String::new(), 0));
+        match ca.0.cmp(&cb.0) {
+            Ordering::Less => return -1,
+            Ordering::Greater => return 1,
+            Ordering::Equal => {}
+        }
+        match (ca.1.is_empty(), cb.1.is_empty()) {
+            (true, true) => {}
+            (true, false) => return 1,
+            (false, true) => return -1,
+            (false, false) => {
+                for (u1, u2) in ca.1.encode_utf16().zip(cb.1.encode_utf16()) {
+                    if u1 != u2 {
+                        return (u1 as i64) - (u2 as i64);
+                    }
+                }
+                let l1 = ca.1.encode_utf16().count() as i64;
+                let l2 = cb.1.encode_utf16().count() as i64;
+                if l1 != l2 {
+                    return l1 - l2;
+                }
+            }
+        }
+        match ca.2.cmp(&cb.2) {
+            Ordering::Less => return -1,
+            Ordering::Greater => return 1,
+            Ordering::Equal => {}
+        }
+    }
+    0
+}
+
 /// Component-wise numeric comparison of dotted versions (`DottedVersion.compareTo`): missing
 /// components are 0; an alpha suffix (`beta`) sorts before the bare number.
 pub fn dotted_version_cmp(a: &str, b: &str) -> Ordering {
-    let comps = |v: &str| -> Vec<(u64, String)> {
-        v.split('.')
-            .map(|c| {
-                let digits: String = c.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-                let rest: String = c.chars().skip(digits.len()).collect();
-                (digits.parse().unwrap_or(0), rest)
-            })
-            .collect()
-    };
-    let (x, y) = (comps(a), comps(b));
-    for i in 0..x.len().max(y.len()) {
-        let ca = x.get(i).cloned().unwrap_or((0, String::new()));
-        let cb = y.get(i).cloned().unwrap_or((0, String::new()));
-        let o = ca.0.cmp(&cb.0);
-        if o != Ordering::Equal {
-            return o;
-        }
-        let o = match (ca.1.is_empty(), cb.1.is_empty()) {
-            (true, false) => Ordering::Greater,
-            (false, true) => Ordering::Less,
-            _ => ca.1.cmp(&cb.1),
-        };
-        if o != Ordering::Equal {
-            return o;
-        }
-    }
-    Ordering::Equal
+    dotted_version_compare_to(a, b).cmp(&0)
 }
 
 pub fn is_callable(v: &Value) -> bool {

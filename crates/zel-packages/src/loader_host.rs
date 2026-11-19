@@ -123,9 +123,31 @@ impl PackageLoader {
             return Ok(Value::Bool(true));
         }
         if name == "proto_common_do_not_use.external_proto_infos" {
-            return Ok(Value::List(Arc::new(Mutex::new(
-                zel_starlark::StarlarkList::new(Vec::new()),
-            ))));
+            return Ok(Value::Tuple(crate::provider::external_proto_infos()));
+        }
+        if name == "proto_common_do_not_use.direct_dependencies_violation_msg" {
+            let Some(lbl) = pos.first() else {
+                return Err(herr(
+                    ctx,
+                    "direct_dependencies_violation_msg() missing required label argument",
+                ));
+            };
+            let s = match lbl {
+                Value::Label(l) => l.to_string(),
+                Value::String(s) => s.clone(),
+                other => {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "direct_dependencies_violation_msg(): got '{}', want Label or string",
+                            other.type_name()
+                        ),
+                    ))
+                }
+            };
+            return Ok(Value::String(format!(
+                "--direct_dependencies_violation_msg=%s is imported, but {s} doesn't directly depend on a proto_library that 'srcs' it."
+            )));
         }
         if name == "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc" {
             if self.cfg.incompatible_use_cc_configure_from_rules_cc {

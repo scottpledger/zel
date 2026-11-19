@@ -74,7 +74,7 @@ fn dispatch(
         return Ok(Value::Bool(true));
     }
     if name == "proto_common_do_not_use.external_proto_infos" {
-        return Ok(mk_list(Vec::new()));
+        return Ok(Value::Tuple(zel_packages::provider::external_proto_infos()));
     }
     if name.starts_with("call:") && name != "call:provider" && name != "call:provider_raw" {
         return err(format!("'{}' object is not callable", pos.first().map(|v| v.type_name()).unwrap_or("host_object")));
@@ -133,6 +133,125 @@ fn dispatch(
     }
     if name == "coverage_common.instrumented_files_info" {
         return instrumented_files_info(st, &pos, &kw);
+    }
+    if let Some(frag_fn) = name.strip_prefix("fragment.") {
+        return match frag_fn {
+            "apple.multi_arch_platform" => {
+                check_kwargs("multi_arch_platform", &pos, &kw, &["platform_type"])?;
+                let pt = want_str(
+                    arg(&pos, &kw, 0, "platform_type").ok_or_else(|| {
+                        StarlarkError(
+                            "multi_arch_platform() missing 1 required positional argument: platform_type"
+                                .into(),
+                        )
+                    })?,
+                    "multi_arch_platform",
+                    "platform_type",
+                )?;
+                crate::fragments::apple_multi_arch_platform(&st.cfg, &pt).map_err(StarlarkError)
+            }
+            "objc.target_should_alwayslink" => {
+                if let Some((pkg, _)) = ctx.current_label_ctx() {
+                    let repo = pkg.repository().name();
+                    if repo != "_builtins"
+                        && !repo.starts_with("apple_support")
+                        && !repo.starts_with("build_bazel_rules_apple")
+                    {
+                        return err(format!("Rule in '{pkg}' cannot use private API"));
+                    }
+                }
+                check_kwargs("target_should_alwayslink", &pos, &kw, &["ctx"])?;
+                let ctx_arg = arg(&pos, &kw, 0, "ctx").ok_or_else(|| {
+                    StarlarkError(
+                        "target_should_alwayslink() missing 1 required positional argument: ctx"
+                            .into(),
+                    )
+                })?;
+                if !matches!(ctx_arg, Value::Host(k, _) if k == "ctx") {
+                    return err(format!(
+                        "in call to target_should_alwayslink(), parameter 'ctx' got value of type '{}', want 'ctx'",
+                        ctx_arg.type_name()
+                    ));
+                }
+                if st.rule.attrs.contains_key("alwayslink") {
+                    if let Value::Struct(ref s) = st.attr_struct {
+                        if let Some(Value::Bool(b)) = s.fields.get("alwayslink") {
+                            return Ok(Value::Bool(*b));
+                        }
+                    }
+                    if let Some(Value::Bool(b)) = st.rule.attrs.get("alwayslink") {
+                        return Ok(Value::Bool(*b));
+                    }
+                }
+                let by_default = st
+                    .cfg
+                    .options
+                    .get("incompatible_objc_alwayslink_by_default")
+                    .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                    .or_else(|| {
+                        match st
+                            .cfg
+                            .build_options()
+                            .get("incompatible_objc_alwayslink_by_default")
+                        {
+                            Some(crate::build_options::ConfigValue::Scalar(s)) => {
+                                Some(matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                            }
+                            _ => None,
+                        }
+                    })
+                    .unwrap_or(false);
+                Ok(Value::Bool(by_default))
+            }
+            "proto.strict_proto_deps"
+            | "proto.strict_public_imports"
+            | "proto.experimental_proto_descriptorsets_include_source_info" => {
+                if let Some((pkg, _)) = ctx.current_label_ctx() {
+                    let repo = pkg.repository().name();
+                    let allowed = repo == "_builtins"
+                        || repo == "bazel_tools"
+                        || repo.starts_with("protobuf")
+                        || repo.starts_with("com_google_protobuf")
+                        || repo.starts_with("rules_proto");
+                    if !allowed {
+                        return err(format!("Rule in '{pkg}' cannot use private API"));
+                    }
+                }
+                check_kwargs(frag_fn, &pos, &kw, &[])?;
+                match frag_fn {
+                    "proto.strict_proto_deps" => {
+                        crate::fragments::strict_deps_mode_upper(&st.cfg, "strict_proto_deps", "error")
+                            .map(Value::String)
+                            .map_err(StarlarkError)
+                    }
+                    "proto.strict_public_imports" => {
+                        crate::fragments::strict_deps_mode_upper(&st.cfg, "strict_public_imports", "off")
+                            .map(Value::String)
+                            .map_err(StarlarkError)
+                    }
+                    _ => {
+                        let on = st
+                            .cfg
+                            .options
+                            .get("experimental_proto_descriptor_sets_include_source_info")
+                            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                            .or_else(|| {
+                                match st.cfg.build_options().get(
+                                    "experimental_proto_descriptor_sets_include_source_info",
+                                ) {
+                                    Some(crate::build_options::ConfigValue::Scalar(s)) => Some(
+                                        matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
+                                    ),
+                                    _ => None,
+                                }
+                            })
+                            .unwrap_or(false);
+                        Ok(Value::Bool(on))
+                    }
+                }
+            }
+            other => err(format!("unknown fragment method '{other}'")),
+        };
     }
     if name == "Label" {
         let v = pos.first().or_else(|| kw.get("input")).ok_or_else(|| {
@@ -398,8 +517,11 @@ fn fragment_value(st: &CtxState, name: &str) -> Result<Value, StarlarkError> {
     }
     match name {
         "coverage" => Ok(mk_struct(vec![("collect_code_coverage", Value::Bool(coverage_enabled(&st.cfg)))])),
-        other => crate::fragments::fragment(other, &st.cfg)
-            .ok_or_else(|| StarlarkError(format!("unknown configuration fragment '{other}'"))),
+        other => match crate::fragments::fragment_checked(other, &st.cfg) {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => err(format!("unknown configuration fragment '{other}'")),
+            Err(e) => err(e),
+        },
     }
 }
 

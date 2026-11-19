@@ -753,21 +753,6 @@ pub fn format_float(v: f64) -> String {
     }
 }
 
-fn dotted_version_canonical_components(v: &str) -> Vec<(u64, String)> {
-    let mut comps: Vec<(u64, String)> = v
-        .split('.')
-        .map(|c| {
-            let digits: String = c.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-            let rest: String = c.chars().skip(digits.len()).collect();
-            (digits.parse().unwrap_or(0), rest)
-        })
-        .collect();
-    while comps.last().is_some_and(|(n, r)| *n == 0 && r.is_empty()) {
-        comps.pop();
-    }
-    comps
-}
-
 pub fn int_equals_float(x: &BigInt, y: f64) -> bool {
     !y.is_nan() && crate::bigint::compare_int_and_float(x, y) == std::cmp::Ordering::Equal
 }
@@ -851,8 +836,8 @@ impl PartialEq for Value {
                 if k1 != k2 {
                     false
                 } else if k1 == "dotted_version" {
-                    dotted_version_canonical_components(i1)
-                        == dotted_version_canonical_components(i2)
+                    crate::eval::builtins::dotted_version_canonical_components(i1)
+                        == crate::eval::builtins::dotted_version_canonical_components(i2)
                 } else {
                     i1 == i2
                 }
@@ -936,7 +921,7 @@ impl Hash for Value {
                 9u8.hash(state);
                 k.hash(state);
                 if k == "dotted_version" {
-                    dotted_version_canonical_components(id).hash(state);
+                    crate::eval::builtins::dotted_version_canonical_components(id).hash(state);
                 } else {
                     id.hash(state);
                 }

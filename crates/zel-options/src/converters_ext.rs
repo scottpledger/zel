@@ -930,7 +930,7 @@ fn dotted_version(raw: &str) -> R {
             "Dotted version components must all start with the form \\d+([a-z0-9]*?)?(\\d+)? but got '{raw}'"
         ))
     };
-    if raw.is_empty() {
+    if raw.is_empty() || raw.ends_with('.') {
         return Err(illegal());
     }
     let mut count = 0;
@@ -949,9 +949,16 @@ fn dotted_version(raw: &str) -> R {
         {
             return Err(illegal());
         }
-        let lead: String = comp.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if lead.parse::<i32>().is_err() {
+        let lead_len = comp.bytes().take_while(|c| c.is_ascii_digit()).count();
+        if comp[..lead_len].parse::<i32>().is_err() {
             return Err(illegal());
+        }
+        let rem = &comp[lead_len..];
+        if let Some(last_alpha) = rem.rfind(|c: char| c.is_ascii_alphabetic()) {
+            let tail_digits = &rem[last_alpha + 1..];
+            if !tail_digits.is_empty() && tail_digits.parse::<i32>().is_err() {
+                return Err(illegal());
+            }
         }
         count += 1;
     }
@@ -1269,6 +1276,12 @@ pub(crate) fn convert_custom_ext(def: &OptionDefinition, name: &str, raw: &str) 
         ("SignalListConverter", _) => signal_list(raw),
         ("GcThrashingLimitsConverter", _) => gc_thrashing_limits(raw),
         ("DottedVersionConverter", _) => dotted_version(raw),
+        ("StrictDepsConverter", _) => enum_convert(
+            "strict dependency checking level",
+            &["off", "warn", "error", "strict", "default"],
+            raw,
+        )
+        .and_then(|()| ok(raw)),
         ("LabelListConverter" | "LabelOrderedSetConverter", _) => label_list(raw),
         ("LabelMapConverter", _) => label_map(raw),
         ("LabelToStringEntryConverter", _) => label_to_string_entry(raw),
