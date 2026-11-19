@@ -94,7 +94,11 @@ pub fn extension_display(id: &ExtensionId) -> String {
 pub fn extension_key(id: &ExtensionId) -> String {
     // `Label.toString()` renders the main repository as the empty string (`//:ext.bzl`) and
     // other repositories as `@@canonical//...`.
-    let bzl = id.bzl_file.strip_prefix("@@").filter(|r| r.starts_with("//")).unwrap_or(&id.bzl_file);
+    let bzl = id
+        .bzl_file
+        .strip_prefix("@@")
+        .filter(|r| r.starts_with("//"))
+        .unwrap_or(&id.bzl_file);
     match &id.isolation_key {
         Some((m, u)) => format!("{}%{}%{}+{}", bzl, id.name, m, u),
         None => format!("{}%{}", bzl, id.name),
@@ -113,9 +117,23 @@ pub fn digest_b64(parts: &[&str]) -> Vec<u8> {
 impl LockExt {
     fn to_json(&self) -> Json {
         let mut o = vec![
-            ("bzlTransitiveDigest".to_string(), Json::str(base64_encode(&self.bzl_transitive_digest))),
-            ("usagesDigest".to_string(), Json::str(base64_encode(&self.usages_digest))),
-            ("recordedInputs".to_string(), Json::Arr(self.recorded_inputs.iter().map(|s| Json::str(s.clone())).collect())),
+            (
+                "bzlTransitiveDigest".to_string(),
+                Json::str(base64_encode(&self.bzl_transitive_digest)),
+            ),
+            (
+                "usagesDigest".to_string(),
+                Json::str(base64_encode(&self.usages_digest)),
+            ),
+            (
+                "recordedInputs".to_string(),
+                Json::Arr(
+                    self.recorded_inputs
+                        .iter()
+                        .map(|s| Json::str(s.clone()))
+                        .collect(),
+                ),
+            ),
             (
                 "generatedRepoSpecs".to_string(),
                 Json::Obj(
@@ -125,7 +143,8 @@ impl LockExt {
                             // `RepoRule.instantiate` stores only explicitly specified attributes and
                             // never the reserved `name` attribute.
                             let mut s = s.clone();
-                            s.attrs.retain(|(k, v)| k != "name" && !matches!(v, AttrVal::None));
+                            s.attrs
+                                .retain(|(k, v)| k != "name" && !matches!(v, AttrVal::None));
                             (n.clone(), s.to_json())
                         })
                         .collect(),
@@ -135,12 +154,21 @@ impl LockExt {
         if let Some(m) = &self.metadata {
             let mut mo = vec![];
             if let Some(d) = m.explicit_root_direct_deps.as_ref() {
-                mo.push(("explicitRootModuleDirectDeps".to_string(), Json::Arr(d.iter().map(|x| Json::str(x.clone())).collect())));
+                mo.push((
+                    "explicitRootModuleDirectDeps".to_string(),
+                    Json::Arr(d.iter().map(|x| Json::str(x.clone())).collect()),
+                ));
             }
             if let Some(d) = m.explicit_root_direct_dev_deps.as_ref() {
-                mo.push(("explicitRootModuleDirectDevDeps".to_string(), Json::Arr(d.iter().map(|x| Json::str(x.clone())).collect())));
+                mo.push((
+                    "explicitRootModuleDirectDevDeps".to_string(),
+                    Json::Arr(d.iter().map(|x| Json::str(x.clone())).collect()),
+                ));
             }
-            mo.push(("useAllRepos".to_string(), Json::str(m.use_all_repos.clone())));
+            mo.push((
+                "useAllRepos".to_string(),
+                Json::str(m.use_all_repos.clone()),
+            ));
             mo.push(("reproducible".to_string(), Json::Bool(m.reproducible)));
             o.push(("moduleExtensionMetadata".to_string(), Json::Obj(mo)));
         }
@@ -149,7 +177,11 @@ impl LockExt {
 
     fn from_json(j: &Json) -> Result<LockExt, String> {
         let b64 = |k: &str| -> Result<Vec<u8>, String> {
-            base64_decode(j.get(k).and_then(|v| v.as_str()).ok_or_else(|| format!("missing {k}"))?)
+            base64_decode(
+                j.get(k)
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| format!("missing {k}"))?,
+            )
         };
         let mut specs = vec![];
         match j.get("generatedRepoSpecs") {
@@ -157,7 +189,8 @@ impl LockExt {
                 for (n, s) in o {
                     let mut spec = RepoSpec::from_json(s).ok_or("invalid repoSpec in lockfile")?;
                     if !spec.attrs.iter().any(|(k, _)| k == "name") {
-                        spec.attrs.insert(0, ("name".to_string(), AttrVal::Str(n.clone())));
+                        spec.attrs
+                            .insert(0, ("name".to_string(), AttrVal::Str(n.clone())));
                     }
                     specs.push((n.clone(), spec));
                 }
@@ -165,12 +198,25 @@ impl LockExt {
             _ => return Err("missing generatedRepoSpecs".into()),
         }
         let metadata = j.get("moduleExtensionMetadata").map(|m| {
-            let list = |k: &str| m.get(k).and_then(|v| v.as_arr()).map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect());
+            let list = |k: &str| {
+                m.get(k).and_then(|v| v.as_arr()).map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+            };
             LockMetadata {
                 explicit_root_direct_deps: list("explicitRootModuleDirectDeps"),
                 explicit_root_direct_dev_deps: list("explicitRootModuleDirectDevDeps"),
-                use_all_repos: m.get("useAllRepos").and_then(|v| v.as_str()).unwrap_or("NO").to_string(),
-                reproducible: m.get("reproducible").and_then(|v| v.as_bool()).unwrap_or(false),
+                use_all_repos: m
+                    .get("useAllRepos")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("NO")
+                    .to_string(),
+                reproducible: m
+                    .get("reproducible")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             }
         });
         Ok(LockExt {
@@ -179,7 +225,11 @@ impl LockExt {
             recorded_inputs: j
                 .get("recordedInputs")
                 .and_then(|v| v.as_arr())
-                .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
                 .unwrap_or_default(),
             generated_repo_specs: specs,
             metadata,
@@ -202,14 +252,31 @@ impl Lockfile {
                 )
             })
             .collect();
-        let yanked: Vec<(String, Json)> = self.selected_yanked_versions.iter().map(|(k, v)| (k.to_string(), Json::str(v.clone()))).collect();
+        let yanked: Vec<(String, Json)> = self
+            .selected_yanked_versions
+            .iter()
+            .map(|(k, v)| (k.to_string(), Json::str(v.clone())))
+            .collect();
         let exts: Vec<(String, Json)> = self
             .module_extensions
             .iter()
-            .map(|(id, f)| (id.clone(), Json::Obj(f.iter().map(|(fk, e)| (fk.clone(), e.to_json())).collect())))
+            .map(|(id, f)| {
+                (
+                    id.clone(),
+                    Json::Obj(f.iter().map(|(fk, e)| (fk.clone(), e.to_json())).collect()),
+                )
+            })
             .collect();
-        let facts: Vec<(String, Json)> = self.facts.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-        let facts_versions: Vec<(String, Json)> = self.facts_versions.iter().map(|(k, v)| (k.clone(), Json::int(*v))).collect();
+        let facts: Vec<(String, Json)> = self
+            .facts
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        let facts_versions: Vec<(String, Json)> = self
+            .facts_versions
+            .iter()
+            .map(|(k, v)| (k.clone(), Json::int(*v)))
+            .collect();
         Json::Obj(vec![
             ("lockFileVersion".into(), Json::int(self.version)),
             ("registryFileHashes".into(), Json::Obj(hashes)),
@@ -228,7 +295,10 @@ impl Lockfile {
 
     pub fn parse(text: &str) -> Result<Lockfile, String> {
         let j = Json::parse(text)?;
-        let version = j.get("lockFileVersion").and_then(|v| v.as_i64()).unwrap_or(-1);
+        let version = j
+            .get("lockFileVersion")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(-1);
         if version != LOCK_FILE_VERSION {
             return Err(format!("unsupported lockfile version {version}"));
         }
@@ -239,14 +309,17 @@ impl Lockfile {
                 if h == NOT_FOUND_MARKER {
                     lf.registry_file_hashes.insert(u.clone(), None);
                 } else {
-                    let c = crate::hash::Checksum::parse_integrity(h).or_else(|_| crate::hash::Checksum::sha256_hex(h)).map_err(|e| format!("Invalid checksum: {h} ({e})"))?;
+                    let c = crate::hash::Checksum::parse_integrity(h)
+                        .or_else(|_| crate::hash::Checksum::sha256_hex(h))
+                        .map_err(|e| format!("Invalid checksum: {h} ({e})"))?;
                     lf.registry_file_hashes.insert(u.clone(), Some(c.hex()));
                 }
             }
         }
         if let Some(Json::Obj(o)) = j.get("selectedYankedVersions") {
             for (k, v) in o {
-                lf.selected_yanked_versions.insert(ModuleKey::parse(k)?, v.as_str().unwrap_or("").to_string());
+                lf.selected_yanked_versions
+                    .insert(ModuleKey::parse(k)?, v.as_str().unwrap_or("").to_string());
             }
         }
         if let Some(Json::Obj(o)) = j.get("moduleExtensions") {
@@ -287,7 +360,12 @@ impl Lockfile {
             .split("\"lockFileVersion\"")
             .nth(1)
             .and_then(|r| r.trim_start().strip_prefix(':'))
-            .and_then(|r| r.trim_start().split(|c: char| !c.is_ascii_digit() && c != '-').next().map(|s| s.to_string()))
+            .and_then(|r| {
+                r.trim_start()
+                    .split(|c: char| !c.is_ascii_digit() && c != '-')
+                    .next()
+                    .map(|s| s.to_string())
+            })
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(-1);
         if version != LOCK_FILE_VERSION {
@@ -314,7 +392,11 @@ pub fn metadata_to_lock(m: &ExtensionMetadata) -> Option<LockMetadata> {
         Some(crate::json::Json::Null) => true,
         Some(_) => false,
     };
-    let default = !m.reproducible && m.explicit_root_direct_deps.is_none() && m.explicit_root_direct_dev_deps.is_none() && m.use_all == "NO" && facts_empty;
+    let default = !m.reproducible
+        && m.explicit_root_direct_deps.is_none()
+        && m.explicit_root_direct_dev_deps.is_none()
+        && m.use_all == "NO"
+        && facts_empty;
     if default {
         return None;
     }
@@ -387,40 +469,69 @@ pub fn recorded_inputs_outdated(
     let resolve = |p: &str| -> Option<std::path::PathBuf> {
         if let Some(rest) = p.strip_prefix("@@") {
             let (repo, rel) = rest.split_once("//")?;
-            Some(if repo.is_empty() { workspace.join(rel) } else { external.join(repo).join(rel) })
+            Some(if repo.is_empty() {
+                workspace.join(rel)
+            } else {
+                external.join(repo).join(rel)
+            })
         } else {
             Some(std::path::PathBuf::from(p))
         }
     };
     for i in inputs {
         let (input, value) = i.split_once(' ').unwrap_or((i.as_str(), ""));
-        let Some(input) = unescape_input(input) else { return Some("malformed recorded input".into()) };
+        let Some(input) = unescape_input(input) else {
+            return Some("malformed recorded input".into());
+        };
         let value = unescape_input(value);
         if let Some(name) = input.strip_prefix("ENV:") {
             let cur = env.get(name).cloned();
             if cur != value {
-                let show = |v: &Option<String>| v.as_ref().map(|x| format!("'{x}'")).unwrap_or_else(|| "<unset>".into());
-                return Some(format!("environment variable {name} changed: {} -> {}", show(&value), show(&cur)));
+                let show = |v: &Option<String>| {
+                    v.as_ref()
+                        .map(|x| format!("'{x}'"))
+                        .unwrap_or_else(|| "<unset>".into())
+                };
+                return Some(format!(
+                    "environment variable {name} changed: {} -> {}",
+                    show(&value),
+                    show(&cur)
+                ));
             }
         } else if let Some(p) = input.strip_prefix("FILE:") {
-            let Some(path) = resolve(p) else { return Some("malformed recorded input".into()) };
+            let Some(path) = resolve(p) else {
+                return Some("malformed recorded input".into());
+            };
             let cur = if path.is_dir() {
                 "DIR".to_string()
             } else if !path.exists() {
                 "ENOENT".to_string()
             } else {
-                std::fs::read(&path).map(|b| crate::hash::sha256_hex(&b)).unwrap_or_default()
+                std::fs::read(&path)
+                    .map(|b| crate::hash::sha256_hex(&b))
+                    .unwrap_or_default()
             };
             if Some(&cur) != value.as_ref() {
                 return Some(format!("file info or contents of {p} changed"));
             }
         } else if let Some(p) = input.strip_prefix("DIRENTS:") {
-            let Some(path) = resolve(p) else { return Some("malformed recorded input".into()) };
+            let Some(path) = resolve(p) else {
+                return Some("malformed recorded input".into());
+            };
             let mut names: Vec<String> = std::fs::read_dir(&path)
-                .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+                .map(|rd| {
+                    rd.filter_map(|e| e.ok())
+                        .map(|e| e.file_name().to_string_lossy().into_owned())
+                        .collect()
+                })
                 .unwrap_or_default();
             names.sort();
-            if Some(crate::hash::Fingerprint::new().add_strings(&names).hex_digest()) != value {
+            if Some(
+                crate::hash::Fingerprint::new()
+                    .add_strings(&names)
+                    .hex_digest(),
+            ) != value
+            {
                 return Some(format!("directory entries of {p} changed"));
             }
         }
@@ -435,9 +546,12 @@ mod tests {
     #[test]
     fn roundtrip_lockfile() {
         let mut lf = Lockfile::default();
-        lf.registry_file_hashes.insert("https://x/a".into(), Some(crate::hash::sha256_hex(b"hi")));
-        lf.registry_file_hashes.insert("https://x/missing".into(), None);
-        lf.selected_yanked_versions.insert(ModuleKey::parse("foo@1.0").unwrap(), "because".into());
+        lf.registry_file_hashes
+            .insert("https://x/a".into(), Some(crate::hash::sha256_hex(b"hi")));
+        lf.registry_file_hashes
+            .insert("https://x/missing".into(), None);
+        lf.selected_yanked_versions
+            .insert(ModuleKey::parse("foo@1.0").unwrap(), "because".into());
         let mut m = BTreeMap::new();
         m.insert(
             "general".to_string(),
@@ -450,17 +564,27 @@ mod tests {
                     RepoSpec::new(
                         "@bazel_tools//tools/build_defs/repo:http.bzl",
                         "http_archive",
-                        vec![("name".into(), AttrVal::Str("r".into())), ("urls".into(), AttrVal::List(vec![AttrVal::Str("u".into())]))],
+                        vec![
+                            ("name".into(), AttrVal::Str("r".into())),
+                            ("urls".into(), AttrVal::List(vec![AttrVal::Str("u".into())])),
+                        ],
                     ),
                 )],
-                metadata: Some(LockMetadata { explicit_root_direct_deps: Some(vec!["r".into()]), explicit_root_direct_dev_deps: None, use_all_repos: "NO".into(), reproducible: false }),
+                metadata: Some(LockMetadata {
+                    explicit_root_direct_deps: Some(vec!["r".into()]),
+                    explicit_root_direct_dev_deps: None,
+                    use_all_repos: "NO".into(),
+                    reproducible: false,
+                }),
             },
         );
         lf.module_extensions.insert("@@foo+//:e.bzl%e".into(), m);
         let text = lf.to_text();
         assert!(text.contains("\"lockFileVersion\": 28"));
         assert!(text.contains("\"not found\""));
-        assert!(text.contains("\"repoRuleId\": \"@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive\""));
+        assert!(text.contains(
+            "\"repoRuleId\": \"@@bazel_tools//tools/build_defs/repo:http.bzl%http_archive\""
+        ));
         // `name` is reserved (`RepoRule.RESERVED_ATTRIBUTES`) and never serialized; it is re-added on read.
         assert!(!text.contains("\"name\""), "{text}");
         let back = Lockfile::parse(&text).unwrap();
@@ -469,7 +593,11 @@ mod tests {
 
     #[test]
     fn extension_key_matches_label_to_string() {
-        let id = |bzl: &str| crate::resolve::ExtensionId { bzl_file: bzl.into(), name: "ex".into(), isolation_key: None };
+        let id = |bzl: &str| crate::resolve::ExtensionId {
+            bzl_file: bzl.into(),
+            name: "ex".into(),
+            isolation_key: None,
+        };
         assert_eq!(extension_key(&id("@@//:ext.bzl")), "//:ext.bzl%ex");
         assert_eq!(extension_key(&id("@@mx+//:ext.bzl")), "@@mx+//:ext.bzl%ex");
         assert_eq!(extension_display(&id("@@//:ext.bzl")), "@@//:ext.bzl%ex");
@@ -479,12 +607,22 @@ mod tests {
     fn read_modes() {
         let d = crate::registry::testutil::tmpdir("lockread");
         let p = d.join("MODULE.bazel.lock");
-        assert_eq!(Lockfile::read(&p, LockfileMode::Error).unwrap(), Lockfile::default());
+        assert_eq!(
+            Lockfile::read(&p, LockfileMode::Error).unwrap(),
+            Lockfile::default()
+        );
         std::fs::write(&p, "{\"lockFileVersion\": 3}").unwrap();
-        assert!(Lockfile::read(&p, LockfileMode::Error).unwrap_err().contains("not supported by this version of Bazel"));
-        assert_eq!(Lockfile::read(&p, LockfileMode::Update).unwrap(), Lockfile::default());
+        assert!(Lockfile::read(&p, LockfileMode::Error)
+            .unwrap_err()
+            .contains("not supported by this version of Bazel"));
+        assert_eq!(
+            Lockfile::read(&p, LockfileMode::Update).unwrap(),
+            Lockfile::default()
+        );
         std::fs::write(&p, "{\"lockFileVersion\": 28, <<<<<<< x").unwrap();
-        assert!(Lockfile::read(&p, LockfileMode::Update).unwrap_err().contains("merge conflict"));
+        assert!(Lockfile::read(&p, LockfileMode::Update)
+            .unwrap_err()
+            .contains("merge conflict"));
     }
 
     #[test]
@@ -494,6 +632,10 @@ mod tests {
         let h = "72e76b0eea4e81611ef5452aa82b3da34caca0c8b7b5c0c9584338aa93bae26b";
         std::fs::write(&p, format!("{{\"lockFileVersion\": 28, \"registryFileHashes\": {{\"https://r/modules/a/1/MODULE.bazel\": \"{h}\"}}, \"selectedYankedVersions\": {{}}, \"moduleExtensions\": {{}}}}")).unwrap();
         let lf = Lockfile::read(&p, LockfileMode::Error).unwrap();
-        assert_eq!(lf.registry_file_hashes.get("https://r/modules/a/1/MODULE.bazel"), Some(&Some(h.to_string())));
+        assert_eq!(
+            lf.registry_file_hashes
+                .get("https://r/modules/a/1/MODULE.bazel"),
+            Some(&Some(h.to_string()))
+        );
     }
 }

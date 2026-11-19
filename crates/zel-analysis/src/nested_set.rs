@@ -23,13 +23,19 @@ pub struct NSet<E> {
 
 impl<E> Default for NSet<E> {
     fn default() -> Self {
-        NSet { order: COMPILE_ORDER, children: None }
+        NSet {
+            order: COMPILE_ORDER,
+            children: None,
+        }
     }
 }
 
 impl<E: Clone + PartialEq> NSet<E> {
     pub fn empty(order: i32) -> Self {
-        NSet { order, children: None }
+        NSet {
+            order,
+            children: None,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -101,7 +107,10 @@ impl<E: Clone + PartialEq> NSet<E> {
             1 => children.pop().unwrap(),
             _ => NNode::Arr(Arc::new(children)),
         };
-        NSet { order, children: Some(node) }
+        NSet {
+            order,
+            children: Some(node),
+        }
     }
 
     /// Flattened elements (traversal order, duplicates kept; only for tests/debugging).

@@ -81,8 +81,12 @@ impl RepoContentsCache {
         }
 
         candidates.sort_by(|a, b| {
-            let mtime_a = fs::metadata(&a.recorded_inputs_file).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
-            let mtime_b = fs::metadata(&b.recorded_inputs_file).and_then(|m| m.modified()).unwrap_or(SystemTime::UNIX_EPOCH);
+            let mtime_a = fs::metadata(&a.recorded_inputs_file)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            let mtime_b = fs::metadata(&b.recorded_inputs_file)
+                .and_then(|m| m.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
             mtime_b.cmp(&mtime_a)
         });
 
@@ -141,7 +145,9 @@ impl RepoContentsCache {
         let cutoff = if max_age.is_zero() {
             SystemTime::UNIX_EPOCH
         } else {
-            SystemTime::now().checked_sub(max_age).unwrap_or(SystemTime::UNIX_EPOCH)
+            SystemTime::now()
+                .checked_sub(max_age)
+                .unwrap_or(SystemTime::UNIX_EPOCH)
         };
 
         let trash_dir = self.ensure_trash_dir()?;
@@ -199,7 +205,10 @@ fn generate_uuid() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(1);
     let cnt = COUNTER.fetch_add(1, Ordering::Relaxed);
-    let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let t = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
     format!("{t:016x}-{cnt:08x}")
 }
 

@@ -24,8 +24,8 @@
 use crate::hpack::{Decoder, Encoder, Header};
 use std::collections::{HashMap, VecDeque};
 use std::io::{self, Read, Write};
-use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -86,7 +86,12 @@ pub fn read_frame<R: Read + ?Sized>(r: &mut R, max_frame: usize) -> io::Result<F
     let stream = u32::from_be_bytes([h[5], h[6], h[7], h[8]]) & 0x7fff_ffff;
     let mut payload = vec![0u8; len];
     r.read_exact(&mut payload)?;
-    Ok(Frame { ty: h[3], flags: h[4], stream, payload })
+    Ok(Frame {
+        ty: h[3],
+        flags: h[4],
+        stream,
+        payload,
+    })
 }
 
 /// Local settings advertised to the peer.
@@ -172,7 +177,9 @@ impl Shared {
     fn closed_err(st: &State) -> io::Error {
         io::Error::new(
             io::ErrorKind::ConnectionAborted,
-            st.closed.clone().unwrap_or_else(|| "connection closed".into()),
+            st.closed
+                .clone()
+                .unwrap_or_else(|| "connection closed".into()),
         )
     }
 
@@ -202,7 +209,9 @@ impl Shared {
             match self.writer.try_lock() {
                 Ok(mut w) => {
                     let data = std::mem::take(&mut *self.pending.lock().unwrap());
-                    if !data.is_empty() && (w.out.write_all(&data).and_then(|_| w.out.flush())).is_err() {
+                    if !data.is_empty()
+                        && (w.out.write_all(&data).and_then(|_| w.out.flush())).is_err()
+                    {
                         drop(w);
                         self.fail("write failed".into());
                         return;
@@ -363,7 +372,10 @@ impl Conn {
                 goaway: false,
             }),
             cv: Condvar::new(),
-            writer: Mutex::new(Writer { out: writer, enc: Encoder::new() }),
+            writer: Mutex::new(Writer {
+                out: writer,
+                enc: Encoder::new(),
+            }),
             pending: Mutex::new(Vec::new()),
             shutdown,
             incoming: Mutex::new(incoming),
@@ -387,7 +399,8 @@ impl Conn {
     }
 
     pub fn close(&self) {
-        self.sh.send_control(encode_frame(T_GOAWAY, 0, 0, &[0, 0, 0, 0, 0, 0, 0, 0]));
+        self.sh
+            .send_control(encode_frame(T_GOAWAY, 0, 0, &[0, 0, 0, 0, 0, 0, 0, 0]));
         self.sh.fail("connection closed locally".into());
     }
 
@@ -484,7 +497,12 @@ impl Stream {
     }
 
     /// Sends DATA respecting stream and connection flow control; blocks while the window is 0.
-    pub fn send_data(&self, data: &[u8], end_stream: bool, timeout: Option<Duration>) -> io::Result<()> {
+    pub fn send_data(
+        &self,
+        data: &[u8],
+        end_stream: bool,
+        timeout: Option<Duration>,
+    ) -> io::Result<()> {
         let sh = &self.sh;
         let deadline = timeout.map(|t| Instant::now() + t);
         let mut off = 0usize;
@@ -497,10 +515,15 @@ impl Stream {
                     }
                     let (win, reset) = match st.streams.get(&self.id) {
                         Some(s) => (s.send_window, s.reset || s.remote_ended && s.local_ended),
-                        None => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream gone")),
+                        None => {
+                            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream gone"))
+                        }
                     };
                     if reset {
-                        return Err(io::Error::new(io::ErrorKind::BrokenPipe, "stream reset by peer"));
+                        return Err(io::Error::new(
+                            io::ErrorKind::BrokenPipe,
+                            "stream reset by peer",
+                        ));
                     }
                     let remaining = data.len() - off;
                     if remaining == 0 {
@@ -518,7 +541,10 @@ impl Stream {
                         Some(d) => {
                             let now = Instant::now();
                             if now >= d {
-                                return Err(io::Error::new(io::ErrorKind::TimedOut, "flow control wait timed out"));
+                                return Err(io::Error::new(
+                                    io::ErrorKind::TimedOut,
+                                    "flow control wait timed out",
+                                ));
                             }
                             sh.cv.wait_timeout(st, d - now).unwrap().0
                         }
@@ -589,7 +615,8 @@ impl Stream {
     }
 
     pub fn reset(&self, code: u32) {
-        self.sh.send_control(encode_frame(T_RST_STREAM, 0, self.id, &code.to_be_bytes()));
+        self.sh
+            .send_control(encode_frame(T_RST_STREAM, 0, self.id, &code.to_be_bytes()));
         self.remove();
     }
 
@@ -607,7 +634,10 @@ impl Stream {
         let done = {
             let st = self.sh.state.lock().unwrap();
             match st.streams.get(&self.id) {
-                Some(s) => (s.remote_ended && s.events.is_empty() && s.local_ended) || (s.reset && s.events.is_empty()),
+                Some(s) => {
+                    (s.remote_ended && s.events.is_empty() && s.local_ended)
+                        || (s.reset && s.events.is_empty())
+                }
                 None => false,
             }
         };
@@ -620,7 +650,9 @@ impl Stream {
     pub fn abandon_if_remote_done(&self) {
         let rem = {
             let st = self.sh.state.lock().unwrap();
-            st.streams.get(&self.id).map(|s| s.remote_ended && !s.local_ended)
+            st.streams
+                .get(&self.id)
+                .map(|s| s.remote_ended && !s.local_ended)
         };
         if rem == Some(true) {
             self.reset(ERR_NO_ERROR);
@@ -632,8 +664,12 @@ impl Drop for Stream {
     fn drop(&mut self) {
         let exists = self.sh.state.lock().unwrap().streams.contains_key(&self.id);
         if exists && self.sh.state.lock().unwrap().closed.is_none() {
-            self.sh
-                .send_control(encode_frame(T_RST_STREAM, 0, self.id, &ERR_CANCEL.to_be_bytes()));
+            self.sh.send_control(encode_frame(
+                T_RST_STREAM,
+                0,
+                self.id,
+                &ERR_CANCEL.to_be_bytes(),
+            ));
         }
         if exists {
             self.remove();
@@ -646,7 +682,10 @@ fn conn_error(sh: &Shared, code: u32, msg: &str) -> io::Error {
     payload.extend_from_slice(&code.to_be_bytes());
     payload.extend_from_slice(msg.as_bytes());
     sh.send_control(encode_frame(T_GOAWAY, 0, 0, &payload));
-    io::Error::new(io::ErrorKind::InvalidData, format!("h2 connection error: {msg}"))
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("h2 connection error: {msg}"),
+    )
 }
 
 fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
@@ -655,7 +694,10 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
             let mut p = [0u8; 24];
             r.read_exact(&mut p)?;
             if p != PREFACE {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, "bad client preface"));
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "bad client preface",
+                ));
             }
         }
         let max_frame = sh.local.max_frame as usize;
@@ -675,12 +717,24 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                         return Err(conn_error(&sh, ERR_PROTOCOL, "DATA on stream 0"));
                     }
                     let total = f.payload.len() as u32;
-                    if sh.recv_conn_window.fetch_sub(total as i64, Ordering::SeqCst) - (total as i64) < 0 {
-                        return Err(conn_error(&sh, ERR_FLOW_CONTROL, "connection window exceeded"));
+                    if sh
+                        .recv_conn_window
+                        .fetch_sub(total as i64, Ordering::SeqCst)
+                        - (total as i64)
+                        < 0
+                    {
+                        return Err(conn_error(
+                            &sh,
+                            ERR_FLOW_CONTROL,
+                            "connection window exceeded",
+                        ));
                     }
                     let mut data = &f.payload[..];
                     if f.flags & F_PADDED != 0 {
-                        let pad = *data.first().ok_or_else(|| conn_error(&sh, ERR_FRAME_SIZE, "bad pad"))? as usize;
+                        let pad = *data
+                            .first()
+                            .ok_or_else(|| conn_error(&sh, ERR_FRAME_SIZE, "bad pad"))?
+                            as usize;
                         if pad + 1 > data.len() {
                             return Err(conn_error(&sh, ERR_PROTOCOL, "padding too long"));
                         }
@@ -712,7 +766,10 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                     }
                     let mut p = &f.payload[..];
                     if f.flags & F_PADDED != 0 {
-                        let pad = *p.first().ok_or_else(|| conn_error(&sh, ERR_FRAME_SIZE, "bad pad"))? as usize;
+                        let pad = *p
+                            .first()
+                            .ok_or_else(|| conn_error(&sh, ERR_FRAME_SIZE, "bad pad"))?
+                            as usize;
                         if pad + 1 > p.len() {
                             return Err(conn_error(&sh, ERR_PROTOCOL, "padding too long"));
                         }
@@ -732,7 +789,9 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                     }
                 }
                 T_CONTINUATION => {
-                    let (sid, mut block, end_stream) = hb.take().ok_or_else(|| conn_error(&sh, ERR_PROTOCOL, "unexpected CONTINUATION"))?;
+                    let (sid, mut block, end_stream) = hb
+                        .take()
+                        .ok_or_else(|| conn_error(&sh, ERR_PROTOCOL, "unexpected CONTINUATION"))?;
                     block.extend_from_slice(&f.payload);
                     if f.flags & F_END_HEADERS != 0 {
                         handle_headers(&sh, &mut dec, sid, &block, end_stream)?;
@@ -745,7 +804,12 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                     if f.payload.len() != 4 {
                         return Err(conn_error(&sh, ERR_FRAME_SIZE, "bad RST_STREAM"));
                     }
-                    let code = u32::from_be_bytes([f.payload[0], f.payload[1], f.payload[2], f.payload[3]]);
+                    let code = u32::from_be_bytes([
+                        f.payload[0],
+                        f.payload[1],
+                        f.payload[2],
+                        f.payload[3],
+                    ]);
                     let mut st = sh.state.lock().unwrap();
                     if let Some(s) = st.streams.get_mut(&f.stream) {
                         s.reset = true;
@@ -772,7 +836,11 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                             4 => {
                                 if v as i64 > MAX_WINDOW {
                                     drop(st);
-                                    return Err(conn_error(&sh, ERR_FLOW_CONTROL, "bad initial window"));
+                                    return Err(conn_error(
+                                        &sh,
+                                        ERR_FLOW_CONTROL,
+                                        "bad initial window",
+                                    ));
                                 }
                                 let delta = v as i64 - st.peer_initial_window;
                                 st.peer_initial_window = v as i64;
@@ -783,7 +851,11 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                             5 => {
                                 if !(16384..=16_777_215).contains(&v) {
                                     drop(st);
-                                    return Err(conn_error(&sh, ERR_PROTOCOL, "bad max frame size"));
+                                    return Err(conn_error(
+                                        &sh,
+                                        ERR_PROTOCOL,
+                                        "bad max frame size",
+                                    ));
                                 }
                                 st.peer_max_frame = v as usize;
                             }
@@ -797,7 +869,9 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                     sh.cv.notify_all();
                     sh.send_control(encode_frame(T_SETTINGS, F_ACK, 0, &[]));
                 }
-                T_PUSH_PROMISE => return Err(conn_error(&sh, ERR_PROTOCOL, "PUSH_PROMISE not enabled")),
+                T_PUSH_PROMISE => {
+                    return Err(conn_error(&sh, ERR_PROTOCOL, "PUSH_PROMISE not enabled"))
+                }
                 T_PING => {
                     if f.flags & F_ACK == 0 {
                         sh.send_control(encode_frame(T_PING, F_ACK, 0, &f.payload));
@@ -805,7 +879,8 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                 }
                 T_GOAWAY => {
                     let last = if f.payload.len() >= 4 {
-                        u32::from_be_bytes([f.payload[0], f.payload[1], f.payload[2], f.payload[3]]) & 0x7fff_ffff
+                        u32::from_be_bytes([f.payload[0], f.payload[1], f.payload[2], f.payload[3]])
+                            & 0x7fff_ffff
                     } else {
                         0
                     };
@@ -825,7 +900,12 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                     if f.payload.len() != 4 {
                         return Err(conn_error(&sh, ERR_FRAME_SIZE, "bad WINDOW_UPDATE"));
                     }
-                    let inc = (u32::from_be_bytes([f.payload[0], f.payload[1], f.payload[2], f.payload[3]]) & 0x7fff_ffff) as i64;
+                    let inc = (u32::from_be_bytes([
+                        f.payload[0],
+                        f.payload[1],
+                        f.payload[2],
+                        f.payload[3],
+                    ]) & 0x7fff_ffff) as i64;
                     if inc == 0 {
                         return Err(conn_error(&sh, ERR_PROTOCOL, "zero window increment"));
                     }
@@ -834,7 +914,11 @@ fn reader_loop(sh: Arc<Shared>, mut r: Box<dyn Read + Send>) {
                         st.conn_send_window += inc;
                         if st.conn_send_window > MAX_WINDOW {
                             drop(st);
-                            return Err(conn_error(&sh, ERR_FLOW_CONTROL, "connection window overflow"));
+                            return Err(conn_error(
+                                &sh,
+                                ERR_FLOW_CONTROL,
+                                "connection window overflow",
+                            ));
                         }
                     } else if let Some(s) = st.streams.get_mut(&f.stream) {
                         s.send_window += inc;
@@ -865,20 +949,17 @@ fn handle_headers(
         .map_err(|e| conn_error(sh, 9, &format!("HPACK: {e}")))?;
     let mut st = sh.state.lock().unwrap();
     let mut new_stream = false;
-    if !st.streams.contains_key(&stream) {
+    let win = st.peer_initial_window;
+    if let std::collections::hash_map::Entry::Vacant(e) = st.streams.entry(stream) {
         if sh.role == Role::Server && stream % 2 == 1 {
-            let win = st.peer_initial_window;
-            st.streams.insert(
-                stream,
-                StreamState {
-                    send_window: win,
-                    events: VecDeque::new(),
-                    got_headers: false,
-                    remote_ended: false,
-                    local_ended: false,
-                    reset: false,
-                },
-            );
+            e.insert(StreamState {
+                send_window: win,
+                events: VecDeque::new(),
+                got_headers: false,
+                remote_ended: false,
+                local_ended: false,
+                reset: false,
+            });
             new_stream = true;
         } else {
             return Ok(()); // frames for streams we already closed
@@ -899,7 +980,10 @@ fn handle_headers(
     sh.cv.notify_all();
     if new_stream {
         if let Some(tx) = sh.incoming.lock().unwrap().as_ref() {
-            let _ = tx.send(Stream { sh: sh.clone(), id: stream });
+            let _ = tx.send(Stream {
+                sh: sh.clone(),
+                id: stream,
+            });
         }
     }
     Ok(())
@@ -908,7 +992,7 @@ fn handle_headers(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     fn pair(
         client_settings: LocalSettings,
         server_settings: LocalSettings,
@@ -920,13 +1004,18 @@ mod tests {
     }
 
     fn hdrs(v: &[(&str, &str)]) -> Vec<Header> {
-        v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+        v.iter()
+            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .collect()
     }
 
     fn collect_body(s: &Stream) -> Vec<u8> {
         let mut body = Vec::new();
         loop {
-            match s.recv(Some(Instant::now() + Duration::from_secs(20))).unwrap() {
+            match s
+                .recv(Some(Instant::now() + Duration::from_secs(20)))
+                .unwrap()
+            {
                 Event::Data(d) => body.extend(d),
                 Event::End => return body,
                 Event::Reset(c) => panic!("reset {c}"),
@@ -937,23 +1026,42 @@ mod tests {
 
     #[test]
     fn echo_with_small_windows_exercises_flow_control() {
-        let small = LocalSettings { initial_window: 1000, max_frame: 16384, max_concurrent_streams: 100, connection_window: 0 };
+        let small = LocalSettings {
+            initial_window: 1000,
+            max_frame: 16384,
+            max_concurrent_streams: 100,
+            connection_window: 0,
+        };
         let (client, _server, rx) = pair(small.clone(), small);
         std::thread::spawn(move || {
             while let Ok(st) = rx.recv() {
                 std::thread::spawn(move || {
                     let body = collect_body(&st);
-                    st.send_headers(&hdrs(&[(":status", "200")]), false).unwrap();
-                    st.send_data(&body, true, Some(Duration::from_secs(20))).unwrap();
+                    st.send_headers(&hdrs(&[(":status", "200")]), false)
+                        .unwrap();
+                    st.send_data(&body, true, Some(Duration::from_secs(20)))
+                        .unwrap();
                 });
             }
         });
         let payload: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
         let s = client
-            .open_stream(&hdrs(&[(":method", "POST"), (":path", "/echo"), (":scheme", "http"), (":authority", "x")]), false)
+            .open_stream(
+                &hdrs(&[
+                    (":method", "POST"),
+                    (":path", "/echo"),
+                    (":scheme", "http"),
+                    (":authority", "x"),
+                ]),
+                false,
+            )
             .unwrap();
-        s.send_data(&payload, true, Some(Duration::from_secs(20))).unwrap();
-        match s.recv(Some(Instant::now() + Duration::from_secs(20))).unwrap() {
+        s.send_data(&payload, true, Some(Duration::from_secs(20)))
+            .unwrap();
+        match s
+            .recv(Some(Instant::now() + Duration::from_secs(20)))
+            .unwrap()
+        {
             Event::Headers(h) => assert_eq!(h[0], (":status".to_string(), "200".to_string())),
             e => panic!("{e:?}"),
         }
@@ -962,13 +1070,17 @@ mod tests {
 
     #[test]
     fn many_concurrent_streams_and_max_concurrency_limit() {
-        let server = LocalSettings { max_concurrent_streams: 2, ..LocalSettings::default() };
+        let server = LocalSettings {
+            max_concurrent_streams: 2,
+            ..LocalSettings::default()
+        };
         let (client, _server, rx) = pair(LocalSettings::default(), server);
         std::thread::spawn(move || {
             while let Ok(st) = rx.recv() {
                 std::thread::spawn(move || {
                     let body = collect_body(&st);
-                    st.send_headers(&hdrs(&[(":status", "200")]), false).unwrap();
+                    st.send_headers(&hdrs(&[(":status", "200")]), false)
+                        .unwrap();
                     st.send_data(&body, true, None).unwrap();
                 });
             }
@@ -977,10 +1089,23 @@ mod tests {
         for i in 0..16u8 {
             let c = client.clone();
             threads.push(std::thread::spawn(move || {
-                let s = c.open_stream(&hdrs(&[(":method", "POST"), (":path", "/e"), (":scheme", "http"), (":authority", "x")]), false).unwrap();
+                let s = c
+                    .open_stream(
+                        &hdrs(&[
+                            (":method", "POST"),
+                            (":path", "/e"),
+                            (":scheme", "http"),
+                            (":authority", "x"),
+                        ]),
+                        false,
+                    )
+                    .unwrap();
                 s.send_data(&vec![i; 5000], true, None).unwrap();
                 loop {
-                    if let Event::Headers(_) = s.recv(Some(Instant::now() + Duration::from_secs(20))).unwrap() {
+                    if let Event::Headers(_) = s
+                        .recv(Some(Instant::now() + Duration::from_secs(20)))
+                        .unwrap()
+                    {
                         break;
                     }
                 }
@@ -1007,18 +1132,32 @@ mod tests {
                 }
             }
             let big = got.iter().find(|h| h.0 == "x-big").unwrap().1.clone();
-            st.send_headers(&hdrs(&[(":status", "200")]), false).unwrap();
+            st.send_headers(&hdrs(&[(":status", "200")]), false)
+                .unwrap();
             st.send_data(b"ok", false, None).unwrap();
-            st.send_headers(&[("x-len".to_string(), big.len().to_string())], true).unwrap();
+            st.send_headers(&[("x-len".to_string(), big.len().to_string())], true)
+                .unwrap();
         });
         let big = "z".repeat(40_000);
         let s = client
-            .open_stream(&[(":method".into(), "GET".into()), (":path".into(), "/".into()), (":scheme".into(), "http".into()), (":authority".into(), "x".into()), ("x-big".into(), big)], true)
+            .open_stream(
+                &[
+                    (":method".into(), "GET".into()),
+                    (":path".into(), "/".into()),
+                    (":scheme".into(), "http".into()),
+                    (":authority".into(), "x".into()),
+                    ("x-big".into(), big),
+                ],
+                true,
+            )
             .unwrap();
         let mut trailers = None;
         let mut data = Vec::new();
         loop {
-            match s.recv(Some(Instant::now() + Duration::from_secs(20))).unwrap() {
+            match s
+                .recv(Some(Instant::now() + Duration::from_secs(20)))
+                .unwrap()
+            {
                 Event::Data(d) => data.extend(d),
                 Event::Trailers(t) => trailers = Some(t),
                 Event::End => break,
@@ -1026,18 +1165,32 @@ mod tests {
             }
         }
         assert_eq!(data, b"ok");
-        assert_eq!(trailers.unwrap()[0], ("x-len".to_string(), "40000".to_string()));
+        assert_eq!(
+            trailers.unwrap()[0],
+            ("x-len".to_string(), "40000".to_string())
+        );
     }
 
     #[test]
     fn rst_stream_and_connection_failure_surface_as_errors() {
         let (client, server, rx) = pair(LocalSettings::default(), LocalSettings::default());
         let s = client
-            .open_stream(&hdrs(&[(":method", "POST"), (":path", "/"), (":scheme", "http"), (":authority", "x")]), false)
+            .open_stream(
+                &hdrs(&[
+                    (":method", "POST"),
+                    (":path", "/"),
+                    (":scheme", "http"),
+                    (":authority", "x"),
+                ]),
+                false,
+            )
             .unwrap();
         let ss = rx.recv().unwrap();
         ss.reset(ERR_CANCEL);
-        match s.recv(Some(Instant::now() + Duration::from_secs(10))).unwrap() {
+        match s
+            .recv(Some(Instant::now() + Duration::from_secs(10)))
+            .unwrap()
+        {
             Event::Reset(c) => assert_eq!(c, ERR_CANCEL),
             e => panic!("{e:?}"),
         }
@@ -1047,14 +1200,19 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(client.is_closed());
-        assert!(client.open_stream(&hdrs(&[(":method", "GET")]), true).is_err());
+        assert!(client
+            .open_stream(&hdrs(&[(":method", "GET")]), true)
+            .is_err());
     }
 
     #[test]
     fn frame_codec_roundtrip() {
         let b = encode_frame(T_PING, F_ACK, 0, &[1, 2, 3, 4, 5, 6, 7, 8]);
         let f = read_frame(&mut &b[..], 16384).unwrap();
-        assert_eq!((f.ty, f.flags, f.stream, f.payload.len()), (T_PING, F_ACK, 0, 8));
+        assert_eq!(
+            (f.ty, f.flags, f.stream, f.payload.len()),
+            (T_PING, F_ACK, 0, 8)
+        );
         assert!(read_frame(&mut &encode_frame(T_DATA, 0, 1, &[0; 100])[..], 50).is_err());
     }
 }

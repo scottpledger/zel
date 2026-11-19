@@ -11,7 +11,15 @@ fn to_id(key: &ModuleKey) -> String {
     if key.is_root() {
         return "\"<root>\"".to_string();
     }
-    format!("\"{}@{}\"", key.name, if key.version.is_empty() { "_".to_string() } else { key.version.to_string() })
+    format!(
+        "\"{}@{}\"",
+        key.name,
+        if key.version.is_empty() {
+            "_".to_string()
+        } else {
+            key.version.to_string()
+        }
+    )
 }
 
 fn ext_to_id(id: &ExtensionId) -> String {
@@ -29,15 +37,27 @@ fn print_extension(ctx: &FormatCtx<'_>, str: &mut String, id: &ExtensionId) {
     if info == ExtensionShow::Usages {
         return;
     }
-    let used: BTreeSet<String> = ctx.ext_imports.get(id).map(|m| m.keys().cloned().collect()).unwrap_or_default();
+    let used: BTreeSet<String> = ctx
+        .ext_imports
+        .get(id)
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
     for repo in &used {
-        str.push_str(&format!("    {} [ label=\"{}\" ]\n", ext_repo_to_id(id, repo), repo));
+        str.push_str(&format!(
+            "    {} [ label=\"{}\" ]\n",
+            ext_repo_to_id(id, repo),
+            repo
+        ));
     }
     if info == ExtensionShow::Repos {
         return;
     }
     for repo in ctx.insp.repos_of(id).difference(&used) {
-        str.push_str(&format!("    {} [ label=\"{}\" style=dotted ]\n", ext_repo_to_id(id, repo), repo));
+        str.push_str(&format!(
+            "    {} [ label=\"{}\" style=dotted ]\n",
+            ext_repo_to_id(id, repo),
+            repo
+        ));
     }
     str.push_str("  }\n");
 }
@@ -46,7 +66,9 @@ fn reason_label(ctx: &FormatCtx<'_>, key: &ModuleKey, parent: &ModuleKey) -> Str
     if !ctx.opts.verbose {
         return String::new();
     }
-    let Some(e) = ctx.extra_resolution_explanation(key, parent) else { return String::new() };
+    let Some(e) = ctx.extra_resolution_explanation(key, parent) else {
+        return String::new();
+    };
     let label = e.resolution_reason.label();
     if label.is_empty() {
         String::new()
@@ -67,8 +89,12 @@ pub fn format(ctx: &FormatCtx<'_>) -> String {
     to_visit.push_back(ModuleKey::root());
 
     while let Some(key) = to_visit.pop_front() {
-        let Some(module) = ctx.insp.dep_graph.get(&key) else { continue };
-        let Some(node) = ctx.result.get(&key) else { continue };
+        let Some(module) = ctx.insp.dep_graph.get(&key) else {
+            continue;
+        };
+        let Some(node) = ctx.result.get(&key) else {
+            continue;
+        };
         let source_id = to_id(&key);
 
         if key.is_root() {
@@ -77,7 +103,10 @@ pub fn format(ctx: &FormatCtx<'_>) -> String {
         } else if node.target || !module.is_used() {
             let shape = if node.target { "diamond" } else { "box" };
             let style = if module.is_used() { "solid" } else { "dotted" };
-            str.push_str(&format!("  {} [ shape={shape} style={style} ]\n", to_id(&key)));
+            str.push_str(&format!(
+                "  {} [ shape={shape} style={style} ]\n",
+                to_id(&key)
+            ));
         }
 
         if opts.extension_info != ExtensionShow::Hidden {
@@ -90,7 +119,11 @@ pub fn format(ctx: &FormatCtx<'_>) -> String {
                     print_extension(ctx, &mut str, &id);
                 }
                 for repo in ctx.ext_imports.repos_imported_by(&id, &key) {
-                    str.push_str(&format!("  {} -> {}\n", to_id(&key), ext_repo_to_id(&id, &repo)));
+                    str.push_str(&format!(
+                        "  {} -> {}\n",
+                        to_id(&key),
+                        ext_repo_to_id(&id, &repo)
+                    ));
                 }
             }
         }

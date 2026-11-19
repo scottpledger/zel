@@ -45,7 +45,9 @@ fn scalar(ty: &FieldType, n: u32) -> Option<Value> {
         FieldType::Double => Value::Double(n as f64 + 0.5),
         FieldType::Float => Value::Float(n as f32 + 0.25),
         FieldType::Int32 | FieldType::SInt32 | FieldType::SFixed32 => Value::Int(-(n as i64)),
-        FieldType::Int64 | FieldType::SInt64 | FieldType::SFixed64 => Value::Int(-(n as i64) * 1_000_000_007),
+        FieldType::Int64 | FieldType::SInt64 | FieldType::SFixed64 => {
+            Value::Int(-(n as i64) * 1_000_000_007)
+        }
         FieldType::UInt32 | FieldType::Fixed32 => Value::UInt(n as u64 + 1),
         FieldType::UInt64 | FieldType::Fixed64 => Value::UInt((n as u64 + 1) << 33),
         FieldType::Bool => Value::Bool(true),
@@ -136,14 +138,24 @@ fn every_message_roundtrips_binary() {
         let bytes = m.encode_to_vec();
         let d = Msg::decode(name, &bytes).unwrap_or_else(|e| panic!("{name}: {e:?}"));
         assert_eq!(d.encode_to_vec(), bytes, "{name} re-encode differs");
-        assert_eq!(d.to_json(), m.to_json(), "{name} json differs after roundtrip");
+        assert_eq!(
+            d.to_json(),
+            m.to_json(),
+            "{name} json differs after roundtrip"
+        );
         n += 1;
     }
     eprintln!("roundtripped {n} message types");
 }
 
 fn protoc(args: &[&str], input: &[u8]) -> Option<Vec<u8>> {
-    let mut c = Command::new("protoc").args(args).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().ok()?;
+    let mut c = Command::new("protoc")
+        .args(args)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .ok()?;
     let mut stdin = c.stdin.take()?;
     let data = input.to_vec();
     let t = std::thread::spawn(move || {
@@ -152,23 +164,73 @@ fn protoc(args: &[&str], input: &[u8]) -> Option<Vec<u8>> {
     let out = c.wait_with_output().ok()?;
     let _ = t.join();
     if !out.status.success() {
-        panic!("protoc {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+        panic!(
+            "protoc {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&out.stderr)
+        );
     }
     Some(out.stdout)
 }
 
 /// Files `protoc` can compile directly from the embedded tree (no googleapis dependency).
 const PROTOC_FILES: &[(&str, &str, &[&str])] = &[
-    ("src/main/protobuf/spawn.proto", "tools.protos", &["SpawnExec", "ExecLogEntry", "SpawnMetrics", "Digest"]),
-    ("src/main/protobuf/command_line.proto", "command_line", &["CommandLine", "ChunkList", "OptionList"]),
-    ("src/main/protobuf/invocation_policy.proto", "blaze.invocation_policy", &["InvocationPolicy", "FlagPolicy"]),
-    ("src/main/protobuf/failure_details.proto", "failure_details", &["FailureDetail", "Spawn", "Execution"]),
-    ("src/main/protobuf/action_cache.proto", "blaze", &["ActionCacheStatistics", "ActionCacheEntry"]),
-    ("src/main/protobuf/test_status.proto", "blaze", &["TestCase"]),
-    ("src/main/protobuf/memory_pressure.proto", "memory_pressure", &["MemoryPressureStats"]),
-    ("src/main/protobuf/command_server.proto", "command_server", &["RunRequest", "RunResponse", "ServerInfo"]),
-    ("src/main/protobuf/execution_statistics.proto", "tools.protos", &["ExecutionStatistics"]),
-    ("bep/build_event_stream.proto", "build_event_stream", &["BuildEvent", "BuildEventId", "TestResult", "BuildMetrics", "File"]),
+    (
+        "src/main/protobuf/spawn.proto",
+        "tools.protos",
+        &["SpawnExec", "ExecLogEntry", "SpawnMetrics", "Digest"],
+    ),
+    (
+        "src/main/protobuf/command_line.proto",
+        "command_line",
+        &["CommandLine", "ChunkList", "OptionList"],
+    ),
+    (
+        "src/main/protobuf/invocation_policy.proto",
+        "blaze.invocation_policy",
+        &["InvocationPolicy", "FlagPolicy"],
+    ),
+    (
+        "src/main/protobuf/failure_details.proto",
+        "failure_details",
+        &["FailureDetail", "Spawn", "Execution"],
+    ),
+    (
+        "src/main/protobuf/action_cache.proto",
+        "blaze",
+        &["ActionCacheStatistics", "ActionCacheEntry"],
+    ),
+    (
+        "src/main/protobuf/test_status.proto",
+        "blaze",
+        &["TestCase"],
+    ),
+    (
+        "src/main/protobuf/memory_pressure.proto",
+        "memory_pressure",
+        &["MemoryPressureStats"],
+    ),
+    (
+        "src/main/protobuf/command_server.proto",
+        "command_server",
+        &["RunRequest", "RunResponse", "ServerInfo"],
+    ),
+    (
+        "src/main/protobuf/execution_statistics.proto",
+        "tools.protos",
+        &["ExecutionStatistics"],
+    ),
+    (
+        "bep/build_event_stream.proto",
+        "build_event_stream",
+        &[
+            "BuildEvent",
+            "BuildEventId",
+            "TestResult",
+            "BuildMetrics",
+            "File",
+        ],
+    ),
 ];
 
 #[test]
@@ -182,7 +244,10 @@ fn agrees_with_protoc_for_binary_and_text() {
     for (file, pkg, types) in PROTOC_FILES {
         for t in *types {
             let full = format!("{pkg}.{t}");
-            let Some(desc) = registry().message(&full).or_else(|| registry().message(&format!("{pkg}.{t}"))) else {
+            let Some(desc) = registry()
+                .message(&full)
+                .or_else(|| registry().message(&format!("{pkg}.{t}")))
+            else {
                 // Try nested lookups (e.g. message names inside the package).
                 continue;
             };
@@ -191,14 +256,34 @@ fn agrees_with_protoc_for_binary_and_text() {
             fill(&mut m, 2, 5);
             let bytes = m.encode_to_vec();
             let decode_arg = format!("--decode={full}");
-            let args = ["-I", root, "-I", "/opt/homebrew/include", "-I", "/usr/local/include", decode_arg.as_str(), file];
-            let Some(text) = protoc(&args, &bytes) else { return };
+            let args = [
+                "-I",
+                root,
+                "-I",
+                "/opt/homebrew/include",
+                "-I",
+                "/usr/local/include",
+                decode_arg.as_str(),
+                file,
+            ];
+            let Some(text) = protoc(&args, &bytes) else {
+                return;
+            };
             let text = String::from_utf8(text).unwrap();
             // Our text format equals protoc's debug text (octal escapes included).
             assert_eq!(m.to_text(), text, "{full}: text differs from protoc");
             // protoc can re-encode our text to the same bytes.
             let enc_arg = format!("--encode={full}");
-            let args = ["-I", root, "-I", "/opt/homebrew/include", "-I", "/usr/local/include", enc_arg.as_str(), file];
+            let args = [
+                "-I",
+                root,
+                "-I",
+                "/opt/homebrew/include",
+                "-I",
+                "/usr/local/include",
+                enc_arg.as_str(),
+                file,
+            ];
             let enc = protoc(&args, m.to_text().as_bytes()).unwrap();
             assert_eq!(enc, bytes, "{full}: protoc encoding differs");
             checked += 1;

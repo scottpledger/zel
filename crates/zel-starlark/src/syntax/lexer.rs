@@ -151,7 +151,8 @@ impl<'a> Lexer<'a> {
                     }
                     if indent != *self.indent_stack.last().unwrap_or(&0) {
                         return Err(LexerError {
-                            message: "unindent does not match any outer indentation level".to_string(),
+                            message: "unindent does not match any outer indentation level"
+                                .to_string(),
                             location: self.loc(),
                         });
                     }
@@ -211,7 +212,9 @@ impl<'a> Lexer<'a> {
                 self.at_line_start = true;
                 if self.paren_depth == 0 {
                     // Avoid duplicate newlines
-                    if !tokens.is_empty() && tokens.last().map(|t| &t.kind) != Some(&TokenKind::Newline) {
+                    if !tokens.is_empty()
+                        && tokens.last().map(|t| &t.kind) != Some(&TokenKind::Newline)
+                    {
                         tokens.push(Token {
                             kind: TokenKind::Newline,
                             location: loc,
@@ -221,8 +224,8 @@ impl<'a> Lexer<'a> {
                 continue;
             }
 
-            // String or bytes literals
-            if (c == 'r' || c == 'R') && matches!(self.peek_next(), Some('"') | Some('\'')) {
+            // String literals (only lowercase `r` prefix is raw in Starlark; `b` is an identifier)
+            if c == 'r' && matches!(self.peek_next(), Some('"') | Some('\'')) {
                 let loc = self.loc();
                 self.advance(); // r
                 let s = self.lex_string(true)?;
@@ -231,31 +234,6 @@ impl<'a> Lexer<'a> {
                     location: loc,
                 });
                 continue;
-            }
-            if (c == 'b' || c == 'B') && matches!(self.peek_next(), Some('"') | Some('\'')) {
-                let loc = self.loc();
-                self.advance(); // b
-                let s = self.lex_string(false)?;
-                tokens.push(Token {
-                    kind: TokenKind::Bytes(s.into_bytes()),
-                    location: loc,
-                });
-                continue;
-            }
-            if ((c == 'r' || c == 'R') && (self.peek_next() == Some('b') || self.peek_next() == Some('B')))
-                || ((c == 'b' || c == 'B') && (self.peek_next() == Some('r') || self.peek_next() == Some('R')))
-            {
-                if matches!(self.peek_n(2), Some('"') | Some('\'')) {
-                    let loc = self.loc();
-                    self.advance(); // r or b
-                    self.advance(); // b or r
-                    let s = self.lex_string(true)?;
-                    tokens.push(Token {
-                        kind: TokenKind::Bytes(s.into_bytes()),
-                        location: loc,
-                    });
-                    continue;
-                }
             }
             if c == '"' || c == '\'' {
                 let loc = self.loc();
@@ -268,7 +246,13 @@ impl<'a> Lexer<'a> {
             }
 
             // Numbers: Hex, Octal, Binary, Decimal or Float
-            if c.is_ascii_digit() || (c == '.' && self.peek_next().map(|n| n.is_ascii_digit()).unwrap_or(false)) {
+            if c.is_ascii_digit()
+                || (c == '.'
+                    && self
+                        .peek_next()
+                        .map(|n| n.is_ascii_digit())
+                        .unwrap_or(false))
+            {
                 let loc = self.loc();
                 let tok = self.lex_number()?;
                 tokens.push(Token {
@@ -629,7 +613,10 @@ impl<'a> Lexer<'a> {
             // In Starlark, `1.` or `1.5` or `.5` is a float.
             // But `1.func()` would not be a float if next char is alphabetic and no digit.
             let next_after_dot = self.peek_next();
-            if next_after_dot.map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) {
+            if next_after_dot
+                .map(|c| c.is_ascii_alphabetic() || c == '_')
+                .unwrap_or(false)
+            {
                 // Not float, dot is attr!
             } else {
                 is_float = true;
@@ -712,13 +699,33 @@ impl<'a> Lexer<'a> {
                 });
             }
 
-            if !raw && c == '\\' {
+            if raw && c == '\\' {
+                self.advance();
+                let Some(next_c) = self.peek() else {
+                    return Err(LexerError {
+                        message: "unclosed string literal".to_string(),
+                        location: loc,
+                    });
+                };
+                out.push('\\');
+                if next_c == '\r' && self.peek_next() == Some('\n') {
+                    self.advance();
+                    self.advance();
+                    out.push('\n');
+                } else if next_c == '\r' || next_c == '\n' {
+                    self.advance();
+                    out.push('\n');
+                } else {
+                    self.advance();
+                    out.push(next_c);
+                }
+            } else if !raw && c == '\\' {
                 self.advance();
                 let esc = match self.peek() {
                     Some(ch) => ch,
                     None => {
                         return Err(LexerError {
-                            message: "unclosed string literal after '\\'".to_string(),
+                            message: "unclosed string literal".to_string(),
                             location: loc,
                         })
                     }
@@ -735,82 +742,43 @@ impl<'a> Lexer<'a> {
                     '\\' => out.push('\\'),
                     '\'' => out.push('\''),
                     '"' => out.push('"'),
+                    '\r' => {
+                        if self.peek() == Some('\n') {
+                            self.advance();
+                        }
+                    }
                     '\n' => {
                         // Escaped newline -> ignored!
                     }
-                    'x' => {
-                        // 2 hex digits
-                        let h1 = self.advance().ok_or_else(|| LexerError {
-                            message: "incomplete \\x escape".to_string(),
-                            location: loc.clone(),
-                        })?;
-                        let h2 = self.advance().ok_or_else(|| LexerError {
-                            message: "incomplete \\x escape".to_string(),
-                            location: loc.clone(),
-                        })?;
-                        let byte = u8::from_str_radix(&format!("{h1}{h2}"), 16).map_err(|_| LexerError {
-                            message: format!("invalid \\x escape: \\x{h1}{h2}"),
-                            location: loc.clone(),
-                        })?;
-                        out.push(byte as char);
-                    }
-                    'u' => {
-                        // 4 hex digits
-                        let mut hex = String::new();
-                        for _ in 0..4 {
-                            hex.push(self.advance().ok_or_else(|| LexerError {
-                                message: "incomplete \\u escape".to_string(),
-                                location: loc.clone(),
-                            })?);
-                        }
-                        let code = u32::from_str_radix(&hex, 16).map_err(|_| LexerError {
-                            message: format!("invalid \\u escape: \\u{hex}"),
-                            location: loc.clone(),
-                        })?;
-                        let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
-                        out.push(ch);
-                    }
-                    'U' => {
-                        // 8 hex digits
-                        let mut hex = String::new();
-                        for _ in 0..8 {
-                            hex.push(self.advance().ok_or_else(|| LexerError {
-                                message: "incomplete \\U escape".to_string(),
-                                location: loc.clone(),
-                            })?);
-                        }
-                        let code = u32::from_str_radix(&hex, 16).map_err(|_| LexerError {
-                            message: format!("invalid \\U escape: \\U{hex}"),
-                            location: loc.clone(),
-                        })?;
-                        let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
-                        out.push(ch);
-                    }
                     '0'..='7' => {
-                        // 1 to 3 octal digits
-                        let mut oct = String::new();
-                        oct.push(esc);
+                        // 1 to 3 octal digits (Bazel Lexer.java: > 0xff is an error)
+                        let mut oct = (esc as u32) - ('0' as u32);
                         for _ in 0..2 {
                             if let Some(next_c) = self.peek() {
                                 if ('0'..='7').contains(&next_c) {
-                                    oct.push(next_c);
+                                    oct = (oct << 3) | ((next_c as u32) - ('0' as u32));
                                     self.advance();
                                 } else {
                                     break;
                                 }
                             }
                         }
-                        let code = u32::from_str_radix(&oct, 8).map_err(|_| LexerError {
-                            message: format!("invalid octal escape: \\{oct}"),
-                            location: loc.clone(),
-                        })?;
-                        let ch = char::from_u32(code).unwrap_or('\u{FFFD}');
-                        out.push(ch);
+                        if oct > 0xff {
+                            return Err(LexerError {
+                                message: "octal escape sequence out of range (maximum is \\377)"
+                                    .to_string(),
+                                location: loc,
+                            });
+                        }
+                        out.push(char::from_u32(oct & 0xff).unwrap());
                     }
                     other => {
-                        // Bazel: standard python escape rules
-                        out.push('\\');
-                        out.push(other);
+                        return Err(LexerError {
+                            message: format!(
+                                "invalid escape sequence: \\{other}. Use '\\\\' to insert '\\'."
+                            ),
+                            location: loc,
+                        });
                     }
                 }
             } else {

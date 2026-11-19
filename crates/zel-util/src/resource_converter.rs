@@ -41,8 +41,13 @@ pub struct HostResources {
 
 impl HostResources {
     pub fn detect() -> Self {
-        let cpus = std::thread::available_parallelism().map(|n| n.get() as f64).unwrap_or(1.0);
-        Self { cpus, memory_mb: detect_memory_mb() }
+        let cpus = std::thread::available_parallelism()
+            .map(|n| n.get() as f64)
+            .unwrap_or(1.0);
+        Self {
+            cpus,
+            memory_mb: detect_memory_mb(),
+        }
     }
 
     /// Like [`detect`](Self::detect) but probed once per process.
@@ -65,10 +70,45 @@ impl HostResources {
 fn detect_memory_mb() -> f64 {
     #[cfg(target_os = "macos")]
     {
-        if let Ok(o) = std::process::Command::new("/usr/sbin/sysctl").args(["-n", "hw.memsize"]).output() {
+        if let Ok(o) = std::process::Command::new("/usr/sbin/sysctl")
+            .args(["-n", "hw.memsize"])
+            .output()
+        {
             if let Ok(b) = String::from_utf8_lossy(&o.stdout).trim().parse::<f64>() {
                 return b / (1024.0 * 1024.0);
             }
+        }
+    }
+    #[cfg(windows)]
+    {
+        #[repr(C)]
+        struct MemoryStatusEx {
+            dw_length: u32,
+            dw_memory_load: u32,
+            ull_total_phys: u64,
+            ull_avail_phys: u64,
+            ull_total_page_file: u64,
+            ull_avail_page_file: u64,
+            ull_total_virtual: u64,
+            ull_avail_virtual: u64,
+            ull_avail_extended_virtual: u64,
+        }
+        extern "system" {
+            fn GlobalMemoryStatusEx(lp_buffer: *mut MemoryStatusEx) -> i32;
+        }
+        let mut ms = MemoryStatusEx {
+            dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
+            dw_memory_load: 0,
+            ull_total_phys: 0,
+            ull_avail_phys: 0,
+            ull_total_page_file: 0,
+            ull_avail_page_file: 0,
+            ull_total_virtual: 0,
+            ull_avail_virtual: 0,
+            ull_avail_extended_virtual: 0,
+        };
+        if unsafe { GlobalMemoryStatusEx(&mut ms) } != 0 && ms.ull_total_phys > 0 {
+            return (ms.ull_total_phys as f64) / (1024.0 * 1024.0);
         }
     }
     if let Ok(t) = std::fs::read_to_string("/proc/meminfo") {
@@ -131,25 +171,40 @@ pub struct IntegerSpec {
 
 impl IntegerSpec {
     pub const fn new(keywords: Keywords, auto: AutoValue, min: i32, max: i32) -> Self {
-        Self { keywords, auto, min, max, jobs_style: false }
+        Self {
+            keywords,
+            auto,
+            min,
+            max,
+            jobs_style: false,
+        }
     }
 
     /// `JobsConverter` (`--jobs`).
-    pub const JOBS: IntegerSpec =
-        IntegerSpec { keywords: Keywords::AutoCpusRam, auto: AutoValue::HostCpus, min: 1, max: MAX_JOBS, jobs_style: true };
+    pub const JOBS: IntegerSpec = IntegerSpec {
+        keywords: Keywords::AutoCpusRam,
+        auto: AutoValue::HostCpus,
+        min: 1,
+        max: MAX_JOBS,
+        jobs_style: true,
+    };
     /// `LocalTestJobsConverter` (`--local_test_jobs`).
-    pub const LOCAL_TEST_JOBS: IntegerSpec = IntegerSpec::new(Keywords::AutoCpusRam, AutoValue::Zero, 0, i32::MAX);
+    pub const LOCAL_TEST_JOBS: IntegerSpec =
+        IntegerSpec::new(Keywords::AutoCpusRam, AutoValue::Zero, 0, i32::MAX);
     /// `LoadingPhaseThreadCountConverter`, `BuildRequestOptions.ThreadConverter`,
     /// `PackageOptions.ParallelismConverter`.
-    pub const THREADS_MIN1: IntegerSpec = IntegerSpec::new(Keywords::AutoCpusRam, AutoValue::HostCpus, 1, i32::MAX);
+    pub const THREADS_MIN1: IntegerSpec =
+        IntegerSpec::new(Keywords::AutoCpusRam, AutoValue::HostCpus, 1, i32::MAX);
     /// `IncludeScanningOptions.ParallelismConverter`, `SandboxOptions.AsyncTreeDeletesConverter`.
-    pub const THREADS_MIN0: IntegerSpec = IntegerSpec::new(Keywords::AutoCpusRam, AutoValue::HostCpus, 0, i32::MAX);
+    pub const THREADS_MIN0: IntegerSpec =
+        IntegerSpec::new(Keywords::AutoCpusRam, AutoValue::HostCpus, 0, i32::MAX);
     /// `CpuResourceConverter`.
     pub const CPU: IntegerSpec = IntegerSpec::new(Keywords::Cpus, AutoValue::HostCpus, 0, i32::MAX);
     /// `RamResourceConverter`.
     pub const RAM: IntegerSpec = IntegerSpec::new(Keywords::Ram, AutoValue::HostCpus, 0, i32::MAX);
     /// `WorkerOptions.MultiResourceConverter.valueConverter`: `IntegerConverter(() -> 0, 0, MAX)`.
-    pub const WORKER_VALUE: IntegerSpec = IntegerSpec::new(Keywords::AutoCpusRam, AutoValue::Zero, 0, i32::MAX);
+    pub const WORKER_VALUE: IntegerSpec =
+        IntegerSpec::new(Keywords::AutoCpusRam, AutoValue::Zero, 0, i32::MAX);
 }
 
 /// A `DoubleConverter` configuration.
@@ -162,7 +217,11 @@ pub struct DoubleSpec {
 
 impl DoubleSpec {
     /// `AssignmentConverter`'s value converter (`[0, Double.MAX_VALUE]`, `HOST_CPUS`/`HOST_RAM`).
-    pub const ASSIGNMENT: DoubleSpec = DoubleSpec { keywords: Keywords::CpusRam, min: 0.0, max: f64::MAX };
+    pub const ASSIGNMENT: DoubleSpec = DoubleSpec {
+        keywords: Keywords::CpusRam,
+        min: 0.0,
+        max: f64::MAX,
+    };
 }
 
 fn keyword_value(name: &str, auto: AutoValue, host: &dyn Fn() -> HostResources) -> f64 {
@@ -181,7 +240,9 @@ fn keyword_value(name: &str, auto: AutoValue, host: &dyn Fn() -> HostResources) 
 /// `RamResourceConverter`).
 pub fn type_description(keywords: Keywords) -> String {
     match keywords {
-        Keywords::Cpus => format!("an integer, or \"{HOST_CPUS_KEYWORD}\", optionally followed by [-|*]<float>."),
+        Keywords::Cpus => {
+            format!("an integer, or \"{HOST_CPUS_KEYWORD}\", optionally followed by [-|*]<float>.")
+        }
         Keywords::Ram => {
             format!("an integer number of MBs, or \"{HOST_RAM_KEYWORD}\", optionally followed by [-|*]<float>.")
         }
@@ -215,15 +276,16 @@ pub fn java_decode_long(input: &str) -> Option<i64> {
     } else {
         (false, input)
     };
-    let (radix, digits) = if let Some(r) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
-        (16, r)
-    } else if let Some(r) = rest.strip_prefix('#') {
-        (16, r)
-    } else if rest.len() > 1 && rest.starts_with('0') {
-        (8, &rest[1..])
-    } else {
-        (10, rest)
-    };
+    let (radix, digits) =
+        if let Some(r) = rest.strip_prefix("0x").or_else(|| rest.strip_prefix("0X")) {
+            (16, r)
+        } else if let Some(r) = rest.strip_prefix('#') {
+            (16, r)
+        } else if rest.len() > 1 && rest.starts_with('0') {
+            (8, &rest[1..])
+        } else {
+            (10, rest)
+        };
     // A second sign after the prefix is rejected by Java.
     if digits.is_empty() || digits.starts_with('-') || digits.starts_with('+') {
         return None;
@@ -281,14 +343,20 @@ fn parse_java_floating(s: &str) -> Option<f64> {
         if int_part.is_empty() && frac_part.is_empty() {
             return None;
         }
-        if !int_part.chars().all(|c| c.is_ascii_hexdigit()) || !frac_part.chars().all(|c| c.is_ascii_hexdigit()) {
+        if !int_part.chars().all(|c| c.is_ascii_hexdigit())
+            || !frac_part.chars().all(|c| c.is_ascii_hexdigit())
+        {
             return None;
         }
         let exp_digits = exp.strip_prefix(['+', '-']).unwrap_or(exp);
         if exp_digits.is_empty() || !exp_digits.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
-        let e: i32 = exp.parse().ok().unwrap_or(if exp.starts_with('-') { i32::MIN / 2 } else { i32::MAX / 2 });
+        let e: i32 = exp.parse().ok().unwrap_or(if exp.starts_with('-') {
+            i32::MIN / 2
+        } else {
+            i32::MAX / 2
+        });
         let mut m = 0f64;
         for c in int_part.chars() {
             m = m * 16.0 + c.to_digit(16)? as f64;
@@ -310,7 +378,10 @@ fn parse_java_floating(s: &str) -> Option<f64> {
         None => (mant, None),
     };
     let has_digits = !ip.is_empty() || fp.map(|f| !f.is_empty()).unwrap_or(false);
-    if !has_digits || !ip.bytes().all(|b| b.is_ascii_digit()) || !fp.unwrap_or("").bytes().all(|b| b.is_ascii_digit()) {
+    if !has_digits
+        || !ip.bytes().all(|b| b.is_ascii_digit())
+        || !fp.unwrap_or("").bytes().all(|b| b.is_ascii_digit())
+    {
         return None;
     }
     if let Some(e) = exp {
@@ -319,10 +390,20 @@ fn parse_java_floating(s: &str) -> Option<f64> {
             return None;
         }
     }
-    let text = format!("{}{}{}{}", if ip.is_empty() { "0" } else { ip }, if fp.is_some() { "." } else { "" }, fp.unwrap_or(""), exp.map(|e| format!("e{e}")).unwrap_or_default());
+    let text = format!(
+        "{}{}{}{}",
+        if ip.is_empty() { "0" } else { ip },
+        if fp.is_some() { "." } else { "" },
+        fp.unwrap_or(""),
+        exp.map(|e| format!("e{e}")).unwrap_or_default()
+    );
     // Rust's parser rejects a trailing '.', which Java accepts.
     let text = text.replace(".e", ".0e");
-    let text = if text.ends_with('.') { format!("{text}0") } else { text };
+    let text = if text.ends_with('.') {
+        format!("{text}0")
+    } else {
+        text
+    };
     text.parse::<f64>().ok().map(sign)
 }
 
@@ -333,7 +414,9 @@ pub fn java_parse_double(input: &str) -> Option<f64> {
 
 /// Guava `Doubles.tryParse(String)` succeeds (no trimming).
 pub fn guava_try_parse_double(input: &str) -> Option<f64> {
-    if input.chars().next().map(|c| c <= ' ').unwrap_or(false) || input.chars().last().map(|c| c <= ' ').unwrap_or(false) {
+    if input.chars().next().map(|c| c <= ' ').unwrap_or(false)
+        || input.chars().last().map(|c| c <= ' ').unwrap_or(false)
+    {
         return None;
     }
     parse_java_floating(input)
@@ -400,7 +483,10 @@ pub fn convert_keyword(
     host: &dyn Fn() -> HostResources,
 ) -> Result<f64, String> {
     // validInputPattern: (?<keyword>auto|HOST_CPUS|HOST_RAM)(?<expression>[-*][0-9]?(?:.[0-9]+)?)?
-    let found = keywords.names().iter().find_map(|k| input.strip_prefix(k).map(|rest| (*k, rest)));
+    let found = keywords
+        .names()
+        .iter()
+        .find_map(|k| input.strip_prefix(k).map(|rest| (*k, rest)));
     if let Some((kw, rest)) = found {
         if rest.is_empty() {
             return Ok(keyword_value(kw, auto, host));
@@ -409,9 +495,14 @@ pub fn convert_keyword(
         let op = chars.next().unwrap();
         if (op == '-' || op == '*') && matches_operand(chars.as_str()) {
             let operand_text = chars.as_str();
-            let operand = java_parse_float(operand_text).ok_or_else(|| format!("'{operand_text} is not a float"))?;
+            let operand = java_parse_float(operand_text)
+                .ok_or_else(|| format!("'{operand_text} is not a float"))?;
             let first = keyword_value(kw, auto, host);
-            return Ok(if op == '-' { first - operand as f64 } else { first * operand as f64 });
+            return Ok(if op == '-' {
+                first - operand as f64
+            } else {
+                first * operand as f64
+            });
         }
     }
     Err(format!(
@@ -476,8 +567,16 @@ impl IntegerSpec {
 impl DoubleSpec {
     fn check_and_limit(&self, value: f64) -> Result<f64, String> {
         // `Double.compareTo`: NaN is greater than everything (including +Infinity).
-        let cmp_min = if value.is_nan() { std::cmp::Ordering::Greater } else { value.total_cmp(&self.min) };
-        let cmp_min = if value == self.min { std::cmp::Ordering::Equal } else { cmp_min };
+        let cmp_min = if value.is_nan() {
+            std::cmp::Ordering::Greater
+        } else {
+            value.total_cmp(&self.min)
+        };
+        let cmp_min = if value == self.min {
+            std::cmp::Ordering::Equal
+        } else {
+            cmp_min
+        };
         if cmp_min == std::cmp::Ordering::Less {
             return Err(format!(
                 "Value '({})' must be at least {}.",
@@ -513,13 +612,18 @@ impl DoubleSpec {
 pub fn split_assignment(input: &str) -> Result<(&str, &str), String> {
     match input.find('=') {
         Some(pos) if pos > 0 => Ok((&input[..pos], &input[pos + 1..])),
-        _ => Err("Variable definitions must be in the form of a 'name=value' assignment".to_string()),
+        _ => {
+            Err("Variable definitions must be in the form of a 'name=value' assignment".to_string())
+        }
     }
 }
 
 /// `ResourceConverter.AssignmentConverter.getTypeDescription()`.
 pub fn assignment_type_description() -> String {
-    format!("a named double, 'name=value', where value is {}", type_description(Keywords::CpusRam))
+    format!(
+        "a named double, 'name=value', where value is {}",
+        type_description(Keywords::CpusRam)
+    )
 }
 
 /// `ResourceConverter.AssignmentConverter.convert` (`--local_resources=name=value`).
@@ -528,7 +632,10 @@ pub fn convert_resource_assignment(
     host: &dyn Fn() -> HostResources,
 ) -> Result<(String, f64), String> {
     let (name, value) = split_assignment(input)?;
-    Ok((name.to_string(), DoubleSpec::ASSIGNMENT.convert(value, host)?))
+    Ok((
+        name.to_string(),
+        DoubleSpec::ASSIGNMENT.convert(value, host)?,
+    ))
 }
 
 #[cfg(test)]
@@ -536,7 +643,10 @@ mod tests {
     use super::*;
 
     fn host() -> HostResources {
-        HostResources { cpus: 8.0, memory_mb: 16384.0 }
+        HostResources {
+            cpus: 8.0,
+            memory_mb: 16384.0,
+        }
     }
     fn int(spec: IntegerSpec, s: &str) -> Result<i32, String> {
         spec.convert_with_host(s, &host())
@@ -555,25 +665,53 @@ mod tests {
         assert_eq!(int(IntegerSpec::JOBS, "12"), Ok(12));
         assert_eq!(int(IntegerSpec::JOBS, "99999"), Ok(5000));
         assert_eq!(int(IntegerSpec::JOBS, "010"), Ok(8)); // Integer.decode: octal
-        assert_eq!(int(IntegerSpec::JOBS, "0"), Err("Value '(0)' must be at least 1.".into()));
-        assert_eq!(int(IntegerSpec::JOBS, "-3"), Err("Value '(-3)' must be at least 1.".into()));
-        assert_eq!(int(IntegerSpec::JOBS, "HOST_CPUS-8"), Err("Value '(0)' must be at least 1.".into()));
-        assert_eq!(int(IntegerSpec::JOBS, "09"), Err("'09' is not an int".into()));
+        assert_eq!(
+            int(IntegerSpec::JOBS, "0"),
+            Err("Value '(0)' must be at least 1.".into())
+        );
+        assert_eq!(
+            int(IntegerSpec::JOBS, "-3"),
+            Err("Value '(-3)' must be at least 1.".into())
+        );
+        assert_eq!(
+            int(IntegerSpec::JOBS, "HOST_CPUS-8"),
+            Err("Value '(0)' must be at least 1.".into())
+        );
+        assert_eq!(
+            int(IntegerSpec::JOBS, "09"),
+            Err("'09' is not an int".into())
+        );
     }
 
     #[test]
     fn jobs_errors() {
         let syntax = "an integer, or a keyword (\"auto\", \"HOST_CPUS\", \"HOST_RAM\"), optionally followed by an operation ([-|*]<float>) eg. \"auto\", \"HOST_CPUS*.5\"";
-        for bad in ["lots", "1.5", "+4", "0x10", "HOST_CPUS/2", "HOST_CPUS*", "auto ", "AUTO", "HOST_CPUS*.5x", "99999999999"] {
+        for bad in [
+            "lots",
+            "1.5",
+            "+4",
+            "0x10",
+            "HOST_CPUS/2",
+            "HOST_CPUS*",
+            "auto ",
+            "AUTO",
+            "HOST_CPUS*.5x",
+            "99999999999",
+        ] {
             let expect = if bad == "HOST_CPUS*" {
                 "' is not a float".to_string()
             } else {
-                format!("Parameter '{bad}' does not follow correct syntax. This flag takes {syntax}.")
+                format!(
+                    "Parameter '{bad}' does not follow correct syntax. This flag takes {syntax}."
+                )
             };
             assert_eq!(int(IntegerSpec::JOBS, bad), Err(expect), "{bad}");
         }
         // Regex matches, Float.parseFloat does not.
-        assert_eq!(int(IntegerSpec::JOBS, "HOST_CPUS*1x5"), Err("'1x5 is not a float".into()));
+        assert_eq!(
+            int(IntegerSpec::JOBS, "HOST_CPUS*1x5"),
+            Err("'1x5 is not a float".into())
+        );
         assert_eq!(syntax, type_description(Keywords::AutoCpusRam));
         assert_eq!(syntax, FLAG_SYNTAX);
     }
@@ -620,7 +758,10 @@ mod tests {
         let err = "Variable definitions must be in the form of a 'name=value' assignment";
         assert_eq!(conv("cpu"), Err(err.into()));
         assert_eq!(conv("=3"), Err(err.into()));
-        assert_eq!(conv("cpu=-1"), Err("Value '(-1.000000)' must be at least 0.000000.".into()));
+        assert_eq!(
+            conv("cpu=-1"),
+            Err("Value '(-1.000000)' must be at least 0.000000.".into())
+        );
         // `auto` is not a keyword for assignments.
         assert_eq!(
             conv("cpu=auto"),
@@ -628,7 +769,10 @@ mod tests {
         );
         assert_eq!(
             conv("cpu=NaN"),
-            Err(format!("Value '(NaN)' cannot be greater than 17976931348623157{}.000000.", "0".repeat(292)))
+            Err(format!(
+                "Value '(NaN)' cannot be greater than 17976931348623157{}.000000.",
+                "0".repeat(292)
+            ))
         );
     }
 

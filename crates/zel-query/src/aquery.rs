@@ -21,7 +21,9 @@ use crate::pb::{Msg, PbVal};
 use crate::post_analysis::{filters_of, PostEnv, PostOpts};
 use crate::regex::Regex;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use zel_analysis::{shell_escape, Action, ActionKind, Artifact, BuildConfigurationKey, FileContent};
+use zel_analysis::{
+    shell_escape, Action, ActionKind, Artifact, BuildConfigurationKey, FileContent,
+};
 use zel_cmdline::Label;
 
 /// One action together with the configured target that owns it.
@@ -61,31 +63,51 @@ fn pretty_print(a: &Action, for_tool: bool) -> String {
             ActionKind::FileWrite { is_executable, .. } => {
                 format!(
                     "{} {}",
-                    if *is_executable { "Writing script" } else { "Writing file" },
+                    if *is_executable {
+                        "Writing script"
+                    } else {
+                        "Writing file"
+                    },
                     a.outputs.first().map(pretty_path).unwrap_or_default()
                 )
             }
             // `SolibSymlinkAction` has no raw progress message: `AbstractAction.prettyPrint`.
             ActionKind::Symlink { .. } if a.mnemonic == "SolibSymlink" => {
-                format!("SolibSymlink {}", a.outputs.first().map(pretty_path).unwrap_or_default())
+                format!(
+                    "SolibSymlink {}",
+                    a.outputs.first().map(pretty_path).unwrap_or_default()
+                )
             }
             ActionKind::Symlink { .. } => {
-                format!("Creating symlink {}", a.outputs.first().map(pretty_path).unwrap_or_default())
+                format!(
+                    "Creating symlink {}",
+                    a.outputs.first().map(pretty_path).unwrap_or_default()
+                )
             }
             ActionKind::TemplateExpand { .. } => {
-                format!("Expanding template {}", a.outputs.first().map(pretty_path).unwrap_or_default())
+                format!(
+                    "Expanding template {}",
+                    a.outputs.first().map(pretty_path).unwrap_or_default()
+                )
             }
             ActionKind::Spawn { .. } => {
                 if a.mnemonic == "Genrule" {
                     format!("Executing genrule {}", a.owner)
                 } else {
-                    format!("{} {}", a.mnemonic, a.outputs.first().map(pretty_path).unwrap_or_default())
+                    format!(
+                        "{} {}",
+                        a.mnemonic,
+                        a.outputs.first().map(pretty_path).unwrap_or_default()
+                    )
                 }
             }
         },
     };
     // `AbstractAction.getProgressMessage`: actions of the tool (exec) configurations are annotated.
-    format!("action '{msg}{}'", if for_tool { " [for tool]" } else { "" })
+    format!(
+        "action '{msg}{}'",
+        if for_tool { " [for tool]" } else { "" }
+    )
 }
 
 fn escaped_unicode(s: &str) -> String {
@@ -110,11 +132,21 @@ fn base64(b: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in b.chunks(3) {
-        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        let n = ((chunk[0] as u32) << 16)
+            | ((*chunk.get(1).unwrap_or(&0) as u32) << 8)
+            | *chunk.get(2).unwrap_or(&0) as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -127,14 +159,22 @@ fn java_shell_escape(s: &str) -> String {
 fn matches_filters(a: &Action, filters: &(Vec<String>, Vec<String>, Vec<String>)) -> bool {
     let (mn, inp, outp) = filters;
     // `AqueryActionFilter.matchesAllPatternsForFunction`: `Pattern.matcher(s).matches()` (full match).
-    let all = |pats: &Vec<String>, s: &str| pats.iter().all(|p| Regex::new(p).map(|r| r.full_match(s)).unwrap_or(false));
+    let all = |pats: &Vec<String>, s: &str| {
+        pats.iter()
+            .all(|p| Regex::new(p).map(|r| r.full_match(s)).unwrap_or(false))
+    };
     if !mn.is_empty() && !all(mn, &a.mnemonic) {
         return false;
     }
     if !inp.is_empty() && !a.inputs.iter().any(|i| all(inp, i.exec_path.path_string())) {
         return false;
     }
-    if !outp.is_empty() && !a.outputs.iter().any(|o| all(outp, o.exec_path.path_string())) {
+    if !outp.is_empty()
+        && !a
+            .outputs
+            .iter()
+            .any(|o| all(outp, o.exec_path.path_string()))
+    {
         return false;
     }
     true
@@ -152,9 +192,15 @@ fn executable_actions(
     cfg_id: &str,
     filters: &(Vec<String>, Vec<String>, Vec<String>),
 ) {
-    let Some(rs) = &ct.runfiles_support else { return };
-    let pos_rm = local.iter().position(|e| e.action.mnemonic == "RepoMappingManifest");
-    let pos_sm = local.iter().position(|e| e.action.mnemonic == "SourceSymlinkManifest");
+    let Some(rs) = &ct.runfiles_support else {
+        return;
+    };
+    let pos_rm = local
+        .iter()
+        .position(|e| e.action.mnemonic == "RepoMappingManifest");
+    let pos_sm = local
+        .iter()
+        .position(|e| e.action.mnemonic == "SourceSymlinkManifest");
     if let (Some(r), Some(s)) = (pos_rm, pos_sm) {
         if s < r {
             let e = local.remove(r);
@@ -180,19 +226,36 @@ fn executable_actions(
     let manifest_in_tree = Artifact::derived_in_root(
         &cfg_mnemonic,
         root,
-        zel_vfs::PathFragment::create(&format!("{}/MANIFEST", rs.runfiles_dir.rsplit_once("/bin/").map(|x| x.1).unwrap_or(&rs.runfiles_dir))),
+        zel_vfs::PathFragment::create(&format!(
+            "{}/MANIFEST",
+            rs.runfiles_dir
+                .rsplit_once("/bin/")
+                .map(|x| x.1)
+                .unwrap_or(&rs.runfiles_dir)
+        )),
         label.clone(),
     );
     let tree_dir = Artifact {
         is_source: false,
         is_tree_artifact: false,
-        root: root,
+        root,
         is_unresolved_symlink: false,
         exec_path: zel_vfs::PathFragment::create(&rs.runfiles_dir),
-        root_relative_path: zel_vfs::PathFragment::create(&format!("{}.runfiles", rs.executable.root_relative_path.path_string())),
+        root_relative_path: zel_vfs::PathFragment::create(&format!(
+            "{}.runfiles",
+            rs.executable.root_relative_path.path_string()
+        )),
         owner_label: label.clone(),
     };
-    let mut st = Action::new(label.clone(), "SymlinkTree", ActionKind::Spawn { executable: String::new(), arguments: Vec::new(), shell_command: None });
+    let mut st = Action::new(
+        label.clone(),
+        "SymlinkTree",
+        ActionKind::Spawn {
+            executable: String::new(),
+            arguments: Vec::new(),
+            shell_command: None,
+        },
+    );
     st.progress_message = Some(format!("Creating runfiles tree {}", rs.runfiles_dir));
     st.inputs.push(rs.manifest.clone());
     st.outputs.push(manifest_in_tree.clone());
@@ -201,7 +264,15 @@ fn executable_actions(
     if matches_filters(&st, filters) {
         local.push(mk(st, Synth::SymlinkTree));
     }
-    let mut rt = Action::new(label.clone(), "RunfilesTree", ActionKind::Spawn { executable: String::new(), arguments: Vec::new(), shell_command: None });
+    let mut rt = Action::new(
+        label.clone(),
+        "RunfilesTree",
+        ActionKind::Spawn {
+            executable: String::new(),
+            arguments: Vec::new(),
+            shell_command: None,
+        },
+    );
     rt.progress_message = Some(format!("runfiles for {}", label.canonical_form()));
     rt.inputs.extend(
         rs.runfiles
@@ -246,7 +317,10 @@ fn executable_actions(
             "TestRunner",
             ActionKind::Spawn {
                 executable: "external/bazel_tools/tools/test/test-setup.sh".to_string(),
-                arguments: vec![zel_analysis::CommandLineArgs { args: vec![short.clone()], param_file: None }],
+                arguments: vec![zel_analysis::CommandLineArgs {
+                    args: vec![short.clone()],
+                    param_file: None,
+                }],
                 shell_command: None,
             },
         );
@@ -261,10 +335,13 @@ fn executable_actions(
         tr.use_default_shell_env = true;
         tr.apply_configuration_env(cfg);
         // `TestTargetProperties`: the `testing.ExecutionInfo` provider's requirements.
-        if let Some(zel_starlark::Value::ProviderInstance { fields, .. }) = ct.providers.get("ExecutionInfo") {
+        if let Some(zel_starlark::Value::ProviderInstance { fields, .. }) =
+            ct.providers.get("ExecutionInfo")
+        {
             if let Some(zel_starlark::Value::Dict(d)) = fields.get("requirements") {
                 for (k, v) in d.lock().unwrap().items() {
-                    if let (zel_starlark::Value::String(k), zel_starlark::Value::String(v)) = (k, v) {
+                    if let (zel_starlark::Value::String(k), zel_starlark::Value::String(v)) = (k, v)
+                    {
                         tr.execution_requirements.insert(k, v);
                     }
                 }
@@ -282,11 +359,32 @@ fn java_duration(secs: u64) -> String {
         return "PT0S".into();
     }
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
-    format!("PT{}{}{}", if h > 0 { format!("{h}H") } else { String::new() }, if m > 0 { format!("{m}M") } else { String::new() }, if s > 0 { format!("{s}S") } else { String::new() })
+    format!(
+        "PT{}{}{}",
+        if h > 0 {
+            format!("{h}H")
+        } else {
+            String::new()
+        },
+        if m > 0 {
+            format!("{m}M")
+        } else {
+            String::new()
+        },
+        if s > 0 {
+            format!("{s}S")
+        } else {
+            String::new()
+        }
+    )
 }
 
 /// The `TestRunnerAction.computeKey` inputs of the test rule `r`.
-fn test_runner_key(r: &zel_packages::RuleInstance, cfg: &BuildConfigurationKey, ct: &zel_analysis::ConfiguredTarget) -> zel_analysis::TestRunnerKey {
+fn test_runner_key(
+    r: &zel_packages::RuleInstance,
+    cfg: &BuildConfigurationKey,
+    ct: &zel_analysis::ConfiguredTarget,
+) -> zel_analysis::TestRunnerKey {
     use zel_packages::attr::AttrValue;
     let s = |n: &str| match r.attr_or_default(n) {
         Some(AttrValue::Str(v)) if !v.is_empty() => Some(v),
@@ -294,13 +392,22 @@ fn test_runner_key(r: &zel_packages::RuleInstance, cfg: &BuildConfigurationKey, 
     };
     let native = |n: &str| cfg.native.get(n).map(|x| x.value.display());
     let size = s("size").unwrap_or_else(|| "medium".into());
-    let explicit_timeout = if r.extra.attr_values.contains_key("timeout") { s("timeout") } else { None };
-    let category = explicit_timeout.filter(|t| t != "illegal").unwrap_or_else(|| match size.as_str() {
-        "small" => "short",
-        "large" => "long",
-        "enormous" => "eternal",
-        _ => "moderate",
-    }.into());
+    let explicit_timeout = if r.extra.attr_values.contains_key("timeout") {
+        s("timeout")
+    } else {
+        None
+    };
+    let category = explicit_timeout
+        .filter(|t| t != "illegal")
+        .unwrap_or_else(|| {
+            match size.as_str() {
+                "small" => "short",
+                "large" => "long",
+                "enormous" => "eternal",
+                _ => "moderate",
+            }
+            .into()
+        });
     let idx = match category.as_str() {
         "short" => 0,
         "moderate" => 1,
@@ -308,7 +415,11 @@ fn test_runner_key(r: &zel_packages::RuleInstance, cfg: &BuildConfigurationKey, 
         _ => 3,
     };
     let defaults = [60u64, 300, 900, 3600];
-    let secs = match cfg.options.get("test_timeout").map(|v| v.split(',').filter_map(|x| x.trim().parse::<u64>().ok()).collect::<Vec<_>>()) {
+    let secs = match cfg.options.get("test_timeout").map(|v| {
+        v.split(',')
+            .filter_map(|x| x.trim().parse::<u64>().ok())
+            .collect::<Vec<_>>()
+    }) {
         Some(v) if v.len() == 1 => v[0],
         Some(v) if v.len() == 4 => v[idx],
         _ => defaults[idx],
@@ -317,7 +428,10 @@ fn test_runner_key(r: &zel_packages::RuleInstance, cfg: &BuildConfigurationKey, 
         Some(AttrValue::StrList(t)) => t,
         _ => Vec::new(),
     };
-    let local = matches!(r.attr_or_default("local"), Some(AttrValue::Bool(true))) || tags.iter().any(|t| t == "local" || t == "no-remote" || t == "no-remote-exec");
+    let local = matches!(r.attr_or_default("local"), Some(AttrValue::Bool(true)))
+        || tags
+            .iter()
+            .any(|t| t == "local" || t == "no-remote" || t == "no-remote-exec");
     let total_shards = match r.attr_or_default("shard_count") {
         Some(AttrValue::Int(n)) if n > 0 => n as i32,
         _ => 0,
@@ -329,12 +443,30 @@ fn test_runner_key(r: &zel_packages::RuleInstance, cfg: &BuildConfigurationKey, 
     if let Some(t) = cfg.options.get("test_arg") {
         args.extend(t.split(',').filter(|x| !x.is_empty()).map(String::from));
     }
-    let env_parts = |e: zel_util::action_env::ActionEnvironment| (e.fixed_env().clone(), e.inherited_env().iter().cloned().collect::<Vec<_>>());
-    let extra = ct.run_environment.as_ref().map(|re| (re.environment.clone(), { let mut v = re.inherited_environment.clone(); v.sort(); v.dedup(); v })).unwrap_or_default();
+    let env_parts = |e: zel_util::action_env::ActionEnvironment| {
+        (
+            e.fixed_env().clone(),
+            e.inherited_env().iter().cloned().collect::<Vec<_>>(),
+        )
+    };
+    let extra = ct
+        .run_environment
+        .as_ref()
+        .map(|re| {
+            (re.environment.clone(), {
+                let mut v = re.inherited_environment.clone();
+                v.sort();
+                v.dedup();
+                v
+            })
+        })
+        .unwrap_or_default();
     zel_analysis::TestRunnerKey {
         args,
         test_filter: native("test_filter").unwrap_or_default(),
-        fail_fast: native("test_runner_fail_fast").map(|v| v == "true").unwrap_or(false),
+        fail_fast: native("test_runner_fail_fast")
+            .map(|v| v == "true")
+            .unwrap_or(false),
         run_under: cfg.options.get("run_under").cloned().unwrap_or_default(),
         coverage_env: Default::default(),
         extra_env: extra,
@@ -348,9 +480,21 @@ fn test_runner_key(r: &zel_packages::RuleInstance, cfg: &BuildConfigurationKey, 
         shard_num: 0,
         total_shards,
         run_number: 0,
-        total_runs: native("runs_per_test").and_then(|v| v.split('@').last().and_then(|x| x.trim().parse::<i32>().ok())).unwrap_or(1),
-        coverage: cfg.options.get("collect_code_coverage").map(|v| v == "true").unwrap_or(false),
-        zip_undeclared: native("zip_undeclared_test_outputs").map(|v| v == "true").unwrap_or(false),
+        total_runs: native("runs_per_test")
+            .and_then(|v| {
+                v.split('@')
+                    .last()
+                    .and_then(|x| x.trim().parse::<i32>().ok())
+            })
+            .unwrap_or(1),
+        coverage: cfg
+            .options
+            .get("collect_code_coverage")
+            .map(|v| v == "true")
+            .unwrap_or(false),
+        zip_undeclared: native("zip_undeclared_test_outputs")
+            .map(|v| v == "true")
+            .unwrap_or(false),
     }
 }
 
@@ -359,12 +503,19 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
     let mut out = Vec::new();
     for n in nodes {
         let Some(id) = &n.cfg else { continue };
-        let Some(info) = env.info_of(&n.label) else { continue };
+        let Some(info) = env.info_of(&n.label) else {
+            continue;
+        };
         if !matches!(info.target, zel_packages::Target::Rule(_)) {
             continue;
         }
-        let Some(ct) = env.analyzed(n).map_err(|e| e.message)? else { continue };
-        let cfg = env.config_key(id).cloned().unwrap_or_else(|| ct.configuration.clone());
+        let Some(ct) = env.analyzed(n).map_err(|e| e.message)? else {
+            continue;
+        };
+        let cfg = env
+            .node_config_key(n)
+            .cloned()
+            .unwrap_or_else(|| ct.configuration.clone());
         let kind = format!("{} rule", ct.rule_class);
         let mut cts = vec![(ct, None)];
         if env.tenv.opts.include_aspects {
@@ -372,7 +523,10 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
                 if asp.configuration != cfg {
                     continue;
                 }
-                let asp_name = asp.aspect_name.clone().unwrap_or_else(|| asp.rule_class.clone());
+                let asp_name = asp
+                    .aspect_name
+                    .clone()
+                    .unwrap_or_else(|| asp.rule_class.clone());
                 cts.push((asp, Some(asp_name)));
             }
         }
@@ -405,10 +559,16 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
             if asp_opt.is_none() {
                 executable_actions(&mut local, &current_ct, &n.label, &kind, &cfg, id, &filters);
                 if current_ct.is_test {
-                    if let Some(zel_packages::Target::Rule(r)) = env.info_of(&n.label).map(|i| i.target.clone()) {
+                    if let Some(zel_packages::Target::Rule(r)) =
+                        env.info_of(&n.label).map(|i| i.target.clone())
+                    {
                         for e in local.iter_mut() {
                             if e.synth == Synth::TestRunner && e.action.key_info.is_none() {
-                                e.action.key_info = Some(std::sync::Arc::new(zel_analysis::ActionKeyInfo::TestRunner(Box::new(test_runner_key(&r, &cfg, &current_ct)))));
+                                e.action.key_info = Some(std::sync::Arc::new(
+                                    zel_analysis::ActionKeyInfo::TestRunner(Box::new(
+                                        test_runner_key(&r, &cfg, &current_ct),
+                                    )),
+                                ));
                             }
                         }
                     }
@@ -416,7 +576,8 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
                 if let Some(rs) = &current_ct.runfiles_support {
                     let pkgs = env.tr.transitive_packages(&n.label, &cfg);
                     for e in local.iter_mut() {
-                        if e.action.mnemonic == "RepoMappingManifest" && e.action.key_info.is_none() {
+                        if e.action.mnemonic == "RepoMappingManifest" && e.action.key_info.is_none()
+                        {
                             use zel_analysis::nested_set::{NSet, STABLE_ORDER};
                             let roots: Vec<(String, String)> = rs
                                 .runfiles
@@ -425,14 +586,16 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
                                 .map(|k| (k.clone(), k.split('/').next().unwrap_or("").to_string()))
                                 .collect();
                             let has_syms = !rs.runfiles.symlinks.is_empty();
-                            e.action.key_info = Some(std::sync::Arc::new(zel_analysis::ActionKeyInfo::RepoMapping {
-                                packages: pkgs.clone(),
-                                runfiles_owner_repos: rs.runfiles.nested_set(),
-                                has_runfiles_symlinks: has_syms,
-                                root_symlink_segments: NSet::build(STABLE_ORDER, roots, vec![]),
-                                workspace_name: rs.workspace_name.clone(),
-                                compact: !env.tr.config.no_compact_repo_mapping,
-                            }));
+                            e.action.key_info = Some(std::sync::Arc::new(
+                                zel_analysis::ActionKeyInfo::RepoMapping {
+                                    packages: pkgs.clone(),
+                                    runfiles_owner_repos: rs.runfiles.nested_set(),
+                                    has_runfiles_symlinks: has_syms,
+                                    root_symlink_segments: NSet::build(STABLE_ORDER, roots, vec![]),
+                                    workspace_name: rs.workspace_name.clone(),
+                                    compact: !env.tr.config.no_compact_repo_mapping,
+                                },
+                            ));
                         }
                     }
                 }
@@ -444,9 +607,17 @@ fn collect(env: &mut PostEnv<'_>, nodes: &[Node]) -> Result<Vec<Entry>, String> 
 }
 
 /// The `<tool>.runfiles` inputs of the executable tools of the genrule `label`.
-fn tool_runfiles_inputs(env: &mut PostEnv<'_>, label: &Label, cfg: &BuildConfigurationKey) -> Vec<Artifact> {
-    let Some(info) = env.info_of(label) else { return Vec::new() };
-    let zel_packages::Target::Rule(r) = &info.target else { return Vec::new() };
+fn tool_runfiles_inputs(
+    env: &mut PostEnv<'_>,
+    label: &Label,
+    cfg: &BuildConfigurationKey,
+) -> Vec<Artifact> {
+    let Some(info) = env.info_of(label) else {
+        return Vec::new();
+    };
+    let zel_packages::Target::Rule(r) = &info.target else {
+        return Vec::new();
+    };
     let tool_labels: Vec<Label> = crate::target_env::rule_deps(r, true, true)
         .into_iter()
         .filter(|(_, a)| a == "tools" || a == "exec_tools")
@@ -457,7 +628,9 @@ fn tool_runfiles_inputs(env: &mut PostEnv<'_>, label: &Label, cfg: &BuildConfigu
         if !tool_labels.contains(&l) {
             continue;
         }
-        let Ok(ct) = env.tr.analyze(&l, &key) else { continue };
+        let Ok(ct) = env.tr.analyze(&l, &key) else {
+            continue;
+        };
         if let Some(rs) = &ct.runfiles_support {
             let exe = &rs.executable;
             out.push(Artifact {
@@ -466,7 +639,10 @@ fn tool_runfiles_inputs(env: &mut PostEnv<'_>, label: &Label, cfg: &BuildConfigu
                 root: exe.root,
                 is_unresolved_symlink: false,
                 exec_path: zel_vfs::PathFragment::create(&rs.runfiles_dir),
-                root_relative_path: zel_vfs::PathFragment::create(&format!("{}.runfiles", exe.root_relative_path.path_string())),
+                root_relative_path: zel_vfs::PathFragment::create(&format!(
+                    "{}.runfiles",
+                    exe.root_relative_path.path_string()
+                )),
                 owner_label: exe.owner_label.clone(),
             });
         }
@@ -501,7 +677,11 @@ fn describe_command(e: &Entry) -> String {
 /// configurations, the (single) execution platform for exec configurations.
 fn exec_platform(e: &Entry) -> Option<String> {
     if e.cfg.is_exec {
-        e.cfg.platforms.first().cloned().or_else(|| Some("@@platforms//host:host".to_string()))
+        e.cfg
+            .platforms
+            .first()
+            .cloned()
+            .or_else(|| Some("@@platforms//host:host".to_string()))
     } else {
         Some("@@platforms//host:host".to_string())
     }
@@ -517,14 +697,23 @@ fn sorted_paths(v: &[Artifact]) -> Vec<String> {
         .iter()
         .map(|a| {
             let s = a.exec_path.path_string().to_string();
-            escaped_unicode(&if a.is_tree_artifact { format!("{s} (TreeArtifact)") } else { s })
+            escaped_unicode(&if a.is_tree_artifact {
+                format!("{s} (TreeArtifact)")
+            } else {
+                s
+            })
         })
         .collect();
     p.sort();
     p
 }
 
-fn write_text(e: &Entry, popts: &PostOpts, params: &BTreeMap<String, String>, templates: &HashMap<String, String>) -> String {
+fn write_text(
+    e: &Entry,
+    popts: &PostOpts,
+    params: &BTreeMap<String, String>,
+    templates: &HashMap<String, String>,
+) -> String {
     let a = &e.action;
     let mut s = String::new();
     s.push_str(&pretty_print(a, e.cfg.is_exec));
@@ -535,7 +724,9 @@ fn write_text(e: &Entry, popts: &PostOpts, params: &BTreeMap<String, String>, te
     if let Some(p) = exec_platform(e) {
         // `ActionGraphTextOutputFormatterCallback` prints it through the label printer (display
         // form); `# Execution platform:` in `Command Line:` and the proto field use `Label.toString()`.
-        let shown = zel_cmdline::Label::parse_canonical(&p).map(|l| lp(&l)).unwrap_or(p);
+        let shown = zel_cmdline::Label::parse_canonical(&p)
+            .map(|l| lp(&l))
+            .unwrap_or(p);
         s.push_str(&format!("  Execution platform: {shown}\n"));
     }
     if let Some(asp) = &e.aspect {
@@ -543,15 +734,24 @@ fn write_text(e: &Entry, popts: &PostOpts, params: &BTreeMap<String, String>, te
     }
     s.push_str(&format!("  ActionKey: {}\n", entry_key(e)));
     if popts.include_artifacts {
-        s.push_str(&format!("  Inputs: [{}]\n", sorted_paths(&a.inputs).join(", ")));
-        s.push_str(&format!("  Outputs: [{}]\n", sorted_paths(&a.outputs).join(", ")));
+        s.push_str(&format!(
+            "  Inputs: [{}]\n",
+            sorted_paths(&a.inputs).join(", ")
+        ));
+        s.push_str(&format!(
+            "  Outputs: [{}]\n",
+            sorted_paths(&a.outputs).join(", ")
+        ));
     }
     let env = match &a.action_env {
         Some(ae) => ae.fixed_env().clone(),
         None => a.env.clone(),
     };
     if matches!(a.kind, ActionKind::Spawn { .. }) && !env.is_empty() {
-        let mut v: Vec<String> = env.iter().map(|(k, v)| escaped_unicode(&format!("{k}={v}"))).collect();
+        let mut v: Vec<String> = env
+            .iter()
+            .map(|(k, v)| escaped_unicode(&format!("{k}={v}")))
+            .collect();
         v.sort();
         s.push_str(&format!("  Environment: [{}]\n", v.join(", ")));
     }
@@ -564,7 +764,10 @@ fn write_text(e: &Entry, popts: &PostOpts, params: &BTreeMap<String, String>, te
     if popts.include_param_files {
         for i in &a.inputs {
             if let Some(c) = params.get(i.exec_path.path_string()) {
-                s.push_str(&format!("  Params File Content ({}):\n    {}\n", i.exec_path, c));
+                s.push_str(&format!(
+                    "  Params File Content ({}):\n    {}\n",
+                    i.exec_path, c
+                ));
             }
         }
     }
@@ -576,10 +779,22 @@ fn write_text(e: &Entry, popts: &PostOpts, params: &BTreeMap<String, String>, te
             .collect();
         s.push_str(&format!("  ExecutionInfo: {{{}}}\n", v.join(", ")));
     }
-    if let ActionKind::TemplateExpand { template, substitutions, computed_substitutions, .. } = &a.kind {
-        s.push_str(&format!("  Template: {}\n", template_content(template, templates)));
+    if let ActionKind::TemplateExpand {
+        template,
+        substitutions,
+        computed_substitutions,
+        ..
+    } = &a.kind
+    {
+        s.push_str(&format!(
+            "  Template: {}\n",
+            template_content(template, templates)
+        ));
         s.push_str("  Substitutions: [\n");
-        let mut subs: Vec<(String, String)> = substitutions.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut subs: Vec<(String, String)> = substitutions
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         subs.extend(computed_substitutions.iter().cloned());
         for (k, v) in subs {
             s.push_str(&format!("    {{{k}: {v}}}\n"));
@@ -588,18 +803,30 @@ fn write_text(e: &Entry, popts: &PostOpts, params: &BTreeMap<String, String>, te
     }
     match &a.kind {
         // `ParameterFileWriteAction` (Args content) is not a `FileContentsProvider`.
-        ActionKind::FileWrite { content: FileContent::Args { .. }, .. } => {}
-        ActionKind::FileWrite { content, is_executable } => {
+        ActionKind::FileWrite {
+            content: FileContent::Args { .. },
+            ..
+        } => {}
+        ActionKind::FileWrite {
+            content,
+            is_executable,
+        } => {
             // `GenQuery`'s output writer is not an `AbstractFileWriteAction.FileContentsProvider`.
             if !e.owner_kind.starts_with("genquery") {
                 s.push_str(&format!("  IsExecutable: {is_executable}\n"));
             }
             if popts.include_file_write_contents {
-                s.push_str(&format!("  FileWriteContents: [{}]\n", base64(&content.render())));
+                s.push_str(&format!(
+                    "  FileWriteContents: [{}]\n",
+                    base64(&content.render())
+                ));
             }
         }
         // 9.3.2: `TemplateExpansionAction` is no `FileContentsProvider` (no `IsExecutable`).
-        ActionKind::Symlink { target_path: Some(p), .. } => {
+        ActionKind::Symlink {
+            target_path: Some(p),
+            ..
+        } => {
             s.push_str(&format!("  UnresolvedSymlinkTarget: {p}\n"));
         }
         _ => {}
@@ -612,7 +839,10 @@ fn write_text(e: &Entry, popts: &PostOpts, params: &BTreeMap<String, String>, te
 /// generated ones.
 fn template_content(t: &Artifact, templates: &HashMap<String, String>) -> String {
     if t.is_source {
-        templates.get(t.exec_path.path_string()).cloned().unwrap_or_default()
+        templates
+            .get(t.exec_path.path_string())
+            .cloned()
+            .unwrap_or_default()
     } else {
         format!("ARTIFACT:{}", t.exec_path.path_string())
     }
@@ -627,7 +857,10 @@ fn read_templates(env: &PostEnv<'_>, entries: &[Entry]) -> HashMap<String, Strin
                 if let Some(root) = lookup.resolver.repo_root(template.owner_label.repository()) {
                     let path = root.get_relative(&template.root_relative_path);
                     if let Ok(bytes) = lookup.fs.read_file(&path) {
-                        out.insert(template.exec_path.path_string().to_string(), String::from_utf8_lossy(&bytes).to_string());
+                        out.insert(
+                            template.exec_path.path_string().to_string(),
+                            String::from_utf8_lossy(&bytes).to_string(),
+                        );
                     }
                 }
             }
@@ -641,13 +874,19 @@ fn param_files(entries: &[Entry]) -> BTreeMap<String, String> {
     for e in entries {
         let (_, params) = e.action.command_line();
         for (path, body) in params {
-            m.insert(path, String::from_utf8_lossy(&body).replace('\n', " \\\n    "));
+            m.insert(
+                path,
+                String::from_utf8_lossy(&body).replace('\n', " \\\n    "),
+            );
         }
         if let ActionKind::FileWrite { content, .. } = &e.action.kind {
             if e.action.mnemonic == "ParameterFileWrite" {
                 if let Some(o) = e.action.outputs.first() {
                     let body = String::from_utf8_lossy(&content.render()).to_string();
-                    m.insert(o.exec_path.path_string().to_string(), body.lines().collect::<Vec<_>>().join(" \\\n    "));
+                    m.insert(
+                        o.exec_path.path_string().to_string(),
+                        body.lines().collect::<Vec<_>>().join(" \\\n    "),
+                    );
                 }
             }
         }
@@ -655,7 +894,12 @@ fn param_files(entries: &[Entry]) -> BTreeMap<String, String> {
     m
 }
 
-pub(crate) fn format_aquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, _fopts: &FormatOpts) -> Result<Vec<u8>, String> {
+pub(crate) fn format_aquery(
+    env: &mut PostEnv<'_>,
+    nodes: &[Node],
+    popts: &PostOpts,
+    _fopts: &FormatOpts,
+) -> Result<Vec<u8>, String> {
     let mut entries = collect(env, nodes)?;
     if popts.prune_unused_actions {
         let mut generating: HashMap<Artifact, usize> = HashMap::new();
@@ -688,9 +932,18 @@ pub(crate) fn format_aquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostO
                 }
             }
         }
-        entries = entries.into_iter().enumerate().filter(|(i, _)| reachable.contains(i)).map(|(_, e)| e).collect();
+        entries = entries
+            .into_iter()
+            .enumerate()
+            .filter(|(i, _)| reachable.contains(i))
+            .map(|(_, e)| e)
+            .collect();
     }
-    let params = if popts.include_param_files { param_files(&entries) } else { BTreeMap::new() };
+    let params = if popts.include_param_files {
+        param_files(&entries)
+    } else {
+        BTreeMap::new()
+    };
     let templates = read_templates(env, &entries);
     match popts.output.as_str() {
         "text" => {
@@ -763,9 +1016,17 @@ fn summary(entries: &[Entry]) -> String {
     if total == 0 {
         out.push_str("No actions matched.\n");
     } else {
-        out.push_str(&format!("{total} total action{}.\n", if total == 1 { "" } else { "s" }));
+        out.push_str(&format!(
+            "{total} total action{}.\n",
+            if total == 1 { "" } else { "s" }
+        ));
     }
-    for (title, v) in [("Mnemonics:", mnemonics), ("Configurations:", configs), ("Execution Platforms:", platforms), ("Aspects:", aspects)] {
+    for (title, v) in [
+        ("Mnemonics:", mnemonics),
+        ("Configurations:", configs),
+        ("Execution Platforms:", platforms),
+        ("Aspects:", aspects),
+    ] {
         if !v.is_empty() {
             out.push('\n');
             out.push_str(title);
@@ -776,7 +1037,8 @@ fn summary(entries: &[Entry]) -> String {
                 .map(|(i, (k, _))| (crate::java_order::string_hash(k), i))
                 .collect();
             let order = crate::java_order::hashmap_order(&hashes);
-            let mut ordered: Vec<(String, usize)> = order.into_iter().map(|i| v[i].clone()).collect();
+            let mut ordered: Vec<(String, usize)> =
+                order.into_iter().map(|i| v[i].clone()).collect();
             for i in 0..ordered.len() {
                 if i + 2 < ordered.len()
                     && ordered[i].0 == "RepoMappingManifest"
@@ -805,7 +1067,13 @@ fn summary(entries: &[Entry]) -> String {
                     break;
                 }
             }
-            if title == "Configurations:" && ordered.len() == 2 && ordered[0].0 == "k8-fastbuild" && ordered[1].0 == "k8-opt" && ordered[0].1 == 1 && ordered[1].1 == 1 {
+            if title == "Configurations:"
+                && ordered.len() == 2
+                && ordered[0].0 == "k8-fastbuild"
+                && ordered[1].0 == "k8-opt"
+                && ordered[0].1 == 1
+                && ordered[1].1 == 1
+            {
                 ordered.swap(0, 1);
             }
             ordered.sort_by_key(|(_, c)| *c);
@@ -897,8 +1165,20 @@ fn push_set(ids: &mut Ids, dep_sets: &mut Vec<Msg>, id: u32, v: &[&Artifact], ch
     dep_sets.push(ds);
 }
 
-fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String, String>) -> Result<Vec<u8>, String> {
-    let mut ids = Ids { paths: HashMap::new(), path_msgs: Vec::new(), artifacts: HashMap::new(), artifact_msgs: Vec::new(), next_path_id: 1, next_artifact_id: 1, events: Vec::new() };
+fn proto_output(
+    entries: &[Entry],
+    popts: &PostOpts,
+    templates: &HashMap<String, String>,
+) -> Result<Vec<u8>, String> {
+    let mut ids = Ids {
+        paths: HashMap::new(),
+        path_msgs: Vec::new(),
+        artifacts: HashMap::new(),
+        artifact_msgs: Vec::new(),
+        next_path_id: 1,
+        next_artifact_id: 1,
+        events: Vec::new(),
+    };
     let mut target_ids: HashMap<String, u32> = HashMap::new();
     let mut targets: Vec<Msg> = Vec::new();
     let mut class_ids: HashMap<String, u32> = HashMap::new();
@@ -919,7 +1199,11 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
             let id = classes.len() as u32 + 1;
             let mut m = Msg::new();
             m.add(1, "id", PbVal::Uint32(id));
-            m.str(2, "name", e.owner_kind.trim_end_matches(" rule").to_string());
+            m.str(
+                2,
+                "name",
+                e.owner_kind.trim_end_matches(" rule").to_string(),
+            );
             ids.events.push((7, "rule_classes", m.clone()));
             classes.push(m);
             id
@@ -929,7 +1213,12 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
             let mut m = Msg::new();
             m.add(1, "id", PbVal::Uint32(id));
             // `Label.toString()`: canonical form, `//pkg:name` for the main repository.
-            m.str(2, "label", { let c = e.owner.canonical_form(); c.strip_prefix("@@//").map(|r| format!("//{r}")).unwrap_or(c) });
+            m.str(2, "label", {
+                let c = e.owner.canonical_form();
+                c.strip_prefix("@@//")
+                    .map(|r| format!("//{r}"))
+                    .unwrap_or(c)
+            });
             m.add(3, "rule_class_id", PbVal::Uint32(class_id));
             ids.events.push((3, "targets", m.clone()));
             targets.push(m);
@@ -977,7 +1266,9 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
             Some(ae) => ae.fixed_env().clone(),
             None => a.env.clone(),
         };
-        if matches!(a.kind, ActionKind::Spawn { .. }) && !matches!(e.synth, Synth::SymlinkTree | Synth::RunfilesTree) {
+        if matches!(a.kind, ActionKind::Spawn { .. })
+            && !matches!(e.synth, Synth::SymlinkTree | Synth::RunfilesTree)
+        {
             let mut sorted: Vec<(String, String)> = env.into_iter().collect();
             sorted.sort();
             for (k, v) in sorted {
@@ -989,20 +1280,25 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
                 // `KnownNestedSets`: the id of a set is allocated first, then its transitive sets
                 // and its direct artifacts are visited (leaves keep the action's input order),
                 // then the proto is streamed. Every action owns its input set.
-                fn dedup<'x>(v: Vec<&'x Artifact>) -> Vec<&'x Artifact> {
+                fn dedup(v: Vec<&Artifact>) -> Vec<&Artifact> {
                     let mut seen = std::collections::HashSet::new();
-                    v.into_iter().filter(|x| seen.insert(x.exec_path.path_string().to_string())).collect()
+                    v.into_iter()
+                        .filter(|x| seen.insert(x.exec_path.path_string().to_string()))
+                        .collect()
                 }
-                let dsid = if a.mnemonic == "Genrule" && !a.tools.is_empty() || a.mnemonic == "Genrule" {
+                let dsid = if a.mnemonic == "Genrule" {
                     // `GenRuleBase`: inputs = {transitive: srcs, tools(+runfiles); direct: genrule-setup.sh}.
-                    let is_setup = |x: &&Artifact| x.exec_path.path_string().ends_with("genrule-setup.sh");
+                    let is_setup =
+                        |x: &&Artifact| x.exec_path.path_string().ends_with("genrule-setup.sh");
                     let setup: Vec<&Artifact> = a.inputs.iter().filter(is_setup).collect();
-                    let tool_paths: std::collections::HashSet<&str> = a.tools.iter().map(|t| t.exec_path.path_string()).collect();
+                    let tool_paths: std::collections::HashSet<&str> =
+                        a.tools.iter().map(|t| t.exec_path.path_string()).collect();
                     let tools_set: Vec<&Artifact> = a
                         .tools
                         .iter()
                         .chain(a.inputs.iter().filter(|x| {
-                            x.exec_path.path_string().ends_with(".runfiles") && !tool_paths.contains(x.exec_path.path_string())
+                            x.exec_path.path_string().ends_with(".runfiles")
+                                && !tool_paths.contains(x.exec_path.path_string())
                         }))
                         .collect();
                     let srcs: Vec<&Artifact> = a
@@ -1015,13 +1311,15 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
                         })
                         .collect();
                     let (srcs, tools_set, setup) = (dedup(srcs), dedup(tools_set), dedup(setup));
-                    let n_children = usize::from(!srcs.is_empty()) + usize::from(!tools_set.is_empty());
+                    let n_children =
+                        usize::from(!srcs.is_empty()) + usize::from(!tools_set.is_empty());
                     if n_children == 0 || (setup.is_empty() && n_children == 1) {
                         if n_children == 0 && setup.len() == 1 {
                             if let Some(existing) = setup_dep_set_id {
                                 existing
                             } else {
-                                let all: Vec<&Artifact> = dedup(srcs.into_iter().chain(tools_set).chain(setup).collect());
+                                let all: Vec<&Artifact> =
+                                    dedup(srcs.into_iter().chain(tools_set).chain(setup).collect());
                                 let id = dep_set_next;
                                 dep_set_next += 1;
                                 push_set(&mut ids, &mut dep_sets, id, &all, &[]);
@@ -1029,7 +1327,8 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
                                 id
                             }
                         } else {
-                            let all: Vec<&Artifact> = dedup(srcs.into_iter().chain(tools_set).chain(setup).collect());
+                            let all: Vec<&Artifact> =
+                                dedup(srcs.into_iter().chain(tools_set).chain(setup).collect());
                             let id = dep_set_next;
                             dep_set_next += 1;
                             push_set(&mut ids, &mut dep_sets, id, &all, &[]);
@@ -1058,9 +1357,13 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
                         x.exec_path.path_string().ends_with("/MANIFEST")
                             || x.exec_path.path_string().ends_with(".repo_mapping")
                     };
-                    let child_arts: Vec<&Artifact> = all.iter().copied().filter(|x| !is_direct(x)).collect();
-                    let mut direct_arts: Vec<&Artifact> = all.iter().copied().filter(is_direct).collect();
-                    direct_arts.sort_by_key(|x| usize::from(x.exec_path.path_string().ends_with(".repo_mapping")));
+                    let child_arts: Vec<&Artifact> =
+                        all.iter().copied().filter(|x| !is_direct(x)).collect();
+                    let mut direct_arts: Vec<&Artifact> =
+                        all.iter().copied().filter(is_direct).collect();
+                    direct_arts.sort_by_key(|x| {
+                        usize::from(x.exec_path.path_string().ends_with(".repo_mapping"))
+                    });
                     let parent_id = dep_set_next;
                     dep_set_next += 1;
                     let child_id = dep_set_next;
@@ -1069,11 +1372,29 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
                         let grand_id = dep_set_next;
                         dep_set_next += 1;
                         push_set(&mut ids, &mut dep_sets, grand_id, &child_arts, &[]);
-                        push_set(&mut ids, &mut dep_sets, child_id, &[child_arts[1]], &[grand_id]);
-                        push_set(&mut ids, &mut dep_sets, parent_id, &direct_arts, &[child_id]);
+                        push_set(
+                            &mut ids,
+                            &mut dep_sets,
+                            child_id,
+                            &[child_arts[1]],
+                            &[grand_id],
+                        );
+                        push_set(
+                            &mut ids,
+                            &mut dep_sets,
+                            parent_id,
+                            &direct_arts,
+                            &[child_id],
+                        );
                     } else {
                         push_set(&mut ids, &mut dep_sets, child_id, &child_arts, &[]);
-                        push_set(&mut ids, &mut dep_sets, parent_id, &direct_arts, &[child_id]);
+                        push_set(
+                            &mut ids,
+                            &mut dep_sets,
+                            parent_id,
+                            &direct_arts,
+                            &[child_id],
+                        );
                     }
                     parent_id
                 } else if e.synth == Synth::RunfilesTree {
@@ -1129,24 +1450,50 @@ fn proto_output(entries: &[Entry], popts: &PostOpts, templates: &HashMap<String,
             m.str(14, "execution_platform", p);
         }
         match &a.kind {
-            ActionKind::TemplateExpand { template, substitutions, computed_substitutions, is_executable } => {
-                m.str(15, "template_content", template_content(template, templates));
-                for (k, v) in substitutions.iter().chain(computed_substitutions.iter()).map(|(k, v)| (k, v)) {
+            ActionKind::TemplateExpand {
+                template,
+                substitutions,
+                computed_substitutions,
+                is_executable,
+            } => {
+                m.str(
+                    15,
+                    "template_content",
+                    template_content(template, templates),
+                );
+                for (k, v) in substitutions
+                    .iter()
+                    .chain(computed_substitutions.iter())
+                    .map(|(k, v)| (k, v))
+                {
                     m.rmsg(16, "substitutions", kv(k, v));
                 }
                 let _ = is_executable;
             }
             ActionKind::FileWrite { .. } if e.owner_kind.starts_with("genquery") => {}
-            ActionKind::FileWrite { content: FileContent::Args { .. }, .. } => {}
-            ActionKind::FileWrite { content, is_executable } => {
+            ActionKind::FileWrite {
+                content: FileContent::Args { .. },
+                ..
+            } => {}
+            ActionKind::FileWrite {
+                content,
+                is_executable,
+            } => {
                 if popts.include_file_write_contents {
-                    m.str(17, "file_contents", String::from_utf8_lossy(&content.render()).to_string());
+                    m.str(
+                        17,
+                        "file_contents",
+                        String::from_utf8_lossy(&content.render()).to_string(),
+                    );
                 }
                 if *is_executable {
                     m.bool(19, "is_executable", true);
                 }
             }
-            ActionKind::Symlink { target_path: Some(p), .. } => {
+            ActionKind::Symlink {
+                target_path: Some(p),
+                ..
+            } => {
                 m.str(18, "unresolved_symlink_target", p.clone());
             }
             _ => {}

@@ -30,6 +30,7 @@ pub enum AttrType {
     IntList,
     StringDict,
     StringListDict,
+    LabelListDict,
     Label,
     LabelList,
     LabelKeyedStringDict,
@@ -45,11 +46,12 @@ impl AttrType {
             Self::Int => "int",
             Self::String => "string",
             Self::Bool => "bool",
-            Self::Tristate => "int",
+            Self::Tristate => "tristate",
             Self::StringList => "list(string)",
             Self::IntList => "list(int)",
             Self::StringDict => "dict(string, string)",
             Self::StringListDict => "dict(string, list(string))",
+            Self::LabelListDict => "dict(string, list(label))",
             Self::Label => "label",
             Self::LabelList => "list(label)",
             Self::LabelKeyedStringDict => "dict(label, string)",
@@ -71,6 +73,7 @@ pub enum AttrValue {
     IntList(Vec<i64>),
     StrDict(BTreeMap<String, String>),
     StrListDict(BTreeMap<String, Vec<String>>),
+    LabelListDict(Vec<(String, Vec<Label>)>),
     Label(Option<Label>),
     LabelList(Vec<Label>),
     LabelKeyedStrDict(Vec<(Label, String)>),
@@ -167,7 +170,7 @@ impl Attribute {
             ty,
             mandatory: false,
             non_empty: false,
-            configurable: true,
+            configurable: !matches!(ty, AttrType::Output | AttrType::OutputList),
             default: None,
             allowed_files: FileTypes::Any,
             files_unspecified: false,
@@ -239,6 +242,7 @@ impl Attribute {
             AttrType::IntList => AttrValue::IntList(Vec::new()),
             AttrType::StringDict => AttrValue::StrDict(BTreeMap::new()),
             AttrType::StringListDict => AttrValue::StrListDict(BTreeMap::new()),
+            AttrType::LabelListDict => AttrValue::LabelListDict(Vec::new()),
             AttrType::Label => AttrValue::Label(None),
             AttrType::LabelList => AttrValue::LabelList(Vec::new()),
             AttrType::LabelKeyedStringDict => AttrValue::LabelKeyedStrDict(Vec::new()),
@@ -276,6 +280,15 @@ fn seq(v: &Value) -> Option<Vec<Value>> {
     match v {
         Value::List(l) => Some(l.lock().unwrap().elements.clone()),
         Value::Tuple(t) => Some(t.clone()),
+        Value::Set(s) => Some(s.lock().unwrap().elements.clone()),
+        Value::Range(r) => Some(
+            r.to_vec()
+                .into_iter()
+                .map(|i| Value::Int(zel_starlark::BigInt::from_i64(i)))
+                .collect(),
+        ),
+        Value::Dict(d) => Some(d.lock().unwrap().keys()),
+        Value::Depset(ds) => Some(ds.to_list()),
         _ => None,
     }
 }
@@ -289,17 +302,15 @@ fn dict_items(v: &Value) -> Option<Vec<(Value, Value)>> {
 
 /// Converts a label string relative to the current package (`LabelConverter`).
 pub fn convert_label(s: &str, ctx: &ConvertCtx<'_>) -> Result<Label, String> {
-    if s.starts_with("//") || s.starts_with('@') {
-        Label::parse_with_repo_mapping(s, ctx.mapping).map_err(|e| e.to_string())
-    } else if let Some(name) = s.strip_prefix(':') {
-        Label::create(ctx.pkg.clone(), name).map_err(|e| e.to_string())
-    } else {
-        // `foo/bar.cc` is shorthand for `:foo/bar.cc`.
-        Label::create(ctx.pkg.clone(), s).map_err(|e| e.to_string())
-    }
+    Label::parse_with_package_context(s, ctx.pkg, ctx.mapping).map_err(|e| e.to_string())
 }
 
-fn convert_one_label(v: &Value, attr: &str, idx: Option<usize>, ctx: &ConvertCtx<'_>) -> Result<Label, String> {
+fn convert_one_label(
+    v: &Value,
+    attr: &str,
+    idx: Option<usize>,
+    ctx: &ConvertCtx<'_>,
+) -> Result<Label, String> {
     match v {
         Value::Label(l) => Ok(l.clone()),
         Value::String(s) => convert_label(s, ctx).map_err(|e| match idx {
@@ -369,11 +380,7 @@ pub fn convert_plain(
             Value::Bool(b) => Ok(AttrValue::Tristate(i32::from(*b))),
             Value::Int(i) => match i.to_i64() {
                 Some(n @ -1..=1) => Ok(AttrValue::Tristate(n as i32)),
-                _ => Err(format!(
-                    "expected value of type 'int' in range [-1, 1] for attribute '{attr}' in '{}' rule, but got {}",
-                    ctx.rule_class,
-                    v.repr()
-                )),
+                _ => Err("TriState values is not one of [-1, 0, 1]".to_string()),
             },
             _ => Err(err()),
         },
@@ -401,7 +408,13 @@ pub fn convert_plain(
             for (i, it) in items.iter().enumerate() {
                 match it {
                     Value::Int(n) => match n.to_i64() {
-                        Some(n) => out.push(n),
+                        Some(n) if i32::try_from(n).is_ok() => out.push(n),
+                        Some(n) => {
+                            return Err(format!(
+                                "integer value '{n}' for element {i} of attribute '{attr}' in '{}' rule is out of range for a 32-bit integer",
+                                ctx.rule_class
+                            ))
+                        }
                         None => return Err(err()),
                     },
                     other => {
@@ -455,6 +468,32 @@ pub fn convert_plain(
             }
             Ok(AttrValue::StrListDict(out))
         }
+        AttrType::LabelListDict => {
+            let items = dict_items(v).ok_or_else(err)?;
+            let mut out = Vec::new();
+            for (k, val) in items {
+                let Value::String(k) = k else {
+                    return Err(format!(
+                        "expected value of type 'string' for dict key element, but got {} ({})",
+                        k.repr(),
+                        type_of(&k)
+                    ));
+                };
+                let list = seq(&val).ok_or_else(|| {
+                    format!(
+                        "expected value of type 'list(label)' for dict value element, but got {} ({})",
+                        val.repr(),
+                        type_of(&val)
+                    )
+                })?;
+                let mut labels = Vec::with_capacity(list.len());
+                for (i, e) in list.iter().enumerate() {
+                    labels.push(convert_one_label(e, attr, Some(i), ctx)?);
+                }
+                out.push((k, labels));
+            }
+            Ok(AttrValue::LabelListDict(out))
+        }
         AttrType::Label => match v {
             Value::None => Ok(AttrValue::Label(None)),
             _ => Ok(AttrValue::Label(Some(convert_one_label(v, attr, None, ctx)?))),
@@ -470,10 +509,32 @@ pub fn convert_plain(
         AttrType::LabelKeyedStringDict => {
             let items = dict_items(v).ok_or_else(err)?;
             let mut out = Vec::new();
+            let mut seen: std::collections::HashMap<Label, Vec<String>> =
+                std::collections::HashMap::new();
             for (i, (k, val)) in items.iter().enumerate() {
                 let l = convert_one_label(k, attr, Some(i), ctx)?;
                 let Value::String(s) = val else { return Err(err()) };
+                seen.entry(l.clone()).or_default().push(k.repr());
                 out.push((l, s.clone()));
+            }
+            if out.len() > seen.len() {
+                let mut dups = Vec::new();
+                for (l, _) in &out {
+                    if let Some(origs) = seen.remove(l) {
+                        if origs.len() > 1 {
+                            dups.push(format!(
+                                "{} (as [{}])",
+                                l.canonical_form(),
+                                origs.join(", ")
+                            ));
+                        }
+                    }
+                }
+                return Err(format!(
+                    "duplicate labels in attribute '{attr}' of '{}': {}",
+                    ctx.rule_class,
+                    dups.join(", ")
+                ));
             }
             Ok(AttrValue::LabelKeyedStrDict(out))
         }
@@ -492,40 +553,208 @@ pub fn convert_plain(
     }
 }
 
-/// Converts any Starlark value (including `select()` chains) to `ty`.
-pub fn convert_value(
+fn type_supports_concat(ty: AttrType) -> bool {
+    matches!(
+        ty,
+        AttrType::Int
+            | AttrType::String
+            | AttrType::StringList
+            | AttrType::IntList
+            | AttrType::StringDict
+            | AttrType::StringListDict
+            | AttrType::LabelList
+            | AttrType::LabelKeyedStringDict
+            | AttrType::StringKeyedLabelDict
+            | AttrType::OutputList
+    )
+}
+
+fn concat_attr_values(ty: AttrType, vals: Vec<AttrValue>) -> Result<AttrValue, String> {
+    if vals.len() == 1 {
+        return Ok(vals.into_iter().next().unwrap());
+    }
+    match ty {
+        AttrType::Int => {
+            let mut sum: i32 = 0;
+            for v in vals {
+                if let AttrValue::Int(n) = v {
+                    sum = sum.wrapping_add(n as i32);
+                }
+            }
+            Ok(AttrValue::Int(i64::from(sum)))
+        }
+        AttrType::String => {
+            let mut out = String::new();
+            for v in vals {
+                if let AttrValue::Str(s) = v {
+                    out.push_str(&s);
+                }
+            }
+            Ok(AttrValue::Str(out))
+        }
+        AttrType::StringList => {
+            let mut out = Vec::new();
+            for v in vals {
+                if let AttrValue::StrList(l) = v {
+                    out.extend(l);
+                }
+            }
+            Ok(AttrValue::StrList(out))
+        }
+        AttrType::IntList => {
+            let mut out = Vec::new();
+            for v in vals {
+                if let AttrValue::IntList(l) = v {
+                    out.extend(l);
+                }
+            }
+            Ok(AttrValue::IntList(out))
+        }
+        AttrType::LabelList => {
+            let mut out = Vec::new();
+            for v in vals {
+                if let AttrValue::LabelList(l) = v {
+                    out.extend(l);
+                }
+            }
+            Ok(AttrValue::LabelList(out))
+        }
+        AttrType::OutputList => {
+            let mut out = Vec::new();
+            for v in vals {
+                if let AttrValue::OutputList(l) = v {
+                    out.extend(l);
+                }
+            }
+            Ok(AttrValue::OutputList(out))
+        }
+        AttrType::StringDict => {
+            let mut out = BTreeMap::new();
+            for v in vals {
+                if let AttrValue::StrDict(d) = v {
+                    out.extend(d);
+                }
+            }
+            Ok(AttrValue::StrDict(out))
+        }
+        AttrType::StringListDict => {
+            let mut out = BTreeMap::new();
+            for v in vals {
+                if let AttrValue::StrListDict(d) = v {
+                    out.extend(d);
+                }
+            }
+            Ok(AttrValue::StrListDict(out))
+        }
+        AttrType::LabelKeyedStringDict => {
+            let mut out: Vec<(Label, String)> = Vec::new();
+            for v in vals {
+                if let AttrValue::LabelKeyedStrDict(d) = v {
+                    for (k, val) in d {
+                        if let Some(pos) = out.iter().position(|(ek, _)| *ek == k) {
+                            out[pos].1 = val;
+                        } else {
+                            out.push((k, val));
+                        }
+                    }
+                }
+            }
+            Ok(AttrValue::LabelKeyedStrDict(out))
+        }
+        AttrType::StringKeyedLabelDict => {
+            let mut out: Vec<(String, Label)> = Vec::new();
+            for v in vals {
+                if let AttrValue::StrKeyedLabelDict(d) = v {
+                    for (k, val) in d {
+                        if let Some(pos) = out.iter().position(|(ek, _)| *ek == k) {
+                            out[pos].1 = val;
+                        } else {
+                            out.push((k, val));
+                        }
+                    }
+                }
+            }
+            Ok(AttrValue::StrKeyedLabelDict(out))
+        }
+        _ => Err(format!(
+            "type '{}' doesn't support select concatenation",
+            ty.name()
+        )),
+    }
+}
+
+/// Converts any Starlark value (including `select()` chains) to `ty`, simplifying unconditional
+/// selects (`BuildType.selectableConvert(..., simplifyUnconditionalSelects = true)`).
+/// Returns `Ok(None)` when the value simplifies to `select({"//conditions:default": None})` on a
+/// type whose type default is null (`Label` / `Output`), so callers can keep the attribute unset.
+pub fn convert_value_opt(
     v: &Value,
     attr: &Attribute,
     ctx: &ConvertCtx<'_>,
-) -> Result<AttrValue, String> {
+) -> Result<Option<AttrValue>, String> {
     if let Value::SelectorList(sl) = v {
         if !attr.configurable {
             return Err(format!("attribute \"{}\" is not configurable", attr.name));
         }
+        if sl.elements.len() > 1 && !type_supports_concat(attr.ty) {
+            return Err(format!(
+                "type '{}' doesn't support select concatenation",
+                attr.ty.name()
+            ));
+        }
         let mut parts = Vec::new();
+        let mut all_unconditional = !sl.elements.is_empty();
+        let mut uncond_vals: Vec<AttrValue> = Vec::with_capacity(sl.elements.len());
+        let mut single_uncond_none = false;
+
         for el in &sl.elements {
             match el {
                 SelectorElement::Native(val) => {
-                    parts.push(SelectPart::Plain(convert_plain(val, attr.ty, &attr.name, ctx)?))
+                    let converted = convert_plain(val, attr.ty, &attr.name, ctx)?;
+                    uncond_vals.push(converted.clone());
+                    parts.push(SelectPart::Plain(converted));
                 }
                 SelectorElement::Select(map) => {
-                    let mut entries = Vec::new();
+                    if map.is_empty() {
+                        return Err("select({}) with an empty dictionary can never resolve because it includes no conditions to match".to_string());
+                    }
+                    let mut entries = Vec::with_capacity(map.len());
+                    let mut seen_keys = std::collections::HashSet::new();
                     let no_match_error = String::new();
+                    let mut branch_was_none = false;
                     for (k, val) in map {
-                        let key = if k == "//conditions:default" {
-                            Label::parse_canonical(&k).map_err(|e| e.to_string())?
-                        } else {
-                            convert_label(&k, ctx).map_err(|e| {
-                                format!("invalid label '{k}' in select() key of attribute '{}': {e}", attr.name)
-                            })?
-                        };
-                        // `None` in a select branch means the attribute's default value.
+                        let key = convert_label(k, ctx).map_err(|e| {
+                            format!(
+                                "invalid label '{k}' in select() key of attribute '{}': {e}",
+                                attr.name
+                            )
+                        })?;
+                        if !seen_keys.insert(key.clone()) {
+                            return Err(format!(
+                                "Multiple entries with same key: {}",
+                                key.canonical_form()
+                            ));
+                        }
+                        // `None` in a select branch means the type/attribute default value.
                         let converted = if matches!(val, Value::None) {
+                            branch_was_none = true;
                             attr.default_value()
                         } else {
                             convert_plain(val, attr.ty, &attr.name, ctx)?
                         };
                         entries.push((key, converted));
+                    }
+                    if entries.len() == 1 && entries[0].0.canonical_form() == "//conditions:default"
+                    {
+                        if sl.elements.len() == 1
+                            && branch_was_none
+                            && matches!(attr.ty, AttrType::Label | AttrType::Output)
+                        {
+                            single_uncond_none = true;
+                        }
+                        uncond_vals.push(entries[0].1.clone());
+                    } else {
+                        all_unconditional = false;
                     }
                     parts.push(SelectPart::Select {
                         entries,
@@ -534,9 +763,24 @@ pub fn convert_value(
                 }
             }
         }
-        return Ok(AttrValue::Select(parts));
+        if all_unconditional {
+            if single_uncond_none {
+                return Ok(None);
+            }
+            return concat_attr_values(attr.ty, uncond_vals).map(Some);
+        }
+        return Ok(Some(AttrValue::Select(parts)));
     }
-    convert_plain(v, attr.ty, &attr.name, ctx)
+    convert_plain(v, attr.ty, &attr.name, ctx).map(Some)
+}
+
+/// Converts any Starlark value (including `select()` chains) to `ty`.
+pub fn convert_value(
+    v: &Value,
+    attr: &Attribute,
+    ctx: &ConvertCtx<'_>,
+) -> Result<AttrValue, String> {
+    convert_value_opt(v, attr, ctx).map(|o| o.unwrap_or_else(|| attr.default_value()))
 }
 
 impl AttrValue {
@@ -556,7 +800,11 @@ impl AttrValue {
             Self::Bool(b) => Value::Bool(*b),
             Self::Tristate(t) => Value::Int(zel_starlark::BigInt::from_i64(i64::from(*t))),
             Self::StrList(l) => list(l.iter().map(|s| Value::String(s.clone())).collect()),
-            Self::IntList(l) => list(l.iter().map(|n| Value::Int(zel_starlark::BigInt::from_i64(*n))).collect()),
+            Self::IntList(l) => list(
+                l.iter()
+                    .map(|n| Value::Int(zel_starlark::BigInt::from_i64(*n)))
+                    .collect(),
+            ),
             Self::StrDict(d) => dict(
                 d.iter()
                     .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
@@ -572,13 +820,29 @@ impl AttrValue {
                     })
                     .collect(),
             ),
+            Self::LabelListDict(d) => dict(
+                d.iter()
+                    .map(|(k, v)| {
+                        (
+                            Value::String(k.clone()),
+                            list(
+                                v.iter()
+                                    .map(|l| Value::String(l.canonical_form()))
+                                    .collect(),
+                            ),
+                        )
+                    })
+                    .collect(),
+            ),
             Self::Label(l) | Self::Output(l) => match l {
                 Some(l) => Value::String(l.canonical_form()),
                 None => Value::None,
             },
-            Self::LabelList(l) | Self::OutputList(l) => {
-                list(l.iter().map(|l| Value::String(l.canonical_form())).collect())
-            }
+            Self::LabelList(l) | Self::OutputList(l) => list(
+                l.iter()
+                    .map(|l| Value::String(l.canonical_form()))
+                    .collect(),
+            ),
             Self::LabelKeyedStrDict(d) => dict(
                 d.iter()
                     .map(|(k, v)| (Value::String(k.canonical_form()), Value::String(v.clone())))
@@ -650,6 +914,7 @@ impl AttrValue {
             Self::LabelList(l) => l.clone(),
             Self::LabelKeyedStrDict(d) => d.iter().map(|(k, _)| k.clone()).collect(),
             Self::StrKeyedLabelDict(d) => d.iter().map(|(_, v)| v.clone()).collect(),
+            Self::LabelListDict(d) => d.iter().flat_map(|(_, vs)| vs.iter().cloned()).collect(),
             Self::Select(parts) => {
                 let mut out = Vec::new();
                 for p in parts {
@@ -681,6 +946,7 @@ impl AttrValue {
             Self::StrList(l) => l.is_empty(),
             Self::StrDict(d) => d.is_empty(),
             Self::StrListDict(d) => d.is_empty(),
+            Self::LabelListDict(d) => d.is_empty(),
             Self::LabelList(l) | Self::OutputList(l) => l.is_empty(),
             Self::LabelKeyedStrDict(d) => d.is_empty(),
             Self::StrKeyedLabelDict(d) => d.is_empty(),

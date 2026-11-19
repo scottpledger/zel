@@ -42,16 +42,20 @@ impl ExecLogOptions {
     pub fn from_flags(get: &dyn Fn(&str) -> Option<String>) -> Self {
         let ne = |n: &str| get(n).filter(|s| !s.is_empty());
         Self {
-            json_file: ne("execution_log_json_file").or_else(|| ne("experimental_execution_log_json_file")),
+            json_file: ne("execution_log_json_file")
+                .or_else(|| ne("experimental_execution_log_json_file")),
             binary_file: ne("execution_log_binary_file")
                 .or_else(|| ne("experimental_execution_log_file"))
                 .or_else(|| ne("experimental_execution_log_binary_file")),
-            compact_file: ne("execution_log_compact_file").or_else(|| ne("experimental_execution_log_compact_file")),
+            compact_file: ne("execution_log_compact_file")
+                .or_else(|| ne("experimental_execution_log_compact_file")),
             include_spawn_metrics: !matches!(
                 get("experimental_execution_log_spawn_metrics").as_deref(),
                 Some("false") | Some("0") | Some("no")
             ),
-            hash_function_name: get("digest_function").unwrap_or_else(|| "SHA256".to_string()).to_ascii_uppercase(),
+            hash_function_name: get("digest_function")
+                .unwrap_or_else(|| "SHA256".to_string())
+                .to_ascii_uppercase(),
         }
     }
 
@@ -208,7 +212,7 @@ pub fn zstd_store(data: &[u8]) -> Vec<u8> {
     let mut chunks = data.chunks(MAX).peekable();
     while let Some(c) = chunks.next() {
         let last = chunks.peek().is_none();
-        let hdr = (c.len() as u32) << 3 | (last as u32); // block type 0 = raw
+        let hdr = ((c.len() as u32) << 3) | (last as u32); // block type 0 = raw
         out.extend_from_slice(&hdr.to_le_bytes()[..3]);
         out.extend_from_slice(c);
     }
@@ -277,7 +281,12 @@ impl ExecutionLogWriter {
             json: Mutex::new(open(&opts.json_file)?),
             binary: Mutex::new(open(&opts.binary_file)?),
             compact_path: opts.compact_file.clone(),
-            compact: Mutex::new(Compact { entries: Vec::new(), next_id: 1, files: HashMap::new(), started: false }),
+            compact: Mutex::new(Compact {
+                entries: Vec::new(),
+                next_id: 1,
+                files: HashMap::new(),
+                started: false,
+            }),
             opts,
             invocation_id: invocation_id.to_string(),
             errors: Mutex::new(Vec::new()),
@@ -324,7 +333,10 @@ impl ExecutionLogWriter {
         let mut fe = Msg::new("tools.protos.ExecLogEntry.File");
         fe.set_str("path", f.path.clone());
         if !f.hash.is_empty() {
-            fe.set_msg("digest", digest(&f.hash, f.size, &self.opts.hash_function_name));
+            fe.set_msg(
+                "digest",
+                digest(&f.hash, f.size, &self.opts.hash_function_name),
+            );
         }
         let mut e = Msg::new("tools.protos.ExecLogEntry");
         e.set_msg("file", fe);
@@ -358,7 +370,7 @@ impl ExecutionLogWriter {
                 input_ids.push(id);
             }
         }
-        let mut set = |ids: &[u32], c: &mut Compact| -> u32 {
+        let set = |ids: &[u32], c: &mut Compact| -> u32 {
             if ids.is_empty() {
                 return 0;
             }
@@ -430,7 +442,14 @@ impl ExecutionLogWriter {
     pub fn discard(&self) {
         *self.json.lock().unwrap() = None;
         *self.binary.lock().unwrap() = None;
-        for p in [&self.opts.json_file, &self.opts.binary_file, &self.opts.compact_file].into_iter().flatten() {
+        for p in [
+            &self.opts.json_file,
+            &self.opts.binary_file,
+            &self.opts.compact_file,
+        ]
+        .into_iter()
+        .flatten()
+        {
             let _ = std::fs::remove_file(p);
         }
     }
@@ -457,11 +476,27 @@ mod tests {
             env: vec![("PATH".into(), "/bin".into()), ("A".into(), "1".into())],
             platform: vec![("os".into(), "linux".into())],
             inputs: vec![
-                SpawnFile { path: "p/in.txt".into(), hash: input_hash.into(), size: 3, ..Default::default() },
-                SpawnFile { path: "tools/t".into(), hash: "ff".into(), size: 9, is_tool: true, ..Default::default() },
+                SpawnFile {
+                    path: "p/in.txt".into(),
+                    hash: input_hash.into(),
+                    size: 3,
+                    ..Default::default()
+                },
+                SpawnFile {
+                    path: "tools/t".into(),
+                    hash: "ff".into(),
+                    size: 9,
+                    is_tool: true,
+                    ..Default::default()
+                },
             ],
             listed_outputs: vec!["bazel-out/k8-fastbuild/bin/p/out".into()],
-            actual_outputs: vec![SpawnFile { path: "bazel-out/k8-fastbuild/bin/p/out".into(), hash: "aa".into(), size: 3, ..Default::default() }],
+            actual_outputs: vec![SpawnFile {
+                path: "bazel-out/k8-fastbuild/bin/p/out".into(),
+                hash: "aa".into(),
+                size: 3,
+                ..Default::default()
+            }],
             remotable: true,
             cacheable: true,
             remote_cacheable: true,
@@ -502,8 +537,14 @@ mod tests {
         assert_eq!(lines.len(), 2);
         assert!(lines[0].starts_with("{\"commandArgs\":[\"/bin/bash\",\"-c\",\"echo hi > out\"],\"environmentVariables\":[{\"name\":\"A\",\"value\":\"1\"},{\"name\":\"PATH\",\"value\":\"/bin\"}]"), "{}", lines[0]);
         assert!(lines[0].contains("\"timeoutMillis\":\"1500\""));
-        assert!(lines[0].contains("\"digest\":{\"hash\":\"dd\",\"sizeBytes\":\"100\",\"hashFunctionName\":\"SHA256\"}"));
-        assert!(lines[0].contains("\"metrics\":{\"totalTime\":\"1.234s\"}"), "{}", lines[0]);
+        assert!(lines[0].contains(
+            "\"digest\":{\"hash\":\"dd\",\"sizeBytes\":\"100\",\"hashFunctionName\":\"SHA256\"}"
+        ));
+        assert!(
+            lines[0].contains("\"metrics\":{\"totalTime\":\"1.234s\"}"),
+            "{}",
+            lines[0]
+        );
         assert!(lines[0].contains("\"isTool\":true"));
 
         // Binary: delimited SpawnExec that round-trips to the same JSON.
@@ -531,7 +572,10 @@ mod tests {
             pos += len;
         }
         assert!(entries[0].has("invocation"));
-        assert_eq!(entries[0].get_msg("invocation").unwrap().get_str("id"), "inv-1");
+        assert_eq!(
+            entries[0].get_msg("invocation").unwrap().get_str("id"),
+            "inv-1"
+        );
         let files = entries.iter().filter(|e| e.has("file")).count();
         // tools/t, p/in.txt, out (shared across the two spawns) => 3 distinct files.
         assert_eq!(files, 3);
@@ -550,7 +594,12 @@ mod tests {
         for data in [Vec::new(), b"hello".to_vec(), vec![7u8; 300_000]] {
             let z = zstd_store(&data);
             assert_eq!(zstd_unstore(&z).unwrap(), data);
-            let Ok(mut c) = Command::new("zstd").args(["-dc"]).stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() else {
+            let Ok(mut c) = Command::new("zstd")
+                .args(["-dc"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+            else {
                 return;
             };
             let mut stdin = c.stdin.take().unwrap();
@@ -564,7 +613,12 @@ mod tests {
 
     #[test]
     fn option_aliases() {
-        let m: std::collections::HashMap<&str, &str> = [("experimental_execution_log_file", "/a.bin"), ("execution_log_compact_file", "/c.zst")].into_iter().collect();
+        let m: std::collections::HashMap<&str, &str> = [
+            ("experimental_execution_log_file", "/a.bin"),
+            ("execution_log_compact_file", "/c.zst"),
+        ]
+        .into_iter()
+        .collect();
         let o = ExecLogOptions::from_flags(&|n| m.get(n).map(|s| s.to_string()));
         assert_eq!(o.binary_file.as_deref(), Some("/a.bin"));
         assert_eq!(o.compact_file.as_deref(), Some("/c.zst"));

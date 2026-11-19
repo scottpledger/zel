@@ -31,8 +31,10 @@ use zel_remote::grpc::{CallOptions, Channel, GrpcStatus, RetryPolicy};
 use zel_remote::options::Endpoint;
 use zel_remote::transport::Connector;
 
-pub const PUBLISH_LIFECYCLE: &str = "/google.devtools.build.v1.PublishBuildEvent/PublishLifecycleEvent";
-pub const PUBLISH_STREAM: &str = "/google.devtools.build.v1.PublishBuildEvent/PublishBuildToolEventStream";
+pub const PUBLISH_LIFECYCLE: &str =
+    "/google.devtools.build.v1.PublishBuildEvent/PublishLifecycleEvent";
+pub const PUBLISH_STREAM: &str =
+    "/google.devtools.build.v1.PublishBuildEvent/PublishBuildToolEventStream";
 const BEP_TYPE_URL: &str = "type.googleapis.com/build_event_stream.BuildEvent";
 const BES_MAX_RETRIES: u32 = 4;
 
@@ -53,11 +55,19 @@ pub struct BesConfig {
 }
 
 impl BesConfig {
-    pub fn from_options(o: &crate::bep::BepOptions, build_id: &str, invocation_id: &str, command: &str) -> Option<Self> {
+    pub fn from_options(
+        o: &crate::bep::BepOptions,
+        build_id: &str,
+        invocation_id: &str,
+        command: &str,
+    ) -> Option<Self> {
         Some(Self {
             backend: o.bes_backend.clone()?,
             results_url: o.bes_results_url.clone(),
-            timeout: o.bes_timeout_secs.filter(|s| *s > 0).map(Duration::from_secs),
+            timeout: o
+                .bes_timeout_secs
+                .filter(|s| *s > 0)
+                .map(Duration::from_secs),
             headers: o.bes_headers.clone(),
             instance_name: o.bes_instance_name.clone(),
             keywords: o.bes_keywords.clone(),
@@ -79,7 +89,10 @@ impl BesConfig {
     /// Normalized keywords: `command_name=<cmd>`, `protocol_name=BEP`, plus user keywords
     /// (`--bes_keywords`) and the project id (as `project_id`).
     pub fn all_keywords(&self) -> Vec<String> {
-        let mut k = vec![format!("command_name={}", self.command_name), "protocol_name=BEP".to_string()];
+        let mut k = vec![
+            format!("command_name={}", self.command_name),
+            "protocol_name=BEP".to_string(),
+        ];
         for u in &self.keywords {
             let u = format!("user_keyword={u}");
             if !k.contains(&u) {
@@ -138,7 +151,10 @@ pub fn lifecycle_request(cfg: &BesConfig, kind: &str, success: bool) -> Msg {
     let mut ev = Msg::new("google.devtools.build.v1.BuildEvent");
     match kind {
         "build_enqueued" => {
-            ev.set_msg("build_enqueued", Msg::new("google.devtools.build.v1.BuildEvent.BuildEnqueued"));
+            ev.set_msg(
+                "build_enqueued",
+                Msg::new("google.devtools.build.v1.BuildEvent.BuildEnqueued"),
+            );
         }
         "invocation_attempt_started" => {
             let mut s = Msg::new("google.devtools.build.v1.BuildEvent.InvocationAttemptStarted");
@@ -148,14 +164,28 @@ pub fn lifecycle_request(cfg: &BesConfig, kind: &str, success: bool) -> Msg {
         "invocation_attempt_finished" => {
             let mut f = Msg::new("google.devtools.build.v1.BuildEvent.InvocationAttemptFinished");
             let mut st = Msg::new("google.devtools.build.v1.BuildStatus");
-            st.set_enum("result", if success { "COMMAND_SUCCEEDED" } else { "COMMAND_FAILED" });
+            st.set_enum(
+                "result",
+                if success {
+                    "COMMAND_SUCCEEDED"
+                } else {
+                    "COMMAND_FAILED"
+                },
+            );
             f.set_msg("invocation_status", st);
             ev.set_msg("invocation_attempt_finished", f);
         }
         _ => {
             let mut f = Msg::new("google.devtools.build.v1.BuildEvent.BuildFinished");
             let mut st = Msg::new("google.devtools.build.v1.BuildStatus");
-            st.set_enum("result", if success { "COMMAND_SUCCEEDED" } else { "COMMAND_FAILED" });
+            st.set_enum(
+                "result",
+                if success {
+                    "COMMAND_SUCCEEDED"
+                } else {
+                    "COMMAND_FAILED"
+                },
+            );
             f.set_msg("status", st);
             ev.set_msg("build_finished", f);
         }
@@ -230,7 +260,10 @@ pub struct BesTransport {
 impl BesTransport {
     /// Connects and starts the upload thread. Lifecycle events are published immediately.
     pub fn start(cfg: BesConfig, channel: Arc<Channel>) -> Arc<Self> {
-        let shared = Arc::new(Shared { q: Mutex::new(Queue::default()), cv: Condvar::new() });
+        let shared = Arc::new(Shared {
+            q: Mutex::new(Queue::default()),
+            cv: Condvar::new(),
+        });
         let (tx, rx) = mpsc::channel();
         let t = Arc::new(Self {
             cfg: cfg.clone(),
@@ -260,9 +293,17 @@ impl BesTransport {
 
     fn publish_lifecycle(&self, kind: &str, success: bool) -> Result<(), GrpcStatus> {
         let req = lifecycle_request(&self.cfg, kind, success).encode_to_vec();
-        let opts = CallOptions { timeout: self.cfg.timeout, metadata: vec![] };
-        let policy = RetryPolicy { max_retries: BES_MAX_RETRIES, ..Default::default() };
-        policy.run(|| self.channel.unary(PUBLISH_LIFECYCLE, &req, &opts)).map(|_| ())
+        let opts = CallOptions {
+            timeout: self.cfg.timeout,
+            metadata: vec![],
+        };
+        let policy = RetryPolicy {
+            max_retries: BES_MAX_RETRIES,
+            ..Default::default()
+        };
+        policy
+            .run(|| self.channel.unary(PUBLISH_LIFECYCLE, &req, &opts))
+            .map(|_| ())
     }
 
     /// Declares whether the invocation succeeded (used for the lifecycle finish events).
@@ -295,10 +336,16 @@ fn run_stream(cfg: &BesConfig, channel: &Channel, shared: &Shared) -> Result<(),
             }
         });
         let mut got_final = false;
-        let opts = CallOptions { timeout: None, metadata: vec![] };
+        let opts = CallOptions {
+            timeout: None,
+            metadata: vec![],
+        };
         let res = channel.call(PUBLISH_STREAM, &mut iter, &opts, &mut |msg| {
-            let r = Msg::decode("google.devtools.build.v1.PublishBuildToolEventStreamResponse", &msg)
-                .map_err(|e| GrpcStatus::new(13, format!("bad BES ack: {e}")))?;
+            let r = Msg::decode(
+                "google.devtools.build.v1.PublishBuildToolEventStreamResponse",
+                &msg,
+            )
+            .map_err(|e| GrpcStatus::new(13, format!("bad BES ack: {e}")))?;
             let seq = r.get_i64("sequence_number");
             let mut q = shared.q.lock().unwrap();
             if seq > q.acked {
@@ -368,9 +415,11 @@ impl BuildEventTransport for BesTransport {
         if let Some(rx) = rx {
             let deadline = self.cfg.timeout.map(|t| Instant::now() + t);
             let r = match deadline {
-                Some(d) => rx.recv_timeout(d.saturating_duration_since(Instant::now())).map_err(|_| {
-                    "Build Event Service upload timed out (--bes_timeout)".to_string()
-                }),
+                Some(d) => rx
+                    .recv_timeout(d.saturating_duration_since(Instant::now()))
+                    .map_err(|_| {
+                        "Build Event Service upload timed out (--bes_timeout)".to_string()
+                    }),
                 None => rx.recv().map_err(|_| "BES upload thread died".to_string()),
             };
             result = r.and_then(|x| x);
@@ -436,7 +485,9 @@ mod tests {
             let (c, s) = memory_pair();
             let me = self.0.clone();
             std::thread::spawn(move || {
-                let Ok((_conn, rx)) = Conn::server_from(s, LocalSettings::default()) else { return };
+                let Ok((_conn, rx)) = Conn::server_from(s, LocalSettings::default()) else {
+                    return;
+                };
                 while let Ok(stream) = rx.recv() {
                     let me = me.clone();
                     std::thread::spawn(move || me.handle(stream));
@@ -468,8 +519,15 @@ mod tests {
                 }
             }
             *self.headers.lock().unwrap() = headers.clone();
-            let path = headers.iter().find(|h| h.0 == ":path").map(|h| h.1.clone()).unwrap_or_default();
-            let ok_headers = [(":status".to_string(), "200".to_string()), ("content-type".to_string(), "application/grpc".to_string())];
+            let path = headers
+                .iter()
+                .find(|h| h.0 == ":path")
+                .map(|h| h.1.clone())
+                .unwrap_or_default();
+            let ok_headers = [
+                (":status".to_string(), "200".to_string()),
+                ("content-type".to_string(), "application/grpc".to_string()),
+            ];
             if path == PUBLISH_LIFECYCLE {
                 self.lifecycle.lock().unwrap().push(msgs[0].clone());
                 let _ = st.send_headers(&ok_headers, false);
@@ -492,11 +550,16 @@ mod tests {
             }
             let _ = st.send_headers(&ok_headers, false);
             for m in &msgs {
-                let r = Msg::decode("google.devtools.build.v1.PublishBuildToolEventStreamRequest", m).unwrap();
+                let r = Msg::decode(
+                    "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                    m,
+                )
+                .unwrap();
                 let o = r.get_msg("ordered_build_event").unwrap();
                 let seq = o.get_i64("sequence_number");
                 self.stream_reqs.lock().unwrap().push(m.clone());
-                let mut resp = Msg::new("google.devtools.build.v1.PublishBuildToolEventStreamResponse");
+                let mut resp =
+                    Msg::new("google.devtools.build.v1.PublishBuildToolEventStreamResponse");
                 resp.set_int("sequence_number", seq);
                 if let Some(sid) = o.get_msg("stream_id") {
                     resp.set_msg("stream_id", sid.clone());
@@ -523,17 +586,39 @@ mod tests {
     }
 
     fn run_build(srv: &FakeBes) -> Result<(), String> {
-        let channel = Arc::new(Channel::new(Arc::new(Conn2(srv.clone())), 1, vec![("x-token".into(), "abc".into())]));
+        let channel = Arc::new(Channel::new(
+            Arc::new(Conn2(srv.clone())),
+            1,
+            vec![("x-token".into(), "abc".into())],
+        ));
         let t = BesTransport::start(cfg(), channel);
         let streamer = BuildEventStreamer::new(vec![t.clone()], false);
-        streamer.post(BepBuilder::build_started("inv-1", 0, "v", "", "build", "/w", "/w", 1, "h", "u", vec![ids::progress(0), ids::build_finished()]));
+        streamer.post(BepBuilder::build_started(
+            "inv-1",
+            0,
+            "v",
+            "",
+            "build",
+            "/w",
+            "/w",
+            1,
+            "h",
+            "u",
+            vec![ids::progress(0), ids::build_finished()],
+        ));
         streamer.post(BepBuilder::build_finished("SUCCESS", 0, 1, None));
-        streamer.post(BepBuilder::build_metrics(Msg::new("build_event_stream.BuildMetrics")));
+        streamer.post(BepBuilder::build_metrics(Msg::new(
+            "build_event_stream.BuildMetrics",
+        )));
         streamer.post(BepBuilder::build_tool_logs(&[]));
         streamer.post(BepBuilder::convenience_symlinks(&[]));
         assert!(streamer.is_closed());
         let errs = streamer.close_errors();
-        if errs.is_empty() { Ok(()) } else { Err(errs.join(";")) }
+        if errs.is_empty() {
+            Ok(())
+        } else {
+            Err(errs.join(";"))
+        }
     }
 
     #[test]
@@ -545,24 +630,66 @@ mod tests {
         // Sequence numbers are 1..=n and the last event is ComponentStreamFinished.
         let decoded: Vec<Msg> = reqs
             .iter()
-            .map(|m| Msg::decode("google.devtools.build.v1.PublishBuildToolEventStreamRequest", m).unwrap())
+            .map(|m| {
+                Msg::decode(
+                    "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                    m,
+                )
+                .unwrap()
+            })
             .collect();
         for (i, d) in decoded.iter().enumerate() {
-            assert_eq!(d.get_msg("ordered_build_event").unwrap().get_i64("sequence_number"), i as i64 + 1);
+            assert_eq!(
+                d.get_msg("ordered_build_event")
+                    .unwrap()
+                    .get_i64("sequence_number"),
+                i as i64 + 1
+            );
         }
         let first = decoded[0].get_msg("ordered_build_event").unwrap();
-        assert_eq!(first.get_msg("stream_id").unwrap().get_str("invocation_id"), "inv-1");
-        assert_eq!(first.get_msg("stream_id").unwrap().get_enum_name("component"), "TOOL");
-        let any = first.get_msg("event").unwrap().get_msg("bazel_event").unwrap();
+        assert_eq!(
+            first.get_msg("stream_id").unwrap().get_str("invocation_id"),
+            "inv-1"
+        );
+        assert_eq!(
+            first
+                .get_msg("stream_id")
+                .unwrap()
+                .get_enum_name("component"),
+            "TOOL"
+        );
+        let any = first
+            .get_msg("event")
+            .unwrap()
+            .get_msg("bazel_event")
+            .unwrap();
         assert_eq!(any.get_str("type_url"), BEP_TYPE_URL);
         let inner = Msg::decode("build_event_stream.BuildEvent", any.get_bytes("value")).unwrap();
         assert!(inner.get_msg("id").unwrap().has("started"));
         assert!(decoded[0].get_str("notification_keywords") == "command_name=build");
-        assert!(decoded.last().unwrap().get_msg("ordered_build_event").unwrap().get_msg("event").unwrap().has("component_stream_finished"));
+        assert!(decoded
+            .last()
+            .unwrap()
+            .get_msg("ordered_build_event")
+            .unwrap()
+            .get_msg("event")
+            .unwrap()
+            .has("component_stream_finished"));
         let lc = srv.lifecycle.lock().unwrap().len();
-        assert_eq!(lc, 4, "enqueued, attempt started, attempt finished, build finished");
-        assert!(srv.headers.lock().unwrap().iter().any(|(k, v)| k == "x-token" && v == "abc"));
-        assert_eq!(cfg().streaming_message().unwrap(), "Streaming build results to: https://results.example/invocations/inv-1");
+        assert_eq!(
+            lc, 4,
+            "enqueued, attempt started, attempt finished, build finished"
+        );
+        assert!(srv
+            .headers
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(k, v)| k == "x-token" && v == "abc"));
+        assert_eq!(
+            cfg().streaming_message().unwrap(),
+            "Streaming build results to: https://results.example/invocations/inv-1"
+        );
     }
 
     #[test]

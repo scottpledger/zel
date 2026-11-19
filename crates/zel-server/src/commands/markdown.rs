@@ -23,7 +23,12 @@ use std::collections::HashMap;
 
 /// `Markdown.renderToHtml`: renders and trims.
 pub fn render_to_html(md: &str) -> String {
-    let lines: Vec<String> = md.replace("\r\n", "\n").replace('\r', "\n").split('\n').map(expand_tabs).collect();
+    let lines: Vec<String> = md
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
+        .map(expand_tabs)
+        .collect();
     let (blocks, _) = parse_blocks(&lines);
     let refs = collect_refs(&lines);
     let mut out = String::new();
@@ -51,7 +56,10 @@ fn expand_tabs(l: &str) -> String {
 }
 
 pub fn escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 #[derive(Debug, Clone)]
@@ -60,7 +68,12 @@ enum Block {
     Heading(usize, String),
     Code(Option<String>, String),
     Quote(Vec<Block>),
-    List { ordered: bool, start: u32, tight: bool, items: Vec<Vec<Block>> },
+    List {
+        ordered: bool,
+        start: u32,
+        tight: bool,
+        items: Vec<Vec<Block>>,
+    },
     Hr,
 }
 
@@ -77,7 +90,10 @@ fn is_hr(l: &str) -> bool {
         return false;
     }
     let t: String = l.chars().filter(|c| *c != ' ').collect();
-    t.len() >= 3 && ["-", "*", "_"].iter().any(|m| t.chars().all(|c| m.starts_with(c)))
+    t.len() >= 3
+        && ["-", "*", "_"]
+            .iter()
+            .any(|m| t.chars().all(|c| m.starts_with(c)))
 }
 
 fn atx_heading(l: &str) -> Option<(usize, String)> {
@@ -169,7 +185,11 @@ fn can_interrupt_paragraph(l: &str) -> bool {
     if indent_of(l) > 3 {
         return false;
     }
-    if fence_start(l).is_some() || atx_heading(l).is_some() || is_hr(l) || l.trim_start().starts_with('>') {
+    if fence_start(l).is_some()
+        || atx_heading(l).is_some()
+        || is_hr(l)
+        || l.trim_start().starts_with('>')
+    {
         return true;
     }
     if let Some((ordered, _, start, _, content)) = list_marker(l) {
@@ -213,7 +233,11 @@ fn parse_blocks(lines: &[String]) -> (Vec<Block>, Vec<bool>) {
         if indent_of(l) >= 4 {
             let mut code: Vec<String> = Vec::new();
             while i < lines.len() && (is_blank(&lines[i]) || indent_of(&lines[i]) >= 4) {
-                code.push(if lines[i].len() >= 4 { lines[i][4..].to_string() } else { String::new() });
+                code.push(if lines[i].len() >= 4 {
+                    lines[i][4..].to_string()
+                } else {
+                    String::new()
+                });
                 i += 1;
             }
             while code.last().is_some_and(|c| c.trim().is_empty()) {
@@ -232,7 +256,9 @@ fn parse_blocks(lines: &[String]) -> (Vec<Block>, Vec<bool>) {
                 let closing = indent_of(&lines[i]) <= 3
                     && t.starts_with(fc)
                     && t.chars().take_while(|x| *x == fc).count() >= fnn
-                    && t[t.chars().take_while(|x| *x == fc).count()..].trim().is_empty();
+                    && t[t.chars().take_while(|x| *x == fc).count()..]
+                        .trim()
+                        .is_empty();
                 if closing {
                     i += 1;
                     break;
@@ -258,7 +284,11 @@ fn parse_blocks(lines: &[String]) -> (Vec<Block>, Vec<bool>) {
                     let r = &t.trim_start()[1..];
                     inner.push(r.strip_prefix(' ').unwrap_or(r).to_string());
                     i += 1;
-                } else if !is_blank(t) && !inner.is_empty() && !is_blank(inner.last().unwrap()) && !can_interrupt_paragraph(t) {
+                } else if !is_blank(t)
+                    && !inner.is_empty()
+                    && !is_blank(inner.last().unwrap())
+                    && !can_interrupt_paragraph(t)
+                {
                     inner.push(t.trim_start().to_string());
                     i += 1;
                 } else {
@@ -271,7 +301,9 @@ fn parse_blocks(lines: &[String]) -> (Vec<Block>, Vec<bool>) {
             let mut item_loose = false;
             let mut between_blank = false;
             loop {
-                let Some((o, d, _, offset, first)) = list_marker(&lines[i]) else { break };
+                let Some((o, d, _, offset, first)) = list_marker(&lines[i]) else {
+                    break;
+                };
                 if o != ordered || d != delim {
                     break;
                 }
@@ -289,7 +321,9 @@ fn parse_blocks(lines: &[String]) -> (Vec<Block>, Vec<bool>) {
                     } else if indent_of(t) >= offset {
                         let s = &t[offset..];
                         if let Some((fc, fnn)) = in_fence {
-                            if s.trim_start().starts_with(fc) && s.trim_start().chars().take_while(|x| *x == fc).count() >= fnn {
+                            if s.trim_start().starts_with(fc)
+                                && s.trim_start().chars().take_while(|x| *x == fc).count() >= fnn
+                            {
                                 in_fence = None;
                             }
                         } else if let Some((fc, fnn, _, _)) = fence_start(s) {
@@ -297,14 +331,18 @@ fn parse_blocks(lines: &[String]) -> (Vec<Block>, Vec<bool>) {
                         }
                         item_lines.push(s.to_string());
                         i += 1;
-                    } else if item_lines.last().is_some_and(|x| !is_blank(x)) && !can_interrupt_paragraph(t) && list_marker(t).is_none() {
+                    } else if item_lines.last().is_some_and(|x| !is_blank(x))
+                        && !can_interrupt_paragraph(t)
+                        && list_marker(t).is_none()
+                    {
                         item_lines.push(t.trim_start().to_string());
                         i += 1;
                     } else {
                         break;
                     }
                 }
-                let trailing_blank = item_lines.last().is_some_and(|x| x.is_empty()) && i < lines.len();
+                let trailing_blank =
+                    item_lines.last().is_some_and(|x| x.is_empty()) && i < lines.len();
                 while item_lines.last().is_some_and(|x| x.is_empty()) {
                     item_lines.pop();
                 }
@@ -313,14 +351,23 @@ fn parse_blocks(lines: &[String]) -> (Vec<Block>, Vec<bool>) {
                     item_loose = true;
                 }
                 items.push(sub);
-                if trailing_blank && i < lines.len() && list_marker(&lines[i]).is_some_and(|(o2, d2, ..)| o2 == ordered && d2 == delim) {
+                if trailing_blank
+                    && i < lines.len()
+                    && list_marker(&lines[i])
+                        .is_some_and(|(o2, d2, ..)| o2 == ordered && d2 == delim)
+                {
                     between_blank = true;
                 }
                 if i >= lines.len() {
                     break;
                 }
             }
-            block = Block::List { ordered, start, tight: !(item_loose || between_blank), items };
+            block = Block::List {
+                ordered,
+                start,
+                tight: !(item_loose || between_blank),
+                items,
+            };
         } else if !collect_refs(std::slice::from_ref(l)).is_empty() {
             // Link reference definitions produce no output.
             i += 1;
@@ -352,7 +399,12 @@ fn parse_blocks(lines: &[String]) -> (Vec<Block>, Vec<bool>) {
     (blocks, gaps)
 }
 
-fn render_blocks(blocks: &[Block], out: &mut String, tight: bool, refs: &HashMap<String, (String, Option<String>)>) {
+fn render_blocks(
+    blocks: &[Block],
+    out: &mut String,
+    tight: bool,
+    refs: &HashMap<String, (String, Option<String>)>,
+) {
     for b in blocks {
         match b {
             Block::Para(t) => {
@@ -364,10 +416,14 @@ fn render_blocks(blocks: &[Block], out: &mut String, tight: bool, refs: &HashMap
                     out.push_str("</p>\n");
                 }
             }
-            Block::Heading(n, t) => out.push_str(&format!("<h{n}>{}</h{n}>\n", render_inline(t, refs))),
+            Block::Heading(n, t) => {
+                out.push_str(&format!("<h{n}>{}</h{n}>\n", render_inline(t, refs)))
+            }
             Block::Code(lang, text) => {
                 match lang {
-                    Some(l) => out.push_str(&format!("<pre><code class=\"language-{}\">", escape(l))),
+                    Some(l) => {
+                        out.push_str(&format!("<pre><code class=\"language-{}\">", escape(l)))
+                    }
                     None => out.push_str("<pre><code>"),
                 }
                 out.push_str(&escape(text));
@@ -379,7 +435,12 @@ fn render_blocks(blocks: &[Block], out: &mut String, tight: bool, refs: &HashMap
                 out.push_str("</blockquote>\n");
             }
             Block::Hr => out.push_str("<hr />\n"),
-            Block::List { ordered, start, tight, items } => {
+            Block::List {
+                ordered,
+                start,
+                tight,
+                items,
+            } => {
                 let tag = if *ordered { "ol" } else { "ul" };
                 if *ordered && *start != 1 {
                     out.push_str(&format!("<ol start=\"{start}\">\n"));
@@ -444,7 +505,10 @@ fn collect_refs(lines: &[String]) -> HashMap<String, (String, Option<String>)> {
 }
 
 fn normalize_label(s: &str) -> String {
-    s.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
+    s.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
 }
 
 // ------------------------------------------------------------------ inline
@@ -456,10 +520,20 @@ enum Node {
     Code(String),
     Soft,
     Hard,
-    Delim { ch: char, count: usize, can_open: bool, can_close: bool, orig: usize },
+    Delim {
+        ch: char,
+        count: usize,
+        can_open: bool,
+        can_close: bool,
+        orig: usize,
+    },
     Em(Vec<Node>),
     Strong(Vec<Node>),
-    Link { children: Vec<Node>, dest: String, title: Option<String> },
+    Link {
+        children: Vec<Node>,
+        dest: String,
+        title: Option<String>,
+    },
     Open(char),
 }
 
@@ -530,8 +604,14 @@ fn parse_inline(text: &str, refs: &HashMap<String, (String, Option<String>)>) ->
                 match found {
                     Some(end) => {
                         flush!();
-                        let mut content: String = chars[i + n..end].iter().collect::<String>().replace('\n', " ");
-                        if content.starts_with(' ') && content.ends_with(' ') && !content.trim().is_empty() {
+                        let mut content: String = chars[i + n..end]
+                            .iter()
+                            .collect::<String>()
+                            .replace('\n', " ");
+                        if content.starts_with(' ')
+                            && content.ends_with(' ')
+                            && !content.trim().is_empty()
+                        {
                             content = content[1..content.len() - 1].to_string();
                         }
                         nodes.push(Node::Code(content));
@@ -548,7 +628,11 @@ fn parse_inline(text: &str, refs: &HashMap<String, (String, Option<String>)>) ->
                 if let Some(len) = autolink_len(&rest) {
                     flush!();
                     let url: String = chars[i + 1..i + len - 1].iter().collect();
-                    nodes.push(Node::Link { children: vec![Node::Text(url.clone())], dest: url, title: None });
+                    nodes.push(Node::Link {
+                        children: vec![Node::Text(url.clone())],
+                        dest: url,
+                        title: None,
+                    });
                     i += len;
                 } else if let Some(len) = html_inline_len(&rest) {
                     flush!();
@@ -563,15 +647,26 @@ fn parse_inline(text: &str, refs: &HashMap<String, (String, Option<String>)>) ->
                 let n = chars[i..].iter().take_while(|x| **x == c).count();
                 let before = if i == 0 { ' ' } else { chars[i - 1] };
                 let after = chars.get(i + n).copied().unwrap_or(' ');
-                let left = !after.is_whitespace() && (!is_punct(after) || before.is_whitespace() || is_punct(before));
-                let right = !before.is_whitespace() && (!is_punct(before) || after.is_whitespace() || is_punct(after));
+                let left = !after.is_whitespace()
+                    && (!is_punct(after) || before.is_whitespace() || is_punct(before));
+                let right = !before.is_whitespace()
+                    && (!is_punct(before) || after.is_whitespace() || is_punct(after));
                 let (can_open, can_close) = if c == '*' {
                     (left, right)
                 } else {
-                    (left && (!right || is_punct(before)), right && (!left || is_punct(after)))
+                    (
+                        left && (!right || is_punct(before)),
+                        right && (!left || is_punct(after)),
+                    )
                 };
                 flush!();
-                nodes.push(Node::Delim { ch: c, count: n, can_open, can_close, orig: n });
+                nodes.push(Node::Delim {
+                    ch: c,
+                    count: n,
+                    can_open,
+                    can_close,
+                    orig: n,
+                });
                 i += n;
             }
             '[' => {
@@ -607,7 +702,14 @@ fn parse_inline(text: &str, refs: &HashMap<String, (String, Option<String>)>) ->
                                 match rest.iter().position(|x| *x == ']') {
                                     Some(e) => {
                                         let l: String = rest[1..e].iter().collect();
-                                        (if l.trim().is_empty() { inner_src.clone() } else { l }, e + 1)
+                                        (
+                                            if l.trim().is_empty() {
+                                                inner_src.clone()
+                                            } else {
+                                                l
+                                            },
+                                            e + 1,
+                                        )
                                     }
                                     None => (inner_src.clone(), 0),
                                 }
@@ -624,7 +726,11 @@ fn parse_inline(text: &str, refs: &HashMap<String, (String, Option<String>)>) ->
                                 let children: Vec<Node> = nodes.drain(oi + 1..).collect();
                                 nodes.pop(); // the opener
                                 let children = process_emphasis(children);
-                                nodes.push(Node::Link { children, dest: d, title: t });
+                                nodes.push(Node::Link {
+                                    children,
+                                    dest: d,
+                                    title: t,
+                                });
                                 i += 1 + consumed;
                             }
                             None => {
@@ -682,7 +788,9 @@ fn autolink_len(s: &str) -> Option<usize> {
     if scheme.len() < 2
         || scheme.len() > 32
         || !scheme.chars().next().unwrap().is_ascii_alphabetic()
-        || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
+        || !scheme
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '.' | '-'))
     {
         return None;
     }
@@ -778,7 +886,13 @@ fn process_emphasis(mut nodes: Vec<Node>) -> Vec<Node> {
     let mut ci = 0;
     while ci < nodes.len() {
         let (cch, ccount, can_open_c, corig) = match &nodes[ci] {
-            Node::Delim { ch, count, can_open, can_close: true, orig } => (*ch, *count, *can_open, *orig),
+            Node::Delim {
+                ch,
+                count,
+                can_open,
+                can_close: true,
+                orig,
+            } => (*ch, *count, *can_open, *orig),
             _ => {
                 ci += 1;
                 continue;
@@ -786,7 +900,14 @@ fn process_emphasis(mut nodes: Vec<Node>) -> Vec<Node> {
         };
         let mut found = None;
         for o in (0..ci).rev() {
-            if let Node::Delim { ch, count, can_open: true, can_close, orig } = &nodes[o] {
+            if let Node::Delim {
+                ch,
+                count,
+                can_open: true,
+                can_close,
+                orig,
+            } = &nodes[o]
+            {
                 if *ch == cch && *count > 0 {
                     let skip = (*can_close || can_open_c)
                         && (*orig + corig) % 3 == 0
@@ -818,7 +939,11 @@ fn process_emphasis(mut nodes: Vec<Node>) -> Vec<Node> {
         if let Node::Delim { count, .. } = &mut nodes[o + 1] {
             *count -= use_n;
         }
-        let wrapped = if use_n == 2 { Node::Strong(inner) } else { Node::Em(inner) };
+        let wrapped = if use_n == 2 {
+            Node::Strong(inner)
+        } else {
+            Node::Em(inner)
+        };
         nodes.insert(o + 1, wrapped);
         let mut wi = o + 1;
         let mut closer_at = o + 2;
@@ -876,8 +1001,15 @@ fn emit(nodes: &[Node], out: &mut String) {
                 emit(c, out);
                 out.push_str("</strong>");
             }
-            Node::Link { children, dest, title } => {
-                out.push_str(&format!("<a href=\"{}\"", escape(&percent_encode_url(dest))));
+            Node::Link {
+                children,
+                dest,
+                title,
+            } => {
+                out.push_str(&format!(
+                    "<a href=\"{}\"",
+                    escape(&percent_encode_url(dest))
+                ));
                 if let Some(t) = title {
                     out.push_str(&format!(" title=\"{}\"", escape(t)));
                 }
@@ -898,7 +1030,11 @@ fn percent_encode_url(s: &str) -> String {
     while i < bytes.len() {
         let b = bytes[i];
         let keep = b.is_ascii_alphanumeric() || b"-_.!~*'();:@&=+$,/?#[]%".contains(&b);
-        if b == b'%' && !(i + 2 < bytes.len() + 0 && bytes.get(i + 1).is_some_and(|x| x.is_ascii_hexdigit()) && bytes.get(i + 2).is_some_and(|x| x.is_ascii_hexdigit())) {
+        if b == b'%'
+            && !(i + 2 < bytes.len()
+                && bytes.get(i + 1).is_some_and(|x| x.is_ascii_hexdigit())
+                && bytes.get(i + 2).is_some_and(|x| x.is_ascii_hexdigit()))
+        {
             out.push_str("%25");
         } else if keep {
             out.push(b as char);
@@ -916,26 +1052,47 @@ mod tests {
 
     #[test]
     fn paragraphs_and_code() {
-        assert_eq!(r("a `b` c\n\nsecond"), "<p>a <code>b</code> c</p>\n<p>second</p>");
-        assert_eq!(r("it's <b>x</b> & \"q\""), "<p>it's &lt;b&gt;x&lt;/b&gt; &amp; &quot;q&quot;</p>");
+        assert_eq!(
+            r("a `b` c\n\nsecond"),
+            "<p>a <code>b</code> c</p>\n<p>second</p>"
+        );
+        assert_eq!(
+            r("it's <b>x</b> & \"q\""),
+            "<p>it's &lt;b&gt;x&lt;/b&gt; &amp; &quot;q&quot;</p>"
+        );
     }
 
     #[test]
     fn emphasis() {
         assert_eq!(r("${X}/_blaze_${U}"), "<p>${X}/<em>blaze</em>${U}</p>");
-        assert_eq!(r("*a* **b** snake_case_name"), "<p><em>a</em> <strong>b</strong> snake_case_name</p>");
+        assert_eq!(
+            r("*a* **b** snake_case_name"),
+            "<p><em>a</em> <strong>b</strong> snake_case_name</p>"
+        );
     }
 
     #[test]
     fn lists() {
-        assert_eq!(r("x\n\n1. a\n2. b"), "<p>x</p>\n<ol>\n<li>a</li>\n<li>b</li>\n</ol>");
+        assert_eq!(
+            r("x\n\n1. a\n2. b"),
+            "<p>x</p>\n<ol>\n<li>a</li>\n<li>b</li>\n</ol>"
+        );
         assert_eq!(r("- a\n- b"), "<ul>\n<li>a</li>\n<li>b</li>\n</ul>");
-        assert_eq!(r("- a\n\n- b"), "<ul>\n<li>\n<p>a</p>\n</li>\n<li>\n<p>b</p>\n</li>\n</ul>");
+        assert_eq!(
+            r("- a\n\n- b"),
+            "<ul>\n<li>\n<p>a</p>\n</li>\n<li>\n<p>b</p>\n</li>\n</ul>"
+        );
     }
 
     #[test]
     fn links() {
-        assert_eq!(r("[t](http://x/y_z)"), "<p><a href=\"http://x/y_z\">t</a></p>");
-        assert_eq!(r("[t]\n\n[t]: http://x"), "<p><a href=\"http://x\">t</a></p>");
+        assert_eq!(
+            r("[t](http://x/y_z)"),
+            "<p><a href=\"http://x/y_z\">t</a></p>"
+        );
+        assert_eq!(
+            r("[t]\n\n[t]: http://x"),
+            "<p><a href=\"http://x\">t</a></p>"
+        );
     }
 }

@@ -147,6 +147,16 @@ impl PackageLoader {
                         f.insert((*k).to_string(), v.clone());
                     }
                 }
+                let (pkg, mapping) = match ctx.current_label_ctx() {
+                    Some((p, m)) => (p, m),
+                    None => (owner.clone(), self.cfg.lookup.resolver.mapping(owner.repository())),
+                };
+                f.insert("_defining_pkg".into(), Value::String(pkg.canonical_form()));
+                let mut rm = zel_starlark::StarlarkDict::new();
+                for (k, v) in mapping.entries() {
+                    let _ = rm.insert(Value::String(k.clone()), Value::String(v.name().to_string()));
+                }
+                f.insert("_repo_map".into(), Value::Dict(Arc::new(Mutex::new(rm))));
                 f.insert("_transition".into(), Value::Bool(true));
                 // `StarlarkDefinedConfigTransition.getLocation()` (printed by `cquery --transitions`).
                 f.insert("location".into(), Value::String(fmt_loc(&ctx.last_call_loc)));
@@ -159,8 +169,18 @@ impl PackageLoader {
                 if !matches!(settings, Value::Dict(_)) {
                     return Err(herr(ctx, type_mismatch("settings", &settings, "dict", "analysis_test_transition")));
                 }
+                let (pkg, mapping) = match ctx.current_label_ctx() {
+                    Some((p, m)) => (p, m),
+                    None => (owner.clone(), self.cfg.lookup.resolver.mapping(owner.repository())),
+                };
                 let mut f: BTreeMap<String, Value> = BTreeMap::new();
                 f.insert("settings".into(), settings);
+                f.insert("_defining_pkg".into(), Value::String(pkg.canonical_form()));
+                let mut rm = zel_starlark::StarlarkDict::new();
+                for (k, v) in mapping.entries() {
+                    let _ = rm.insert(Value::String(k.clone()), Value::String(v.name().to_string()));
+                }
+                f.insert("_repo_map".into(), Value::Dict(Arc::new(Mutex::new(rm))));
                 f.insert("_analysis_test_transition".into(), Value::Bool(true));
                 return Ok(Value::Struct(Arc::new(StructValue::new(f))));
             }
@@ -210,6 +230,13 @@ impl PackageLoader {
             "call:provider" => return crate::provider::call_provider(ctx, false, pos, kw),
             "call:provider_raw" => return crate::provider::call_provider(ctx, true, pos, kw),
             "call:macro" => return self.call_macro(ctx, state, pos, kw),
+            "repository_rule" | "module_extension" | "tag_class" => {
+                return Ok(Value::RuleCallable {
+                    rule_class: "custom_rule".to_string(),
+                    executable: false,
+                    test: false,
+                });
+            }
             _ => {}
         }
         if let Some(class) = name.strip_prefix("rule.") {
@@ -261,14 +288,14 @@ impl PackageLoader {
             "existing_rules" => {
                 let s = st.lock().unwrap();
                 let mut items = Vec::new();
-                for (n, t) in &s.targets {
-                    if let Target::Rule(_) = t {
-                        if let Some(v) = self.existing_rule_view(&s, n) {
-                            items.push((Value::String(n.clone()), v));
-                        }
+                for n in &s.rule_order {
+                    if let Some(v) = self.existing_rule_view(&s, n) {
+                        items.push((Value::String(n.clone()), v));
                     }
                 }
-                Ok(mk_dict(items))
+                let d = mk_dict(items);
+                d.freeze();
+                Ok(d)
             }
             "package_name" => Ok(Value::String(
                 st.lock().unwrap().id.package_fragment().path_string().to_string(),
@@ -279,7 +306,22 @@ impl PackageLoader {
             "repo_name" => Ok(Value::String(
                 st.lock().unwrap().id.repository().name().to_string(),
             )),
-            "module_name" | "module_version" => Ok(Value::None),
+            "module_name" => {
+                let repo = st.lock().unwrap().id.repository().clone();
+                let mv = self.cfg.lookup.resolver.module_name_and_version(&repo);
+                Ok(match mv {
+                    Some((name, _)) => Value::String(name),
+                    None => Value::None,
+                })
+            }
+            "module_version" => {
+                let repo = st.lock().unwrap().id.repository().clone();
+                let mv = self.cfg.lookup.resolver.module_name_and_version(&repo);
+                Ok(match mv {
+                    Some((_, ver)) => Value::String(ver),
+                    None => Value::None,
+                })
+            }
             "package_default_visibility" => {
                 let s = st.lock().unwrap();
                 let labels = s
@@ -287,7 +329,8 @@ impl PackageLoader {
                     .default_visibility
                     .clone()
                     .unwrap_or_else(|| vec![Label::parse_canonical("//visibility:private").unwrap()]);
-                Ok(mk_list(labels.into_iter().map(Value::Label).collect()))
+                let combined = crate::pkg_spec::concat_visibility_with_package(&labels, &s.id);
+                Ok(mk_list(combined.into_iter().map(Value::Label).collect()))
             }
             "package_relative_label" => {
                 let v = arg(&pos, &kw, 0, "input")
@@ -303,7 +346,7 @@ impl PackageLoader {
                         };
                         convert_label(s, &cctx)
                             .map(Value::Label)
-                            .map_err(|e| herr(ctx, e))
+                            .map_err(|e| herr(ctx, format!("in call to package_relative_label(): {e}")))
                     }
                     other => Err(herr(
                         ctx,
@@ -407,19 +450,13 @@ impl PackageLoader {
                 ))
             }
         };
-        let matches = self.run_glob(ctx, st, &include, &exclude, op, allow_empty)?;
-        Ok(mk_list(
-            matches
-                .into_iter()
-                .map(|m| {
-                    if m.starts_with('@') {
-                        Value::String(format!(":{m}"))
-                    } else {
-                        Value::String(m)
-                    }
-                })
-                .collect(),
-        ))
+        let mut matches: Vec<String> = self
+            .run_glob(ctx, st, &include, &exclude, op, allow_empty)?
+            .into_iter()
+            .map(|m| if m.starts_with('@') { format!(":{m}") } else { m })
+            .collect();
+        matches.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
+        Ok(mk_list(matches.into_iter().map(Value::String).collect()))
     }
 
     fn run_glob(
@@ -431,14 +468,10 @@ impl PackageLoader {
         op: GlobOp,
         allow_empty: bool,
     ) -> Result<Vec<String>, StarlarkError> {
-        for p in include.iter().chain(exclude.iter()) {
-            if let Some(e) = glob::check_pattern_for_error(p) {
-                return Err(herr(ctx, format!("{e} (in glob pattern '{p}')")));
-            }
-        }
-        let (pkg_dir, is_root_pkg) = {
+        let (pkg_id, pkg_dir, is_root_pkg) = {
             let s = st.lock().unwrap();
             (
+                s.id.clone(),
                 s.pkg_dir.clone(),
                 s.id.repository().is_main() && s.id.package_fragment().is_empty(),
             )
@@ -447,8 +480,30 @@ impl PackageLoader {
             fs: self.fs(),
             package_dir: &pkg_dir,
             skip_convenience_symlinks: is_root_pkg,
+            lookup: Some((&self.cfg.lookup, &pkg_id)),
         };
-        let r = glob::evaluate(&gctx, include, exclude, op);
+        let r = match glob::evaluate_checked(&gctx, include, exclude, op) {
+            Ok(r) => r,
+            Err(glob::GlobEvalError::BadPattern(e)) => return Err(herr(ctx, e)),
+            Err(glob::GlobEvalError::IoError(e)) => {
+                let msg = format!(
+                    "error globbing [{}]{} op={}: {e}",
+                    include.join(", "),
+                    if exclude.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" - [{}]", exclude.join(", "))
+                    },
+                    op.bazel_name()
+                );
+                let mut s = st.lock().unwrap();
+                s.error(Some(fmt_loc(&ctx.last_call_loc)), msg.clone());
+                if s.glob_io_error.is_none() {
+                    s.glob_io_error = Some(msg);
+                }
+                return Ok(Vec::new());
+            }
+        };
         if !allow_empty {
             let what = if op == GlobOp::Subpackages { "subpackages" } else { "glob" };
             if let Some(p) = r.empty_includes.first() {
@@ -517,7 +572,8 @@ impl PackageLoader {
                 ))
             }
         };
-        let m = self.run_glob(ctx, st, &include, &exclude, GlobOp::Subpackages, allow_empty)?;
+        let mut m = self.run_glob(ctx, st, &include, &exclude, GlobOp::Subpackages, allow_empty)?;
+        m.sort_by(|a, b| a.encode_utf16().cmp(b.encode_utf16()));
         Ok(mk_list(m.into_iter().map(Value::String).collect()))
     }
 
@@ -555,7 +611,9 @@ impl PackageLoader {
             mapping: &mapping,
             rule_class: "package",
         };
-        apply_package_args(&mut s.args, kw, &cctx).map_err(|e| herr(ctx, e))?;
+        let mut new_args = PackageArgs::default();
+        apply_package_args(&mut new_args, kw, &cctx).map_err(|e| herr(ctx, e))?;
+        s.args.merge_from(&new_args);
         Ok(Value::None)
     }
 
@@ -591,8 +649,9 @@ impl PackageLoader {
                 let a = Attribute::new("visibility", AttrType::LabelList);
                 match convert_value(v, &a, &cctx).map_err(|e| herr(ctx, e))? {
                     AttrValue::LabelList(l) => {
-                        parse_visibility(&l).map_err(|e| herr(ctx, e))?;
-                        Some(l)
+                        let simplified = crate::pkg_spec::validate_and_simplify_visibility(&l)
+                            .map_err(|e| herr(ctx, e))?;
+                        Some(simplified)
                     }
                     _ => None,
                 }
@@ -602,9 +661,25 @@ impl PackageLoader {
             .clone()
             .unwrap_or_else(|| vec![Label::parse_canonical("//visibility:public").unwrap()]);
         if let Some((_, def_pkg)) = s.macro_stack.last() {
-            let extra = Label::create(def_pkg.clone(), "__pkg__").map_err(|e| herr(ctx, e.to_string()))?;
-            visibility.push(extra);
+            visibility = crate::pkg_spec::concat_visibility_with_package(&visibility, def_pkg);
         }
+        let explicit_licenses: Option<Vec<String>> = match kw.get("licenses") {
+            None | Some(Value::None) => None,
+            Some(v) => {
+                let raw = match convert_plain(v, AttrType::StringList, "licenses", &cctx)
+                    .map_err(|e| herr(ctx, e))?
+                {
+                    AttrValue::StrList(l) => l,
+                    _ => unreachable!(),
+                };
+                Some(parse_license_strings(&raw, &cctx).map_err(|e| herr(ctx, e))?)
+            }
+        };
+        let is_singleton_vis = |vis: &[Label]| -> bool {
+            vis.len() == 1
+                && (vis[0].canonical_form() == "//visibility:public"
+                    || vis[0].canonical_form() == "//visibility:private")
+        };
         let loc = fmt_loc(&ctx.last_call_loc);
         for f in files {
             if let Err(e) = zel_cmdline::validator::validate_target_name(&f) {
@@ -613,12 +688,23 @@ impl PackageLoader {
             match s.targets.get(&f) {
                 Some(Target::InputFile { .. }) => {
                     if let Some(prev) = s.exported_files.get(&f) {
-                        if explicit_vis.is_some() && *prev != visibility {
+                        // Bazel compares RuleVisibility by reference identity; only the
+                        // PUBLIC and PRIVATE singletons compare equal across separate calls.
+                        let same_singleton = is_singleton_vis(prev)
+                            && is_singleton_vis(&visibility)
+                            && *prev == visibility;
+                        if !same_singleton {
                             return Err(herr(
                                 ctx,
                                 format!("visibility for exported file '{f}' declared twice"),
                             ));
                         }
+                    }
+                    if explicit_licenses.is_some() && s.exported_licenses.contains_key(&f) {
+                        return Err(herr(
+                            ctx,
+                            format!("licenses for exported file '{f}' declared twice"),
+                        ));
                     }
                 }
                 Some(_) => {
@@ -632,7 +718,10 @@ impl PackageLoader {
                     s.any_target_declared = true;
                 }
             }
-            s.exported_files.insert(f, visibility.clone());
+            s.exported_files.insert(f.clone(), visibility.clone());
+            if let Some(lic) = &explicit_licenses {
+                s.exported_licenses.insert(f, lic.clone());
+            }
         }
         Ok(Value::None)
     }
@@ -694,21 +783,28 @@ impl PackageLoader {
             }
             None => Vec::new(),
         };
-        for spec in &packages {
-            PackageSpec::parse(&mapping, id.repository(), spec).map_err(|e| {
-                herr(ctx, format!("package group '{}': {e}", label.canonical_form()))
-            })?;
+        let loc = fmt_loc(&ctx.last_call_loc);
+        let mut valid_packages = Vec::with_capacity(packages.len());
+        for spec in packages {
+            match PackageSpec::parse(&mapping, id.repository(), &spec) {
+                Ok(_) => valid_packages.push(spec),
+                Err(e) => {
+                    s.error(
+                        Some(loc.clone()),
+                        format!("package group '{}': {e}", label.canonical_form()),
+                    );
+                }
+            }
         }
         if s.targets.contains_key(name) {
             let e = Self::conflict_message(&s, name, "package group", None);
             return Err(herr(ctx, e));
         }
-        let loc = fmt_loc(&ctx.last_call_loc);
         s.targets.insert(
             name.clone(),
             Target::PackageGroup {
                 label,
-                packages,
+                packages: valid_packages,
             },
         );
         s.target_locations.insert(name.clone(), loc);
@@ -800,16 +896,25 @@ impl PackageLoader {
             (Value::String("kind".into()), Value::String(r.rule_class.clone())),
         ];
         let rc = r.extra.rule_class.as_ref();
-        // Attributes in schema order (BTreeMap): explicit values, otherwise defaults.
-        let mut names: BTreeSet<String> = r.extra.attr_values.keys().cloned().collect();
+        // Attributes in rule-class declaration order, then any extra open attributes.
+        let mut ordered_names: Vec<String> = Vec::new();
         if let Some(rc) = rc {
-            names.extend(rc.attrs.keys().cloned());
-        }
-        for n in names {
-            if n == "name" || !n.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
-                continue;
+            for an in &rc.attr_order {
+                if an != "name" && an.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+                    ordered_names.push(an.clone());
+                }
             }
-            let v = r.attr_or_default(&n)?;
+        }
+        for an in r.extra.attr_values.keys() {
+            if an != "name"
+                && an.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false)
+                && !ordered_names.contains(an)
+            {
+                ordered_names.push(an.clone());
+            }
+        }
+        for n in ordered_names {
+            let Some(v) = r.attr_or_default(&n) else { continue };
             if let Some(val) = starlarkify(&v, &s.id) {
                 items.push((Value::String(n), val));
             }
@@ -897,21 +1002,13 @@ impl PackageLoader {
                     return Err(herr(ctx, no_such_attribute(&label, k, rc)))
                 }
             };
-            let conv = convert_value(v, &attr, &cctx).map_err(|e| herr(ctx, e))?;
-            if let (Some(allowed), AttrValue::Str(sv)) = (&attr.allowed_values, &conv) {
-                if !allowed.contains(sv) {
-                    let list = allowed
-                        .iter()
-                        .map(|a| format!("'{a}'"))
-                        .collect::<Vec<_>>()
-                        .join(", ");
-                    return Err(herr(
-                        ctx,
-                        format!(
-                            "invalid value in '{k}' attribute: has to be one of {list} instead of '{sv}'"
-                        ),
-                    ));
-                }
+            let Some(conv) = convert_value_opt(v, &attr, &cctx).map_err(|e| herr(ctx, e))? else {
+                // `select({"//conditions:default": None})` on a type with a null default leaves
+                // the attribute unset so late-bound / computed defaults still apply.
+                continue;
+            };
+            if let Some(allowed) = &attr.allowed_values {
+                check_allowed_values(allowed, &conv, k).map_err(|e| herr(ctx, e))?;
             }
             if attr.non_empty && conv.is_empty() {
                 return Err(herr(
@@ -936,26 +1033,28 @@ impl PackageLoader {
 
         // Package-level defaults.
         let visibility_explicit = values.contains_key("visibility");
+        if let Some(AttrValue::LabelList(l)) = values.get("visibility").cloned() {
+            let simplified = crate::pkg_spec::validate_and_simplify_visibility(&l)
+                .map_err(|e| herr(ctx, e))?;
+            values.insert("visibility".into(), AttrValue::LabelList(simplified));
+        }
         let mut effective_vis: Vec<Label> = match values.get("visibility") {
             Some(AttrValue::LabelList(l)) => l.clone(),
             Some(AttrValue::Select(_)) => Vec::new(),
+            _ if rc.name == "config_setting" => {
+                vec![Label::parse_canonical("//visibility:public").unwrap()]
+            }
             _ => s.args.default_visibility.clone().unwrap_or_default(),
         };
-        if let Some(AttrValue::LabelList(l)) = values.get("visibility") {
-            if let Err(e) = parse_visibility(l) {
-                return Err(herr(ctx, e));
-            }
-        }
         let macro_ctx = s.macro_stack.last().cloned();
         if let Some((_, def_pkg)) = &macro_ctx {
-            if let Ok(extra) = Label::create(def_pkg.clone(), "__pkg__") {
-                if !effective_vis.iter().any(|l| l.canonical_form() == "//visibility:public") {
-                    effective_vis.push(extra);
-                }
-            }
+            effective_vis = crate::pkg_spec::concat_visibility_with_package(&effective_vis, def_pkg);
         }
         if !visibility_explicit {
-            if let Some(dv) = &s.args.default_visibility {
+            if rc.name == "config_setting" {
+                let pub_vis = vec![Label::parse_canonical("//visibility:public").unwrap()];
+                values.insert("visibility".into(), AttrValue::LabelList(pub_vis));
+            } else if let Some(dv) = &s.args.default_visibility {
                 values.insert("visibility".into(), AttrValue::LabelList(dv.clone()));
             }
         }
@@ -964,7 +1063,7 @@ impl PackageLoader {
         // `ComputedDefault`s over `PackageArgs`, so query output omits them.
         let mut pkg_default_attrs: Vec<String> = Vec::new();
         let mut own_features: Option<AttrValue> = None;
-        if rc.attr("testonly").is_some() && !values.contains_key("testonly") {
+        if !rc.is_test && rc.attr("testonly").is_some() && !values.contains_key("testonly") {
             if let Some(t) = s.args.default_testonly {
                 values.insert("testonly".into(), AttrValue::Bool(t));
                 pkg_default_attrs.push("testonly".into());
@@ -1007,16 +1106,12 @@ impl PackageLoader {
                     Some(own) => own_features = Some(own.clone()),
                     None => pkg_default_attrs.push("features".into()),
                 }
-                let mut f = match values.get("features") {
+                let own = match values.get("features") {
                     Some(AttrValue::StrList(l)) => l.clone(),
                     _ => Vec::new(),
                 };
-                for x in &s.args.features {
-                    if !f.contains(x) {
-                        f.push(x.clone());
-                    }
-                }
-                values.insert("features".into(), AttrValue::StrList(f));
+                let merged = PackageArgs::merge_feature_lists(&s.args.features, &own);
+                values.insert("features".into(), AttrValue::StrList(merged));
             }
         }
         if !values.contains_key("package_metadata") && !s.args.default_package_metadata.is_empty() {
@@ -1039,7 +1134,7 @@ impl PackageLoader {
             }
         }
         if let Some(AttrValue::Str(t)) = values.get("timeout") {
-            if !t.is_empty() && !["short", "moderate", "long", "eternal"].contains(&t.as_str()) {
+            if !["short", "moderate", "long", "eternal"].contains(&t.as_str()) {
                 soft_errors.push(format!("In rule '{name}', timeout '{t}' is not a valid timeout."));
             }
         }
@@ -1077,24 +1172,97 @@ impl PackageLoader {
             }
         }
 
-        // Outputs.
+        // Outputs: implicit outputs first (in function/dict order), then explicit outputs in
+        // rule-class attribute declaration order (`Rule.java`, `ImplicitOutputsFunction.java`).
         let mut out_labels: Vec<Label> = Vec::new();
-        for a in rc.attrs.values() {
-            match values.get(&a.name) {
-                Some(AttrValue::Output(Some(l))) => out_labels.push(l.clone()),
-                Some(AttrValue::OutputList(l)) => out_labels.extend(l.iter().cloned()),
-                _ => {}
-            }
-        }
-        for (_, tmpl) in &rc.implicit_outputs {
-            let mut text = tmpl.replace("%{name}", &name);
-            for (an, av) in &values {
-                if let AttrValue::Str(sv) = av {
-                    text = text.replace(&format!("%{{{an}}}"), sv);
+        let implicit_templates: Vec<(String, String)> = if let Some(cb) = &rc.outputs_fn {
+            let mut attr_fields: BTreeMap<String, Value> = BTreeMap::new();
+            attr_fields.insert("name".to_string(), Value::String(name.clone()));
+            for an in &rc.attr_order {
+                if an == "name" {
+                    continue;
+                }
+                let Some(attr_def) = rc.attr_or_implicit(an) else {
+                    continue;
+                };
+                // `AttributeMap.isConfigurable`: an attribute is configurable on an instance
+                // only when its stored value is a `select()` (`SelectorList`).
+                if !matches!(values.get(an), Some(AttrValue::Select(_))) {
+                    let val = values
+                        .get(an)
+                        .cloned()
+                        .unwrap_or_else(|| attr_def.default_value());
+                    let pub_name = an.replace(['$', ':'], "_");
+                    attr_fields.insert(pub_name, val.to_value());
                 }
             }
-            let l = Label::create(id.clone(), &text).map_err(|e| herr(ctx, e.to_string()))?;
-            out_labels.push(l);
+            let attrs_struct = Value::Struct(Arc::new(StructValue::new(attr_fields)));
+            drop(s);
+            let res = ctx.call_value(cb.clone(), vec![attrs_struct], BTreeMap::new())?;
+            s = st.lock().unwrap();
+            let Value::Dict(d) = res else {
+                return Err(herr(
+                    ctx,
+                    format!(
+                        "got {} for 'implicit outputs function return value', want dict",
+                        res.type_name()
+                    ),
+                ));
+            };
+            let mut tmpls = Vec::new();
+            for (k, v) in d.lock().unwrap().items() {
+                match (k, v) {
+                    (Value::String(k), Value::String(v)) => tmpls.push((k, v)),
+                    _ => {
+                        return Err(herr(
+                            ctx,
+                            "implicit outputs function return value must be a dict of strings",
+                        ))
+                    }
+                }
+            }
+            tmpls
+        } else {
+            rc.implicit_outputs.clone()
+        };
+        let mut seen_implicit: BTreeSet<String> = BTreeSet::new();
+        for (okey, tmpl) in &implicit_templates {
+            let expanded = expand_implicit_outputs(tmpl, &name, &values, rc)
+                .map_err(|e| herr(ctx, format!("For attribute '{okey}' in outputs: {e}")))?;
+            if rc.outputs_fn.is_some() && expanded.len() != 1 {
+                return Err(herr(
+                    ctx,
+                    format!("For attribute '{okey}' in outputs: Invalid placeholder(s) in template"),
+                ));
+            }
+            for text in expanded {
+                if text == "." {
+                    return Err(herr(ctx, "output file name can't be equal '.'"));
+                }
+                if seen_implicit.insert(text.clone()) {
+                    let l = Label::create(id.clone(), &text).map_err(|e| herr(ctx, e.to_string()))?;
+                    out_labels.push(l);
+                }
+            }
+        }
+        for an in &rc.attr_order {
+            match values.get(an) {
+                Some(AttrValue::Output(Some(l))) => {
+                    if l.name() == "." {
+                        return Err(herr(ctx, "output file name can't be equal '.'"));
+                    }
+                    out_labels.push(l.clone());
+                }
+                Some(AttrValue::OutputList(l)) => {
+                    for ol in l {
+                        if ol.name() == "." {
+                            return Err(herr(ctx, "output file name can't be equal '.'"));
+                        }
+                        out_labels.push(ol.clone());
+                    }
+                }
+                _ => {}
+            }
         }
 
         // Name conflicts (TargetRecorder.checkRuleAndOutputs).
@@ -1149,27 +1317,26 @@ impl PackageLoader {
                     ),
                 ));
             }
-            if on.contains('/') {
-                let parts: Vec<&str> = on.split('/').collect();
-                for k in 1..parts.len() {
-                    let prefix = parts[..k].join("/");
-                    if seen_outs.contains_key(&prefix) {
-                        return Err(herr(
-                            ctx,
-                            format!("rule '{name}' has conflicting output files '{on}' and '{prefix}'"),
-                        ));
-                    }
-                    if let Some(Target::OutputFile { generating_rule, .. }) = s.targets.get(&prefix) {
-                        return Err(herr(
-                            ctx,
-                            format!(
-                                "output file '{on}' of rule '{name}' conflicts with output file '{prefix}' of rule '{}'",
-                                generating_rule.name()
-                            ),
-                        ));
-                    }
-                    new_prefixes.push((prefix, on.clone()));
+            let out_frag = PathFragment::create(&on);
+            let seg_count = out_frag.segment_count();
+            for k in 1..seg_count {
+                let prefix = out_frag.sub_fragment_range(0, k).path_string().to_string();
+                if seen_outs.contains_key(&prefix) {
+                    return Err(herr(
+                        ctx,
+                        format!("rule '{name}' has conflicting output files '{on}' and '{prefix}'"),
+                    ));
                 }
+                if let Some(Target::OutputFile { generating_rule, .. }) = s.targets.get(&prefix) {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "output file '{on}' of rule '{name}' conflicts with output file '{prefix}' of rule '{}'",
+                            generating_rule.name()
+                        ),
+                    ));
+                }
+                new_prefixes.push((prefix, on.clone()));
             }
         }
         // Same file as input and output.
@@ -1209,7 +1376,10 @@ impl PackageLoader {
             Some(AttrValue::Str(c)) => Some(c.clone()),
             _ => None,
         };
-        let testonly = matches!(values.get("testonly"), Some(AttrValue::Bool(true)));
+        let testonly = match values.get("testonly") {
+            Some(AttrValue::Bool(b)) => *b,
+            _ => rc.is_test,
+        };
         let executable = match values.get("executable") {
             Some(AttrValue::Bool(b)) => *b,
             _ => rc.is_executable,
@@ -1219,38 +1389,35 @@ impl PackageLoader {
         for (k, v) in &values {
             attrs.insert(k.clone(), v.to_value());
         }
-        let generator_name = macro_ctx.as_ref().map(|(m, _)| m.clone()).or_else(|| {
-            match values.get("generator_name") {
-                Some(AttrValue::Str(s)) if !s.is_empty() => Some(s.clone()),
-                _ => {
-                    if !ctx.thread.frames.is_empty() {
-                        let macro_name = ctx.thread.frames.first().and_then(|f| {
-                            match f.locals.lock().unwrap().get("name") {
-                                Some(Value::String(s)) => Some(s.clone()),
-                                _ => None,
-                            }
-                        });
-                        macro_name.or_else(|| Some(name.clone()))
-                    } else {
-                        None
-                    }
+        let generator_name = if let Some(AttrValue::Str(gn)) = values.get("generator_name") {
+            Some(gn.clone())
+        } else {
+            macro_ctx.as_ref().map(|(m, _)| m.clone()).or_else(|| {
+                if !ctx.thread.frames.is_empty() {
+                    let macro_name = ctx.thread.frames.first().and_then(|f| {
+                        match f.locals.lock().unwrap().get("name") {
+                            Some(Value::String(s)) => Some(s.clone()),
+                            _ => None,
+                        }
+                    });
+                    macro_name.or_else(|| Some(name.clone()))
+                } else {
+                    None
                 }
-            }
-        });
+            })
+        };
         let macro_frames = s.macro_frames.clone();
         let generator_function = match values.get("generator_function") {
             Some(AttrValue::Str(s)) if !s.is_empty() => Some(s.clone()),
             _ => {
-                if let Some((_, sym, _)) = macro_frames.last() {
+                if let Some((_, sym, _, _)) = macro_frames.last() {
                     Some(sym.clone())
-                } else if let Some(f) = ctx.thread.frames.first() {
-                    Some(f.function_name.clone())
                 } else {
-                    None
+                    ctx.thread.frames.first().map(|f| f.function_name.clone())
                 }
             }
         };
-        let rule_loc = if let Some((call, _, _)) = macro_frames.first() {
+        let rule_loc = if let Some((call, _, _, _)) = macro_frames.first() {
             call.clone()
         } else if let Some(f) = ctx.thread.frames.first() {
             f.location.to_string()
@@ -1262,7 +1429,7 @@ impl PackageLoader {
         let generator_location = match values.get("generator_location") {
             Some(AttrValue::Str(s)) if !s.is_empty() => Some(s.clone()),
             _ => {
-                let raw = if let Some((call, _, _)) = macro_frames.first() {
+                let raw = if let Some((call, _, _, _)) = macro_frames.first() {
                     Some(call.clone())
                 } else {
                     ctx.thread.frames.first().map(|f| f.location.to_string())
@@ -1287,9 +1454,9 @@ impl PackageLoader {
             }
         };
         let mut instantiation_stack = Vec::new();
-        if let Some((call, _, _)) = macro_frames.first() {
+        if let Some((call, _, _, _)) = macro_frames.first() {
             instantiation_stack.push((call.clone(), "<toplevel>".to_string()));
-            for (_, sym, dloc) in &macro_frames {
+            for (_, sym, dloc, _) in &macro_frames {
                 instantiation_stack.push((dloc.clone(), sym.clone()));
             }
             // The call inside the macro's implementation function.
@@ -1305,6 +1472,7 @@ impl PackageLoader {
             let last_func = ctx.thread.frames.last().unwrap().function_name.clone();
             instantiation_stack.push((loc.clone(), last_func));
         }
+        let symbolic_macro_instance = macro_ctx.as_ref().map(|(m, _)| m.clone());
         let rule = RuleInstance {
             label: label.clone(),
             rule_class: rc.name.clone(),
@@ -1326,11 +1494,12 @@ impl PackageLoader {
                 generator_function,
                 generator_location,
                 instantiation_stack,
-                macro_instance: generator_name.clone(),
+                macro_instance: symbolic_macro_instance,
                 effective_visibility: effective_vis,
                 visibility_explicit,
                 pkg_default_attrs,
                 own_features,
+                pkg_features: s.args.features.clone(),
             },
         };
         for ol in out_labels {
@@ -1355,6 +1524,7 @@ impl PackageLoader {
             }
         }
         s.targets.insert(name.clone(), Target::Rule(rule));
+        s.rule_order.push(name.clone());
         s.target_locations.insert(name, rule_loc.clone());
         s.any_target_declared = true;
         for e in soft_errors {
@@ -1445,13 +1615,36 @@ impl PackageLoader {
         if matches!(s.fields.get("allow_empty"), Some(Value::Bool(false)))
             || matches!(s.fields.get("non_empty"), Some(Value::Bool(true)))
         {
+            if !matches!(
+                ty,
+                AttrType::StringList | AttrType::IntList | AttrType::LabelList | AttrType::OutputList
+            ) {
+                return Err(format!(
+                    "attribute '{name}' cannot be non-empty because it is not a list"
+                ));
+            }
             a.non_empty = true;
         }
         if let Some(vals) = s.fields.get("values") {
-            if let Ok(l) = sl_values(vals) {
-                if !l.is_empty() {
-                    a.allowed_values = Some(l);
+            let items = zel_starlark::eval::builtins::value_to_sequence(vals)
+                .map_err(|e| format!("in attribute '{name}': {}", e.0))?;
+            if !items.is_empty() {
+                let mapping = self.cfg.lookup.resolver.mapping(pkg.repository());
+                let cctx = ConvertCtx {
+                    pkg,
+                    mapping: &mapping,
+                    rule_class: "rule",
+                };
+                let mut out = Vec::with_capacity(items.len());
+                for item in &items {
+                    match convert_plain(item, ty, name, &cctx)? {
+                        AttrValue::Str(sv) => out.push(sv),
+                        AttrValue::Int(iv) => out.push(iv.to_string()),
+                        AttrValue::Bool(bv) => out.push(if bv { "True" } else { "False" }.to_string()),
+                        _ => return Err(format!("values is not supported for attribute '{name}'")),
+                    }
                 }
+                a.allowed_values = Some(out);
             }
         }
         if let Some(Value::Bool(true)) = s.fields.get("executable") {
@@ -1513,7 +1706,11 @@ impl PackageLoader {
             _ => {}
         }
         // `configurable = False` (symbolic macro attributes): no `select()` values.
+        // Output attributes are always nonconfigurable (`Attribute.java` / `BuildType.whyNotConfigurable`).
         if let Some(Value::Bool(false)) = s.fields.get("configurable") {
+            a.configurable = false;
+        }
+        if matches!(a.ty, AttrType::Output | AttrType::OutputList) {
             a.configurable = false;
         }
         if matches!(a.ty, AttrType::Label | AttrType::LabelList)
@@ -1521,6 +1718,9 @@ impl PackageLoader {
             && matches!(s.fields.get("allow_single_file"), None | Some(Value::None))
         {
             a.files_unspecified = true;
+            if !name.starts_with('$') && !name.starts_with(':') {
+                a.allowed_files = crate::attr::FileTypes::NoFiles;
+            }
         }
         match s.fields.get("allow_files") {
             Some(Value::Bool(false)) => a.allowed_files = crate::attr::FileTypes::NoFiles,
@@ -1642,26 +1842,39 @@ impl PackageLoader {
             Some(Value::String(s)) => vec![s.clone()],
             _ => strs("attr_aspects").map_err(|e| herr(ctx, e))?,
         };
+        if attr_aspects.len() > 1 && attr_aspects.iter().any(|x| x == "*") {
+            return Err(herr(
+                ctx,
+                "'*' must be the only string in 'attr_aspects' list",
+            ));
+        }
         let groups = |k: &str| -> Vec<Vec<String>> {
             let Some(p) = kw.get(k) else { return Vec::new() };
             let items = zel_starlark::eval::builtins::value_to_sequence(p).unwrap_or_default();
-            let all_lists = !items.is_empty() && items.iter().all(|i| matches!(i, Value::List(_) | Value::Tuple(_)));
-            if all_lists {
+            if items.is_empty() {
+                return Vec::new();
+            }
+            let any_list = items.iter().any(|i| matches!(i, Value::List(_) | Value::Tuple(_)));
+            if any_list {
                 items
                     .iter()
-                    .map(|i| {
-                        zel_starlark::eval::builtins::value_to_sequence(i)
-                            .unwrap_or_default()
-                            .iter()
-                            .filter_map(crate::provider::provider_ref_of)
-                            .collect()
+                    .filter_map(|i| {
+                        if matches!(i, Value::List(_) | Value::Tuple(_)) {
+                            let sub: Vec<String> = zel_starlark::eval::builtins::value_to_sequence(i)
+                                .unwrap_or_default()
+                                .iter()
+                                .filter_map(crate::provider::provider_ref_of)
+                                .collect();
+                            if sub.is_empty() { None } else { Some(sub) }
+                        } else {
+                            crate::provider::provider_ref_of(i).map(|p| vec![p])
+                        }
                     })
                     .collect()
-            } else if items.is_empty() {
-                Vec::new()
             } else {
-                // A flat list means "any one of these providers".
-                items.iter().filter_map(crate::provider::provider_ref_of).map(|p| vec![p]).collect()
+                // A flat list is a single conjunction (all listed providers must be present).
+                let conj: Vec<String> = items.iter().filter_map(crate::provider::provider_ref_of).collect();
+                if conj.is_empty() { Vec::new() } else { vec![conj] }
             }
         };
         let mut attrs = Vec::new();
@@ -1673,16 +1886,32 @@ impl PackageLoader {
                 let Value::String(k) = k else {
                     return Err(herr(ctx, "attrs keys must be strings"));
                 };
-                let attr = self.attr_from_value(&k, &v, owner).map_err(|e| herr(ctx, e))?;
+                let mut attr = self.attr_from_value(&k, &v, owner).map_err(|e| herr(ctx, e))?;
                 if !k.starts_with('_') {
                     let simple = matches!(attr.ty, AttrType::Bool | AttrType::Int | AttrType::String);
-                    if !simple || attr.allowed_values.is_none() {
+                    if !simple {
                         return Err(herr(
                             ctx,
                             format!(
                                 "Aspect parameter attribute '{k}' must have type 'bool', 'int' or 'string' and use the 'values' restriction."
                             ),
                         ));
+                    }
+                    if attr.allowed_values.is_none() && attr.ty != AttrType::Bool {
+                        match &attr.default {
+                            Some(AttrValue::Str(s)) => attr.allowed_values = Some(vec![s.clone()]),
+                            Some(AttrValue::Int(i)) => {
+                                attr.allowed_values = Some(vec![i.to_string()])
+                            }
+                            _ => {
+                                return Err(herr(
+                                    ctx,
+                                    format!(
+                                        "Aspect parameter attribute '{k}' must have type 'bool', 'int' or 'string' and use the 'values' restriction."
+                                    ),
+                                ));
+                            }
+                        }
                     }
                 }
                 attrs.push(attr);
@@ -1694,30 +1923,68 @@ impl PackageLoader {
         };
         let provides: Vec<String> =
             seq("provides").iter().filter_map(crate::provider::provider_ref_of).collect();
+        let apply_to_generating_rules =
+            matches!(kw.get("apply_to_generating_rules"), Some(Value::Bool(true)));
+        let required_providers = groups("required_providers");
+        if apply_to_generating_rules && !required_providers.is_empty() {
+            return Err(herr(
+                ctx,
+                "An aspect cannot simultaneously have required providers and apply to generating rules.",
+            ));
+        }
+        if apply_to_generating_rules
+            && kw
+                .get("propagation_predicate")
+                .map(|v| !matches!(v, Value::None))
+                .unwrap_or(false)
+        {
+            return Err(herr(
+                ctx,
+                "An aspect cannot simultaneously have a propagation predicate and apply to generating rules.",
+            ));
+        }
+        let mapping = self.cfg.lookup.resolver.mapping(owner.repository());
+        let cctx = ConvertCtx {
+            pkg: owner,
+            mapping: &mapping,
+            rule_class: "aspect",
+        };
+        let mut exec_compatible_with = Vec::new();
+        for v in seq("exec_compatible_with") {
+            match v {
+                Value::Label(l) => exec_compatible_with.push(l.canonical_form()),
+                Value::String(s) => {
+                    let l = convert_label(&s, &cctx).map_err(|e| herr(ctx, e))?;
+                    exec_compatible_with.push(l.canonical_form());
+                }
+                other => {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "expected value of type 'string' for element of 'exec_compatible_with', but got {}",
+                            other.type_name()
+                        ),
+                    ))
+                }
+            }
+        }
         let def = crate::aspect::AspectDef {
             id: 0,
             implementation,
             attr_aspects,
             attrs,
-            required_providers: groups("required_providers"),
+            required_providers,
             required_aspect_providers: groups("required_aspect_providers"),
             provides,
             requires: seq("requires"),
             toolchains: seq("toolchains"),
             fragments: strs("fragments").map_err(|e| herr(ctx, e))?,
-            apply_to_generating_rules: matches!(kw.get("apply_to_generating_rules"), Some(Value::Bool(true))),
-            exec_compatible_with: seq("exec_compatible_with")
-                .iter()
-                .filter_map(|v| match v {
-                    Value::Label(l) => Some(l.canonical_form()),
-                    Value::String(s) => Some(s.clone()),
-                    _ => None,
-                })
-                .collect(),
+            apply_to_generating_rules,
+            exec_compatible_with,
             defined_in: Mutex::new(String::new()),
             name: Mutex::new(None),
             doc: match kw.get("doc") {
-                Some(Value::String(s)) => s.clone(),
+                Some(Value::String(s)) => s.trim().to_string(),
                 _ => String::new(),
             },
         };
@@ -1747,6 +2014,84 @@ impl PackageLoader {
             .ok_or_else(|| herr(ctx, "rule() missing 1 required positional argument: implementation"))?;
         let mut rest_kwargs = kw.clone();
         rest_kwargs.remove("implementation");
+        {
+            let mapping = self.cfg.lookup.resolver.mapping(owner.repository());
+            let cctx = crate::attr::ConvertCtx {
+                pkg: owner,
+                mapping: &mapping,
+                rule_class: "rule",
+            };
+            let conv_str = |s: &str| -> Result<Label, String> {
+                if s.starts_with("//") && !owner.repository().is_main() && mapping.get("").is_main() {
+                    let pkg_body = s.trim_start_matches("//");
+                    let (p, n) = match pkg_body.split_once(':') {
+                        Some((p, n)) => (p, n),
+                        None => (pkg_body, pkg_body.rsplit('/').next().unwrap_or("")),
+                    };
+                    if p == "conditions" || p == "visibility" {
+                        crate::attr::convert_label(s, &cctx)
+                    } else {
+                        let pid = PackageIdentifier::create(
+                            owner.repository().clone(),
+                            zel_vfs::PathFragment::create(p),
+                        )
+                        .map_err(|e| e.to_string())?;
+                        Label::create(pid, n).map_err(|e| e.to_string())
+                    }
+                } else {
+                    crate::attr::convert_label(s, &cctx)
+                }
+            };
+            let conv = |v: &Value| -> Value {
+                match v {
+                    Value::String(s) if s.starts_with('@') || s.starts_with("//") || s.starts_with(':') => {
+                        conv_str(s).map(Value::Label).unwrap_or_else(|_| v.clone())
+                    }
+                    Value::Struct(st) if st.fields.contains_key("_toolchain_type") => {
+                        let mut f = st.fields.clone();
+                        if let Some(Value::String(n)) = f.get("name").cloned() {
+                            if let Ok(l) = conv_str(&n) {
+                                f.insert("name".into(), Value::Label(l));
+                            }
+                        }
+                        Value::Struct(Arc::new(zel_starlark::StructValue::new(f)))
+                    }
+                    o => o.clone(),
+                }
+            };
+            for key in ["toolchains", "exec_compatible_with"] {
+                if let Some(v) = rest_kwargs.get(key).cloned() {
+                    if let Ok(items) = zel_starlark::eval::builtins::value_to_sequence(&v) {
+                        let out: Vec<Value> = items.iter().map(&conv).collect();
+                        rest_kwargs.insert(
+                            key.to_string(),
+                            Value::List(Arc::new(Mutex::new(zel_starlark::StarlarkList::new(out)))),
+                        );
+                    }
+                }
+            }
+            if let Some(Value::Dict(d)) = rest_kwargs.get("exec_groups").cloned() {
+                let items = d.lock().unwrap().items();
+                let mut new_entries = Vec::with_capacity(items.len());
+                for (gk, gv) in items {
+                    if let Value::Struct(gs) = &gv {
+                        let mut gf = gs.fields.clone();
+                        for key in ["toolchains", "exec_compatible_with"] {
+                            if let Some(v) = gf.get(key).cloned() {
+                                if let Ok(seq) = zel_starlark::eval::builtins::value_to_sequence(&v) {
+                                    let out: Vec<Value> = seq.iter().map(&conv).collect();
+                                    gf.insert(key.to_string(), mk_list(out));
+                                }
+                            }
+                        }
+                        new_entries.push((gk, Value::Struct(Arc::new(zel_starlark::StructValue::new(gf)))));
+                    } else {
+                        new_entries.push((gk, gv));
+                    }
+                }
+                rest_kwargs.insert("exec_groups".to_string(), mk_dict(new_entries));
+            }
+        }
         let flag = |k: &str| matches!(kw.get(k), Some(Value::Bool(true)));
         let test = flag("test") || flag("analysis_test");
         let executable = flag("executable") || test;
@@ -1763,6 +2108,7 @@ impl PackageLoader {
             }
         }
         let mut outputs = Vec::new();
+        let mut outputs_fn = None;
         if let Some(o) = kw.get("outputs") {
             match o {
                 Value::None => {}
@@ -1774,7 +2120,10 @@ impl PackageLoader {
                         }
                     }
                 }
-                other => return Err(herr(ctx, type_mismatch("outputs", other, "dict", "rule"))),
+                cb @ Value::UserFunction(_) => {
+                    outputs_fn = Some(cb.clone());
+                }
+                other => return Err(herr(ctx, type_mismatch("outputs", other, "dict or function", "rule"))),
             }
         }
         let build_setting = kw.get("build_setting").map(|v| !matches!(v, Value::None)).unwrap_or(false);
@@ -1819,6 +2168,7 @@ impl PackageLoader {
             executable,
             test,
             outputs,
+            outputs_fn,
             build_setting,
             class: None,
             implementation,
@@ -1904,8 +2254,23 @@ impl PackageLoader {
                 Value::Host(k, id) if k == "rule" => {
                     if let Ok(idx) = id.parse::<usize>() {
                         if let Some(r) = reg.rules.get(idx) {
-                            for a in &r.attrs {
-                                if a.name != "name" && a.name != "visibility" {
+                            let rc = r.class.clone().unwrap_or_else(|| {
+                                Arc::new(crate::rule_class::starlark_rule_class(
+                                    r.name.as_deref().unwrap_or("_"),
+                                    r.attrs.clone(),
+                                    r.executable,
+                                    r.test,
+                                    vec![],
+                                    r.build_setting,
+                                ))
+                            });
+                            for a in rc.attrs.values() {
+                                if a.name != "name"
+                                    && a.name != "visibility"
+                                    && !a.name.starts_with('_')
+                                    && !a.name.starts_with('$')
+                                    && !a.name.starts_with(':')
+                                {
                                     attrs.push(a.clone());
                                 }
                             }
@@ -1916,7 +2281,12 @@ impl PackageLoader {
                     if let Ok(idx) = id.parse::<usize>() {
                         if let Some(m) = reg.macros.get(idx) {
                             for a in &m.attrs {
-                                if a.name != "name" && a.name != "visibility" {
+                                if a.name != "name"
+                                    && a.name != "visibility"
+                                    && !a.name.starts_with('_')
+                                    && !a.name.starts_with('$')
+                                    && !a.name.starts_with(':')
+                                {
                                     attrs.push(a.clone());
                                 }
                             }
@@ -2039,18 +2409,67 @@ impl PackageLoader {
                 format!("macro '{inst_name}' conflicts with an existing target."),
             ));
         }
-        if let Some(prev) = s.macro_names.get(&inst_name) {
-            return Err(herr(
-                ctx,
-                format!(
-                    "macro '{inst_name}' conflicts with an existing macro (and was not created by it), defined at {prev}"
-                ),
-            ));
+        if let Some(prev) = s.macro_names.get(&inst_name).cloned() {
+            // One main submacro whose name equals its parent macro's name is allowed when no
+            // sibling submacro of that name has been declared yet (`TargetRecorder.java`).
+            let is_parent_name = s
+                .macro_stack
+                .last()
+                .map(|(parent_name, _)| *parent_name == inst_name)
+                .unwrap_or(false);
+            let allowed_main_submacro = is_parent_name
+                && s.macro_frames
+                    .last_mut()
+                    .map(|(_, _, _, main_sub_defined)| {
+                        if !*main_sub_defined {
+                            *main_sub_defined = true;
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+            if !allowed_main_submacro {
+                return Err(herr(
+                    ctx,
+                    format!(
+                        "macro '{inst_name}' conflicts with an existing macro (and was not created by it), defined at {prev}"
+                    ),
+                ));
+            }
+        }
+        if let Some((parent_name, _)) = s.macro_stack.last() {
+            if !name_within_macro_namespace(&inst_name, parent_name) {
+                return Err(herr(
+                    ctx,
+                    format!(
+                        "macro '{parent_name}' cannot declare submacro named '{inst_name}'. Macro names must match the parent macro's name or be '<parent>_<suffix>', '<parent>-<suffix>', or '<parent>.<suffix>'."
+                    ),
+                ));
+            }
+        }
+        if s.macro_stack.is_empty() {
+            for (k, v) in &values {
+                if k == "visibility" || k == "compatible_with" || k == "restricted_to" || k == "package_metadata" {
+                    continue;
+                }
+                for l in v.labels() {
+                    s.top_level_macro_labels.push((l, loc.clone()));
+                }
+            }
         }
         for a in &attrs {
             if !values.contains_key(&a.name) {
-                let dv = if a.name == "visibility" { s.args.default_visibility.clone() } else { None };
-                values.insert(a.name.clone(), dv.map(AttrValue::LabelList).unwrap_or_else(|| a.default_value()));
+                if a.name == "visibility" {
+                    let dv = s.args.default_visibility.clone();
+                    values.insert(
+                        a.name.clone(),
+                        dv.map(AttrValue::LabelList)
+                            .unwrap_or_else(|| a.default_value()),
+                    );
+                } else if let Some(def) = &a.default {
+                    values.insert(a.name.clone(), def.clone());
+                }
             }
         }
         // `MacroClass.instantiateAndAddMacro`: the macro's `visibility` is what was passed (else the
@@ -2128,18 +2547,25 @@ impl PackageLoader {
                             let m = &reg.macros[c.macro_id];
                             (m.name.clone().unwrap_or_default(), m.def_location.clone())
                         };
-                        s.macro_frames.push((c.location.clone(), sym, dloc));
+                        s.macro_frames.push((c.location.clone(), sym, dloc, false));
                         c
                     }
                     None => return true,
                 }
             };
-            let (imp, def_name) = {
+            let (imp, def_name, attr_names) = {
                 let reg = self.registry.lock().unwrap();
                 let m = &reg.macros[call.macro_id];
-                (m.implementation.clone(), m.name.clone().unwrap_or_default())
+                (
+                    m.implementation.clone(),
+                    m.name.clone().unwrap_or_default(),
+                    m.attrs.iter().map(|a| a.name.clone()).collect::<Vec<_>>(),
+                )
             };
             let mut kwargs: BTreeMap<String, Value> = BTreeMap::new();
+            for k in &attr_names {
+                kwargs.insert(k.clone(), Value::None);
+            }
             kwargs.insert("name".into(), Value::String(call.name.clone()));
             for (k, v) in &call.values {
                 kwargs.insert(k.clone(), to_macro_value(v));
@@ -2158,13 +2584,13 @@ impl PackageLoader {
     }
 
     /// Final checks after all BUILD/macro code ran (`Package.Builder.beforeBuild`).
-    fn finish_package(&self, st: &Arc<Mutex<PackageState>>) {
+    fn finish_package(&self, st: &Arc<Mutex<PackageState>>, run_checks: bool) {
         let mut s = st.lock().unwrap();
         let id = s.id.clone();
         let default_vis = s.args.default_visibility.clone();
         // `test_suite`s with empty `tests` get `$implicit_tests`: the package's non-manual tests
         // matching the suite's tags (`TestSuiteImplicitTestsAccumulator`), sorted.
-        {
+        if run_checks {
             let tests: Vec<(Label, Vec<String>)> = s
                 .targets
                 .values()
@@ -2220,10 +2646,14 @@ impl PackageLoader {
                 r.extra.attr_values.insert("$implicit_tests".into(), AttrValue::LabelList(labels));
             }
         }
-        // Collect in-package label references.
+        // Collect in-package label references from non-symbolic-macro rules and top-level macro
+        // explicit attributes (`Package.java` / `TargetRecorder.java`).
         let mut refs: Vec<(Label, String)> = Vec::new();
         for (_, t) in s.targets.iter() {
             if let Target::Rule(r) = t {
+                if r.extra.macro_instance.is_some() {
+                    continue;
+                }
                 let rloc = r.extra.location.clone().unwrap_or_default();
                 for (an, v) in &r.extra.attr_values {
                     let is_output = r
@@ -2242,6 +2672,7 @@ impl PackageLoader {
                 }
             }
         }
+        refs.extend(s.top_level_macro_labels.iter().cloned());
         let mut reported: BTreeSet<String> = BTreeSet::new();
         for (l, rloc) in refs {
             if l.package_identifier() != &id {
@@ -2268,6 +2699,134 @@ impl PackageLoader {
                     .or_insert_with(|| dv.clone());
             }
         }
+        // Validate environment_group member environments and `fulfills` cycles (`EnvironmentGroup.java`).
+        let mut env_errors: Vec<(Option<String>, String)> = Vec::new();
+        for (gname, (envs, _)) in &s.environment_groups {
+            let gloc = s.target_locations.get(gname).cloned();
+            let glabel = format!("{}:{}", id.canonical_form(), gname);
+            let mut direct_fulfillers: BTreeMap<Label, Vec<Label>> = BTreeMap::new();
+            for env_label in envs {
+                if env_label.package_identifier() != &id {
+                    env_errors.push((
+                        gloc.clone(),
+                        format!(
+                            "{} is not in the same package as group {}",
+                            env_label.canonical_form(),
+                            glabel
+                        ),
+                    ));
+                    continue;
+                }
+                match s.targets.get(env_label.name()) {
+                    None => {
+                        env_errors.push((
+                            gloc.clone(),
+                            format!("environment {} does not exist", env_label.canonical_form()),
+                        ));
+                    }
+                    Some(Target::Rule(r)) if r.rule_class == "environment" => {
+                        if let Some(AttrValue::LabelList(fulfills)) = r.extra.attr_values.get("fulfills") {
+                            for fl in fulfills {
+                                if fl.package_identifier() != &id {
+                                    env_errors.push((
+                                        gloc.clone(),
+                                        format!(
+                                            "in \"fulfills\" attribute of {}: environment {} does not exist",
+                                            env_label.canonical_form(),
+                                            fl.canonical_form()
+                                        ),
+                                    ));
+                                    continue;
+                                }
+                                match s.targets.get(fl.name()) {
+                                    None => {
+                                        env_errors.push((
+                                            gloc.clone(),
+                                            format!(
+                                                "in \"fulfills\" attribute of {}: environment {} does not exist",
+                                                env_label.canonical_form(),
+                                                fl.canonical_form()
+                                            ),
+                                        ));
+                                    }
+                                    Some(Target::Rule(fr)) if fr.rule_class == "environment" => {
+                                        if !envs.contains(fl) {
+                                            env_errors.push((
+                                                gloc.clone(),
+                                                format!(
+                                                    "in \"fulfills\" attribute of {}: {} is not a member of this group",
+                                                    env_label.canonical_form(),
+                                                    fl.canonical_form()
+                                                ),
+                                            ));
+                                        } else {
+                                            direct_fulfillers
+                                                .entry(fl.clone())
+                                                .or_default()
+                                                .push(env_label.clone());
+                                        }
+                                    }
+                                    Some(_) => {
+                                        env_errors.push((
+                                            gloc.clone(),
+                                            format!(
+                                                "in \"fulfills\" attribute of {}: {} is not a valid environment",
+                                                env_label.canonical_form(),
+                                                fl.canonical_form()
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Some(_) => {
+                        env_errors.push((
+                            gloc.clone(),
+                            format!("{} is not a valid environment", env_label.canonical_form()),
+                        ));
+                    }
+                }
+            }
+            // Detect cycles in `direct_fulfillers` without recursing unboundedly.
+            let mut state: BTreeMap<Label, u8> = BTreeMap::new(); // 1=visiting, 2=done
+            fn visit_fulfills(
+                cur: &Label,
+                adj: &BTreeMap<Label, Vec<Label>>,
+                state: &mut BTreeMap<Label, u8>,
+            ) -> Option<Label> {
+                match state.get(cur).copied() {
+                    Some(1) => return Some(cur.clone()),
+                    Some(2) => return None,
+                    _ => {}
+                }
+                state.insert(cur.clone(), 1);
+                if let Some(nexts) = adj.get(cur) {
+                    for nxt in nexts {
+                        if let Some(cyc) = visit_fulfills(nxt, adj, state) {
+                            return Some(cyc);
+                        }
+                    }
+                }
+                state.insert(cur.clone(), 2);
+                None
+            }
+            for env_label in envs {
+                if let Some(cyc) = visit_fulfills(env_label, &direct_fulfillers, &mut state) {
+                    env_errors.push((
+                        gloc.clone(),
+                        format!(
+                            "cycle detected in environment_group '{gname}' involving environment {}",
+                            cyc.canonical_form()
+                        ),
+                    ));
+                    break;
+                }
+            }
+        }
+        for (eloc, emsg) in env_errors {
+            s.error(eloc, emsg);
+        }
     }
 }
 
@@ -2281,6 +2840,186 @@ pub fn java_label_cmp(a: &Label, b: &Label) -> std::cmp::Ordering {
         )
     };
     key(a).cmp(&key(b))
+}
+
+fn remove_extension(s: &str) -> String {
+    match s.rfind('.') {
+        Some(idx) if idx > 0 && !s[idx + 1..].contains('/') => s[..idx].to_string(),
+        _ => s.to_string(),
+    }
+}
+
+/// Expands an `ImplicitOutputsFunction` template (`%{name}`, `%{dirname}`, `%{basename}`,
+/// `%{attr}` cross product, `%%` escaping) matching `ImplicitOutputsFunction.java`.
+fn expand_implicit_outputs(
+    template: &str,
+    rule_name: &str,
+    values: &BTreeMap<String, AttrValue>,
+    rc: &RuleClass,
+) -> Result<Vec<String>, String> {
+    let mut literals: Vec<String> = Vec::new();
+    let mut placeholders: Vec<String> = Vec::new();
+    let mut rest = template;
+    loop {
+        let Some(start) = rest.find("%{") else {
+            literals.push(rest.replace("%%", "%"));
+            break;
+        };
+        let after_open = &rest[start + 2..];
+        let Some(end) = after_open.find('}') else {
+            literals.push(rest.replace("%%", "%"));
+            break;
+        };
+        literals.push(rest[..start].replace("%%", "%"));
+        placeholders.push(after_open[..end].to_string());
+        rest = &after_open[end + 1..];
+    }
+    if placeholders.is_empty() {
+        return Ok(vec![literals.concat()]);
+    }
+    let mut sets: Vec<Vec<String>> = Vec::with_capacity(placeholders.len());
+    for ph in &placeholders {
+        let vals: Vec<String> = if ph == "dirname" {
+            let dir = PathFragment::create(rule_name)
+                .parent_directory()
+                .unwrap_or_else(PathFragment::empty);
+            if dir.is_empty() {
+                vec![String::new()]
+            } else {
+                vec![format!("{}/", dir.path_string())]
+            }
+        } else if ph == "basename" {
+            vec![PathFragment::create(rule_name).base_name().to_string()]
+        } else if ph == "name" {
+            vec![rule_name.to_string()]
+        } else {
+            if let Some(AttrValue::Select(_)) = values.get(ph) {
+                return Err(format!(
+                    "Attribute {ph} is configurable and cannot be used in outputs"
+                ));
+            }
+            let av = values
+                .get(ph)
+                .cloned()
+                .or_else(|| rc.attr_or_implicit(ph).map(|a| a.default_value()));
+            let Some(av) = av else {
+                return Ok(Vec::new());
+            };
+            let mut raw = match av {
+                AttrValue::Str(s) => vec![s],
+                AttrValue::StrList(l) => l,
+                AttrValue::Label(Some(l)) => vec![remove_extension(l.name())],
+                AttrValue::Label(None) | AttrValue::Output(None) => return Ok(Vec::new()),
+                AttrValue::LabelList(l) => l.iter().map(|x| remove_extension(x.name())).collect(),
+                AttrValue::Output(Some(l)) => vec![l.name().to_string()],
+                AttrValue::OutputList(l) => l.iter().map(|x| x.name().to_string()).collect(),
+                _ => {
+                    return Err(format!(
+                        "Attributes of this type cannot be used in an outputs substitution template (attribute '{ph}')"
+                    ))
+                }
+            };
+            // Preserve insertion order while deduplicating like ImmutableSet.
+            let mut seen = BTreeSet::new();
+            raw.retain(|x| seen.insert(x.clone()));
+            raw
+        };
+        if vals.is_empty() {
+            return Ok(Vec::new());
+        }
+        sets.push(vals);
+    }
+    let mut combos: Vec<String> = vec![literals[0].clone()];
+    for (i, set) in sets.iter().enumerate() {
+        let suffix = &literals[i + 1];
+        let mut next = Vec::with_capacity(combos.len() * set.len());
+        for prefix in &combos {
+            for val in set {
+                next.push(format!("{prefix}{val}{suffix}"));
+            }
+        }
+        combos = next;
+    }
+    Ok(combos)
+}
+
+fn parse_license_strings(raw: &[String], cctx: &ConvertCtx<'_>) -> Result<Vec<String>, String> {
+    const ENUM_ORDER: &[&str] = &[
+        "BY_EXCEPTION_ONLY",
+        "RESTRICTED",
+        "RECIPROCAL",
+        "NOTICE",
+        "PERMISSIVE",
+        "UNENCUMBERED",
+        "NONE",
+    ];
+    let mut enums: BTreeSet<usize> = BTreeSet::new();
+    let mut exceptions: BTreeSet<String> = BTreeSet::new();
+    for s in raw {
+        if let Some(lbl) = s.strip_prefix("exception=") {
+            let l = convert_label(lbl, cctx)
+                .map_err(|e| format!("invalid license exception label '{lbl}': {e}"))?;
+            exceptions.insert(format!("exception={}", l.canonical_form()));
+        } else {
+            let up = s.to_ascii_uppercase();
+            if let Some(idx) = ENUM_ORDER.iter().position(|&k| k == up) {
+                enums.insert(idx);
+            } else {
+                return Err(format!("invalid license type: '{s}'"));
+            }
+        }
+    }
+    let mut out: Vec<String> = enums.into_iter().map(|i| ENUM_ORDER[i].to_string()).collect();
+    out.extend(exceptions);
+    Ok(out)
+}
+
+fn join_english_list_single_quoted(items: &[String]) -> String {
+    match items.len() {
+        0 => String::new(),
+        1 => format!("'{}'", items[0]),
+        2 => format!("'{}' or '{}'", items[0], items[1]),
+        n => {
+            let prefix: Vec<String> = items[..n - 1].iter().map(|s| format!("'{s}'")).collect();
+            format!("{}, or '{}'", prefix.join(", "), items[n - 1])
+        }
+    }
+}
+
+fn check_allowed_values(allowed: &[String], val: &AttrValue, attr: &str) -> Result<(), String> {
+    let check_scalar = |v: &AttrValue| -> Result<(), String> {
+        let repr = match v {
+            AttrValue::Str(s) => Some(s.clone()),
+            AttrValue::Int(i) => Some(i.to_string()),
+            AttrValue::Bool(b) => Some(if *b { "True" } else { "False" }.to_string()),
+            _ => None,
+        };
+        if let Some(sv) = repr {
+            if !allowed.contains(&sv) {
+                let list = join_english_list_single_quoted(allowed);
+                return Err(format!(
+                    "invalid value in '{attr}' attribute: has to be one of {list} instead of '{sv}'"
+                ));
+            }
+        }
+        Ok(())
+    };
+    match val {
+        AttrValue::Select(parts) => {
+            for p in parts {
+                match p {
+                    SelectPart::Plain(v) => check_scalar(v)?,
+                    SelectPart::Select { entries, .. } => {
+                        for (_, ev) in entries {
+                            check_scalar(ev)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        }
+        other => check_scalar(other),
+    }
 }
 
 /// `BuildType.convertFromBuildLangType`: plain list values of `orderIndependent()` attributes
@@ -2306,10 +3045,16 @@ fn sort_order_independent(v: AttrValue, attr: &Attribute) -> AttrValue {
 /// `TestTargetUtils.sortTagsBySense` + `testMatchesFilters`: whether a test's tags (plus its size)
 /// satisfy a test_suite's tag filter (`-tag` excludes, any other tag is required).
 fn test_matches_suite_tags(test_tags: &[String], suite_tags: &[String]) -> bool {
-    suite_tags.iter().all(|t| match t.strip_prefix('-') {
-        Some(ex) => !test_tags.iter().any(|x| x == ex),
-        None => test_tags.iter().any(|x| x == t),
-    })
+    suite_tags
+        .iter()
+        .filter(|t| t.as_str() != "manual")
+        .all(|t| match t.strip_prefix('-') {
+            Some(ex) => !test_tags.iter().any(|x| x == ex),
+            None => {
+                let req = t.strip_prefix('+').unwrap_or(t);
+                test_tags.iter().any(|x| x == req)
+            }
+        })
 }
 
 /// Collapses `loc: loc: msg` into `loc: msg` (host calls get the location prefixed twice when the

@@ -53,7 +53,10 @@ pub fn analysis_failure(
     rule_loc: &dyn Fn(&str) -> Option<String>,
 ) -> AnalysisFailure {
     if error == "target depends on an already-reported cycle" {
-        return AnalysisFailure { events: Vec::new(), abort_suffix: "" };
+        return AnalysisFailure {
+            events: Vec::new(),
+            abort_suffix: "",
+        };
     }
     let mut events = Vec::new();
     for (i, line) in error.lines().enumerate() {
@@ -69,9 +72,18 @@ pub fn analysis_failure(
     let failing = failing_rule(error).unwrap_or_else(|| root_s.clone());
     if !is_cycle && !referenced {
         if let Some(loc) = rule_loc(&failing) {
-            events.push(format!("ERROR: {loc}: Analysis of target '{failing}' (config: {config}) failed"));
+            events.push(format!(
+                "ERROR: {loc}: Analysis of target '{failing}' (config: {config}) failed"
+            ));
         }
     }
-    let abort_suffix = if referenced || (!is_cycle && failing != root_s) { ": Analysis failed" } else { "" };
-    AnalysisFailure { events, abort_suffix }
+    let abort_suffix = if referenced || (!is_cycle && failing != root_s) {
+        ": Analysis failed"
+    } else {
+        ""
+    };
+    AnalysisFailure {
+        events,
+        abort_suffix,
+    }
 }

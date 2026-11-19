@@ -15,8 +15,16 @@ struct JsonFormatter<'a, 'b> {
 
 /// Formats the result graph as pretty JSON followed by a newline.
 pub fn format(ctx: &FormatCtx<'_>) -> String {
-    let mut f = JsonFormatter { ctx, seen_extensions: HashSet::new() };
-    let mut root = f.print_module(&ModuleKey::root(), None, IsExpanded::True, IsIndirect::False);
+    let mut f = JsonFormatter {
+        ctx,
+        seen_extensions: HashSet::new(),
+    };
+    let mut root = f.print_module(
+        &ModuleKey::root(),
+        None,
+        IsExpanded::True,
+        IsIndirect::False,
+    );
     if let Json::Obj(members) = &mut root {
         members.push(("root".into(), Json::Bool(true)));
     }
@@ -45,13 +53,25 @@ impl JsonFormatter<'_, '_> {
             return Json::Obj(obj);
         }
         let repo_imports = ctx.ext_imports.repos_imported_by(id, key);
-        obj.push(("used_repos".into(), Json::Arr(repo_imports.into_iter().map(Json::Str).collect())));
+        obj.push((
+            "used_repos".into(),
+            Json::Arr(repo_imports.into_iter().map(Json::Str).collect()),
+        ));
         if unexpanded || info == ExtensionShow::Repos {
             return Json::Obj(obj);
         }
-        let imported: std::collections::BTreeSet<String> =
-            ctx.ext_imports.get(id).map(|m| m.keys().cloned().collect()).unwrap_or_default();
-        let unused: Vec<Json> = ctx.insp.repos_of(id).difference(&imported).cloned().map(Json::Str).collect();
+        let imported: std::collections::BTreeSet<String> = ctx
+            .ext_imports
+            .get(id)
+            .map(|m| m.keys().cloned().collect())
+            .unwrap_or_default();
+        let unused: Vec<Json> = ctx
+            .insp
+            .repos_of(id)
+            .difference(&imported)
+            .cloned()
+            .map(Json::Str)
+            .collect();
         obj.push(("unused_repos".into(), Json::Arr(unused)));
         Json::Obj(obj)
     }
@@ -69,7 +89,10 @@ impl JsonFormatter<'_, '_> {
         let node = ctx.result.get(key).cloned().unwrap_or_default();
         let module = ctx.insp.dep_graph.get(key);
         let mut obj: Vec<(String, Json)> = vec![("key".into(), Json::Str(print_key(key)))];
-        obj.push(("name".into(), Json::Str(module.map(|m| m.name.clone()).unwrap_or_default())));
+        obj.push((
+            "name".into(),
+            Json::Str(module.map(|m| m.name.clone()).unwrap_or_default()),
+        ));
         obj.push((
             "version".into(),
             Json::Str(module.map(|m| m.version.to_string()).unwrap_or_default()),
@@ -95,12 +118,21 @@ impl JsonFormatter<'_, '_> {
                 if let Some(e) = ctx.extra_resolution_explanation(key, parent) {
                     if !module.map(|m| m.is_used()).unwrap_or(false) {
                         obj.push(("unused".into(), Json::Bool(true)));
-                        obj.push(("resolvedVersion".into(), Json::Str(e.changed_version.to_string())));
+                        obj.push((
+                            "resolvedVersion".into(),
+                            Json::Str(e.changed_version.to_string()),
+                        ));
                     } else {
-                        obj.push(("originalVersion".into(), Json::Str(e.changed_version.to_string())));
+                        obj.push((
+                            "originalVersion".into(),
+                            Json::Str(e.changed_version.to_string()),
+                        ));
                     }
                     // Faithful to the Java implementation, which stores the changed version here.
-                    obj.push(("resolutionReason".into(), Json::Str(e.changed_version.to_string())));
+                    obj.push((
+                        "resolutionReason".into(),
+                        Json::Str(e.changed_version.to_string()),
+                    ));
                     if let Some(by) = &e.requested_by_modules {
                         obj.push((
                             "resolvedRequestedBy".into(),
@@ -121,9 +153,19 @@ impl JsonFormatter<'_, '_> {
         let mut cycles = vec![];
         for (child, meta) in node.children_sorted_by_edge_type() {
             if meta.cycle == IsCycle::True {
-                cycles.push(self.print_module(&child, Some(key), IsExpanded::False, IsIndirect::False));
+                cycles.push(self.print_module(
+                    &child,
+                    Some(key),
+                    IsExpanded::False,
+                    IsIndirect::False,
+                ));
             } else if meta.indirect == IsIndirect::True {
-                indirect_deps.push(self.print_module(&child, Some(key), meta.expanded, IsIndirect::True));
+                indirect_deps.push(self.print_module(
+                    &child,
+                    Some(key),
+                    meta.expanded,
+                    IsIndirect::True,
+                ));
             } else {
                 deps.push(self.print_module(&child, Some(key), meta.expanded, IsIndirect::False));
             }

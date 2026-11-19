@@ -422,12 +422,15 @@ fn looks_like_file_path(
     raw: &str,
 ) -> Option<PathFragment> {
     let pf = PathFragment::create(raw);
+    if pf.is_empty() {
+        return None;
+    }
     let full = if pf.is_absolute() {
         pf.clone()
     } else {
         cwd.get_relative(&pf)
     };
-    if fs.exists(&full, true) {
+    if fs.stat(&full, true).is_ok_and(|s| s.is_file) {
         return Some(full);
     }
     if raw.starts_with('/')
@@ -548,24 +551,29 @@ pub fn resolve_version_spec(
             ));
         } else if let Some(ver) = trimmed.strip_prefix("warn:") {
             let ver = ver.trim().to_string();
-            let warn = format!(
-                "Warning: No Zel/Bazel version specified; falling back to '{ver}' (from ${var_name})."
-            );
-            return Ok(parse_raw_version_spec(
-                fs,
-                cwd,
-                ver,
-                VersionSource::FallbackEnv(var_name.clone()),
-                Some(warn),
-            ));
+            if !ver.is_empty() {
+                let warn = format!(
+                    "Warning: No Zel/Bazel version specified; falling back to '{ver}' (from ${var_name})."
+                );
+                return Ok(parse_raw_version_spec(
+                    fs,
+                    cwd,
+                    ver,
+                    VersionSource::FallbackEnv(var_name.clone()),
+                    Some(warn),
+                ));
+            }
         } else if let Some(ver) = trimmed.strip_prefix("silent:") {
-            return Ok(parse_raw_version_spec(
-                fs,
-                cwd,
-                ver.trim().to_string(),
-                VersionSource::FallbackEnv(var_name.clone()),
-                None,
-            ));
+            let ver = ver.trim().to_string();
+            if !ver.is_empty() {
+                return Ok(parse_raw_version_spec(
+                    fs,
+                    cwd,
+                    ver,
+                    VersionSource::FallbackEnv(var_name.clone()),
+                    None,
+                ));
+            }
         } else if !trimmed.is_empty() {
             return Ok(parse_raw_version_spec(
                 fs,
@@ -1258,11 +1266,20 @@ pub fn plan_invocation(
     // Determine the target Zel/Bazel binary path if needed
     let resolved_binary: Option<PathFragment> = if spec.is_path {
         let bin_path = PathFragment::create(&spec.version);
-        if !fs.exists(&bin_path, true) {
-            return Err(format!(
-                "The Zel/Bazel binary '{}' (specified in {}) does not exist.",
-                bin_path, spec.source
-            ));
+        match fs.stat(&bin_path, true) {
+            Ok(st) if st.is_file => {}
+            Ok(_) => {
+                return Err(format!(
+                    "The Zel/Bazel binary '{}' (specified in {}) is not a regular file.",
+                    bin_path, spec.source
+                ));
+            }
+            Err(_) => {
+                return Err(format!(
+                    "The Zel/Bazel binary '{}' (specified in {}) does not exist.",
+                    bin_path, spec.source
+                ));
+            }
         }
         Some(bin_path)
     } else if version_matches_current {

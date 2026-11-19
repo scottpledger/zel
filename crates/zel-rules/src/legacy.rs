@@ -85,6 +85,7 @@ pub(crate) fn analyze_legacy(
                     inputs: vec![src.clone()],
                     outputs: vec![dst.clone()],
                     execution_info: BTreeMap::new(),
+                    tools: vec![],
                     java_compile: None,
                 });
             }
@@ -162,6 +163,7 @@ pub(crate) fn analyze_legacy(
                     inputs: action_inputs,
                     outputs: vec![out_art.clone()],
                     execution_info: BTreeMap::new(),
+                    tools: vec![],
                     java_compile: None,
                 });
             } else {

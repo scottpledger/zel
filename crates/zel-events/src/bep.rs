@@ -49,7 +49,10 @@ pub mod ids {
         bid("progress", p)
     }
     pub fn unstructured_command_line() -> Msg {
-        bid("unstructured_command_line", sub("UnstructuredCommandLineId"))
+        bid(
+            "unstructured_command_line",
+            sub("UnstructuredCommandLineId"),
+        )
     }
     pub fn structured_command_line(label: &str) -> Msg {
         let mut p = sub("StructuredCommandLineId");
@@ -468,7 +471,13 @@ impl BuildEventStreamer {
         pairs(&out, &err)
     }
 
-    fn progress_node(n: i32, out: &str, err: &str, chain_in: Option<&Msg>, has_next: bool) -> BuildEventNode {
+    fn progress_node(
+        n: i32,
+        out: &str,
+        err: &str,
+        chain_in: Option<&Msg>,
+        has_next: bool,
+    ) -> BuildEventNode {
         let mut children = Vec::new();
         if has_next {
             children.push(ids::progress(n + 1));
@@ -491,7 +500,10 @@ impl BuildEventStreamer {
             return;
         }
         let progress_count = st.progress_count;
-        let posted: Vec<bool> = ids.iter().map(|i| Self::is_posted(st, i, progress_count)).collect();
+        let posted: Vec<bool> = ids
+            .iter()
+            .map(|i| Self::is_posted(st, i, progress_count))
+            .collect();
         if let Some(f) = st.frontier.as_mut() {
             for (i, p) in ids.iter().zip(posted) {
                 if !p {
@@ -503,7 +515,9 @@ impl BuildEventStreamer {
 
     fn is_posted(st: &State, id: &Msg, progress_count: i32) -> bool {
         if id.has("progress") {
-            id.get_msg("progress").map(|p| p.get_i64("opaque_count") < progress_count as i64).unwrap_or(false)
+            id.get_msg("progress")
+                .map(|p| p.get_i64("opaque_count") < progress_count as i64)
+                .unwrap_or(false)
         } else {
             st.posted.contains(&key(id))
         }
@@ -526,11 +540,13 @@ impl BuildEventStreamer {
             st.frontier = Some(HashSet::new());
             Self::register(st, std::slice::from_ref(id));
             let is_initial = id.has("progress")
-                && id.get_msg("progress").map(|p| p.get_i64("opaque_count") == 0).unwrap_or(false);
-            let announces_initial = node
-                .children
-                .iter()
-                .any(|c| c.has("progress") && c.get_msg("progress").unwrap().get_i64("opaque_count") == 0);
+                && id
+                    .get_msg("progress")
+                    .map(|p| p.get_i64("opaque_count") == 0)
+                    .unwrap_or(false);
+            let announces_initial = node.children.iter().any(|c| {
+                c.has("progress") && c.get_msg("progress").unwrap().get_i64("opaque_count") == 0
+            });
             if !is_initial && !announces_initial {
                 let p = Self::progress_node(st.progress_count, "", "", Some(id), true);
                 st.progress_count += 1;
@@ -551,7 +567,11 @@ impl BuildEventStreamer {
             st.buffered_pairs = None;
         } else {
             let k = key(id);
-            let announced = st.frontier.as_ref().map(|f| f.contains(&k)).unwrap_or(false);
+            let announced = st
+                .frontier
+                .as_ref()
+                .map(|f| f.contains(&k))
+                .unwrap_or(false);
             if !announced && !Self::is_posted(st, id, st.progress_count) {
                 // `consumeAsPairs`: with nothing buffered the last consumer still runs once with
                 // (null, null), so an unannounced event is always chained in via a progress event.
@@ -632,7 +652,10 @@ impl BuildEventStreamer {
             }
         }
         // Ensure the artificial start event exists when the build ends early.
-        if node.completes_build && !st.posted.contains(&key(&ids::started())) && st.frontier.is_none() {
+        if node.completes_build
+            && !st.posted.contains(&key(&ids::started()))
+            && st.frontier.is_none()
+        {
             // Nothing posted yet: the completing event itself becomes the stream root.
         }
         let id = node.id.clone();
@@ -659,7 +682,9 @@ impl BuildEventStreamer {
     }
 
     fn abort_info(st: &State) -> (String, String) {
-        st.abort_reason.clone().unwrap_or(("UNKNOWN".into(), String::new()))
+        st.abort_reason
+            .clone()
+            .unwrap_or(("UNKNOWN".into(), String::new()))
     }
 
     fn aborted_node(id: Msg, children: Vec<Msg>, reason: &(String, String)) -> BuildEventNode {
@@ -727,19 +752,30 @@ impl BuildEventStreamer {
         }
         let remaining: HashSet<Vec<u8>> = st.frontier.clone().unwrap_or_default();
         st.final_events_to_come = Some(remaining);
-        if st.final_events_to_come.as_ref().map(HashSet::is_empty).unwrap_or(true) {
+        if st
+            .final_events_to_come
+            .as_ref()
+            .map(HashSet::is_empty)
+            .unwrap_or(true)
+        {
             // close() is invoked by the caller path when empty.
         }
     }
 
     /// Sets the reason used for `aborted` events generated at close.
     pub fn add_abort_reason(&self, reason: &str, description: &str) {
-        self.state.lock().unwrap().abort_reason = Some((reason.to_string(), description.to_string()));
+        self.state.lock().unwrap().abort_reason =
+            Some((reason.to_string(), description.to_string()));
     }
 
     /// Whether a configuration event was already posted for `id` (dedup helper).
     pub fn configuration_posted(&self, id: &str) -> bool {
-        !self.state.lock().unwrap().configurations_posted.insert(id.to_string())
+        !self
+            .state
+            .lock()
+            .unwrap()
+            .configurations_posted
+            .insert(id.to_string())
     }
 
     /// Flushes accumulated stdout/stderr into progress events immediately (`flush()`).
@@ -778,14 +814,18 @@ impl BuildEventStreamer {
             st.closed = true;
             if st.final_events_to_come.is_none() {
                 // Crash/early close: finish the stream as best we can.
-                if st.frontier.is_some() || st.buffered_pairs.is_some() || !st.out_chunks.is_empty() {
+                if st.frontier.is_some() || st.buffered_pairs.is_some() || !st.out_chunks.is_empty()
+                {
                     self.build_complete_locked(&mut st, &[]);
                 }
             }
         }
         for t in &self.transports {
             if let Err(e) = t.close() {
-                self.close_errors.lock().unwrap().push(format!("{}: {e}", t.name()));
+                self.close_errors
+                    .lock()
+                    .unwrap()
+                    .push(format!("{}: {e}", t.name()));
             }
         }
     }
@@ -857,7 +897,12 @@ impl BepBuilder {
         for a in args {
             b.set_str("args", a.clone());
         }
-        BuildEventNode::new(ids::unstructured_command_line(), vec![], "unstructured_command_line", b)
+        BuildEventNode::new(
+            ids::unstructured_command_line(),
+            vec![],
+            "unstructured_command_line",
+            b,
+        )
     }
 
     /// `label`: "original", "canonical" or "tool"; `sections` are `(label, kind, values)` where
@@ -872,7 +917,10 @@ impl BepBuilder {
     ) -> BuildEventNode {
         let mut cl = Msg::new("command_line.CommandLine");
         cl.set_str("command_line_label", label);
-        let section = |cl: &mut Msg, label: &str, chunks: Option<Vec<String>>, opts: Option<&[(String, String)]>| {
+        let section = |cl: &mut Msg,
+                       label: &str,
+                       chunks: Option<Vec<String>>,
+                       opts: Option<&[(String, String)]>| {
             let mut sec = cl.new_child("sections");
             sec.set_str("section_label", label);
             if let Some(chunks) = chunks {
@@ -886,7 +934,14 @@ impl BepBuilder {
                 let mut ol = sec.new_child("option_list");
                 for (n, v) in opts {
                     let mut o = ol.new_child("option");
-                    o.set_str("combined_form", if v.is_empty() { format!("--{n}") } else { format!("--{n}={v}") });
+                    o.set_str(
+                        "combined_form",
+                        if v.is_empty() {
+                            format!("--{n}")
+                        } else {
+                            format!("--{n}={v}")
+                        },
+                    );
                     o.set_str("option_name", n.clone());
                     o.set_str("option_value", v.clone());
                     ol.set_msg("option", o);
@@ -895,9 +950,19 @@ impl BepBuilder {
             }
             cl.set_msg("sections", sec);
         };
-        section(&mut cl, "executable", Some(vec![executable.to_string()]), None);
+        section(
+            &mut cl,
+            "executable",
+            Some(vec![executable.to_string()]),
+            None,
+        );
         section(&mut cl, "startup options", None, Some(startup_options));
-        section(&mut cl, "command", Some(vec![command_name.to_string()]), None);
+        section(
+            &mut cl,
+            "command",
+            Some(vec![command_name.to_string()]),
+            None,
+        );
         section(&mut cl, "command options", None, Some(command_options));
         section(&mut cl, "residual", Some(residue.to_vec()), None);
         BuildEventNode {
@@ -964,17 +1029,31 @@ impl BepBuilder {
     /// configured/unconfigured target ids.
     pub fn pattern_expanded(patterns: &[String], target_labels: &[String]) -> BuildEventNode {
         let b = Msg::new("build_event_stream.PatternExpanded");
-        let children = target_labels.iter().map(|l| ids::unconfigured_label(l)).collect();
+        let children = target_labels
+            .iter()
+            .map(|l| ids::unconfigured_label(l))
+            .collect();
         BuildEventNode::new(ids::pattern(patterns), children, "expanded", b)
     }
 
-    pub fn configuration(id: &str, mnemonic: &str, platform: &str, cpu: &str, make_vars: &[(String, String)], is_tool: bool) -> BuildEventNode {
+    pub fn configuration(
+        id: &str,
+        mnemonic: &str,
+        platform: &str,
+        cpu: &str,
+        make_vars: &[(String, String)],
+        is_tool: bool,
+    ) -> BuildEventNode {
         let mut c = Msg::new("build_event_stream.Configuration");
         c.set_str("mnemonic", mnemonic);
         c.set_str("platform_name", platform);
         c.set_str("cpu", cpu);
         for (k, v) in make_vars {
-            c.put_map("make_variable", Value::Str(k.clone()), Value::Str(v.clone()));
+            c.put_map(
+                "make_variable",
+                Value::Str(k.clone()),
+                Value::Str(v.clone()),
+            );
         }
         c.set_bool("is_tool", is_tool);
         BuildEventNode::new(ids::configuration(id), vec![], "configuration", c)
@@ -1059,10 +1138,21 @@ impl BepBuilder {
         if let Some(fd) = failure_detail {
             a.set_msg("failure_detail", fd.to_msg());
         }
-        BuildEventNode::new(ids::action_completed(primary_output, label, config_id), vec![], "action", a)
+        BuildEventNode::new(
+            ids::action_completed(primary_output, label, config_id),
+            vec![],
+            "action",
+            a,
+        )
     }
 
-    pub fn file(name: &str, path: &str, prefix: &[String], length: Option<i64>, digest: Option<&str>) -> Msg {
+    pub fn file(
+        name: &str,
+        path: &str,
+        prefix: &[String],
+        length: Option<i64>,
+        digest: Option<&str>,
+    ) -> Msg {
         let mut f = Msg::new("build_event_stream.File");
         for p in prefix {
             f.set_str("path_prefix", p.clone());
@@ -1095,7 +1185,11 @@ impl BepBuilder {
         };
         let mut child_ids = Vec::new();
         for (i, c) in chunks.iter().enumerate() {
-            let id = if chunks.len() == 1 { group_key.to_string() } else { format!("{group_key}-{i}") };
+            let id = if chunks.len() == 1 {
+                group_key.to_string()
+            } else {
+                format!("{group_key}-{i}")
+            };
             let mut ns = Msg::new("build_event_stream.NamedSetOfFiles");
             for f in c {
                 ns.set_msg("files", f.clone());
@@ -1150,7 +1244,12 @@ impl BepBuilder {
         }
         // Named sets are announced by TargetComplete's output groups, not as ordinary children:
         // Bazel posts them *before* the completion and lists them as its children.
-        BuildEventNode::new(ids::target_completed(label, config_id), vec![], "completed", c)
+        BuildEventNode::new(
+            ids::target_completed(label, config_id),
+            vec![],
+            "completed",
+            c,
+        )
     }
 
     pub fn build_finished(
@@ -1235,14 +1334,22 @@ impl BepBuilder {
         d.set_int("nanos", duration_millis.rem_euclid(1000) * 1_000_000);
         r.set_msg("test_attempt_duration", d);
         for (name, path) in outputs {
-            r.set_msg("test_action_output", BepBuilder::file(name, path, &[], None, None));
+            r.set_msg(
+                "test_action_output",
+                BepBuilder::file(name, path, &[], None, None),
+            );
         }
         let mut ei = r.new_child("execution_info");
         ei.set_str("strategy", strategy);
         ei.set_int("exit_code", exit_code as i64);
         r.set_msg("execution_info", ei);
-        BuildEventNode::new(ids::test_result(label, config_id, run, shard, attempt), vec![], "test_result", r)
-            .after(ids::target_completed(label, config_id))
+        BuildEventNode::new(
+            ids::test_result(label, config_id, run, shard, attempt),
+            vec![],
+            "test_result",
+            r,
+        )
+        .after(ids::target_completed(label, config_id))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1266,7 +1373,14 @@ impl BepBuilder {
         s.set_int("total_run_count", total_run_count as i64);
         // `runCount` counts runs (`--runs_per_test`), not run×shard units; shards are reported
         // separately, so a sharded single run has run_count 1.
-        s.set_int("run_count", if shard_count > 1 { (total_run_count / shard_count).max(1) as i64 } else { total_run_count as i64 });
+        s.set_int(
+            "run_count",
+            if shard_count > 1 {
+                (total_run_count / shard_count).max(1) as i64
+            } else {
+                total_run_count as i64
+            },
+        );
         s.set_int("attempt_count", attempt_count as i64);
         s.set_int("shard_count", shard_count as i64);
         for (n, p) in passed {
@@ -1290,7 +1404,12 @@ impl BepBuilder {
         s.set_msg("first_start_time", a);
         s.set_msg("last_stop_time", b);
         s.set_msg("total_run_duration", c);
-        let mut n = BuildEventNode::new(ids::test_summary(label, config_id), vec![], "test_summary", s);
+        let mut n = BuildEventNode::new(
+            ids::test_summary(label, config_id),
+            vec![],
+            "test_summary",
+            s,
+        );
         for r in result_ids {
             n = n.after(r);
         }
@@ -1319,14 +1438,35 @@ pub fn file_uri(path: &str) -> String {
     if path.contains("://") {
         return path.to_string();
     }
-    let p = if path.starts_with('/') { path.to_string() } else { format!("/{path}") };
+    let p = if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("/{path}")
+    };
     let mut out = String::from("file://");
     for b in p.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'/' | b'-' | b'_' | b'.' | b'!' | b'~'
-            | b'*' | b'\'' | b'(' | b')' | b':' | b'@' | b'&' | b'=' | b'+' | b'$' | b',' | b';' => {
-                out.push(b as char)
-            }
+            b'A'..=b'Z'
+            | b'a'..=b'z'
+            | b'0'..=b'9'
+            | b'/'
+            | b'-'
+            | b'_'
+            | b'.'
+            | b'!'
+            | b'~'
+            | b'*'
+            | b'\''
+            | b'('
+            | b')'
+            | b':'
+            | b'@'
+            | b'&'
+            | b'='
+            | b'+'
+            | b'$'
+            | b','
+            | b';' => out.push(b as char),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -1357,7 +1497,10 @@ pub struct BepOptions {
 
 impl BepOptions {
     /// Builds from a lookup of the last value for each flag (`name` without dashes).
-    pub fn from_flags(get: &dyn Fn(&str) -> Option<String>, get_all: &dyn Fn(&str) -> Vec<String>) -> Self {
+    pub fn from_flags(
+        get: &dyn Fn(&str) -> Option<String>,
+        get_all: &dyn Fn(&str) -> Vec<String>,
+    ) -> Self {
         let b = |n: &str, d: bool| match get(n).as_deref() {
             Some("0") | Some("false") | Some("no") => false,
             Some(_) => true,
@@ -1381,7 +1524,10 @@ impl BepOptions {
             bes_timeout_secs: get("bes_timeout").and_then(|s| parse_duration_secs(&s)),
             bes_headers: get_all("bes_header")
                 .into_iter()
-                .filter_map(|h| h.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+                .filter_map(|h| {
+                    h.split_once('=')
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                })
                 .collect(),
             bes_instance_name: get("bes_instance_name").unwrap_or_default(),
             bes_keywords: get_all("bes_keywords"),
@@ -1433,7 +1579,10 @@ pub fn parse_duration_secs(s: &str) -> Option<u64> {
     } else {
         (s, 1.0)
     };
-    num.trim().parse::<f64>().ok().map(|n| (n * mul).ceil() as u64)
+    num.trim()
+        .parse::<f64>()
+        .ok()
+        .map(|n| (n * mul).ceil() as u64)
 }
 
 #[cfg(test)]
@@ -1461,12 +1610,28 @@ mod tests {
     fn stream_dag_progress_and_last_message() {
         let (s, mem) = streamer();
         s.post(BepBuilder::build_started(
-            "u", 1_700_000_000_123, "release 9", "", "build", "/w", "/w", 7, "h", "u",
+            "u",
+            1_700_000_000_123,
+            "release 9",
+            "",
+            "build",
+            "/w",
+            "/w",
+            7,
+            "h",
+            "u",
             vec![ids::progress(0), ids::build_finished()],
         ));
         s.report_stderr("INFO: hello\n");
-        s.post(BepBuilder::build_finished("SUCCESS", 0, 1_700_000_001_000, None));
-        s.post(BepBuilder::build_metrics(Msg::new("build_event_stream.BuildMetrics")));
+        s.post(BepBuilder::build_finished(
+            "SUCCESS",
+            0,
+            1_700_000_001_000,
+            None,
+        ));
+        s.post(BepBuilder::build_metrics(Msg::new(
+            "build_event_stream.BuildMetrics",
+        )));
         s.post(BepBuilder::build_tool_logs(&[]));
         s.post(BepBuilder::convenience_symlinks(&[]));
         let k = kinds(&mem);
@@ -1477,13 +1642,17 @@ mod tests {
         let evs = mem.events.lock().unwrap();
         // started announces progress 0 via link event
         let started = &evs[0];
-        assert!(started.get_msgs("children").iter().any(|c| c.has("build_finished")));
+        assert!(started
+            .get_msgs("children")
+            .iter()
+            .any(|c| c.has("build_finished")));
         let last = evs.last().unwrap();
         assert!(last.get_bool("last_message"), "last: {}", last.to_json());
         // stderr text rode on a progress event
-        assert!(evs
-            .iter()
-            .any(|e| e.get_msg("progress").map(|p| p.get_str("stderr") == "INFO: hello\n").unwrap_or(false)));
+        assert!(evs.iter().any(|e| e
+            .get_msg("progress")
+            .map(|p| p.get_str("stderr") == "INFO: hello\n")
+            .unwrap_or(false)));
         // every announced id was posted exactly once
         let mut announced: HashSet<Vec<u8>> = HashSet::new();
         let mut posted = HashSet::new();
@@ -1495,7 +1664,13 @@ mod tests {
             }
         }
         for a in &announced {
-            assert!(posted.contains(a), "announced not posted: {:?}", Msg::decode("build_event_stream.BuildEventId", a).unwrap().to_json());
+            assert!(
+                posted.contains(a),
+                "announced not posted: {:?}",
+                Msg::decode("build_event_stream.BuildEventId", a)
+                    .unwrap()
+                    .to_json()
+            );
         }
     }
 
@@ -1504,17 +1679,43 @@ mod tests {
         let (s, mem) = streamer();
         s.add_abort_reason("USER_INTERRUPTED", "interrupted");
         s.post(BepBuilder::build_started(
-            "u", 0, "v", "", "build", "/w", "/w", 1, "h", "u",
-            vec![ids::progress(0), ids::target_configured("//a:b"), ids::build_finished()],
+            "u",
+            0,
+            "v",
+            "",
+            "build",
+            "/w",
+            "/w",
+            1,
+            "h",
+            "u",
+            vec![
+                ids::progress(0),
+                ids::target_configured("//a:b"),
+                ids::build_finished(),
+            ],
         ));
         s.post(BepBuilder::build_finished("INTERRUPTED", 8, 5, None));
-        s.post(BepBuilder::build_metrics(Msg::new("build_event_stream.BuildMetrics")));
+        s.post(BepBuilder::build_metrics(Msg::new(
+            "build_event_stream.BuildMetrics",
+        )));
         s.post(BepBuilder::build_tool_logs(&[]));
         s.post(BepBuilder::convenience_symlinks(&[]));
         let evs = mem.events.lock().unwrap();
         let aborted: Vec<_> = evs.iter().filter(|e| e.has("aborted")).collect();
-        assert_eq!(aborted.len(), 1, "{:?}", evs.iter().map(|e| e.to_json()).collect::<Vec<_>>());
-        assert_eq!(aborted[0].get_msg("aborted").unwrap().get_enum_name("reason"), "USER_INTERRUPTED");
+        assert_eq!(
+            aborted.len(),
+            1,
+            "{:?}",
+            evs.iter().map(|e| e.to_json()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            aborted[0]
+                .get_msg("aborted")
+                .unwrap()
+                .get_enum_name("reason"),
+            "USER_INTERRUPTED"
+        );
         assert!(evs.last().unwrap().get_bool("last_message"));
     }
 
@@ -1522,12 +1723,46 @@ mod tests {
     fn order_constraint_buffers_until_prerequisite() {
         let (s, mem) = streamer();
         s.post(BepBuilder::build_started(
-            "u", 0, "v", "", "test", "/w", "/w", 1, "h", "u",
-            vec![ids::progress(0), ids::target_completed("//a:t", "c1"), ids::test_result("//a:t", "c1", 1, 1, 1), ids::build_finished()],
+            "u",
+            0,
+            "v",
+            "",
+            "test",
+            "/w",
+            "/w",
+            1,
+            "h",
+            "u",
+            vec![
+                ids::progress(0),
+                ids::target_completed("//a:t", "c1"),
+                ids::test_result("//a:t", "c1", 1, 1, 1),
+                ids::build_finished(),
+            ],
         ));
-        s.post(BepBuilder::test_result("//a:t", "c1", 1, 1, 1, "PASSED", false, 0, 10, &[], "local", 0));
+        s.post(BepBuilder::test_result(
+            "//a:t",
+            "c1",
+            1,
+            1,
+            1,
+            "PASSED",
+            false,
+            0,
+            10,
+            &[],
+            "local",
+            0,
+        ));
         assert!(!kinds(&mem).contains(&"test_result".to_string()));
-        s.post(BepBuilder::target_completed("//a:t", "c1", true, &[], &[], None));
+        s.post(BepBuilder::target_completed(
+            "//a:t",
+            "c1",
+            true,
+            &[],
+            &[],
+            None,
+        ));
         let k = kinds(&mem);
         let ti = k.iter().position(|x| x == "target_completed").unwrap();
         let ri = k.iter().position(|x| x == "test_result").unwrap();
@@ -1539,7 +1774,10 @@ mod tests {
         let mut ev = Msg::new("build_event_stream.BuildEvent");
         ev.set_msg("id", ids::build_finished());
         let j = serialize_event(BepFormat::Json, &ev);
-        assert_eq!(String::from_utf8(j).unwrap(), "{\"id\":{\"buildFinished\":{}}}\n");
+        assert_eq!(
+            String::from_utf8(j).unwrap(),
+            "{\"id\":{\"buildFinished\":{}}}\n"
+        );
         let b = serialize_event(BepFormat::Binary, &ev);
         assert_eq!(b[0] as usize, b.len() - 1);
         let t = String::from_utf8(serialize_event(BepFormat::Text, &ev)).unwrap();
@@ -1548,7 +1786,9 @@ mod tests {
 
     #[test]
     fn named_sets_split_and_uri() {
-        let files: Vec<Msg> = (0..5).map(|i| BepBuilder::file(&format!("f{i}"), &format!("/o/f {i}"), &[], None, None)).collect();
+        let files: Vec<Msg> = (0..5)
+            .map(|i| BepBuilder::file(&format!("f{i}"), &format!("/o/f {i}"), &[], None, None))
+            .collect();
         let (root, nodes) = BepBuilder::named_sets("g", files, Some(2));
         assert_eq!(nodes.len(), 4);
         assert_eq!(root.get_msg("named_set").unwrap().get_str("id"), "g");
@@ -1558,10 +1798,28 @@ mod tests {
 
     #[test]
     fn started_event_json_shape() {
-        let n = BepBuilder::build_started("u", 1500, "v", "", "build", "/w", "/w", 3, "h", "me", vec![]);
+        let n = BepBuilder::build_started(
+            "u",
+            1500,
+            "v",
+            "",
+            "build",
+            "/w",
+            "/w",
+            3,
+            "h",
+            "me",
+            vec![],
+        );
         let j = n.to_proto(false).to_json();
-        assert!(j.starts_with("{\"id\":{\"started\":{}},\"started\":{\"uuid\":\"u\""), "{j}");
-        assert!(j.contains("\"startTime\":\"1970-01-01T00:00:01.500Z\""), "{j}");
+        assert!(
+            j.starts_with("{\"id\":{\"started\":{}},\"started\":{\"uuid\":\"u\""),
+            "{j}"
+        );
+        assert!(
+            j.contains("\"startTime\":\"1970-01-01T00:00:01.500Z\""),
+            "{j}"
+        );
         assert!(j.contains("\"serverPid\":\"3\""), "{j}");
     }
 }

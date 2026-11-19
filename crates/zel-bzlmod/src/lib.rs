@@ -18,24 +18,26 @@
 //! Mirrors `src/main/java/com/google/devtools/build/lib/bazel/{bzlmod,repository}`.
 
 pub mod archive;
-pub mod patch;
 pub mod codecs;
-pub mod download;
 pub mod commands;
 pub mod ctx;
 mod ctxargs;
+pub mod download;
 pub mod fetch;
 pub mod hash;
 pub mod json;
 pub mod lockfile;
-pub mod model;
-pub mod netrc;
-pub mod module_file;
 pub mod modcommand;
+pub mod model;
+pub mod module_file;
+pub mod netrc;
+pub mod patch;
 pub mod registry;
 pub mod repo_contents_cache;
 pub mod resolve;
 pub mod resolver;
+#[cfg(test)]
+mod round7a_tests;
 pub mod rt;
 pub mod semantics_fp;
 pub mod session;
@@ -44,8 +46,31 @@ pub mod usages_digest;
 pub mod vendor;
 pub mod version;
 pub mod wasm;
-#[cfg(test)]
-mod round7a_tests;
 
 pub use model::*;
 pub use version::Version;
+
+/// Formats a local filesystem path as a `file://` (or `file:///C:/...` on Windows) URL.
+pub fn file_url_for_path(p: &std::path::Path) -> String {
+    let s = p.to_string_lossy().replace('\\', "/");
+    if s.starts_with('/') {
+        format!("file://{s}")
+    } else {
+        format!("file:///{s}")
+    }
+}
+
+pub(crate) fn canonical_no_unc(p: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let c = std::fs::canonicalize(p)?;
+    #[cfg(windows)]
+    {
+        let s = c.to_string_lossy();
+        if let Some(rest) = s.strip_prefix(r"\\?\UNC\") {
+            return Ok(std::path::PathBuf::from(format!(r"\\{rest}")));
+        }
+        if let Some(rest) = s.strip_prefix(r"\\?\") {
+            return Ok(std::path::PathBuf::from(rest));
+        }
+    }
+    Ok(c)
+}

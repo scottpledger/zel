@@ -154,14 +154,15 @@ fn py_native(
             if let Some(ts) = a(3, "targets") {
                 for t in items(ts) {
                     if let Some(ct) = target_of(&t) {
-                        map.insert(ct.label.clone(), target_files(&ct));
+                        insert_target_location_keys(&mut map, &ct, target_files(&ct));
                     }
                 }
             }
             let _ = &ctx;
+            let mapping = repo_mapping_for_target(st);
             let lookup = |n: &str| st.make_vars.get(n).cloned();
             let s = expand_make_variables(&expr, &lookup).map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))?;
-            expand_locations(&s, &map, &st.label, LocationMode::Runfiles, &st.inputs.workspace_name)
+            crate::location::expand_locations_with_mapping(&s, &map, &st.label, LocationMode::Runfiles, &st.inputs.workspace_name, Some(&mapping))
                 .map(Value::String)
                 .map_err(StarlarkError)
         })(),

@@ -106,7 +106,9 @@ impl TestCase {
         while pos < buf.len() {
             let (f, w) = wire::decode_tag(buf, &mut pos)?;
             match (f, w) {
-                (1, 2) => t.child.push(TestCase::decode(wire::decode_bytes(buf, &mut pos)?)?),
+                (1, 2) => t
+                    .child
+                    .push(TestCase::decode(wire::decode_bytes(buf, &mut pos)?)?),
                 (2, 2) => t.name = Some(wire::decode_string(buf, &mut pos)?),
                 (3, 2) => t.class_name = Some(wire::decode_string(buf, &mut pos)?),
                 (4, 0) => t.run_duration_millis = Some(wire::decode_varint(buf, &mut pos)? as i64),
@@ -234,7 +236,9 @@ impl TestResultData {
                 (6, 0) => d.has_coverage = Some(wire::decode_varint(buf, &mut pos)? != 0),
                 (7, 0) => d.remotely_cached = Some(wire::decode_varint(buf, &mut pos)? != 0),
                 (8, 0) => d.is_remote_strategy = Some(wire::decode_varint(buf, &mut pos)? != 0),
-                (9, 0) => d.test_times.push(wire::decode_varint(buf, &mut pos)? as i64),
+                (9, 0) => d
+                    .test_times
+                    .push(wire::decode_varint(buf, &mut pos)? as i64),
                 (9, 2) => {
                     // packed
                     let sub = wire::decode_bytes(buf, &mut pos)?;
@@ -244,18 +248,25 @@ impl TestResultData {
                     }
                 }
                 (10, 2) => d.passed_log = Some(wire::decode_string(buf, &mut pos)?),
-                (11, 0) => d.test_process_times.push(wire::decode_varint(buf, &mut pos)? as i64),
+                (11, 0) => d
+                    .test_process_times
+                    .push(wire::decode_varint(buf, &mut pos)? as i64),
                 (11, 2) => {
                     let sub = wire::decode_bytes(buf, &mut pos)?;
                     let mut p = 0;
                     while p < sub.len() {
-                        d.test_process_times.push(wire::decode_varint(sub, &mut p)? as i64);
+                        d.test_process_times
+                            .push(wire::decode_varint(sub, &mut p)? as i64);
                     }
                 }
                 (12, 0) => d.run_duration_millis = Some(wire::decode_varint(buf, &mut pos)? as i64),
-                (13, 2) => d.test_case = Some(TestCase::decode(wire::decode_bytes(buf, &mut pos)?)?),
+                (13, 2) => {
+                    d.test_case = Some(TestCase::decode(wire::decode_bytes(buf, &mut pos)?)?)
+                }
                 (14, 0) => d.failed_status = Some(wire::decode_varint(buf, &mut pos)?),
-                (15, 0) => d.start_time_millis_epoch = Some(wire::decode_varint(buf, &mut pos)? as i64),
+                (15, 0) => {
+                    d.start_time_millis_epoch = Some(wire::decode_varint(buf, &mut pos)? as i64)
+                }
                 (16, 2) => d.status_details = Some(wire::decode_string(buf, &mut pos)?),
                 (17, 0) => d.exit_code = Some(wire::decode_varint(buf, &mut pos)? as i64 as i32),
                 _ => wire::skip_field(w, buf, &mut pos)?,
@@ -274,7 +285,11 @@ enum Tok {
 }
 
 fn unescape(s: &str) -> String {
-    s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", "\"").replace("&apos;", "'").replace("&amp;", "&")
+    s.replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&amp;", "&")
 }
 
 fn tokenize(xml: &str) -> Result<Vec<Tok>, String> {
@@ -331,7 +346,10 @@ fn tokenize(xml: &str) -> Result<Vec<Tok>, String> {
 }
 
 fn parse_time_to_millis(v: &str) -> Result<i64, String> {
-    let f: f64 = v.trim().parse().map_err(|_| format!("Number could not be parsed: {v}"))?;
+    let f: f64 = v
+        .trim()
+        .parse()
+        .map_err(|_| format!("Number could not be parsed: {v}"))?;
     Ok((f * 1000.0).round() as i64)
 }
 
@@ -359,11 +377,18 @@ impl P {
         Ok(())
     }
 
-    fn contained(&mut self, element: &str, b: &mut TestCase, self_closed: bool) -> Result<(), String> {
+    fn contained(
+        &mut self,
+        element: &str,
+        b: &mut TestCase,
+        self_closed: bool,
+    ) -> Result<(), String> {
         let (mut failures, mut errors, mut skipped) = (0, 0, false);
         if !self_closed {
             loop {
-                let Some(t) = self.toks.get(self.i) else { return Err("unexpected end of XML".into()) };
+                let Some(t) = self.toks.get(self.i) else {
+                    return Err("unexpected end of XML".into());
+                };
                 self.i += 1;
                 match t {
                     Tok::Start(name, attrs, sc) => {
@@ -383,7 +408,9 @@ impl P {
                                     match k.as_str() {
                                         "name" => c.name = Some(v.clone()),
                                         "classname" => c.class_name = Some(v.clone()),
-                                        "time" => c.run_duration_millis = Some(parse_time_to_millis(v)?),
+                                        "time" => {
+                                            c.run_duration_millis = Some(parse_time_to_millis(v)?)
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -417,7 +444,9 @@ impl P {
                     }
                     Tok::End(n) => {
                         if n != element {
-                            return Err(format!("Expected end of XML element '{element}' , but got '{n}'"));
+                            return Err(format!(
+                                "Expected end of XML element '{element}' , but got '{n}'"
+                            ));
                         }
                         break;
                     }
@@ -443,7 +472,12 @@ impl P {
         Ok(())
     }
 
-    fn suite(&mut self, element: &str, attrs: &[(String, String)], sc: bool) -> Result<TestCase, String> {
+    fn suite(
+        &mut self,
+        element: &str,
+        attrs: &[(String, String)],
+        sc: bool,
+    ) -> Result<TestCase, String> {
         let mut b = TestCase::new(CaseType::TestSuite);
         for (k, v) in attrs {
             match k.as_str() {
@@ -545,7 +579,11 @@ mod tests {
         let root = parse_test_xml(xml).unwrap().unwrap();
         assert_eq!(root.kind, Some(CaseType::TestSuite));
         assert_eq!(root.name.as_deref(), Some("all"));
-        assert_eq!(root.status, Some(CaseStatus::Failed), "failure propagates upward");
+        assert_eq!(
+            root.status,
+            Some(CaseStatus::Failed),
+            "failure propagates upward"
+        );
         let suite = &root.child[0];
         assert_eq!(suite.run_duration_millis, Some(1500));
         assert_eq!(suite.child.len(), 3);
@@ -556,10 +594,22 @@ mod tests {
         assert_eq!(suite.child[1].status, Some(CaseStatus::Failed));
         assert_eq!(suite.child[2].status, Some(CaseStatus::Skipped));
         assert_eq!(suite.child[2].run, Some(false));
-        let d = TestResultData { test_case: Some(root.clone()), failed_status: Some(FAILED_FULL), ..Default::default() };
-        assert_eq!(TestResultData::decode(&d.encode()).unwrap().test_case.unwrap(), root);
+        let d = TestResultData {
+            test_case: Some(root.clone()),
+            failed_status: Some(FAILED_FULL),
+            ..Default::default()
+        };
+        assert_eq!(
+            TestResultData::decode(&d.encode())
+                .unwrap()
+                .test_case
+                .unwrap(),
+            root
+        );
         assert!(parse_test_xml("<root/>").unwrap().is_none());
-        assert!(parse_test_xml("<testsuite name=\"a\"><testcase time=\"abc\"/></testsuite>").is_err());
+        assert!(
+            parse_test_xml("<testsuite name=\"a\"><testcase time=\"abc\"/></testsuite>").is_err()
+        );
         assert!(parse_test_xml("<testsuite><testcase></testsuite>").is_err());
     }
 }

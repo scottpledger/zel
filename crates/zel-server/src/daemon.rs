@@ -28,7 +28,9 @@ use std::time::{Duration, Instant};
 use zel_proto::command_server::{
     CancelRequest, CancelResponse, PingRequest, PingResponse, RunRequest, RunResponse,
 };
-use zel_proto::failure_details::{Category, CommandCode, InterruptedCode, FailureDetail, GrpcServerCode};
+use zel_proto::failure_details::{
+    Category, CommandCode, FailureDetail, GrpcServerCode, InterruptedCode,
+};
 use zel_remote::grpc::{frame_message, percent_encode, MessageParser};
 use zel_remote::hpack::Header;
 use zel_remote::http2::{Conn, Event, LocalSettings, Stream};
@@ -110,19 +112,21 @@ fn send_msg(st: &Stream, bytes: &[u8]) -> io::Result<()> {
 /// Serves one accepted transport on a background thread.
 fn serve_transport(d: &Arc<Daemon>, t: Transport) {
     let d = Arc::clone(d);
-    let _ = std::thread::Builder::new().name("zel-grpc-conn".into()).spawn(move || {
-        let Ok((conn, rx)) = Conn::server_from(t, LocalSettings::default()) else {
-            return;
-        };
-        while let Ok(stream) = rx.recv() {
-            let d = Arc::clone(&d);
-            let _ = std::thread::spawn(move || {
-                let _ = handle_stream(&d, stream);
-            });
-        }
-        // Peer went away: release the socket instead of leaving it in CLOSE_WAIT.
-        conn.close();
-    });
+    let _ = std::thread::Builder::new()
+        .name("zel-grpc-conn".into())
+        .spawn(move || {
+            let Ok((conn, rx)) = Conn::server_from(t, LocalSettings::default()) else {
+                return;
+            };
+            while let Ok(stream) = rx.recv() {
+                let d = Arc::clone(&d);
+                let _ = std::thread::spawn(move || {
+                    let _ = handle_stream(&d, stream);
+                });
+            }
+            // Peer went away: release the socket instead of leaving it in CLOSE_WAIT.
+            conn.close();
+        });
 }
 
 fn handle_stream(d: &Arc<Daemon>, st: Stream) -> io::Result<()> {
@@ -164,7 +168,9 @@ fn handle_ping(d: &Daemon, st: &Stream, payload: &[u8]) -> io::Result<()> {
         return finish_err(st, 7, "bad cookie");
     }
     send_ok_headers(st)?;
-    let resp = PingResponse { cookie: d.cfg.response_cookie.clone() };
+    let resp = PingResponse {
+        cookie: d.cfg.response_cookie.clone(),
+    };
     send_msg(st, &resp.encode_to_vec())?;
     finish_ok(st)
 }
@@ -183,7 +189,13 @@ fn handle_cancel(d: &Daemon, st: &Stream, payload: &[u8]) -> io::Result<()> {
     }
     d.cv.notify_all();
     send_ok_headers(st)?;
-    send_msg(st, &CancelResponse { cookie: d.cfg.response_cookie.clone() }.encode_to_vec())?;
+    send_msg(
+        st,
+        &CancelResponse {
+            cookie: d.cfg.response_cookie.clone(),
+        }
+        .encode_to_vec(),
+    )?;
     finish_ok(st)
 }
 
@@ -225,9 +237,16 @@ fn handle_run(d: &Arc<Daemon>, st: &Stream, payload: &[u8]) -> io::Result<()> {
         return finish_ok(st);
     }
 
-    let id = format!("{}-{}", d.rt.server_pid, d.next_id.fetch_add(1, Ordering::SeqCst));
+    let id = format!(
+        "{}-{}",
+        d.rt.server_pid,
+        d.next_id.fetch_add(1, Ordering::SeqCst)
+    );
     let cancel = Arc::new(AtomicBool::new(false));
-    d.cancels.lock().unwrap().insert(id.clone(), Arc::clone(&cancel));
+    d.cancels
+        .lock()
+        .unwrap()
+        .insert(id.clone(), Arc::clone(&cancel));
     // First message announces the command id (`GrpcServerImpl.run`).
     send_msg(st, &run_response(d, &id).encode_to_vec())?;
 
@@ -235,7 +254,13 @@ fn handle_run(d: &Arc<Daemon>, st: &Stream, payload: &[u8]) -> io::Result<()> {
     let result = run_locked(d, st, &req, &id, &cancel);
     d.cancels.lock().unwrap().remove(&id);
     *d.running.lock().unwrap() -= 1;
-    let (final_resp, shut) = result?;
+    let (final_resp, shut) = match result {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = finish_err(st, 13, &e.to_string());
+            return Err(e);
+        }
+    };
     send_msg(st, &final_resp.encode_to_vec())?;
     if shut {
         d.shutdown.store(true, Ordering::SeqCst);
@@ -271,7 +296,11 @@ fn run_locked(
     };
     // ---- lock acquisition
     {
-        let timeout: Option<Duration> = if req.block_for_lock { None } else { Some(Duration::ZERO) };
+        let timeout: Option<Duration> = if req.block_for_lock {
+            None
+        } else {
+            Some(Duration::ZERO)
+        };
         let mut announced = String::new();
         let mut cur = d.current.lock().unwrap();
         while let Some(other) = cur.clone() {
@@ -324,43 +353,51 @@ fn run_locked(
         let d2 = Arc::clone(d);
         let req2 = req.clone();
         // Starlark analysis (e.g. `@rules_shell` under `--instrument_test_targets`) recurses deeply: the command
-        // thread gets a large (lazily committed) stack instead of the 2 MiB default.
-        std::thread::Builder::new().name("zel-command".into()).stack_size(512 << 20).spawn(move || {
-            let _guard = CommandLockGuard(Arc::clone(&d2));
-            crate::live::set_current(Some(sink));
-            let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if req2.arg.iter().any(|a| a == b"--test_force_command_panic")
-                    || std::env::var("ZEL_TEST_FORCE_PANIC").is_ok()
-                {
-                    panic!("test forced command panic");
+        // thread gets a large stack instead of the 2 MiB default. On Windows, `CreateThread` eagerly commits
+        // `stack_size` bytes from the pagefile, so cap it to 16 MiB there.
+        #[cfg(unix)]
+        const COMMAND_STACK_BYTES: usize = 512 << 20;
+        #[cfg(not(unix))]
+        const COMMAND_STACK_BYTES: usize = 16 << 20;
+        std::thread::Builder::new()
+            .name("zel-command".into())
+            .stack_size(COMMAND_STACK_BYTES)
+            .spawn(move || {
+                let _guard = CommandLockGuard(Arc::clone(&d2));
+                crate::live::set_current(Some(sink));
+                let panic_res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if req2.arg.iter().any(|a| a == b"--test_force_command_panic")
+                        || std::env::var("ZEL_TEST_FORCE_PANIC").is_ok()
+                    {
+                        panic!("test forced command panic");
+                    }
+                    d2.rt.dispatch_command(&req2, &d2.cfg.response_cookie)
+                }));
+                crate::live::set_current(None);
+                match panic_res {
+                    Ok(resp) => {
+                        let _ = tx.send(resp);
+                    }
+                    Err(err) => {
+                        let msg = if let Some(s) = err.downcast_ref::<&str>() {
+                            format!("command panicked: {s}")
+                        } else if let Some(s) = err.downcast_ref::<String>() {
+                            format!("command panicked: {s}")
+                        } else {
+                            "command thread panicked".to_string()
+                        };
+                        let mut resp = final_failure(
+                            &d2,
+                            "panic",
+                            ExitCode::BLAZE_INTERNAL_ERROR,
+                            &msg,
+                            Category::Command(CommandCode::CommandFailureUnknown),
+                        );
+                        resp.standard_error = format!("INTERNAL ERROR: {msg}\n").into_bytes();
+                        let _ = tx.send(resp);
+                    }
                 }
-                d2.rt.dispatch_command(&req2, &d2.cfg.response_cookie)
-            }));
-            crate::live::set_current(None);
-            match panic_res {
-                Ok(resp) => {
-                    let _ = tx.send(resp);
-                }
-                Err(err) => {
-                    let msg = if let Some(s) = err.downcast_ref::<&str>() {
-                        format!("command panicked: {s}")
-                    } else if let Some(s) = err.downcast_ref::<String>() {
-                        format!("command panicked: {s}")
-                    } else {
-                        "command thread panicked".to_string()
-                    };
-                    let mut resp = final_failure(
-                        &d2,
-                        "panic",
-                        ExitCode::BLAZE_INTERNAL_ERROR,
-                        &msg,
-                        Category::Command(CommandCode::CommandFailureUnknown),
-                    );
-                    resp.standard_error = format!("INTERNAL ERROR: {msg}\n").into_bytes();
-                    let _ = tx.send(resp);
-                }
-            }
-        })?;
+            })?;
     }
     let mut cancelled_at: Option<Instant> = None;
     let mut out = loop {
@@ -540,7 +577,10 @@ pub fn serve_grpc(
             && last_mem_check.elapsed() >= Duration::from_secs(5)
         {
             last_mem_check = Instant::now();
-            if crate::sys::free_memory_fraction().map(|f| f < 0.05).unwrap_or(false) {
+            if crate::sys::free_memory_fraction()
+                .map(|f| f < 0.05)
+                .unwrap_or(false)
+            {
                 let _ = zel_exec::layout::append_server_log(
                     std::path::Path::new(d.rt.dirs.output_base.path_string()),
                     d.rt.server_pid,
@@ -569,8 +609,16 @@ pub fn serve_grpc(
             break;
         }
     }
+    crate::exec_phase::shutdown_worker_pools(d.rt.dirs.output_base.path_string());
+    if !d.rt.expunge_requested.load(Ordering::SeqCst)
+        && !d.rt.skip_action_cache_save.load(Ordering::SeqCst)
+    {
+        if let Ok(cache) = d.rt.action_cache.lock() {
+            let _ = cache.save_to_disk(d.rt.fs.as_ref(), &d.rt.dirs.action_cache_file());
+        }
+    }
     crate::cleanup_server_status_files(d.rt.fs.as_ref(), &server_dir);
-    if d.rt.shutdown_requested.load(Ordering::SeqCst) {
+    if d.rt.expunge_requested.load(Ordering::SeqCst) {
         let _ = std::fs::remove_dir_all(d.rt.dirs.output_base.path_string());
     }
     Ok(())
@@ -599,11 +647,17 @@ mod tests {
         let cur_clone = Arc::clone(&current);
         let cv_clone = Arc::clone(&cv);
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
-            let _guard = TestLockGuard { current: cur_clone, cv: cv_clone };
+            let _guard = TestLockGuard {
+                current: cur_clone,
+                cv: cv_clone,
+            };
             panic!("intentional test panic inside command");
         }));
 
-        assert_eq!(*current.lock().unwrap(), None, "command lock must be released after panic");
+        assert_eq!(
+            *current.lock().unwrap(),
+            None,
+            "command lock must be released after panic"
+        );
     }
 }
-

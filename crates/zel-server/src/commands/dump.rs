@@ -41,7 +41,8 @@ const SKY_FUNCTIONS: &[SkyFunctionName] = &[
 /// filters are supported (`.*`, literal text, `^`, `$`, `.`, `|`, `[...]` classes via a small
 /// backtracking matcher); anything else is rejected with Bazel's message.
 fn compile_filter(src: &str) -> Result<Regex, String> {
-    Regex::new(src).map_err(|e| format!("Illegal regular expression syntax in --skykey_filter: {e}"))
+    Regex::new(src)
+        .map_err(|e| format!("Illegal regular expression syntax in --skykey_filter: {e}"))
 }
 
 /// Tiny regex engine (`java.util.regex.Pattern.find`-style semantics) — literals, `.`, `*`, `+`,
@@ -115,7 +116,9 @@ impl Regex {
                             lo = *c.get(*pos).ok_or("Unclosed character class")?;
                         }
                         *pos += 1;
-                        if c.get(*pos) == Some(&'-') && c.get(*pos + 1).map(|x| *x != ']').unwrap_or(false) {
+                        if c.get(*pos) == Some(&'-')
+                            && c.get(*pos + 1).map(|x| *x != ']').unwrap_or(false)
+                        {
                             let hi = c[*pos + 1];
                             *pos += 2;
                             ranges.push((lo, hi));
@@ -147,14 +150,24 @@ impl Regex {
                     *pos += 1;
                     match e {
                         'd' => Atom::Class(vec![('0', '9')], false),
-                        'w' => Atom::Class(vec![('a', 'z'), ('A', 'Z'), ('0', '9'), ('_', '_')], false),
-                        's' => Atom::Class(vec![(' ', ' '), ('\t', '\t'), ('\n', '\n'), ('\r', '\r')], false),
+                        'w' => {
+                            Atom::Class(vec![('a', 'z'), ('A', 'Z'), ('0', '9'), ('_', '_')], false)
+                        }
+                        's' => Atom::Class(
+                            vec![(' ', ' '), ('\t', '\t'), ('\n', '\n'), ('\r', '\r')],
+                            false,
+                        ),
                         'n' => Atom::Lit('\n'),
                         't' => Atom::Lit('\t'),
                         other => Atom::Lit(other),
                     }
                 }
-                '*' | '+' | '?' => return Err(format!("Dangling meta character '{ch}' near index {pos}", pos = *pos)),
+                '*' | '+' | '?' => {
+                    return Err(format!(
+                        "Dangling meta character '{ch}' near index {pos}",
+                        pos = *pos
+                    ))
+                }
                 other => {
                     *pos += 1;
                     Atom::Lit(other)
@@ -179,18 +192,34 @@ impl Regex {
         (0..=t.len()).any(|s| Self::match_alts(&self.alts, &t, s, &mut |_| true))
     }
 
-    fn match_alts(alts: &[Vec<Item>], t: &[char], pos: usize, k: &mut dyn FnMut(usize) -> bool) -> bool {
+    fn match_alts(
+        alts: &[Vec<Item>],
+        t: &[char],
+        pos: usize,
+        k: &mut dyn FnMut(usize) -> bool,
+    ) -> bool {
         alts.iter().any(|items| Self::match_items(items, t, pos, k))
     }
 
-    fn match_items(items: &[Item], t: &[char], pos: usize, k: &mut dyn FnMut(usize) -> bool) -> bool {
+    fn match_items(
+        items: &[Item],
+        t: &[char],
+        pos: usize,
+        k: &mut dyn FnMut(usize) -> bool,
+    ) -> bool {
         let Some((first, rest)) = items.split_first() else {
             return k(pos);
         };
         Self::match_rep(first, 0, t, pos, &mut |p| Self::match_items(rest, t, p, k))
     }
 
-    fn match_rep(it: &Item, count: usize, t: &[char], pos: usize, k: &mut dyn FnMut(usize) -> bool) -> bool {
+    fn match_rep(
+        it: &Item,
+        count: usize,
+        t: &[char],
+        pos: usize,
+        k: &mut dyn FnMut(usize) -> bool,
+    ) -> bool {
         // Greedy: try one more repetition first.
         if count < it.max {
             let matched = Self::match_atom(&it.atom, t, pos, &mut |p| {
@@ -211,7 +240,9 @@ impl Regex {
             Atom::Any => pos < t.len() && t[pos] != '\n' && k(pos + 1),
             Atom::Lit(c) => pos < t.len() && t[pos] == *c && k(pos + 1),
             Atom::Class(r, neg) => {
-                pos < t.len() && (r.iter().any(|(lo, hi)| t[pos] >= *lo && t[pos] <= *hi) != *neg) && k(pos + 1)
+                pos < t.len()
+                    && (r.iter().any(|(lo, hi)| t[pos] >= *lo && t[pos] <= *hi) != *neg)
+                    && k(pos + 1)
             }
             Atom::Start => pos == 0 && k(pos),
             Atom::End => pos == t.len() && k(pos),
@@ -223,10 +254,17 @@ impl Regex {
 impl BlazeRuntime {
     fn dump_packages(&self, out: &mut Vec<u8>) {
         use std::io::Write;
-        let snap = self.skyframe.evaluator.snapshot_values(&[SkyFunctionName::PACKAGE_LOAD]);
+        let snap = self
+            .skyframe
+            .evaluator
+            .snapshot_values(&[SkyFunctionName::PACKAGE_LOAD]);
         let _ = writeln!(out, "{} packages", snap.len());
         for (key, val) in snap {
-            match val.as_any().downcast_ref::<PackageLoadValue>().map(|v| &v.0) {
+            match val
+                .as_any()
+                .downcast_ref::<PackageLoadValue>()
+                .map(|v| &v.0)
+            {
                 Some(Ok(pkg)) => {
                     let _ = writeln!(out, "  Package {} ({})", pkg.id, pkg.build_file);
                     let _ = writeln!(out, "    Rules");
@@ -236,7 +274,10 @@ impl BlazeRuntime {
                             zel_packages::Target::Rule(_) => {
                                 let _ = writeln!(out, "      {} {}", t.target_kind(), t.label());
                             }
-                            zel_packages::Target::OutputFile { label, generating_rule } => {
+                            zel_packages::Target::OutputFile {
+                                label,
+                                generating_rule,
+                            } => {
                                 files.push(format!(
                                     "      {} {label} (generated by {generating_rule})",
                                     t.target_kind()
@@ -270,10 +311,17 @@ impl BlazeRuntime {
 
     fn dump_rules(&self, out: &mut Vec<u8>) {
         use std::io::Write;
-        let snap = self.skyframe.evaluator.snapshot_values(&[SkyFunctionName::PACKAGE_LOAD]);
+        let snap = self
+            .skyframe
+            .evaluator
+            .snapshot_values(&[SkyFunctionName::PACKAGE_LOAD]);
         let mut counts: BTreeMap<String, (usize, usize)> = BTreeMap::new(); // kind -> (rules, actions)
         for (_, val) in &snap {
-            if let Some(Ok(pkg)) = val.as_any().downcast_ref::<PackageLoadValue>().map(|v| &v.0) {
+            if let Some(Ok(pkg)) = val
+                .as_any()
+                .downcast_ref::<PackageLoadValue>()
+                .map(|v| &v.0)
+            {
                 for t in pkg.targets.values() {
                     if let zel_packages::Target::Rule(r) = t {
                         counts.entry(r.rule_class.clone()).or_default().0 += 1;
@@ -282,17 +330,35 @@ impl BlazeRuntime {
             }
         }
         if counts.is_empty() {
-            let _ = write!(out, "No rules in Bazel server, please run a build command first.");
+            let _ = write!(
+                out,
+                "No rules in Bazel server, please run a build command first."
+            );
             return;
         }
-        let mut rows: Vec<(String, usize, usize)> = counts.into_iter().map(|(k, (c, a))| (k, c, a)).collect();
+        let mut rows: Vec<(String, usize, usize)> =
+            counts.into_iter().map(|(k, (c, a))| (k, c, a)).collect();
         // Bazel sorts by COUNT desc, then name asc (SkyKeyStats.BY_COUNT_DESC)
         rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
         let longest_name = rows.iter().map(|r| r.0.len()).max().unwrap_or(4);
-        let name_col = longest_name.min(30).max(4);
-        let _ = write!(out, "{:<width$}{:>10}{:>10}\n", "RULE", "COUNT", "ACTIONS", width = name_col);
+        let name_col = longest_name.clamp(4, 30);
+        let _ = writeln!(
+            out,
+            "{:<width$}{:>10}{:>10}",
+            "RULE",
+            "COUNT",
+            "ACTIONS",
+            width = name_col
+        );
         for (kind, count, actions) in rows {
-            let _ = write!(out, "{:<width$}{:>10}{:>10}\n", kind, count, actions, width = name_col);
+            let _ = writeln!(
+                out,
+                "{:<width$}{:>10}{:>10}",
+                kind,
+                count,
+                actions,
+                width = name_col
+            );
         }
     }
 
@@ -340,10 +406,14 @@ impl BlazeRuntime {
             "deps" | "rdeps" => {
                 for k in keys.iter().filter(|k| filter.find(&name(k))) {
                     let _ = writeln!(out, "{}", name(k));
-                    let mut deps: Vec<String> = if mode == "deps" { ev.direct_deps(k) } else { ev.reverse_deps(k) }
-                        .iter()
-                        .map(|d| d.to_string())
-                        .collect();
+                    let mut deps: Vec<String> = if mode == "deps" {
+                        ev.direct_deps(k)
+                    } else {
+                        ev.reverse_deps(k)
+                    }
+                    .iter()
+                    .map(|d| d.to_string())
+                    .collect();
                     deps.sort();
                     for d in deps {
                         let _ = writeln!(out, "  {d}");
@@ -353,18 +423,30 @@ impl BlazeRuntime {
             "changed" => {
                 let _ = writeln!(out, "Values created or changed by the last command:");
                 let _ = writeln!(out);
-                let _ = writeln!(out, "Values re-evaluated to an equal value, which stopped the invalidation:");
+                let _ = writeln!(
+                    out,
+                    "Values re-evaluated to an equal value, which stopped the invalidation:"
+                );
                 let _ = writeln!(out);
-                let _ = writeln!(out, "Changed values without changed dependencies, the origins of the changes:");
+                let _ = writeln!(
+                    out,
+                    "Changed values without changed dependencies, the origins of the changes:"
+                );
                 let _ = writeln!(out);
-                let _ = writeln!(out, "Changed values and the changed dependencies that caused them:");
+                let _ = writeln!(
+                    out,
+                    "Changed values and the changed dependencies that caused them:"
+                );
             }
             "function_graph" => {
                 let mut g: BTreeMap<String, BTreeMap<String, usize>> = BTreeMap::new();
                 for k in keys.iter().filter(|k| filter.find(&name(k))) {
                     let from = k.function_name().to_string();
                     for d in ev.direct_deps(k) {
-                        *g.entry(from.clone()).or_default().entry(d.function_name().to_string()).or_default() += 1;
+                        *g.entry(from.clone())
+                            .or_default()
+                            .entry(d.function_name().to_string())
+                            .or_default() += 1;
                     }
                 }
                 let _ = writeln!(out, "digraph {{");
@@ -381,7 +463,12 @@ impl BlazeRuntime {
     }
 
     /// `DumpCommand.exec`.
-    pub(crate) fn cmd_dump(&self, args: &[String], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> ExitCode {
+    pub(crate) fn cmd_dump(
+        &self,
+        args: &[String],
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
         let parsed = match ParsedCommandOptions::parse_for_command("dump", args) {
             Ok(p) => p,
             Err(e) => {
@@ -390,11 +477,22 @@ impl BlazeRuntime {
             }
         };
         if !parsed.targets.is_empty() {
-            writeln_bytes(stderr, &format!("ERROR: Unrecognized arguments: {}", parsed.targets.join(" ")));
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "ERROR: Unrecognized arguments: {}",
+                    parsed.targets.join(" ")
+                ),
+            );
             return ExitCode::COMMAND_LINE_ERROR;
         }
         let flag = |n: &str| parsed.get_bool(n).unwrap_or(false);
-        let val = |n: &str| parsed.parsed_options.get(n).and_then(|d| d.raw_values.last().cloned());
+        let val = |n: &str| {
+            parsed
+                .parsed_options
+                .get(n)
+                .and_then(|d| d.raw_values.last().cloned())
+        };
         let skyframe = val("skyframe").unwrap_or_else(|| "off".into());
         let any_output = flag("packages")
             || flag("action_cache")
@@ -406,7 +504,11 @@ impl BlazeRuntime {
         if !any_output {
             let dump_defs: Vec<&zel_options::OptionDefinition> = zel_options::ALL_COMMAND_OPTIONS
                 .iter()
-                .filter(|d| d.commands.contains(&"dump") && d.documentation_category == zel_options::OptionDocumentationCategory::OutputSelection)
+                .filter(|d| {
+                    d.commands.contains(&"dump")
+                        && d.documentation_category
+                            == zel_options::OptionDocumentationCategory::OutputSelection
+                })
                 .collect();
             let help = super::help::expand_help_topic(
                 "dump",
@@ -419,12 +521,15 @@ impl BlazeRuntime {
         }
         if skyframe != "off" {
             if let Err(msg) = skyframe_enum_check(&skyframe) {
-                writeln_bytes(stderr, &format!("ERROR: While parsing option --skyframe={skyframe}: {msg}"));
+                writeln_bytes(
+                    stderr,
+                    &format!("ERROR: While parsing option --skyframe={skyframe}: {msg}"),
+                );
                 return ExitCode::COMMAND_LINE_ERROR;
             }
         }
         writeln_bytes(stderr, &format!("WARNING: {WARNING_MESSAGE}"));
-        let mut failure = ExitCode::SUCCESS;
+        let failure = ExitCode::SUCCESS;
         if flag("packages") {
             self.dump_packages(stdout);
             stdout.push(b'\n');
@@ -452,20 +557,38 @@ impl BlazeRuntime {
             );
         }
         if let Some(mode) = val("memory") {
-            let words: Vec<&str> = mode.splitn(3, ':').next().unwrap_or("").split(',').collect();
+            let words: Vec<&str> = mode.split(':').next().unwrap_or("").split(',').collect();
             const KNOWN: &[&str] = &[
-                "shallow", "deep", "transitive", "full", "summary", "count", "bytes", "notransient", "noconfig",
-                "noprecomputed", "noworkspacestatus",
+                "shallow",
+                "deep",
+                "transitive",
+                "full",
+                "summary",
+                "count",
+                "bytes",
+                "notransient",
+                "noconfig",
+                "noprecomputed",
+                "noworkspacestatus",
             ];
-            if let Some(bad) = words.iter().find(|w| !w.starts_with("needle=") && !KNOWN.contains(w)) {
+            if let Some(bad) = words
+                .iter()
+                .find(|w| !w.starts_with("needle=") && !KNOWN.contains(w))
+            {
                 writeln_bytes(stderr, &format!("ERROR: Unrecognized word '{bad}'"));
                 return ExitCode::COMMAND_LINE_ERROR;
             }
-            if !words.iter().any(|w| ["shallow", "deep", "transitive", "full"].contains(w)) {
+            if !words
+                .iter()
+                .any(|w| ["shallow", "deep", "transitive", "full"].contains(w))
+            {
                 writeln_bytes(stderr, "ERROR: No collection type specified");
                 return ExitCode::COMMAND_LINE_ERROR;
             }
-            if !words.iter().any(|w| ["summary", "count", "bytes"].contains(w)) {
+            if !words
+                .iter()
+                .any(|w| ["summary", "count", "bytes"].contains(w))
+            {
                 writeln_bytes(stderr, "ERROR: No display mode specified");
                 return ExitCode::COMMAND_LINE_ERROR;
             }
@@ -510,9 +633,13 @@ fn skyframe_enum_spec() -> &'static zel_options::types::EnumSpec {
 }
 
 fn skyframe_enum_check(value: &str) -> Result<(), String> {
-    zel_options::convert_enum(skyframe_enum_spec(), value).map(|_| ()).map_err(|e| e.to_string())
+    zel_options::convert_enum(skyframe_enum_spec(), value)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 fn skyframe_enum_error(value: &str) -> String {
-    skyframe_enum_check(value).err().unwrap_or_else(|| format!("unsupported skyframe mode '{value}'"))
+    skyframe_enum_check(value)
+        .err()
+        .unwrap_or_else(|| format!("unsupported skyframe mode '{value}'"))
 }

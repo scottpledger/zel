@@ -28,7 +28,8 @@
 
 use crate::engine::InMemoryMemoizingEvaluator;
 use crate::{
-    DirectoryListingStateFunction, DirectoryListingStateValue, FileStateValue, SkyFunctionName, SkyKey,
+    DirectoryListingStateFunction, DirectoryListingStateValue, FileStateValue, SkyFunctionName,
+    SkyKey,
 };
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -38,7 +39,10 @@ use zel_vfs::{FileSystem, PathFragment};
 pub const RACY_WINDOW_MS: u64 = 2000;
 
 pub fn now_ms() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Which keys changed since the last command.
@@ -51,7 +55,11 @@ pub enum ModifiedFileSet {
 
 pub trait DiffAwareness: Send + Sync {
     fn name(&self) -> &'static str;
-    fn get_diff(&self, evaluator: &InMemoryMemoizingEvaluator, fs: &dyn FileSystem) -> ModifiedFileSet;
+    fn get_diff(
+        &self,
+        evaluator: &InMemoryMemoizingEvaluator,
+        fs: &dyn FileSystem,
+    ) -> ModifiedFileSet;
 }
 
 pub struct StatDiffAwareness {
@@ -60,14 +68,21 @@ pub struct StatDiffAwareness {
 
 impl Default for StatDiffAwareness {
     fn default() -> Self {
-        Self { threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(16) }
+        Self {
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(16),
+        }
     }
 }
 
 fn is_dirty(key: &SkyKey, value: &dyn crate::SkyValue, fs: &dyn FileSystem) -> bool {
     match key {
         SkyKey::FileState(rp) => {
-            let Some(old) = value.as_any().downcast_ref::<FileStateValue>() else { return true };
+            let Some(old) = value.as_any().downcast_ref::<FileStateValue>() else {
+                return true;
+            };
             let path = rp.as_path();
             let st = fs.stat(&path, false);
             match (old, st) {
@@ -76,10 +91,22 @@ fn is_dirty(key: &SkyKey, value: &dyn crate::SkyValue, fs: &dyn FileSystem) -> b
                 (_, Err(_)) => true,
                 (FileStateValue::Directory, Ok(s)) => !s.is_directory || s.is_symlink,
                 (FileStateValue::Symlink { target }, Ok(s)) => {
-                    !s.is_symlink || fs.read_symbolic_link(&path).map(|t| t != *target).unwrap_or(true)
+                    !s.is_symlink
+                        || fs
+                            .read_symbolic_link(&path)
+                            .map(|t| t != *target)
+                            .unwrap_or(true)
                 }
-                (FileStateValue::RegularFile { size, mtime_ms, observed_ms, .. }, Ok(s)) => {
-                    if s.is_symlink || s.is_directory {
+                (
+                    FileStateValue::RegularFile {
+                        size,
+                        mtime_ms,
+                        observed_ms,
+                        ..
+                    },
+                    Ok(s),
+                ) => {
+                    if s.is_symlink || s.is_directory || s.is_special_file {
                         return true;
                     }
                     // mtime 0 means the file system has no meaningful mtimes (in-memory FS).
@@ -88,10 +115,32 @@ fn is_dirty(key: &SkyKey, value: &dyn crate::SkyValue, fs: &dyn FileSystem) -> b
                         || s.last_modified_time_ms != *mtime_ms
                         || observed_ms.saturating_sub(*mtime_ms) < RACY_WINDOW_MS
                 }
+                (
+                    FileStateValue::RegularFileProxy {
+                        size,
+                        mtime_ms,
+                        node_id,
+                    },
+                    Ok(s),
+                ) => {
+                    s.is_symlink
+                        || s.is_directory
+                        || s.is_special_file
+                        || s.size != *size
+                        || s.last_modified_time_ms != *mtime_ms
+                        || s.node_id != *node_id
+                }
+                (FileStateValue::SpecialFile { mtime_ms, node_id }, Ok(s)) => {
+                    !s.is_special_file
+                        || s.last_modified_time_ms != *mtime_ms
+                        || s.node_id != *node_id
+                }
             }
         }
         SkyKey::DirectoryListingState(rp) => {
-            let Some(old) = value.as_any().downcast_ref::<DirectoryListingStateValue>() else { return true };
+            let Some(old) = value.as_any().downcast_ref::<DirectoryListingStateValue>() else {
+                return true;
+            };
             match DirectoryListingStateFunction::compute_state(fs, &rp.as_path()) {
                 Ok(now) => now != *old,
                 Err(_) => true,
@@ -106,8 +155,15 @@ impl DiffAwareness for StatDiffAwareness {
         "stat"
     }
 
-    fn get_diff(&self, evaluator: &InMemoryMemoizingEvaluator, fs: &dyn FileSystem) -> ModifiedFileSet {
-        let nodes = evaluator.snapshot_values(&[SkyFunctionName::FILE_STATE, SkyFunctionName::DIRECTORY_LISTING]);
+    fn get_diff(
+        &self,
+        evaluator: &InMemoryMemoizingEvaluator,
+        fs: &dyn FileSystem,
+    ) -> ModifiedFileSet {
+        let nodes = evaluator.snapshot_values(&[
+            SkyFunctionName::FILE_STATE,
+            SkyFunctionName::DIRECTORY_LISTING,
+        ]);
         if nodes.is_empty() {
             return ModifiedFileSet::Nothing;
         }
@@ -151,7 +207,9 @@ impl Default for ExplicitDiffAwareness {
 
 impl ExplicitDiffAwareness {
     pub fn new() -> Self {
-        Self { pending: std::sync::Mutex::new(Vec::new()) }
+        Self {
+            pending: std::sync::Mutex::new(Vec::new()),
+        }
     }
 
     pub fn notify_modified(&self, path: PathFragment) {
@@ -164,7 +222,11 @@ impl DiffAwareness for ExplicitDiffAwareness {
         "explicit"
     }
 
-    fn get_diff(&self, evaluator: &InMemoryMemoizingEvaluator, _fs: &dyn FileSystem) -> ModifiedFileSet {
+    fn get_diff(
+        &self,
+        evaluator: &InMemoryMemoizingEvaluator,
+        _fs: &dyn FileSystem,
+    ) -> ModifiedFileSet {
         let paths: Vec<PathFragment> = std::mem::take(&mut *self.pending.lock().unwrap());
         if paths.is_empty() {
             return ModifiedFileSet::Nothing;
@@ -172,12 +234,18 @@ impl DiffAwareness for ExplicitDiffAwareness {
         // A modified path dirties its own FILE_STATE and the listing of its parent directory.
         let mut keys = Vec::new();
         let set: std::collections::HashSet<PathFragment> = paths.iter().cloned().collect();
-        for (k, _) in evaluator.snapshot_values(&[SkyFunctionName::FILE_STATE, SkyFunctionName::DIRECTORY_LISTING]) {
+        for (k, _) in evaluator.snapshot_values(&[
+            SkyFunctionName::FILE_STATE,
+            SkyFunctionName::DIRECTORY_LISTING,
+        ]) {
             match &k {
                 SkyKey::FileState(rp) if set.contains(&rp.as_path()) => keys.push(k.clone()),
                 SkyKey::DirectoryListingState(rp) => {
                     let d = rp.as_path();
-                    if paths.iter().any(|p| p.parent_directory().as_ref() == Some(&d)) {
+                    if paths
+                        .iter()
+                        .any(|p| p.parent_directory().as_ref() == Some(&d))
+                    {
                         keys.push(k.clone());
                     }
                 }
@@ -187,6 +255,8 @@ impl DiffAwareness for ExplicitDiffAwareness {
         if keys.is_empty() {
             ModifiedFileSet::Nothing
         } else {
+            keys.sort();
+            keys.dedup();
             ModifiedFileSet::Keys(keys)
         }
     }

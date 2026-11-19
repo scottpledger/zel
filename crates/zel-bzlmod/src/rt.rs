@@ -6,8 +6,10 @@ use crate::model::*;
 use crate::resolve::{ExtensionId, Resolution};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use zel_starlark::{BigInt, EvalContext, StarlarkDict, StarlarkError, StarlarkList, StructValue, Value};
+use std::sync::{Arc, Mutex, Weak};
+use zel_starlark::{
+    BigInt, EvalContext, StarlarkDict, StarlarkError, StarlarkList, StructValue, Value,
+};
 
 /// Command-line / environment configuration of the external repository subsystem.
 #[derive(Clone, Debug, Default)]
@@ -31,6 +33,7 @@ pub struct ExternalOptions {
     pub nofetch: bool,
     pub verbose: bool,
     pub experimental_repository_ctx_execute_wasm: bool,
+    pub credential_helpers: Vec<(String, PathBuf)>,
 }
 
 #[derive(Clone)]
@@ -106,6 +109,15 @@ pub struct Rt {
     pub(crate) log: Mutex<Vec<String>>,
 }
 
+#[derive(Clone)]
+pub(crate) struct DeferredRepoCall {
+    pub name: String,
+    pub bzl_file: String,
+    pub rule_name: String,
+    pub attr_defs: Vec<(String, AttrDef)>,
+    pub kw: BTreeMap<String, AttrVal>,
+}
+
 #[derive(Default)]
 pub(crate) struct RtState {
     pub rule_defs: Vec<RuleDef>,
@@ -114,19 +126,27 @@ pub(crate) struct RtState {
     pub bzl_cache: HashMap<String, BTreeMap<String, Value>>,
     pub loading: Vec<String>,
     pub ext_results: HashMap<ExtensionId, ExtensionResult>,
+    pub evaluating_exts: Vec<ExtensionId>,
     pub fetched: HashSet<String>,
     pub fetching: Vec<String>,
     /// Active collectors for repos created by calling repository rules inside an extension.
-    pub collectors: Vec<Vec<(String, RepoSpec)>>,
+    pub collectors: Vec<Vec<DeferredRepoCall>>,
     /// Call-site location (`file:line:col`) of the repository rule call that generated a repo name in the active extension.
     pub repo_call_locs: BTreeMap<String, String>,
     pub ctxs: Vec<Option<crate::ctx::CtxData>>,
     pub exec_results: Vec<(i32, Vec<u8>, Vec<u8>)>,
     /// bzl key -> (sha256 of source, keys of directly loaded bzl files)
     pub bzl_deps: HashMap<String, (String, Vec<String>)>,
+    /// Memoized transitive `.bzl` digests, parsed load lists, load-graph repo mappings, and
+    /// repository rule metadata `(local, environ)` for the lifetime of this `Rt`.
+    pub bzl_transitive_digests: HashMap<String, Vec<u8>>,
+    pub bzl_load_mappings: HashMap<String, Vec<(String, String, String)>>,
+    pub bzl_loads_cache: HashMap<String, Vec<String>>,
+    pub rule_meta_cache: HashMap<(String, String), (bool, Vec<String>)>,
     /// Package loader used for `.bzl` files that do not define repository rules / extensions
     /// (rule definitions such as rules_cc, which need the full rule-building builtins).
     pub loader: Option<Arc<zel_packages::PackageLoader>>,
+    pub me: Weak<Rt>,
 }
 
 pub type RtResult<T> = Result<T, String>;
@@ -174,15 +194,34 @@ pub fn opaque_struct_value(fields: Vec<(&str, Value)>, class: &str) -> Value {
 
 fn attr_kinds() -> &'static [&'static str] {
     &[
-        "string", "int", "bool", "string_list", "int_list", "string_dict", "string_list_dict", "label", "label_list",
-        "label_keyed_string_dict", "output", "output_list", "string_keyed_label_dict", "label_list_dict",
+        "string",
+        "int",
+        "bool",
+        "string_list",
+        "int_list",
+        "string_dict",
+        "string_list_dict",
+        "label",
+        "label_list",
+        "label_keyed_string_dict",
+        "output",
+        "output_list",
+        "string_keyed_label_dict",
+        "label_list_dict",
     ]
 }
 
 fn host_globals() -> Vec<&'static str> {
     vec![
-        "repository_rule", "module_extension", "tag_class", "extension_metadata", "Label", "Label_",
-        "exec_result", "watch_marker",
+        "repository_rule",
+        "module_extension",
+        "tag_class",
+        "extension_metadata",
+        "Label",
+        "Label_",
+        "exec_result",
+        "watch_marker",
+        "rule",
     ]
 }
 
@@ -194,21 +233,89 @@ pub(crate) const NESTED_STATIC_TRAILER_MARK: &str = "\n<<zel-nested-static-trail
 
 /// `.bzl` builtins besides the Starlark core, which the resolver accepts as predeclared names.
 const BZL_BUILTIN_NAMES: &[&str] = &[
-    "rule", "aspect", "provider", "macro", "Label", "select", "depset", "struct", "native", "config", "config_common",
-    "platform_common", "cc_common", "java_common", "apple_common", "android_common", "proto_common", "testing",
-    "json", "proto", "exec_group", "subrule", "visibility", "DefaultInfo", "OutputGroupInfo", "RunEnvironmentInfo",
-    "InstrumentedFilesInfo", "CcInfo", "JavaInfo", "ProtoInfo", "PyInfo", "coverage_common", "analysis_test_transition",
-    "transition", "module_extension", "tag_class", "repository_rule", "attr", "extension_metadata", "Args",
-    "PackageSpecificationInfo", "FilesToRunProvider", "ToolchainInfo", "TemplateVariableInfo", "ProguardSpecProvider",
-    "CcSharedLibraryInfo", "CcToolchainConfigInfo", "ConstraintValueInfo", "ConstraintSettingInfo", "PlatformInfo",
-    "ToolchainTypeInfo", "StarlarkAspectInfo", "OutputGroups", "DebugPackageInfo", "JavaPluginInfo", "JavaRuntimeInfo",
-    "JavaToolchainInfo", "ObjcProvider", "AppleExecutableBinaryInfo", "bazel_features", "existing_rule", "package_name",
-    "repository_name", "glob", "package", "licenses", "exports_files", "fail", "print",
+    "rule",
+    "aspect",
+    "provider",
+    "macro",
+    "Label",
+    "select",
+    "depset",
+    "struct",
+    "native",
+    "config",
+    "config_common",
+    "platform_common",
+    "cc_common",
+    "java_common",
+    "apple_common",
+    "android_common",
+    "proto_common",
+    "testing",
+    "json",
+    "proto",
+    "exec_group",
+    "subrule",
+    "visibility",
+    "DefaultInfo",
+    "OutputGroupInfo",
+    "RunEnvironmentInfo",
+    "InstrumentedFilesInfo",
+    "CcInfo",
+    "JavaInfo",
+    "ProtoInfo",
+    "PyInfo",
+    "coverage_common",
+    "analysis_test_transition",
+    "transition",
+    "module_extension",
+    "tag_class",
+    "repository_rule",
+    "attr",
+    "extension_metadata",
+    "Args",
+    "PackageSpecificationInfo",
+    "FilesToRunProvider",
+    "ToolchainInfo",
+    "TemplateVariableInfo",
+    "ProguardSpecProvider",
+    "CcSharedLibraryInfo",
+    "CcToolchainConfigInfo",
+    "ConstraintValueInfo",
+    "ConstraintSettingInfo",
+    "PlatformInfo",
+    "ToolchainTypeInfo",
+    "StarlarkAspectInfo",
+    "OutputGroups",
+    "DebugPackageInfo",
+    "JavaPluginInfo",
+    "JavaRuntimeInfo",
+    "JavaToolchainInfo",
+    "ObjcProvider",
+    "AppleExecutableBinaryInfo",
+    "bazel_features",
+    "existing_rule",
+    "package_name",
+    "repository_name",
+    "glob",
+    "package",
+    "licenses",
+    "exports_files",
+    "fail",
+    "print",
 ];
 
 impl Rt {
     pub fn new(opts: ExternalOptions, resolution: Arc<Resolution>) -> Arc<Rt> {
-        Arc::new(Rt { opts, lock: Mutex::new(LockState::default()), resolution, state: Mutex::new(RtState::default()), log: Mutex::new(vec![]) })
+        Arc::new_cyclic(|me| Rt {
+            opts,
+            lock: Mutex::new(LockState::default()),
+            resolution,
+            state: Mutex::new(RtState {
+                me: me.clone(),
+                ..Default::default()
+            }),
+            log: Mutex::new(vec![]),
+        })
     }
 
     pub fn external_dir(&self) -> PathBuf {
@@ -234,7 +341,9 @@ impl Rt {
 
     /// Repo mapping (apparent -> canonical) visible from inside repo `canonical`.
     pub fn repo_mapping_of(&self, canonical: &str) -> BTreeMap<String, String> {
-        self.repo_mapping_ordered_of(canonical).into_iter().collect()
+        self.repo_mapping_ordered_of(canonical)
+            .into_iter()
+            .collect()
     }
 
     /// The repo mapping in `ImmutableMap` insertion order (module repos: extension imports, own
@@ -254,30 +363,31 @@ impl Rt {
                 m.push((k, v));
             }
         }
-        // Repo generated by an extension: mapping of the extension's defining repo + its siblings.
+        // Repo generated by an extension: mapping of the extension's defining repo, then generated
+        // repos, then root overrides (`ModuleExtensionRepoMappingEntriesFunction`).
         for (id, mk, _) in &res.extension_usages {
-            let Some(unique) = res.extension_unique_names.get(id) else { continue };
-            if let Some(rest) = canonical.strip_prefix(&format!("{unique}+")) {
-                let _ = rest;
+            let Some(unique) = res.extension_unique_names.get(id) else {
+                continue;
+            };
+            if canonical.strip_prefix(&format!("{unique}+")).is_some() {
                 let host_repo = id.bzl_repo();
                 let mut m = if host_repo.is_empty() && id.is_innate() {
                     res.repo_mapping_ordered(mk)
                 } else if let Some(k) = res.canonical_repo_names.get(&host_repo) {
                     res.repo_mapping_ordered(k)
                 } else {
-                    res.repo_mapping_ordered(mk)
+                    res.repo_mapping_ordered(&ModuleKey::root())
                 };
-                // Repos injected via inject_repo()/override_repo() by the root module.
-                if let Some(ov) = res.repo_overrides.get(id) {
-                    for (exported, canon) in ov {
-                        put(&mut m, exported.clone(), canon.clone());
-                    }
-                }
-                // Siblings generated by the same extension are visible under their exported names.
-                let usages = res.usages_of(id);
-                for (_, u) in usages {
-                    for (_, exported) in u.imports() {
-                        put(&mut m, exported.clone(), format!("{unique}+{exported}"));
+                let (already, me) = {
+                    let st = self.state.lock().unwrap();
+                    (
+                        st.ext_results.contains_key(id) || st.evaluating_exts.contains(id),
+                        st.me.upgrade(),
+                    )
+                };
+                if !already {
+                    if let Some(rt) = me {
+                        let _ = rt.eval_extension(id);
                     }
                 }
                 if let Some(r) = self.state.lock().unwrap().ext_results.get(id) {
@@ -285,50 +395,113 @@ impl Rt {
                         put(&mut m, n.clone(), format!("{unique}+{n}"));
                     }
                 }
+                // Repos injected via inject_repo()/override_repo() by the root module apply last.
+                if let Some(ov) = res.repo_overrides.get(id) {
+                    for (exported, canon) in ov {
+                        put(&mut m, exported.clone(), canon.clone());
+                    }
+                }
                 return m;
             }
         }
-        res.repo_mapping_ordered(&ModuleKey::root())
+        vec![]
     }
 
     /// Resolves `raw` relative to `(repo, pkg)` into canonical `(repo, package, name)`.
-    pub fn resolve_label(&self, raw: &str, ctx_repo: &str, ctx_pkg: &str) -> RtResult<(String, String, String)> {
+    pub fn resolve_label(
+        &self,
+        raw: &str,
+        ctx_repo: &str,
+        ctx_pkg: &str,
+    ) -> RtResult<(String, String, String)> {
+        self.resolve_label_with_mapping(raw, ctx_repo, ctx_pkg, None)
+    }
+
+    /// Resolves `raw` relative to `(ctx_repo, ctx_pkg)` using `explicit_mapping` if provided,
+    /// otherwise `self.repo_mapping_of(ctx_repo)`.
+    pub fn resolve_label_with_mapping(
+        &self,
+        raw: &str,
+        ctx_repo: &str,
+        ctx_pkg: &str,
+        explicit_mapping: Option<&BTreeMap<String, String>>,
+    ) -> RtResult<(String, String, String)> {
         // Default target of the `@repo` shorthand (`@a` is `@a//:a`).
         let short_name: String = {
             let r = raw.trim_start_matches('@');
             let r = r.split_once("//").map(|(a, _)| a).unwrap_or(r);
-            r.rsplit('+').find(|p| !p.is_empty()).unwrap_or(r).to_string()
+            r.rsplit('+')
+                .find(|p| !p.is_empty())
+                .unwrap_or(r)
+                .to_string()
         };
         let (repo, rest): (String, String) = if let Some(r) = raw.strip_prefix("@@") {
-            let (a, b) = r.split_once("//").map(|(a, b)| (a.to_string(), format!("//{b}"))).unwrap_or((r.to_string(), String::new()));
+            let (a, b) = r
+                .split_once("//")
+                .map(|(a, b)| (a.to_string(), format!("//{b}")))
+                .unwrap_or((r.to_string(), String::new()));
             (a, b)
         } else if let Some(r) = raw.strip_prefix('@') {
-            let (a, b) = r.split_once("//").map(|(a, b)| (a.to_string(), format!("//{b}"))).unwrap_or((r.to_string(), String::new()));
-            let canon = self.repo_mapping_of(ctx_repo).get(&a).cloned();
+            let (a, b) = r
+                .split_once("//")
+                .map(|(a, b)| (a.to_string(), format!("//{b}")))
+                .unwrap_or((r.to_string(), String::new()));
+            let owned_map;
+            let mapping = match explicit_mapping {
+                Some(m) => m,
+                None => {
+                    owned_map = self.repo_mapping_of(ctx_repo);
+                    &owned_map
+                }
+            };
+            let canon = mapping.get(&a).cloned();
             match canon {
                 Some(c) => (c, b),
                 None => {
-                    // Overridden repositories and bazel_tools stay addressable by name.
-                    if self.opts.override_repository.contains_key(&a) || a == "bazel_tools" || a == "platforms" {
+                    if self.opts.override_repository.contains_key(&a) {
                         (a, b)
                     } else {
                         let from_repo = format!("@@{ctx_repo}");
-                        (format!("[unknown repo '{a}' requested from {from_repo}]"), b)
+                        (
+                            format!("[unknown repo '{a}' requested from {from_repo}]"),
+                            b,
+                        )
                     }
                 }
             }
         } else if raw.starts_with("//") {
-            (ctx_repo.to_string(), raw.to_string())
+            let body = raw.trim_start_matches("//");
+            let p = body.split_once(':').map(|(p, _)| p).unwrap_or(body);
+            let r = if p == "conditions" || p == "visibility" {
+                ""
+            } else {
+                ctx_repo
+            };
+            (r.to_string(), raw.to_string())
         } else if raw.starts_with(':') {
-            (ctx_repo.to_string(), format!("//{ctx_pkg}{raw}"))
+            let r = if ctx_pkg == "conditions" || ctx_pkg == "visibility" {
+                ""
+            } else {
+                ctx_repo
+            };
+            (r.to_string(), format!("//{ctx_pkg}{raw}"))
         } else {
-            return Err(format!("invalid label '{raw}': absolute label must begin with '@' or '//'"));
+            return Err(format!(
+                "invalid label '{raw}': absolute label must begin with '@' or '//'"
+            ));
         };
-        let rest = if rest.is_empty() { format!("//:{short_name}") } else { rest };
+        let rest = if rest.is_empty() {
+            format!("//:{short_name}")
+        } else {
+            rest
+        };
         let body = rest.trim_start_matches("//");
         let (pkg, name) = match body.split_once(':') {
             Some((p, n)) => (p.to_string(), n.to_string()),
-            None => (body.to_string(), body.rsplit('/').next().unwrap_or("").to_string()),
+            None => (
+                body.to_string(),
+                body.rsplit('/').next().unwrap_or("").to_string(),
+            ),
         };
         Ok((repo, pkg, name))
     }
@@ -354,50 +527,133 @@ impl Rt {
 
     // ---------------------------------------------------------------- bzl loading
 
-    fn new_context(self: &Arc<Self>, file_name: &str, ctx_repo: &str, ctx_pkg: &str) -> EvalContext {
-        let mut ctx = EvalContext::default();
-        ctx.file_name = file_name.to_string();
+    fn new_context(
+        self: &Arc<Self>,
+        file_name: &str,
+        ctx_repo: &str,
+        ctx_pkg: &str,
+    ) -> EvalContext {
         // Undefined builtins (e.g. `macro`, `cc_common`) evaluate leniently; set for diagnostics.
-        ctx.strict_names = std::env::var("ZEL_STRICT_BZLMOD").is_ok();
-        ctx.main_repo_mapping = Some(Arc::new(self.repo_mapping_of("")));
+        let mut ctx = EvalContext {
+            file_name: file_name.to_string(),
+            strict_names: std::env::var("ZEL_STRICT_BZLMOD").is_ok(),
+            main_repo_mapping: Some(Arc::new(self.repo_mapping_of(""))),
+            ..Default::default()
+        };
         let rt = self.clone();
-        ctx.host = Some(Arc::new(move |c, name, args, kw| rt.host_dispatch(c, name, args, kw)));
+        ctx.host = Some(Arc::new(move |c, name, args, kw| {
+            rt.host_dispatch(c, name, args, kw)
+        }));
         let rt_print = self.clone();
         ctx.print_handler = Some(Arc::new(move |loc, msg| {
-            rt_print.log.lock().unwrap().push(format!("DEBUG: {}:{}:{}: {msg}", loc.file, loc.line, loc.column));
+            rt_print.log.lock().unwrap().push(format!(
+                "DEBUG: {}:{}:{}: {msg}",
+                loc.file, loc.line, loc.column
+            ));
         }));
         for n in host_globals() {
-            ctx.globals.insert(n.to_string(), Value::BuiltinFunction(format!("host:{n}")));
+            ctx.globals
+                .insert(n.to_string(), Value::BuiltinFunction(format!("host:{n}")));
         }
         let mut attr_fields = BTreeMap::new();
         for k in attr_kinds() {
-            attr_fields.insert(k.to_string(), Value::BuiltinFunction(format!("host:attr.{k}")));
+            attr_fields.insert(
+                k.to_string(),
+                Value::BuiltinFunction(format!("host:attr.{k}")),
+            );
         }
-        ctx.globals.insert("attr".into(), Value::Struct(Arc::new(StructValue::new(attr_fields))));
+        ctx.globals.insert(
+            "attr".into(),
+            Value::Struct(Arc::new(StructValue::new(attr_fields))),
+        );
         // `native` in repo-rule / extension .bzl files: only `bazel_version` is available outside
         // BUILD files (like Bazel, `native.existing_rule` etc. are not usable there).
         let mut native_fields = BTreeMap::new();
-        native_fields.insert("bazel_version".to_string(), Value::String(crate::resolve::default_bazel_version()));
+        native_fields.insert(
+            "bazel_version".to_string(),
+            Value::String(crate::resolve::default_bazel_version()),
+        );
         // `StarlarkNativeModule.ExistingRulesShouldBeNoOp`: in module extension / repo rule
         // evaluation `native.existing_rule[s]` just return nothing (used by `maybe()`).
-        native_fields.insert("existing_rule".to_string(), Value::BuiltinFunction("host:native.existing_rule".into()));
-        native_fields.insert("existing_rules".to_string(), Value::BuiltinFunction("host:native.existing_rules".into()));
-        native_fields.insert("package_name".to_string(), Value::BuiltinFunction("host:native.package_name".into()));
-        native_fields.insert("glob".to_string(), Value::BuiltinFunction("host:native.glob".into()));
+        native_fields.insert(
+            "existing_rule".to_string(),
+            Value::BuiltinFunction("host:native.existing_rule".into()),
+        );
+        native_fields.insert(
+            "existing_rules".to_string(),
+            Value::BuiltinFunction("host:native.existing_rules".into()),
+        );
+        native_fields.insert(
+            "package_name".to_string(),
+            Value::BuiltinFunction("host:native.package_name".into()),
+        );
+        native_fields.insert(
+            "glob".to_string(),
+            Value::BuiltinFunction("host:native.glob".into()),
+        );
         for name in [
-            "action_listener", "alias", "cc_binary", "cc_import", "cc_libc_top_alias", "cc_library", "cc_shared_library",
-            "cc_static_library", "cc_test", "cc_toolchain", "cc_toolchain_alias", "cc_toolchain_suite", "config_feature_flag",
-            "config_setting", "constraint_setting", "constraint_value", "environment", "exports_files", "extra_action",
-            "fdo_prefetch_hints", "fdo_profile", "filegroup", "genquery", "genrule", "java_binary", "java_import",
-            "java_library", "java_package_configuration", "java_plugin", "java_plugins_flag_alias", "java_runtime",
-            "java_test", "java_toolchain", "label_flag", "label_setting", "memprof_profile", "module_name", "module_version",
-            "objc_import", "objc_library", "package_default_visibility", "package_group", "package_relative_label",
-            "platform", "propeller_optimize", "repo_name", "repository_name", "starlark_doc_extract", "subpackages",
-            "test_suite", "toolchain", "toolchain_type",
+            "action_listener",
+            "alias",
+            "cc_binary",
+            "cc_import",
+            "cc_libc_top_alias",
+            "cc_library",
+            "cc_shared_library",
+            "cc_static_library",
+            "cc_test",
+            "cc_toolchain",
+            "cc_toolchain_alias",
+            "cc_toolchain_suite",
+            "config_feature_flag",
+            "config_setting",
+            "constraint_setting",
+            "constraint_value",
+            "environment",
+            "exports_files",
+            "extra_action",
+            "fdo_prefetch_hints",
+            "fdo_profile",
+            "filegroup",
+            "genquery",
+            "genrule",
+            "java_binary",
+            "java_import",
+            "java_library",
+            "java_package_configuration",
+            "java_plugin",
+            "java_plugins_flag_alias",
+            "java_runtime",
+            "java_test",
+            "java_toolchain",
+            "label_flag",
+            "label_setting",
+            "memprof_profile",
+            "module_name",
+            "module_version",
+            "objc_import",
+            "objc_library",
+            "package_default_visibility",
+            "package_group",
+            "package_relative_label",
+            "platform",
+            "propeller_optimize",
+            "repo_name",
+            "repository_name",
+            "starlark_doc_extract",
+            "subpackages",
+            "test_suite",
+            "toolchain",
+            "toolchain_type",
         ] {
-            native_fields.insert(name.to_string(), Value::BuiltinFunction(format!("host:native.{name}")));
+            native_fields.insert(
+                name.to_string(),
+                Value::BuiltinFunction(format!("host:native.{name}")),
+            );
         }
-        ctx.globals.insert("native".into(), Value::Struct(Arc::new(StructValue::new_native(native_fields))));
+        ctx.globals.insert(
+            "native".into(),
+            Value::Struct(Arc::new(StructValue::new_native(native_fields))),
+        );
         let rt2 = self.clone();
         let (cr, cp) = (ctx_repo.to_string(), ctx_pkg.to_string());
         ctx.load_hook = Some(Arc::new(move |label: &str| rt2.load_bzl(label, &cr, &cp)));
@@ -405,7 +661,12 @@ impl Rt {
     }
 
     /// Loads (and caches) the exports of a `.bzl` file given a label relative to `(ctx_repo, ctx_pkg)`.
-    pub fn load_bzl(self: &Arc<Self>, label: &str, ctx_repo: &str, ctx_pkg: &str) -> Result<BTreeMap<String, Value>, String> {
+    pub fn load_bzl(
+        self: &Arc<Self>,
+        label: &str,
+        ctx_repo: &str,
+        ctx_pkg: &str,
+    ) -> Result<BTreeMap<String, Value>, String> {
         let (repo, pkg, name) = self.resolve_label(label, ctx_repo, ctx_pkg)?;
         let key = format!("@@{repo}//{pkg}:{name}");
         if let Some(c) = self.state.lock().unwrap().bzl_cache.get(&key) {
@@ -423,21 +684,46 @@ impl Rt {
         let r = self.load_bzl_uncached(&key, &repo, &pkg, &name);
         self.state.lock().unwrap().loading.retain(|k| *k != key);
         let exports = r?;
-        self.state.lock().unwrap().bzl_cache.insert(key, exports.clone());
+        self.state
+            .lock()
+            .unwrap()
+            .bzl_cache
+            .insert(key, exports.clone());
         Ok(exports)
     }
 
     /// Evaluates a bzl file in a fresh context (functions resolve globals dynamically, so callers
     /// that want to invoke a function from this file should call it on the returned context).
-    pub(crate) fn eval_bzl_fresh(self: &Arc<Self>, key: &str, repo: &str, pkg: &str, name: &str) -> Result<EvalContext, String> {
-        let dir = self.fetch_repo(repo).map_err(|e| format!("Unable to load package for {key}: {e}"))?;
-        let path = if pkg.is_empty() { dir.join(name) } else { dir.join(pkg).join(name) };
-        let src = std::fs::read_to_string(&path)
-            .map_err(|e| format!("cannot load '{key}': no such file ({}: {e})", path.display()))?;
+    pub(crate) fn eval_bzl_fresh(
+        self: &Arc<Self>,
+        key: &str,
+        repo: &str,
+        pkg: &str,
+        name: &str,
+    ) -> Result<EvalContext, String> {
+        let dir = self
+            .fetch_repo(repo)
+            .map_err(|e| format!("Unable to load package for {key}: {e}"))?;
+        let path = if pkg.is_empty() {
+            dir.join(name)
+        } else {
+            dir.join(pkg).join(name)
+        };
+        let src = std::fs::read_to_string(&path).map_err(|e| {
+            format!(
+                "cannot load '{key}': no such file ({}: {e})",
+                path.display()
+            )
+        })?;
         let mut ctx = self.new_context(&path.display().to_string(), repo, pkg);
         // Bazel compiles (parses and resolves) the whole file before executing it: syntax errors and
         // undefined names are rejected up front.
-        *ctx.module_env.label_string.lock().unwrap() = Some(key.strip_prefix("@@").filter(|_| repo.is_empty()).unwrap_or(key).to_string());
+        *ctx.module_env.label_string.lock().unwrap() = Some(
+            key.strip_prefix("@@")
+                .filter(|_| repo.is_empty())
+                .unwrap_or(key)
+                .to_string(),
+        );
         ctx.static_names = true;
         ctx.static_universe = BZL_BUILTIN_NAMES.iter().map(|s| s.to_string()).collect();
         if let Err(errs) = ctx.eval_file_checked(&src, None) {
@@ -463,9 +749,9 @@ impl Rt {
                 let (line, column) = load
                     .and_then(|l| {
                         let needle = format!("\"{}\"", l.module_label);
-                        src.lines()
-                            .enumerate()
-                            .find_map(|(line, text)| text.find(&needle).map(|column| (line + 1, column + 1)))
+                        src.lines().enumerate().find_map(|(line, text)| {
+                            text.find(&needle).map(|column| (line + 1, column + 1))
+                        })
                     })
                     .unwrap_or((1, 1));
                 return Err(format!(
@@ -483,7 +769,10 @@ impl Rt {
                 .filter_map(|l| self.resolve_label(&l.module_label, repo, pkg).ok())
                 .map(|(r, p, n)| format!("@@{r}//{p}:{n}"))
                 .collect();
-            st.bzl_deps.insert(key.to_string(), (crate::hash::sha256_hex(src.as_bytes()), children));
+            st.bzl_deps.insert(
+                key.to_string(),
+                (crate::hash::sha256_hex(src.as_bytes()), children),
+            );
         }
         for (n, v) in &ctx.globals {
             if let Value::Host(kind, id) = v {
@@ -501,6 +790,8 @@ impl Rt {
                         if let Some(d) = st.ext_defs.get_mut(idx) {
                             if d.name.is_empty() {
                                 d.name = n.clone();
+                            }
+                            if d.bzl_file.is_empty() {
                                 d.bzl_file = key.to_string();
                             }
                         }
@@ -516,7 +807,14 @@ impl Rt {
     /// runtime's own host) rather than ordinary rules/macros/functions (evaluated by the package
     /// loader, which provides `rule`, `provider`, `attr`, ...).
     fn defines_external_machinery(src: &str) -> bool {
-        ["repository_rule(", "module_extension(", "tag_class(", "tools/build_defs/repo"].iter().any(|m| src.contains(m))
+        [
+            "repository_rule(",
+            "module_extension(",
+            "tag_class(",
+            "tools/build_defs/repo",
+        ]
+        .iter()
+        .any(|m| src.contains(m))
     }
 
     pub(crate) fn package_loader(self: &Arc<Self>) -> Arc<zel_packages::PackageLoader> {
@@ -524,8 +822,13 @@ impl Rt {
         if let Some(l) = &st.loader {
             return l.clone();
         }
-        let fs = Arc::new(zel_vfs::LocalFileSystem::new(zel_vfs::DigestHashFunction::Sha256));
-        let mut cfg = zel_packages::LoaderConfig::new(fs, Arc::new(crate::resolver::BzlmodRepoResolver::new(self.clone())));
+        let fs = Arc::new(zel_vfs::LocalFileSystem::new(
+            zel_vfs::DigestHashFunction::Sha256,
+        ));
+        let mut cfg = zel_packages::LoaderConfig::new(
+            fs,
+            Arc::new(crate::resolver::BzlmodRepoResolver::new(self.clone())),
+        );
         // Helper .bzl files evaluated by the loader call repository rules and `repository_ctx` /
         // `module_ctx` methods; those belong to this runtime.
         let rt_o = Arc::downgrade(self);
@@ -535,7 +838,11 @@ impl Rt {
             let repo = pkg.repository().name().to_string();
             let dir = rt.fetch_repo(&repo).ok()?;
             let pf = pkg.package_fragment().path_string().to_string();
-            let path = if pf.is_empty() { dir.join(label.name()) } else { dir.join(&pf).join(label.name()) };
+            let path = if pf.is_empty() {
+                dir.join(label.name())
+            } else {
+                dir.join(&pf).join(label.name())
+            };
             let src = std::fs::read_to_string(path).ok()?;
             if !Self::defines_external_machinery(&src) {
                 return None;
@@ -552,15 +859,29 @@ impl Rt {
         l
     }
 
-    fn load_bzl_uncached(self: &Arc<Self>, key: &str, repo: &str, pkg: &str, name: &str) -> Result<BTreeMap<String, Value>, String> {
+    fn load_bzl_uncached(
+        self: &Arc<Self>,
+        key: &str,
+        repo: &str,
+        pkg: &str,
+        name: &str,
+    ) -> Result<BTreeMap<String, Value>, String> {
         if let Ok(dir) = self.fetch_repo(repo) {
-            let path = if pkg.is_empty() { dir.join(name) } else { dir.join(pkg).join(name) };
+            let path = if pkg.is_empty() {
+                dir.join(name)
+            } else {
+                dir.join(pkg).join(name)
+            };
             if let Ok(src) = std::fs::read_to_string(&path) {
                 if !Self::defines_external_machinery(&src) {
-                    let label = zel_cmdline::Label::parse_canonical(key).map_err(|e| e.to_string())?;
+                    let label =
+                        zel_cmdline::Label::parse_canonical(key).map_err(|e| e.to_string())?;
                     if let Ok(exports) = self.package_loader().load_bzl_exports(&label) {
                         // Record the dependency edge for lockfile digests like `eval_bzl_fresh` does.
-                        self.state.lock().unwrap().bzl_deps.insert(key.to_string(), (crate::hash::sha256_hex(src.as_bytes()), vec![]));
+                        self.state.lock().unwrap().bzl_deps.insert(
+                            key.to_string(),
+                            (crate::hash::sha256_hex(src.as_bytes()), vec![]),
+                        );
                         return Ok(exports);
                     }
                     // Re-evaluate failures through the Bzlmod Starlark context below so static
@@ -574,9 +895,23 @@ impl Rt {
         let pristine = self.new_context("", repo, pkg).globals;
         let mut exports = BTreeMap::new();
         for (k, v) in ctx.globals {
-            let predeclared = matches!(k.as_str(), "attr" | "repository_rule" | "module_extension" | "tag_class" | "extension_metadata" | "Label" | "json" | "proto")
-                && matches!(v, Value::BuiltinFunction(_) | Value::Struct(_));
-            if predeclared && pristine.get(&k).map_or(true, |p| format!("{p:?}") == format!("{v:?}")) {
+            let predeclared = matches!(
+                k.as_str(),
+                "attr"
+                    | "repository_rule"
+                    | "module_extension"
+                    | "tag_class"
+                    | "extension_metadata"
+                    | "Label"
+                    | "json"
+                    | "proto"
+                    | "rule"
+            ) && matches!(v, Value::BuiltinFunction(_) | Value::Struct(_));
+            if predeclared
+                && pristine
+                    .get(&k)
+                    .is_none_or(|p| format!("{p:?}") == format!("{v:?}"))
+            {
                 continue;
             }
             exports.insert(k, v);
@@ -599,7 +934,11 @@ impl Rt {
         if let Some(rest) = name.strip_prefix("call:") {
             return self.call_host_object(ctx, rest, pos, kw);
         }
-        if let Some(kind) = name.strip_prefix("index:").or_else(|| name.strip_prefix("contains:")).or_else(|| name.strip_prefix("debugprint:")) {
+        if let Some(kind) = name
+            .strip_prefix("index:")
+            .or_else(|| name.strip_prefix("contains:"))
+            .or_else(|| name.strip_prefix("debugprint:"))
+        {
             if kind == "Facts" {
                 return crate::ctx::facts_op(name, &pos);
             }
@@ -633,9 +972,35 @@ impl Rt {
                     other => other,
                 }
             }
-            "module_extension" => self.make_module_extension(pos, kw, ctx.call_location.clone()),
+            "module_extension" => self.make_module_extension(ctx, pos, kw, ctx.call_location.clone()),
+            "rule" => Ok(Value::Host("bzlmod_rule".into(), String::new())),
             "tag_class" => {
-                let attrs = self.attrs_from_kw(kw.get("attrs"))?;
+                if pos.len() > 1 {
+                    return err(format!(
+                        "tag_class() accepts no more than 1 positional argument but got {}",
+                        pos.len()
+                    ));
+                }
+                if pos.len() == 1 && kw.contains_key("attrs") {
+                    return err("tag_class() got multiple values for parameter 'attrs'");
+                }
+                for k in kw.keys() {
+                    if k != "attrs" && k != "doc" {
+                        return err(format!("tag_class() got an unexpected keyword argument '{k}'"));
+                    }
+                }
+                if let Some(doc) = kw.get("doc") {
+                    if !matches!(doc, Value::None | Value::String(_)) {
+                        return err(format!(
+                            "in call to tag_class(), parameter 'doc' got value of type '{}', want 'string or NoneType'",
+                            doc.type_name()
+                        ));
+                    }
+                }
+                let attrs = match pos.first().or_else(|| kw.get("attrs")) {
+                    None => vec![],
+                    Some(v) => self.attrs_from_dict(v, "tag_class")?,
+                };
                 let mut st = self.state.lock().unwrap();
                 st.tag_class_defs.push(attrs);
                 Ok(Value::Host("tag_class".into(), (st.tag_class_defs.len() - 1).to_string()))
@@ -649,6 +1014,7 @@ impl Rt {
                 let is_empty_list = |v: Option<&Value>| matches!(v, Some(Value::List(l)) if l.lock().unwrap().elements.is_empty());
                 let (deps_is_all, dev_is_all) = (is_all(deps_val), is_all(dev_val));
                 // `ModuleExtensionMetadata.create` checks, in this order.
+                #[allow(clippy::nonminimal_bool)]
                 if !(deps_is_none && dev_is_none) && !(deps_is_all && is_empty_list(dev_val)) && !(dev_is_all && is_empty_list(deps_val)) {
                     if deps_is_all || dev_is_all {
                         return err("if one of root_module_direct_deps and root_module_direct_dev_deps is \"all\", the other must be an empty list");
@@ -763,60 +1129,133 @@ impl Rt {
             if let Some(first) = comps.next() {
                 let repo = first.as_os_str().to_string_lossy().into_owned();
                 let rest: PathBuf = comps.collect();
-                let pkg = rest.parent().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+                let pkg = rest
+                    .parent()
+                    .map(|x| x.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 return (repo, pkg);
             }
         }
         if let Ok(rel) = p.strip_prefix(&self.opts.workspace_root) {
-            let pkg = rel.parent().map(|x| x.to_string_lossy().into_owned()).unwrap_or_default();
+            let pkg = rel
+                .parent()
+                .map(|x| x.to_string_lossy().into_owned())
+                .unwrap_or_default();
             return (String::new(), pkg);
         }
         (String::new(), String::new())
     }
 
-    fn attrs_from_kw(&self, v: Option<&Value>) -> Result<Vec<(String, AttrDef)>, StarlarkError> {
+    fn attrs_from_dict(
+        &self,
+        v: &Value,
+        fn_name: &str,
+    ) -> Result<Vec<(String, AttrDef)>, StarlarkError> {
+        let Value::Dict(d) = v else {
+            return err(format!(
+                "in call to {fn_name}(), parameter 'attrs' got value of type '{}', want 'dict'",
+                v.type_name()
+            ));
+        };
         let mut out = vec![];
-        let Some(Value::Dict(d)) = v else { return Ok(out) };
         for (k, v) in &d.lock().unwrap().entries {
-            let Value::Struct(s) = v else { return err("attrs must be created with attr.*()") };
+            let Value::String(k) = k else {
+                return err(format!(
+                    "in call to {fn_name}(), got dict<{}, {}> for 'attrs', want dict<string, attr>",
+                    k.type_name(),
+                    v.type_name()
+                ));
+            };
+            let Value::Struct(s) = v else {
+                return err("attrs must be created with attr.*()");
+            };
+            if !s.fields.contains_key("_attr_kind") && !s.fields.contains_key("_attr_type") {
+                return err("attrs must be created with attr.*()");
+            }
             // `attr.*()` values made by the package loader (`_attr_type`) are accepted too.
-            let kind = s.fields.get("_attr_kind").or_else(|| s.fields.get("_attr_type")).and_then(|k| k.as_str()).unwrap_or("string").to_string();
+            let kind = s
+                .fields
+                .get("_attr_kind")
+                .or_else(|| s.fields.get("_attr_type"))
+                .and_then(|k| k.as_str())
+                .unwrap_or("string")
+                .to_string();
             let def = AttrDef {
                 kind,
                 default: match s.fields.get("default") {
                     Some(Value::None) | None => None,
                     Some(x) => Some(AttrVal::from_value(x)),
                 },
-                mandatory: s.fields.get("mandatory").map(|x| x.is_truthy()).unwrap_or(false),
-                values: s.fields.get("values").map(|x| match AttrVal::from_value(x) {
-                    AttrVal::List(l) => l,
-                    _ => vec![],
-                }).unwrap_or_default(),
-                allow_empty: s.fields.get("allow_empty").map(|x| x.is_truthy()).unwrap_or(true),
+                mandatory: s
+                    .fields
+                    .get("mandatory")
+                    .map(|x| x.is_truthy())
+                    .unwrap_or(false),
+                values: s
+                    .fields
+                    .get("values")
+                    .map(|x| match AttrVal::from_value(x) {
+                        AttrVal::List(l) => l,
+                        _ => vec![],
+                    })
+                    .unwrap_or_default(),
+                allow_empty: s
+                    .fields
+                    .get("allow_empty")
+                    .map(|x| x.is_truthy())
+                    .unwrap_or(true),
             };
-            out.push((k.to_string(), def));
+            out.push((k.clone(), def));
         }
         Ok(out)
     }
 
-    fn make_attr(&self, kind: &str, pos: Vec<Value>, kw: BTreeMap<String, Value>) -> Result<Value, StarlarkError> {
+    fn attrs_from_kw(&self, v: Option<&Value>) -> Result<Vec<(String, AttrDef)>, StarlarkError> {
+        let Some(v @ Value::Dict(_)) = v else {
+            return Ok(vec![]);
+        };
+        self.attrs_from_dict(v, "repository_rule")
+    }
+
+    fn make_attr(
+        &self,
+        kind: &str,
+        pos: Vec<Value>,
+        kw: BTreeMap<String, Value>,
+    ) -> Result<Value, StarlarkError> {
         let mut default = kw.get("default").cloned().unwrap_or(Value::None);
         if default == Value::None && !pos.is_empty() && !matches!(kind, "label" | "label_list") {
             default = pos[0].clone();
         }
-        let values = kw.get("values").cloned().unwrap_or_else(|| list_value(vec![]));
+        let values = kw
+            .get("values")
+            .cloned()
+            .unwrap_or_else(|| list_value(vec![]));
         Ok(struct_value(vec![
             ("_attr_kind", str_value(kind)),
             ("default", default),
-            ("mandatory", Value::Bool(kw.get("mandatory").map(|v| v.is_truthy()).unwrap_or(false))),
+            (
+                "mandatory",
+                Value::Bool(kw.get("mandatory").map(|v| v.is_truthy()).unwrap_or(false)),
+            ),
             ("values", values),
-            ("allow_empty", Value::Bool(kw.get("allow_empty").map(|v| v.is_truthy()).unwrap_or(true))),
+            (
+                "allow_empty",
+                Value::Bool(kw.get("allow_empty").map(|v| v.is_truthy()).unwrap_or(true)),
+            ),
             ("doc", kw.get("doc").cloned().unwrap_or(Value::None)),
         ]))
     }
 
-    fn make_repository_rule(&self, pos: Vec<Value>, kw: BTreeMap<String, Value>) -> Result<Value, StarlarkError> {
-        let implementation = kw.get("implementation").cloned().or_else(|| pos.first().cloned());
+    fn make_repository_rule(
+        &self,
+        pos: Vec<Value>,
+        kw: BTreeMap<String, Value>,
+    ) -> Result<Value, StarlarkError> {
+        let implementation = kw
+            .get("implementation")
+            .cloned()
+            .or_else(|| pos.first().cloned());
         let Some(implementation) = implementation else {
             return err("repository_rule() missing 1 required positional argument: implementation");
         };
@@ -831,56 +1270,106 @@ impl Rt {
         if !attrs.iter().any(|(n, _)| n == "repo_mapping") {
             attrs.push((
                 "repo_mapping".into(),
-                AttrDef { kind: "string_dict".into(), default: None, mandatory: false, values: vec![], allow_empty: true },
+                AttrDef {
+                    kind: "string_dict".into(),
+                    default: None,
+                    mandatory: false,
+                    values: vec![],
+                    allow_empty: true,
+                },
             ));
         }
         let def = RuleDef {
             implementation,
             attrs,
             local: kw.get("local").map(|v| v.is_truthy()).unwrap_or(false),
-            environ: kw.get("environ").map(|v| v.to_string_list()).unwrap_or_default(),
+            environ: kw
+                .get("environ")
+                .map(|v| v.to_string_list())
+                .unwrap_or_default(),
             configure: kw.get("configure").map(|v| v.is_truthy()).unwrap_or(false),
             bzl_file: String::new(),
             name: String::new(),
         };
         let mut st = self.state.lock().unwrap();
         st.rule_defs.push(def);
-        Ok(Value::Host("repository_rule".into(), (st.rule_defs.len() - 1).to_string()))
+        Ok(Value::Host(
+            "repository_rule".into(),
+            (st.rule_defs.len() - 1).to_string(),
+        ))
     }
 
-    fn make_module_extension(&self, pos: Vec<Value>, kw: BTreeMap<String, Value>, location: String) -> Result<Value, StarlarkError> {
-        let implementation = kw.get("implementation").cloned().or_else(|| pos.first().cloned());
+    fn make_module_extension(
+        &self,
+        ctx: &EvalContext,
+        pos: Vec<Value>,
+        kw: BTreeMap<String, Value>,
+        location: String,
+    ) -> Result<Value, StarlarkError> {
+        let init_label = ctx.module_env.label_string.lock().unwrap().clone();
+        let in_active_ctx = !self.state.lock().unwrap().ctxs.iter().all(|c| c.is_none());
+        let Some(raw_label) = init_label.filter(|_| !in_active_ctx) else {
+            return err("module_extension() can only be used while initializing a .bzl file");
+        };
+        let bzl_file = if raw_label.starts_with("//") {
+            format!("@@{raw_label}")
+        } else {
+            raw_label
+        };
+        let implementation = kw
+            .get("implementation")
+            .cloned()
+            .or_else(|| pos.first().cloned());
         let Some(implementation) = implementation else {
-            return err("module_extension() missing 1 required positional argument: implementation");
+            return err(
+                "module_extension() missing 1 required positional argument: implementation",
+            );
         };
         let mut tag_classes = vec![];
         if let Some(Value::Dict(d)) = kw.get("tag_classes") {
             for (k, v) in &d.lock().unwrap().entries {
-                let Value::Host(kind, id) = v else { return err("tag_classes values must be created with tag_class()") };
+                let Value::Host(kind, id) = v else {
+                    return err("tag_classes values must be created with tag_class()");
+                };
                 if kind != "tag_class" {
                     return err("tag_classes values must be created with tag_class()");
                 }
                 let idx: usize = id.parse().unwrap_or(0);
-                tag_classes.push((k.to_string(), self.state.lock().unwrap().tag_class_defs[idx].clone()));
+                tag_classes.push((
+                    k.to_string(),
+                    self.state.lock().unwrap().tag_class_defs[idx].clone(),
+                ));
             }
         }
         let def = ExtensionDef {
             implementation,
             tag_classes,
-            environ: kw.get("environ").map(|v| v.to_string_list()).unwrap_or_default(),
-            os_dependent: kw.get("os_dependent").map(|v| v.is_truthy()).unwrap_or(false),
-            arch_dependent: kw.get("arch_dependent").map(|v| v.is_truthy()).unwrap_or(false),
+            environ: kw
+                .get("environ")
+                .map(|v| v.to_string_list())
+                .unwrap_or_default(),
+            os_dependent: kw
+                .get("os_dependent")
+                .map(|v| v.is_truthy())
+                .unwrap_or(false),
+            arch_dependent: kw
+                .get("arch_dependent")
+                .map(|v| v.is_truthy())
+                .unwrap_or(false),
             facts_version: match kw.get("facts_version") {
                 Some(Value::Int(i)) => i.to_u64().unwrap_or(0) as u32,
                 _ => 0,
             },
-            bzl_file: String::new(),
+            bzl_file,
             name: String::new(),
             location,
         };
         let mut st = self.state.lock().unwrap();
         st.ext_defs.push(def);
-        Ok(Value::Host("module_extension".into(), (st.ext_defs.len() - 1).to_string()))
+        Ok(Value::Host(
+            "module_extension".into(),
+            (st.ext_defs.len() - 1).to_string(),
+        ))
     }
 
     /// `call:<kind>` on Host objects: invoking a repository rule instantiates a repo.
@@ -891,7 +1380,9 @@ impl Rt {
         pos: Vec<Value>,
         kw: BTreeMap<String, Value>,
     ) -> Result<Value, StarlarkError> {
-        let Some(Value::Host(_, id)) = pos.first().cloned() else { return err("bad callable") };
+        let Some(Value::Host(_, id)) = pos.first().cloned() else {
+            return err("bad callable");
+        };
         match rest {
             "repository_rule" => {
                 let idx: usize = id.parse().unwrap_or(0);
@@ -918,15 +1409,20 @@ impl Rt {
                 }
                 crate::ctx::validate_repo_rule_call(&def.name, &def.attrs, &kw, &_ctx.call_kw_order.clone())?;
                 crate::ctx::check_repo_rule_labels(self, &def.name, &def.attrs, &kw, None)?;
-                let mut attrs: Vec<(String, AttrVal)> = vec![];
+                let mut attrs: BTreeMap<String, AttrVal> = BTreeMap::new();
                 for (k, v) in &kw {
-                    attrs.push((k.clone(), AttrVal::from_value(v)));
+                    attrs.insert(k.clone(), AttrVal::from_value(v));
                 }
-                let (bzl, rn) = (def.bzl_file.clone(), def.name.clone());
-                let spec = RepoSpec { bzl_file: bzl, rule_name: rn, attrs };
+                let call = DeferredRepoCall {
+                    name: name.clone(),
+                    bzl_file: def.bzl_file.clone(),
+                    rule_name: def.name.clone(),
+                    attr_defs: def.attrs.clone(),
+                    kw: attrs,
+                };
                 let call_loc = _ctx.call_location.clone();
                 let mut st = self.state.lock().unwrap();
-                let dup = st.collectors.last().is_some_and(|c| c.iter().any(|(n, _)| *n == name));
+                let dup = st.collectors.last().is_some_and(|c| c.iter().any(|d| d.name == name));
                 if dup {
                     let at = st.repo_call_locs.get(&name).cloned().unwrap_or_default();
                     drop(st);
@@ -934,7 +1430,7 @@ impl Rt {
                 }
                 match st.collectors.last_mut() {
                     Some(c) => {
-                        c.push((name.clone(), spec));
+                        c.push(call);
                         st.repo_call_locs.insert(name, call_loc);
                         Ok(Value::None)
                     }
@@ -942,50 +1438,18 @@ impl Rt {
                 }
             }
             "module_extension" => err("module extensions are not callable"),
+            "bzlmod_rule" => err("a rule can only be instantiated while evaluating a BUILD file or a legacy or symbolic macro"),
             other => err(format!("'{other}' object is not callable")),
         }
     }
-
 }
 
 impl Rt {
-    /// `BzlLoadFunction`'s transitive digest of a `.bzl` file (module-extension dialect): the
-    /// SHA-256 of the concatenation of the file's own SHA-256 and the transitive digests of its
-    /// `load()`s in source order (duplicates included). Predeclared bzlmod builtins are not
-    /// fingerprinted by Bazel for MODULE-loaded files.
-    pub fn bzl_transitive_digest(self: &Arc<Self>, key: &str) -> Vec<u8> {
-        let mut memo: HashMap<String, Vec<u8>> = HashMap::new();
-        self.transitive_digest_of(key, &mut memo, &mut vec![])
-    }
-
-    fn transitive_digest_of(self: &Arc<Self>, key: &str, memo: &mut HashMap<String, Vec<u8>>, stack: &mut Vec<String>) -> Vec<u8> {
-        if let Some(d) = memo.get(key) {
-            return d.clone();
+    pub(crate) fn bzl_loads_of(&self, key: &str, text: &str) -> Vec<String> {
+        if let Some(loads) = self.state.lock().unwrap().bzl_loads_cache.get(key) {
+            return loads.clone();
         }
-        let split = || -> Option<(String, String, String)> {
-            let r = key.strip_prefix("@@")?;
-            let (repo, rest) = r.split_once("//")?;
-            let (pkg, name) = rest.split_once(':')?;
-            Some((repo.to_string(), pkg.to_string(), name.to_string()))
-        };
-        let src = split().and_then(|(repo, pkg, name)| {
-            let dir = self.fetch_repo(&repo).ok()?;
-            let path = if pkg.is_empty() { dir.join(&name) } else { dir.join(&pkg).join(&name) };
-            std::fs::read(path).ok().map(|b| (repo, pkg, b))
-        });
-        let Some((repo, pkg, bytes)) = src else {
-            // Not readable (builtin exports without a source file): fall back to the recorded hash.
-            let st = self.state.lock().unwrap();
-            let h = st.bzl_deps.get(key).map(|(h, _)| h.clone()).unwrap_or_else(|| "native".into());
-            return crate::hash::sha256(h.as_bytes()).to_vec();
-        };
-        if stack.iter().any(|k| k == key) {
-            return vec![];
-        }
-        stack.push(key.to_string());
-        let mut data: Vec<u8> = crate::hash::sha256(&bytes).to_vec();
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        let loads: Vec<String> = zel_starlark::Lexer::new(key, &text)
+        let loads: Vec<String> = zel_starlark::Lexer::new(key, text)
             .lex_all()
             .ok()
             .and_then(|t| zel_starlark::Parser::new(t).parse_module().ok())
@@ -999,6 +1463,75 @@ impl Rt {
                     .collect()
             })
             .unwrap_or_default();
+        self.state
+            .lock()
+            .unwrap()
+            .bzl_loads_cache
+            .insert(key.to_string(), loads.clone());
+        loads
+    }
+
+    /// `BzlLoadFunction`'s transitive digest of a `.bzl` file (module-extension dialect): the
+    /// SHA-256 of the concatenation of the file's own SHA-256 and the transitive digests of its
+    /// `load()`s in source order (duplicates included). Predeclared bzlmod builtins are not
+    /// fingerprinted by Bazel for MODULE-loaded files.
+    pub fn bzl_transitive_digest(self: &Arc<Self>, key: &str) -> Vec<u8> {
+        if let Some(d) = self.state.lock().unwrap().bzl_transitive_digests.get(key) {
+            return d.clone();
+        }
+        let mut memo: HashMap<String, Vec<u8>> = HashMap::new();
+        let d = self.transitive_digest_of(key, &mut memo, &mut vec![]);
+        let mut st = self.state.lock().unwrap();
+        for (k, v) in memo {
+            st.bzl_transitive_digests.insert(k, v);
+        }
+        d
+    }
+
+    fn transitive_digest_of(
+        self: &Arc<Self>,
+        key: &str,
+        memo: &mut HashMap<String, Vec<u8>>,
+        stack: &mut Vec<String>,
+    ) -> Vec<u8> {
+        if let Some(d) = memo.get(key) {
+            return d.clone();
+        }
+        if let Some(d) = self.state.lock().unwrap().bzl_transitive_digests.get(key) {
+            return d.clone();
+        }
+        let split = || -> Option<(String, String, String)> {
+            let r = key.strip_prefix("@@")?;
+            let (repo, rest) = r.split_once("//")?;
+            let (pkg, name) = rest.split_once(':')?;
+            Some((repo.to_string(), pkg.to_string(), name.to_string()))
+        };
+        let src = split().and_then(|(repo, pkg, name)| {
+            let dir = self.fetch_repo(&repo).ok()?;
+            let path = if pkg.is_empty() {
+                dir.join(&name)
+            } else {
+                dir.join(&pkg).join(&name)
+            };
+            std::fs::read(path).ok().map(|b| (repo, pkg, b))
+        });
+        let Some((repo, pkg, bytes)) = src else {
+            // Not readable (builtin exports without a source file): fall back to the recorded hash.
+            let st = self.state.lock().unwrap();
+            let h = st
+                .bzl_deps
+                .get(key)
+                .map(|(h, _)| h.clone())
+                .unwrap_or_else(|| "native".into());
+            return crate::hash::sha256(h.as_bytes()).to_vec();
+        };
+        if stack.iter().any(|k| k == key) {
+            return vec![];
+        }
+        stack.push(key.to_string());
+        let mut data: Vec<u8> = crate::hash::sha256(&bytes).to_vec();
+        let text = String::from_utf8_lossy(&bytes).to_string();
+        let loads = self.bzl_loads_of(key, &text);
         for l in loads {
             if let Ok((r, p, n)) = self.resolve_label(&l, &repo, &pkg) {
                 let child = format!("@@{r}//{p}:{n}");
@@ -1027,7 +1560,12 @@ thread_local! {
 }
 
 impl Rt {
-    pub fn set_lockfile(&self, mode: crate::lockfile::LockfileMode, workspace: crate::lockfile::Lockfile, hidden: crate::lockfile::Lockfile) {
+    pub fn set_lockfile(
+        &self,
+        mode: crate::lockfile::LockfileMode,
+        workspace: crate::lockfile::Lockfile,
+        hidden: crate::lockfile::Lockfile,
+    ) {
         let mut l = self.lock.lock().unwrap();
         l.mode = Some(mode);
         l.workspace = workspace;
@@ -1041,12 +1579,21 @@ impl Rt {
         use crate::lockfile::*;
         let l = self.lock.lock().unwrap();
         let res = &self.resolution;
-        let live: std::collections::HashSet<String> =
-            res.extension_ids().iter().filter(|i| !i.is_innate()).map(extension_key).collect();
+        let live: std::collections::HashSet<String> = res
+            .extension_ids()
+            .iter()
+            .filter(|i| !i.is_innate())
+            .map(extension_key)
+            .collect();
         let mut ws = Lockfile::default();
         let mut hid = Lockfile::default();
         // BazelLockFileModule drops `file:` registry hashes (commit 9d961b96f5).
-        ws.registry_file_hashes = res.registry_file_hashes.iter().filter(|(u, _)| !u.starts_with("file:")).map(|(u, h)| (u.clone(), h.clone())).collect();
+        ws.registry_file_hashes = res
+            .registry_file_hashes
+            .iter()
+            .filter(|(u, _)| !u.starts_with("file:"))
+            .map(|(u, h)| (u.clone(), h.clone()))
+            .collect();
         ws.selected_yanked_versions = res.selected_yanked_versions.clone();
         ws.facts = l.workspace.facts.clone();
         ws.facts_versions = l.workspace.facts_versions.clone();
@@ -1062,14 +1609,22 @@ impl Rt {
             }
         }
         for (id, factors, e) in &l.used {
-            let (target, other) = if e.reproducible() { (&mut hid, &mut ws) } else { (&mut ws, &mut hid) };
+            let (target, other) = if e.reproducible() {
+                (&mut hid, &mut ws)
+            } else {
+                (&mut ws, &mut hid)
+            };
             if let Some(m) = other.module_extensions.get_mut(id) {
                 m.remove(factors);
                 if m.is_empty() {
                     other.module_extensions.remove(id);
                 }
             }
-            target.module_extensions.entry(id.clone()).or_default().insert(factors.clone(), e.clone());
+            target
+                .module_extensions
+                .entry(id.clone())
+                .or_default()
+                .insert(factors.clone(), e.clone());
         }
         (ws, hid)
     }

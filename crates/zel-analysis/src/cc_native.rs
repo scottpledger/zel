@@ -23,7 +23,7 @@ fn cc_native(
         // Directory contents are only known at execution time: a tree artifact expands to
         // itself (callers pass its path to tools that expand it).
         return Some(match pos.get(1) {
-            Some(v @ Value::Host(k, _)) if k == "file" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(vec![v.clone()]))))),
+            Some(v @ Value::Host(k, _)) if k == "file" => Ok(mk_list(vec![v.clone()])),
             _ => err("TreeArtifactExpander.expand: expected a File"),
         });
     }
@@ -52,7 +52,7 @@ fn cc_native(
         "absolute_symlink" => cc_absolute_symlink(st, pos, kw),
         "check_toplevel" => Ok(Value::None),
         "expand_and_tokenize" => cc_expand_and_tokenize(st, pos, kw),
-        "per_file_copts" | "collect_per_file_lto_backend_opts" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(vec![]))))),
+        "per_file_copts" | "collect_per_file_lto_backend_opts" => Ok(mk_list(vec![])),
         _ => return None,
     })
 }
@@ -370,24 +370,35 @@ fn cc_expand_and_tokenize(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Strin
     let attr = cc_str(pos, kw, 1, "attr", "expand_and_tokenize")?;
     let flags: Vec<String> = cc_kw(pos, kw, 2, "flags").map(|v| items(v).iter().filter_map(|x| x.as_str().map(str::to_string)).collect()).unwrap_or_default();
     if flags.is_empty() {
-        return Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(vec![])))));
+        return Ok(mk_list(vec![]));
     }
     let mut map: BTreeMap<Label, Vec<Artifact>> = BTreeMap::new();
     for k in ["srcs", "non_arc_srcs", "hdrs", "data", "additional_linker_inputs"] {
         if let Some(ts) = st.deps.get(k) {
             for t in ts {
-                map.entry(t.label.clone()).or_default().extend(target_files(t));
+                insert_target_location_keys(&mut map, t, target_files(t));
             }
         }
     }
     let lookup = |n: &str| st.make_vars.get(n).cloned();
+    let repo_map = st.repo_mapping();
     let mut out = Vec::new();
     for s in flags {
-        let s = expand_make_variables(&s, &lookup).map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))?;
-        let s = expand_locations(&s, &map, &st.label, LocationMode::Exec, &st.inputs.workspace_name).map_err(StarlarkError)?;
+        let s = expand_with_locations(
+            &s,
+            &lookup,
+            &map,
+            &st.label,
+            LocationMode::Exec,
+            &st.inputs.workspace_name,
+            Some(&repo_map),
+            cfg!(windows),
+        )
+        .map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))?
+        .text;
         for t in shell_tokenize(&s).map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))? {
             out.push(Value::String(t));
         }
     }
-    Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(out)))))
+    Ok(mk_list(out))
 }

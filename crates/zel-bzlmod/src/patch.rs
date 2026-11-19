@@ -3,6 +3,7 @@
 //! create/delete, owner permission bits). No external `patch` binary is used and no
 //! `.orig`/`.rej` files are produced.
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Component, Path, PathBuf};
 
@@ -245,11 +246,17 @@ fn extract_path(line: &str, strip: i64, loc: usize) -> R<Option<String>> {
             return Ok(Some(p.to_string()));
         }
     }
-    Err(format!("Cannot determine file name with strip = {strip} at line {loc}:\n{line}"))
+    Err(format!(
+        "Cannot determine file name with strip = {strip} at line {loc}:\n{line}"
+    ))
 }
 
 fn normalize(base: &Path, rel: &str) -> PathBuf {
-    let mut out = if rel.starts_with('/') { PathBuf::from("/") } else { base.to_path_buf() };
+    let mut out = if rel.starts_with('/') {
+        PathBuf::from("/")
+    } else {
+        base.to_path_buf()
+    };
     for c in Path::new(rel).components() {
         match c {
             Component::ParentDir => {
@@ -278,7 +285,10 @@ fn get_file_path(path: &str, out_dir: &Path, loc: usize) -> R<PathBuf> {
         if a == out_dir {
             break;
         }
-        if std::fs::symlink_metadata(a).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        if std::fs::symlink_metadata(a)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
             if real_out.is_none() {
                 real_out = std::fs::canonicalize(out_dir).ok();
             }
@@ -298,7 +308,9 @@ fn get_file_path(path: &str, out_dir: &Path, loc: usize) -> R<PathBuf> {
                 }
                 Err(e) => {
                     let detail = resolve_symlinks_error(a).unwrap_or_else(|| e.to_string());
-                    return Err(format!("Cannot resolve file path \"{path}\" at line {loc}: {detail}"));
+                    return Err(format!(
+                        "Cannot resolve file path \"{path}\" at line {loc}: {detail}"
+                    ));
                 }
             }
         }
@@ -333,7 +345,11 @@ fn resolve_symlinks_error(p: &Path) -> Option<String> {
                 }
                 Ok(md) if md.file_type().is_symlink() => {
                     let target = std::fs::read_link(&resolved).ok()?;
-                    let mut next = if target.is_absolute() { target } else { resolved.parent()?.join(target) };
+                    let mut next = if target.is_absolute() {
+                        target
+                    } else {
+                        resolved.parent()?.join(target)
+                    };
                     for r in comps {
                         next.push(r.as_os_str());
                     }
@@ -348,7 +364,10 @@ fn resolve_symlinks_error(p: &Path) -> Option<String> {
             return None;
         }
     }
-    Some(format!("{} (Too many levels of symbolic links)", p.display()))
+    Some(format!(
+        "{} (Too many levels of symbolic links)",
+        p.display()
+    ))
 }
 
 #[derive(Debug)]
@@ -367,7 +386,7 @@ fn parse_unified(content: &[String]) -> Vec<Delta> {
     let mut in_prelude = true;
     let mut raw: Vec<(char, String)> = Vec::new();
     let mut old_ln: i64 = 0;
-    let mut flush = |raw: &mut Vec<(char, String)>, old_ln: i64, deltas: &mut Vec<Delta>| {
+    let flush = |raw: &mut Vec<(char, String)>, old_ln: i64, deltas: &mut Vec<Delta>| {
         if raw.is_empty() {
             return;
         }
@@ -381,7 +400,11 @@ fn parse_unified(content: &[String]) -> Vec<Delta> {
                 target.push(rest);
             }
         }
-        deltas.push(Delta { pos: old_ln - 1, source, target });
+        deltas.push(Delta {
+            pos: old_ln - 1,
+            source,
+            target,
+        });
     };
     for l in content {
         if in_prelude {
@@ -451,7 +474,12 @@ fn verify_chunk(d: &Delta, target: &[String], fuzz: i64, position: i64) -> Resul
 
 /// `ChangeDelta.applyFuzzyToAt`: removes the source lines (minus `fuzz` at either end) and inserts
 /// the target lines (minus `fuzz` at either end) at `position + fuzz`.
-fn apply_fuzzy_to_at(d: &Delta, target: &mut Vec<String>, fuzz: i64, position: i64) -> Result<(), String> {
+fn apply_fuzzy_to_at(
+    d: &Delta,
+    target: &mut Vec<String>,
+    fuzz: i64,
+    position: i64,
+) -> Result<(), String> {
     let size = d.source.len() as i64;
     let mut i = fuzz;
     while i < size - fuzz {
@@ -487,6 +515,7 @@ fn apply_fuzzy_to_at(d: &Delta, target: &mut Vec<String>, fuzz: i64, position: i
 
 /// `Patch.findPositionWithFuzzAndMoreDelta`: a negative result means "not found" (including a match at a
 /// negative position, which the caller cannot tell apart).
+#[allow(clippy::too_many_arguments)]
 fn find_position_with_fuzz_and_more_delta(
     d: &Delta,
     content: &[String],
@@ -500,7 +529,9 @@ fn find_position_with_fuzz_and_more_delta(
     if !*before_out && default_position - more + fuzz <= last_patch_end {
         *before_out = true;
     }
-    if !*after_out && (content.len() as i64) < default_position + more + d.source.len() as i64 - fuzz {
+    if !*after_out
+        && (content.len() as i64) < default_position + more + d.source.len() as i64 - fuzz
+    {
         *after_out = true;
     }
     if !*before_out && verify_chunk(d, content, fuzz, default_position - more)? == Verify::Ok {
@@ -528,7 +559,14 @@ fn apply_delta(content: &mut Vec<String>, d: &Delta, max_fuzz: i64) -> Result<()
         let mut more: i64 = 0;
         loop {
             let pos = find_position_with_fuzz_and_more_delta(
-                d, content, fuzz, more, default_position, last_patch_end, &mut before_out, &mut after_out,
+                d,
+                content,
+                fuzz,
+                more,
+                default_position,
+                last_patch_end,
+                &mut before_out,
+                &mut after_out,
             )?;
             if pos >= 0 {
                 found = Some((fuzz, pos));
@@ -547,13 +585,27 @@ fn apply_delta(content: &mut Vec<String>, d: &Delta, max_fuzz: i64) -> Result<()
 }
 
 fn owner_perm(p: &Path) -> i32 {
-    match std::fs::metadata(p) {
-        Ok(m) => ((m.permissions().mode() >> 6) & 7) as i32,
-        Err(_) => -1,
+    #[cfg(unix)]
+    {
+        match std::fs::metadata(p) {
+            Ok(m) => ((m.permissions().mode() >> 6) & 7) as i32,
+            Err(_) => -1,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = p;
+        -1
     }
 }
 
-fn apply_to_file(deltas: &[Delta], old: Option<&Path>, new: Option<&Path>, renaming: bool, mut perm: i32) -> R<()> {
+fn apply_to_file(
+    deltas: &[Delta],
+    old: Option<&Path>,
+    new: Option<&Path>,
+    renaming: bool,
+    mut perm: i32,
+) -> R<()> {
     let input = match (old, new) {
         (Some(o), _) if o.exists() => Some(o),
         (_, Some(n)) if n.exists() => Some(n),
@@ -573,13 +625,18 @@ fn apply_to_file(deltas: &[Delta], old: Option<&Path>, new: Option<&Path>, renam
         apply_delta(&mut content, d, 2).map_err(|m| {
             format!(
                 "in patch applied to {}: {}, error applying change near line {}",
-                old.map(|p| p.display().to_string()).unwrap_or_else(|| "null".into()),
+                old.map(|p| p.display().to_string())
+                    .unwrap_or_else(|| "null".into()),
                 m,
                 d.pos + 1
             )
         })?;
     }
-    let output = if old.map(|o| o.exists()).unwrap_or(false) && !renaming { old } else { new };
+    let output = if old.map(|o| o.exists()).unwrap_or(false) && !renaming {
+        old
+    } else {
+        new
+    };
     if let Some(o) = old {
         let _ = std::fs::remove_file(o);
     }
@@ -587,6 +644,7 @@ fn apply_to_file(deltas: &[Delta], old: Option<&Path>, new: Option<&Path>, renam
     if let (Some(out), false) = (output, is_delete) {
         write_lines(out, &content)?;
         if perm != -1 {
+            #[cfg(unix)]
             if let Ok(m) = std::fs::metadata(out) {
                 let mut mode = m.permissions().mode();
                 // `PatchUtil.setFilePermission`: `Path.setReadable/Writable/Executable` modify only 0400 / 0200 / 0111.
@@ -654,7 +712,10 @@ fn apply_inner(patch_file: &Path, strip: i64, out_dir: &Path) -> R<()> {
             if !content.is_empty() || renaming || perm != -1 {
                 let start = i + 1 - content.len().min(i + 1);
                 if !content.is_empty() {
-                    if content.len() < 2 || !content[0].starts_with("---") || !content[1].starts_with("+++") {
+                    if content.len() < 2
+                        || !content[0].starts_with("---")
+                        || !content[1].starts_with("+++")
+                    {
                         return Err(format!("The patch content must start with ---/+++ prelude lines at line {start}."));
                     }
                     match &header {
@@ -671,12 +732,22 @@ fn apply_inner(patch_file: &Path, strip: i64, out_dir: &Path) -> R<()> {
                     let mut ne = String::new();
                     match &old_file {
                         None => oe = ", old file name is not specified".into(),
-                        Some(f) if !f.exists() => oe = format!(", old file name ({}) doesn't exist", old_str.clone().unwrap_or_default()),
+                        Some(f) if !f.exists() => {
+                            oe = format!(
+                                ", old file name ({}) doesn't exist",
+                                old_str.clone().unwrap_or_default()
+                            )
+                        }
                         _ => {}
                     }
                     match &new_file {
                         None => ne = ", new file name is not specified".into(),
-                        Some(f) if f.exists() => ne = format!(", new file name ({}) already exists", new_str.clone().unwrap_or_default()),
+                        Some(f) if f.exists() => {
+                            ne = format!(
+                                ", new file name ({}) already exists",
+                                new_str.clone().unwrap_or_default()
+                            )
+                        }
                         _ => {}
                     }
                     if !oe.is_empty() || !ne.is_empty() {
@@ -694,15 +765,29 @@ fn apply_inner(patch_file: &Path, strip: i64, out_dir: &Path) -> R<()> {
                 if !is_add && !oex && !nex {
                     let oe = match &old_file {
                         None => ", old file name is not specified".to_string(),
-                        Some(_) => format!(", old file name ({}) doesn't exist", old_str.clone().unwrap_or_default()),
+                        Some(_) => format!(
+                            ", old file name ({}) doesn't exist",
+                            old_str.clone().unwrap_or_default()
+                        ),
                     };
                     let ne = match &new_file {
                         None => ", new file name is not specified".to_string(),
-                        Some(_) => format!(", new file name ({}) doesn't exist", new_str.clone().unwrap_or_default()),
+                        Some(_) => format!(
+                            ", new file name ({}) doesn't exist",
+                            new_str.clone().unwrap_or_default()
+                        ),
                     };
-                    return Err(format!("Cannot find file to patch (near line {start}){oe}{ne}."));
+                    return Err(format!(
+                        "Cannot find file to patch (near line {start}){oe}{ne}."
+                    ));
                 }
-                apply_to_file(&deltas, old_file.as_deref(), new_file.as_deref(), renaming, perm)?;
+                apply_to_file(
+                    &deltas,
+                    old_file.as_deref(),
+                    new_file.as_deref(),
+                    renaming,
+                    perm,
+                )?;
             }
             content.clear();
             header = None;
@@ -759,7 +844,11 @@ fn apply_inner(patch_file: &Path, strip: i64, out_dir: &Path) -> R<()> {
                 }
                 let c = line.as_bytes()[index];
                 if !(b'0'..=b'7').contains(&c) {
-                    return Err(format!("Wrong file mode format at line {}: {}", i + 1, line));
+                    return Err(format!(
+                        "Wrong file mode format at line {}: {}",
+                        i + 1,
+                        line
+                    ));
                 }
                 perm = (c - b'0') as i32;
             }
@@ -767,8 +856,12 @@ fn apply_inner(patch_file: &Path, strip: i64, out_dir: &Path) -> R<()> {
                 let pos = line[2..].find("@@").unwrap() + 2;
                 let hs = &line[..pos + 2];
                 content.push(hs.to_string());
-                let (_, ob, _, nb) = parse_chunk_header(hs).ok_or_else(|| format!("Wrong chunk header: {hs}"))?;
-                header = Some(ChunkHeader { old_size: ob, new_size: nb });
+                let (_, ob, _, nb) =
+                    parse_chunk_header(hs).ok_or_else(|| format!("Wrong chunk header: {hs}"))?;
+                header = Some(ChunkHeader {
+                    old_size: ob,
+                    new_size: nb,
+                });
                 oc = 0;
                 nc = 0;
                 reading = true;
@@ -813,7 +906,11 @@ fn apply_inner(patch_file: &Path, strip: i64, out_dir: &Path) -> R<()> {
                 if old_str.is_none() {
                     let s = line[12..].trim().to_string();
                     if s.is_empty() {
-                        return Err(format!("Cannot determine file name from line {}:\n{}", i + 1, line));
+                        return Err(format!(
+                            "Cannot determine file name from line {}:\n{}",
+                            i + 1,
+                            line
+                        ));
                     }
                     old_file = Some(get_file_path(&s, out_dir, i + 1)?);
                     old_str = Some(s);
@@ -824,7 +921,11 @@ fn apply_inner(patch_file: &Path, strip: i64, out_dir: &Path) -> R<()> {
                 if new_str.is_none() {
                     let s = line[10..].trim().to_string();
                     if s.is_empty() {
-                        return Err(format!("Cannot determine file name from line {}:\n{}", i + 1, line));
+                        return Err(format!(
+                            "Cannot determine file name from line {}:\n{}",
+                            i + 1,
+                            line
+                        ));
                     }
                     new_file = Some(get_file_path(&s, out_dir, i + 1)?);
                     new_str = Some(s);
@@ -857,7 +958,10 @@ mod tests {
         )
         .unwrap();
         apply(&d.join("p.diff"), 1, &d).unwrap();
-        assert_eq!(std::fs::read_to_string(d.join("a.txt")).unwrap(), "x\ny\n1\ntwo\n3\n4\n5\n");
+        assert_eq!(
+            std::fs::read_to_string(d.join("a.txt")).unwrap(),
+            "x\ny\n1\ntwo\n3\n4\n5\n"
+        );
         assert!(!d.join("a.txt.orig").exists());
     }
 
@@ -876,17 +980,28 @@ mod tests {
         apply(&d.join("p.diff"), 1, &d).unwrap();
         assert!(d.join("new.txt").exists() && !d.join("old.txt").exists());
         assert!(!d.join("gone.txt").exists());
-        assert_eq!(std::fs::read_to_string(d.join("made.txt")).unwrap(), "m\nn\n");
+        assert_eq!(
+            std::fs::read_to_string(d.join("made.txt")).unwrap(),
+            "m\nn\n"
+        );
     }
 
     #[test]
     fn mismatch_and_escape_errors() {
         let d = tmp("err");
         std::fs::write(d.join("a.txt"), "q\n").unwrap();
-        std::fs::write(d.join("p.diff"), "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-nope\n+x\n").unwrap();
+        std::fs::write(
+            d.join("p.diff"),
+            "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-nope\n+x\n",
+        )
+        .unwrap();
         let e = apply(&d.join("p.diff"), 1, &d).unwrap_err().to_string();
         assert!(e.contains("error applying change near line 1"), "{e}");
-        std::fs::write(d.join("p2.diff"), "--- a/../../x\n+++ b/../../x\n@@ -0,0 +1 @@\n+x\n").unwrap();
+        std::fs::write(
+            d.join("p2.diff"),
+            "--- a/../../x\n+++ b/../../x\n@@ -0,0 +1 @@\n+x\n",
+        )
+        .unwrap();
         let e = apply(&d.join("p2.diff"), 1, &d).unwrap_err().to_string();
         assert!(e.contains("outside of external repository"), "{e}");
     }
@@ -902,7 +1017,8 @@ mod tests {
         )
         .unwrap();
         apply(&d.join("p.diff"), 1, &d).unwrap();
-        assert!(std::fs::read_to_string(d.join("MODULE.bazel")).unwrap().contains("0.6.1"));
+        assert!(std::fs::read_to_string(d.join("MODULE.bazel"))
+            .unwrap()
+            .contains("0.6.1"));
     }
-
 }

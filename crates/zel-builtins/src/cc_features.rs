@@ -44,7 +44,8 @@ fn str_of(v: &Value) -> Option<String> {
 }
 
 fn str_list(v: Option<Value>) -> Vec<String> {
-    v.map(|v| items(&v).iter().filter_map(str_of).collect()).unwrap_or_default()
+    v.map(|v| items(&v).iter().filter_map(str_of).collect())
+        .unwrap_or_default()
 }
 
 fn opt_str(v: Option<Value>) -> Option<String> {
@@ -247,9 +248,8 @@ fn parse_flag_group(v: &Value) -> Res<FlagGroup> {
         expand_if_not_available: avail_list(field(v, "expand_if_not_available")),
         expand_if_true: opt_str(field(v, "expand_if_true")),
         expand_if_false: opt_str(field(v, "expand_if_false")),
-        expand_if_equal: field(v, "expand_if_equal").and_then(|e| {
-            Some((opt_str(field(&e, "name"))?, opt_str(field(&e, "value"))?))
-        }),
+        expand_if_equal: field(v, "expand_if_equal")
+            .and_then(|e| Some((opt_str(field(&e, "name"))?, opt_str(field(&e, "value"))?))),
         ordered: vec![],
     };
     for f in str_list(field(v, "flags")) {
@@ -304,7 +304,10 @@ impl ToolchainFeatures {
         let mut fs = Vec::new();
         for f in features {
             if field(f, "name").is_none() {
-                return err(format!("Invalid toolchain configuration: feature has no name (got {})", f.type_name()));
+                return err(format!(
+                    "Invalid toolchain configuration: feature has no name (got {})",
+                    f.type_name()
+                ));
             }
             let mut flag_sets = vec![];
             for s in items(&field(f, "flag_sets").unwrap_or(Value::None)) {
@@ -348,14 +351,22 @@ impl ToolchainFeatures {
                     with_features: with_feature_sets(field(&t, "with_features")),
                 });
             }
+            let action_name = opt_str(field(a, "action_name")).unwrap_or_default();
             let mut flag_sets = vec![];
             for s in items(&field(a, "flag_sets").unwrap_or(Value::None)) {
-                flag_sets.push(parse_flag_set(&s)?);
+                let mut fs = parse_flag_set(&s)?;
+                if !fs.actions.is_empty() {
+                    return Err(StarlarkError(format!(
+                        "action_config {action_name} specifies actions.  An action_config's flag sets automatically apply to the configured action.  Thus, you must not specify action lists in an action_config's flag set."
+                    )));
+                }
+                fs.actions = vec![action_name.clone()];
+                flag_sets.push(fs);
             }
-            let action_name = opt_str(field(a, "action_name")).unwrap_or_default();
             acs.push(ActionConfig {
                 // An action_config is named after its action.
-                config_name: opt_str(field(a, "config_name")).unwrap_or_else(|| action_name.clone()),
+                config_name: opt_str(field(a, "config_name"))
+                    .unwrap_or_else(|| action_name.clone()),
                 action_name,
                 enabled: truthy(&field(a, "enabled")),
                 tools,
@@ -409,7 +420,10 @@ impl ToolchainFeatures {
                 ));
             }
             names.push(a.config_name.clone());
-            if action_config_by_action.insert(a.action_name.clone(), i).is_some() {
+            if action_config_by_action
+                .insert(a.action_name.clone(), i)
+                .is_some()
+            {
                 return err(format!(
                     "Invalid toolchain configuration: multiple action configs for action '{}'",
                     a.action_name
@@ -484,7 +498,11 @@ impl ToolchainFeatures {
         let requested_set: BTreeSet<String> = requested.iter().cloned().collect();
         let requested_sel: Vec<usize> = {
             let mut seen = HashSet::new();
-            requested.iter().filter_map(|n| self.by_name.get(n).copied()).filter(|i| seen.insert(*i)).collect()
+            requested
+                .iter()
+                .filter_map(|n| self.by_name.get(n).copied())
+                .filter(|i| seen.insert(*i))
+                .collect()
         };
         let mut enabled: HashSet<usize> = HashSet::new();
         fn enable_all_implied(t: &ToolchainFeatures, s: usize, enabled: &mut HashSet<usize>) {
@@ -530,13 +548,19 @@ impl ToolchainFeatures {
         }
         let mut enabled_in_order: Vec<usize> = enabled.iter().copied().collect();
         enabled_in_order.sort();
-        let enabled_features: Vec<usize> =
-            enabled_in_order.iter().copied().filter(|&i| i < self.features.len()).collect();
+        let enabled_features: Vec<usize> = enabled_in_order
+            .iter()
+            .copied()
+            .filter(|&i| i < self.features.len())
+            .collect();
         // Colliding `provides`.
         let mut by_symbol: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
         for &i in &enabled_in_order {
             for p in &self.provides[i] {
-                by_symbol.entry(p.as_str()).or_default().push(self.names[i].as_str());
+                by_symbol
+                    .entry(p.as_str())
+                    .or_default()
+                    .push(self.names[i].as_str());
             }
         }
         for (sym, providers) in by_symbol {
@@ -553,7 +577,11 @@ impl ToolchainFeatures {
             if i < self.features.len() {
                 enabled_names.insert(self.features[i].name.clone());
             } else {
-                enabled_action_names.insert(self.action_configs[i - self.features.len()].action_name.clone());
+                enabled_action_names.insert(
+                    self.action_configs[i - self.features.len()]
+                        .action_name
+                        .clone(),
+                );
             }
         }
         Ok(FeatureConfiguration {
@@ -570,7 +598,9 @@ impl ToolchainFeatures {
         (requested.contains(&s) || implied_by_enabled)
             && self.implies[s].iter().all(|i| enabled.contains(i))
             && (self.requires[s].is_empty()
-                || self.requires[s].iter().any(|all| all.iter().all(|r| enabled.contains(r))))
+                || self.requires[s]
+                    .iter()
+                    .any(|all| all.iter().all(|r| enabled.contains(r))))
     }
 
     /// `getArtifactNameForCategory`.
@@ -654,7 +684,11 @@ enum Var {
 impl Variables {
     /// All bindings visible from `self` (ancestors first, so descendants override).
     pub fn flattened(&self) -> BTreeMap<String, Value> {
-        let mut m = self.parent.as_ref().map(|p| p.flattened()).unwrap_or_default();
+        let mut m = self
+            .parent
+            .as_ref()
+            .map(|p| p.flattened())
+            .unwrap_or_default();
         for (k, v) in &self.map {
             m.insert(k.clone(), v.clone());
         }
@@ -675,7 +709,9 @@ impl Variables {
             Value::Bool(b) => Var::Bool(*b),
             Value::String(s) => Var::Str(s.clone()),
             Value::Label(l) => Var::Str(l.canonical_form()),
-            Value::List(_) | Value::Tuple(_) | Value::Depset(_) | Value::Set(_) => Var::Seq(items(v)),
+            Value::List(_) | Value::Tuple(_) | Value::Depset(_) | Value::Set(_) => {
+                Var::Seq(items(v))
+            }
             Value::Struct(_) | Value::ProviderInstance { .. } => Var::Struct(v.clone()),
             other => match path_of(other) {
                 Some(p) => Var::Str(p),
@@ -720,14 +756,18 @@ impl Variables {
         Ok(Some(cur))
     }
 
+    #[allow(dead_code)]
     fn is_available(&self, name: &str, path_of: PathOf) -> bool {
         matches!(self.lookup(name, path_of), Ok(Some(_)))
     }
 
+    #[allow(dead_code)]
     fn get(&self, name: &str, path_of: PathOf) -> Res<Var> {
         match self.lookup(name, path_of)? {
             Some(v) => Ok(v),
-            None => err(format!("Invalid toolchain configuration: Cannot find variable named '{name}'.")),
+            None => err(format!(
+                "Invalid toolchain configuration: Cannot find variable named '{name}'."
+            )),
         }
     }
 }
@@ -769,7 +809,7 @@ struct Scope<'a> {
     bound: Vec<(String, Value)>,
 }
 
-impl<'a> Scope<'a> {
+impl Scope<'_> {
     fn lookup(&self, name: &str, path_of: PathOf) -> Res<Option<Var>> {
         // Innermost binding first (exact name, or a field path below a bound name).
         for (bn, bv) in self.bound.iter().rev() {
@@ -780,7 +820,9 @@ impl<'a> Scope<'a> {
                 let mut cur = Variables::as_var(bv, path_of);
                 for f in rest.split('.') {
                     cur = match cur {
-                        Some(Var::Struct(sv)) => field(&sv, f).and_then(|fv| Variables::as_var(&fv, path_of)),
+                        Some(Var::Struct(sv)) => {
+                            field(&sv, f).and_then(|fv| Variables::as_var(&fv, path_of))
+                        }
                         _ => None,
                     };
                 }
@@ -797,7 +839,9 @@ impl<'a> Scope<'a> {
     fn get(&self, name: &str, path_of: PathOf) -> Res<Var> {
         match self.lookup(name, path_of)? {
             Some(v) => Ok(v),
-            None => err(format!("Invalid toolchain configuration: Cannot find variable named '{name}'.")),
+            None => err(format!(
+                "Invalid toolchain configuration: Cannot find variable named '{name}'."
+            )),
         }
     }
 
@@ -817,10 +861,18 @@ fn with_features_satisfied(sets: &[WithFeatureSet], enabled: &HashSet<String>) -
     if sets.is_empty() {
         return true;
     }
-    sets.iter().any(|s| s.features.iter().all(|f| enabled.contains(f)) && !s.not_features.iter().any(|f| enabled.contains(f)))
+    sets.iter().any(|s| {
+        s.features.iter().all(|f| enabled.contains(f))
+            && !s.not_features.iter().any(|f| enabled.contains(f))
+    })
 }
 
-fn expand_group(g: &FlagGroup, scope: &mut Scope, path_of: PathOf, out: &mut Vec<String>) -> Res<()> {
+fn expand_group(
+    g: &FlagGroup,
+    scope: &mut Scope,
+    path_of: PathOf,
+    out: &mut Vec<String>,
+) -> Res<()> {
     for v in &g.expand_if_available {
         if !scope.is_available(v, path_of) {
             return Ok(());
@@ -884,13 +936,11 @@ fn expand_flag_set(
     enabled: &HashSet<String>,
     path_of: PathOf,
     out: &mut Vec<String>,
-    is_action_config: bool,
 ) -> Res<()> {
     if !with_features_satisfied(&fs.with_features, enabled) {
         return Ok(());
     }
-    // An action_config's flag sets apply to its own action; feature flag sets name actions.
-    if !is_action_config && !fs.actions.iter().any(|a| a == action) {
+    if !fs.actions.iter().any(|a| a == action) {
         return Ok(());
     }
     for g in &fs.flag_groups {
@@ -909,30 +959,62 @@ impl FeatureConfiguration {
     }
 
     /// `getCommandLine`.
-    pub fn command_line(&self, action: &str, vars: &Variables, path_of: PathOf) -> Res<Vec<String>> {
+    pub fn command_line(
+        &self,
+        action: &str,
+        vars: &Variables,
+        path_of: PathOf,
+    ) -> Res<Vec<String>> {
         let mut out = Vec::new();
-        let mut scope = Scope { base: vars, bound: vec![] };
+        let mut scope = Scope {
+            base: vars,
+            bound: vec![],
+        };
         if self.action_is_configured(action) {
             let ac = &self.toolchain.action_configs[self.toolchain.action_config_by_action[action]];
             for fs in &ac.flag_sets {
-                expand_flag_set(fs, action, &mut scope, &self.enabled_names, path_of, &mut out, true)?;
+                expand_flag_set(
+                    fs,
+                    action,
+                    &mut scope,
+                    &self.enabled_names,
+                    path_of,
+                    &mut out,
+                )?;
             }
         }
         for &fi in &self.enabled_features {
             for fs in &self.toolchain.features[fi].flag_sets {
-                expand_flag_set(fs, action, &mut scope, &self.enabled_names, path_of, &mut out, false)?;
+                expand_flag_set(
+                    fs,
+                    action,
+                    &mut scope,
+                    &self.enabled_names,
+                    path_of,
+                    &mut out,
+                )?;
             }
         }
         Ok(out)
     }
 
     /// `getEnvironmentVariables`.
-    pub fn environment(&self, action: &str, vars: &Variables, path_of: PathOf) -> Res<Vec<(String, String)>> {
+    pub fn environment(
+        &self,
+        action: &str,
+        vars: &Variables,
+        path_of: PathOf,
+    ) -> Res<Vec<(String, String)>> {
         let mut out: Vec<(String, String)> = Vec::new();
-        let scope = Scope { base: vars, bound: vec![] };
+        let scope = Scope {
+            base: vars,
+            bound: vec![],
+        };
         for &fi in &self.enabled_features {
             for es in &self.toolchain.features[fi].env_sets {
-                if !es.actions.iter().any(|a| a == action) || !with_features_satisfied(&es.with_features, &self.enabled_names) {
+                if !es.actions.iter().any(|a| a == action)
+                    || !with_features_satisfied(&es.with_features, &self.enabled_names)
+                {
                     continue;
                 }
                 for e in &es.entries {
@@ -955,7 +1037,9 @@ impl FeatureConfiguration {
 
     fn action_config(&self, action: &str) -> Res<&ActionConfig> {
         if !self.action_is_configured(action) {
-            return err(format!("Action {action} does not have an enabled configuration in the toolchain."));
+            return err(format!(
+                "Action {action} does not have an enabled configuration in the toolchain."
+            ));
         }
         Ok(&self.toolchain.action_configs[self.toolchain.action_config_by_action[action]])
     }
@@ -977,7 +1061,11 @@ impl FeatureConfiguration {
         let t = self.matching_tool(action)?;
         if t.crosstool_relative {
             let d = self.toolchain.tools_directory.trim_end_matches('/');
-            Ok(if d.is_empty() { t.path.clone() } else { format!("{d}/{}", t.path) })
+            Ok(if d.is_empty() {
+                t.path.clone()
+            } else {
+                format!("{d}/{}", t.path)
+            })
         } else {
             Ok(t.path.clone())
         }
@@ -996,14 +1084,18 @@ where
     T: Send + Sync + 'static,
 {
     // One registry per type via a type-keyed map.
-    static MAP: OnceLock<Mutex<HashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>>> = OnceLock::new();
+    static MAP: OnceLock<Mutex<HashMap<std::any::TypeId, Box<dyn std::any::Any + Send + Sync>>>> =
+        OnceLock::new();
     let map = MAP.get_or_init(|| Mutex::new(HashMap::new()));
     let mut g = map.lock().unwrap();
     let entry = g.entry(std::any::TypeId::of::<T>()).or_insert_with(|| {
         let leaked: &'static Mutex<Vec<Arc<T>>> = Box::leak(Box::new(Mutex::new(Vec::new())));
         Box::new(leaked)
     });
-    entry.downcast_ref::<&'static Mutex<Vec<Arc<T>>>>().copied().unwrap()
+    entry
+        .downcast_ref::<&'static Mutex<Vec<Arc<T>>>>()
+        .copied()
+        .unwrap()
 }
 
 pub fn register<T: Send + Sync + 'static>(kind: &str, v: T) -> Value {
@@ -1015,7 +1107,11 @@ pub fn register<T: Send + Sync + 'static>(kind: &str, v: T) -> Value {
 
 pub fn lookup<T: Send + Sync + 'static>(v: &Value, kind: &str) -> Option<Arc<T>> {
     match v {
-        Value::Host(k, id) if k == kind => registry::<T>().lock().unwrap().get(id.parse::<usize>().ok()?).cloned(),
+        Value::Host(k, id) if k == kind => registry::<T>()
+            .lock()
+            .unwrap()
+            .get(id.parse::<usize>().ok()?)
+            .cloned(),
         _ => None,
     }
 }
@@ -1031,4 +1127,61 @@ pub fn variables_of(v: &Value) -> Option<Arc<Variables>> {
 /// `cc_toolchain_variables(vars)` / `combine_cc_toolchain_variables(parent, variables)`.
 pub fn make_variables(parent: Option<Arc<Variables>>, map: BTreeMap<String, Value>) -> Value {
     register(KIND_VARIABLES, Variables { parent, map })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zel_starlark::{StarlarkList, StructValue};
+
+    fn mk_struct(fields: Vec<(&str, Value)>) -> Value {
+        Value::Struct(Arc::new(StructValue::new(
+            fields
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v))
+                .collect(),
+        )))
+    }
+
+    fn mk_list(items: Vec<Value>) -> Value {
+        Value::List(Arc::new(Mutex::new(StarlarkList::new(items))))
+    }
+
+    #[test]
+    fn action_config_flag_set_rejects_actions_and_defaults_to_action_name() {
+        let fg = mk_struct(vec![("flags", mk_list(vec![Value::String("-O2".into())]))]);
+        let bad_fs = mk_struct(vec![
+            (
+                "actions",
+                mk_list(vec![Value::String("other-action".into())]),
+            ),
+            ("flag_groups", mk_list(vec![fg.clone()])),
+        ]);
+        let bad_ac = mk_struct(vec![
+            ("action_name", Value::String("c-compile".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![bad_fs])),
+        ]);
+        let err = ToolchainFeatures::new(&[], &[bad_ac], &[], "", &|_| None)
+            .err()
+            .unwrap();
+        assert!(err.0.contains("specifies actions"), "{}", err.0);
+
+        let good_fs = mk_struct(vec![
+            ("actions", mk_list(vec![])),
+            ("flag_groups", mk_list(vec![fg])),
+        ]);
+        let good_ac = mk_struct(vec![
+            ("action_name", Value::String("c-compile".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![good_fs])),
+        ]);
+        let tf = Arc::new(ToolchainFeatures::new(&[], &[good_ac], &[], "", &|_| None).unwrap());
+        let fc = tf.configure(&["c-compile".into()]).unwrap();
+        let vars = Variables::default();
+        assert_eq!(
+            fc.command_line("c-compile", &vars, &|_| None).unwrap(),
+            vec!["-O2"]
+        );
+    }
 }

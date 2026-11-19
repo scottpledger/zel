@@ -15,5 +15,9 @@
 pub mod string_methods;
 pub mod universal;
 
-pub use string_methods::eval_string_method;
-pub use universal::{compare_values, eval_universal_function, value_to_sequence};
+pub use string_methods::{eval_string_method, eval_string_method_in};
+pub use universal::{
+    compare_values, dir_attrs, eval_universal_function, eval_universal_function_in,
+    fallible_merge_sort, is_callable, merge_sort_keyed, value_to_sequence, DICT_METHODS,
+    LABEL_FIELDS, LABEL_METHODS, LIST_METHODS, SET_METHODS, STRING_METHODS,
+};

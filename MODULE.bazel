@@ -20,3 +20,6 @@ rust_toolchains.toolchain(
 )
 use_repo(rust_toolchains, "default_rust_toolchains")
 register_toolchains("@default_rust_toolchains//...")
+
+zel_bazel_tools_data = use_repo_rule("//crates:zel-bazel-tools/zel_tools_data.bzl", "zel_bazel_tools_data")
+zel_bazel_tools_data(name = "zel_bazel_tools_data")

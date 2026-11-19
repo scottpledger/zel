@@ -38,7 +38,8 @@ impl VendorFile {
         if !path.exists() {
             return Ok(Self::default());
         }
-        let content = fs::read_to_string(&path).map_err(|e| format!("ERROR: error reading VENDOR.bazel file: {e}"))?;
+        let content = fs::read_to_string(&path)
+            .map_err(|e| format!("ERROR: error reading VENDOR.bazel file: {e}"))?;
         Self::parse_at(&content, &path.display().to_string())
     }
 
@@ -63,49 +64,68 @@ impl VendorFile {
     pub fn parse_at(content: &str, display_path: &str) -> Result<Self, String> {
         use std::sync::{Arc, Mutex};
         use zel_starlark::{EvalContext, StarlarkError, Value};
-        let state: Arc<Mutex<(BTreeSet<String>, BTreeSet<String>)>> = Arc::new(Mutex::new((BTreeSet::new(), BTreeSet::new())));
+        let state: Arc<Mutex<(BTreeSet<String>, BTreeSet<String>)>> =
+            Arc::new(Mutex::new((BTreeSet::new(), BTreeSet::new())));
         let st = state.clone();
-        let mut ctx = EvalContext::default();
-        ctx.file_name = display_path.to_string();
-        ctx.strict_names = true;
-        ctx.host = Some(Arc::new(move |_c, name, pos, kw| {
-            if !kw.is_empty() {
-                let k = kw.keys().next().cloned().unwrap_or_default();
-                return Err(StarlarkError(format!("{name}() got unexpected keyword argument '{k}'")));
-            }
-            let mut repos = Vec::new();
-            for (i, v) in pos.iter().enumerate() {
-                match v {
-                    Value::String(s) => {
-                        let Some(rest) = s.strip_prefix("@@") else {
-                            return Err(StarlarkError("the canonical repository name must start with `@@`".to_string()));
-                        };
-                        repos.push(rest.to_string());
-                    }
-                    other => {
-                        return Err(StarlarkError(format!("at index {i} of args, got element of type {}, want string", other.type_name())));
+        let mut ctx = EvalContext {
+            file_name: display_path.to_string(),
+            strict_names: true,
+            host: Some(Arc::new(move |_c, name, pos, kw| {
+                if !kw.is_empty() {
+                    let k = kw.keys().next().cloned().unwrap_or_default();
+                    return Err(StarlarkError(format!(
+                        "{name}() got unexpected keyword argument '{k}'"
+                    )));
+                }
+                let mut repos = Vec::new();
+                for (i, v) in pos.iter().enumerate() {
+                    match v {
+                        Value::String(s) => {
+                            let Some(rest) = s.strip_prefix("@@") else {
+                                return Err(StarlarkError(
+                                    "the canonical repository name must start with `@@`"
+                                        .to_string(),
+                                ));
+                            };
+                            repos.push(rest.to_string());
+                        }
+                        other => {
+                            return Err(StarlarkError(format!(
+                                "at index {i} of args, got element of type {}, want string",
+                                other.type_name()
+                            )));
+                        }
                     }
                 }
-            }
-            let mut g = st.lock().unwrap();
-            for r in repos {
-                if name == "ignore" {
-                    g.0.insert(r);
-                } else {
-                    g.1.insert(r);
+                let mut g = st.lock().unwrap();
+                for r in repos {
+                    if name == "ignore" {
+                        g.0.insert(r);
+                    } else {
+                        g.1.insert(r);
+                    }
                 }
-            }
-            Ok(Value::None)
-        }));
-        ctx.globals.insert("ignore".into(), Value::BuiltinFunction("host:ignore".into()));
-        ctx.globals.insert("pin".into(), Value::BuiltinFunction("host:pin".into()));
+                Ok(Value::None)
+            })),
+            ..Default::default()
+        };
+        ctx.globals.insert(
+            "ignore".into(),
+            Value::BuiltinFunction("host:ignore".into()),
+        );
+        ctx.globals
+            .insert("pin".into(), Value::BuiltinFunction("host:pin".into()));
         if let Err(errors) = ctx.eval_file_checked(content, Some(("VENDOR.bazel files", false))) {
             let syntax = errors.iter().any(|e| e.contains("syntax error at"));
             let mut out = String::new();
             if syntax {
                 for e in &errors {
                     let line = e.trim_matches(|c| c == '\n' || c == '\r');
-                    out.push_str(&if line.starts_with("ERROR: ") { format!("{line}\n") } else { format!("ERROR: {line}\n") });
+                    out.push_str(&if line.starts_with("ERROR: ") {
+                        format!("{line}\n")
+                    } else {
+                        format!("ERROR: {line}\n")
+                    });
                 }
                 out.push_str("ERROR: error parsing VENDOR.bazel file");
             } else {
@@ -116,7 +136,10 @@ impl VendorFile {
             return Err(out);
         }
         let g = state.lock().unwrap();
-        Ok(Self { ignored_repos: g.0.clone(), pinned_repos: g.1.clone() })
+        Ok(Self {
+            ignored_repos: g.0.clone(),
+            pinned_repos: g.1.clone(),
+        })
     }
 }
 
@@ -124,13 +147,19 @@ impl VendorFile {
 fn strip_location(e: &str) -> String {
     let e = e.trim().trim_start_matches("ERROR: ");
     let mut rest = e;
-    // location prefix: <path>:<line>:<col>: 
+    // location prefix: <path>:<line>:<col>:
     if let Some(idx) = e.find(": ") {
         let head = &e[..idx];
         let mut parts = head.rsplitn(3, ':');
         let col = parts.next();
         let line = parts.next();
-        if col.map(|c| c.chars().all(|x| x.is_ascii_digit())).unwrap_or(false) && line.map(|c| c.chars().all(|x| x.is_ascii_digit())).unwrap_or(false) {
+        if col
+            .map(|c| c.chars().all(|x| x.is_ascii_digit()))
+            .unwrap_or(false)
+            && line
+                .map(|c| c.chars().all(|x| x.is_ascii_digit()))
+                .unwrap_or(false)
+        {
             rest = &e[idx + 2..];
         }
     }
@@ -143,7 +172,9 @@ pub fn replant_symlinks(
     workspace: &Path,
     external_repo_root: &Path,
 ) -> Result<(), String> {
-    let vendor_dir = repo_under_vendor.parent().ok_or("Cannot get vendor directory")?;
+    let vendor_dir = repo_under_vendor
+        .parent()
+        .ok_or("Cannot get vendor directory")?;
 
     // 1. Ensure <vendor_dir>/bazel-external symlinks to external_repo_root
     let external_symlink = vendor_dir.join(EXTERNAL_ROOT_SYMLINK_NAME);
@@ -202,12 +233,13 @@ pub fn replant_symlinks(
             None
         };
 
-        if let Some(new_target) = new_target {
+        if let Some(_new_target) = new_target {
             let _ = fs::remove_file(&symlink_path);
             #[cfg(unix)]
             {
-                std::os::unix::fs::symlink(&new_target, &symlink_path)
-                    .map_err(|e| format!("Failed to replant symlink {}: {e}", symlink_path.display()))?;
+                std::os::unix::fs::symlink(&_new_target, &symlink_path).map_err(|e| {
+                    format!("Failed to replant symlink {}: {e}", symlink_path.display())
+                })?;
             }
         }
     }
@@ -255,8 +287,13 @@ pub(crate) fn ensure_symlink(target: &Path, link: &Path) -> Result<(), String> {
 
     #[cfg(unix)]
     {
-        std::os::unix::fs::symlink(target, link)
-            .map_err(|e| format!("Failed to create symlink {} -> {}: {e}", link.display(), target.display()))?;
+        std::os::unix::fs::symlink(target, link).map_err(|e| {
+            format!(
+                "Failed to create symlink {} -> {}: {e}",
+                link.display(),
+                target.display()
+            )
+        })?;
     }
     Ok(())
 }

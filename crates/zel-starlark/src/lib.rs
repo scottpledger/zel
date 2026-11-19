@@ -25,15 +25,17 @@ pub mod types;
 pub use bigint::BigInt;
 pub use eval::format::{percent_format, str_format};
 pub use eval::frame::CallFrame;
-pub use eval::modules::json::{json_decode, json_encode, json_indent};
+pub use eval::modules::json::{json_decode, json_encode, json_encode_with_host, json_indent};
 pub use eval::modules::proto::proto_encode_text;
 pub use eval::thread::{register_source, source_line, StarlarkThread};
 pub use semantics::StarlarkSemantics;
 pub use syntax::ast::{
-    AssignOp, AssignTarget, BinaryOpKind, CmpOp, CompClause, Expr, LoadStatement,
-    ClosureEnv, ModuleEnv, ParamDef, Pattern, Scope, Stmt, UnaryOpKind, UserFunctionDef,
+    pattern_names, AssignOp, AssignTarget, BinaryOpKind, ClosureEnv, CmpOp, CompClause, Expr,
+    LoadStatement, ModuleEnv, ParamDef, Pattern, Scope, Stmt, UnaryOpKind, UserFunctionDef,
 };
-pub use syntax::checks::{check_dot_bazel_file_syntax, check_undefined_names, did_you_mean, SyntaxError};
+pub use syntax::checks::{
+    check_dot_bazel_file_syntax, check_undefined_names, did_you_mean, SyntaxError,
+};
 pub use syntax::lexer::{Lexer, LexerError};
 pub use syntax::location::Location;
 pub use syntax::parser::Parser;
@@ -42,14 +44,15 @@ pub use syntax::token::{Token, TokenKind};
 pub use types::depset::{Depset, DepsetOrder};
 pub use types::dict::StarlarkDict;
 pub use types::list::{StarlarkError, StarlarkList};
+pub use types::mutability::Mutability;
 pub use types::range::RangeList;
 pub use types::select::{SelectorElement, SelectorList};
 pub use types::set::StarlarkSet;
 pub use types::struct_value::StructValue;
-pub use types::value::{format_float, int_equals_float, Value, HOST_REPR};
+pub use types::value::{format_float, int_equals_float, Value, HOST_IS_IMMUTABLE, HOST_REPR};
 
 use std::cmp::Ordering;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 use zel_cmdline::Label;
 use zel_vfs::{evaluate_glob, FileSystem, PathFragment};
@@ -66,7 +69,12 @@ pub struct RecordedRuleCall {
 /// stripped; Host objects use `attr:<kind>.<name>` / `method:<kind>.<name>` / `call:<kind>`),
 /// positional args (the receiver is the first arg for attr/method/call) and keyword args.
 pub type HostFn = Arc<
-    dyn Fn(&mut EvalContext, &str, Vec<Value>, BTreeMap<String, Value>) -> Result<Value, StarlarkError>
+    dyn Fn(
+            &mut EvalContext,
+            &str,
+            Vec<Value>,
+            BTreeMap<String, Value>,
+        ) -> Result<Value, StarlarkError>
         + Send
         + Sync,
 >;
@@ -89,7 +97,8 @@ pub struct PreloadFailure {
 /// Callback resolving every top-level `load()` of a file before it is resolved and evaluated
 /// (Bazel loads all `.bzl` dependencies of a file up front).
 /// On success it returns the canonical form of each label, in order.
-pub type PreloadHook = Arc<dyn Fn(&[PreloadItem]) -> Result<Vec<String>, PreloadFailure> + Send + Sync>;
+pub type PreloadHook =
+    Arc<dyn Fn(&[PreloadItem]) -> Result<Vec<String>, PreloadFailure> + Send + Sync>;
 
 enum ControlFlow {
     None,
@@ -109,6 +118,8 @@ pub struct EvalContext {
     pub fs: Option<Arc<dyn FileSystem>>,
     pub semantics: StarlarkSemantics,
     pub thread: StarlarkThread,
+    /// Shared mutability for lists, dicts, and sets created during this evaluation.
+    pub mutability: Arc<Mutability>,
     pub host: Option<HostFn>,
     /// Location of the call currently being dispatched to the host (`file:line:col`).
     pub call_location: String,
@@ -157,6 +168,7 @@ pub struct EvalContext {
     /// When `Some`, `print()` output is captured here instead of written to stderr.
     pub captured_prints: Option<Vec<(Location, String)>>,
     /// Custom handler for `print()` output.
+    #[allow(clippy::type_complexity)]
     pub print_handler: Option<Arc<dyn Fn(&Location, &str) + Send + Sync>>,
     /// Prefix errors that carry no `file:line:col:` position with the failing statement's.
     pub locate_errors: bool,
@@ -195,6 +207,7 @@ impl EvalContext {
             fs,
             semantics,
             thread,
+            mutability: Mutability::create(),
             host: None,
             call_location: String::new(),
             assign_stmt_location: None,
@@ -229,9 +242,18 @@ impl EvalContext {
     fn init_builtins(&mut self) {
         // Builtin modules
         let mut json_fields = BTreeMap::new();
-        json_fields.insert("encode".to_string(), Value::BuiltinFunction("json.encode".to_string()));
-        json_fields.insert("decode".to_string(), Value::BuiltinFunction("json.decode".to_string()));
-        json_fields.insert("indent".to_string(), Value::BuiltinFunction("json.indent".to_string()));
+        json_fields.insert(
+            "encode".to_string(),
+            Value::BuiltinFunction("json.encode".to_string()),
+        );
+        json_fields.insert(
+            "decode".to_string(),
+            Value::BuiltinFunction("json.decode".to_string()),
+        );
+        json_fields.insert(
+            "indent".to_string(),
+            Value::BuiltinFunction("json.indent".to_string()),
+        );
         json_fields.insert(
             "encode_indent".to_string(),
             Value::BuiltinFunction("json.encode_indent".to_string()),
@@ -268,8 +290,12 @@ impl EvalContext {
         }
 
         let mut resolver = Resolver::new();
-        resolver.allow_late_loads = !self.file_name.ends_with(".bzl");
+        let is_bzl = self.file_name.ends_with(".bzl");
+        resolver.allow_late_loads = !is_bzl;
+        resolver.allow_toplevel_rebinding = !is_bzl;
+        resolver.load_binds_globally = !is_bzl;
         resolver.resolve_module(&stmts)?;
+        self.record_declared_globals(&stmts);
 
         for stmt in &stmts {
             match self.exec_stmt(stmt)? {
@@ -376,7 +402,11 @@ impl EvalContext {
             }
         }
         let resolver_errors_only = || -> Vec<String> {
-            parsed.resolver_errors.iter().map(|e| e.error.to_string()).collect()
+            parsed
+                .resolver_errors
+                .iter()
+                .map(|e| e.error.to_string())
+                .collect()
         };
         let tokens = match Lexer::new(&self.file_name, source).lex_all() {
             Ok(t) => t,
@@ -439,21 +469,50 @@ impl EvalContext {
                             (local.clone(), Location::new(&loc.file, line, column), true)
                         })
                         .collect(),
-                    Stmt::Assign { target: AssignTarget::Ident(name), location, .. } => {
+                    Stmt::Assign {
+                        target: AssignTarget::Ident(name),
+                        location,
+                        op,
+                        ..
+                    } if *op == AssignOp::Assign => {
                         vec![(name.clone(), location.clone(), false)]
                     }
-                    Stmt::Def(function) => vec![(function.name.clone(), function.location.clone(), false)],
+                    Stmt::Assign {
+                        target: AssignTarget::Tuple(pats),
+                        location,
+                        op,
+                        ..
+                    } if *op == AssignOp::Assign => pattern_names(pats)
+                        .into_iter()
+                        .map(|name| (name, location.clone(), false))
+                        .collect(),
+                    Stmt::Def(function) => {
+                        vec![(function.name.clone(), function.location.clone(), false)]
+                    }
                     _ => vec![],
                 };
                 for (name, location, from_load) in bindings {
                     if let Some((previous, previous_load)) = top_level.get(&name) {
-                        let first = if *previous_load || from_load {
+                        let first = if *previous_load && !from_load {
                             format!("{location}: conflicting global declaration of '{name}'")
+                        } else if !*previous_load && from_load {
+                            format!("{location}: conflicting file-local declaration of '{name}'")
                         } else {
                             format!("{location}: '{name}' redeclared at top level")
                         };
-                        let kind = if *previous_load { " as file-local" } else { "" };
-                        return Err(vec![first, format!("{previous}: '{name}' previously declared{kind} here")]);
+                        let kind = if *previous_load != from_load {
+                            if *previous_load {
+                                " as file-local"
+                            } else {
+                                " as global"
+                            }
+                        } else {
+                            ""
+                        };
+                        return Err(vec![
+                            first,
+                            format!("{previous}: '{name}' previously declared{kind} here"),
+                        ]);
                     }
                     top_level.insert(name, (location, from_load));
                 }
@@ -493,8 +552,11 @@ impl EvalContext {
         // Bazel resolves names first, then loads every `.bzl` dependency up front.
         if let Some(hook) = self.preload_hook.clone() {
             if !parsed.loads.is_empty() {
-                let items: Vec<PreloadItem> =
-                    parsed.loads.iter().map(|l| (l.label.clone(), (l.line, l.column))).collect();
+                let items: Vec<PreloadItem> = parsed
+                    .loads
+                    .iter()
+                    .map(|l| (l.label.clone(), (l.line, l.column)))
+                    .collect();
                 match hook(&items) {
                     Ok(canonical) => {
                         for ((raw, _), c) in items.iter().zip(canonical) {
@@ -509,8 +571,12 @@ impl EvalContext {
             }
         }
         let mut resolver = Resolver::new();
-        resolver.allow_late_loads = !self.file_name.ends_with(".bzl");
+        let is_bzl = self.file_name.ends_with(".bzl");
+        resolver.allow_late_loads = !is_bzl;
+        resolver.allow_toplevel_rebinding = !is_bzl;
+        resolver.load_binds_globally = !is_bzl;
         resolver.resolve_module(&stmts).map_err(|e| vec![e.0])?;
+        self.record_declared_globals(&stmts);
         self.static_failure = false;
         for stmt in &stmts {
             match self.exec_stmt(stmt).map_err(|e| vec![e.0])? {
@@ -522,6 +588,7 @@ impl EvalContext {
             }
         }
         self.publish_module();
+        self.mutability.freeze();
         Ok(())
     }
 
@@ -556,7 +623,8 @@ impl EvalContext {
                     let load_loc = source_line(&loc.file, loc.line)
                         .and_then(|line| {
                             let needle = format!("\"{}\"", load.module_label);
-                            line.find(&needle).map(|column| Location::new(&loc.file, loc.line, column + 1))
+                            line.find(&needle)
+                                .map(|column| Location::new(&loc.file, loc.line, column + 1))
                         })
                         .unwrap_or_else(|| loc.clone());
                     let exports = hook(&load.module_label).map_err(|mut e| {
@@ -620,23 +688,32 @@ impl EvalContext {
                 location,
                 op_location,
             } => {
-                let saved_assign_loc = self.assign_stmt_location.replace(op_location.clone());
-                let val = self.eval_expr(value);
-                self.assign_stmt_location = saved_assign_loc;
-                let val = val?;
                 match target {
                     AssignTarget::Ident(name) => {
+                        let saved_assign_loc =
+                            self.assign_stmt_location.replace(op_location.clone());
+                        let val_res = self.eval_expr(value);
+                        self.assign_stmt_location = saved_assign_loc;
+                        let val = val_res?;
                         let final_val = if *op == AssignOp::Assign {
                             val
                         } else {
-                            let prev = self.lookup_var(name).ok_or_else(|| {
-                                StarlarkError(format!("{location}: name '{name}' is not defined"))
-                            })?;
-                            self.apply_assign_op(*op, &prev, &val, location)?
+                            let prev =
+                                self.lookup_var_checked(name, location)?.ok_or_else(|| {
+                                    StarlarkError(format!(
+                                        "{location}: name '{name}' is not defined"
+                                    ))
+                                })?;
+                            self.apply_assign_op_inplace(*op, &prev, &val, op_location)?
                         };
                         self.set_var(name, final_val);
                     }
                     AssignTarget::Tuple(names) => {
+                        let saved_assign_loc =
+                            self.assign_stmt_location.replace(op_location.clone());
+                        let val_res = self.eval_expr(value);
+                        self.assign_stmt_location = saved_assign_loc;
+                        let val = val_res?;
                         if *op != AssignOp::Assign {
                             return Err(StarlarkError(format!(
                                 "{location}: augmented assignment to tuple not allowed"
@@ -650,45 +727,71 @@ impl EvalContext {
                     } => {
                         let target_val = self.eval_expr(index_target)?;
                         let key_val = self.eval_expr(index_expr)?;
+                        let saved_assign_loc =
+                            self.assign_stmt_location.replace(op_location.clone());
+                        let val_res = self.eval_expr(value);
+                        self.assign_stmt_location = saved_assign_loc;
+                        let val = val_res?;
                         match target_val {
                             Value::List(l) => {
-                                let mut guard = l.lock().unwrap();
-                                guard.check_mutable()?;
-                                let len = guard.elements.len() as i64;
-                                let idx = key_val.as_i64().ok_or_else(|| {
-                                    StarlarkError(format!(
-                                        "{location}: list index must be integer, not {}",
-                                        key_val.type_name()
-                                    ))
-                                })?;
-                                let actual = if idx < 0 { len + idx } else { idx };
-                                if actual < 0 || actual >= len {
-                                    return Err(StarlarkError(format!(
-                                        "{location}: list index out of range"
-                                    )));
-                                }
+                                let prev = {
+                                    let guard = l.lock().unwrap();
+                                    guard.check_mutable()?;
+                                    let len = guard.elements.len() as i64;
+                                    let idx = key_val.as_i64().ok_or_else(|| {
+                                        StarlarkError(format!(
+                                            "{location}: list index must be integer, not {}",
+                                            key_val.type_name()
+                                        ))
+                                    })?;
+                                    let actual = if idx < 0 { len + idx } else { idx };
+                                    if actual < 0 || actual >= len {
+                                        return Err(StarlarkError(format!(
+                                            "{location}: list index out of range"
+                                        )));
+                                    }
+                                    (actual as usize, guard.elements[actual as usize].clone())
+                                };
                                 if *op == AssignOp::Assign {
-                                    guard.elements[actual as usize] = val;
+                                    let mut guard = l.lock().unwrap();
+                                    guard.check_mutable()?;
+                                    guard.elements[prev.0] = val;
                                 } else {
-                                    let prev = guard.elements[actual as usize].clone();
-                                    guard.elements[actual as usize] =
-                                        self.apply_assign_op(*op, &prev, &val, location)?;
+                                    let next_val = self.apply_assign_op_inplace(
+                                        *op,
+                                        &prev.1,
+                                        &val,
+                                        op_location,
+                                    )?;
+                                    let mut guard = l.lock().unwrap();
+                                    guard.check_mutable()?;
+                                    guard.elements[prev.0] = next_val;
                                 }
                             }
                             Value::Dict(d) => {
-                                let mut guard = d.lock().unwrap();
-                                guard.check_mutable()?;
                                 if *op == AssignOp::Assign {
+                                    let mut guard = d.lock().unwrap();
+                                    guard.check_mutable()?;
                                     guard.insert(key_val, val)?;
                                 } else {
-                                    let prev = guard.get(&key_val).cloned().ok_or_else(|| {
-                                        StarlarkError(format!(
-                                            "{location}: key {} not found in dictionary",
-                                            key_val.repr()
-                                        ))
-                                    })?;
-                                    let next_val =
-                                        self.apply_assign_op(*op, &prev, &val, location)?;
+                                    let prev = {
+                                        let guard = d.lock().unwrap();
+                                        guard.check_mutable()?;
+                                        guard.get(&key_val).cloned().ok_or_else(|| {
+                                            StarlarkError(format!(
+                                                "{location}: key {} not found in dictionary",
+                                                key_val.repr()
+                                            ))
+                                        })?
+                                    };
+                                    let next_val = self.apply_assign_op_inplace(
+                                        *op,
+                                        &prev,
+                                        &val,
+                                        op_location,
+                                    )?;
+                                    let mut guard = d.lock().unwrap();
+                                    guard.check_mutable()?;
                                     guard.insert(key_val, next_val)?;
                                 }
                             }
@@ -700,9 +803,30 @@ impl EvalContext {
                             }
                         }
                     }
-                    AssignTarget::Attr { .. } => {
+                    AssignTarget::Attr {
+                        target: attr_target,
+                        attr,
+                    } => {
+                        let obj = self.eval_expr(attr_target)?;
+                        if *op != AssignOp::Assign {
+                            let prev = self.eval_attr(obj.clone(), attr, location)?;
+                            let saved_assign_loc =
+                                self.assign_stmt_location.replace(op_location.clone());
+                            let val_res = self.eval_expr(value);
+                            self.assign_stmt_location = saved_assign_loc;
+                            let val = val_res?;
+                            let _next =
+                                self.apply_assign_op_inplace(*op, &prev, &val, op_location)?;
+                        } else {
+                            let saved_assign_loc =
+                                self.assign_stmt_location.replace(op_location.clone());
+                            let val_res = self.eval_expr(value);
+                            self.assign_stmt_location = saved_assign_loc;
+                            let _ = val_res?;
+                        }
                         return Err(StarlarkError(format!(
-                            "{location}: cannot assign to attribute"
+                            "{op_location}: cannot set .{attr} field of {} value",
+                            obj.type_name()
                         )));
                     }
                 }
@@ -713,12 +837,11 @@ impl EvalContext {
                 Ok(ControlFlow::None)
             }
             Stmt::Def(func) => {
-                // Evaluate parameter defaults at definition time and freeze them
+                // Evaluate parameter defaults at definition time (frozen later when Mutability closes).
                 let mut evaluated_params = Vec::new();
                 for p in &func.params {
                     let default_val = if let Some(ref def_expr) = p.default {
                         let v = self.eval_expr(def_expr)?;
-                        v.freeze();
                         Some(Expr::Literal(v))
                     } else {
                         None
@@ -778,7 +901,9 @@ impl EvalContext {
                 let iter_val = self.eval_expr(iter)?;
                 // Depset direct iteration is forbidden in Bazel Starlark!
                 if matches!(iter_val, Value::Depset(_)) {
-                    return Err(StarlarkError("iteration over depset is forbidden".to_string()));
+                    return Err(StarlarkError(
+                        "iteration over depset is forbidden".to_string(),
+                    ));
                 }
 
                 // Increment iteration count on iterable
@@ -792,7 +917,10 @@ impl EvalContext {
                 // Ranges iterate lazily (`range(2147483647)` with an early `break` is common).
                 let elements: Box<dyn Iterator<Item = Value>> = if let Value::Range(r) = &iter_val {
                     let (start, step, len) = (r.start, r.step, r.len);
-                    Box::new((0..len).map(move |i| Value::Int(BigInt::from_i64(start + i as i64 * step))))
+                    Box::new(
+                        (0..len)
+                            .map(move |i| Value::Int(BigInt::from_i64(start + i as i64 * step))),
+                    )
                 } else {
                     match eval::builtins::value_to_sequence(&iter_val) {
                         Ok(seq) => Box::new(seq.into_iter()),
@@ -804,7 +932,11 @@ impl EvalContext {
                                 _ => {}
                             }
                             let _ = e;
-                            return Err(StarlarkError(format!("{}: type '{}' is not iterable", iter.location(), iter_val.type_name())));
+                            return Err(StarlarkError(format!(
+                                "{}: type '{}' is not iterable",
+                                iter.location(),
+                                iter_val.type_name()
+                            )));
                         }
                     }
                 };
@@ -846,6 +978,66 @@ impl EvalContext {
         }
     }
 
+    fn apply_assign_op_inplace(
+        &self,
+        op: AssignOp,
+        prev: &Value,
+        rhs: &Value,
+        loc: &Location,
+    ) -> Result<Value, StarlarkError> {
+        match (op, prev, rhs) {
+            (AssignOp::Add, Value::List(l1), Value::List(l2)) => {
+                let rhs_elems = l2.lock().unwrap().elements.clone();
+                l1.lock()
+                    .unwrap()
+                    .extend(rhs_elems)
+                    .map_err(|e| with_loc(e, loc))?;
+                Ok(Value::List(Arc::clone(l1)))
+            }
+            (AssignOp::BitOr, Value::Dict(d1), Value::Dict(d2)) => {
+                let rhs_entries = d2.lock().unwrap().entries.clone();
+                d1.lock()
+                    .unwrap()
+                    .update(rhs_entries)
+                    .map_err(|e| with_loc(e, loc))?;
+                Ok(Value::Dict(Arc::clone(d1)))
+            }
+            (AssignOp::BitOr, Value::Set(s1), Value::Set(s2)) => {
+                let rhs_set = s2.lock().unwrap().clone();
+                s1.lock()
+                    .unwrap()
+                    .update(&rhs_set)
+                    .map_err(|e| with_loc(e, loc))?;
+                Ok(Value::Set(Arc::clone(s1)))
+            }
+            (AssignOp::BitAnd, Value::Set(s1), Value::Set(s2)) => {
+                let rhs_set = s2.lock().unwrap().clone();
+                s1.lock()
+                    .unwrap()
+                    .intersection_update(&rhs_set)
+                    .map_err(|e| with_loc(e, loc))?;
+                Ok(Value::Set(Arc::clone(s1)))
+            }
+            (AssignOp::Sub, Value::Set(s1), Value::Set(s2)) => {
+                let rhs_set = s2.lock().unwrap().clone();
+                s1.lock()
+                    .unwrap()
+                    .difference_update(&rhs_set)
+                    .map_err(|e| with_loc(e, loc))?;
+                Ok(Value::Set(Arc::clone(s1)))
+            }
+            (AssignOp::BitXor, Value::Set(s1), Value::Set(s2)) => {
+                let rhs_set = s2.lock().unwrap().clone();
+                s1.lock()
+                    .unwrap()
+                    .symmetric_difference_update(&rhs_set)
+                    .map_err(|e| with_loc(e, loc))?;
+                Ok(Value::Set(Arc::clone(s1)))
+            }
+            _ => self.apply_assign_op(op, prev, rhs, loc),
+        }
+    }
+
     fn apply_assign_op(
         &self,
         op: AssignOp,
@@ -855,14 +1047,40 @@ impl EvalContext {
     ) -> Result<Value, StarlarkError> {
         match op {
             AssignOp::Assign => Ok(rhs.clone()),
-            AssignOp::Add => prev.add(rhs),
+            AssignOp::Add => match (prev, rhs) {
+                (Value::List(a), Value::List(b)) => {
+                    let mut v = a.lock().unwrap().elements.clone();
+                    v.extend(b.lock().unwrap().elements.clone());
+                    Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                        v,
+                        Arc::clone(&self.mutability),
+                    )))))
+                }
+                _ => prev.add(rhs).map_err(|e| with_loc(e, loc)),
+            },
             AssignOp::Sub => self.eval_binop(BinaryOpKind::Sub, prev, rhs, loc),
             AssignOp::Mul => self.eval_binop(BinaryOpKind::Mul, prev, rhs, loc),
             AssignOp::Div => self.eval_binop(BinaryOpKind::Div, prev, rhs, loc),
             AssignOp::FloorDiv => self.eval_binop(BinaryOpKind::FloorDiv, prev, rhs, loc),
             AssignOp::Mod => self.eval_binop(BinaryOpKind::Mod, prev, rhs, loc),
             AssignOp::BitAnd => self.eval_binop(BinaryOpKind::BitAnd, prev, rhs, loc),
-            AssignOp::BitOr => prev.bitor(rhs),
+            AssignOp::BitOr => match (prev, rhs) {
+                (Value::Dict(a), Value::Dict(b)) => {
+                    let d1 = a.lock().unwrap();
+                    let d2 = b.lock().unwrap();
+                    Ok(Value::Dict(Arc::new(Mutex::new(
+                        d1.union_in(&d2, Arc::clone(&self.mutability)),
+                    ))))
+                }
+                (Value::Set(a), Value::Set(b)) => {
+                    let s1 = a.lock().unwrap();
+                    let s2 = b.lock().unwrap();
+                    Ok(Value::Set(Arc::new(Mutex::new(
+                        s1.union_in(&s2, Arc::clone(&self.mutability)),
+                    ))))
+                }
+                _ => prev.bitor(rhs).map_err(|e| with_loc(e, loc)),
+            },
             AssignOp::BitXor => self.eval_binop(BinaryOpKind::BitXor, prev, rhs, loc),
             AssignOp::Shl => self.eval_binop(BinaryOpKind::Shl, prev, rhs, loc),
             AssignOp::Shr => self.eval_binop(BinaryOpKind::Shr, prev, rhs, loc),
@@ -875,29 +1093,133 @@ impl EvalContext {
         *self.module_env.globals.lock().unwrap() = self.globals.clone();
     }
 
-    fn lookup_var(&self, name: &str) -> Option<Value> {
-        if let Some(frame) = self.thread.current_frame() {
-            if let Some(val) = frame.locals.lock().unwrap().get(name) {
-                return Some(val.clone());
+    fn record_declared_globals(&mut self, stmts: &[Stmt]) {
+        let mut declared = self.module_env.declared_globals.lock().unwrap();
+        let is_bzl = self.file_name.ends_with(".bzl");
+        for s in stmts {
+            match s {
+                Stmt::Def(f) => {
+                    declared.insert(f.name.clone());
+                    if is_bzl {
+                        self.globals.remove(&f.name);
+                    }
+                }
+                Stmt::Assign { target, .. } => {
+                    let mut names = Vec::new();
+                    match target {
+                        AssignTarget::Ident(n) => names.push(n.clone()),
+                        AssignTarget::Tuple(ps) => names.extend(pattern_names(ps)),
+                        _ => {}
+                    }
+                    for n in names {
+                        declared.insert(n.clone());
+                        if is_bzl {
+                            self.globals.remove(&n);
+                        }
+                    }
+                }
+                Stmt::Load(l, _) if !is_bzl => {
+                    for (local, _) in &l.symbols {
+                        declared.insert(local.clone());
+                    }
+                }
+                _ => {}
             }
-            for p in &frame.parents {
+        }
+    }
+
+    fn lookup_var_checked(
+        &self,
+        name: &str,
+        loc: &Location,
+    ) -> Result<Option<Value>, StarlarkError> {
+        if let Some(frame) = self.thread.current_frame() {
+            if frame.local_names.contains(name) {
+                return match frame.locals.lock().unwrap().get(name) {
+                    Some(val) => Ok(Some(val.clone())),
+                    None => Err(StarlarkError(format!(
+                        "{loc}: local variable '{name}' is referenced before assignment."
+                    ))),
+                };
+            }
+            if let Some(val) = frame.locals.lock().unwrap().get(name) {
+                return Ok(Some(val.clone()));
+            }
+            for (i, p) in frame.parents.iter().enumerate() {
+                if let Some(p_locals) = frame.parent_local_names.get(i) {
+                    if p_locals.contains(name) {
+                        return match p.lock().unwrap().get(name) {
+                            Some(val) => Ok(Some(val.clone())),
+                            None => Err(StarlarkError(format!(
+                                "{loc}: free variable '{name}' is referenced before assignment."
+                            ))),
+                        };
+                    }
+                }
                 if let Some(val) = p.lock().unwrap().get(name) {
-                    return Some(val.clone());
+                    return Ok(Some(val.clone()));
                 }
             }
             if let Some(module) = &frame.module {
-                if let Some(val) = module.globals.lock().unwrap().get(name) {
-                    return Some(val.clone());
+                if Arc::ptr_eq(module, &self.module_env) {
+                    if let Some(val) = self.globals.get(name) {
+                        return Ok(Some(val.clone()));
+                    }
+                    if self
+                        .module_env
+                        .declared_globals
+                        .lock()
+                        .unwrap()
+                        .contains(name)
+                    {
+                        return Err(StarlarkError(format!(
+                            "{loc}: global variable '{name}' is referenced before assignment."
+                        )));
+                    }
+                    return Ok(None);
                 }
-                return None;
+                if let Some(val) = module.globals.lock().unwrap().get(name) {
+                    return Ok(Some(val.clone()));
+                }
+                if module.declared_globals.lock().unwrap().contains(name) {
+                    return Err(StarlarkError(format!(
+                        "{loc}: global variable '{name}' is referenced before assignment."
+                    )));
+                }
+                return Ok(None);
             }
         }
-        self.globals.get(name).cloned()
+        if let Some(val) = self.globals.get(name) {
+            return Ok(Some(val.clone()));
+        }
+        if self
+            .module_env
+            .declared_globals
+            .lock()
+            .unwrap()
+            .contains(name)
+        {
+            return Err(StarlarkError(format!(
+                "{loc}: global variable '{name}' is referenced before assignment."
+            )));
+        }
+        Ok(None)
+    }
+
+    fn lookup_var(&self, name: &str) -> Option<Value> {
+        self.lookup_var_checked(name, &Location::default())
+            .ok()
+            .flatten()
     }
 
     /// The package and repository mapping of the `.bzl` whose function is running (or being
     /// evaluated), if it came from a `.bzl` file.
-    pub fn current_label_ctx(&self) -> Option<(zel_cmdline::PackageIdentifier, zel_cmdline::RepositoryMapping)> {
+    pub fn current_label_ctx(
+        &self,
+    ) -> Option<(
+        zel_cmdline::PackageIdentifier,
+        zel_cmdline::RepositoryMapping,
+    )> {
         self.current_module_env().label_ctx.lock().unwrap().clone()
     }
 
@@ -912,7 +1234,9 @@ impl EvalContext {
         if name != "hasattr" && name != "getattr" {
             return None;
         }
-        let Some(Value::Host(kind, id)) = pos.first() else { return None };
+        let Some(Value::Host(kind, id)) = pos.first() else {
+            return None;
+        };
         let attr = pos.get(1).and_then(|v| v.as_str())?.to_string();
         let host = self.host.clone()?;
         let r = host(
@@ -922,9 +1246,11 @@ impl EvalContext {
             BTreeMap::new(),
         );
         let r = r.map(|v| match &v {
-            Value::BuiltinFunction(n) if n.starts_with("host:method:") => {
-                self.bound_method(Value::Host(kind.clone(), id.clone()), &attr, &Location::default())
-            }
+            Value::BuiltinFunction(n) if n.starts_with("host:method:") => self.bound_method(
+                Value::Host(kind.clone(), id.clone()),
+                &attr,
+                &Location::default(),
+            ),
             _ => v,
         });
         Some(match (name, r) {
@@ -951,9 +1277,14 @@ impl EvalContext {
     fn capture_closure(&self) -> ClosureEnv {
         match self.thread.current_frame() {
             Some(f) => {
-                let mut v = vec![f.locals.clone()];
-                v.extend(f.parents.iter().cloned());
-                ClosureEnv(v)
+                let mut scopes = vec![f.locals.clone()];
+                scopes.extend(f.parents.iter().cloned());
+                let mut local_names = vec![Arc::clone(&f.local_names)];
+                local_names.extend(f.parent_local_names.iter().cloned());
+                ClosureEnv {
+                    scopes,
+                    local_names,
+                }
             }
             None => ClosureEnv::default(),
         }
@@ -969,21 +1300,53 @@ impl EvalContext {
 
     fn bind_loop_vars(&mut self, var_names: &[Pattern], elem: Value) -> Result<(), StarlarkError> {
         if var_names.len() == 1 {
-            if let Pattern::Name(n) = &var_names[0] {
-                self.set_var(n, elem);
-                return Ok(());
+            match &var_names[0] {
+                Pattern::Name(n) => {
+                    self.set_var(n, elem);
+                    return Ok(());
+                }
+                Pattern::Tuple(inner) => {
+                    return self.bind_patterns(inner, elem, "");
+                }
             }
         }
         self.bind_patterns(var_names, elem, "")
     }
 
     /// Unpacks `val` (a sequence) into `pats`, recursing into nested tuple patterns.
-    fn bind_patterns(&mut self, pats: &[Pattern], val: Value, loc: &str) -> Result<(), StarlarkError> {
-        let items = eval::builtins::value_to_sequence(&val)?;
-        if items.len() != pats.len() {
-            let prefix = if loc.is_empty() { String::new() } else { format!("{loc}: ") };
+    fn bind_patterns(
+        &mut self,
+        pats: &[Pattern],
+        val: Value,
+        loc: &str,
+    ) -> Result<(), StarlarkError> {
+        let prefix = if loc.is_empty() {
+            String::new()
+        } else {
+            format!("{loc}: ")
+        };
+        if matches!(val, Value::String(_)) {
             return Err(StarlarkError(format!(
-                "{prefix}cannot unpack {} values into {} variables",
+                "{prefix}got '{}' in sequence assignment (want {}-element sequence)",
+                val.type_name(),
+                pats.len()
+            )));
+        }
+        let items = eval::builtins::value_to_sequence(&val).map_err(|_| {
+            StarlarkError(format!(
+                "{prefix}got '{}' in sequence assignment (want {}-element sequence)",
+                val.type_name(),
+                pats.len()
+            ))
+        })?;
+        if items.len() != pats.len() {
+            let which = if items.len() < pats.len() {
+                "few"
+            } else {
+                "many"
+            };
+            return Err(StarlarkError(format!(
+                "{prefix}too {which} values to unpack (got {}, want {})",
                 items.len(),
                 pats.len()
             )));
@@ -1000,21 +1363,24 @@ impl EvalContext {
     pub fn eval_expr(&mut self, expr: &Expr) -> Result<Value, StarlarkError> {
         match expr {
             Expr::Literal(v) => Ok(v.clone()),
-            Expr::Ident(name, _loc) => {
-                if let Some(v) = self.lookup_var(name) {
+            Expr::Ident(name, loc) => {
+                if let Some(v) = self.lookup_var_checked(name, loc)? {
                     return Ok(v);
                 }
                 // Universe functions are first-class values (`f = fail`, `key = len`).
-                if syntax::checks::UNIVERSE.contains(&name.as_str()) && !matches!(name.as_str(), "None" | "True" | "False") {
+                if syntax::checks::UNIVERSE.contains(&name.as_str())
+                    && !matches!(name.as_str(), "None" | "True" | "False")
+                {
                     return Ok(Value::BuiltinFunction(name.clone()));
                 }
-                // Universal / Builtin functions
-                if let Some(v) = eval::builtins::eval_universal_function(name, &[], &BTreeMap::new())? {
-                    return Ok(v);
+                if !self.strict_names
+                    && matches!(name.as_str(), "struct" | "depset" | "select" | "Label")
+                {
+                    return Ok(Value::BuiltinFunction(name.clone()));
                 }
                 if self.strict_names {
                     return Err(StarlarkError(format!(
-                        "{_loc}: name '{name}' is not defined"
+                        "{loc}: name '{name}' is not defined"
                     )));
                 }
                 // Legacy permissive mode (MODULE.bazel / embedders): unknown identifiers evaluate
@@ -1030,7 +1396,10 @@ impl EvalContext {
                 for item in items {
                     out.push(self.eval_expr(item)?);
                 }
-                Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(out)))))
+                Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                    out,
+                    Arc::clone(&self.mutability),
+                )))))
             }
             Expr::Tuple(items, _) => {
                 let mut out = Vec::with_capacity(items.len());
@@ -1040,7 +1409,7 @@ impl EvalContext {
                 Ok(Value::Tuple(out))
             }
             Expr::Dict(pairs, loc, colons) => {
-                let mut dict = StarlarkDict::new();
+                let mut dict = StarlarkDict::new_in(Arc::clone(&self.mutability));
                 for (i, (k_expr, v_expr)) in pairs.iter().enumerate() {
                     let k = self.eval_expr(k_expr)?;
                     let v = self.eval_expr(v_expr)?;
@@ -1048,7 +1417,10 @@ impl EvalContext {
                     let at = colons.get(i).unwrap_or(loc);
                     if dict.contains_key(&k) {
                         return Err(with_loc(
-                            StarlarkError(format!("dictionary expression has duplicate key: {}", k.repr())),
+                            StarlarkError(format!(
+                                "dictionary expression has duplicate key: {}",
+                                k.repr()
+                            )),
                             at,
                         ));
                     }
@@ -1059,7 +1431,10 @@ impl EvalContext {
             Expr::ListComp { body, clauses, .. } => {
                 let mut out = Vec::new();
                 self.eval_list_comp_clauses(clauses, 0, body, &mut out)?;
-                Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(out)))))
+                Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                    out,
+                    Arc::clone(&self.mutability),
+                )))))
             }
             Expr::DictComp {
                 key,
@@ -1067,7 +1442,7 @@ impl EvalContext {
                 clauses,
                 ..
             } => {
-                let mut dict = StarlarkDict::new();
+                let mut dict = StarlarkDict::new_in(Arc::clone(&self.mutability));
                 self.eval_dict_comp_clauses(clauses, 0, key, value, &mut dict)?;
                 Ok(Value::Dict(Arc::new(Mutex::new(dict))))
             }
@@ -1139,16 +1514,24 @@ impl EvalContext {
                     let matches = match op {
                         CmpOp::Eq => cur == rhs_val,
                         CmpOp::Ne => cur != rhs_val,
-                        CmpOp::Lt => eval::builtins::compare_values(&cur, &rhs_val).map_err(|e| with_loc(e, cmp_loc))? == Ordering::Less,
+                        CmpOp::Lt => {
+                            eval::builtins::compare_values(&cur, &rhs_val)
+                                .map_err(|e| with_loc(e, cmp_loc))?
+                                == Ordering::Less
+                        }
                         CmpOp::Le => {
-                            let ord = eval::builtins::compare_values(&cur, &rhs_val).map_err(|e| with_loc(e, cmp_loc))?;
+                            let ord = eval::builtins::compare_values(&cur, &rhs_val)
+                                .map_err(|e| with_loc(e, cmp_loc))?;
                             ord == Ordering::Less || ord == Ordering::Equal
                         }
                         CmpOp::Gt => {
-                            eval::builtins::compare_values(&cur, &rhs_val).map_err(|e| with_loc(e, cmp_loc))? == Ordering::Greater
+                            eval::builtins::compare_values(&cur, &rhs_val)
+                                .map_err(|e| with_loc(e, cmp_loc))?
+                                == Ordering::Greater
                         }
                         CmpOp::Ge => {
-                            let ord = eval::builtins::compare_values(&cur, &rhs_val).map_err(|e| with_loc(e, cmp_loc))?;
+                            let ord = eval::builtins::compare_values(&cur, &rhs_val)
+                                .map_err(|e| with_loc(e, cmp_loc))?;
                             ord == Ordering::Greater || ord == Ordering::Equal
                         }
                         CmpOp::In => self.check_contains(&rhs_val, &cur)?,
@@ -1184,69 +1567,7 @@ impl EvalContext {
                 location: loc,
             } => {
                 let recv = self.eval_expr(target)?;
-                match recv {
-                    Value::Struct(s) => s.get(attr).map_err(|e| StarlarkError(format!("{loc}: {}", e.0))),
-                    Value::Host(kind, id) => {
-                        let host = self.host.clone().ok_or_else(|| {
-                            StarlarkError(format!("{loc}: no host to resolve '{attr}'"))
-                        })?;
-                        self.call_location = loc.to_string();
-
-                        let r = host(
-                            self,
-                            &format!("attr:{kind}.{attr}"),
-                            vec![Value::Host(kind.clone(), id.clone())],
-                            BTreeMap::new(),
-                        )
-                        .map_err(|e| StarlarkError(format!("{loc}: {}", e.0)))?;
-                        // A method read without calling it (`f = ctx.path`) stays bound to its receiver.
-                        Ok(match &r {
-                            Value::BuiltinFunction(n) if n.starts_with("host:method:") => {
-                                self.bound_method(Value::Host(kind, id), attr, loc)
-                            }
-                            _ => r,
-                        })
-                    }
-                    Value::ProviderInstance { fields, .. } => fields
-                        .get(attr)
-                        .cloned()
-                        .ok_or_else(|| StarlarkError(format!("{loc}: field '{attr}' not found"))),
-                    Value::Label(l) => match attr.as_str() {
-                        "name" => Ok(Value::String(l.name().to_string())),
-                        "package" => Ok(Value::String(l.package_name().to_string())),
-                        "repo_name" | "workspace_name" => {
-                            Ok(Value::String(l.repository().name().to_string()))
-                        }
-                        "workspace_root" => Ok(Value::String(if l.repository().is_main() {
-                            String::new()
-                        } else {
-                            format!("external/{}", l.repository().name())
-                        })),
-                        "same_package_label" | "relative" | "package_relative" => Ok(self.bound_method(Value::Label(l.clone()), attr, loc)),
-                        _ => Err(StarlarkError(format!("{loc}: Label has no attribute '{attr}'"))),
-                    },
-                    Value::Dict(d) => {
-                        let found = d.lock().unwrap().get(&Value::String(attr.clone())).cloned();
-                        match found {
-                            Some(v) => Ok(v),
-                            None if matches!(
-                                attr.as_str(),
-                                "get" | "items" | "keys" | "values" | "pop" | "popitem" | "setdefault" | "update" | "clear"
-                            ) =>
-                            {
-                                Ok(self.bound_method(Value::Dict(d.clone()), attr, loc))
-                            }
-                            None => Err(StarlarkError(format!("{loc}: 'dict' value has no field or method '{attr}'"))),
-                        }
-                    }
-                    recv @ (Value::List(_) | Value::String(_) | Value::Set(_) | Value::Tuple(_)) => {
-                        Ok(self.bound_method(recv, attr, loc))
-                    }
-                    other => Err(StarlarkError(format!(
-                        "{loc}: '{}' value has no field or method '{attr}'",
-                        other.type_name()
-                    ))),
-                }
+                self.eval_attr(recv, attr, loc)
             }
             Expr::Index {
                 target,
@@ -1334,17 +1655,24 @@ impl EvalContext {
                         )
                         .map_err(|e| StarlarkError(format!("{loc}: {}", e.0)))
                     }
-                    (Value::Dict(d), key) => d
-                        .lock()
-                        .unwrap()
-                        .get(&key)
-                        .cloned()
-                        .ok_or_else(|| StarlarkError(format!("{loc}: key {} not found in dictionary", key.repr()))),
+                    (Value::Dict(d), key) => {
+                        d.lock().unwrap().get(&key).cloned().ok_or_else(|| {
+                            StarlarkError(format!(
+                                "{loc}: key {} not found in dictionary",
+                                key.repr()
+                            ))
+                        })
+                    }
                     // `target[OutputGroupInfo]["group"]`: provider instances index by field name.
-                    (Value::ProviderInstance { fields, provider_name }, Value::String(n)) => fields
-                        .get(&n)
-                        .cloned()
-                        .ok_or_else(|| StarlarkError(format!("{loc}: key \"{n}\" not found in {provider_name}"))),
+                    (
+                        Value::ProviderInstance {
+                            fields,
+                            provider_name,
+                        },
+                        Value::String(n),
+                    ) => fields.get(&n).cloned().ok_or_else(|| {
+                        StarlarkError(format!("{loc}: key \"{n}\" not found in {provider_name}"))
+                    }),
                     (other, idx) => Err(StarlarkError(format!(
                         "{loc}: type '{}' is not indexable with '{}'",
                         other.type_name(),
@@ -1365,7 +1693,9 @@ impl EvalContext {
                 let st_val = step.as_ref().map(|e| self.eval_expr(e)).transpose()?;
 
                 let step_num = match st_val.as_ref().and_then(|v| v.as_i64()) {
-                    Some(0) => return Err(StarlarkError(format!("{loc}: slice step cannot be zero"))),
+                    Some(0) => {
+                        return Err(StarlarkError(format!("{loc}: slice step cannot be zero")))
+                    }
                     Some(s) => s,
                     None => 1,
                 };
@@ -1373,13 +1703,22 @@ impl EvalContext {
                 match recv {
                     Value::String(s) => {
                         let chars: Vec<char> = s.chars().collect();
-                        let sliced = slice_sequence(&chars, s_val.as_ref(), e_val.as_ref(), step_num);
+                        let sliced =
+                            slice_sequence(&chars, s_val.as_ref(), e_val.as_ref(), step_num);
                         Ok(Value::String(sliced.into_iter().collect()))
                     }
                     Value::List(l) => {
                         let guard = l.lock().unwrap();
-                        let sliced = slice_sequence(&guard.elements, s_val.as_ref(), e_val.as_ref(), step_num);
-                        Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(sliced)))))
+                        let sliced = slice_sequence(
+                            &guard.elements,
+                            s_val.as_ref(),
+                            e_val.as_ref(),
+                            step_num,
+                        );
+                        Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                            sliced,
+                            Arc::clone(&self.mutability),
+                        )))))
                     }
                     Value::Tuple(t) => {
                         let sliced = slice_sequence(&t, s_val.as_ref(), e_val.as_ref(), step_num);
@@ -1388,8 +1727,13 @@ impl EvalContext {
                     Value::Range(r) => {
                         let vec = r.to_vec();
                         let sliced = slice_sequence(&vec, s_val.as_ref(), e_val.as_ref(), step_num);
-                        Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(
-                            sliced.into_iter().map(BigInt::from_i64).map(Value::Int).collect(),
+                        Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                            sliced
+                                .into_iter()
+                                .map(BigInt::from_i64)
+                                .map(Value::Int)
+                                .collect(),
+                            Arc::clone(&self.mutability),
                         )))))
                     }
                     other => Err(StarlarkError(format!(
@@ -1425,6 +1769,8 @@ impl EvalContext {
             Value::String(_) => "string",
             Value::List(_) => "list",
             Value::Dict(_) => "dict",
+            Value::Set(_) => "set",
+            Value::Depset(_) => "depset",
             Value::Label(_) => "Label",
             _ => recv.type_name(),
         }
@@ -1457,8 +1803,124 @@ impl EvalContext {
             location: loc.clone(),
             module: Some(self.current_module_env()),
             repr_override: Some(format!("<built-in method {attr} of {recv_type} value>")),
-            closure: ClosureEnv(vec![scope]),
+            closure: ClosureEnv {
+                scopes: vec![scope],
+                local_names: vec![Arc::new(HashSet::new())],
+            },
         }))
+    }
+
+    fn eval_attr(
+        &mut self,
+        recv: Value,
+        attr: &str,
+        loc: &Location,
+    ) -> Result<Value, StarlarkError> {
+        match recv {
+            Value::Struct(s) => s
+                .get(attr)
+                .map_err(|e| StarlarkError(format!("{loc}: {}", e.0))),
+            Value::Host(kind, id) => {
+                let host = self
+                    .host
+                    .clone()
+                    .ok_or_else(|| StarlarkError(format!("{loc}: no host to resolve '{attr}'")))?;
+                self.call_location = loc.to_string();
+
+                let r = host(
+                    self,
+                    &format!("attr:{kind}.{attr}"),
+                    vec![Value::Host(kind.clone(), id.clone())],
+                    BTreeMap::new(),
+                )
+                .map_err(|e| StarlarkError(format!("{loc}: {}", e.0)))?;
+                // A method read without calling it (`f = ctx.path`) stays bound to its receiver.
+                Ok(match &r {
+                    Value::BuiltinFunction(n) if n.starts_with("host:method:") => {
+                        self.bound_method(Value::Host(kind, id), attr, loc)
+                    }
+                    _ => r,
+                })
+            }
+            Value::ProviderInstance { fields, .. } => fields
+                .get(attr)
+                .cloned()
+                .ok_or_else(|| StarlarkError(format!("{loc}: field '{attr}' not found"))),
+            Value::Label(l) => match attr {
+                "name" => Ok(Value::String(l.name().to_string())),
+                "package" => Ok(Value::String(l.package_name().to_string())),
+                "repo_name" | "workspace_name" => {
+                    Ok(Value::String(l.repository().name().to_string()))
+                }
+                "workspace_root" => Ok(Value::String(if l.repository().is_main() {
+                    String::new()
+                } else {
+                    format!("external/{}", l.repository().name())
+                })),
+                "same_package_label" | "relative" | "package_relative" => {
+                    Ok(self.bound_method(Value::Label(l.clone()), attr, loc))
+                }
+                _ => Err(StarlarkError(format!(
+                    "{loc}: Label has no attribute '{attr}'"
+                ))),
+            },
+            Value::Dict(d) => {
+                let found = d
+                    .lock()
+                    .unwrap()
+                    .get(&Value::String(attr.to_string()))
+                    .cloned();
+                match found {
+                    Some(v) => Ok(v),
+                    None if eval::builtins::DICT_METHODS.contains(&attr) => {
+                        Ok(self.bound_method(Value::Dict(d.clone()), attr, loc))
+                    }
+                    None => Err(StarlarkError(format!(
+                        "{loc}: 'dict' value has no field or method '{attr}'"
+                    ))),
+                }
+            }
+            Value::List(_) => {
+                if eval::builtins::LIST_METHODS.contains(&attr) {
+                    Ok(self.bound_method(recv, attr, loc))
+                } else {
+                    Err(StarlarkError(format!(
+                        "{loc}: 'list' value has no field or method '{attr}'"
+                    )))
+                }
+            }
+            Value::String(_) => {
+                if eval::builtins::STRING_METHODS.contains(&attr) {
+                    Ok(self.bound_method(recv, attr, loc))
+                } else {
+                    Err(StarlarkError(format!(
+                        "{loc}: 'string' value has no field or method '{attr}'"
+                    )))
+                }
+            }
+            Value::Set(_) => {
+                if eval::builtins::SET_METHODS.contains(&attr) {
+                    Ok(self.bound_method(recv, attr, loc))
+                } else {
+                    Err(StarlarkError(format!(
+                        "{loc}: 'set' value has no field or method '{attr}'"
+                    )))
+                }
+            }
+            Value::Depset(_) => {
+                if attr == "to_list" {
+                    Ok(self.bound_method(recv, attr, loc))
+                } else {
+                    Err(StarlarkError(format!(
+                        "{loc}: 'depset' value has no field or method '{attr}'"
+                    )))
+                }
+            }
+            other => Err(StarlarkError(format!(
+                "{loc}: '{}' value has no field or method '{attr}'",
+                other.type_name()
+            ))),
+        }
     }
 
     fn eval_binop(
@@ -1469,8 +1931,34 @@ impl EvalContext {
         loc: &Location,
     ) -> Result<Value, StarlarkError> {
         match op {
-            BinaryOpKind::Add => l.add(r).map_err(|e| with_loc(e, loc)),
-            BinaryOpKind::BitOr => l.bitor(r).map_err(|e| with_loc(e, loc)),
+            BinaryOpKind::Add => match (l, r) {
+                (Value::List(a), Value::List(b)) => {
+                    let mut v = a.lock().unwrap().elements.clone();
+                    v.extend(b.lock().unwrap().elements.clone());
+                    Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                        v,
+                        Arc::clone(&self.mutability),
+                    )))))
+                }
+                _ => l.add(r).map_err(|e| with_loc(e, loc)),
+            },
+            BinaryOpKind::BitOr => match (l, r) {
+                (Value::Dict(a), Value::Dict(b)) => {
+                    let d1 = a.lock().unwrap();
+                    let d2 = b.lock().unwrap();
+                    Ok(Value::Dict(Arc::new(Mutex::new(
+                        d1.union_in(&d2, Arc::clone(&self.mutability)),
+                    ))))
+                }
+                (Value::Set(a), Value::Set(b)) => {
+                    let s1 = a.lock().unwrap();
+                    let s2 = b.lock().unwrap();
+                    Ok(Value::Set(Arc::new(Mutex::new(
+                        s1.union_in(&s2, Arc::clone(&self.mutability)),
+                    ))))
+                }
+                _ => l.bitor(r).map_err(|e| with_loc(e, loc)),
+            },
             BinaryOpKind::Sub => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.sub(b))),
                 (Value::Float(a), Value::Float(b)) => Ok(Value::Float(a - b)),
@@ -1479,7 +1967,9 @@ impl EvalContext {
                 (Value::Set(a), Value::Set(b)) => {
                     let s1 = a.lock().unwrap();
                     let s2 = b.lock().unwrap();
-                    Ok(Value::Set(Arc::new(Mutex::new(s1.difference(&s2)))))
+                    let mut diff = s1.difference(&s2);
+                    diff.mutability = Arc::clone(&self.mutability);
+                    Ok(Value::Set(Arc::new(Mutex::new(diff))))
                 }
                 _ => Err(StarlarkError(format!(
                     "{loc}: unsupported binary operation: {} - {}",
@@ -1503,7 +1993,10 @@ impl EvalContext {
                     for _ in 0..count {
                         out.extend(guard.elements.clone());
                     }
-                    Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(out)))))
+                    Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                        out,
+                        Arc::clone(&self.mutability),
+                    )))))
                 }
                 (Value::Tuple(items), Value::Int(n)) | (Value::Int(n), Value::Tuple(items)) => {
                     let count = n.to_i64().unwrap_or(0).max(0) as usize;
@@ -1538,7 +2031,9 @@ impl EvalContext {
             },
             BinaryOpKind::FloorDiv => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => {
-                    let q = a.floored_div(b).map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
+                    let q = a
+                        .floored_div(b)
+                        .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
                     Ok(Value::Int(q))
                 }
                 (Value::Float(a), Value::Float(b)) => {
@@ -1567,7 +2062,9 @@ impl EvalContext {
             },
             BinaryOpKind::Mod => match (l, r) {
                 (Value::Int(a), Value::Int(b)) => {
-                    let m = a.floored_mod(b).map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
+                    let m = a
+                        .floored_mod(b)
+                        .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
                     Ok(Value::Int(m))
                 }
                 (Value::Float(a), Value::Float(b)) => {
@@ -1579,16 +2076,6 @@ impl EvalContext {
                 }
                 (Value::String(fmt_str), Value::Tuple(args)) => {
                     let res = percent_format(fmt_str, args, None)?;
-                    Ok(Value::String(res))
-                }
-                (Value::String(fmt_str), Value::Dict(dict)) => {
-                    let guard = dict.lock().unwrap();
-                    let map: BTreeMap<String, Value> = guard
-                        .entries
-                        .iter()
-                        .filter_map(|(k, v)| k.as_str().map(|ks| (ks.to_string(), v.clone())))
-                        .collect();
-                    let res = percent_format(fmt_str, &[], Some(&map))?;
                     Ok(Value::String(res))
                 }
                 (Value::String(fmt_str), single) => {
@@ -1606,7 +2093,9 @@ impl EvalContext {
                 (Value::Set(a), Value::Set(b)) => {
                     let s1 = a.lock().unwrap();
                     let s2 = b.lock().unwrap();
-                    Ok(Value::Set(Arc::new(Mutex::new(s1.intersection(&s2)))))
+                    let mut inter = s1.intersection(&s2);
+                    inter.mutability = Arc::clone(&self.mutability);
+                    Ok(Value::Set(Arc::new(Mutex::new(inter))))
                 }
                 _ => Err(StarlarkError(format!(
                     "{loc}: unsupported binary operation: {} & {}",
@@ -1619,7 +2108,9 @@ impl EvalContext {
                 (Value::Set(a), Value::Set(b)) => {
                     let s1 = a.lock().unwrap();
                     let s2 = b.lock().unwrap();
-                    Ok(Value::Set(Arc::new(Mutex::new(s1.symmetric_difference(&s2)))))
+                    let mut sym = s1.symmetric_difference(&s2);
+                    sym.mutability = Arc::clone(&self.mutability);
+                    Ok(Value::Set(Arc::new(Mutex::new(sym))))
                 }
                 _ => Err(StarlarkError(format!(
                     "{loc}: unsupported binary operation: {} ^ {}",
@@ -1632,7 +2123,9 @@ impl EvalContext {
                     let shift = b
                         .to_i64()
                         .ok_or_else(|| StarlarkError(format!("{loc}: shift count too large")))?;
-                    let res = a.shl(shift).map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
+                    let res = a
+                        .shl(shift)
+                        .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
                     Ok(Value::Int(res))
                 }
                 _ => Err(StarlarkError(format!(
@@ -1646,7 +2139,9 @@ impl EvalContext {
                     let shift = b
                         .to_i64()
                         .ok_or_else(|| StarlarkError(format!("{loc}: shift count too large")))?;
-                    let res = a.shr(shift).map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
+                    let res = a
+                        .shr(shift)
+                        .map_err(|e| StarlarkError(format!("{loc}: {e}")))?;
                     Ok(Value::Int(res))
                 }
                 _ => Err(StarlarkError(format!(
@@ -1666,7 +2161,9 @@ impl EvalContext {
             Value::Set(s) => Ok(s.lock().unwrap().contains(item)),
             Value::Dict(d) => Ok(d.lock().unwrap().contains_key(item)),
             // `"group" in target[OutputGroupInfo]`: membership of a field name.
-            Value::ProviderInstance { fields, .. } => Ok(item.as_str().is_some_and(|n| fields.contains_key(n))),
+            Value::ProviderInstance { fields, .. } => {
+                Ok(item.as_str().is_some_and(|n| fields.contains_key(n)))
+            }
             Value::Range(r) => {
                 if let Some(i) = item.as_i64() {
                     if r.step > 0 && i >= r.start && i < r.stop && (i - r.start) % r.step == 0 {
@@ -1679,9 +2176,10 @@ impl EvalContext {
                 Ok(false)
             }
             Value::Host(kind, id) => {
-                let host = self.host.clone().ok_or_else(|| {
-                    StarlarkError(format!("type '{kind}' is not iterable"))
-                })?;
+                let host = self
+                    .host
+                    .clone()
+                    .ok_or_else(|| StarlarkError(format!("type '{kind}' is not iterable")))?;
                 let r = host(
                     self,
                     &format!("contains:{kind}"),
@@ -1704,6 +2202,23 @@ impl EvalContext {
         }
     }
 
+    fn push_comp_frame(&mut self) {
+        let parents = match self.thread.current_frame() {
+            Some(f) => {
+                let mut v = vec![Arc::clone(&f.locals)];
+                v.extend(f.parents.iter().cloned());
+                v
+            }
+            None => Vec::new(),
+        };
+        let mut frame = eval::frame::CallFrame::new("<comprehension>", Location::default());
+        frame.parents = parents;
+        if let Some(f) = self.thread.current_frame() {
+            frame.module = f.module.clone();
+        }
+        self.thread.frames.push(frame);
+    }
+
     fn eval_list_comp_clauses(
         &mut self,
         clauses: &[CompClause],
@@ -1719,10 +2234,9 @@ impl EvalContext {
             CompClause::For { var_names, iter } => {
                 let iter_val = self.eval_expr(iter)?;
                 let elements = eval::builtins::value_to_sequence(&iter_val)?;
-                let saved_globals = self.globals.clone();
-                // Comprehension variables are scoped to the comprehension: restore the
-                // enclosing function's locals afterwards.
-                let saved_locals = self.thread.current_frame().map(|f| f.locals.lock().unwrap().clone());
+                if idx == 0 {
+                    self.push_comp_frame();
+                }
                 let mut res = Ok(());
                 for elem in elements {
                     if let Err(e) = self.bind_loop_vars(var_names, elem) {
@@ -1734,9 +2248,8 @@ impl EvalContext {
                         break;
                     }
                 }
-                self.globals = saved_globals;
-                if let (Some(m), Some(f)) = (saved_locals, self.thread.current_frame()) {
-                    *f.locals.lock().unwrap() = m;
+                if idx == 0 {
+                    self.thread.pop_frame();
                 }
                 res
             }
@@ -1767,22 +2280,23 @@ impl EvalContext {
             CompClause::For { var_names, iter } => {
                 let iter_val = self.eval_expr(iter)?;
                 let elements = eval::builtins::value_to_sequence(&iter_val)?;
-                let saved_globals = self.globals.clone();
-                let saved_locals = self.thread.current_frame().map(|f| f.locals.lock().unwrap().clone());
+                if idx == 0 {
+                    self.push_comp_frame();
+                }
                 let mut res = Ok(());
                 for elem in elements {
                     if let Err(e) = self.bind_loop_vars(var_names, elem) {
                         res = Err(e);
                         break;
                     }
-                    if let Err(e) = self.eval_dict_comp_clauses(clauses, idx + 1, key, value, dict) {
+                    if let Err(e) = self.eval_dict_comp_clauses(clauses, idx + 1, key, value, dict)
+                    {
                         res = Err(e);
                         break;
                     }
                 }
-                self.globals = saved_globals;
-                if let (Some(m), Some(f)) = (saved_locals, self.thread.current_frame()) {
-                    *f.locals.lock().unwrap() = m;
+                if idx == 0 {
+                    self.thread.pop_frame();
                 }
                 res
             }
@@ -1805,7 +2319,12 @@ impl EvalContext {
         loc: &Location,
     ) -> Result<Value, StarlarkError> {
         // Method call on receiver
-        if let Expr::Attr { target, attr, location: attr_loc } = callee {
+        if let Expr::Attr {
+            target,
+            attr,
+            location: attr_loc,
+        } = callee
+        {
             let recv = self.eval_expr(target)?;
             self.pre_call_loc = self.cur_call_loc.clone();
             self.cur_call_loc = loc.clone();
@@ -1815,7 +2334,10 @@ impl EvalContext {
             }
             if let Some(va) = var_args {
                 let va_val = self.eval_expr(va)?;
-                eval_pos.extend(star_args_seq(&va_val).map_err(|e| StarlarkError(format!("{}: {}", star_at(va, loc), e.0)))?);
+                eval_pos.extend(
+                    star_args_seq(&va_val)
+                        .map_err(|e| StarlarkError(format!("{}: {}", star_at(va, loc), e.0)))?,
+                );
             }
             let mut eval_kw = BTreeMap::new();
             for (k, v) in kw_args {
@@ -1823,7 +2345,8 @@ impl EvalContext {
             }
             if let Some(ka) = kw_var_args {
                 let ka_val = self.eval_expr(ka)?;
-                self.pending_dup_kw = merge_star_kwargs(&mut eval_kw, &ka_val).map_err(|e| StarlarkError(format!("{}: {}", star_at(ka, loc), e.0)))?;
+                self.pending_dup_kw = merge_star_kwargs(&mut eval_kw, &ka_val)
+                    .map_err(|e| StarlarkError(format!("{}: {}", star_at(ka, loc), e.0)))?;
             }
             self.call_kw_order = kw_call_order(kw_args, kw_var_args.as_deref().map(|_| &eval_kw));
             self.arg_eval_loc = self.cur_call_loc.clone();
@@ -1840,7 +2363,10 @@ impl EvalContext {
         }
         if let Some(va) = var_args {
             let va_val = self.eval_expr(va)?;
-            eval_pos.extend(star_args_seq(&va_val).map_err(|e| StarlarkError(format!("{}: {}", star_at(va, loc), e.0)))?);
+            eval_pos.extend(
+                star_args_seq(&va_val)
+                    .map_err(|e| StarlarkError(format!("{}: {}", star_at(va, loc), e.0)))?,
+            );
         }
         let mut eval_kw = BTreeMap::new();
         for (k, v) in kw_args {
@@ -1848,268 +2374,504 @@ impl EvalContext {
         }
         if let Some(ka) = kw_var_args {
             let ka_val = self.eval_expr(ka)?;
-            self.pending_dup_kw = merge_star_kwargs(&mut eval_kw, &ka_val).map_err(|e| StarlarkError(format!("{}: {}", star_at(ka, loc), e.0)))?;
+            self.pending_dup_kw = merge_star_kwargs(&mut eval_kw, &ka_val)
+                .map_err(|e| StarlarkError(format!("{}: {}", star_at(ka, loc), e.0)))?;
         }
 
         self.call_kw_order = kw_call_order(kw_args, kw_var_args.as_deref().map(|_| &eval_kw));
         self.arg_eval_loc = self.cur_call_loc.clone();
         self.cur_call_loc = loc.clone();
         if let Expr::Ident(func_name, _) = callee {
-            if self.host.is_some() {
-                if let Some(Value::BuiltinFunction(bf)) = self.lookup_var(func_name) {
-                    if let Some(name) = bf.strip_prefix("host:") {
-                        let host = self.host.clone().unwrap();
-                        self.call_location = loc.to_string();
-
-                        self.last_call_loc = loc.clone();
-                        return host(self, name, eval_pos, eval_kw).map_err(|e| {
-                            let prefix = format!("{loc}: ");
-                            if e.0.starts_with(&prefix) || e.0.starts_with("ERROR: ") || e.0.contains(": Traceback (most recent call last):\n") {
-                                e
-                            } else {
-                                StarlarkError(format!("{prefix}{}", e.0))
-                            }
-                        });
-                    }
-                }
+            if let Some(bound_val) = self.lookup_var_checked(func_name, loc)? {
+                return self.call_callable(bound_val, eval_pos, eval_kw, loc);
             }
-            match func_name.as_str() {
-                "select" => {
-                    let entries = match eval_pos.first() {
-                        Some(Value::Dict(d)) => {
-                            let guard = d.lock().unwrap();
-                            let mut list = Vec::new();
-                            for (k, v) in &guard.entries {
-                                list.push((k.to_string(), v.clone()));
-                            }
-                            list
-                        }
-                        _ => {
-                            return Err(StarlarkError(format!(
-                                "{loc}: select() requires a dict argument"
-                            )));
-                        }
-                    };
-                    return Ok(Value::SelectorList(SelectorList::from_select(entries)));
-                }
-                "depset" => {
-                    let direct = eval_pos
-                        .first()
-                        .or_else(|| eval_kw.get("direct"))
-                        .and_then(|v| match v {
-                            Value::List(l) => Some(l.lock().unwrap().elements.clone()),
-                            Value::Tuple(t) => Some(t.clone()),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    let order = eval_kw
-                        .get("order")
-                        .and_then(|v| v.as_str())
-                        .map(DepsetOrder::parse)
-                        .transpose()?
-                        .unwrap_or_default();
-                    let transitive = eval_kw
-                        .get("transitive")
-                        .and_then(|v| match v {
-                            Value::List(l) => Some(
-                                l.lock()
-                                    .unwrap()
-                                    .elements
-                                    .iter()
-                                    .filter_map(|item| match item {
-                                        Value::Depset(d) => Some(Arc::clone(d)),
-                                        _ => None,
-                                    })
-                                    .collect(),
-                            ),
-                            Value::Tuple(t) => Some(
-                                t.iter()
-                                    .filter_map(|item| match item {
-                                        Value::Depset(d) => Some(Arc::clone(d)),
-                                        _ => None,
-                                    })
-                                    .collect(),
-                            ),
-                            _ => None,
-                        })
-                        .unwrap_or_default();
-                    return Ok(Value::Depset(Arc::new(Depset::new(
-                        order, direct, transitive,
-                    )?)));
-                }
-                "glob" => {
-                    let include = eval_pos
-                        .first()
-                        .or_else(|| eval_kw.get("include"))
-                        .map(|v| v.to_string_list())
-                        .unwrap_or_default();
-                    let exclude = eval_pos
-                        .get(1)
-                        .or_else(|| eval_kw.get("exclude"))
-                        .map(|v| v.to_string_list())
-                        .unwrap_or_default();
-                    let exclude_dirs = eval_kw
-                        .get("exclude_directories")
-                        .map(|v| match v {
-                            Value::Int(i) => !i.is_zero(),
-                            Value::Bool(b) => *b,
-                            _ => true,
-                        })
-                        .unwrap_or(true);
-                    if let Some(ref fs) = self.fs {
-                        if let Ok(matched) = evaluate_glob(
-                            fs.as_ref(),
-                            &self.package_dir,
-                            &include,
-                            &exclude,
-                            exclude_dirs,
-                        ) {
-                            return Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(
-                                matched.into_iter().map(Value::String).collect(),
-                            )))));
-                        }
-                    }
-                    return Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(
-                        Vec::new(),
-                    )))));
-                }
-                "struct" => {
-                    return Ok(Value::Struct(Arc::new(StructValue::new(eval_kw))));
-                }
-                "provider" => {
-                    return Ok(Value::Provider {
-                        name: "Provider".to_string(),
-                    });
-                }
-                "rule" | "repository_rule" | "module_extension" | "aspect" | "tag_class" => {
-                    let executable = eval_kw
-                        .get("executable")
-                        .map(|v| v.is_truthy())
-                        .unwrap_or(false);
-                    let test = eval_kw.get("test").map(|v| v.is_truthy()).unwrap_or(false);
-                    return Ok(Value::RuleCallable {
-                        rule_class: "custom_rule".to_string(),
-                        executable,
-                        test,
-                    });
-                }
-                "Label" => {
-                    let s = eval_pos
-                        .first()
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("//:default");
-                    let lctx = self.current_module_env().label_ctx.lock().unwrap().clone();
-                    let label = match lctx {
-                        Some((pkg, mapping)) => {
-                            // An apparent repo name the mapping does not know resolves to Bazel's
-                            // `[unknown repo 'x' requested from @@owner]` placeholder repository.
-                            let mapping = match s.strip_prefix('@').filter(|r| !r.starts_with('@')) {
-                                Some(rest) => {
-                                    let apparent = rest.split("//").next().unwrap_or(rest);
-                                    if !apparent.is_empty() && !mapping.entries().any(|(k, _)| k == apparent) && apparent != "bazel_tools" && apparent != "platforms" {
-                                        let owner = mapping.get("");
-                                        let marker = format!("[unknown repo '{apparent}' requested from @@{}]", owner.name());
-                                        let mut entries: std::collections::HashMap<String, zel_cmdline::RepositoryName> =
-                                            mapping.entries().map(|(k, v)| (k.clone(), v.clone())).collect();
-                                        entries.insert(apparent.to_string(), zel_cmdline::RepositoryName::create_unvalidated(marker));
-                                        zel_cmdline::RepositoryMapping::new(entries, owner)
-                                    } else {
-                                        mapping
-                                    }
-                                }
-                                None => mapping,
-                            };
-                            if s.starts_with("//") || s.starts_with('@') {
-                                Label::parse_with_repo_mapping(s, &mapping)
-                            } else {
-                                Label::create(pkg, s.strip_prefix(':').unwrap_or(s))
-                            }
-                            .map_err(|e| StarlarkError(e.to_string()))?
-                        }
-                        None => Label::parse_canonical(s).map_err(|e| StarlarkError(e.to_string()))?,
-                    };
-                    return Ok(Value::Label(label));
-                }
-                "exports_files" => {
-                    if let Some(first) = eval_pos.first() {
-                        self.exports_files.extend(first.to_string_list());
-                    }
-                    return Ok(Value::None);
-                }
-                "package" | "licenses" | "register_toolchains" | "register_execution_platforms" => {
-                    return Ok(Value::None);
-                }
-                "fail" => {
-                    let sep = eval_kw
-                        .get("sep")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(" ");
-                    let attr_prefix = eval_kw
-                        .get("attr")
-                        .and_then(|v| v.as_str())
-                        .map(|a| format!("attribute {a}: "))
-                        .unwrap_or_default();
-
-                    let mut parts = Vec::new();
-                    if let Some(msg_val) = eval_kw.get("msg") {
-                        if !matches!(msg_val, Value::None) {
-                            parts.push(msg_val.to_string());
-                        }
-                    }
-                    for arg in eval_pos {
-                        parts.push(arg.to_string());
-                    }
-                    let msg = parts.join(sep);
-                    let trace = self.thread.format_stack_trace_at(&loc);
-                    return Err(StarlarkError(format!("{trace}Error in fail: {attr_prefix}{msg}")));
-                }
-                "print" => {
-                    let sep = eval_kw
-                        .get("sep")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or(" ");
-                    let parts: Vec<String> = eval_pos
-                        .iter()
-                        .map(|v| match v {
-                            Value::Label(l) => label_shorthand_display(l, self.main_repo_mapping.as_deref()),
-                            // `Facts.debugPrint` shows the contents.
-                            v @ Value::Host(k, _) if k == "Facts" => match self.host.clone() {
-                                Some(host) => host(self, "debugprint:Facts", vec![v.clone()], BTreeMap::new()).map(|r| r.to_string()).unwrap_or_else(|_| v.to_string()),
-                                None => v.to_string(),
-                            },
-                            v => v.to_string(),
-                        })
-                        .collect();
-                    let msg = parts.join(sep);
-                    if let Some(handler) = &self.print_handler {
-                        handler(&loc, &msg);
-                    } else if let Some(buf) = self.captured_prints.as_mut() {
-                        buf.push((loc.clone(), msg));
-                    } else {
-                        eprintln!("DEBUG: {}:{}:{}: {msg}", loc.file, loc.line, loc.column);
-                    }
-                    return Ok(Value::None);
-                }
-                _ => {}
-            }
-
-            if let Some(r) = self.probe_host_attr(func_name, &eval_pos, &eval_kw) {
-                return r;
-            }
-            match eval::builtins::eval_universal_function(func_name, &eval_pos, &eval_kw) {
-                Ok(Some(res)) => return Ok(res),
-                Ok(None) => {}
-                Err(e) => {
-                    if !has_location_prefix(&e.0) {
-                        self.builtin_error = Some((func_name.to_string(), e.0.clone()));
-                    }
-                    return Err(with_loc(e, &loc));
+            match self.try_call_builtin(func_name, eval_pos, eval_kw, loc)? {
+                Ok(res) => return Ok(res),
+                Err((ep, ek)) => {
+                    let callee_val = self.eval_expr(callee)?;
+                    return self.call_callable(callee_val, ep, ek, loc);
                 }
             }
         }
 
         let callee_val = self.eval_expr(callee)?;
         self.call_callable(callee_val, eval_pos, eval_kw, loc)
+    }
+
+    fn json_encode_ctx(&mut self, arg: &Value) -> Result<String, StarlarkError> {
+        let host = self.host.clone();
+        // Resolve `File` host values (`Object.objectForEncoding`) using `self.host` when present.
+        let mut resolve = |kind: &str, id: &str| -> Result<Option<Value>, StarlarkError> {
+            if kind != "file" {
+                return Ok(None);
+            }
+            let Some(ref h) = host else {
+                return Ok(None);
+            };
+            let recv = Value::Host(kind.to_string(), id.to_string());
+            let path = h(self, "attr:file.path", vec![recv.clone()], BTreeMap::new())?;
+            let root = h(self, "attr:file.root", vec![recv.clone()], BTreeMap::new())?;
+            let root_path = match root {
+                Value::Struct(s) => s
+                    .fields
+                    .get("path")
+                    .cloned()
+                    .unwrap_or(Value::String(String::new())),
+                _ => Value::String(String::new()),
+            };
+            let short_path = h(self, "attr:file.short_path", vec![recv], BTreeMap::new())?;
+            let mut m = BTreeMap::new();
+            m.insert("path".to_string(), path);
+            m.insert("root".to_string(), root_path);
+            m.insert("short_path".to_string(), short_path);
+            Ok(Some(Value::Struct(Arc::new(StructValue::new(m)))))
+        };
+        json_encode_with_host(arg, &mut resolve)
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn try_call_builtin(
+        &mut self,
+        func_name: &str,
+        eval_pos: Vec<Value>,
+        eval_kw: BTreeMap<String, Value>,
+        loc: &Location,
+    ) -> Result<Result<Value, (Vec<Value>, BTreeMap<String, Value>)>, StarlarkError> {
+        if let Some(dup) = self.pending_dup_kw.take() {
+            return Err(StarlarkError(format!(
+                "{loc}: {func_name}() got multiple values for argument '{dup}'"
+            )));
+        }
+        if self.host.is_some() {
+            if let Some(Value::BuiltinFunction(bf)) = self.lookup_var(func_name) {
+                if let Some(name) = bf.strip_prefix("host:") {
+                    let host = self.host.clone().unwrap();
+                    self.call_location = loc.to_string();
+                    self.last_call_loc = loc.clone();
+                    return Ok(Ok(host(self, name, eval_pos, eval_kw).map_err(|e| {
+                        let prefix = format!("{loc}: ");
+                        if e.0.starts_with(&prefix)
+                            || e.0.starts_with("ERROR: ")
+                            || e.0.contains(": Traceback (most recent call last):\n")
+                        {
+                            e
+                        } else {
+                            StarlarkError(format!("{prefix}{}", e.0))
+                        }
+                    })?));
+                }
+            }
+        }
+        match func_name {
+            "select" => {
+                let entries = match eval_pos.first() {
+                    Some(Value::Dict(d)) => {
+                        let guard = d.lock().unwrap();
+                        let mut list = Vec::new();
+                        for (k, v) in &guard.entries {
+                            list.push((k.to_string(), v.clone()));
+                        }
+                        list
+                    }
+                    _ => {
+                        return Err(StarlarkError(format!(
+                            "{loc}: select() requires a dict argument"
+                        )));
+                    }
+                };
+                return Ok(Ok(Value::SelectorList(SelectorList::from_select(entries))));
+            }
+            "depset" => {
+                let direct = eval_pos
+                    .first()
+                    .or_else(|| eval_kw.get("direct"))
+                    .and_then(|v| match v {
+                        Value::List(l) => Some(l.lock().unwrap().elements.clone()),
+                        Value::Tuple(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                let order = eval_kw
+                    .get("order")
+                    .and_then(|v| v.as_str())
+                    .map(DepsetOrder::parse)
+                    .transpose()?
+                    .unwrap_or_default();
+                let transitive = eval_kw
+                    .get("transitive")
+                    .and_then(|v| match v {
+                        Value::List(l) => Some(
+                            l.lock()
+                                .unwrap()
+                                .elements
+                                .iter()
+                                .filter_map(|item| match item {
+                                    Value::Depset(d) => Some(Arc::clone(d)),
+                                    _ => None,
+                                })
+                                .collect(),
+                        ),
+                        Value::Tuple(t) => Some(
+                            t.iter()
+                                .filter_map(|item| match item {
+                                    Value::Depset(d) => Some(Arc::clone(d)),
+                                    _ => None,
+                                })
+                                .collect(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or_default();
+                return Ok(Ok(Value::Depset(Arc::new(Depset::new_checked(
+                    order,
+                    direct,
+                    transitive,
+                    self.semantics.incompatible_always_check_depset_elements,
+                )?))));
+            }
+            "glob" => {
+                let include = eval_pos
+                    .first()
+                    .or_else(|| eval_kw.get("include"))
+                    .map(|v| v.to_string_list())
+                    .unwrap_or_default();
+                let exclude = eval_pos
+                    .get(1)
+                    .or_else(|| eval_kw.get("exclude"))
+                    .map(|v| v.to_string_list())
+                    .unwrap_or_default();
+                let exclude_dirs = eval_kw
+                    .get("exclude_directories")
+                    .map(|v| match v {
+                        Value::Int(i) => !i.is_zero(),
+                        Value::Bool(b) => *b,
+                        _ => true,
+                    })
+                    .unwrap_or(true);
+                if let Some(ref fs) = self.fs {
+                    if let Ok(matched) = evaluate_glob(
+                        fs.as_ref(),
+                        &self.package_dir,
+                        &include,
+                        &exclude,
+                        exclude_dirs,
+                    ) {
+                        return Ok(Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                            matched.into_iter().map(Value::String).collect(),
+                            Arc::clone(&self.mutability),
+                        ))))));
+                    }
+                }
+                return Ok(Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                    Vec::new(),
+                    Arc::clone(&self.mutability),
+                ))))));
+            }
+            "struct" => {
+                if !eval_pos.is_empty() {
+                    return Err(StarlarkError(format!(
+                        "{loc}: struct() does not accept positional arguments"
+                    )));
+                }
+                return Ok(Ok(Value::Struct(Arc::new(StructValue::new(eval_kw)))));
+            }
+            "provider" => {
+                return Ok(Ok(Value::Provider {
+                    name: "Provider".to_string(),
+                }));
+            }
+            "rule" | "repository_rule" | "module_extension" | "aspect" | "tag_class" => {
+                let executable = eval_kw
+                    .get("executable")
+                    .map(|v| v.is_truthy())
+                    .unwrap_or(false);
+                let test = eval_kw.get("test").map(|v| v.is_truthy()).unwrap_or(false);
+                return Ok(Ok(Value::RuleCallable {
+                    rule_class: "custom_rule".to_string(),
+                    executable,
+                    test,
+                }));
+            }
+            "Label" => {
+                let s = eval_pos
+                    .first()
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("//:default");
+                let lctx = self.current_module_env().label_ctx.lock().unwrap().clone();
+                let label = match lctx {
+                    Some((pkg, mapping)) => {
+                        let mapping = match s.strip_prefix('@').filter(|r| !r.starts_with('@')) {
+                            Some(rest) => {
+                                let apparent = rest.split("//").next().unwrap_or(rest);
+                                if !apparent.is_empty()
+                                    && !mapping.entries().any(|(k, _)| k == apparent)
+                                    && apparent != "bazel_tools"
+                                    && apparent != "platforms"
+                                {
+                                    let owner = mapping.owner_repo().clone();
+                                    let marker = format!(
+                                        "[unknown repo '{apparent}' requested from @@{}]",
+                                        owner.name()
+                                    );
+                                    let mut entries: std::collections::HashMap<
+                                        String,
+                                        zel_cmdline::RepositoryName,
+                                    > = mapping
+                                        .entries()
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect();
+                                    entries.insert(
+                                        apparent.to_string(),
+                                        zel_cmdline::RepositoryName::create_unvalidated(marker),
+                                    );
+                                    zel_cmdline::RepositoryMapping::new(entries, owner)
+                                } else {
+                                    mapping
+                                }
+                            }
+                            None => mapping,
+                        };
+                        Label::parse_with_package_context(s, &pkg, &mapping)
+                            .map_err(|e| StarlarkError(e.to_string()))?
+                    }
+                    None => Label::parse_canonical(s).map_err(|e| StarlarkError(e.to_string()))?,
+                };
+                return Ok(Ok(Value::Label(label)));
+            }
+            "exports_files" => {
+                if let Some(first) = eval_pos.first() {
+                    self.exports_files.extend(first.to_string_list());
+                }
+                return Ok(Ok(Value::None));
+            }
+            "package" | "licenses" | "register_toolchains" | "register_execution_platforms" => {
+                return Ok(Ok(Value::None));
+            }
+            "fail" => {
+                let sep = eval_kw.get("sep").and_then(|v| v.as_str()).unwrap_or(" ");
+                let attr_prefix = eval_kw
+                    .get("attr")
+                    .and_then(|v| v.as_str())
+                    .map(|a| format!("attribute {a}: "))
+                    .unwrap_or_default();
+
+                let mut parts = Vec::new();
+                if let Some(msg_val) = eval_kw.get("msg") {
+                    if !matches!(msg_val, Value::None) {
+                        parts.push(msg_val.to_string());
+                    }
+                }
+                for arg in eval_pos {
+                    parts.push(arg.to_string());
+                }
+                let msg = parts.join(sep);
+                let trace = self.thread.format_stack_trace_at(loc);
+                return Err(StarlarkError(format!(
+                    "{trace}Error in fail: {attr_prefix}{msg}"
+                )));
+            }
+            "print" => {
+                let sep = eval_kw.get("sep").and_then(|v| v.as_str()).unwrap_or(" ");
+                let parts: Vec<String> = eval_pos
+                    .iter()
+                    .map(|v| match v {
+                        Value::Label(l) => {
+                            label_shorthand_display(l, self.main_repo_mapping.as_deref())
+                        }
+                        v @ Value::Host(k, _) if k == "Facts" => match self.host.clone() {
+                            Some(host) => {
+                                host(self, "debugprint:Facts", vec![v.clone()], BTreeMap::new())
+                                    .map(|r| r.to_string())
+                                    .unwrap_or_else(|_| v.to_string())
+                            }
+                            None => v.to_string(),
+                        },
+                        v => v.to_string(),
+                    })
+                    .collect();
+                let msg = parts.join(sep);
+                if let Some(handler) = &self.print_handler {
+                    handler(loc, &msg);
+                } else if let Some(buf) = self.captured_prints.as_mut() {
+                    buf.push((loc.clone(), msg));
+                } else {
+                    eprintln!("DEBUG: {}:{}:{}: {msg}", loc.file, loc.line, loc.column);
+                }
+                return Ok(Ok(Value::None));
+            }
+            "min" | "max" => {
+                for k in eval_kw.keys() {
+                    if k != "key" {
+                        return Err(with_loc(
+                            StarlarkError(format!(
+                                "{func_name}() got unexpected keyword argument: {k}"
+                            )),
+                            loc,
+                        ));
+                    }
+                }
+                let key_fn = match eval_kw.get("key") {
+                    None | Some(Value::None) => None,
+                    Some(f) if eval::builtins::is_callable(f) => Some(f.clone()),
+                    Some(other) => {
+                        return Err(with_loc(
+                            StarlarkError(format!(
+                                "parameter 'key' got value of type '{}', want 'callable or NoneType'",
+                                other.type_name()
+                            )),
+                            loc,
+                        ));
+                    }
+                };
+                if let Some(key_fn) = key_fn {
+                    let items = if eval_pos.len() == 1 {
+                        eval::builtins::value_to_sequence(&eval_pos[0])
+                            .map_err(|e| with_loc(e, loc))?
+                    } else if eval_pos.is_empty() {
+                        return Err(with_loc(
+                            StarlarkError("expected at least one item".to_string()),
+                            loc,
+                        ));
+                    } else {
+                        eval_pos
+                    };
+                    if items.is_empty() {
+                        return Err(with_loc(
+                            StarlarkError("expected at least one item".to_string()),
+                            loc,
+                        ));
+                    }
+                    let want = if func_name == "min" {
+                        Ordering::Less
+                    } else {
+                        Ordering::Greater
+                    };
+                    let mut best = items[0].clone();
+                    let mut best_key = self.call_callable(
+                        key_fn.clone(),
+                        vec![best.clone()],
+                        BTreeMap::new(),
+                        loc,
+                    )?;
+                    for item in &items[1..] {
+                        let k = self.call_callable(
+                            key_fn.clone(),
+                            vec![item.clone()],
+                            BTreeMap::new(),
+                            loc,
+                        )?;
+                        let ord = eval::builtins::compare_values(&k, &best_key)
+                            .map_err(|e| with_loc(e, loc))?;
+                        if ord == want {
+                            best = item.clone();
+                            best_key = k;
+                        }
+                    }
+                    return Ok(Ok(best));
+                }
+            }
+            "sorted" => {
+                for k in eval_kw.keys() {
+                    if k != "key" && k != "reverse" {
+                        return Err(with_loc(
+                            StarlarkError(format!("sorted() got unexpected keyword argument: {k}")),
+                            loc,
+                        ));
+                    }
+                }
+                let key_fn = match eval_kw.get("key") {
+                    None | Some(Value::None) => None,
+                    Some(f) if eval::builtins::is_callable(f) => Some(f.clone()),
+                    Some(other) => {
+                        return Err(with_loc(
+                            StarlarkError(format!(
+                                "parameter 'key' got value of type '{}', want 'callable or NoneType'",
+                                other.type_name()
+                            )),
+                            loc,
+                        ));
+                    }
+                };
+                if let Some(key_fn) = key_fn {
+                    let x = eval_pos.first().ok_or_else(|| {
+                        with_loc(
+                            StarlarkError("sorted() requires 1 argument".to_string()),
+                            loc,
+                        )
+                    })?;
+                    let reverse = eval_kw
+                        .get("reverse")
+                        .map(|v| v.is_truthy())
+                        .unwrap_or(false);
+                    let items =
+                        eval::builtins::value_to_sequence(x).map_err(|e| with_loc(e, loc))?;
+                    let mut decorated: Vec<(Value, Value)> = Vec::with_capacity(items.len());
+                    for item in items {
+                        let k = self.call_callable(
+                            key_fn.clone(),
+                            vec![item.clone()],
+                            BTreeMap::new(),
+                            loc,
+                        )?;
+                        decorated.push((k, item));
+                    }
+                    eval::builtins::fallible_merge_sort(&mut decorated, &mut |a, b| {
+                        let ord = eval::builtins::compare_values(&a.0, &b.0)?;
+                        Ok(if reverse { ord.reverse() } else { ord })
+                    })
+                    .map_err(|e| with_loc(e, loc))?;
+                    let out: Vec<Value> = decorated.into_iter().map(|(_, v)| v).collect();
+                    return Ok(Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                        out,
+                        Arc::clone(&self.mutability),
+                    ))))));
+                }
+            }
+            "getattr" => {
+                if let (Some(x), Some(name)) = (
+                    eval_pos.first().cloned(),
+                    eval_pos.get(1).and_then(|v| v.as_str()).map(str::to_string),
+                ) {
+                    if matches!(x, Value::Host(..)) {
+                        if let Some(r) = self.probe_host_attr("getattr", &eval_pos, &eval_kw) {
+                            return Ok(Ok(r?));
+                        }
+                    }
+                    let is_method = match &x {
+                        Value::Dict(_) => eval::builtins::DICT_METHODS.contains(&name.as_str()),
+                        Value::List(_) => eval::builtins::LIST_METHODS.contains(&name.as_str()),
+                        Value::Set(_) => eval::builtins::SET_METHODS.contains(&name.as_str()),
+                        Value::String(_) => eval::builtins::STRING_METHODS.contains(&name.as_str()),
+                        Value::Depset(_) => name == "to_list",
+                        Value::Label(_) => eval::builtins::LABEL_METHODS.contains(&name.as_str()),
+                        _ => false,
+                    };
+                    if is_method {
+                        return Ok(Ok(self.bound_method(x, &name, loc)));
+                    }
+                }
+            }
+            _ => {}
+        }
+
+        if let Some(r) = self.probe_host_attr(func_name, &eval_pos, &eval_kw) {
+            return Ok(Ok(r?));
+        }
+        match eval::builtins::eval_universal_function_in(
+            func_name,
+            &eval_pos,
+            &eval_kw,
+            &self.mutability,
+        ) {
+            Ok(Some(res)) => Ok(Ok(res)),
+            Ok(None) => Ok(Err((eval_pos, eval_kw))),
+            Err(e) => {
+                if !has_location_prefix(&e.0) {
+                    self.builtin_error = Some((func_name.to_string(), e.0.clone()));
+                }
+                Err(with_loc(e, loc))
+            }
+        }
     }
 
     /// Calls any callable value with already-evaluated arguments.
@@ -2119,7 +2881,19 @@ impl EvalContext {
         pos: Vec<Value>,
         kw: BTreeMap<String, Value>,
     ) -> Result<Value, StarlarkError> {
-        self.call_callable(callee, pos, kw, &Location::default())
+        let prev_mut = if self.mutability.is_frozen() {
+            Some(std::mem::replace(
+                &mut self.mutability,
+                Mutability::create(),
+            ))
+        } else {
+            None
+        };
+        let res = self.call_callable(callee, pos, kw, &Location::default());
+        if let Some(prev) = prev_mut {
+            self.mutability = prev;
+        }
+        res
     }
 
     fn call_callable(
@@ -2129,10 +2903,14 @@ impl EvalContext {
         eval_kw: BTreeMap<String, Value>,
         loc: &Location,
     ) -> Result<Value, StarlarkError> {
-        let loc = loc;
         let pending_dup = self.pending_dup_kw.take();
         match callee_val {
             Value::Host(kind, id) => {
+                if let Some(d) = &pending_dup {
+                    return Err(StarlarkError(format!(
+                        "{loc}: {kind}() got multiple values for argument '{d}'"
+                    )));
+                }
                 let host = self.host.clone().ok_or_else(|| {
                     StarlarkError(format!("{loc}: '{kind}' object is not callable"))
                 })?;
@@ -2143,7 +2921,10 @@ impl EvalContext {
                 self.last_call_loc = loc.clone();
                 host(self, &format!("call:{kind}"), args, eval_kw).map_err(|e| {
                     let prefix = format!("{loc}: ");
-                    if e.0.starts_with(&prefix) || e.0.starts_with("ERROR: ") || e.0.contains(": Traceback (most recent call last):\n") {
+                    if e.0.starts_with(&prefix)
+                        || e.0.starts_with("ERROR: ")
+                        || e.0.contains(": Traceback (most recent call last):\n")
+                    {
                         e
                     } else {
                         StarlarkError(format!("{prefix}{}", e.0))
@@ -2156,26 +2937,43 @@ impl EvalContext {
                 // Bazel locates a function (for binding errors, recursion) at its name, after `def `.
                 let mut def_loc = func.location.clone();
                 def_loc.column += 4;
-                if let Err(e) = self.thread.push_frame_for(&func.name, Arc::as_ptr(&func) as *const u8 as usize, loc.clone()) {
+                if let Err(e) = self.thread.push_frame_for(
+                    &func.name,
+                    Arc::as_ptr(&func) as *const u8 as usize,
+                    loc.clone(),
+                ) {
                     // The recursive frame is entered before the error is reported.
-                    let _ = self.thread.push_frame_for(&func.name, usize::MAX, loc.clone());
+                    let _ = self
+                        .thread
+                        .push_frame_for(&func.name, usize::MAX, loc.clone());
                     return Err(StarlarkError(format!("{def_loc}: {}", e.0)));
                 }
                 self.cur_call_loc = def_loc.clone();
                 let bind_err = |m: String| StarlarkError(format!("{def_loc}: {m}"));
                 if let Some(d) = &pending_dup {
-                    return Err(bind_err(format!("{}() got multiple values for parameter '{d}'", func.name)));
+                    return Err(bind_err(format!(
+                        "{}() got multiple values for parameter '{d}'",
+                        func.name
+                    )));
                 }
                 let plural = |n: usize| if n == 1 { "" } else { "s" };
                 // Check positional / keyword arguments like `Starlark.fastcall` argument binding.
                 {
                     let has_args = func.params.iter().any(|p| p.is_args);
                     let has_kwargs = func.params.iter().any(|p| p.is_kwargs);
-                    let non_kw_only: Vec<&str> =
-                        func.params.iter().filter(|p| !p.is_kw_only && !p.is_args && !p.is_kwargs).map(|p| p.name.as_str()).collect();
+                    let non_kw_only: Vec<&str> = func
+                        .params
+                        .iter()
+                        .filter(|p| !p.is_kw_only && !p.is_args && !p.is_kwargs)
+                        .map(|p| p.name.as_str())
+                        .collect();
                     if eval_pos.len() > non_kw_only.len() && !has_args {
                         if non_kw_only.is_empty() {
-                            return Err(bind_err(format!("{}() does not accept positional arguments, but got {}", func.name, eval_pos.len())));
+                            return Err(bind_err(format!(
+                                "{}() does not accept positional arguments, but got {}",
+                                func.name,
+                                eval_pos.len()
+                            )));
                         }
                         return Err(bind_err(format!(
                             "{}() accepts no more than {} positional argument{} but got {}",
@@ -2187,18 +2985,28 @@ impl EvalContext {
                     }
                     for (i, n) in non_kw_only.iter().enumerate() {
                         if i < eval_pos.len() && eval_kw.contains_key(*n) {
-                            return Err(bind_err(format!("{}() got multiple values for parameter '{n}'", func.name)));
+                            return Err(bind_err(format!(
+                                "{}() got multiple values for parameter '{n}'",
+                                func.name
+                            )));
                         }
                     }
                     if !has_kwargs {
                         let mut unexpected: Vec<String> = Vec::new();
-                        let order: Vec<String> = if self.call_kw_order.iter().all(|k| eval_kw.contains_key(k)) && self.call_kw_order.len() == eval_kw.len() {
-                            self.call_kw_order.clone()
-                        } else {
-                            eval_kw.keys().cloned().collect()
-                        };
+                        let order: Vec<String> =
+                            if self.call_kw_order.iter().all(|k| eval_kw.contains_key(k))
+                                && self.call_kw_order.len() == eval_kw.len()
+                            {
+                                self.call_kw_order.clone()
+                            } else {
+                                eval_kw.keys().cloned().collect()
+                            };
                         for k in order {
-                            if !func.params.iter().any(|p| !p.is_args && !p.is_kwargs && p.name == k) {
+                            if !func
+                                .params
+                                .iter()
+                                .any(|p| !p.is_args && !p.is_kwargs && p.name == k)
+                            {
                                 unexpected.push(k);
                             }
                         }
@@ -2215,9 +3023,14 @@ impl EvalContext {
                         .params
                         .iter()
                         .enumerate()
-                        .filter(|(_, p)| !p.is_kw_only && !p.is_args && !p.is_kwargs && p.default.is_none())
                         .filter(|(_, p)| {
-                            let idx = non_kw_only.iter().position(|n| *n == p.name).unwrap_or(usize::MAX);
+                            !p.is_kw_only && !p.is_args && !p.is_kwargs && p.default.is_none()
+                        })
+                        .filter(|(_, p)| {
+                            let idx = non_kw_only
+                                .iter()
+                                .position(|n| *n == p.name)
+                                .unwrap_or(usize::MAX);
                             idx >= eval_pos.len() && !eval_kw.contains_key(&p.name)
                         })
                         .map(|(_, p)| p.name.as_str())
@@ -2234,7 +3047,13 @@ impl EvalContext {
                     let missing_kw: Vec<&str> = func
                         .params
                         .iter()
-                        .filter(|p| p.is_kw_only && !p.is_args && !p.is_kwargs && p.default.is_none() && !eval_kw.contains_key(&p.name))
+                        .filter(|p| {
+                            p.is_kw_only
+                                && !p.is_args
+                                && !p.is_kwargs
+                                && p.default.is_none()
+                                && !eval_kw.contains_key(&p.name)
+                        })
                         .map(|p| p.name.as_str())
                         .collect();
                     if !missing_kw.is_empty() {
@@ -2257,7 +3076,10 @@ impl EvalContext {
                     }
                 }
                 if let Some(frame) = self.thread.current_frame_mut() {
-                    frame.parents = func.closure.0.clone();
+                    frame.local_names =
+                        Arc::new(collect_function_local_names(&func.params, &func.body));
+                    frame.parents = func.closure.scopes.clone();
+                    frame.parent_local_names = func.closure.local_names.clone();
                 }
 
                 // Bind parameters into frame
@@ -2271,10 +3093,14 @@ impl EvalContext {
                         };
                         self.set_var(&param.name, Value::Tuple(rest));
                     } else if param.is_kwargs {
-                        let mut d = StarlarkDict::new();
+                        let mut d = StarlarkDict::new_in(Arc::clone(&self.mutability));
                         for (k, v) in &eval_kw {
                             // Keywords consumed by named parameters are not collected.
-                            if func.params.iter().any(|p| !p.is_args && !p.is_kwargs && p.name == *k) {
+                            if func
+                                .params
+                                .iter()
+                                .any(|p| !p.is_args && !p.is_kwargs && p.name == *k)
+                            {
                                 continue;
                             }
                             let _ = d.insert(Value::String(k.clone()), v.clone());
@@ -2304,9 +3130,8 @@ impl EvalContext {
                             break;
                         }
                         ControlFlow::Break | ControlFlow::Continue => {
-                            return Err(StarlarkError(format!(
-                                "{loc}: flow statement outside loop"
-                            )));
+                            // `Eval.execFunctionBody` ignores break/continue escaping a body.
+                            break;
                         }
                         ControlFlow::None => {}
                     }
@@ -2317,6 +3142,12 @@ impl EvalContext {
                 Ok(ret)
             }
             Value::BuiltinFunction(bf) if bf.starts_with("host:") && self.host.is_some() => {
+                if let Some(d) = &pending_dup {
+                    let fn_name = &bf["host:".len()..];
+                    return Err(StarlarkError(format!(
+                        "{loc}: {fn_name}() got multiple values for argument '{d}'"
+                    )));
+                }
                 let host = self.host.clone().unwrap();
                 self.call_location = loc.to_string();
 
@@ -2331,105 +3162,144 @@ impl EvalContext {
                 host_result.map_err(|e| {
                     // Host functions may already have prefixed their own call location.
                     let prefix = format!("{loc}: ");
-                    if e.0.starts_with(&prefix) || e.0.starts_with("ERROR: ") || e.0.contains(": Traceback (most recent call last):\n") {
+                    if e.0.starts_with(&prefix)
+                        || e.0.starts_with("ERROR: ")
+                        || e.0.contains(": Traceback (most recent call last):\n")
+                    {
                         e
                     } else {
                         StarlarkError(format!("{prefix}{}", e.0))
                     }
                 })
             }
-            Value::BuiltinFunction(bf) => match bf.as_str() {
-                "json.encode" => {
-                    let arg = eval_pos.first().ok_or_else(|| {
-                        StarlarkError(format!("{loc}: json.encode requires 1 argument"))
-                    })?;
-                    Ok(Value::String(json_encode(arg)?))
+            Value::BuiltinFunction(bf) => {
+                if let Some(d) = &pending_dup {
+                    return Err(StarlarkError(format!(
+                        "{loc}: {bf}() got multiple values for argument '{d}'"
+                    )));
                 }
-                "json.decode" => {
-                    let arg = eval_pos
-                        .first()
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
+                match bf.as_str() {
+                    "json.encode" => {
+                        let arg = eval_pos.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: json.encode requires 1 argument"))
+                        })?;
+                        Ok(Value::String(self.json_encode_ctx(arg)?))
+                    }
+                    "json.decode" => {
+                        let arg = eval_pos.first().and_then(|v| v.as_str()).ok_or_else(|| {
                             StarlarkError(format!("{loc}: json.decode requires string argument"))
                         })?;
-                    let default = eval_kw.get("default").cloned();
-                    json_decode(arg, default)
-                }
-                "json.indent" => {
-                    let arg = eval_pos
-                        .first()
-                        .and_then(|v| v.as_str())
-                        .ok_or_else(|| {
+                        let default = eval_kw.get("default").cloned();
+                        json_decode(arg, default)
+                    }
+                    "json.indent" => {
+                        let arg = eval_pos.first().and_then(|v| v.as_str()).ok_or_else(|| {
                             StarlarkError(format!("{loc}: json.indent requires string argument"))
                         })?;
-                    let prefix = eval_kw
-                        .get("prefix")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let indent = eval_kw
-                        .get("indent")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("\t");
-                    Ok(Value::String(json_indent(arg, prefix, indent)?))
-                }
-                "json.encode_indent" => {
-                    let arg = eval_pos.first().ok_or_else(|| {
-                        StarlarkError(format!("{loc}: json.encode_indent requires 1 argument"))
-                    })?;
-                    let prefix = eval_kw
-                        .get("prefix")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("");
-                    let indent = eval_kw
-                        .get("indent")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("\t");
-                    let encoded = json_encode(arg)?;
-                    Ok(Value::String(json_indent(&encoded, prefix, indent)?))
-                }
-                "proto.encode_text" => {
-                    let arg = eval_pos.first().ok_or_else(|| {
-                        StarlarkError(format!("{loc}: proto.encode_text requires struct argument"))
-                    })?;
-                    Ok(Value::String(proto_encode_text(arg)?))
-                }
-                // `fail` used as a first-class value (e.g. `printer = fail`).
-                "fail" => {
-                    let sep = eval_kw.get("sep").and_then(|v| v.as_str()).unwrap_or(" ").to_string();
-                    let mut parts: Vec<String> = Vec::new();
-                    if let Some(m) = eval_kw.get("msg") {
-                        if !matches!(m, Value::None) {
-                            parts.push(m.to_string());
-                        }
+                        let prefix = eval_kw.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+                        let indent = eval_kw
+                            .get("indent")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("\t");
+                        Ok(Value::String(json_indent(arg, prefix, indent)?))
                     }
-                    for a in &eval_pos {
-                        parts.push(match a {
-                            Value::String(s) => s.clone(),
-                            o => o.to_string(),
-                        });
+                    "json.encode_indent" => {
+                        let arg = eval_pos.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: json.encode_indent requires 1 argument"))
+                        })?;
+                        let prefix = eval_kw.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+                        let indent = eval_kw
+                            .get("indent")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("\t");
+                        let encoded = self.json_encode_ctx(arg)?;
+                        Ok(Value::String(json_indent(&encoded, prefix, indent)?))
                     }
-                    Err(StarlarkError(format!("{loc}: fail: {}", parts.join(&sep))))
+                    "proto.encode_text" => {
+                        let arg = eval_pos.first().ok_or_else(|| {
+                            StarlarkError(format!(
+                                "{loc}: proto.encode_text requires struct argument"
+                            ))
+                        })?;
+                        Ok(Value::String(proto_encode_text(arg)?))
+                    }
+                    _ => match self.try_call_builtin(bf.as_str(), eval_pos, eval_kw, loc)? {
+                        Ok(v) => Ok(v),
+                        Err(_) => Err(StarlarkError(format!("{loc}: unknown builtin '{bf}'"))),
+                    },
                 }
-                _ => match self
-                    .probe_host_attr(bf.as_str(), &eval_pos, &eval_kw)
-                    .map(|r| r.map(Some))
-                    .unwrap_or_else(|| eval::builtins::eval_universal_function(bf.as_str(), &eval_pos, &eval_kw))
-                {
-                    Ok(Some(v)) => Ok(v),
-                    Ok(None) => Err(StarlarkError(format!("{loc}: unknown builtin '{bf}'"))),
-                    Err(e) => Err(StarlarkError(format!("{loc}: {}", e.0))),
-                },
-            },
+            }
             Value::Provider { name } => {
-                let mut eval_kw = eval_kw;
-                // Native providers with positional constructor parameters
-                // (`testing.ExecutionInfo(requirements, exec_group)`).
-                if name == "ExecutionInfo" {
-                    for (p, v) in ["requirements", "exec_group"].iter().zip(eval_pos.iter()) {
-                        eval_kw.entry((*p).to_string()).or_insert_with(|| v.clone());
+                if name == "OutputGroupInfo" {
+                    if !eval_pos.is_empty() {
+                        return Err(StarlarkError(format!(
+                            "{loc}: OutputGroupInfo() got unexpected positional argument"
+                        )));
                     }
+                    let mut converted = BTreeMap::new();
+                    for (group, v) in eval_kw {
+                        let ds = match v {
+                            Value::List(l) => {
+                                let elems = l.lock().unwrap().elements.clone();
+                                for (i, item) in elems.iter().enumerate() {
+                                    if !matches!(item, Value::Host(k, _) if k == "file") {
+                                        return Err(StarlarkError(format!(
+                                            "{loc}: at index {i} of output group '{group}', got element of type {}, want File",
+                                            item.type_name()
+                                        )));
+                                    }
+                                }
+                                Value::Depset(Arc::new(Depset::new(
+                                    DepsetOrder::Default,
+                                    elems,
+                                    vec![],
+                                )?))
+                            }
+                            Value::Tuple(elems) => {
+                                for (i, item) in elems.iter().enumerate() {
+                                    if !matches!(item, Value::Host(k, _) if k == "file") {
+                                        return Err(StarlarkError(format!(
+                                            "{loc}: at index {i} of output group '{group}', got element of type {}, want File",
+                                            item.type_name()
+                                        )));
+                                    }
+                                }
+                                Value::Depset(Arc::new(Depset::new(
+                                    DepsetOrder::Default,
+                                    elems,
+                                    vec![],
+                                )?))
+                            }
+                            Value::Depset(d) => {
+                                for item in d.to_list() {
+                                    if !matches!(item, Value::Host(ref k, _) if k == "file") {
+                                        return Err(StarlarkError(format!(
+                                            "{loc}: for output group '{group}', got depset of {}, want depset of File",
+                                            item.type_name()
+                                        )));
+                                    }
+                                }
+                                Value::Depset(d)
+                            }
+                            other => {
+                                return Err(StarlarkError(format!(
+                                    "{loc}: for output group '{group}', got {}, want depset or sequence of File",
+                                    other.type_name()
+                                )));
+                            }
+                        };
+                        converted.insert(group, ds);
+                    }
+                    return Ok(Value::ProviderInstance {
+                        provider_name: name,
+                        fields: converted,
+                    });
                 }
-                Ok(Value::ProviderInstance { provider_name: name, fields: eval_kw })
+                let fields = construct_native_provider(&name, eval_pos, eval_kw)?;
+                Ok(Value::ProviderInstance {
+                    provider_name: name,
+                    fields,
+                })
             }
             Value::RuleCallable { rule_class, .. } => {
                 self.rule_calls.push(RecordedRuleCall {
@@ -2440,8 +3310,15 @@ impl EvalContext {
             }
             other => {
                 // Bazel reports this at the frame's location before this call started.
-                let at = if self.pre_call_loc.file.is_empty() { loc.clone() } else { self.pre_call_loc.clone() };
-                Err(StarlarkError(format!("{at}: '{}' object is not callable", other.type_name())))
+                let at = if self.pre_call_loc.file.is_empty() {
+                    loc.clone()
+                } else {
+                    self.pre_call_loc.clone()
+                };
+                Err(StarlarkError(format!(
+                    "{at}: '{}' object is not callable",
+                    other.type_name()
+                )))
             }
         }
     }
@@ -2455,22 +3332,39 @@ impl EvalContext {
         loc: &Location,
     ) -> Result<Value, StarlarkError> {
         match recv {
-            Value::String(s) => eval::builtins::eval_string_method(&s, method, pos_args, kw_args),
+            Value::String(s) => eval::builtins::eval_string_method_in(
+                &s,
+                method,
+                pos_args,
+                kw_args,
+                &self.mutability,
+            ),
             Value::Label(l) => match method {
                 "same_package_label" => {
-                    let n = pos_args.first().and_then(|v| v.as_str()).ok_or_else(|| StarlarkError(format!("{loc}: same_package_label() takes a string")))?;
+                    let n = pos_args.first().and_then(|v| v.as_str()).ok_or_else(|| {
+                        StarlarkError(format!("{loc}: same_package_label() takes a string"))
+                    })?;
                     zel_cmdline::Label::create(l.package_identifier().clone(), n)
                         .map(Value::Label)
                         .map_err(|e| StarlarkError(format!("{loc}: {e}")))
                 }
                 "relative" | "package_relative" => {
-                    let raw = pos_args.first().and_then(|v| v.as_str()).ok_or_else(|| StarlarkError(format!("{loc}: relative() takes a string")))?;
+                    let raw = pos_args.first().and_then(|v| v.as_str()).ok_or_else(|| {
+                        StarlarkError(format!("{loc}: relative() takes a string"))
+                    })?;
                     let parsed = if let Some(n) = raw.strip_prefix(':') {
                         zel_cmdline::Label::create(l.package_identifier().clone(), n)
                     } else if raw.starts_with("@@") {
                         zel_cmdline::Label::parse_canonical(raw)
                     } else if let Some(rest) = raw.strip_prefix("//") {
-                        zel_cmdline::Label::parse_canonical(&format!("{}//{rest}", if l.repository().is_main() { "@@".to_string() } else { format!("@@{}", l.repository().name()) }))
+                        zel_cmdline::Label::parse_canonical(&format!(
+                            "{}//{rest}",
+                            if l.repository().is_main() {
+                                "@@".to_string()
+                            } else {
+                                format!("@@{}", l.repository().name())
+                            }
+                        ))
                     } else if raw.starts_with('@') {
                         zel_cmdline::Label::parse_canonical(&format!("@{raw}"))
                     } else {
@@ -2481,15 +3375,25 @@ impl EvalContext {
                         .map(Value::Label)
                         .map_err(|e| StarlarkError(format!("{loc}: {e}")))
                 }
-                other => Err(StarlarkError(format!("{loc}: type 'Label' has no method '{other}'"))),
+                other => Err(StarlarkError(format!(
+                    "{loc}: type 'Label' has no method '{other}'"
+                ))),
             },
             Value::List(l) => {
+                if method == "extend" {
+                    let items = pos_args.first().ok_or_else(|| {
+                        StarlarkError(format!("{loc}: extend() takes 1 argument"))
+                    })?;
+                    let seq = eval::builtins::value_to_sequence(items)?;
+                    l.lock().unwrap().extend(seq)?;
+                    return Ok(Value::None);
+                }
                 let mut guard = l.lock().unwrap();
                 match method {
                     "append" => {
-                        let item = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: append() takes 1 argument")))?;
+                        let item = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: append() takes 1 argument"))
+                        })?;
                         guard.append(item.clone())?;
                         Ok(Value::None)
                     }
@@ -2497,31 +3401,22 @@ impl EvalContext {
                         guard.clear()?;
                         Ok(Value::None)
                     }
-                    "extend" => {
-                        let items = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: extend() takes 1 argument")))?;
-                        let seq = eval::builtins::value_to_sequence(items)?;
-                        guard.extend(seq)?;
-                        Ok(Value::None)
-                    }
                     "index" => {
-                        let item = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: index() takes 1 argument")))?;
+                        let item = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: index() takes 1 argument"))
+                        })?;
                         let s = pos_args.get(1).and_then(|v| v.as_i64());
                         let e = pos_args.get(2).and_then(|v| v.as_i64());
                         let idx = guard.index(item, s, e)?;
                         Ok(Value::Int(BigInt::from_i64(idx)))
                     }
                     "insert" => {
-                        let idx = pos_args
-                            .first()
-                            .and_then(|v| v.as_i64())
-                            .ok_or_else(|| StarlarkError(format!("{loc}: insert() takes index argument")))?;
-                        let item = pos_args
-                            .get(1)
-                            .ok_or_else(|| StarlarkError(format!("{loc}: insert() takes item argument")))?;
+                        let idx = pos_args.first().and_then(|v| v.as_i64()).ok_or_else(|| {
+                            StarlarkError(format!("{loc}: insert() takes index argument"))
+                        })?;
+                        let item = pos_args.get(1).ok_or_else(|| {
+                            StarlarkError(format!("{loc}: insert() takes item argument"))
+                        })?;
                         guard.insert(idx, item.clone())?;
                         Ok(Value::None)
                     }
@@ -2530,9 +3425,9 @@ impl EvalContext {
                         guard.pop(idx)
                     }
                     "remove" => {
-                        let item = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: remove() takes 1 argument")))?;
+                        let item = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: remove() takes 1 argument"))
+                        })?;
                         guard.remove(item)?;
                         Ok(Value::None)
                     }
@@ -2542,6 +3437,27 @@ impl EvalContext {
                 }
             }
             Value::Dict(d) => {
+                if method == "update" {
+                    let mut pairs = Vec::new();
+                    if let Some(first) = pos_args.first() {
+                        match first {
+                            Value::Dict(other_d) => {
+                                pairs.extend(other_d.lock().unwrap().items());
+                            }
+                            other => {
+                                let seq = eval::builtins::value_to_sequence(other)?;
+                                for item in seq {
+                                    pairs.push(eval::builtins::universal::unpack_pair(&item)?);
+                                }
+                            }
+                        }
+                    }
+                    for (k, v) in kw_args {
+                        pairs.push((Value::String(k.clone()), v.clone()));
+                    }
+                    d.lock().unwrap().update(pairs)?;
+                    return Ok(Value::None);
+                }
                 let mut guard = d.lock().unwrap();
                 match method {
                     "clear" => {
@@ -2549,10 +3465,14 @@ impl EvalContext {
                         Ok(Value::None)
                     }
                     "get" => {
-                        let key = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: get() takes at least 1 argument")))?;
-                        let default = pos_args.get(1).or_else(|| kw_args.get("default")).cloned().unwrap_or(Value::None);
+                        let key = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: get() takes at least 1 argument"))
+                        })?;
+                        let default = pos_args
+                            .get(1)
+                            .or_else(|| kw_args.get("default"))
+                            .cloned()
+                            .unwrap_or(Value::None);
                         Ok(guard.get(key).cloned().unwrap_or(default))
                     }
                     "items" => {
@@ -2561,19 +3481,36 @@ impl EvalContext {
                             .into_iter()
                             .map(|(k, v)| Value::Tuple(vec![k, v]))
                             .collect();
-                        Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(pairs)))))
+                        Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                            pairs,
+                            Arc::clone(&self.mutability),
+                        )))))
                     }
-                    "keys" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(
+                    "keys" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
                         guard.keys(),
+                        Arc::clone(&self.mutability),
                     ))))),
-                    "values" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(
+                    "values" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
                         guard.values(),
+                        Arc::clone(&self.mutability),
                     ))))),
                     "pop" => {
-                        let key = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: pop() takes at least 1 argument")))?;
-                        let default = pos_args.get(1).cloned();
+                        for k in kw_args.keys() {
+                            if k != "default" {
+                                return Err(StarlarkError(format!(
+                                    "{loc}: pop() got unexpected keyword argument: {k}"
+                                )));
+                            }
+                        }
+                        if pos_args.len() > 1 && kw_args.contains_key("default") {
+                            return Err(StarlarkError(format!(
+                                "{loc}: pop() got multiple values for parameter 'default'"
+                            )));
+                        }
+                        let key = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: pop() takes at least 1 argument"))
+                        })?;
+                        let default = pos_args.get(1).or_else(|| kw_args.get("default")).cloned();
                         guard.pop(key, default)
                     }
                     "popitem" => {
@@ -2581,32 +3518,27 @@ impl EvalContext {
                         Ok(Value::Tuple(vec![k, v]))
                     }
                     "setdefault" => {
-                        let key = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: setdefault() requires key")))?;
-                        let default = pos_args.get(1).cloned().unwrap_or(Value::None);
-                        guard.setdefault(key.clone(), default)
-                    }
-                    "update" => {
-                        let mut pairs = Vec::new();
-                        if let Some(first) = pos_args.first() {
-                            match first {
-                                Value::Dict(other_d) => {
-                                    pairs.extend(other_d.lock().unwrap().items());
-                                }
-                                other => {
-                                    let seq = eval::builtins::value_to_sequence(other)?;
-                                    for item in seq {
-                                        pairs.push(eval::builtins::universal::unpack_pair(&item)?);
-                                    }
-                                }
+                        for k in kw_args.keys() {
+                            if k != "default" {
+                                return Err(StarlarkError(format!(
+                                    "{loc}: setdefault() got unexpected keyword argument: {k}"
+                                )));
                             }
                         }
-                        for (k, v) in kw_args {
-                            pairs.push((Value::String(k.clone()), v.clone()));
+                        if pos_args.len() > 1 && kw_args.contains_key("default") {
+                            return Err(StarlarkError(format!(
+                                "{loc}: setdefault() got multiple values for parameter 'default'"
+                            )));
                         }
-                        guard.update(pairs)?;
-                        Ok(Value::None)
+                        let key = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: setdefault() requires key"))
+                        })?;
+                        let default = pos_args
+                            .get(1)
+                            .or_else(|| kw_args.get("default"))
+                            .cloned()
+                            .unwrap_or(Value::None);
+                        guard.setdefault(key.clone(), default)
                     }
                     _ => Err(StarlarkError(format!(
                         "{loc}: 'dict' value has no field or method '{method}'"
@@ -2614,117 +3546,157 @@ impl EvalContext {
                 }
             }
             Value::Set(s) => {
-                let mut guard = s.lock().unwrap();
+                let to_set = |v: &Value| -> Result<StarlarkSet, StarlarkError> {
+                    match v {
+                        Value::Set(os) => Ok(os.lock().unwrap().clone()),
+                        _ => StarlarkSet::from_elements(eval::builtins::value_to_sequence(v)?),
+                    }
+                };
                 match method {
                     "add" => {
-                        let item = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: add() takes 1 argument")))?;
-                        guard.add(item.clone())?;
+                        let item = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: add() takes 1 argument"))
+                        })?;
+                        s.lock().unwrap().add(item.clone())?;
                         Ok(Value::None)
                     }
                     "clear" => {
-                        guard.clear()?;
+                        s.lock().unwrap().clear()?;
                         Ok(Value::None)
                     }
                     "discard" => {
-                        let item = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: discard() takes 1 argument")))?;
-                        guard.discard(item)?;
+                        let item = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: discard() takes 1 argument"))
+                        })?;
+                        s.lock().unwrap().discard(item)?;
                         Ok(Value::None)
                     }
                     "remove" => {
-                        let item = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: remove() takes 1 argument")))?;
-                        guard.remove(item)?;
+                        let item = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: remove() takes 1 argument"))
+                        })?;
+                        s.lock().unwrap().remove(item)?;
                         Ok(Value::None)
                     }
-                    "pop" => guard.pop(),
+                    "pop" => s.lock().unwrap().pop(),
                     "issubset" => {
-                        let other = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: issubset() takes 1 argument")))?;
-                        let other_set = match other {
-                            Value::Set(os) => os.lock().unwrap().clone(),
-                            _ => StarlarkSet::from_elements(eval::builtins::value_to_sequence(other)?)?,
-                        };
-                        Ok(Value::Bool(guard.issubset(&other_set)))
+                        let other = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: issubset() takes 1 argument"))
+                        })?;
+                        let other_set = to_set(other)?;
+                        Ok(Value::Bool(s.lock().unwrap().issubset(&other_set)))
                     }
                     "issuperset" => {
-                        let other = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: issuperset() takes 1 argument")))?;
-                        let other_set = match other {
-                            Value::Set(os) => os.lock().unwrap().clone(),
-                            _ => StarlarkSet::from_elements(eval::builtins::value_to_sequence(other)?)?,
-                        };
-                        Ok(Value::Bool(guard.issuperset(&other_set)))
+                        let other = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: issuperset() takes 1 argument"))
+                        })?;
+                        let other_set = to_set(other)?;
+                        Ok(Value::Bool(s.lock().unwrap().issuperset(&other_set)))
                     }
                     "isdisjoint" => {
-                        let other = pos_args
-                            .first()
-                            .ok_or_else(|| StarlarkError(format!("{loc}: isdisjoint() takes 1 argument")))?;
-                        let other_set = match other {
-                            Value::Set(os) => os.lock().unwrap().clone(),
-                            _ => StarlarkSet::from_elements(eval::builtins::value_to_sequence(other)?)?,
-                        };
-                        Ok(Value::Bool(guard.isdisjoint(&other_set)))
+                        let other = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!("{loc}: isdisjoint() takes 1 argument"))
+                        })?;
+                        let other_set = to_set(other)?;
+                        Ok(Value::Bool(s.lock().unwrap().isdisjoint(&other_set)))
                     }
                     "union" => {
-                        let mut res = guard.clone();
+                        let mut others = Vec::with_capacity(pos_args.len());
                         for arg in pos_args {
-                            let other_set = match arg {
-                                Value::Set(os) => os.lock().unwrap().clone(),
-                                _ => StarlarkSet::from_elements(eval::builtins::value_to_sequence(arg)?)?,
-                            };
-                            res = res.union(&other_set);
+                            others.push(to_set(arg)?);
+                        }
+                        let mut res = s.lock().unwrap().clone();
+                        res.frozen = false;
+                        res.iter_count = 0;
+                        res.mutability = Arc::clone(&self.mutability);
+                        for o in &others {
+                            res = res.union_in(o, Arc::clone(&self.mutability));
                         }
                         Ok(Value::Set(Arc::new(Mutex::new(res))))
                     }
                     "intersection" => {
-                        let mut res = guard.clone();
+                        let mut others = Vec::with_capacity(pos_args.len());
                         for arg in pos_args {
-                            let other_set = match arg {
-                                Value::Set(os) => os.lock().unwrap().clone(),
-                                _ => StarlarkSet::from_elements(eval::builtins::value_to_sequence(arg)?)?,
-                            };
-                            res = res.intersection(&other_set);
+                            others.push(to_set(arg)?);
                         }
+                        let mut res = s.lock().unwrap().clone();
+                        res.frozen = false;
+                        res.iter_count = 0;
+                        res.mutability = Arc::clone(&self.mutability);
+                        for o in &others {
+                            res = res.intersection(o);
+                        }
+                        res.mutability = Arc::clone(&self.mutability);
                         Ok(Value::Set(Arc::new(Mutex::new(res))))
                     }
                     "difference" => {
-                        let mut res = guard.clone();
+                        let mut others = Vec::with_capacity(pos_args.len());
                         for arg in pos_args {
-                            let other_set = match arg {
-                                Value::Set(os) => os.lock().unwrap().clone(),
-                                _ => StarlarkSet::from_elements(eval::builtins::value_to_sequence(arg)?)?,
-                            };
-                            res = res.difference(&other_set);
+                            others.push(to_set(arg)?);
                         }
+                        let mut res = s.lock().unwrap().clone();
+                        res.frozen = false;
+                        res.iter_count = 0;
+                        res.mutability = Arc::clone(&self.mutability);
+                        for o in &others {
+                            res = res.difference(o);
+                        }
+                        res.mutability = Arc::clone(&self.mutability);
                         Ok(Value::Set(Arc::new(Mutex::new(res))))
                     }
                     "symmetric_difference" => {
                         let other = pos_args.first().ok_or_else(|| {
                             StarlarkError(format!("{loc}: symmetric_difference() takes 1 argument"))
                         })?;
-                        let other_set = match other {
-                            Value::Set(os) => os.lock().unwrap().clone(),
-                            _ => StarlarkSet::from_elements(eval::builtins::value_to_sequence(other)?)?,
-                        };
-                        Ok(Value::Set(Arc::new(Mutex::new(
-                            guard.symmetric_difference(&other_set),
-                        ))))
+                        let other_set = to_set(other)?;
+                        let mut res = s.lock().unwrap().symmetric_difference(&other_set);
+                        res.mutability = Arc::clone(&self.mutability);
+                        Ok(Value::Set(Arc::new(Mutex::new(res))))
                     }
                     "update" => {
+                        let mut others = Vec::with_capacity(pos_args.len());
                         for arg in pos_args {
-                            let other_set = match arg {
-                                Value::Set(os) => os.lock().unwrap().clone(),
-                                _ => StarlarkSet::from_elements(eval::builtins::value_to_sequence(arg)?)?,
-                            };
-                            guard.update(&other_set)?;
+                            others.push(to_set(arg)?);
                         }
+                        let mut guard = s.lock().unwrap();
+                        guard.check_mutable()?;
+                        for o in &others {
+                            guard.update(o)?;
+                        }
+                        Ok(Value::None)
+                    }
+                    "intersection_update" => {
+                        let mut others = Vec::with_capacity(pos_args.len());
+                        for arg in pos_args {
+                            others.push(to_set(arg)?);
+                        }
+                        let mut guard = s.lock().unwrap();
+                        guard.check_mutable()?;
+                        for o in &others {
+                            guard.intersection_update(o)?;
+                        }
+                        Ok(Value::None)
+                    }
+                    "difference_update" => {
+                        let mut others = Vec::with_capacity(pos_args.len());
+                        for arg in pos_args {
+                            others.push(to_set(arg)?);
+                        }
+                        let mut guard = s.lock().unwrap();
+                        guard.check_mutable()?;
+                        for o in &others {
+                            guard.difference_update(o)?;
+                        }
+                        Ok(Value::None)
+                    }
+                    "symmetric_difference_update" => {
+                        let other = pos_args.first().ok_or_else(|| {
+                            StarlarkError(format!(
+                                "{loc}: symmetric_difference_update() takes 1 argument"
+                            ))
+                        })?;
+                        let other_set = to_set(other)?;
+                        s.lock().unwrap().symmetric_difference_update(&other_set)?;
                         Ok(Value::None)
                     }
                     _ => Err(StarlarkError(format!(
@@ -2733,8 +3705,9 @@ impl EvalContext {
                 }
             }
             Value::Depset(d) => match method {
-                "to_list" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(
+                "to_list" => Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
                     d.to_list(),
+                    Arc::clone(&self.mutability),
                 ))))),
                 _ => Err(StarlarkError(format!(
                     "{loc}: 'depset' value has no field or method '{method}'"
@@ -2749,116 +3722,144 @@ impl EvalContext {
                 self.call_location = loc.to_string();
 
                 self.last_call_loc = loc.clone();
-                host(self, &format!("method:{kind}.{method}"), args, kw_args.clone())
-                    .map_err(|e| {
-                        let prefix = format!("{loc}: ");
-                        if e.0.starts_with(&prefix) || e.0.starts_with("ERROR: ") || e.0.contains(": Traceback (most recent call last):\n") {
-                            e
-                        } else {
-                            StarlarkError(format!("{prefix}{}", e.0))
-                        }
-                    })
+                host(
+                    self,
+                    &format!("method:{kind}.{method}"),
+                    args,
+                    kw_args.clone(),
+                )
+                .map_err(|e| {
+                    let prefix = format!("{loc}: ");
+                    if e.0.starts_with(&prefix)
+                        || e.0.starts_with("ERROR: ")
+                        || e.0.contains(": Traceback (most recent call last):\n")
+                    {
+                        e
+                    } else {
+                        StarlarkError(format!("{prefix}{}", e.0))
+                    }
+                })
             }
             Value::Struct(s) => {
-                if let Some(val) = s.fields.get(method) {
-                    if let Value::BuiltinFunction(bf) = val {
-                        if let (Some(name), Some(host)) = (bf.strip_prefix("host:"), self.host.clone()) {
-                            self.call_location = loc.to_string();
+                if let Some(Value::BuiltinFunction(bf)) = s.fields.get(method) {
+                    if let (Some(name), Some(host)) = (bf.strip_prefix("host:"), self.host.clone())
+                    {
+                        self.call_location = loc.to_string();
 
-                            self.last_call_loc = loc.clone();
-                            let result = host(self, name, pos_args.to_vec(), kw_args.clone());
-                            if let (Err(e), Some(native_fn)) = (&result, bf.strip_prefix("host:native.")) {
-                                self.builtin_error = Some((native_fn.to_string(), e.0.clone()));
-                            }
-                            return result.map_err(|e| {
-                                    let prefix = format!("{loc}: ");
-                                    if e.0.starts_with(&prefix) || e.0.starts_with("ERROR: ") || e.0.contains(": Traceback (most recent call last):\n") {
-                                        e
-                                    } else {
-                                        StarlarkError(format!("{prefix}{}", e.0))
-                                    }
-                                });
+                        self.last_call_loc = loc.clone();
+                        let result = host(self, name, pos_args.to_vec(), kw_args.clone());
+                        if let (Err(e), Some(native_fn)) =
+                            (&result, bf.strip_prefix("host:native."))
+                        {
+                            self.builtin_error = Some((native_fn.to_string(), e.0.clone()));
                         }
-                        match bf.as_str() {
-                            "json.encode" => {
-                                let arg = pos_args.first().ok_or_else(|| {
-                                    StarlarkError(format!("{loc}: json.encode requires 1 argument"))
-                                })?;
-                                return Ok(Value::String(json_encode(arg)?));
+                        return result.map_err(|e| {
+                            let prefix = format!("{loc}: ");
+                            if e.0.starts_with(&prefix)
+                                || e.0.starts_with("ERROR: ")
+                                || e.0.contains(": Traceback (most recent call last):\n")
+                            {
+                                e
+                            } else {
+                                StarlarkError(format!("{prefix}{}", e.0))
                             }
-                            "json.decode" => {
-                                let arg = pos_args
-                                    .first()
-                                    .and_then(|v| v.as_str())
-                                    .ok_or_else(|| {
-                                        StarlarkError(format!("{loc}: json.decode requires string argument"))
-                                    })?;
-                                let default = kw_args.get("default").cloned();
-                                return json_decode(arg, default);
-                            }
-                            "json.indent" => {
-                                let arg = pos_args
-                                    .first()
-                                    .and_then(|v| v.as_str())
-                                    .ok_or_else(|| {
-                                        StarlarkError(format!("{loc}: json.indent requires string argument"))
-                                    })?;
-                                let prefix = kw_args
-                                    .get("prefix")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let indent = kw_args
-                                    .get("indent")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("\t");
-                                return Ok(Value::String(json_indent(arg, prefix, indent)?));
-                            }
-                            "json.encode_indent" => {
-                                let arg = pos_args.first().ok_or_else(|| {
-                                    StarlarkError(format!("{loc}: json.encode_indent requires 1 argument"))
-                                })?;
-                                let prefix = kw_args
-                                    .get("prefix")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                let indent = kw_args
-                                    .get("indent")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("\t");
-                                let encoded = json_encode(arg)?;
-                                return Ok(Value::String(json_indent(&encoded, prefix, indent)?));
-                            }
-                            "proto.encode_text" => {
-                                let arg = pos_args.first().ok_or_else(|| {
-                                    StarlarkError(format!("{loc}: proto.encode_text requires struct argument"))
-                                })?;
-                                return Ok(Value::String(proto_encode_text(arg)?));
-                            }
-                            _ => {}
+                        });
+                    }
+                    match bf.as_str() {
+                        "json.encode" => {
+                            let arg = pos_args.first().ok_or_else(|| {
+                                StarlarkError(format!("{loc}: json.encode requires 1 argument"))
+                            })?;
+                            return Ok(Value::String(self.json_encode_ctx(arg)?));
                         }
+                        "json.decode" => {
+                            let arg =
+                                pos_args.first().and_then(|v| v.as_str()).ok_or_else(|| {
+                                    StarlarkError(format!(
+                                        "{loc}: json.decode requires string argument"
+                                    ))
+                                })?;
+                            let default = kw_args.get("default").cloned();
+                            return json_decode(arg, default);
+                        }
+                        "json.indent" => {
+                            let arg =
+                                pos_args.first().and_then(|v| v.as_str()).ok_or_else(|| {
+                                    StarlarkError(format!(
+                                        "{loc}: json.indent requires string argument"
+                                    ))
+                                })?;
+                            let prefix =
+                                kw_args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+                            let indent = kw_args
+                                .get("indent")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("\t");
+                            return Ok(Value::String(json_indent(arg, prefix, indent)?));
+                        }
+                        "json.encode_indent" => {
+                            let arg = pos_args.first().ok_or_else(|| {
+                                StarlarkError(format!(
+                                    "{loc}: json.encode_indent requires 1 argument"
+                                ))
+                            })?;
+                            let prefix =
+                                kw_args.get("prefix").and_then(|v| v.as_str()).unwrap_or("");
+                            let indent = kw_args
+                                .get("indent")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("\t");
+                            let encoded = self.json_encode_ctx(arg)?;
+                            return Ok(Value::String(json_indent(&encoded, prefix, indent)?));
+                        }
+                        "proto.encode_text" => {
+                            let arg = pos_args.first().ok_or_else(|| {
+                                StarlarkError(format!(
+                                    "{loc}: proto.encode_text requires struct argument"
+                                ))
+                            })?;
+                            return Ok(Value::String(proto_encode_text(arg)?));
+                        }
+                        _ => {}
                     }
                 }
                 if let Some(val) = s.fields.get(method) {
                     if matches!(
                         val,
-                        Value::Provider { .. } | Value::UserFunction(_) | Value::Host(..) | Value::RuleCallable { .. }
+                        Value::Provider { .. }
+                            | Value::UserFunction(_)
+                            | Value::Host(..)
+                            | Value::RuleCallable { .. }
                     ) {
-                        return self.call_callable(val.clone(), pos_args.to_vec(), kw_args.clone(), loc);
+                        return self.call_callable(
+                            val.clone(),
+                            pos_args.to_vec(),
+                            kw_args.clone(),
+                            loc,
+                        );
                     }
                 }
                 if s.is_native {
-                    return s.get(method).map_err(|e| StarlarkError(format!("{}: {}", self.attr_loc, e.0)));
+                    return s
+                        .get(method)
+                        .map_err(|e| StarlarkError(format!("{}: {}", self.attr_loc, e.0)));
                 }
                 Err(StarlarkError(format!(
                     "{loc}: type 'struct' has no method '{method}'"
                 )))
             }
-            Value::ProviderInstance { fields, provider_name } => {
+            Value::ProviderInstance {
+                fields,
+                provider_name,
+            } => {
                 // Callable field of a provider instance (`info.execution_info()`).
                 match fields.get(method) {
-                    Some(val @ (Value::UserFunction(_) | Value::BuiltinFunction(_) | Value::Provider { .. } | Value::Host(..))) => {
-                        self.call_callable(val.clone(), pos_args.to_vec(), kw_args.clone(), loc)
-                    }
+                    Some(
+                        val @ (Value::UserFunction(_)
+                        | Value::BuiltinFunction(_)
+                        | Value::Provider { .. }
+                        | Value::Host(..)),
+                    ) => self.call_callable(val.clone(), pos_args.to_vec(), kw_args.clone(), loc),
                     _ => Err(StarlarkError(format!(
                         "{loc}: type '{provider_name}' has no method '{method}'"
                     ))),
@@ -2918,6 +3919,7 @@ fn slice_sequence<T: Clone>(
     }
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2999,11 +4001,17 @@ my_cc_macro("engine", extra_deps = ["//base"])
 
         // Spot Check 1: %d %s format order
         ctx.eval_str(r#"sc1 = "%d %s" % (1, "two")"#).unwrap();
-        assert_eq!(ctx.globals.get("sc1"), Some(&Value::String("1 two".to_string())));
+        assert_eq!(
+            ctx.globals.get("sc1"),
+            Some(&Value::String("1 two".to_string()))
+        );
 
         // Spot Check 2: Bitwise OR
         ctx.eval_str(r#"sc2 = 5 | 3"#).unwrap();
-        assert_eq!(ctx.globals.get("sc2"), Some(&Value::Int(BigInt::from_i64(7))));
+        assert_eq!(
+            ctx.globals.get("sc2"),
+            Some(&Value::Int(BigInt::from_i64(7)))
+        );
 
         // Spot Check 3: Chained comparisons
         ctx.eval_str(r#"sc3 = 1 < 5 < 10"#).unwrap();
@@ -3011,7 +4019,10 @@ my_cc_macro("engine", extra_deps = ["//base"])
 
         // Spot Check 4: Negative slicing
         ctx.eval_str(r#"sc4 = "hello"[-2:]"#).unwrap();
-        assert_eq!(ctx.globals.get("sc4"), Some(&Value::String("lo".to_string())));
+        assert_eq!(
+            ctx.globals.get("sc4"),
+            Some(&Value::String("lo".to_string()))
+        );
 
         // Spot Check 5: Comprehension scoping
         ctx.eval_str(
@@ -3021,7 +4032,10 @@ dummy = [x for x in ["leaked"]]
 "#,
         )
         .unwrap();
-        assert_eq!(ctx.globals.get("x"), Some(&Value::String("original".to_string())));
+        assert_eq!(
+            ctx.globals.get("x"),
+            Some(&Value::String("original".to_string()))
+        );
 
         // Spot Check 6: Keyword-only parameters
         assert!(ctx
@@ -3055,7 +4069,10 @@ fn has_location_prefix(msg: &str) -> bool {
 
 /// Keyword names of a call in source order; entries contributed by `**kwargs` follow, in sorted
 /// order of the merged map (the evaluator does not retain their original order).
-fn kw_call_order(kw_args: &[(String, Expr)], merged: Option<&BTreeMap<String, Value>>) -> Vec<String> {
+fn kw_call_order(
+    kw_args: &[(String, Expr)],
+    merged: Option<&BTreeMap<String, Value>>,
+) -> Vec<String> {
     let mut out: Vec<String> = kw_args.iter().map(|(k, _)| k.clone()).collect();
     if let Some(m) = merged {
         for k in m.keys() {
@@ -3069,22 +4086,41 @@ fn kw_call_order(kw_args: &[(String, Expr)], merged: Option<&BTreeMap<String, Va
 
 /// `f(*x)`: `x` must be iterable.
 fn star_args_seq(v: &Value) -> Result<Vec<Value>, StarlarkError> {
-    if matches!(v, Value::Int(_) | Value::Bool(_) | Value::None | Value::UserFunction(_) | Value::BuiltinFunction(_)) {
-        return Err(StarlarkError(format!("argument after * must be an iterable, not {}", v.type_name())));
+    if matches!(
+        v,
+        Value::Int(_)
+            | Value::Bool(_)
+            | Value::None
+            | Value::UserFunction(_)
+            | Value::BuiltinFunction(_)
+    ) {
+        return Err(StarlarkError(format!(
+            "argument after * must be an iterable, not {}",
+            v.type_name()
+        )));
     }
     eval::builtins::value_to_sequence(v)
 }
 
 /// `f(**x)`: `x` must be a dict with string keys that do not repeat explicit keyword arguments.
-fn merge_star_kwargs(eval_kw: &mut BTreeMap<String, Value>, v: &Value) -> Result<Option<String>, StarlarkError> {
+fn merge_star_kwargs(
+    eval_kw: &mut BTreeMap<String, Value>,
+    v: &Value,
+) -> Result<Option<String>, StarlarkError> {
     let Value::Dict(d) = v else {
-        return Err(StarlarkError(format!("argument after ** must be a dict, not {}", v.type_name())));
+        return Err(StarlarkError(format!(
+            "argument after ** must be a dict, not {}",
+            v.type_name()
+        )));
     };
     let guard = d.lock().unwrap();
     let mut dup = None;
     for (k, val) in &guard.entries {
         let Some(s) = k.as_str() else {
-            return Err(StarlarkError(format!("keywords must be strings, not {}", k.type_name())));
+            return Err(StarlarkError(format!(
+                "keywords must be strings, not {}",
+                k.type_name()
+            )));
         };
         if eval_kw.contains_key(s) && dup.is_none() {
             dup = Some(s.to_string());
@@ -3109,7 +4145,10 @@ fn star_at(e: &Expr, call: &Location) -> Location {
 }
 
 /// `Label.getShorthandDisplayForm(mainRepositoryMapping)`: the form `print` shows for a label.
-pub fn label_shorthand_display(l: &zel_cmdline::Label, mapping: Option<&BTreeMap<String, String>>) -> String {
+pub fn label_shorthand_display(
+    l: &zel_cmdline::Label,
+    mapping: Option<&BTreeMap<String, String>>,
+) -> String {
     let repo = l.repository();
     let (pkg, name) = (l.package_name(), l.name());
     let base = pkg.rsplit('/').next().unwrap_or(pkg);
@@ -3125,8 +4164,204 @@ pub fn label_shorthand_display(l: &zel_cmdline::Label, mapping: Option<&BTreeMap
     if !pkg.is_empty() && base == name {
         return format!("{repo_display}//{pkg}");
     }
-    if pkg.is_empty() && (repo_display == format!("@{name}") || repo_display == format!("@@{name}")) {
+    if pkg.is_empty() && (repo_display == format!("@{name}") || repo_display == format!("@@{name}"))
+    {
         return repo_display;
     }
     format!("{repo_display}//{pkg}:{name}")
+}
+
+fn collect_function_local_names(params: &[ParamDef], body: &[Stmt]) -> HashSet<String> {
+    fn walk_stmt(s: &Stmt, out: &mut HashSet<String>) {
+        match s {
+            Stmt::Assign { target, op, .. } if *op == AssignOp::Assign => match target {
+                AssignTarget::Ident(n) => {
+                    out.insert(n.clone());
+                }
+                AssignTarget::Tuple(ps) => {
+                    out.extend(pattern_names(ps));
+                }
+                _ => {}
+            },
+            Stmt::Def(f) => {
+                out.insert(f.name.clone());
+            }
+            Stmt::For {
+                var_names, body, ..
+            } => {
+                out.extend(pattern_names(var_names));
+                for b in body {
+                    walk_stmt(b, out);
+                }
+            }
+            Stmt::If {
+                branches,
+                else_body,
+                ..
+            } => {
+                for (_, body) in branches {
+                    for b in body {
+                        walk_stmt(b, out);
+                    }
+                }
+                for b in else_body {
+                    walk_stmt(b, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let mut out = HashSet::new();
+    for p in params {
+        out.insert(p.name.clone());
+    }
+    for s in body {
+        walk_stmt(s, &mut out);
+    }
+    out
+}
+
+fn validate_str_dict(val: &Value, param: &str) -> Result<Value, StarlarkError> {
+    let Value::Dict(d) = val else {
+        return Err(StarlarkError(format!(
+            "got {} for '{param}', want dict",
+            val.type_name()
+        )));
+    };
+    let entries = d.lock().unwrap().items();
+    let mut clean = StarlarkDict::new();
+    for (k, v) in entries {
+        if !matches!(k, Value::String(_)) || !matches!(v, Value::String(_)) {
+            return Err(StarlarkError(format!(
+                "got dict<{}, {}> for '{param}', want dict<string, string>",
+                k.type_name(),
+                v.type_name()
+            )));
+        }
+        clean.insert(k, v)?;
+    }
+    Ok(Value::Dict(Arc::new(Mutex::new(clean))))
+}
+
+fn validate_str_seq(val: &Value, param: &str) -> Result<Value, StarlarkError> {
+    let items = eval::builtins::value_to_sequence(val).map_err(|_| {
+        StarlarkError(format!(
+            "for {param}, got {}, want sequence",
+            val.type_name()
+        ))
+    })?;
+    for (i, item) in items.iter().enumerate() {
+        if !matches!(item, Value::String(_)) {
+            return Err(StarlarkError(format!(
+                "at index {i} of {param}, got element of type {}, want string",
+                item.type_name()
+            )));
+        }
+    }
+    Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(items)))))
+}
+
+fn construct_native_provider(
+    name: &str,
+    eval_pos: Vec<Value>,
+    mut eval_kw: BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, Value>, StarlarkError> {
+    match name {
+        "ExecutionInfo" => {
+            for (p, v) in ["requirements", "exec_group"].iter().zip(eval_pos.iter()) {
+                eval_kw.entry((*p).to_string()).or_insert_with(|| v.clone());
+            }
+            Ok(eval_kw)
+        }
+        "TemplateVariableInfo" => {
+            if eval_pos.len() > 1 {
+                return Err(StarlarkError(format!(
+                    "TemplateVariableInfo() accepts at most 1 positional argument, got {}",
+                    eval_pos.len()
+                )));
+            }
+            for k in eval_kw.keys() {
+                if k != "vars" {
+                    return Err(StarlarkError(format!(
+                        "TemplateVariableInfo() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            if !eval_pos.is_empty() && eval_kw.contains_key("vars") {
+                return Err(StarlarkError(
+                    "TemplateVariableInfo() got multiple values for parameter 'vars'".to_string(),
+                ));
+            }
+            let raw = eval_pos
+                .into_iter()
+                .next()
+                .or_else(|| eval_kw.remove("vars"));
+            let vars = match raw {
+                None => {
+                    return Err(StarlarkError(
+                        "TemplateVariableInfo() missing 1 required positional argument: vars"
+                            .to_string(),
+                    ));
+                }
+                Some(Value::None) => Value::Dict(Arc::new(Mutex::new(StarlarkDict::new()))),
+                Some(v) => validate_str_dict(&v, "vars")?,
+            };
+            let mut out = BTreeMap::new();
+            out.insert("variables".to_string(), vars);
+            Ok(out)
+        }
+        "RunEnvironmentInfo" | "TestEnvironment" => {
+            if eval_pos.len() > 2 {
+                return Err(StarlarkError(format!(
+                    "{name}() accepts at most 2 positional arguments, got {}",
+                    eval_pos.len()
+                )));
+            }
+            for k in eval_kw.keys() {
+                if k != "environment" && k != "inherited_environment" {
+                    return Err(StarlarkError(format!(
+                        "{name}() got unexpected keyword argument '{k}'"
+                    )));
+                }
+            }
+            if !eval_pos.is_empty() && eval_kw.contains_key("environment") {
+                return Err(StarlarkError(format!(
+                    "{name}() got multiple values for parameter 'environment'"
+                )));
+            }
+            if eval_pos.len() >= 2 && eval_kw.contains_key("inherited_environment") {
+                return Err(StarlarkError(format!(
+                    "{name}() got multiple values for parameter 'inherited_environment'"
+                )));
+            }
+            let env_raw = eval_pos
+                .first()
+                .cloned()
+                .or_else(|| eval_kw.remove("environment"));
+            let env = match env_raw {
+                Some(v) => validate_str_dict(&v, "environment")?,
+                None if name == "TestEnvironment" => {
+                    return Err(StarlarkError(
+                        "TestEnvironment() missing 1 required positional argument: environment"
+                            .to_string(),
+                    ));
+                }
+                None => Value::Dict(Arc::new(Mutex::new(StarlarkDict::new()))),
+            };
+            let inh_raw = eval_pos
+                .get(1)
+                .cloned()
+                .or_else(|| eval_kw.remove("inherited_environment"));
+            let inh = match inh_raw {
+                Some(v) => validate_str_seq(&v, "inherited_environment")?,
+                None => Value::List(Arc::new(Mutex::new(StarlarkList::new(Vec::new())))),
+            };
+            let mut out = BTreeMap::new();
+            out.insert("environment".to_string(), env);
+            out.insert("inherited_environment".to_string(), inh);
+            Ok(out)
+        }
+        _ => Ok(eval_kw),
+    }
 }

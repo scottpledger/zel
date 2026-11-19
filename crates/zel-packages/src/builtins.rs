@@ -66,7 +66,10 @@ const JAVA_COMMON_INTERNAL_NATIVES: &[&str] = &[
 
 fn mk_struct(fields: Vec<(&str, Value)>) -> Value {
     Value::Struct(Arc::new(StructValue::new(
-        fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
     )))
 }
 
@@ -74,7 +77,12 @@ fn stubs(ns: &str, names: &[&str]) -> Value {
     mk_struct(
         names
             .iter()
-            .map(|n| (*n, Value::BuiltinFunction(format!("host:builtins.{ns}.{n}"))))
+            .map(|n| {
+                (
+                    *n,
+                    Value::BuiltinFunction(format!("host:builtins.{ns}.{n}")),
+                )
+            })
             .collect(),
     )
 }
@@ -88,34 +96,76 @@ pub(crate) fn builtins_module(predeclared: &BTreeMap<String, Value>) -> Value {
         (
             "apple_common",
             mk_struct(vec![
-                ("DottedVersion", Value::Provider { name: "DottedVersion".into() }),
-                ("dotted_version", Value::BuiltinFunction("host:builtins.apple_common.dotted_version".into())),
+                (
+                    "DottedVersion",
+                    Value::Provider {
+                        name: "DottedVersion".into(),
+                    },
+                ),
+                (
+                    "dotted_version",
+                    Value::BuiltinFunction("host:builtins.apple_common.dotted_version".into()),
+                ),
             ]),
         ),
         ("py_builtins", stubs("py_builtins", PY_BUILTINS_NATIVES)),
-        ("java_common_internal_do_not_use", stubs("java_common_internal_do_not_use", JAVA_COMMON_INTERNAL_NATIVES)),
+        (
+            "java_common_internal_do_not_use",
+            stubs(
+                "java_common_internal_do_not_use",
+                JAVA_COMMON_INTERNAL_NATIVES,
+            ),
+        ),
     ]);
     let toplevel = Value::Struct(Arc::new(StructValue::new(predeclared.clone())));
     let native = predeclared.get("native").cloned().unwrap_or(Value::None);
-    mk_struct(vec![("internal", internal), ("toplevel", toplevel), ("native", native)])
+    mk_struct(vec![
+        ("internal", internal),
+        ("toplevel", toplevel),
+        ("native", native),
+    ])
+}
+
+fn builtins_hash() -> u64 {
+    static HASH: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *HASH.get_or_init(|| {
+        let mut h: u64 = 0xcbf29ce484222325;
+        for (p, b) in zel_bazel_tools::builtins_files() {
+            for byte in p.bytes().chain(b.iter().copied()) {
+                h ^= byte as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        h
+    })
 }
 
 /// Directory holding the materialised `@_builtins` tree (content-addressed under the temp dir).
 pub(crate) fn materialize() -> Result<PathFragment, String> {
-    let mut h: u64 = 0xcbf29ce484222325;
-    for (p, b) in zel_bazel_tools::builtins_files() {
-        for byte in p.bytes().chain(b.iter().copied()) {
-            h ^= byte as u64;
-            h = h.wrapping_mul(0x100000001b3);
-        }
-    }
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let h = builtins_hash();
     let dir = std::env::temp_dir().join(format!("zel-builtins-{h:016x}"));
+    if dir.join("exports.bzl").exists() {
+        return Ok(PathFragment::create(&dir.to_string_lossy()));
+    }
+    let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if !dir.join("exports.bzl").exists() {
-        let tmp = std::env::temp_dir().join(format!("zel-builtins-{h:016x}.{}", std::process::id()));
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!(
+            "zel-builtins-{h:016x}.{}.{seq}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&tmp);
         zel_bazel_tools::materialize_builtins(&tmp)?;
         if std::fs::rename(&tmp, &dir).is_err() {
             let _ = std::fs::remove_dir_all(&tmp);
+            if !dir.join("exports.bzl").exists() {
+                return Err(format!(
+                    "failed to materialize builtins at {}",
+                    dir.display()
+                ));
+            }
         }
     }
     Ok(PathFragment::create(&dir.to_string_lossy()))

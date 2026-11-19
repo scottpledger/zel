@@ -59,11 +59,19 @@ pub fn formatter_names() -> String {
 }
 
 /// Runs a `query` command.
-pub fn run_query(resolver: &PatternResolver, expr_str: &str, opts: &QueryOpts, fmt: &FormatOpts) -> QueryOutcome {
+pub fn run_query(
+    resolver: &PatternResolver,
+    expr_str: &str,
+    opts: &QueryOpts,
+    fmt: &FormatOpts,
+) -> QueryOutcome {
     let mut outcome = QueryOutcome::default();
     let mut opts = opts.clone();
     let streamed = format::is_streamed(&fmt.output)
-        && matches!(fmt.order, format::OrderOutput::No | format::OrderOutput::Auto);
+        && matches!(
+            fmt.order,
+            format::OrderOutput::No | format::OrderOutput::Auto
+        );
     opts.sky = streamed && (!opts.universe_scope.is_empty() || opts.infer_universe_scope);
     // `QueryEnvironmentBasedCommand`: YES requires a streaming formatter and ordering.
     if opts.graphless_query == Some(true) && !streamed {
@@ -114,24 +122,32 @@ pub fn run_query(resolver: &PatternResolver, expr_str: &str, opts: &QueryOpts, f
             return outcome;
         }
     }
-    if fmt.order != format::OrderOutput::Auto && fmt.order != format::OrderOutput::Full && fmt.order != format::OrderOutput::Deps {
+    if fmt.order != format::OrderOutput::Auto
+        && fmt.order != format::OrderOutput::Full
+        && fmt.order != format::OrderOutput::Deps
+    {
         // `no` is accepted by all formatters that stream; non-streaming formatters ignore it.
     }
     env.toplevel = expr.to_truncated_string();
     let mut patterns = Vec::new();
     expr.collect_target_patterns(&mut patterns);
     let patterns_for_preload = patterns.clone();
-    let universe: Vec<String> =
-        if opts.universe_scope.is_empty() { patterns } else { opts.universe_scope.clone() };
+    let universe: Vec<String> = if opts.universe_scope.is_empty() {
+        patterns
+    } else {
+        opts.universe_scope.clone()
+    };
 
     let eval_result;
     let mut diag_errors: Vec<String> = Vec::new();
     let mut had_errors = false;
-    let mut missing_graph: Vec<String> = Vec::new();
+    let missing_graph: Vec<String>;
     {
         let mut engine = Engine::new(&mut env, opts.keep_going, universe);
         engine.diag.graphless = graphless;
-        let preload = engine.env.preload_patterns(&patterns_for_preload, &mut engine.diag);
+        let preload = engine
+            .env
+            .preload_patterns(&patterns_for_preload, &mut engine.diag);
         eval_result = match preload {
             Ok(()) => {
                 if opts.sky && !opts.universe_scope.is_empty() {
@@ -145,12 +161,15 @@ pub fn run_query(resolver: &PatternResolver, expr_str: &str, opts: &QueryOpts, f
             }
             Err(e) => Err(e),
         };
-        diag_errors.extend(engine.diag.errors.drain(..));
+        diag_errors.append(&mut engine.diag.errors);
         had_errors |= engine.diag.had_error;
         missing_graph = std::mem::take(&mut engine.diag.missing_graph);
     }
     if !missing_graph.is_empty() {
-        outcome.stderr.push(format!("WARNING: Targets were missing from graph: [{}]", missing_graph.join(", ")));
+        outcome.stderr.push(format!(
+            "WARNING: Targets were missing from graph: [{}]",
+            missing_graph.join(", ")
+        ));
     }
     // Error events of loaded packages (`ErrorSensingEventHandler`) make the evaluation fail
     // (`--nokeep_going`) or partial (`--keep_going`).
@@ -173,7 +192,10 @@ pub fn run_query(resolver: &PatternResolver, expr_str: &str, opts: &QueryOpts, f
             for l in diag_errors {
                 outcome.stderr.push(format!("ERROR: {l}"));
             }
-            outcome.stderr.push(format!("ERROR: Evaluation of query \"{}\" failed", expr.to_truncated_string()));
+            outcome.stderr.push(format!(
+                "ERROR: Evaluation of query \"{}\" failed",
+                expr.to_truncated_string()
+            ));
             outcome.exit_code = exit::ANALYSIS_FAILURE;
             return outcome;
         }
@@ -193,9 +215,10 @@ pub fn run_query(resolver: &PatternResolver, expr_str: &str, opts: &QueryOpts, f
             // The `--keep_going` warning is emitted by `evaluateQueryInternal`; the command
             // reports `Empty results` afterwards.
             if had_errors {
-                outcome
-                    .stderr
-                    .push("WARNING: --keep_going specified, ignoring errors. Results may be inaccurate".to_string());
+                outcome.stderr.push(
+                    "WARNING: --keep_going specified, ignoring errors. Results may be inaccurate"
+                        .to_string(),
+                );
                 outcome.exit_code = exit::PARTIAL_ANALYSIS_FAILURE;
             }
             if nodes.is_empty() {
@@ -226,9 +249,13 @@ pub fn run_genquery(
     fmt.order = format::OrderOutput::Full;
     for o in opts {
         let o = o.as_str();
-        let bad = |name: &str| format!("error while parsing query options: option --{name} is not allowed");
+        let bad = |name: &str| {
+            format!("error while parsing query options: option --{name} is not allowed")
+        };
         match o {
-            "--keep_going" | "--nokeep_going" => return Err("option --keep_going is not allowed".to_string()),
+            "--keep_going" | "--nokeep_going" => {
+                return Err("option --keep_going is not allowed".to_string())
+            }
             "--implicit_deps" => qopts.implicit_deps = true,
             "--noimplicit_deps" => qopts.implicit_deps = false,
             "--tool_deps" => qopts.tool_deps = true,
@@ -237,11 +264,26 @@ pub fn run_genquery(
             "--nonodep_deps" => qopts.nodep_deps = false,
             "--relative_locations" | "--norelative_locations" => {}
             _ if o.starts_with("--output=") => fmt.output = o["--output=".len()..].to_string(),
-            _ if o.starts_with("--universe_scope") => return Err("option --universe_scope is not allowed".to_string()),
-            _ if o.starts_with("--order_output") => return Err("option --order_output is not allowed".to_string()),
-            _ if o.contains("order_results") => return Err(format!("option --{} is not allowed", o.trim_start_matches("--"))),
-            _ if o.contains("graphless_query") => return Err("option --experimental_graphless_query is not allowed".to_string()),
-            _ => return Err(format!("error while parsing query options: Unrecognized option: {o}")),
+            _ if o.starts_with("--universe_scope") => {
+                return Err("option --universe_scope is not allowed".to_string())
+            }
+            _ if o.starts_with("--order_output") => {
+                return Err("option --order_output is not allowed".to_string())
+            }
+            _ if o.contains("order_results") => {
+                return Err(format!(
+                    "option --{} is not allowed",
+                    o.trim_start_matches("--")
+                ))
+            }
+            _ if o.contains("graphless_query") => {
+                return Err("option --experimental_graphless_query is not allowed".to_string())
+            }
+            _ => {
+                return Err(format!(
+                    "error while parsing query options: Unrecognized option: {o}"
+                ))
+            }
         }
         let _ = bad;
     }
@@ -250,7 +292,11 @@ pub fn run_genquery(
     let resolver = PatternResolver::new(loader.clone(), zel_vfs::PathFragment::empty());
     let outcome = run_query(&resolver, expression, &qopts, &fmt);
     if outcome.exit_code != exit::SUCCESS {
-        return Err(outcome.stderr.join("\n").trim_start_matches("ERROR: ").to_string());
+        return Err(outcome
+            .stderr
+            .join("\n")
+            .trim_start_matches("ERROR: ")
+            .to_string());
     }
     Ok(outcome.stdout)
 }

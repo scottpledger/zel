@@ -23,10 +23,10 @@ use std::time::Instant;
 use zel_analysis::ConfiguredTarget;
 use zel_events::bep::{self, ids, BepBuilder, BepOptions};
 use zel_events::bes;
+use zel_events::exec_log::{ExecLogOptions, ExecutionLogWriter, SpawnFile, SpawnRecord};
 use zel_events::profiler::{self, ProfilePhase, Profiler, ProfilerOptions, ProfilerTask};
 use zel_events::ui::{self, BufferOutErr, UiEventHandler, UiOptions};
-use zel_events::exec_log::{ExecLogOptions, ExecutionLogWriter, SpawnFile, SpawnRecord};
-use zel_events::{ActionInfo, ActionListener, ActionResultInfo, Event, EventHandler, Reporter};
+use zel_events::{ActionInfo, ActionListener, ActionResultInfo, Event, Reporter};
 use zel_options::ParsedCommandOptions;
 use zel_proto::failure_details::{Category, FailureDetail};
 use zel_util::{DetailedExitCode, ExitCode};
@@ -57,7 +57,9 @@ fn uuid_like() -> String {
     // Version-4 shaped identifier derived from time + pid (no RNG crate available).
     let n = zel_events::now_millis() as u128;
     let p = std::process::id() as u128;
-    let x = n.wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835).wrapping_add(p.rotate_left(17));
+    let x = n
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15_F39C_C060_5CED_C835)
+        .wrapping_add(p.rotate_left(17));
     format!(
         "{:08x}-{:04x}-4{:03x}-8{:03x}-{:012x}",
         (x >> 96) as u32,
@@ -86,7 +88,8 @@ struct ActionObserver {
 
 impl ActionListener for ActionObserver {
     fn action_started(&self, a: &ActionInfo) {
-        self.ui.action_started(&a.id, &a.progress_message, Some(&a.owner), &a.mnemonic);
+        self.ui
+            .action_started(&a.id, &a.progress_message, Some(&a.owner), &a.mnemonic);
         self.ui.action_phase(
             &a.id,
             zel_events::ui::ActionPhase::Running,
@@ -96,7 +99,9 @@ impl ActionListener for ActionObserver {
 
     fn action_finished(&self, a: &ActionInfo, r: &ActionResultInfo) {
         self.ui.action_completed(&a.id);
-        let Some(reporter) = self.reporter.upgrade() else { return };
+        let Some(reporter) = self.reporter.upgrade() else {
+            return;
+        };
         let profiler = &self.profiler;
         let end_ns = profiler.now_ns();
         let dur_ns = r.wall_time_ms as i64 * 1_000_000;
@@ -109,7 +114,12 @@ impl ActionListener for ActionObserver {
             Some(&a.owner),
             None,
         );
-        profiler.log_simple_task(end_ns, 1_000, ProfilerTask::ACTION_COMPLETE, &a.progress_message);
+        profiler.log_simple_task(
+            end_ns,
+            1_000,
+            ProfilerTask::ACTION_COMPLETE,
+            &a.progress_message,
+        );
         self.spans.lock().unwrap().push((
             (end_ns - dur_ns).max(0),
             end_ns,
@@ -120,8 +130,13 @@ impl ActionListener for ActionObserver {
             let cfg = self.config_id.lock().unwrap().clone();
             let fd = (!r.success).then(|| {
                 FailureDetail::new(
-                    r.error.clone().unwrap_or_else(|| format!("{} failed: (Exit {})", a.mnemonic, r.exit_code)),
-                    Category::named("spawn", "NON_ZERO_EXIT").unwrap_or(Category::Submessage { field_number: 123, code: 1 }),
+                    r.error.clone().unwrap_or_else(|| {
+                        format!("{} failed: (Exit {})", a.mnemonic, r.exit_code)
+                    }),
+                    Category::named("spawn", "NON_ZERO_EXIT").unwrap_or(Category::Submessage {
+                        field_number: 123,
+                        code: 1,
+                    }),
                 )
             });
             reporter.post_bep_node(BepBuilder::action_executed(
@@ -141,7 +156,13 @@ impl ActionListener for ActionObserver {
         }
         if let (Some(log), true) = (&self.exec_log, a.is_spawn) {
             let files = |paths: &[(String, bool)]| -> Vec<SpawnFile> {
-                paths.iter().map(|(p, _)| SpawnFile { path: p.clone(), ..Default::default() }).collect()
+                paths
+                    .iter()
+                    .map(|(p, _)| SpawnFile {
+                        path: p.clone(),
+                        ..Default::default()
+                    })
+                    .collect()
             };
             let _ = self.include_label;
             log.log(&SpawnRecord {
@@ -150,7 +171,13 @@ impl ActionListener for ActionObserver {
                 inputs: files(&a.inputs),
                 listed_outputs: a.outputs.clone(),
                 actual_outputs: if r.success {
-                    a.outputs.iter().map(|p| SpawnFile { path: p.clone(), ..Default::default() }).collect()
+                    a.outputs
+                        .iter()
+                        .map(|p| SpawnFile {
+                            path: p.clone(),
+                            ..Default::default()
+                        })
+                        .collect()
                 } else {
                     Vec::new()
                 },
@@ -159,9 +186,17 @@ impl ActionListener for ActionObserver {
                 remote_cacheable: true,
                 mnemonic: a.mnemonic.clone(),
                 target_label: a.owner.clone(),
-                runner: if r.cache_hit { "remote cache hit".into() } else { r.runner.clone().unwrap_or_else(|| "local".into()) },
+                runner: if r.cache_hit {
+                    "remote cache hit".into()
+                } else {
+                    r.runner.clone().unwrap_or_else(|| "local".into())
+                },
                 cache_hit: r.cache_hit,
-                status: if r.exit_code == 0 { String::new() } else { "NON_ZERO_EXIT".into() },
+                status: if r.exit_code == 0 {
+                    String::new()
+                } else {
+                    "NON_ZERO_EXIT".into()
+                },
                 exit_code: r.exit_code,
                 total_time_ms: Some(r.wall_time_ms as i64),
                 ..Default::default()
@@ -225,19 +260,26 @@ impl BuildObserver {
         );
         // `Profiler.start`: the profile file is created up front; a missing directory is an error.
         let profile_path = match profile_path {
-            Some((path, gz)) if std::path::Path::new(&path).parent().map_or(false, |d| !d.as_os_str().is_empty() && !d.exists()) => {
-                setup_errors.push(format!("Error while creating profile file: {path} (No such file or directory)"));
+            Some((path, _gz))
+                if std::path::Path::new(&path)
+                    .parent()
+                    .is_some_and(|d| !d.as_os_str().is_empty() && !d.exists()) =>
+            {
+                setup_errors.push(format!(
+                    "Error while creating profile file: {path} (No such file or directory)"
+                ));
                 None
             }
             other => other,
         };
-        let mut popts = match ProfilerOptions::from_flags(&get, &get_all, &invocation_id, output_base) {
-            Ok(o) => o,
-            Err(e) => {
-                setup_errors.push(e);
-                ProfilerOptions::new(&invocation_id, output_base)
-            }
-        };
+        let mut popts =
+            match ProfilerOptions::from_flags(&get, &get_all, &invocation_id, output_base) {
+                Ok(o) => o,
+                Err(e) => {
+                    setup_errors.push(e);
+                    ProfilerOptions::new(&invocation_id, output_base)
+                }
+            };
         if let Some((_, gz)) = &profile_path {
             popts.compress = *gz;
         }
@@ -288,7 +330,11 @@ impl BuildObserver {
             patterns: Default::default(),
             analysis_complete: Default::default(),
             bep_enabled,
-            bep_files: (bep_opts.json_file.clone(), bep_opts.binary_file.clone(), bep_opts.text_file.clone()),
+            bep_files: (
+                bep_opts.json_file.clone(),
+                bep_opts.binary_file.clone(),
+                bep_opts.text_file.clone(),
+            ),
         }
     }
 
@@ -297,6 +343,7 @@ impl BuildObserver {
         std::mem::take(&mut *self.setup_errors.lock().unwrap())
     }
 
+    #[allow(dead_code)]
     pub(crate) fn ui(&self) -> &Arc<UiEventHandler> {
         &self.ui
     }
@@ -342,7 +389,11 @@ impl BuildObserver {
                 None => (o.to_string(), String::new()),
             })
             .collect();
-        let residue: Vec<String> = args.iter().filter(|a| !a.starts_with('-')).cloned().collect();
+        let residue: Vec<String> = args
+            .iter()
+            .filter(|a| !a.starts_with('-'))
+            .cloned()
+            .collect();
         r.post_bep_node(BepBuilder::options_parsed(
             &[],
             &[],
@@ -369,7 +420,10 @@ impl BuildObserver {
         late.push_back(BepBuilder::workspace_status(&[
             ("BUILD_EMBED_LABEL".to_string(), String::new()),
             ("BUILD_HOST".to_string(), host),
-            ("BUILD_TIMESTAMP".to_string(), (zel_events::now_millis() / 1000).to_string()),
+            (
+                "BUILD_TIMESTAMP".to_string(),
+                (zel_events::now_millis() / 1000).to_string(),
+            ),
             ("BUILD_USER".to_string(), user),
         ]));
     }
@@ -382,14 +436,24 @@ impl BuildObserver {
     }
 
     /// Posts the pattern expansion, configuration and `TargetConfigured` events.
-    pub(crate) fn analysis_done(&self, patterns: &[String], configured: &[ConfiguredTarget], roots: &HashSet<String>, cpu: &str, mode: &str, execroot: &str) {
+    pub(crate) fn analysis_done(
+        &self,
+        patterns: &[String],
+        configured: &[ConfiguredTarget],
+        roots: &HashSet<String>,
+        cpu: &str,
+        mode: &str,
+        execroot: &str,
+    ) {
         // The progress bar is only drawn while `UiEventHandler::build_started` is in effect, which
         // needs a live output sink; command output is still buffered by the daemon, so only the
         // tracker state is maintained here (see AGENT_NOTES.md).
-        self.analysis_complete.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.analysis_complete
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         self.ui.analysis_complete_silent();
         self.ui.execution_phase_started();
-        self.ui.set_total_actions(configured.iter().map(|c| c.actions.len() as u64).sum());
+        self.ui
+            .set_total_actions(configured.iter().map(|c| c.actions.len() as u64).sum());
         if !self.bep_enabled {
             return;
         }
@@ -403,11 +467,15 @@ impl BuildObserver {
             .collect();
         let mut node = BepBuilder::pattern_expanded(patterns, &root_labels);
         // Children of the pattern event are the configured targets.
-        node.children = root_labels.iter().map(|l| ids::target_configured(l)).collect();
+        node.children = root_labels
+            .iter()
+            .map(|l| ids::target_configured(l))
+            .collect();
         self.reporter.post_bep_node(node);
         // `WorkspaceConfigEvent`, then the canonical command line (both announced elsewhere, so
         // Bazel's streamer chains them in through progress events).
-        self.reporter.post_bep_node(BepBuilder::workspace_config(execroot));
+        self.reporter
+            .post_bep_node(BepBuilder::workspace_config(execroot));
         self.post_late();
         let cfg_msg = |id: &str| {
             BepBuilder::configuration(
@@ -437,7 +505,14 @@ impl BuildObserver {
             if !roots.contains(&l) {
                 continue;
             }
-            let n = BepBuilder::target_configured(&l, &cfg_id, &format!("{} rule", ct.rule_class), &[], None, true);
+            let n = BepBuilder::target_configured(
+                &l,
+                &cfg_id,
+                &format!("{} rule", ct.rule_class),
+                &[],
+                None,
+                true,
+            );
             self.reporter.post_bep_node(n);
         }
     }
@@ -470,13 +545,21 @@ impl BuildObserver {
             if success {
                 let mut all: Vec<(String, Vec<_>)> = vec![(
                     "default".to_string(),
-                    ct.default_info.files.iter().chain(ct.default_info.executable.iter()).filter(|a| !a.is_source).collect(),
+                    ct.default_info
+                        .files
+                        .iter()
+                        .chain(ct.default_info.executable.iter())
+                        .filter(|a| !a.is_source)
+                        .collect(),
                 )];
                 for (name, files) in &ct.output_groups.groups {
                     if name == "default" {
                         continue;
                     }
-                    all.push((name.clone(), files.iter().filter(|a| !a.is_source).collect()));
+                    all.push((
+                        name.clone(),
+                        files.iter().filter(|a| !a.is_source).collect(),
+                    ));
                 }
                 for (name, files) in all {
                     if files.is_empty() {
@@ -490,12 +573,23 @@ impl BuildObserver {
                             BepBuilder::file(&rest, &format!("{execroot}/{p}"), &prefix, None, None)
                         })
                         .collect();
-                    let key = self.named_sets.fetch_add(1, std::sync::atomic::Ordering::SeqCst).to_string();
-                    let (root_id, nodes) = BepBuilder::named_sets(&key, msgs, max_named_set_entries);
+                    let key = self
+                        .named_sets
+                        .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                        .to_string();
+                    let (root_id, nodes) =
+                        BepBuilder::named_sets(&key, msgs, max_named_set_entries);
                     for n in nodes {
                         self.reporter.post_bep_node(n);
                     }
-                    groups.push((name, vec![root_id.get_msg("named_set").map(|m| m.get_str("id").to_string()).unwrap_or(key)], false));
+                    groups.push((
+                        name,
+                        vec![root_id
+                            .get_msg("named_set")
+                            .map(|m| m.get_str("id").to_string())
+                            .unwrap_or(key)],
+                        false,
+                    ));
                 }
             }
             let tags: Vec<String> = Vec::new();
@@ -504,15 +598,26 @@ impl BuildObserver {
             node.children = Vec::new();
             if !success {
                 // The failed action of the target is announced by its `TargetComplete`.
-                if let Some(a) = ct.default_info.files.iter().chain(ct.default_info.executable.iter()).find(|a| !a.is_source) {
-                    node.children.push(ids::action_completed(a.exec_path.path_string(), &l, &cfg_id));
+                if let Some(a) = ct
+                    .default_info
+                    .files
+                    .iter()
+                    .chain(ct.default_info.executable.iter())
+                    .find(|a| !a.is_source)
+                {
+                    node.children.push(ids::action_completed(
+                        a.exec_path.path_string(),
+                        &l,
+                        &cfg_id,
+                    ));
                 }
             }
             if success {
                 if let Some((runs, shards)) = test_units.get(&l) {
                     for run in 1..=*runs {
                         for shard in 1..=*shards {
-                            node.children.push(ids::test_result(&l, &cfg_id, run, shard, 1));
+                            node.children
+                                .push(ids::test_result(&l, &cfg_id, run, shard, 1));
                         }
                     }
                     node.children.push(ids::test_summary(&l, &cfg_id));
@@ -574,7 +679,10 @@ impl BuildObserver {
                 zel_events::EventKind::Cancelled,
             ]
             .iter()
-            .find_map(|k| body.strip_prefix(k.prefix().as_str()).map(|rest| (*k, rest)));
+            .find_map(|k| {
+                body.strip_prefix(k.prefix().as_str())
+                    .map(|rest| (*k, rest))
+            });
             if let Some((zel_events::EventKind::Info, rest)) = hit {
                 if rest.starts_with("From ") && rest.ends_with(':') {
                     let mut stderr_lines = String::new();
@@ -582,8 +690,18 @@ impl BuildObserver {
                         let nl = lines[out_idx];
                         let nb = nl.strip_suffix('\n').unwrap_or(nl);
                         let is_tagged = [
-                            "FATAL: ", "ERROR: ", "WARNING: ", "INFO: ", "DEBUG: ", "FAIL: ", "PASS: ", "SUBCOMMAND: ", "CANCELLED: ",
-                            "Target ", "Executed ", "Use --",
+                            "FATAL: ",
+                            "ERROR: ",
+                            "WARNING: ",
+                            "INFO: ",
+                            "DEBUG: ",
+                            "FAIL: ",
+                            "PASS: ",
+                            "SUBCOMMAND: ",
+                            "CANCELLED: ",
+                            "Target ",
+                            "Executed ",
+                            "Use --",
                         ]
                         .iter()
                         .any(|p| nb.starts_with(p));
@@ -594,7 +712,8 @@ impl BuildObserver {
                         out_idx += 1;
                     }
                     self.reporter.handle(Event::info(rest.to_string()));
-                    if !stderr_lines.is_empty() && !self.ui.is_filtered(zel_events::EventKind::Info) {
+                    if !stderr_lines.is_empty() && !self.ui.is_filtered(zel_events::EventKind::Info)
+                    {
                         for sl in stderr_lines.split_inclusive('\n') {
                             self.ui.write_raw_stderr(sl.as_bytes());
                         }
@@ -614,20 +733,35 @@ impl BuildObserver {
                 let bucket = 200_000_000i64;
                 let all: Vec<(i64, i64)> = spans.iter().map(|s| (s.0, s.1)).collect();
                 self.profiler.add_action_count_series(&all, bucket);
-                let local: Vec<(i64, i64)> = spans.iter().filter(|s| s.2).map(|s| (s.0, s.1)).collect();
+                let local: Vec<(i64, i64)> =
+                    spans.iter().filter(|s| s.2).map(|s| (s.0, s.1)).collect();
                 if !local.is_empty() {
                     let end = local.iter().map(|a| a.1).max().unwrap_or(0);
                     let n = (end / bucket + 1) as usize;
                     let mut v = vec![0.0; n];
                     for (st, en) in &local {
-                        for x in v.iter_mut().take(((en / bucket).max(0) as usize).min(n - 1) + 1).skip((st / bucket).max(0) as usize) {
+                        for x in v
+                            .iter_mut()
+                            .take(((en / bucket).max(0) as usize).min(n - 1) + 1)
+                            .skip((st / bucket).max(0) as usize)
+                        {
                             *x += 1.0;
                         }
                     }
-                    self.profiler.add_counter_series("action count (local)", None, 0, bucket, &[("action".to_string(), v)]);
+                    self.profiler.add_counter_series(
+                        "action count (local)",
+                        None,
+                        0,
+                        bucket,
+                        &[("action".to_string(), v)],
+                    );
                 }
                 if let Some(longest) = spans.iter().max_by_key(|s| s.1 - s.0) {
-                    self.profiler.log_critical_path_component(longest.0, longest.1 - longest.0, &format!("action '{}'", longest.3));
+                    self.profiler.log_critical_path_component(
+                        longest.0,
+                        longest.1 - longest.0,
+                        &format!("action '{}'", longest.3),
+                    );
                 }
             }
         }
@@ -649,10 +783,18 @@ impl BuildObserver {
                 ("Total worker memory usage", 0.0),
             ];
             for (lane, v) in lanes {
-                self.profiler.add_counter_series(lane, None, 0, ns, &[(lane.to_string(), vec![v, v])]);
+                self.profiler.add_counter_series(
+                    lane,
+                    None,
+                    0,
+                    ns,
+                    &[(lane.to_string(), vec![v, v])],
+                );
             }
         }
-        let analysis_ran = self.analysis_complete.load(std::sync::atomic::Ordering::SeqCst);
+        let analysis_ran = self
+            .analysis_complete
+            .load(std::sync::atomic::Ordering::SeqCst);
         if let Some(l) = &self.actions.exec_log {
             if !analysis_ran {
                 l.discard();
@@ -671,7 +813,9 @@ impl BuildObserver {
         };
         // A missing target pattern fails `build`-like commands as BUILD_FAILURE in the BEP
         // (verified against bazel 9.3.2 for `build //:nope`).
-        let name = if name == "PARSING_FAILURE" && matches!(self.command.as_str(), "build" | "test" | "coverage" | "run") {
+        let name = if name == "PARSING_FAILURE"
+            && matches!(self.command.as_str(), "build" | "test" | "coverage" | "run")
+        {
             "BUILD_FAILURE"
         } else {
             name
@@ -679,10 +823,22 @@ impl BuildObserver {
         if self.bep_enabled {
             let r = &self.reporter;
             let s = r.bep_streamer();
-            s.add_abort_reason(if code == ExitCode::INTERRUPTED { "USER_INTERRUPTED" } else { "INCOMPLETE" }, "");
+            s.add_abort_reason(
+                if code == ExitCode::INTERRUPTED {
+                    "USER_INTERRUPTED"
+                } else {
+                    "INCOMPLETE"
+                },
+                "",
+            );
             if analysis_ran {
                 r.post_bep_node(BepBuilder::convenience_symlinks(&[]));
-                r.post_bep_node(BepBuilder::build_finished(name, num, zel_events::now_millis(), failure));
+                r.post_bep_node(BepBuilder::build_finished(
+                    name,
+                    num,
+                    zel_events::now_millis(),
+                    failure,
+                ));
             } else {
                 // Analysis never completed (e.g. a missing target): the empty pattern expansion
                 // and the workspace status precede `BuildFinished`; the canonical command line
@@ -693,14 +849,21 @@ impl BuildObserver {
                 if let Some(ws) = ws {
                     r.post_bep_node(ws);
                 }
-                r.post_bep_node(BepBuilder::build_finished(name, num, zel_events::now_millis(), failure));
+                r.post_bep_node(BepBuilder::build_finished(
+                    name,
+                    num,
+                    zel_events::now_millis(),
+                    failure,
+                ));
                 let rest: Vec<_> = self.late_nodes.lock().unwrap().drain(..).collect();
                 for n in rest {
                     r.post_bep_node(n);
                 }
             }
             r.post_bep_node(BepBuilder::build_tool_logs(&[]));
-            r.post_bep_node(BepBuilder::build_metrics(zel_proto::dynamic::Msg::new("build_event_stream.BuildMetrics")));
+            r.post_bep_node(BepBuilder::build_metrics(zel_proto::dynamic::Msg::new(
+                "build_event_stream.BuildMetrics",
+            )));
             if let Some(b) = &self.bes {
                 b.set_success(num == 0);
             }
@@ -732,18 +895,35 @@ impl BuildObserver {
                     code = ExitCode::TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR;
                 }
             } else if code != ExitCode::LOCAL_ENVIRONMENTAL_ERROR
-                && (self.bep_files.0.as_ref().map_or(false, |p| std::path::Path::new(p).exists())
-                    || self.bep_files.1.as_ref().map_or(false, |p| std::path::Path::new(p).exists())
-                    || self.bep_files.2.as_ref().map_or(false, |p| std::path::Path::new(p).exists()))
+                && (self
+                    .bep_files
+                    .0
+                    .as_ref()
+                    .is_some_and(|p| std::path::Path::new(p).exists())
+                    || self
+                        .bep_files
+                        .1
+                        .as_ref()
+                        .is_some_and(|p| std::path::Path::new(p).exists())
+                    || self
+                        .bep_files
+                        .2
+                        .as_ref()
+                        .is_some_and(|p| std::path::Path::new(p).exists()))
             {
-                r.handle(Event::info("Build Event Protocol files produced successfully."));
+                r.handle(Event::info(
+                    "Build Event Protocol files produced successfully.",
+                ));
             }
         }
         // Profile.
         if let Some((path, _)) = &self.profile_path {
             let p = PathFragment::create(path);
             if let Err(e) = self.profiler.write_to(fs, &p) {
-                self.reporter.handle(Event::error(None, format!("Error while writing profile file: {e}")));
+                self.reporter.handle(Event::error(
+                    None,
+                    format!("Error while writing profile file: {e}"),
+                ));
             }
         }
         self.ui.after_command();
@@ -786,7 +966,13 @@ impl BuildObserver {
     }
 
     pub(crate) fn action_descriptions(&self) -> Vec<String> {
-        self.actions.spans.lock().unwrap().iter().map(|s| s.3.clone()).collect()
+        self.actions
+            .spans
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|s| s.3.clone())
+            .collect()
     }
 }
 
@@ -803,7 +989,11 @@ fn bep_config_id(command: &str, cpu: &str, mode: &str) -> String {
 
 fn untrimmed_config_id(cpu: &str, mode: &str) -> String {
     let base = config_id(cpu, mode);
-    format!("{}{}", base, zel_util::md5::hex_digest(format!("untrimmed-{base}").as_bytes()))
+    format!(
+        "{}{}",
+        base,
+        zel_util::md5::hex_digest(format!("untrimmed-{base}").as_bytes())
+    )
 }
 
 fn config_id(cpu: &str, mode: &str) -> String {
@@ -815,7 +1005,10 @@ fn config_id(cpu: &str, mode: &str) -> String {
 fn split_exec_path(p: &str) -> (Vec<String>, String) {
     let parts: Vec<&str> = p.split('/').collect();
     if parts.len() > 3 && parts[0] == "bazel-out" {
-        (parts[..3].iter().map(|s| s.to_string()).collect(), parts[3..].join("/"))
+        (
+            parts[..3].iter().map(|s| s.to_string()).collect(),
+            parts[3..].join("/"),
+        )
     } else {
         (Vec::new(), p.to_string())
     }
@@ -829,9 +1022,15 @@ mod tests {
     fn exec_path_splitting() {
         assert_eq!(
             split_exec_path("bazel-out/k8-fastbuild/bin/pkg/a.o"),
-            (vec!["bazel-out".into(), "k8-fastbuild".into(), "bin".into()], "pkg/a.o".to_string())
+            (
+                vec!["bazel-out".into(), "k8-fastbuild".into(), "bin".into()],
+                "pkg/a.o".to_string()
+            )
         );
-        assert_eq!(split_exec_path("pkg/a.cc"), (vec![], "pkg/a.cc".to_string()));
+        assert_eq!(
+            split_exec_path("pkg/a.cc"),
+            (vec![], "pkg/a.cc".to_string())
+        );
     }
 
     #[test]
@@ -841,6 +1040,7 @@ mod tests {
         assert_ne!(config_id("k8", "opt"), config_id("k8", "dbg"));
     }
 
+    #[cfg(unix)]
     fn runtime(root: &std::path::Path, ws: &std::path::Path) -> crate::BlazeRuntime {
         use zel_vfs::LocalFileSystem;
         let fs: Arc<dyn FileSystem> = Arc::new(LocalFileSystem::default());
@@ -853,6 +1053,7 @@ mod tests {
         crate::BlazeRuntime::new(dirs, fs, 1)
     }
 
+    #[cfg(unix)]
     fn run(rt: &crate::BlazeRuntime, args: &[&str]) -> (i32, String, String) {
         let req = zel_proto::command_server::RunRequest {
             cookie: "c".into(),
@@ -870,6 +1071,7 @@ mod tests {
 
     /// End to end: a real build with colour, all three BEP files and a gzip profile, followed by
     /// `analyze-profile` on that profile.
+    #[cfg(unix)]
     #[test]
     fn build_produces_ui_bep_profile_and_analysis() {
         let root = std::env::temp_dir().join(format!("zel-obs-{}", std::process::id()));
@@ -902,24 +1104,52 @@ mod tests {
         );
         assert_eq!(code, 0, "{err}");
         assert!(err.contains("\x1b[32mINFO: \x1b[0mAnalyzed target //p:ok (1 packages loaded, 1 target configured)."), "{err:?}");
-        assert!(err.contains("Build completed successfully, 2 total actions"), "{err}");
+        assert!(
+            err.contains("Build completed successfully, 2 total actions"),
+            "{err}"
+        );
 
         // BEP JSON: well-formed DAG, started first, last message set, outputs reported.
         let json = std::fs::read_to_string(root.join("bep.json")).unwrap();
         let lines: Vec<&str> = json.lines().collect();
         assert!(lines[0].starts_with("{\"id\":{\"started\":{}},\"children\":[{\"progress\":{}},{\"unstructuredCommandLine\":{}},{\"structuredCommandLine\":{\"commandLineLabel\":\"original\"}}"), "{}", lines[0]);
-        assert!(lines.last().unwrap().contains("\"lastMessage\":true"), "{}", lines.last().unwrap());
-        for needle in ["\"buildFinished\":{}", "\"targetCompleted\":{\"label\":\"//p:ok\"", "\"namedSet\":{\"id\":\"0\"}", "\"name\":\"p/ok.txt\"", "\"pathPrefix\":[\"bazel-out\"", "\"configured\":{\"targetKind\":\"genrule rule\"}", "\"exitCode\":{\"name\":\"SUCCESS\"}", "\"expanded\":{}", "\"configuration\":{\"mnemonic\":\"", "\"buildMetrics\":{}"] {
+        assert!(
+            lines.last().unwrap().contains("\"lastMessage\":true"),
+            "{}",
+            lines.last().unwrap()
+        );
+        for needle in [
+            "\"buildFinished\":{}",
+            "\"targetCompleted\":{\"label\":\"//p:ok\"",
+            "\"namedSet\":{\"id\":\"0\"}",
+            "\"name\":\"p/ok.txt\"",
+            "\"pathPrefix\":[\"bazel-out\"",
+            "\"configured\":{\"targetKind\":\"genrule rule\"}",
+            "\"exitCode\":{\"name\":\"SUCCESS\"}",
+            "\"expanded\":{}",
+            "\"configuration\":{\"mnemonic\":\"",
+            "\"buildMetrics\":{}",
+        ] {
             assert!(json.contains(needle), "missing {needle} in {json}");
         }
         // publish_all_actions: the successful genrule is reported as an ActionExecuted event whose
         // id names the primary output.
-        assert!(json.contains("\"actionCompleted\":{\"primaryOutput\":\"bazel-out/"), "{json}");
-        assert!(json.contains("\"action\":{\"success\":true,\"type\":\"Genrule\""), "{json}");
+        assert!(
+            json.contains("\"actionCompleted\":{\"primaryOutput\":\"bazel-out/"),
+            "{json}"
+        );
+        assert!(
+            json.contains("\"action\":{\"success\":true,\"type\":\"Genrule\""),
+            "{json}"
+        );
         // Execution logs: JSON lines and a zstd-framed compact log.
         let exec = std::fs::read_to_string(root.join("exec.json")).unwrap();
         assert_eq!(exec.lines().count(), 1, "{exec}");
-        assert!(exec.contains("\"mnemonic\":\"Genrule\"") && exec.contains("\"targetLabel\":\"//p:ok\""), "{exec}");
+        assert!(
+            exec.contains("\"mnemonic\":\"Genrule\"")
+                && exec.contains("\"targetLabel\":\"//p:ok\""),
+            "{exec}"
+        );
         let z = std::fs::read(root.join("exec.zst")).unwrap();
         let raw = zel_events::exec_log::zstd_unstore(&z).unwrap();
         assert!(!raw.is_empty());
@@ -929,14 +1159,23 @@ mod tests {
         let mut n = 0;
         while pos < bin.len() {
             let len = zel_proto::wire::decode_varint(&bin, &mut pos).unwrap() as usize;
-            let m = zel_proto::dynamic::Msg::decode("build_event_stream.BuildEvent", &bin[pos..pos + len]).unwrap();
+            let m = zel_proto::dynamic::Msg::decode(
+                "build_event_stream.BuildEvent",
+                &bin[pos..pos + len],
+            )
+            .unwrap();
             assert_eq!(m.to_json(), lines[n]);
             pos += len;
             n += 1;
         }
         assert_eq!(n, lines.len());
         let text = std::fs::read_to_string(root.join("bep.txt")).unwrap();
-        assert!(text.starts_with("event {\nid {\n  started {\n  }\n}\nchildren {\n  progress {\n  }\n}"), "{text}");
+        assert!(
+            text.starts_with(
+                "event {\nid {\n  started {\n  }\n}\nchildren {\n  progress {\n  }\n}"
+            ),
+            "{text}"
+        );
         assert_eq!(text.matches("event {\n").count(), lines.len());
 
         // Profile: gzip, analyzable.
@@ -952,15 +1191,26 @@ mod tests {
         // A failing build: BEP records the failure and the exit code; colour applies to ERROR.
         let (code, err, _) = run(
             &rt,
-            &["build", "--color=yes", &format!("--build_event_json_file={}", r("bad.json")), "//p:bad"],
+            &[
+                "build",
+                "--color=yes",
+                &format!("--build_event_json_file={}", r("bad.json")),
+                "//p:bad",
+            ],
         );
         assert_eq!(code, 1, "{err}");
         assert!(err.contains("\x1b[31m\x1b[1mERROR: \x1b[0m"), "{err:?}");
         let bad = std::fs::read_to_string(root.join("bad.json")).unwrap();
-        assert!(bad.contains("\"exitCode\":{\"name\":\"BUILD_FAILURE\",\"code\":1}"), "{bad}");
+        assert!(
+            bad.contains("\"exitCode\":{\"name\":\"BUILD_FAILURE\",\"code\":1}"),
+            "{bad}"
+        );
         // The failed build's BuildFinished carries the derived FailureDetail.
         assert!(bad.contains("\"failureDetail\":{\"message\":"), "{bad}");
-        assert!(bad.contains("\"spawn\":{\"code\":\"NON_ZERO_EXIT\"}"), "{bad}");
+        assert!(
+            bad.contains("\"spawn\":{\"code\":\"NON_ZERO_EXIT\"}"),
+            "{bad}"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

@@ -32,11 +32,11 @@ pub mod executor;
 pub mod recording_fs;
 
 pub use cycles::{CycleInfo, CyclesReporter};
-pub use executor::{loading_signature, SkyframeExecutor, SyncReport};
 pub use engine::{
     Environment, ErrorInfo, EvaluationOptions, EvaluationResult, EvaluationStats,
     InMemoryMemoizingEvaluator, Version,
 };
+pub use executor::{loading_signature, SkyframeExecutor, SyncReport};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SkyFunctionName(pub &'static str);
@@ -64,6 +64,7 @@ impl fmt::Display for SkyFunctionName {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum SkyKey {
     FileState(RootedPath),
+    File(RootedPath),
     DirectoryListingState(RootedPath),
     PackageLookup(PackageIdentifier),
     Package(PackageIdentifier),
@@ -87,6 +88,7 @@ impl SkyKey {
     pub fn function_name(&self) -> SkyFunctionName {
         match self {
             Self::FileState(_) => SkyFunctionName::FILE_STATE,
+            Self::File(_) => SkyFunctionName::FILE,
             Self::DirectoryListingState(_) => SkyFunctionName::DIRECTORY_LISTING,
             Self::ActionExecution(_) => SkyFunctionName::ACTION_EXECUTION,
             Self::PackageLookup(_) => SkyFunctionName::PACKAGE_LOOKUP,
@@ -103,7 +105,10 @@ impl fmt::Display for SkyKey {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FileState(rp) => write!(f, "FILE_STATE:[{}]", rp.as_path()),
-            Self::DirectoryListingState(rp) => write!(f, "DIRECTORY_LISTING_STATE:[{}]", rp.as_path()),
+            Self::File(rp) => write!(f, "FILE:[{}]", rp.as_path()),
+            Self::DirectoryListingState(rp) => {
+                write!(f, "DIRECTORY_LISTING_STATE:[{}]", rp.as_path())
+            }
             Self::ActionExecution(id) => write!(f, "ACTION_EXECUTION:[{id}]"),
             Self::PackageLookup(pkg) => write!(f, "PACKAGE_LOOKUP:[{pkg}]"),
             Self::Package(pkg) => write!(f, "PACKAGE:[{pkg}]"),
@@ -126,15 +131,166 @@ pub trait SkyValue: Any + fmt::Debug + Send + Sync {
     fn eq_value(&self, other: &dyn SkyValue) -> bool;
 }
 
+/// Comparison result of `FileStateValue::compare_contents`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileContentsComparison {
+    Same,
+    SameExceptChangeTime,
+    Different,
+}
+
 /// `FileStateValue`: the observable state of one path (not following symlinks).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileStateValue {
     /// `mtime_ms` is recorded for stat-based diff detection but does not take part in value
     /// equality: a touched-but-identical file is a pruned change.
-    RegularFile { size: u64, digest: Vec<u8>, mtime_ms: u64, observed_ms: u64 },
+    RegularFile {
+        size: u64,
+        digest: Vec<u8>,
+        mtime_ms: u64,
+        observed_ms: u64,
+    },
+    /// Unreadable regular file whose digest could not be read (`MetadataBackedFileStateValue` / proxy).
+    RegularFileProxy {
+        size: u64,
+        mtime_ms: u64,
+        node_id: u64,
+    },
+    /// Special file (FIFO, socket, device) with size 0 and no digest (`SpecialFileStateValue`).
+    SpecialFile {
+        mtime_ms: u64,
+        node_id: u64,
+    },
     Directory,
-    Symlink { target: PathFragment },
+    Symlink {
+        target: PathFragment,
+    },
     NonExistent,
+}
+
+impl FileStateValue {
+    pub fn is_file(&self) -> bool {
+        matches!(
+            self,
+            Self::RegularFile { .. } | Self::RegularFileProxy { .. } | Self::SpecialFile { .. }
+        )
+    }
+
+    pub fn digest(&self) -> Option<&[u8]> {
+        match self {
+            Self::RegularFile { digest, .. } => Some(digest.as_slice()),
+            _ => None,
+        }
+    }
+
+    pub fn size(&self) -> Option<u64> {
+        match self {
+            Self::RegularFile { size, .. } | Self::RegularFileProxy { size, .. } => Some(*size),
+            Self::SpecialFile { .. } => Some(0),
+            _ => None,
+        }
+    }
+
+    /// `FileStateValue.getValueFingerprint`
+    pub fn value_fingerprint(&self) -> Vec<u8> {
+        let mut fp = zel_util::Fingerprint::new();
+        match self {
+            Self::RegularFile { size, digest, .. } => {
+                fp.add_u64(*size);
+                fp.add_bytes(digest);
+            }
+            Self::RegularFileProxy {
+                size,
+                mtime_ms,
+                node_id,
+            } => {
+                fp.add_u64(*size);
+                fp.add_u64(*mtime_ms);
+                fp.add_u64(*node_id);
+            }
+            Self::SpecialFile { mtime_ms, node_id } => {
+                fp.add_u64(0);
+                fp.add_u64(*mtime_ms);
+                fp.add_u64(*node_id);
+            }
+            Self::Symlink { target } => {
+                fp.add_str(target.path_string());
+            }
+            Self::Directory => {
+                fp.add_str("DirectoryFileStateValue");
+            }
+            Self::NonExistent => {
+                fp.add_str("NonexistentFileStateValue");
+            }
+        }
+        fp.digest_and_reset().to_vec()
+    }
+
+    /// `FileStateValue.compareContents`
+    pub fn compare_contents(&self, other: &Self) -> FileContentsComparison {
+        match (self, other) {
+            (
+                Self::RegularFile {
+                    size: s1,
+                    digest: d1,
+                    mtime_ms: m1,
+                    ..
+                },
+                Self::RegularFile {
+                    size: s2,
+                    digest: d2,
+                    mtime_ms: m2,
+                    ..
+                },
+            ) => {
+                if s1 == s2 && d1 == d2 {
+                    if m1 == m2 {
+                        FileContentsComparison::Same
+                    } else {
+                        FileContentsComparison::SameExceptChangeTime
+                    }
+                } else {
+                    FileContentsComparison::Different
+                }
+            }
+            (
+                Self::RegularFileProxy {
+                    size: s1,
+                    mtime_ms: m1,
+                    node_id: n1,
+                },
+                Self::RegularFileProxy {
+                    size: s2,
+                    mtime_ms: m2,
+                    node_id: n2,
+                },
+            ) => {
+                if s1 == s2 && m1 == m2 && n1 == n2 {
+                    FileContentsComparison::Same
+                } else {
+                    FileContentsComparison::Different
+                }
+            }
+            (
+                Self::SpecialFile {
+                    mtime_ms: m1,
+                    node_id: n1,
+                },
+                Self::SpecialFile {
+                    mtime_ms: m2,
+                    node_id: n2,
+                },
+            ) => {
+                if m1 == m2 && n1 == n2 {
+                    FileContentsComparison::Same
+                } else {
+                    FileContentsComparison::Different
+                }
+            }
+            (a, b) if a == b => FileContentsComparison::Same,
+            _ => FileContentsComparison::Different,
+        }
+    }
 }
 
 impl SkyValue for FileStateValue {
@@ -144,11 +300,49 @@ impl SkyValue for FileStateValue {
     fn eq_value(&self, other: &dyn SkyValue) -> bool {
         match (self, other.as_any().downcast_ref::<Self>()) {
             (
-                Self::RegularFile { size: s1, digest: d1, .. },
-                Some(Self::RegularFile { size: s2, digest: d2, .. }),
+                Self::RegularFile {
+                    size: s1,
+                    digest: d1,
+                    ..
+                },
+                Some(Self::RegularFile {
+                    size: s2,
+                    digest: d2,
+                    ..
+                }),
             ) => s1 == s2 && d1 == d2,
             (a, Some(b)) => a == b,
             _ => false,
+        }
+    }
+}
+
+/// Resolved file value after symlink traversal (`FileValue`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileValue {
+    pub exists: bool,
+    pub is_file: bool,
+    pub is_directory: bool,
+    pub is_symlink: bool,
+    pub real_path: RootedPath,
+    pub real_state: FileStateValue,
+}
+
+impl SkyValue for FileValue {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+    fn eq_value(&self, other: &dyn SkyValue) -> bool {
+        match other.as_any().downcast_ref::<Self>() {
+            Some(o) => {
+                self.exists == o.exists
+                    && self.is_file == o.is_file
+                    && self.is_directory == o.is_directory
+                    && self.is_symlink == o.is_symlink
+                    && self.real_path == o.real_path
+                    && self.real_state.eq_value(&o.real_state)
+            }
+            None => false,
         }
     }
 }
@@ -178,10 +372,70 @@ impl SkyValue for DirectoryListingStateValue {
     }
 }
 
+/// Classification of a `PackageLookupValue` outcome matching Bazel's `PackageLookupValue` subclasses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PackageLookupReason {
+    Valid,
+    NoBuildFile,
+    Deleted,
+    InvalidName,
+    IncorrectRepo,
+    MissingRepo,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageLookupValue {
     pub package_exists: bool,
     pub build_file_path: Option<RootedPath>,
+    pub reason: PackageLookupReason,
+    pub error_message: Option<String>,
+}
+
+impl PackageLookupValue {
+    pub fn success(build_file_path: RootedPath) -> Self {
+        Self {
+            package_exists: true,
+            build_file_path: Some(build_file_path),
+            reason: PackageLookupReason::Valid,
+            error_message: None,
+        }
+    }
+
+    pub fn no_build_file(error_message: Option<String>) -> Self {
+        Self {
+            package_exists: false,
+            build_file_path: None,
+            reason: PackageLookupReason::NoBuildFile,
+            error_message,
+        }
+    }
+
+    pub fn deleted(error_message: Option<String>) -> Self {
+        Self {
+            package_exists: false,
+            build_file_path: None,
+            reason: PackageLookupReason::Deleted,
+            error_message,
+        }
+    }
+
+    pub fn invalid_name(error_message: String) -> Self {
+        Self {
+            package_exists: false,
+            build_file_path: None,
+            reason: PackageLookupReason::InvalidName,
+            error_message: Some(error_message),
+        }
+    }
+
+    pub fn missing_repo(error_message: String) -> Self {
+        Self {
+            package_exists: false,
+            build_file_path: None,
+            reason: PackageLookupReason::MissingRepo,
+            error_message: Some(error_message),
+        }
+    }
 }
 
 impl SkyValue for PackageLookupValue {
@@ -251,6 +505,7 @@ impl SkyValue for StringSkyValue {
 pub struct SkyFunctionError {
     pub message: String,
     pub transient: bool,
+    pub catastrophic: bool,
 }
 
 impl SkyFunctionError {
@@ -258,6 +513,7 @@ impl SkyFunctionError {
         Self {
             message: msg.into(),
             transient: false,
+            catastrophic: false,
         }
     }
 
@@ -265,7 +521,29 @@ impl SkyFunctionError {
         Self {
             message: msg.into(),
             transient: true,
+            catastrophic: false,
         }
+    }
+
+    pub fn catastrophic_transient(msg: impl Into<String>) -> Self {
+        Self {
+            message: msg.into(),
+            transient: true,
+            catastrophic: true,
+        }
+    }
+
+    pub fn catastrophic_persistent(msg: impl Into<String>) -> Self {
+        Self {
+            message: msg.into(),
+            transient: false,
+            catastrophic: true,
+        }
+    }
+
+    pub fn with_catastrophic(mut self, catastrophic: bool) -> Self {
+        self.catastrophic = catastrophic;
+        self
     }
 }
 
@@ -289,28 +567,48 @@ pub trait SkyFunction: Send + Sync {
 /// `(path, size, mtime)` so re-checking an unchanged file does not re-read it.
 pub struct FileStateFunction {
     pub fs: Arc<dyn FileSystem>,
+    #[allow(clippy::type_complexity)]
     digests: std::sync::Mutex<std::collections::HashMap<PathFragment, (u64, u64, Vec<u8>)>>,
 }
 
 impl FileStateFunction {
     pub fn new(fs: Arc<dyn FileSystem>) -> Self {
-        Self { fs, digests: Default::default() }
+        Self {
+            fs,
+            digests: Default::default(),
+        }
     }
 
     /// Computes the current state of `path` (shared with the diff checker).
-    pub fn compute_state(&self, full_path: &PathFragment) -> Result<FileStateValue, SkyFunctionError> {
+    pub fn compute_state(
+        &self,
+        full_path: &PathFragment,
+    ) -> Result<FileStateValue, SkyFunctionError> {
         // Taken *before* the stat so that "racy" detection is conservative.
         let observed_ms = diff::now_ms();
         match self.fs.stat(full_path, false) {
             Ok(st) => {
                 if st.is_symlink {
-                    let target = self
-                        .fs
-                        .read_symbolic_link(full_path)
-                        .map_err(|e| SkyFunctionError::transient(e.to_string()))?;
+                    let target = self.fs.read_symbolic_link(full_path).map_err(|e| {
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                        ) {
+                            SkyFunctionError::catastrophic_transient(format!(
+                                "Inconsistent filesystem: {e}"
+                            ))
+                        } else {
+                            SkyFunctionError::transient(e.to_string())
+                        }
+                    })?;
                     Ok(FileStateValue::Symlink { target })
                 } else if st.is_directory {
                     Ok(FileStateValue::Directory)
+                } else if st.is_special_file {
+                    Ok(FileStateValue::SpecialFile {
+                        mtime_ms: st.last_modified_time_ms,
+                        node_id: st.node_id,
+                    })
                 } else {
                     // A cached digest is trusted only if the file's mtime is meaningful (non-zero)
                     // and was not racy when the digest was computed.
@@ -319,24 +617,38 @@ impl FileStateFunction {
                         .lock()
                         .unwrap()
                         .get(full_path)
-                        .filter(|(sz, mt, _)| *sz == st.size && *mt == st.last_modified_time_ms && *mt != 0)
+                        .filter(|(sz, mt, _)| {
+                            *sz == st.size && *mt == st.last_modified_time_ms && *mt != 0
+                        })
                         .map(|(_, _, d)| d.clone());
                     let digest = match cached {
                         Some(d) => d,
-                        None => {
-                            let d = self
-                                .fs
-                                .get_digest(full_path)
-                                .map_err(|e| SkyFunctionError::transient(e.to_string()))?;
-                            let racy = observed_ms.saturating_sub(st.last_modified_time_ms) < diff::RACY_WINDOW_MS;
-                            if !racy {
-                                self.digests
-                                    .lock()
-                                    .unwrap()
-                                    .insert(full_path.clone(), (st.size, st.last_modified_time_ms, d.clone()));
+                        None => match self.fs.get_digest(full_path) {
+                            Ok(d) => {
+                                let racy = observed_ms.saturating_sub(st.last_modified_time_ms)
+                                    < diff::RACY_WINDOW_MS;
+                                if !racy {
+                                    self.digests.lock().unwrap().insert(
+                                        full_path.clone(),
+                                        (st.size, st.last_modified_time_ms, d.clone()),
+                                    );
+                                }
+                                d
                             }
-                            d
-                        }
+                            Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                                return Ok(FileStateValue::RegularFileProxy {
+                                    size: st.size,
+                                    mtime_ms: st.last_modified_time_ms,
+                                    node_id: st.node_id,
+                                });
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                                return Err(SkyFunctionError::catastrophic_transient(format!(
+                                    "Inconsistent filesystem reading {full_path}: {e}"
+                                )));
+                            }
+                            Err(e) => return Err(SkyFunctionError::transient(e.to_string())),
+                        },
                     };
                     Ok(FileStateValue::RegularFile {
                         size: st.size,
@@ -365,13 +677,103 @@ impl SkyFunction for FileStateFunction {
     }
 }
 
+const MAX_SYMLINK_HOPS: usize = 40;
+
+/// Resolves a `RootedPath` through `SkyKey::FileState`, following symlink targets up to
+/// [`MAX_SYMLINK_HOPS`] and detecting cycles.
+fn resolve_file_state(
+    env: &mut Environment<'_>,
+    start_rp: &RootedPath,
+) -> Result<Option<(RootedPath, FileStateValue, bool)>, SkyFunctionError> {
+    let mut current_rp = start_rp.clone();
+    let mut visited = std::collections::HashSet::new();
+    let mut saw_symlink = false;
+    for _ in 0..=MAX_SYMLINK_HOPS {
+        let full_path = current_rp.as_path();
+        if !visited.insert(full_path.clone()) {
+            return Err(SkyFunctionError::persistent(format!(
+                "Symlink cycle detected while trying to find {}",
+                start_rp.as_path()
+            )));
+        }
+        let Some(v) = env.get_value(&SkyKey::FileState(current_rp.clone())) else {
+            return Ok(None);
+        };
+        let state = v
+            .as_any()
+            .downcast_ref::<FileStateValue>()
+            .cloned()
+            .ok_or_else(|| SkyFunctionError::persistent("Invalid FileStateValue"))?;
+        match &state {
+            FileStateValue::Symlink { target } => {
+                saw_symlink = true;
+                let resolved_abs = if target.is_absolute() {
+                    target.clone()
+                } else if let Some(parent) = full_path.parent_directory() {
+                    parent.get_relative(target)
+                } else {
+                    target.clone()
+                };
+                // Keep relative under the same root when possible, otherwise anchor at drive root.
+                current_rp = if let Ok(rel) = resolved_abs.relative_to(current_rp.root()) {
+                    RootedPath::to_rooted_path(current_rp.root().clone(), rel)
+                        .map_err(SkyFunctionError::persistent)?
+                } else {
+                    crate::recording_fs::rooted(&resolved_abs).ok_or_else(|| {
+                        SkyFunctionError::persistent(format!(
+                            "Symlink target must be absolute: {resolved_abs}"
+                        ))
+                    })?
+                };
+            }
+            _ => return Ok(Some((current_rp, state, saw_symlink))),
+        }
+    }
+    Err(SkyFunctionError::persistent(format!(
+        "Infinite symlink expansion detected while trying to find {}",
+        start_rp.as_path()
+    )))
+}
+
+/// Built-in `FILE` SkyFunction (`FileFunction`), resolving symlinks over `FILE_STATE`.
+pub struct FileFunction;
+
+impl SkyFunction for FileFunction {
+    fn compute(
+        &self,
+        key: &SkyKey,
+        env: &mut Environment<'_>,
+    ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        let SkyKey::File(rp) = key else {
+            return Err(SkyFunctionError::persistent("Expected File SkyKey"));
+        };
+        let Some((real_path, real_state, is_symlink)) = resolve_file_state(env, rp)? else {
+            return Ok(None);
+        };
+        let exists = !matches!(real_state, FileStateValue::NonExistent);
+        let is_file = real_state.is_file();
+        let is_directory = matches!(real_state, FileStateValue::Directory);
+        Ok(Some(Arc::new(FileValue {
+            exists,
+            is_file,
+            is_directory,
+            is_symlink,
+            real_path,
+            real_state,
+        })))
+    }
+}
+
 /// Built-in `DIRECTORY_LISTING_STATE` SkyFunction (`DirectoryListingStateFunction`).
 pub struct DirectoryListingStateFunction {
     pub fs: Arc<dyn FileSystem>,
 }
 
 impl DirectoryListingStateFunction {
-    pub fn compute_state(fs: &dyn FileSystem, path: &PathFragment) -> Result<DirectoryListingStateValue, SkyFunctionError> {
+    pub fn compute_state(
+        fs: &dyn FileSystem,
+        path: &PathFragment,
+    ) -> Result<DirectoryListingStateValue, SkyFunctionError> {
         match fs.readdir(path) {
             Ok(entries) => {
                 let mut v: Vec<(String, EntryKind)> = entries
@@ -389,10 +791,19 @@ impl DirectoryListingStateFunction {
                     })
                     .collect();
                 v.sort();
-                Ok(DirectoryListingStateValue { exists: true, entries: v })
+                Ok(DirectoryListingStateValue {
+                    exists: true,
+                    entries: v,
+                })
             }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound || e.kind() == std::io::ErrorKind::NotADirectory => {
-                Ok(DirectoryListingStateValue { exists: false, entries: vec![] })
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::NotADirectory =>
+            {
+                Ok(DirectoryListingStateValue {
+                    exists: false,
+                    entries: vec![],
+                })
             }
             Err(e) => Err(SkyFunctionError::transient(e.to_string())),
         }
@@ -406,9 +817,14 @@ impl SkyFunction for DirectoryListingStateFunction {
         _env: &mut Environment<'_>,
     ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
         let SkyKey::DirectoryListingState(rp) = key else {
-            return Err(SkyFunctionError::persistent("Expected DirectoryListingState SkyKey"));
+            return Err(SkyFunctionError::persistent(
+                "Expected DirectoryListingState SkyKey",
+            ));
         };
-        Ok(Some(Arc::new(Self::compute_state(self.fs.as_ref(), &rp.as_path())?)))
+        Ok(Some(Arc::new(Self::compute_state(
+            self.fs.as_ref(),
+            &rp.as_path(),
+        )?)))
     }
 }
 
@@ -431,6 +847,17 @@ impl SkyFunction for PackageLookupFunction {
             ));
         };
         let pkg_frag = pkg_id.package_fragment();
+        if let Err(msg) = zel_cmdline::validator::validate_package_name(pkg_frag.path_string()) {
+            return Ok(Some(Arc::new(PackageLookupValue::invalid_name(format!(
+                "Invalid package name '{pkg_id}': {msg}"
+            )))));
+        }
+        // `//external` in the main repository is a legacy WORKSPACE-only pseudo-package.
+        if pkg_id.repository().is_main() && pkg_frag.path_string() == "external" {
+            return Ok(Some(Arc::new(PackageLookupValue::no_build_file(Some(
+                "The //external package is not available without WORKSPACE support.".to_string(),
+            )))));
+        }
         // Packages of external repositories live under the repository's own root.
         let repo_root = if pkg_id.repository().is_main() {
             self.workspace_root.clone()
@@ -442,57 +869,37 @@ impl SkyFunction for PackageLookupFunction {
             {
                 Some(root) => root,
                 None => {
-                    let repo_display = format!("@@[unknown repo '{}' requested from @@]", pkg_id.repository().name());
+                    let repo_display = format!(
+                        "@@[unknown repo '{}' requested from @@]",
+                        pkg_id.repository().name()
+                    );
                     return Err(SkyFunctionError::persistent(format!(
                         "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: No repository visible as '@{}' from main repository",
                         pkg_frag,
                         pkg_id.repository().name()
-                    )))
+                    )));
                 }
             }
         };
-        let build_bazel_rp = RootedPath::to_rooted_path(
-            repo_root.clone(),
-            pkg_frag.get_relative_str("BUILD.bazel"),
-        )
-        .map_err(SkyFunctionError::persistent)?;
-        let build_rp = RootedPath::to_rooted_path(
-            repo_root.clone(),
-            pkg_frag.get_relative_str("BUILD"),
-        )
-        .map_err(SkyFunctionError::persistent)?;
 
-        let mut vs = env.get_values(&[
-            SkyKey::FileState(build_bazel_rp.clone()),
-            SkyKey::FileState(build_rp.clone()),
-        ]);
-        if env.values_missing() {
-            return Ok(None);
-        }
-        let v2 = vs.pop().flatten();
-        let v1 = vs.pop().flatten();
-
-        if let Some(fs1) = v1.and_then(|v| v.as_any().downcast_ref::<FileStateValue>().cloned()) {
-            if matches!(fs1, FileStateValue::RegularFile { .. }) {
-                return Ok(Some(Arc::new(PackageLookupValue {
-                    package_exists: true,
-                    build_file_path: Some(build_bazel_rp),
-                })));
-            }
-        }
-        if let Some(fs2) = v2.and_then(|v| v.as_any().downcast_ref::<FileStateValue>().cloned()) {
-            if matches!(fs2, FileStateValue::RegularFile { .. }) {
-                return Ok(Some(Arc::new(PackageLookupValue {
-                    package_exists: true,
-                    build_file_path: Some(build_rp),
-                })));
+        // Probe BUILD.bazel first, then BUILD only if BUILD.bazel is not a file (so changes
+        // to BUILD do not invalidate lookup when BUILD.bazel already exists).
+        for filename in ["BUILD.bazel", "BUILD"] {
+            let candidate_rp =
+                RootedPath::to_rooted_path(repo_root.clone(), pkg_frag.get_relative_str(filename))
+                    .map_err(SkyFunctionError::persistent)?;
+            let Some((_, state, _)) = resolve_file_state(env, &candidate_rp)? else {
+                return Ok(None);
+            };
+            if state.is_file() {
+                return Ok(Some(Arc::new(PackageLookupValue::success(candidate_rp))));
             }
         }
 
-        Ok(Some(Arc::new(PackageLookupValue {
-            package_exists: false,
-            build_file_path: None,
-        })))
+        Ok(Some(Arc::new(PackageLookupValue::no_build_file(Some(format!(
+            "BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - {}",
+            if pkg_frag.is_empty() { "." } else { pkg_frag.path_string() }
+        ))))))
     }
 }
 
@@ -510,7 +917,11 @@ fn load_with_recording<T: Clone>(
     env: &mut Environment<'_>,
     load: impl FnOnce() -> T,
 ) -> Option<T> {
-    let existing = pending.lock().unwrap().get(key).map(|d| (d.result.clone(), d.keys.clone()));
+    let existing = pending
+        .lock()
+        .unwrap()
+        .get(key)
+        .map(|d| (d.result.clone(), d.keys.clone()));
     let (result, keys) = match existing {
         Some(x) => x,
         None => {
@@ -518,7 +929,13 @@ fn load_with_recording<T: Clone>(
             let result = load();
             let rec = recording_fs::finish_recording();
             let keys = recording_fs::dependency_keys(&rec);
-            pending.lock().unwrap().insert(key.clone(), Discovered { result: result.clone(), keys: keys.clone() });
+            pending.lock().unwrap().insert(
+                key.clone(),
+                Discovered {
+                    result: result.clone(),
+                    keys: keys.clone(),
+                },
+            );
             (result, keys)
         }
     };
@@ -535,7 +952,8 @@ fn load_with_recording<T: Clone>(
 /// loaded `.bzl` files, `glob()` directories, ...) is recorded and becomes a real dependency.
 pub struct PackageFunction {
     pub fs: Arc<dyn FileSystem>,
-    pending: std::sync::Mutex<std::collections::HashMap<SkyKey, Discovered<Result<Package, String>>>>,
+    pending:
+        std::sync::Mutex<std::collections::HashMap<SkyKey, Discovered<Result<Package, String>>>>,
     repo_resolver: zel_packages::lookup::RepoResolverSlot,
 }
 
@@ -545,8 +963,15 @@ impl PackageFunction {
     }
 
     /// Like [`new`](Self::new) with the per-runtime external repository resolver slot.
-    pub fn with_resolver(fs: Arc<dyn FileSystem>, repo_resolver: zel_packages::lookup::RepoResolverSlot) -> Self {
-        Self { fs, pending: Default::default(), repo_resolver }
+    pub fn with_resolver(
+        fs: Arc<dyn FileSystem>,
+        repo_resolver: zel_packages::lookup::RepoResolverSlot,
+    ) -> Self {
+        Self {
+            fs,
+            pending: Default::default(),
+            repo_resolver,
+        }
     }
 }
 
@@ -568,15 +993,44 @@ impl SkyFunction for PackageFunction {
             .ok_or_else(|| SkyFunctionError::persistent("Invalid PackageLookupValue"))?;
 
         if !lookup.package_exists {
+            let reason = match lookup.reason {
+                PackageLookupReason::InvalidName => {
+                    return Err(SkyFunctionError::persistent(
+                        lookup.error_message.clone().unwrap_or_else(|| {
+                            format!(
+                                "no such package '{}': Invalid package name",
+                                pkg_id.package_fragment()
+                            )
+                        }),
+                    ));
+                }
+                PackageLookupReason::Deleted => {
+                    "Package is considered deleted due to --deleted_packages".to_string()
+                }
+                _ => lookup
+                    .error_message
+                    .clone()
+                    .unwrap_or_else(|| "BUILD file not found".to_string()),
+            };
             return Err(SkyFunctionError::persistent(format!(
-                "no such package '{}': BUILD file not found",
+                "no such package '{}': {reason}",
                 pkg_id.package_fragment()
             )));
         }
-        let build_rp = lookup.build_file_path.clone().unwrap();
-        let _ = env.get_value(&SkyKey::FileState(build_rp.clone()));
-        if env.values_missing() {
+        let build_rp = lookup.build_file_path.clone().ok_or_else(|| {
+            SkyFunctionError::persistent(
+                "PackageLookupValue marked present without build_file_path",
+            )
+        })?;
+        let Some((_, build_state, _)) = resolve_file_state(env, &build_rp)? else {
             return Ok(None);
+        };
+        if !build_state.is_file() {
+            return Err(SkyFunctionError::persistent(format!(
+                "no such package '{}': BUILD file {} is not a file",
+                pkg_id.package_fragment(),
+                build_rp.as_path()
+            )));
         }
         let recording_fs = recording_fs::RecordingFileSystem::new(Arc::clone(&self.fs));
         let outcome = load_with_recording(&self.pending, key, env, || {
@@ -598,7 +1052,9 @@ impl SkyFunction for PackageFunction {
                 resolver,
             )
         });
-        let Some(outcome) = outcome else { return Ok(None) };
+        let Some(outcome) = outcome else {
+            return Ok(None);
+        };
         let (targets, package_opt) = match outcome {
             Ok(pkg) => {
                 let mut map = BTreeMap::new();
@@ -665,7 +1121,10 @@ pub const LOADING_OPTIONS_KEY: &str = "package_loading_options";
 
 impl PackageLoadFunction {
     pub fn new(ctx: Arc<PackageLoadContext>) -> Self {
-        Self { ctx, pending: Default::default() }
+        Self {
+            ctx,
+            pending: Default::default(),
+        }
     }
 }
 
@@ -678,7 +1137,10 @@ impl SkyFunction for PackageLoadFunction {
         let SkyKey::PackageLoad(pkg_id) = key else {
             return Err(SkyFunctionError::persistent("Expected PackageLoad SkyKey"));
         };
-        if env.get_value(&SkyKey::Precomputed(LOADING_OPTIONS_KEY.to_string())).is_none() {
+        if env
+            .get_value(&SkyKey::Precomputed(LOADING_OPTIONS_KEY.to_string()))
+            .is_none()
+        {
             return Ok(None);
         }
         let loader = self
@@ -688,7 +1150,9 @@ impl SkyFunction for PackageLoadFunction {
             .unwrap()
             .as_ref()
             .and_then(|w| w.upgrade())
-            .ok_or_else(|| SkyFunctionError::persistent("no PackageLoader installed for PACKAGE_LOAD"))?;
+            .ok_or_else(|| {
+                SkyFunctionError::persistent("no PackageLoader installed for PACKAGE_LOAD")
+            })?;
         let ctx = &self.ctx;
         let out = load_with_recording(&self.pending, key, env, || {
             ctx.loads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -702,8 +1166,11 @@ impl SkyFunction for PackageLoadFunction {
 /// dependency-aware [`ConfiguredTargetFunction`] (invoked once per computation so that file
 /// changes are always observed).
 pub type AnalysisSetup = Arc<
-    dyn Fn() -> (Arc<zel_packages::PackageLoader>, zel_rules::AnalysisConfig, BuildConfigurationKey)
-        + Send
+    dyn Fn() -> (
+            Arc<zel_packages::PackageLoader>,
+            zel_rules::AnalysisConfig,
+            BuildConfigurationKey,
+        ) + Send
         + Sync,
 >;
 
@@ -720,11 +1187,17 @@ pub struct ConfiguredTargetFunction {
 
 impl ConfiguredTargetFunction {
     pub fn new(default_config: BuildConfigurationKey) -> Self {
-        Self { default_config, analysis: None }
+        Self {
+            default_config,
+            analysis: None,
+        }
     }
 
     pub fn with_analysis(default_config: BuildConfigurationKey, setup: AnalysisSetup) -> Self {
-        Self { default_config, analysis: Some(setup) }
+        Self {
+            default_config,
+            analysis: Some(setup),
+        }
     }
 }
 
@@ -746,8 +1219,12 @@ impl SkyFunction for ConfiguredTargetFunction {
         if let Some(setup) = &self.analysis {
             let (loader, acfg, cfg) = setup();
             let resolver = zel_rules::TargetResolver::new(loader, acfg);
-            let ct = resolver.analyze(label, &cfg).map_err(SkyFunctionError::persistent)?;
-            return Ok(Some(Arc::new(ConfiguredTargetValue { configured_target: (*ct).clone() })));
+            let ct = resolver
+                .analyze(label, &cfg)
+                .map_err(SkyFunctionError::persistent)?;
+            return Ok(Some(Arc::new(ConfiguredTargetValue {
+                configured_target: (*ct).clone(),
+            })));
         }
         let pkg_val = pkg_val_any
             .as_any()

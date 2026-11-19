@@ -70,6 +70,8 @@ pub struct RuleExtra {
     /// The `features` the rule call itself passed, when the package merged its own features
     /// into `attr_values["features"]` (query shows only the rule's own list).
     pub own_features: Option<AttrValue>,
+    /// The `package(features = [...])` tokens of the package declaring this rule.
+    pub pkg_features: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,14 +136,69 @@ impl RuleInstance {
 
     /// The value of attribute `name`: explicit value, else the rule class default.
     pub fn attr_or_default(&self, name: &str) -> Option<AttrValue> {
+        if name == "name" {
+            return Some(AttrValue::Str(self.label.name().to_string()));
+        }
         if let Some(v) = self.extra.attr_values.get(name) {
             return Some(v.clone());
         }
-        self.extra
+        let rc = self.extra.rule_class.as_ref()?;
+        if name == "timeout" && rc.is_test {
+            let size = match self.attr_or_default("size") {
+                Some(AttrValue::Str(s)) => s,
+                _ => String::new(),
+            };
+            let timeout = match size.as_str() {
+                "small" => "short",
+                "medium" => "moderate",
+                "large" => "long",
+                "enormous" => "eternal",
+                _ => "illegal",
+            };
+            return Some(AttrValue::Str(timeout.to_string()));
+        }
+        rc.attr(name).map(|a| a.default_value())
+    }
+
+    /// All rule tags (`Rule.getRuleTags()`): `tags` list, plus for taggable attributes `size`,
+    /// `timeout`, `flaky`/`noflaky`, `local`/`nolocal`, deduplicated in attribute order.
+    pub fn rule_tags(&self) -> Vec<String> {
+        let mut out: Vec<String> = Vec::new();
+        let mut push = |t: String| {
+            if !out.contains(&t) {
+                out.push(t);
+            }
+        };
+        if let Some(AttrValue::StrList(l)) = self.attr_or_default("tags") {
+            for s in l {
+                push(s);
+            }
+        }
+        if self
+            .extra
             .rule_class
             .as_ref()
-            .and_then(|rc| rc.attr(name))
-            .map(|a| a.default_value())
+            .map(|rc| rc.is_test)
+            .unwrap_or(false)
+        {
+            if let Some(AttrValue::Str(s)) = self.attr_or_default("size") {
+                if !s.is_empty() {
+                    push(s);
+                }
+            }
+            if let Some(AttrValue::Str(t)) = self.attr_or_default("timeout") {
+                if !t.is_empty() {
+                    push(t);
+                }
+            }
+            if let Some(AttrValue::Bool(b)) = self.attr_or_default("flaky") {
+                push(if b { "flaky" } else { "noflaky" }.to_string());
+            }
+        }
+        if let Some(AttrValue::Bool(b)) = self.attr_or_default("local") {
+            push(if b { "local" } else { "nolocal" }.to_string());
+        }
+        out
     }
 }
 
@@ -218,6 +275,98 @@ pub struct PackageArgs {
     pub default_package_metadata: Vec<Label>,
     pub default_hdrs_check: Option<String>,
     pub transitive_visibility: Option<Label>,
+}
+
+impl PackageArgs {
+    /// Returns `default_hdrs_check` if set, otherwise `"strict"` (`PackageArgs.getDefaultHdrsCheck`).
+    pub fn default_hdrs_check_or_strict(&self) -> &str {
+        self.default_hdrs_check.as_deref().unwrap_or("strict")
+    }
+
+    /// Parses a feature list into `(on, off)` sets per `FeatureSet.parse`:
+    /// `-x` turns `x` off (and overrides any `+x`/`x`), `no_layering_check` turns `layering_check`
+    /// off, and any other string turns that feature on unless disabled.
+    pub fn parse_feature_set(
+        features: &[String],
+    ) -> (
+        std::collections::BTreeSet<String>,
+        std::collections::BTreeSet<String>,
+    ) {
+        let mut on = std::collections::BTreeSet::new();
+        let mut off = std::collections::BTreeSet::new();
+        for f in features {
+            if let Some(rest) = f.strip_prefix('-') {
+                on.remove(rest);
+                off.insert(rest.to_string());
+            } else if f == "no_layering_check" {
+                on.remove("layering_check");
+                off.insert("layering_check".to_string());
+            } else if !off.contains(f) {
+                on.insert(f.clone());
+            }
+        }
+        (on, off)
+    }
+
+    /// Formats `(on, off)` back to `FeatureSet.toStringList` order (`on` sorted, then `"-"` + `off` sorted).
+    pub fn format_feature_set(
+        on: &std::collections::BTreeSet<String>,
+        off: &std::collections::BTreeSet<String>,
+    ) -> Vec<String> {
+        let mut out: Vec<String> = on.iter().cloned().collect();
+        out.extend(off.iter().map(|s| format!("-{s}")));
+        out
+    }
+
+    /// Non-commutative `FeatureSet.merge(coarse, fine)` where `fine` overrides `coarse`.
+    pub fn merge_feature_lists(coarse: &[String], fine: &[String]) -> Vec<String> {
+        let (mut on, mut off) = Self::parse_feature_set(coarse);
+        let (fon, foff) = Self::parse_feature_set(fine);
+        for x in fon {
+            off.remove(&x);
+            on.insert(x);
+        }
+        for x in foff {
+            on.remove(&x);
+            off.insert(x);
+        }
+        Self::format_feature_set(&on, &off)
+    }
+
+    /// Merges `other` over `self` (`PackageArgs.merge`): non-default fields from `other` win,
+    /// and `features` merges via `FeatureSet.merge`.
+    pub fn merge_from(&mut self, other: &PackageArgs) {
+        if let Some(v) = &other.default_visibility {
+            self.default_visibility = Some(v.clone());
+        }
+        if let Some(t) = other.default_testonly {
+            self.default_testonly = Some(t);
+        }
+        if let Some(d) = &other.default_deprecation {
+            self.default_deprecation = Some(d.clone());
+        }
+        if !other.features.is_empty() {
+            self.features = Self::merge_feature_lists(&self.features, &other.features);
+        }
+        if !other.licenses.is_empty() {
+            self.licenses = other.licenses.clone();
+        }
+        if !other.default_compatible_with.is_empty() {
+            self.default_compatible_with = other.default_compatible_with.clone();
+        }
+        if !other.default_restricted_to.is_empty() {
+            self.default_restricted_to = other.default_restricted_to.clone();
+        }
+        if !other.default_package_metadata.is_empty() {
+            self.default_package_metadata = other.default_package_metadata.clone();
+        }
+        if let Some(h) = &other.default_hdrs_check {
+            self.default_hdrs_check = Some(h.clone());
+        }
+        if let Some(tv) = &other.transitive_visibility {
+            self.transitive_visibility = Some(tv.clone());
+        }
+    }
 }
 
 /// An evaluated Bazel `BUILD` / `BUILD.bazel` package.

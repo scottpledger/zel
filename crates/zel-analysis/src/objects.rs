@@ -17,8 +17,8 @@
 //! and `Args`. Files are interned by (exec path, kind) so equal files compare/hash equal and
 //! can live in depsets and dict keys; ids stay valid across configured targets.
 
-use crate::{Artifact, ConfiguredTarget, Runfiles};
 use crate::args::ArgsBuilder;
+use crate::{Artifact, ConfiguredTarget, Runfiles};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use zel_starlark::{StructValue, Value};
@@ -58,13 +58,16 @@ fn host_repr(kind: &str, id: &str) -> Option<String> {
             if ct.rule_class == "source file" {
                 Some(format!("<input file target {}>", ct.label.canonical_form()))
             } else if ct.rule_class == "generated file" {
-                Some(format!("<output file target {}>", ct.label.canonical_form()))
+                Some(format!(
+                    "<output file target {}>",
+                    ct.label.canonical_form()
+                ))
             } else {
                 Some(format!("<target {}>", ct.label.canonical_form()))
             }
         }
         ("runfiles", Obj::Runfiles(_)) => Some("<runfiles>".to_string()),
-        ("args", Obj::Args(_)) => Some("<args>".to_string()),
+        ("args", Obj::Args(_)) => Some("context.args() object".to_string()),
         _ => None,
     }
 }
@@ -183,9 +186,9 @@ pub(crate) fn file_attr(a: &Artifact, attr: &str) -> Result<Value, String> {
         }
         "tree_relative_path" => {
             return Err(format!(
-                "'tree_relative_path' is only available on files inside a tree artifact; '{}' is not",
-                a.exec_path
-            ))
+            "'tree_relative_path' is only available on files inside a tree artifact; '{}' is not",
+            a.exec_path
+        ))
         }
         other => return Err(format!("'File' value has no field or method '{other}'")),
     })
@@ -194,11 +197,14 @@ pub(crate) fn file_attr(a: &Artifact, attr: &str) -> Result<Value, String> {
 /// `ctx.actions.template_dict()`.
 pub(crate) fn new_template_dict() -> Value {
     let mut t = table().lock().unwrap();
-    t.items.push(Obj::TemplateDict(Arc::new(Mutex::new(Vec::new()))));
+    t.items
+        .push(Obj::TemplateDict(Arc::new(Mutex::new(Vec::new()))));
     Value::Host("template_dict".into(), (t.items.len() - 1).to_string())
 }
 
-pub(crate) fn template_dict_of(v: &Value) -> Option<Arc<Mutex<Vec<(String, String)>>>> {
+pub(crate) type TemplateDictEntries = Arc<Mutex<Vec<(String, String)>>>;
+
+pub(crate) fn template_dict_of(v: &Value) -> Option<TemplateDictEntries> {
     let Value::Host(k, id) = v else { return None };
     if k != "template_dict" {
         return None;

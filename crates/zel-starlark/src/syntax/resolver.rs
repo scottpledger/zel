@@ -15,7 +15,7 @@
 use crate::syntax::ast::*;
 use crate::types::list::StarlarkError;
 use crate::Location;
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeKind {
@@ -29,6 +29,16 @@ pub struct Resolver {
     loop_depth: usize,
     /// `load()` may follow other statements (BUILD files); `.bzl` files forbid it.
     pub allow_late_loads: bool,
+    /// Multiple top-level bindings of the same name are allowed (BUILD files).
+    pub allow_toplevel_rebinding: bool,
+    /// `load()` binds globally rather than file-locally (BUILD files).
+    pub load_binds_globally: bool,
+}
+
+impl Default for Resolver {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Resolver {
@@ -37,21 +47,30 @@ impl Resolver {
             errors: Vec::new(),
             loop_depth: 0,
             allow_late_loads: false,
+            allow_toplevel_rebinding: false,
+            load_binds_globally: false,
         }
     }
 
     pub fn resolve_module(&mut self, stmts: &[Stmt]) -> Result<(), StarlarkError> {
         let mut saw_non_load = false;
         let mut first_non_load_loc: Option<Location> = None;
-        let mut loaded_names = HashSet::new();
 
         for stmt in stmts {
             match stmt {
                 Stmt::Load(load, loc) => {
                     if saw_non_load && !self.allow_late_loads {
-                        if !loc.file.is_empty() && !loc.file.ends_with("BUILD") && !loc.file.ends_with("BUILD.bazel") {
-                            let f_loc = first_non_load_loc.unwrap_or_else(|| Location::new(&loc.file, 1, 1));
-                            let f_loc = if f_loc.file.is_empty() { Location::new(&loc.file, 1, 1) } else { f_loc };
+                        if !loc.file.is_empty()
+                            && !loc.file.ends_with("BUILD")
+                            && !loc.file.ends_with("BUILD.bazel")
+                        {
+                            let f_loc = first_non_load_loc
+                                .unwrap_or_else(|| Location::new(&loc.file, 1, 1));
+                            let f_loc = if f_loc.file.is_empty() {
+                                Location::new(&loc.file, 1, 1)
+                            } else {
+                                f_loc
+                            };
                             return Err(StarlarkError(format!(
                                 "{loc}: load statements must appear before any other statement\nERROR: {f_loc}: \tfirst non-load statement appears here"
                             )));
@@ -60,8 +79,9 @@ impl Resolver {
                             "{loc}: load statements must appear before any other statement"
                         )));
                     }
+                    let mut per_load_seen = HashSet::new();
                     for (local_name, _) in &load.symbols {
-                        if !loaded_names.insert(local_name.clone()) {
+                        if !per_load_seen.insert(local_name.clone()) {
                             return Err(StarlarkError(format!(
                                 "{loc}: load statement defines '{local_name}' more than once"
                             )));
@@ -71,7 +91,8 @@ impl Resolver {
                 Stmt::Pass(_) => {}
                 // A leading docstring (string-literal expression statement) is not a statement
                 // for this check.
-                Stmt::Expr(Expr::Literal(crate::types::value::Value::String(_))) if !saw_non_load => {}
+                Stmt::Expr(Expr::Literal(crate::types::value::Value::String(_)))
+                    if !saw_non_load => {}
                 _ => {
                     if !saw_non_load {
                         first_non_load_loc = Some(Location::new(
@@ -92,6 +113,92 @@ impl Resolver {
                     }
                     saw_non_load = true;
                 }
+            }
+        }
+
+        // Top-level rebinding and global/file-local conflict checks (Bazel Resolver.java).
+        let mut toplevel_globals: BTreeMap<String, Location> = BTreeMap::new();
+        let mut file_locals: BTreeMap<String, Location> = BTreeMap::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Load(load, loc) => {
+                    for (local_name, _) in &load.symbols {
+                        if self.load_binds_globally {
+                            if let Some(prev_loc) = toplevel_globals.get(local_name) {
+                                if !self.allow_toplevel_rebinding {
+                                    return Err(StarlarkError(format!(
+                                        "{loc}: '{local_name}' redeclared at top level\n{prev_loc}: '{local_name}' previously declared here"
+                                    )));
+                                }
+                            } else {
+                                toplevel_globals.insert(local_name.clone(), loc.clone());
+                            }
+                        } else {
+                            if let Some(prev_loc) = file_locals.get(local_name) {
+                                if !self.allow_toplevel_rebinding {
+                                    return Err(StarlarkError(format!(
+                                        "{loc}: '{local_name}' redeclared at top level\n{prev_loc}: '{local_name}' previously declared here"
+                                    )));
+                                }
+                            } else {
+                                file_locals.insert(local_name.clone(), loc.clone());
+                            }
+                            if let Some(prev_loc) = toplevel_globals.get(local_name) {
+                                return Err(StarlarkError(format!(
+                                    "{loc}: conflicting file-local declaration of '{local_name}'\n{prev_loc}: '{local_name}' previously declared as global here"
+                                )));
+                            }
+                        }
+                    }
+                }
+                Stmt::Def(func) => {
+                    if let Some(prev_loc) = toplevel_globals.get(&func.name) {
+                        if !self.allow_toplevel_rebinding {
+                            return Err(StarlarkError(format!(
+                                "{}: '{}' redeclared at top level\n{prev_loc}: '{}' previously declared here",
+                                func.location, func.name, func.name
+                            )));
+                        }
+                    } else {
+                        toplevel_globals.insert(func.name.clone(), func.location.clone());
+                        if !self.load_binds_globally {
+                            if let Some(prev_loc) = file_locals.get(&func.name) {
+                                return Err(StarlarkError(format!(
+                                    "{}: conflicting global declaration of '{}'\n{prev_loc}: '{}' previously declared as file-local here",
+                                    func.location, func.name, func.name
+                                )));
+                            }
+                        }
+                    }
+                }
+                Stmt::Assign {
+                    target,
+                    op,
+                    location,
+                    ..
+                } if *op == AssignOp::Assign => {
+                    let mut names = HashSet::new();
+                    self.collect_target_bindings(target, &mut names);
+                    for name in names {
+                        if let Some(prev_loc) = toplevel_globals.get(&name) {
+                            if !self.allow_toplevel_rebinding {
+                                return Err(StarlarkError(format!(
+                                    "{location}: '{name}' redeclared at top level\n{prev_loc}: '{name}' previously declared here"
+                                )));
+                            }
+                        } else {
+                            toplevel_globals.insert(name.clone(), location.clone());
+                            if !self.load_binds_globally {
+                                if let Some(prev_loc) = file_locals.get(&name) {
+                                    return Err(StarlarkError(format!(
+                                        "{location}: conflicting global declaration of '{name}'\n{prev_loc}: '{name}' previously declared as file-local here"
+                                    )));
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
         }
 
@@ -282,6 +389,9 @@ impl Resolver {
             Stmt::Assign { target, .. } => {
                 self.collect_target_bindings(target, locals);
             }
+            Stmt::Def(f) => {
+                locals.insert(f.name.clone());
+            }
             Stmt::For {
                 var_names, body, ..
             } => {
@@ -319,7 +429,10 @@ impl Resolver {
         match expr {
             Expr::Literal(_) => Ok(()),
             Expr::Ident(name, _loc) => {
-                if scope == ScopeKind::Function && !bound_vars.contains(name) && is_local_var_candidate(name) {
+                if scope == ScopeKind::Function
+                    && !bound_vars.contains(name)
+                    && is_local_var_candidate(name)
+                {
                     // Check if variable is defined as local anywhere in the function
                     // Note: if it's universal (like len) or global, it can be read.
                     // But if it is assigned in the function, it is local, and reading before assignment is an error!
@@ -343,17 +456,13 @@ impl Resolver {
                 body,
                 clauses,
                 location: _,
-            } => {
-                self.resolve_comprehension(clauses, body, scope, bound_vars)
-            }
+            } => self.resolve_comprehension(clauses, body, scope, bound_vars),
             Expr::DictComp {
                 key,
                 value,
                 clauses,
                 location: _,
-            } => {
-                self.resolve_comprehension_dict(clauses, key, value, scope, bound_vars)
-            }
+            } => self.resolve_comprehension_dict(clauses, key, value, scope, bound_vars),
             Expr::UnaryOp { expr, .. } => self.resolve_expr(expr, scope, bound_vars),
             Expr::BinaryOp { lhs, rhs, .. } => {
                 self.resolve_expr(lhs, scope, bound_vars)?;

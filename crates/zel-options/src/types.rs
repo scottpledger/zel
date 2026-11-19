@@ -66,10 +66,7 @@ pub struct EnumSpec {
 
 /// Converters (by Java class simple name) that implement `BooleanStyleOption`: they accept the
 /// boolean forms `--flag` / `--noflag` in addition to `--flag=<value>`.
-pub const BOOLEAN_STYLE_CONVERTERS: &[&str] = &[
-    "MnemonicBooleanConverter",
-    "SlimProfileConverter",
-];
+pub const BOOLEAN_STYLE_CONVERTERS: &[&str] = &["MnemonicBooleanConverter", "SlimProfileConverter"];
 
 /// The declared schema type of an option.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -190,7 +187,13 @@ impl OptionValue {
 
     pub fn to_string_repr(&self) -> String {
         match self {
-            Self::Boolean(b) => if *b { "true".to_string() } else { "false".to_string() },
+            Self::Boolean(b) => {
+                if *b {
+                    "true".to_string()
+                } else {
+                    "false".to_string()
+                }
+            }
             Self::TriState(t) => t.as_str().to_string(),
             Self::Int(i) => i.to_string(),
             Self::Long(l) => l.to_string(),

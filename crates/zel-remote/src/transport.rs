@@ -109,7 +109,10 @@ struct Pipe {
 
 impl Pipe {
     fn new() -> Arc<Pipe> {
-        Arc::new(Pipe { inner: Mutex::new(PipeInner::default()), cv: Condvar::new() })
+        Arc::new(Pipe {
+            inner: Mutex::new(PipeInner::default()),
+            cv: Condvar::new(),
+        })
     }
     fn close(&self) {
         self.inner.lock().unwrap().closed = true;

@@ -89,7 +89,9 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
         ConvenienceSymlinksMode::Ignore => return msgs,
         ConvenienceSymlinksMode::LogOnly => {
             for (l, t) in &links {
-                msgs.push(format!("INFO: Convenience symlink {l} -> {t} (not created)"));
+                msgs.push(format!(
+                    "INFO: Convenience symlink {l} -> {t} (not created)"
+                ));
             }
             return msgs;
         }
@@ -106,7 +108,10 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
         }
         if let Ok(m) = &existing {
             if m.file_type().is_symlink() {
-                if std::fs::read_link(lp).map(|t| t == Path::new(target)).unwrap_or(false) {
+                if std::fs::read_link(lp)
+                    .map(|t| t == Path::new(target))
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 let _ = std::fs::remove_file(lp);
@@ -122,17 +127,23 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
         }
         #[cfg(unix)]
         if let Err(e) = std::os::unix::fs::symlink(target, lp) {
-            msgs.push(format!("WARNING: Failed to create convenience symlink '{link}': {e}"));
+            msgs.push(format!(
+                "WARNING: Failed to create convenience symlink '{link}': {e}"
+            ));
         }
     }
     msgs
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    fn req<'a>(ws: &'a str, prefix: Option<&'a str>, mode: ConvenienceSymlinksMode) -> SymlinkRequest<'a> {
+    fn req<'a>(
+        ws: &'a str,
+        prefix: Option<&'a str>,
+        mode: ConvenienceSymlinksMode,
+    ) -> SymlinkRequest<'a> {
         SymlinkRequest {
             workspace_dir: ws,
             execroot: "/tmp/ob/execroot/_main",
@@ -146,6 +157,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn creates_and_cleans_links_and_honors_prefix() {
         let ws = std::env::temp_dir().join(format!("zel-symlinks-{}", std::process::id()));
@@ -154,9 +166,17 @@ mod tests {
         let w = ws.to_str().unwrap();
         let msgs = create_convenience_symlinks(&req(w, None, ConvenienceSymlinksMode::Normal));
         assert!(msgs.is_empty(), "{msgs:?}");
-        assert!(std::fs::read_link(ws.join("bazel-bin")).unwrap().ends_with("k8-fastbuild/bin"));
-        assert!(std::fs::read_link(ws.join("bazel-out")).unwrap().ends_with("_main/bazel-out"));
-        assert!(std::fs::symlink_metadata(ws.join(format!("bazel-{}", ws.file_name().unwrap().to_str().unwrap()))).is_ok());
+        assert!(std::fs::read_link(ws.join("bazel-bin"))
+            .unwrap()
+            .ends_with("k8-fastbuild/bin"));
+        assert!(std::fs::read_link(ws.join("bazel-out"))
+            .unwrap()
+            .ends_with("_main/bazel-out"));
+        assert!(std::fs::symlink_metadata(ws.join(format!(
+            "bazel-{}",
+            ws.file_name().unwrap().to_str().unwrap()
+        )))
+        .is_ok());
         create_convenience_symlinks(&req(w, None, ConvenienceSymlinksMode::Clean));
         assert!(std::fs::symlink_metadata(ws.join("bazel-bin")).is_err());
         create_convenience_symlinks(&req(w, Some("zz-"), ConvenienceSymlinksMode::Normal));
@@ -165,7 +185,9 @@ mod tests {
         // Real directory in the way => warning, not clobbered.
         std::fs::create_dir(ws.join("bazel-bin")).unwrap();
         let m = create_convenience_symlinks(&req(w, None, ConvenienceSymlinksMode::Normal));
-        assert!(m.iter().any(|x| x.contains("bazel-bin") && x.starts_with("WARNING")));
+        assert!(m
+            .iter()
+            .any(|x| x.contains("bazel-bin") && x.starts_with("WARNING")));
         let _ = std::fs::remove_dir_all(&ws);
     }
 }

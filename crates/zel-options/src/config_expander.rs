@@ -46,7 +46,11 @@ pub fn expand_command_args(
         if let Some(opts) = rc_config.sections.get(*cmd) {
             let toks: Vec<String> = opts.iter().map(|(o, _)| o.clone()).collect();
             // `common` options that only other commands know are ignored (BlazeOptionHandler.parseRcOptions).
-            let toks = if *cmd == "common" { split_unsupported_common_args(command, &toks).0 } else { toks };
+            let toks = if *cmd == "common" {
+                split_unsupported_common_args(command, &toks).0
+            } else {
+                toks
+            };
             base_args.extend(toks);
         }
     }
@@ -54,26 +58,7 @@ pub fn expand_command_args(
     // 2. Append CLI args
     base_args.extend(cli_args.iter().cloned());
 
-    // 3. Check for --enable_platform_specific_config in base_args
-    let platform = get_platform_name();
-    let platform_enabled = base_args.iter().any(|a| {
-        a == "--enable_platform_specific_config"
-            || a == "--enable_platform_specific_config=true"
-            || a == "--enable_platform_specific_config=1"
-    });
-
-    if platform_enabled {
-        // If corresponding config definition exists in any of the commands to parse
-        let has_platform_config = commands_to_parse.iter().any(|cmd| {
-            let key = format!("{cmd}:{platform}");
-            rc_config.sections.contains_key(&key)
-        });
-        if has_platform_config {
-            base_args.push(format!("--config={platform}"));
-        }
-    }
-
-    // 4. Expand --config recursively
+    // 3. Expand explicit --config references recursively first (ConfigExpander.expandConfigOptions)
     let mut expanded = Vec::new();
     let mut longest_chain = Vec::new();
     let mut config_counts = std::collections::BTreeMap::new();
@@ -89,6 +74,55 @@ pub fn expand_command_args(
         &mut found_notes,
         &mut expanded,
     )?;
+
+    // 4. Evaluate --enable_platform_specific_config from the expanded args (last value wins)
+    let mut platform_enabled: Option<(bool, usize)> = None;
+    for (idx, a) in expanded.iter().enumerate() {
+        if a == "--" {
+            break;
+        }
+        if a == "--enable_platform_specific_config" {
+            platform_enabled = Some((true, idx));
+        } else if a == "--noenable_platform_specific_config" {
+            platform_enabled = Some((false, idx));
+        } else if let Some(val) = a.strip_prefix("--enable_platform_specific_config=") {
+            if let Ok(b) = crate::converters::convert_boolean(val) {
+                platform_enabled = Some((b, idx));
+            }
+        }
+    }
+
+    if let Some((true, insert_after_idx)) = platform_enabled {
+        let platform = get_platform_name();
+        let has_platform_config = commands_to_parse.iter().any(|cmd| {
+            let key = format!("{cmd}:{platform}");
+            rc_config.sections.contains_key(&key)
+        });
+        if has_platform_config {
+            let mut plat_expanded = Vec::new();
+            let mut plat_ancestors = vec![platform.to_string()];
+            let plat_opts = collect_config_definition(
+                rc_config,
+                command,
+                &commands_to_parse,
+                platform,
+                &mut found_notes,
+            )?;
+            expand_configs_recursive(
+                rc_config,
+                command,
+                &commands_to_parse,
+                &plat_opts,
+                &mut plat_ancestors,
+                &mut longest_chain,
+                &mut config_counts,
+                &mut found_notes,
+                &mut plat_expanded,
+            )?;
+            let pos = insert_after_idx + 1;
+            expanded.splice(pos..pos, plat_expanded);
+        }
+    }
 
     let dups: Vec<String> = config_counts
         .into_iter()
@@ -116,6 +150,75 @@ pub fn expand_command_args(
     Ok((expanded, warnings))
 }
 
+fn collect_config_definition(
+    rc_config: &BazelrcConfig,
+    command: &str,
+    commands_to_parse: &[&'static str],
+    cfg: &str,
+    found_notes: &mut Vec<String>,
+) -> Result<Vec<String>, OptionsParsingError> {
+    let mut found_definition = false;
+    let mut cfg_opts = Vec::new();
+
+    for cmd in commands_to_parse {
+        let key = format!("{cmd}:{cfg}");
+        if let Some(opts) = rc_config.sections.get(&key) {
+            found_definition = true;
+            let mut chunk_src: Option<&str> = None;
+            let mut chunk: Vec<&str> = Vec::new();
+            let kept_common: Option<Vec<String>> = if *cmd == "common" {
+                let toks: Vec<String> = opts.iter().map(|(o, _)| o.clone()).collect();
+                Some(split_unsupported_common_args(command, &toks).0)
+            } else {
+                None
+            };
+            let opts: Vec<&(String, String)> = match &kept_common {
+                Some(k) => {
+                    let mut keep = k.clone();
+                    opts.iter()
+                        .filter(|(o, _)| {
+                            if let Some(p) = keep.iter().position(|x| x == o) {
+                                keep.remove(p);
+                                true
+                            } else {
+                                false
+                            }
+                        })
+                        .collect()
+                }
+                None => opts.iter().collect(),
+            };
+            for (opt, src) in opts {
+                if chunk_src.is_some_and(|c| c != src.as_str()) {
+                    found_notes.push(format!(
+                        "INFO: Found applicable config definition {key} in file {}: {}",
+                        chunk_src.unwrap_or_default(),
+                        chunk.join(" ")
+                    ));
+                    chunk.clear();
+                }
+                chunk_src = Some(src.as_str());
+                chunk.push(opt.as_str());
+                cfg_opts.push(opt.clone());
+            }
+            if let Some(c) = chunk_src {
+                found_notes.push(format!(
+                    "INFO: Found applicable config definition {key} in file {c}: {}",
+                    chunk.join(" ")
+                ));
+            }
+        }
+    }
+
+    if !found_definition {
+        return Err(OptionsParsingError::new(format!(
+            "Config value '{cfg}' is not defined in any .rc file"
+        )));
+    }
+    Ok(cfg_opts)
+}
+
+#[allow(clippy::too_many_arguments)]
 fn expand_configs_recursive(
     rc_config: &BazelrcConfig,
     command: &str,
@@ -154,57 +257,13 @@ fn expand_configs_recursive(
 
             *config_counts.entry(cfg.clone()).or_default() += 1;
 
-            let mut found_definition = false;
-            let mut cfg_opts = Vec::new();
-
-            for cmd in commands_to_parse {
-                let key = format!("{cmd}:{cfg}");
-                if let Some(opts) = rc_config.sections.get(&key) {
-                    found_definition = true;
-                    let mut chunk_src: Option<&str> = None;
-                    let mut chunk: Vec<&str> = Vec::new();
-                    let kept_common: Option<Vec<String>> = if *cmd == "common" {
-                        let toks: Vec<String> = opts.iter().map(|(o, _)| o.clone()).collect();
-                        Some(split_unsupported_common_args(command, &toks).0)
-                    } else {
-                        None
-                    };
-                    let opts: Vec<&(String, String)> = match &kept_common {
-                        Some(k) => {
-                            let mut keep = k.clone();
-                            opts.iter().filter(|(o, _)| {
-                                if let Some(p) = keep.iter().position(|x| x == o) { keep.remove(p); true } else { false }
-                            }).collect()
-                        }
-                        None => opts.iter().collect(),
-                    };
-                    for (opt, src) in opts {
-                        if chunk_src.is_some_and(|c| c != src.as_str()) {
-                            found_notes.push(format!(
-                                "INFO: Found applicable config definition {key} in file {}: {}",
-                                chunk_src.unwrap_or_default(),
-                                chunk.join(" ")
-                            ));
-                            chunk.clear();
-                        }
-                        chunk_src = Some(src.as_str());
-                        chunk.push(opt.as_str());
-                        cfg_opts.push(opt.clone());
-                    }
-                    if let Some(c) = chunk_src {
-                        found_notes.push(format!(
-                            "INFO: Found applicable config definition {key} in file {c}: {}",
-                            chunk.join(" ")
-                        ));
-                    }
-                }
-            }
-
-            if !found_definition {
-                return Err(OptionsParsingError::new(format!(
-                    "Config value '{cfg}' is not defined in any .rc file"
-                )));
-            }
+            let cfg_opts = collect_config_definition(
+                rc_config,
+                command,
+                commands_to_parse,
+                &cfg,
+                found_notes,
+            )?;
 
             config_ancestor_set.push(cfg);
             if config_ancestor_set.len() > longest_chain.len() {
@@ -242,23 +301,39 @@ mod tests {
         let mut config = BazelrcConfig::default();
         config.sections.insert(
             "build:base".to_string(),
-            vec![("-c".to_string(), "rc".to_string()), ("opt".to_string(), "rc".to_string())],
+            vec![
+                ("-c".to_string(), "rc".to_string()),
+                ("opt".to_string(), "rc".to_string()),
+            ],
         );
         config.sections.insert(
             "build:a".to_string(),
-            vec![("--config=base".to_string(), "rc".to_string()), ("--jobs=16".to_string(), "rc".to_string())],
+            vec![
+                ("--config=base".to_string(), "rc".to_string()),
+                ("--jobs=16".to_string(), "rc".to_string()),
+            ],
         );
         config.sections.insert(
             "build:b".to_string(),
-            vec![("--config=base".to_string(), "rc".to_string()), ("--verbose_failures".to_string(), "rc".to_string())],
+            vec![
+                ("--config=base".to_string(), "rc".to_string()),
+                ("--verbose_failures".to_string(), "rc".to_string()),
+            ],
         );
         config.sections.insert(
             "build:top".to_string(),
-            vec![("--config=a".to_string(), "rc".to_string()), ("--config=b".to_string(), "rc".to_string())],
+            vec![
+                ("--config=a".to_string(), "rc".to_string()),
+                ("--config=b".to_string(), "rc".to_string()),
+            ],
         );
 
-        let (expanded, _) = expand_command_args(&config, "build", &["--config=top".to_string()]).unwrap();
-        assert_eq!(expanded, vec!["-c", "opt", "--jobs=16", "-c", "opt", "--verbose_failures"]);
+        let (expanded, _) =
+            expand_command_args(&config, "build", &["--config=top".to_string()]).unwrap();
+        assert_eq!(
+            expanded,
+            vec!["-c", "opt", "--jobs=16", "-c", "opt", "--verbose_failures"]
+        );
     }
 
     #[test]
@@ -274,6 +349,8 @@ mod tests {
         );
 
         let err = expand_command_args(&config, "build", &["--config=foo".to_string()]).unwrap_err();
-        assert!(err.message.contains("Config expansion has a cycle: config value foo expands to itself"));
+        assert!(err
+            .message
+            .contains("Config expansion has a cycle: config value foo expands to itself"));
     }
 }

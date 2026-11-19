@@ -153,7 +153,19 @@ pub fn scan(input: &str) -> Result<Vec<Token>, QuerySyntaxError> {
                 while pos < chars.len() {
                     let ch = chars[pos];
                     match ch {
-                        'a'..='z' | 'A'..='Z' | '0'..='9' | '*' | '/' | '@' | '.' | '-' | '_' | ':' | '$' | '~' | '['
+                        'a'..='z'
+                        | 'A'..='Z'
+                        | '0'..='9'
+                        | '*'
+                        | '/'
+                        | '@'
+                        | '.'
+                        | '-'
+                        | '_'
+                        | ':'
+                        | '$'
+                        | '~'
+                        | '['
                         | ']' => pos += 1,
                         '+' => {
                             if starts_with_double_at {
@@ -173,7 +185,10 @@ pub fn scan(input: &str) -> Result<Vec<Token>, QuerySyntaxError> {
                 let word: String = chars[old..pos].iter().collect();
                 match keyword(&word) {
                     Some(k) => tokens.push(tok(k)),
-                    None => tokens.push(Token { kind: TokenKind::Word, word: Some(word) }),
+                    None => tokens.push(Token {
+                        kind: TokenKind::Word,
+                        word: Some(word),
+                    }),
                 }
             }
         }
@@ -224,8 +239,12 @@ pub const SOMEPATH: FuncSpec = f!("somepath", 2, [E, E]);
 pub const TESTS: FuncSpec = f!("tests", 1, [E]);
 pub const VISIBLE: FuncSpec = f!("visible", 2, [E, E]);
 pub const ALLRDEPS: FuncSpec = f!("allrdeps", 1, [E, I]);
-pub const RBUILDFILES: FuncSpec =
-    FuncSpec { name: "rbuildfiles", mandatory: 1, args: &[W], variadic_word: true };
+pub const RBUILDFILES: FuncSpec = FuncSpec {
+    name: "rbuildfiles",
+    mandatory: 1,
+    args: &[W],
+    variadic_word: true,
+};
 pub const CONFIG: FuncSpec = f!("config", 2, [E, W]);
 pub const INPUTS: FuncSpec = f!("inputs", 1, [W, E]);
 pub const OUTPUTS: FuncSpec = f!("outputs", 1, [W, E]);
@@ -304,9 +323,20 @@ pub enum Expr {
     /// A target pattern or `$variable` reference.
     Target(String),
     Set(Vec<String>),
-    Let { name: String, var: Box<Expr>, body: Box<Expr> },
-    Binary { op: BinOp, kind: TokenKind, operands: Vec<Expr> },
-    Func { spec: FuncSpec_, args: Vec<Arg> },
+    Let {
+        name: String,
+        var: Box<Expr>,
+        body: Box<Expr>,
+    },
+    Binary {
+        op: BinOp,
+        kind: TokenKind,
+        operands: Vec<Expr>,
+    },
+    Func {
+        spec: FuncSpec_,
+        args: Vec<Arg>,
+    },
 }
 
 /// Wrapper to give [`FuncSpec`] value equality by name.
@@ -331,7 +361,7 @@ impl Expr {
             }
             Expr::Set(ws) => {
                 for w in ws {
-                    if !out.contains(w) {
+                    if !is_valid_var_reference(w) && !out.contains(w) {
                         out.push(w.clone());
                     }
                 }
@@ -340,7 +370,9 @@ impl Expr {
                 var.collect_target_patterns(out);
                 body.collect_target_patterns(out);
             }
-            Expr::Binary { operands, .. } => operands.iter().for_each(|o| o.collect_target_patterns(out)),
+            Expr::Binary { operands, .. } => {
+                operands.iter().for_each(|o| o.collect_target_patterns(out))
+            }
             Expr::Func { args, .. } => {
                 for a in args {
                     if let Arg::Expr(e) = a {
@@ -396,7 +428,15 @@ pub fn truncate(s: &str) -> String {
 }
 
 pub fn is_valid_var_reference(word: &str) -> bool {
-    word.starts_with('$') && word.len() > 1
+    let Some(rest) = word.strip_prefix('$') else {
+        return false;
+    };
+    let mut bytes = rest.bytes();
+    let Some(first) = bytes.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == b'_')
+        && bytes.all(|b| b.is_ascii_alphanumeric() || b == b'_')
 }
 
 pub fn var_name_from_reference(word: &str) -> &str {
@@ -451,7 +491,12 @@ struct Parser<'a> {
 /// `QueryParser.parse`.
 pub fn parse(query: &str, functions: &[FuncSpec]) -> Result<Expr, QuerySyntaxError> {
     let tokens = scan(query)?;
-    let mut p = Parser { tokens: &tokens, idx: 0, functions, bound: Default::default() };
+    let mut p = Parser {
+        tokens: &tokens,
+        idx: 0,
+        functions,
+        bound: Default::default(),
+    };
     let expr = p.parse_expression()?;
     if p.cur().kind != TokenKind::Eof {
         return Err(QuerySyntaxError(format!(
@@ -463,7 +508,7 @@ pub fn parse(query: &str, functions: &[FuncSpec]) -> Result<Expr, QuerySyntaxErr
     Ok(expr)
 }
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
     fn cur(&self) -> &Token {
         &self.tokens[self.idx]
     }
@@ -524,7 +569,11 @@ impl<'a> Parser<'a> {
             }
             operands.push(self.parse_primary()?);
         }
-        Ok(Expr::Binary { op: BinOp::from_token(last), kind: last, operands })
+        Ok(Expr::Binary {
+            op: BinOp::from_token(last),
+            kind: last,
+            operands,
+        })
     }
 
     fn validate_target_literal(word: String) -> Result<String, QuerySyntaxError> {
@@ -573,7 +622,11 @@ impl<'a> Parser<'a> {
                         self.bound.remove(&name);
                     }
                 }
-                Ok(Expr::Let { name, var: Box::new(var), body: Box::new(body?) })
+                Ok(Expr::Let {
+                    name,
+                    var: Box::new(var),
+                    body: Box::new(body?),
+                })
             }
             TokenKind::LParen => {
                 self.consume(TokenKind::LParen)?;
@@ -650,7 +703,9 @@ impl<'a> Parser<'a> {
                     match parse_java_int(&s) {
                         Some(n) => args.push(Arg::Int(n)),
                         None => {
-                            return Err(QuerySyntaxError(format!("expected an integer literal: '{s}'")))
+                            return Err(QuerySyntaxError(format!(
+                                "expected an integer literal: '{s}'"
+                            )))
                         }
                     }
                 }
@@ -662,7 +717,10 @@ impl<'a> Parser<'a> {
             return Err(self.arg_count_error(&spec, "too many"));
         }
         self.consume(TokenKind::RParen)?;
-        Ok(Expr::Func { spec: FuncSpec_(spec), args })
+        Ok(Expr::Func {
+            spec: FuncSpec_(spec),
+            args,
+        })
     }
 }
 
@@ -672,7 +730,9 @@ fn parse_java_int(s: &str) -> Option<i32> {
     if body.is_empty() || !body.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
-    s.parse::<i32>().ok().or_else(|| s.strip_prefix('+').and_then(|r| r.parse().ok()))
+    s.parse::<i32>()
+        .ok()
+        .or_else(|| s.strip_prefix('+').and_then(|r| r.parse().ok()))
 }
 
 #[cfg(test)]
@@ -687,7 +747,10 @@ mod tests {
     fn lexes_words_like_bazel() {
         let t = scan("deps(//a:b-c) + @@foo+//x:y").unwrap();
         let kinds: Vec<String> = t.iter().map(|t| t.to_string()).collect();
-        assert_eq!(kinds, vec!["deps", "(", "//a:b-c", ")", "+", "@@foo+//x:y", "EOF"]);
+        assert_eq!(
+            kinds,
+            vec!["deps", "(", "//a:b-c", ")", "+", "@@foo+//x:y", "EOF"]
+        );
         assert_eq!(scan("a-b").unwrap()[0].word.as_deref(), Some("a-b"));
         assert_eq!(scan("'a b'").unwrap()[0].word.as_deref(), Some("a b"));
         assert_eq!(scan("'abc").unwrap_err().0, "unclosed quotation");
@@ -696,18 +759,33 @@ mod tests {
 
     #[test]
     fn parses_operators_left_associatively() {
-        assert_eq!(p("//a + //b - //c").unwrap().to_string(), "((//a + //b) - //c)");
-        assert_eq!(p("//a + //b + //c").unwrap().to_string(), "(//a + //b + //c)");
+        assert_eq!(
+            p("//a + //b - //c").unwrap().to_string(),
+            "((//a + //b) - //c)"
+        );
+        assert_eq!(
+            p("//a + //b + //c").unwrap().to_string(),
+            "(//a + //b + //c)"
+        );
         assert_eq!(p("//a ^ //b").unwrap().to_string(), "(//a ^ //b)");
-        assert_eq!(p("//a union //b except //c").unwrap().to_string(), "((//a union //b) except //c)");
+        assert_eq!(
+            p("//a union //b except //c").unwrap().to_string(),
+            "((//a union //b) except //c)"
+        );
         assert_eq!(p("deps(//a)-//b").unwrap().to_string(), "(deps(//a) - //b)");
     }
 
     #[test]
     fn parses_functions_let_and_set() {
         assert_eq!(p("deps(//a, 2)").unwrap().to_string(), "deps(//a, 2)");
-        assert_eq!(p("kind('.*_test', //a/...)").unwrap().to_string(), "kind('.*_test', //a/...)");
-        assert_eq!(p("let x = //a in deps($x)").unwrap().to_string(), "let x = //a in deps($x)");
+        assert_eq!(
+            p("kind('.*_test', //a/...)").unwrap().to_string(),
+            "kind('.*_test', //a/...)"
+        );
+        assert_eq!(
+            p("let x = //a in deps($x)").unwrap().to_string(),
+            "let x = //a in deps($x)"
+        );
         assert_eq!(p("set(//a //b)").unwrap().to_string(), "set(//a //b)");
         assert_eq!(p("set()").unwrap().to_string(), "set()");
         assert_eq!(p("some(//a)").unwrap().to_string(), "some(//a)");
@@ -717,17 +795,34 @@ mod tests {
     #[test]
     fn reports_errors_like_bazel() {
         assert_eq!(p("deps(").unwrap_err(), "premature end of input");
-        assert_eq!(p("deps()").unwrap_err(), "too few arguments to function 'deps' at ')'");
+        assert_eq!(
+            p("deps()").unwrap_err(),
+            "too few arguments to function 'deps' at ')'"
+        );
         assert_eq!(
             p("deps(//a, 1, 2)").unwrap_err(),
             "too many arguments to function 'deps' at ', 2 )'"
         );
-        assert_eq!(p("'-//a'").unwrap_err(), "target literal must not begin with (-): -//a");
-        assert_eq!(p("'*foo'").unwrap_err(), "target literal must not begin with (*): *foo");
+        assert_eq!(
+            p("'-//a'").unwrap_err(),
+            "target literal must not begin with (-): -//a"
+        );
+        assert_eq!(
+            p("'*foo'").unwrap_err(),
+            "target literal must not begin with (*): *foo"
+        );
         assert_eq!(p("-//a").unwrap_err(), "syntax error at '- //a'");
-        assert!(p("foo(//a)").unwrap_err().starts_with("unknown function 'foo' at 'foo ( //a'; expected one of ['allpaths', 'attr',"));
-        assert_eq!(p("//a //b").unwrap_err(), "unexpected token '//b' after query expression '//a'");
-        assert_eq!(p("deps(//a, x)").unwrap_err(), "expected an integer literal: 'x'");
+        assert!(p("foo(//a)").unwrap_err().starts_with(
+            "unknown function 'foo' at 'foo ( //a'; expected one of ['allpaths', 'attr',"
+        ));
+        assert_eq!(
+            p("//a //b").unwrap_err(),
+            "unexpected token '//b' after query expression '//a'"
+        );
+        assert_eq!(
+            p("deps(//a, x)").unwrap_err(),
+            "expected an integer literal: 'x'"
+        );
         assert_eq!(p("let x = //a in filter($x, //b)").unwrap_err(), "variable '$x' cannot be used as an argument to function 'filter'; variable references are only allowed in expression arguments");
         assert_eq!(p("+ //a").unwrap_err(), "syntax error at '+ //a'");
     }
@@ -738,5 +833,10 @@ mod tests {
         let mut v = Vec::new();
         e.collect_target_patterns(&mut v);
         assert_eq!(v, vec!["//a", "//b", "//c", "//d", "//e"]);
+
+        let e2 = p("let x = //a in set($x //b) + $1 + $a-b + $ü").unwrap();
+        let mut v2 = Vec::new();
+        e2.collect_target_patterns(&mut v2);
+        assert_eq!(v2, vec!["//a", "//b", "$1", "$a-b", "$ü"]);
     }
 }

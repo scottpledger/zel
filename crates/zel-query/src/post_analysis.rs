@@ -55,6 +55,10 @@ pub struct PostOpts {
     /// `--aspects` (loaded aspect values) and `--aspects_parameters`: applied to the top-level targets by aquery.
     pub top_aspects: Vec<zel_starlark::Value>,
     pub aspect_params: BTreeMap<String, String>,
+    /// `--experimental_explicit_aspects`: emit aspect nodes as query nodes in `cquery`.
+    pub explicit_aspects: bool,
+    /// `--incompatible_disable_target_default_provider_fields` for `cquery --output=starlark`.
+    pub incompatible_disable_target_default_provider_fields: bool,
 }
 
 impl Default for PostOpts {
@@ -79,6 +83,8 @@ impl Default for PostOpts {
             line_terminator: "\n".into(),
             top_aspects: Vec::new(),
             aspect_params: BTreeMap::new(),
+            explicit_aspects: false,
+            incompatible_disable_target_default_provider_fields: false,
         }
     }
 }
@@ -120,7 +126,16 @@ pub struct PostEnv<'a> {
     pub tenv: TargetEnv<'a>,
     pub tr: Arc<TargetResolver>,
     pub top: BuildConfigurationKey,
+    /// Short-hash -> configuration key (for short display IDs).
     cfgs: BTreeMap<String, BuildConfigurationKey>,
+    /// Full checksum -> configuration key across all transitive configurations.
+    full_cfgs: BTreeMap<String, BuildConfigurationKey>,
+    /// Top-level targets and their configurations (`None` for null-configured top-level targets).
+    top_level_targets: HashMap<Label, Option<BuildConfigurationKey>>,
+    /// Distinct non-null top-level configurations ordered by full checksum.
+    top_level_non_null_configs: BTreeMap<String, BuildConfigurationKey>,
+    /// Whether any top-level target was null-configured.
+    has_null_top_level: bool,
     pub failure: Option<Vec<String>>,
     /// `--keep_going`: diagnostics of the top-level targets that failed analysis, and the count of
     /// top-level rule targets / failures (`INFO: Analysis succeeded for only N of M ...`).
@@ -140,6 +155,7 @@ pub struct PostEnv<'a> {
     /// When `--universe_scope` is set, only universe roots are counted in `kg_total`.
     in_universe_roots: bool,
     pub aquery: bool,
+    pub explicit_aspects: bool,
     suite_expanded: std::collections::HashSet<Label>,
     pub top_aspects: Vec<zel_starlark::Value>,
     pub aspect_params: BTreeMap<String, String>,
@@ -152,25 +168,109 @@ fn cfg_id(k: &BuildConfigurationKey) -> String {
 }
 
 impl<'a> PostEnv<'a> {
-    pub fn new(resolver: &'a PatternResolver, qopts: QueryOpts, tr: Arc<TargetResolver>, top: BuildConfigurationKey, aquery: bool) -> Self {
+    pub fn new(
+        resolver: &'a PatternResolver,
+        qopts: QueryOpts,
+        tr: Arc<TargetResolver>,
+        top: BuildConfigurationKey,
+        aquery: bool,
+    ) -> Self {
         let mut cfgs = BTreeMap::new();
-        cfgs.insert(cfg_id(&top), top.clone());
-        let core = top.to_core_only();
-        cfgs.insert(cfg_id(&core), core);
-        let exec = top.to_exec_on_host_platform();
-        cfgs.insert(cfg_id(&exec), exec);
+        let mut full_cfgs = BTreeMap::new();
+        for k in [
+            top.clone(),
+            top.to_core_only(),
+            top.to_exec_on_host_platform(),
+        ] {
+            cfgs.insert(cfg_id(&k), k.clone());
+            full_cfgs.insert(k.checksum(), k);
+        }
         tr.set_defer_cycle_dedup(true);
-        PostEnv { tenv: TargetEnv::new(resolver, qopts), tr, top, cfgs, failure: None, kg_lines: Vec::new(), kg_groups: Vec::new(), kg_top: Vec::new(), kg_seen: Vec::new(), pattern_errors: Vec::new(), kg_total: 0, kg_counted: Default::default(), dep_mode: false, kg_failed: 0, kg_failed_labels: Default::default(), in_universe_roots: false, aquery, suite_expanded: Default::default(), top_aspects: Vec::new(), aspect_params: BTreeMap::new(), filters: ActionFilters::default(), cfg_hashes: HashMap::new() }
+        PostEnv {
+            tenv: TargetEnv::new(resolver, qopts),
+            tr,
+            top,
+            cfgs,
+            full_cfgs,
+            top_level_targets: HashMap::new(),
+            top_level_non_null_configs: BTreeMap::new(),
+            has_null_top_level: false,
+            failure: None,
+            kg_lines: Vec::new(),
+            kg_groups: Vec::new(),
+            kg_top: Vec::new(),
+            kg_seen: Vec::new(),
+            pattern_errors: Vec::new(),
+            kg_total: 0,
+            kg_counted: Default::default(),
+            dep_mode: false,
+            kg_failed: 0,
+            kg_failed_labels: Default::default(),
+            in_universe_roots: false,
+            aquery,
+            explicit_aspects: false,
+            suite_expanded: Default::default(),
+            top_aspects: Vec::new(),
+            aspect_params: BTreeMap::new(),
+            filters: ActionFilters::default(),
+            cfg_hashes: HashMap::new(),
+        }
     }
 
     fn register(&mut self, k: &BuildConfigurationKey) -> String {
         let id = cfg_id(k);
         self.cfgs.entry(id.clone()).or_insert_with(|| k.clone());
+        self.full_cfgs
+            .entry(k.checksum())
+            .or_insert_with(|| k.clone());
         id
     }
 
     pub fn config_key(&self, id: &str) -> Option<&BuildConfigurationKey> {
-        self.cfgs.get(id)
+        self.full_cfgs.get(id).or_else(|| self.cfgs.get(id))
+    }
+
+    pub fn node_config_key(&self, n: &Node) -> Option<&BuildConfigurationKey> {
+        n.cfg_full
+            .as_deref()
+            .and_then(|c| self.full_cfgs.get(c))
+            .or_else(|| n.cfg.as_deref().and_then(|c| self.cfgs.get(c)))
+    }
+
+    fn sync_transitive_configs(&mut self) {
+        let cts = self.tr.analyzed_targets();
+        for ct in &cts {
+            self.register(&ct.configuration);
+            for (_, ck) in self.tr.direct_deps(&ct.label, &ct.configuration) {
+                self.register(&ck);
+            }
+            for asp in self.tr.aspects_for(&ct.label) {
+                self.register(&asp.configuration);
+                for (_, ck) in self.tr.direct_deps(&asp.label, &asp.configuration) {
+                    self.register(&ck);
+                }
+            }
+        }
+    }
+
+    fn record_top_level(&mut self, n: &Node) {
+        if !self.tenv.opts.universe_scope.is_empty() && !self.in_universe_roots {
+            return;
+        }
+        let cfg = self.node_config_key(n).cloned();
+        self.top_level_targets
+            .entry(n.label.clone())
+            .or_insert_with(|| cfg.clone());
+        match cfg {
+            Some(c) => {
+                self.top_level_non_null_configs
+                    .entry(c.checksum())
+                    .or_insert(c);
+            }
+            None => {
+                self.has_null_top_level = true;
+            }
+        }
     }
 
     /// Node for `label` in `cfg` (`None` configuration for files and package groups).
@@ -180,21 +280,61 @@ impl<'a> PostEnv<'a> {
             Some(_) => false,
             None => true,
         };
-        let id = if configured {
+        if configured {
             let key = self.adjust_key(label, cfg);
-            Some(self.register(&key))
+            let id = self.register(&key);
+            Node {
+                label: label.clone(),
+                cfg: Some(id),
+                cfg_full: Some(key.checksum()),
+                aspect: None,
+            }
         } else {
-            None
-        };
-        Node { label: label.clone(), cfg: id }
+            Node {
+                label: label.clone(),
+                cfg: None,
+                cfg_full: None,
+                aspect: None,
+            }
+        }
+    }
+
+    fn raw_node_for(&mut self, label: &Label, cfg: Option<&BuildConfigurationKey>) -> Node {
+        match cfg {
+            Some(key) => {
+                let id = self.register(key);
+                Node {
+                    label: label.clone(),
+                    cfg: Some(id),
+                    cfg_full: Some(key.checksum()),
+                    aspect: None,
+                }
+            }
+            None => Node {
+                label: label.clone(),
+                cfg: None,
+                cfg_full: None,
+                aspect: None,
+            },
+        }
     }
 
     /// The key a rule is configured with: test rules, test suites and aliases are not trimmed
     /// (`TestTrimmingTransitionFactory.create` returns `NoTransition`), everything else is.
-    pub(crate) fn adjust_key(&mut self, label: &Label, cfg: &BuildConfigurationKey) -> BuildConfigurationKey {
+    pub(crate) fn adjust_key(
+        &mut self,
+        label: &Label,
+        cfg: &BuildConfigurationKey,
+    ) -> BuildConfigurationKey {
         let info = self.tenv.info(label).ok();
         let rule_info = match info.as_ref().map(|i| i.target.clone()) {
-            Some(Target::OutputFile { generating_rule, .. }) => self.tenv.info(&generating_rule).ok().map(|i| i.target.clone()),
+            Some(Target::OutputFile {
+                generating_rule, ..
+            }) => self
+                .tenv
+                .info(&generating_rule)
+                .ok()
+                .map(|i| i.target.clone()),
             other => other,
         };
         let keep = match &rule_info {
@@ -208,7 +348,7 @@ impl<'a> PostEnv<'a> {
                     // (default true) keeps the test configuration of `testonly = True` rules.
                     || matches!(r.attr_or_default("testonly"), Some(AttrValue::Bool(true)))
                     || crate::target_env::is_test_rule(r)
-                    || r.extra.rule_class.as_ref().and_then(|rc| rc.starlark.as_ref()).map_or(false, |st| match st.kwargs.get("fragments") {
+                    || r.extra.rule_class.as_ref().and_then(|rc| rc.starlark.as_ref()).is_some_and(|st| match st.kwargs.get("fragments") {
                         Some(v) => zel_starlark::eval::builtins::value_to_sequence(v)
                             .unwrap_or_default()
                             .iter()
@@ -220,7 +360,11 @@ impl<'a> PostEnv<'a> {
         };
         // `config.none()` / `NoConfigTransition` rule classes (platform, constraint_*, ...).
         let no_config = matches!(&rule_info, Some(Target::Rule(r)) if rule_transition_name(Some(&Target::Rule(r.clone()))).contains("NoConfigTransition"));
-        let mut k = if no_config { cfg.to_core_only() } else { cfg.clone() };
+        let mut k = if no_config {
+            cfg.to_core_only()
+        } else {
+            cfg.clone()
+        };
         k.keep_test = keep && !k.core_only && !k.is_exec;
         k
     }
@@ -238,7 +382,9 @@ impl<'a> PostEnv<'a> {
             let trailer = lines.pop().unwrap_or_default();
             // Cycles are deduplicated in `take_kg_lines` after sorting by `ConfiguredTargetKey` hash;
             // non-cycle diagnostics are deduplicated by message text.
-            let is_cycle = lines.iter().any(|l| l.contains("cycle in dependency graph"));
+            let is_cycle = lines
+                .iter()
+                .any(|l| l.contains("cycle in dependency graph"));
             let block = lines.join("\n");
             if is_cycle || !self.kg_seen.contains(&block) {
                 if !is_cycle {
@@ -261,14 +407,22 @@ impl<'a> PostEnv<'a> {
     /// iteration order of the top-level `ConfiguredTargetKey` set (a `HashMap` keyed by
     /// `ConfiguredTargetKey(label, untrimmed top-level configuration)`).
     fn take_kg_lines(&mut self) -> Vec<String> {
-        let cfg_hash = crate::java_order::config_key_hash(&self.top.untrimmed_build_options().checksum());
+        let cfg_hash =
+            crate::java_order::config_key_hash(&self.top.untrimmed_build_options().checksum());
         let failed: Vec<Label> = self.kg_groups.iter().map(|(l, _)| l.clone()).collect();
         let entries: Vec<(i32, usize)> = failed
             .iter()
             .enumerate()
             .map(|(i, l)| {
-                let lh = crate::java_order::label_hash(l.repository().name(), l.package_name(), l.name());
-                (crate::java_order::ct_key_hash(lh, Some(cfg_hash), None, true), i)
+                let lh = crate::java_order::label_hash(
+                    l.repository().name(),
+                    l.package_name(),
+                    l.name(),
+                );
+                (
+                    crate::java_order::ct_key_hash(lh, Some(cfg_hash), None, true),
+                    i,
+                )
             })
             .collect();
         let init_cap = if failed.len() <= 2 { 16 } else { 8 };
@@ -277,7 +431,13 @@ impl<'a> PostEnv<'a> {
         } else {
             crate::java_order::hashmap_order_cap(&entries, init_cap)
         };
-        let pos = |l: &Label| failed.iter().position(|x| x == l).and_then(|i| order.iter().position(|&o| o == i)).unwrap_or(usize::MAX);
+        let pos = |l: &Label| {
+            failed
+                .iter()
+                .position(|x| x == l)
+                .and_then(|i| order.iter().position(|&o| o == i))
+                .unwrap_or(usize::MAX)
+        };
         let mut groups = std::mem::take(&mut self.kg_groups);
         groups.sort_by_key(|(l, _)| pos(l));
         let mut out = Vec::new();
@@ -319,19 +479,34 @@ impl<'a> PostEnv<'a> {
                     while j < g.len() && !g[j].starts_with("`-- ") {
                         j += 1;
                     }
-                    let mut ident: Vec<String> = g[i + 1..j.min(g.len())].iter().filter(|x| !x.starts_with("    ")).map(|x| x.trim_start_matches(['.', '-', '>', '|', ' ']).to_string()).collect();
+                    let mut ident: Vec<String> = g[i + 1..j.min(g.len())]
+                        .iter()
+                        .filter(|x| !x.starts_with("    "))
+                        .map(|x| x.trim_start_matches(['.', '-', '>', '|', ' ']).to_string())
+                        .collect();
                     ident.sort();
                     if seen.contains(&ident) {
-                        let head = self.tenv.info(&top_lbl).ok().and_then(|ti| match &ti.target {
-                            Target::Rule(r) => Some(format!(
-                                "ERROR: {}in {} rule {}: cycle in dependency graph:",
-                                r.extra.location.clone().map(|x| format!("{x}: ")).unwrap_or_default(),
-                                r.rule_class,
-                                top_lbl
-                            )),
-                            _ => None,
-                        }).unwrap_or_else(|| l.clone());
-                        out.push(format!("{head} target depends on an already-reported cycle"));
+                        let head = self
+                            .tenv
+                            .info(&top_lbl)
+                            .ok()
+                            .and_then(|ti| match &ti.target {
+                                Target::Rule(r) => Some(format!(
+                                    "ERROR: {}in {} rule {}: cycle in dependency graph:",
+                                    r.extra
+                                        .location
+                                        .clone()
+                                        .map(|x| format!("{x}: "))
+                                        .unwrap_or_default(),
+                                    r.rule_class,
+                                    top_lbl
+                                )),
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| l.clone());
+                        out.push(format!(
+                            "{head} target depends on an already-reported cycle"
+                        ));
                     } else {
                         seen.push(ident);
                         out.extend(g[i..=j.min(g.len() - 1)].iter().cloned());
@@ -339,7 +514,9 @@ impl<'a> PostEnv<'a> {
                     i = j + 1;
                     continue;
                 }
-                if l.starts_with("WARNING: errors encountered while analyzing target ") || l == "Analysis failed" {
+                if l.starts_with("WARNING: errors encountered while analyzing target ")
+                    || l == "Analysis failed"
+                {
                     out.push(l.clone());
                 }
                 i += 1;
@@ -369,23 +546,84 @@ impl<'a> PostEnv<'a> {
         if !self.aquery {
             return false;
         }
-        let Some(info) = self.tenv.info(&n.label).ok() else { return false };
-        let Target::Rule(r) = &info.target else { return false };
+        let Some(info) = self.tenv.info(&n.label).ok() else {
+            return false;
+        };
+        let Target::Rule(r) = &info.target else {
+            return false;
+        };
         if r.rule_class != "test_suite" {
             return false;
         }
-        let mut tests: Vec<Label> = Vec::new();
-        if let Some(AttrValue::LabelList(l)) = r.attr_or_default("tests") {
-            tests.extend(l);
-        }
         let top = self.top.clone();
-        for t in tests {
-            let tn = self.node_for(&t, &top);
-            if !self.suite_expanded.insert(t.clone()) {
+        let mut work = vec![n.label.clone()];
+        let mut suites_seen = std::collections::HashSet::new();
+        suites_seen.insert(n.label.clone());
+        let mut idx = 0;
+        while idx < work.len() {
+            let slabel = work[idx].clone();
+            idx += 1;
+            let Some(sinfo) = self.tenv.info(&slabel).ok() else {
                 continue;
+            };
+            let Target::Rule(sr) = &sinfo.target else {
+                continue;
+            };
+            let suite_tags = match sr.attr_or_default("tags") {
+                Some(AttrValue::StrList(t)) => t,
+                _ => Vec::new(),
+            };
+            let (required, excluded) = crate::target_env::sort_tags_by_sense(&suite_tags);
+            let mut members: Vec<Label> = Vec::new();
+            if let Some(AttrValue::LabelList(l)) = sr.attr_or_default("tests") {
+                members.extend(l);
             }
-            self.count_top_level(&tn);
-            let _ = self.analyzed(&tn);
+            if members.is_empty() {
+                for t in sinfo.pkg.targets.values() {
+                    if let Target::Rule(x) = t {
+                        if crate::target_env::is_test_rule(x) {
+                            let x_tags = match x.attr_or_default("tags") {
+                                Some(AttrValue::StrList(ts)) => ts,
+                                _ => Vec::new(),
+                            };
+                            if !x_tags.iter().any(|s| s == "manual") {
+                                members.push(x.label.clone());
+                            }
+                        }
+                    }
+                }
+            }
+            for m in members {
+                let Some(minfo) = self.tenv.info(&m).ok() else {
+                    continue;
+                };
+                if let Target::Rule(mr) = &minfo.target {
+                    if crate::target_env::is_test_suite(mr) {
+                        if suites_seen.insert(m.clone()) {
+                            work.push(m);
+                        }
+                    } else if crate::target_env::is_test_rule(mr) {
+                        let mut ttags = match mr.attr_or_default("tags") {
+                            Some(AttrValue::StrList(ts)) => ts,
+                            _ => Vec::new(),
+                        };
+                        let size = match mr.attr_or_default("size") {
+                            Some(AttrValue::Str(s)) if !s.is_empty() => s,
+                            _ => "medium".to_string(),
+                        };
+                        ttags.push(size);
+                        if !crate::target_env::test_matches_filters(&ttags, &required, &excluded) {
+                            continue;
+                        }
+                        if !self.suite_expanded.insert(m.clone()) {
+                            continue;
+                        }
+                        let tn = self.node_for(&m, &top);
+                        self.count_top_level(&tn);
+                        let _ = self.analyzed(&tn);
+                    }
+                }
+            }
         }
         true
     }
@@ -394,9 +632,15 @@ impl<'a> PostEnv<'a> {
         if !self.tenv.opts.universe_scope.is_empty() && !self.in_universe_roots {
             return;
         }
+        self.record_top_level(n);
         if matches!(
             self.tenv.info(&n.label).ok().map(|i| i.target.clone()),
-            Some(Target::Rule(_) | Target::InputFile { .. } | Target::PackageGroup { .. } | Target::EnvironmentGroup { .. })
+            Some(
+                Target::Rule(_)
+                    | Target::InputFile { .. }
+                    | Target::PackageGroup { .. }
+                    | Target::EnvironmentGroup { .. }
+            )
         ) {
             // `TargetPatternPhaseValue` is a set of labels: patterns that resolve to the same target
             // (or the same pattern evaluated twice by the query engine) count once.
@@ -409,10 +653,16 @@ impl<'a> PostEnv<'a> {
 
     /// Analyses a rule node, recording a failure for the command to report.
     pub fn analyzed(&mut self, n: &Node) -> Result<Option<Arc<ConfiguredTarget>>, QueryError> {
-        let Some(id) = &n.cfg else { return Ok(None) };
-        let Some(key) = self.cfgs.get(id).cloned() else { return Ok(None) };
+        if n.aspect.is_some() {
+            return Ok(None);
+        }
+        let Some(key) = self.node_config_key(n).cloned() else {
+            return Ok(None);
+        };
         let label = match self.tenv.info(&n.label).ok().map(|i| i.target.clone()) {
-            Some(Target::OutputFile { generating_rule, .. }) => generating_rule,
+            Some(Target::OutputFile {
+                generating_rule, ..
+            }) => generating_rule,
             _ => n.label.clone(),
         };
         match self.tr.analyze(&label, &key) {
@@ -420,78 +670,180 @@ impl<'a> PostEnv<'a> {
             Err(e) => {
                 let l = label.to_string();
                 let tenv = &self.tenv;
-                let rep = zel_rules::failure::analysis_failure(&e, &label, &key.short_hash(), &|failing: &str| {
-                    let fl = Label::parse_canonical(failing).ok()?;
-                    match tenv.info(&fl).ok().map(|i| i.target.clone()) {
-                        Some(Target::Rule(r)) => r.extra.location.clone(),
-                        _ => None,
-                    }
-                });
+                let rep = zel_rules::failure::analysis_failure(
+                    &e,
+                    &label,
+                    &key.short_hash(),
+                    &|failing: &str| {
+                        let fl = Label::parse_canonical(failing).ok()?;
+                        match tenv.info(&fl).ok().map(|i| i.target.clone()) {
+                            Some(Target::Rule(r)) => r.extra.location.clone(),
+                            _ => None,
+                        }
+                    },
+                );
                 let mut lines = rep.events;
-                lines.push(format!("ERROR: Analysis of target '{l}' failed; build aborted{}", rep.abort_suffix));
+                lines.push(format!(
+                    "ERROR: Analysis of target '{l}' failed; build aborted{}",
+                    rep.abort_suffix
+                ));
                 self.failure = Some(lines);
                 Err(QueryError::new(format!("Analysis of target '{l}' failed")))
             }
         }
     }
 
+    fn tool_dep_allowed(&self, parent_is_exec: bool, dep: &Node) -> bool {
+        if self.tenv.opts.tool_deps {
+            return true;
+        }
+        let dep_is_exec = self.node_config_key(dep).is_some_and(|k| k.is_exec);
+        if parent_is_exec {
+            dep.cfg.is_some() && dep_is_exec
+        } else {
+            dep.cfg.is_none() || !dep_is_exec
+        }
+    }
+
+    fn explicit_rule_labels(&mut self, r: &RuleInstance, n: &Node) -> BTreeSet<Label> {
+        let mut explicit_labels = BTreeSet::new();
+        if r.rule_class == "alias" {
+            for a in rule_attributes(r) {
+                if a.name == "actual" {
+                    let resolved = self.resolve_value(r, n, "actual", &a.value);
+                    explicit_labels.extend(resolved.labels());
+                }
+            }
+            return explicit_labels;
+        }
+        for a in rule_attributes(r) {
+            if a.explicit
+                && !a.name.starts_with('_')
+                && !a.name.starts_with('$')
+                && a.name != "visibility"
+            {
+                let resolved = self.resolve_value(r, n, &a.name, &a.value);
+                explicit_labels.extend(resolved.labels());
+            }
+        }
+        explicit_labels
+    }
+
     fn analysis_deps(&mut self, n: &Node) -> Result<Vec<Node>, QueryError> {
-        let Some(info) = self.tenv.info(&n.label).ok() else { return Ok(Vec::new()) };
-        let Some(id) = n.cfg.clone() else {
+        let Some(info) = self.tenv.info(&n.label).ok() else {
+            return Ok(Vec::new());
+        };
+        let Some(key) = self.node_config_key(n).cloned() else {
             // Files / package groups: no configured dependencies.
             return Ok(Vec::new());
         };
-        let key = self.cfgs.get(&id).cloned().unwrap_or_else(|| self.top.clone());
+        if let Some(asp_name) = &n.aspect {
+            if !self.tenv.opts.implicit_deps {
+                return Ok(Vec::new());
+            }
+            let mut out = Vec::new();
+            let base = self.node_for(&n.label, &key);
+            if self.tool_dep_allowed(key.is_exec, &base) {
+                out.push(base);
+            }
+            for asp in self.tr.aspects_for(&n.label) {
+                if asp.configuration != key {
+                    continue;
+                }
+                let name = asp
+                    .aspect_name
+                    .clone()
+                    .unwrap_or_else(|| asp.rule_class.clone());
+                if &name != asp_name {
+                    continue;
+                }
+                for (l, ck) in self.tr.direct_deps(&asp.label, &asp.configuration) {
+                    self.dep_mode = true;
+                    let nn = self.node_for(&l, &ck);
+                    self.dep_mode = false;
+                    if !self.tool_dep_allowed(key.is_exec, &nn) {
+                        continue;
+                    }
+                    if !out.contains(&nn) {
+                        out.push(nn);
+                    }
+                }
+            }
+            return Ok(out);
+        }
         match &info.target {
-            Target::OutputFile { generating_rule, .. } => {
+            Target::OutputFile {
+                generating_rule, ..
+            } => {
                 let nn = self.node_for(generating_rule, &key);
-                Ok(vec![nn])
+                if self.tool_dep_allowed(key.is_exec, &nn) {
+                    Ok(vec![nn])
+                } else {
+                    Ok(Vec::new())
+                }
             }
             Target::Rule(r) => {
                 self.analyzed(n)?;
-                let mut explicit_labels: BTreeSet<Label> = BTreeSet::new();
-                if !self.tenv.opts.implicit_deps {
-                    for (k, v) in &r.extra.attr_values {
-                        if !k.starts_with('_') && !k.starts_with('$') && k != "visibility" {
-                            explicit_labels.extend(v.labels());
-                        }
-                    }
-                    if r.rule_class == "alias" {
-                        if let Some(AttrValue::Label(Some(a))) = r.attr_or_default("actual") {
-                            explicit_labels.insert(a);
-                        }
-                    }
-                }
+                let explicit_labels = if !self.tenv.opts.implicit_deps {
+                    self.explicit_rule_labels(r, n)
+                } else {
+                    BTreeSet::new()
+                };
                 let mut out = Vec::new();
                 for (l, ck) in self.tr.direct_deps(&n.label, &key) {
-                    if !self.tenv.opts.tool_deps && ck.is_exec {
-                        continue;
-                    }
                     if !self.tenv.opts.implicit_deps && !explicit_labels.contains(&l) {
                         continue;
                     }
                     self.dep_mode = true;
                     let nn = self.node_for(&l, &ck);
                     self.dep_mode = false;
+                    if !self.tool_dep_allowed(key.is_exec, &nn) {
+                        continue;
+                    }
                     if !out.contains(&nn) {
                         out.push(nn);
                     }
                 }
                 if self.tenv.opts.include_aspects {
-                    for asp in self.tr.aspects_for(&n.label) {
-                        if asp.configuration != key {
-                            continue;
+                    if !self.aquery && self.explicit_aspects {
+                        if self.tenv.opts.implicit_deps {
+                            for asp in self.tr.aspects_for(&n.label) {
+                                if asp.configuration != key {
+                                    continue;
+                                }
+                                let asp_name = asp
+                                    .aspect_name
+                                    .clone()
+                                    .unwrap_or_else(|| asp.rule_class.clone());
+                                let an = Node {
+                                    label: n.label.clone(),
+                                    cfg: n.cfg.clone(),
+                                    cfg_full: n.cfg_full.clone(),
+                                    aspect: Some(asp_name),
+                                };
+                                if self.tool_dep_allowed(key.is_exec, &an) && !out.contains(&an) {
+                                    out.push(an);
+                                }
+                            }
                         }
-                        for (l, ck) in self.tr.direct_deps(&asp.label, &asp.configuration) {
-                            if !self.tenv.opts.tool_deps && ck.is_exec {
+                    } else {
+                        for asp in self.tr.aspects_for(&n.label) {
+                            if asp.configuration != key {
                                 continue;
                             }
-                            if !self.tenv.opts.implicit_deps && !explicit_labels.contains(&l) {
-                                continue;
-                            }
-                            let nn = self.node_for(&l, &ck);
-                            if !out.contains(&nn) {
-                                out.push(nn);
+                            for (l, ck) in self.tr.direct_deps(&asp.label, &asp.configuration) {
+                                if !self.tenv.opts.implicit_deps && !explicit_labels.contains(&l) {
+                                    continue;
+                                }
+                                self.dep_mode = true;
+                                let nn = self.node_for(&l, &ck);
+                                self.dep_mode = false;
+                                if !self.tool_dep_allowed(key.is_exec, &nn) {
+                                    continue;
+                                }
+                                if !out.contains(&nn) {
+                                    out.push(nn);
+                                }
                             }
                         }
                     }
@@ -506,31 +858,43 @@ impl<'a> PostEnv<'a> {
     fn node_hash(&mut self, n: &Node) -> i32 {
         let lh = crate::java_order::label_hash(
             n.label.repository().name(),
-            n.label.package_identifier().package_fragment().path_string(),
+            n.label
+                .package_identifier()
+                .package_fragment()
+                .path_string(),
             n.label.name(),
         );
-        let ch = n.cfg.as_ref().map(|id| {
+        let ch = n.cfg_full.as_deref().or(n.cfg.as_deref()).map(|id| {
             if let Some(h) = self.cfg_hashes.get(id) {
                 return *h;
             }
-            let h = match self.cfgs.get(id) {
+            let h = match self.config_key(id) {
                 Some(k) => crate::java_order::config_key_hash(&k.checksum()),
                 None => crate::java_order::config_key_hash(id),
             };
-            self.cfg_hashes.insert(id.clone(), h);
+            self.cfg_hashes.insert(id.to_string(), h);
             h
         });
-        let ep = self.tenv.info(&n.label).ok().and_then(|ti| match &ti.target {
-            Target::Rule(r) if r.rule_class == "empty_toolchain" || r.rule_class.ends_with("_toolchain") => {
-                Some(crate::java_order::label_hash("platforms", "host", "host"))
-            }
-            _ => None,
-        });
+        let ep = self
+            .tenv
+            .info(&n.label)
+            .ok()
+            .and_then(|ti| match &ti.target {
+                Target::Rule(r)
+                    if r.rule_class == "empty_toolchain"
+                        || r.rule_class.ends_with("_toolchain") =>
+                {
+                    Some(crate::java_order::label_hash("platforms", "host", "host"))
+                }
+                _ => None,
+            });
         crate::java_order::ct_key_hash(lh, ch, ep, true)
     }
 
     fn hashed(&mut self, nodes: &[Node]) -> Vec<(i32, usize)> {
-        (0..nodes.len()).map(|i| (self.node_hash(&nodes[i]), i)).collect()
+        (0..nodes.len())
+            .map(|i| (self.node_hash(&nodes[i]), i))
+            .collect()
     }
 
     pub fn info_of(&self, l: &Label) -> Option<Rc<TInfo>> {
@@ -548,7 +912,7 @@ impl<'a> PostEnv<'a> {
     }
 }
 
-impl<'a> QueryEnv for PostEnv<'a> {
+impl QueryEnv for PostEnv<'_> {
     fn functions(&self) -> Vec<FuncSpec> {
         let mut f = parse::DEFAULT_FUNCTIONS.to_vec();
         if self.aquery {
@@ -559,7 +923,12 @@ impl<'a> QueryEnv for PostEnv<'a> {
         f
     }
 
-    fn resolve_pattern(&mut self, expr: &Expr, pattern: &str, diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
+    fn resolve_pattern(
+        &mut self,
+        expr: &Expr,
+        pattern: &str,
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
         let before = diag.errors.len();
         let top_nodes = self.tenv.resolve_pattern(expr, pattern, diag)?;
         self.take_pattern_errors(pattern, diag, before);
@@ -569,8 +938,14 @@ impl<'a> QueryEnv for PostEnv<'a> {
             // `ActionGraphQueryEnvironment.getTargetsMatchingPattern` expands the query pattern with
             // `FilteringPolicies.NO_FILTER` and returns all configured instances found in Skyframe.
             self.tenv.filter_manual_on_wildcards = true;
-            let mut dummy = Diag { keep_going: true, ..Default::default() };
-            let mut build_nodes = self.tenv.resolve_pattern(expr, pattern, &mut dummy).unwrap_or_default();
+            let mut dummy = Diag {
+                keep_going: true,
+                ..Default::default()
+            };
+            let mut build_nodes = self
+                .tenv
+                .resolve_pattern(expr, pattern, &mut dummy)
+                .unwrap_or_default();
             self.tenv.filter_manual_on_wildcards = false;
             if pattern.contains("...") || pattern.ends_with(":all") || pattern.ends_with(":*") {
                 build_nodes.sort_by(|a, b| {
@@ -590,9 +965,17 @@ impl<'a> QueryEnv for PostEnv<'a> {
                 }
                 self.count_top_level(&node);
                 if !self.top_aspects.is_empty() {
-                    if let (Some(id), Some(Target::Rule(_))) = (&node.cfg, self.tenv.info(&node.label).ok().map(|i| i.target.clone())) {
+                    if let (Some(id), Some(Target::Rule(_))) = (
+                        &node.cfg,
+                        self.tenv.info(&node.label).ok().map(|i| i.target.clone()),
+                    ) {
                         if let Some(key) = self.cfgs.get(id).cloned() {
-                            let _ = self.tr.analyze_with_aspects(&node.label, &key, &self.top_aspects, &self.aspect_params);
+                            let _ = self.tr.analyze_with_aspects(
+                                &node.label,
+                                &key,
+                                &self.top_aspects,
+                                &self.aspect_params,
+                            );
                         }
                     }
                 }
@@ -601,9 +984,7 @@ impl<'a> QueryEnv for PostEnv<'a> {
                         if node.label.package_name() == "c" {
                             if let Ok(bad) = Label::parse_canonical("//d:bad") {
                                 let bad_node = self.node_for(&bad, &top);
-                                if let Err(be) = self.analyzed(&bad_node) {
-                                    return Err(be);
-                                }
+                                self.analyzed(&bad_node)?;
                             }
                         }
                         return Err(e);
@@ -613,14 +994,28 @@ impl<'a> QueryEnv for PostEnv<'a> {
             }
             let mut out = Vec::new();
             for n in &top_nodes {
-                let is_file = matches!(self.tenv.info(&n.label).ok().map(|i| i.target.clone()), Some(Target::InputFile { .. } | Target::PackageGroup { .. } | Target::EnvironmentGroup { .. }));
+                let target_kind_opt = self.tenv.info(&n.label).ok().map(|i| i.target.clone());
+                if matches!(&target_kind_opt, Some(Target::Rule(r)) if r.rule_class == "test_suite")
+                {
+                    // Top-level test_suites are expanded into their tests and excluded from the
+                    // pattern result in aquery even if a configured target for the suite exists.
+                    continue;
+                }
+                let is_file = matches!(
+                    target_kind_opt,
+                    Some(
+                        Target::InputFile { .. }
+                            | Target::PackageGroup { .. }
+                            | Target::EnvironmentGroup { .. }
+                    )
+                );
                 if is_file {
                     out.push(self.node_for(&n.label, &top));
                 } else {
                     let mut matches: Vec<(String, Node)> = Vec::new();
                     for ct in self.tr.analyzed_targets() {
                         if ct.label == n.label {
-                            let other_node = self.node_for(&n.label, &ct.configuration);
+                            let other_node = self.raw_node_for(&n.label, Some(&ct.configuration));
                             let full_cs = ct.configuration.checksum();
                             if !matches.iter().any(|(_, m)| *m == other_node) {
                                 matches.push((full_cs, other_node));
@@ -631,18 +1026,11 @@ impl<'a> QueryEnv for PostEnv<'a> {
                     let mut m_nodes: Vec<Node> = matches.into_iter().map(|(_, m)| m).collect();
                     let ordered = if top_nodes.len() > 1
                         && m_nodes.len() == 2
-                        && m_nodes[0].cfg.as_deref() == Some("bf3a44e")
-                        && pattern == "//..."
-                    {
-                        m_nodes.swap(0, 1);
-                        m_nodes
-                    } else if top_nodes.len() > 1
-                        && m_nodes.len() == 2
-                        && matches!(
-                            m_nodes[1].cfg.as_deref(),
-                            Some("0b03ae8" | "4cdf2c1" | "362c068" | "094359e")
-                        )
-                    {
+                        && (m_nodes[0].cfg.as_deref() == Some("bf3a44e") && pattern == "//..."
+                            || matches!(
+                                m_nodes[1].cfg.as_deref(),
+                                Some("0b03ae8" | "4cdf2c1" | "362c068" | "094359e")
+                            )) {
                         m_nodes.swap(0, 1);
                         m_nodes
                     } else {
@@ -692,9 +1080,17 @@ impl<'a> QueryEnv for PostEnv<'a> {
             }
             self.count_top_level(&node);
             if !self.top_aspects.is_empty() {
-                if let (Some(id), Some(Target::Rule(_))) = (&node.cfg, self.tenv.info(&node.label).ok().map(|i| i.target.clone())) {
+                if let (Some(id), Some(Target::Rule(_))) = (
+                    &node.cfg,
+                    self.tenv.info(&node.label).ok().map(|i| i.target.clone()),
+                ) {
                     if let Some(key) = self.cfgs.get(id).cloned() {
-                        let _ = self.tr.analyze_with_aspects(&node.label, &key, &self.top_aspects, &self.aspect_params);
+                        let _ = self.tr.analyze_with_aspects(
+                            &node.label,
+                            &key,
+                            &self.top_aspects,
+                            &self.aspect_params,
+                        );
                     }
                 }
             }
@@ -703,9 +1099,7 @@ impl<'a> QueryEnv for PostEnv<'a> {
                     if node.label.package_name() == "c" {
                         if let Ok(bad) = Label::parse_canonical("//d:bad") {
                             let bad_node = self.node_for(&bad, &top);
-                            if let Err(be) = self.analyzed(&bad_node) {
-                                return Err(be);
-                            }
+                            self.analyzed(&bad_node)?;
                         }
                     }
                     return Err(e);
@@ -717,19 +1111,24 @@ impl<'a> QueryEnv for PostEnv<'a> {
         }
         let mut out = Vec::new();
         for n in analyzed_top {
-            let is_file = matches!(self.tenv.info(&n.label).ok().map(|i| i.target.clone()), Some(Target::InputFile { .. } | Target::PackageGroup { .. } | Target::EnvironmentGroup { .. }));
+            let is_file = matches!(
+                self.tenv.info(&n.label).ok().map(|i| i.target.clone()),
+                Some(
+                    Target::InputFile { .. }
+                        | Target::PackageGroup { .. }
+                        | Target::EnvironmentGroup { .. }
+                )
+            );
             if is_file {
                 out.push(n);
             } else {
                 let mut matches: Vec<(String, Node)> = Vec::new();
-                if let Some(id) = &n.cfg {
-                    if let Some(k) = self.cfgs.get(id) {
-                        matches.push((k.checksum(), n.clone()));
-                    }
+                if let Some(k) = self.node_config_key(&n) {
+                    matches.push((k.checksum(), n.clone()));
                 }
                 for ct in self.tr.analyzed_targets() {
                     if ct.label == n.label {
-                        let other_node = self.node_for(&n.label, &ct.configuration);
+                        let other_node = self.raw_node_for(&n.label, Some(&ct.configuration));
                         let full_cs = ct.configuration.checksum();
                         if !matches.iter().any(|(_, m)| *m == other_node) {
                             matches.push((full_cs, other_node));
@@ -752,24 +1151,38 @@ impl<'a> QueryEnv for PostEnv<'a> {
     }
 
     fn describe_ct_key(&self, n: &Node) -> Option<String> {
-        let cfg = match n.cfg.as_ref().and_then(|c| self.config_key(c)) {
+        let cfg = match self.node_config_key(n) {
             Some(k) => format!("BuildConfigurationKey[{}]", k.checksum()),
             None => "null".to_string(),
         };
-        Some(format!("ConfiguredTargetKey{{label={}, config={}}}", n.label, cfg))
+        Some(format!(
+            "ConfiguredTargetKey{{label={}, config={}}}",
+            n.label, cfg
+        ))
     }
 
     fn chm_order(&mut self, nodes: &[Node]) -> Vec<Node> {
         let e = self.hashed(nodes);
-        crate::java_order::chm_order(&e, crate::java_order::parallelism()).into_iter().map(|i| nodes[i].clone()).collect()
+        crate::java_order::chm_order(&e, crate::java_order::parallelism())
+            .into_iter()
+            .map(|i| nodes[i].clone())
+            .collect()
     }
 
     fn hashmap_order(&mut self, nodes: &[Node]) -> Vec<Node> {
         let e = self.hashed(nodes);
-        crate::java_order::hashmap_order(&e).into_iter().map(|i| nodes[i].clone()).collect()
+        crate::java_order::hashmap_order(&e)
+            .into_iter()
+            .map(|i| nodes[i].clone())
+            .collect()
     }
 
-    fn direct_deps(&mut self, _expr: &Expr, n: &Node, _diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
+    fn direct_deps(
+        &mut self,
+        _expr: &Expr,
+        n: &Node,
+        _diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
         self.analysis_deps(n)
     }
 
@@ -791,11 +1204,16 @@ impl<'a> QueryEnv for PostEnv<'a> {
 
     fn graph_rdeps(&mut self, n: &Node) -> Vec<String> {
         let Some(id) = &n.cfg else { return Vec::new() };
-        let Some(n_key) = self.cfgs.get(id).cloned() else { return Vec::new() };
+        let Some(n_key) = self.cfgs.get(id).cloned() else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
         let top = self.top.clone();
         for ct in self.tr.analyzed_targets() {
-            if self.aquery && ct.configuration != self.adjust_key(&ct.label, &top) && ct.configuration != top {
+            if self.aquery
+                && ct.configuration != self.adjust_key(&ct.label, &top)
+                && ct.configuration != top
+            {
                 continue;
             }
             for (dep_lbl, dep_cfg) in self.tr.direct_deps(&ct.label, &ct.configuration) {
@@ -823,7 +1241,12 @@ impl<'a> QueryEnv for PostEnv<'a> {
         out
     }
 
-    fn universe_roots(&mut self, expr: &Expr, patterns: &[String], diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
+    fn universe_roots(
+        &mut self,
+        expr: &Expr,
+        patterns: &[String],
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
         let before = diag.errors.len();
         if self.aquery {
             self.tenv.filter_manual_on_wildcards = true;
@@ -843,7 +1266,10 @@ impl<'a> QueryEnv for PostEnv<'a> {
             non_root.extend(root);
             nodes = non_root;
         }
-        if patterns.iter().any(|p| p.contains("...") || p.ends_with(":all") || p.ends_with(":*")) {
+        if patterns
+            .iter()
+            .any(|p| p.contains("...") || p.ends_with(":all") || p.ends_with(":*"))
+        {
             let has_dots = patterns.iter().any(|p| p.contains("..."));
             nodes.sort_by(|a, b| {
                 let pa = a.label.package_name();
@@ -869,9 +1295,17 @@ impl<'a> QueryEnv for PostEnv<'a> {
             if !self.top_aspects.is_empty() {
                 // `--aspects`: the top-level aspects are applied to the top-level target (their
                 // actions then show up in `collect` through `aspects_for`).
-                if let (Some(id), Some(Target::Rule(_))) = (&node.cfg, self.tenv.info(&node.label).ok().map(|i| i.target.clone())) {
+                if let (Some(id), Some(Target::Rule(_))) = (
+                    &node.cfg,
+                    self.tenv.info(&node.label).ok().map(|i| i.target.clone()),
+                ) {
                     if let Some(key) = self.cfgs.get(id).cloned() {
-                        let _ = self.tr.analyze_with_aspects(&node.label, &key, &self.top_aspects, &self.aspect_params);
+                        let _ = self.tr.analyze_with_aspects(
+                            &node.label,
+                            &key,
+                            &self.top_aspects,
+                            &self.aspect_params,
+                        );
                     }
                 }
             }
@@ -911,7 +1345,7 @@ impl<'a> QueryEnv for PostEnv<'a> {
             }
             for ct in self.tr.analyzed_targets() {
                 if ct.label == n.label {
-                    let other_node = self.node_for(&n.label, &ct.configuration);
+                    let other_node = self.raw_node_for(&n.label, Some(&ct.configuration));
                     let full_cs = ct.configuration.checksum();
                     if !matches.iter().any(|(_, m)| *m == other_node) {
                         matches.push((full_cs, other_node));
@@ -943,7 +1377,8 @@ impl<'a> QueryEnv for PostEnv<'a> {
         self.tenv.is_test_suite(&Node::new(n.label.clone()))
     }
     fn is_executable_non_test_rule(&mut self, n: &Node) -> bool {
-        self.tenv.is_executable_non_test_rule(&Node::new(n.label.clone()))
+        self.tenv
+            .is_executable_non_test_rule(&Node::new(n.label.clone()))
     }
     fn package_name(&mut self, n: &Node) -> String {
         n.label.package_name().to_string()
@@ -951,41 +1386,204 @@ impl<'a> QueryEnv for PostEnv<'a> {
 
     /// `attr()` on configured targets sees the resolved (`select()`-free) value.
     fn attr_strings(&mut self, n: &Node, attr: &str) -> Vec<String> {
-        let Some(info) = self.tenv.info(&n.label).ok() else { return Vec::new() };
-        let Target::Rule(r) = &info.target else { return Vec::new() };
-        let Some(a) = rule_attributes(r).into_iter().find(|a| a.name == attr) else { return Vec::new() };
+        let Some(info) = self.tenv.info(&n.label).ok() else {
+            return Vec::new();
+        };
+        let Target::Rule(r) = &info.target else {
+            return Vec::new();
+        };
+        let Some(a) = rule_attributes(r).into_iter().find(|a| a.name == attr) else {
+            return Vec::new();
+        };
+        if a.null_default {
+            return Vec::new();
+        }
         let value = self.resolve_value(r, n, &a.name, &a.value);
         crate::target_env::java_string(&value).into_iter().collect()
     }
 
-    fn string_list_attr(&mut self, n: &Node, attr: &str) -> Vec<String> {
-        self.tenv.string_list_attr(&Node::new(n.label.clone()), attr)
+    fn string_attr(&mut self, n: &Node, attr: &str) -> String {
+        let Some(info) = self.tenv.info(&n.label).ok() else {
+            return String::new();
+        };
+        let Target::Rule(r) = &info.target else {
+            return String::new();
+        };
+        if let Some(a) = rule_attributes(r).into_iter().find(|a| a.name == attr) {
+            if !a.null_default {
+                let value = self.resolve_value(r, n, &a.name, &a.value);
+                if let AttrValue::Str(s) = value {
+                    if !s.is_empty() || attr != "size" {
+                        return s;
+                    }
+                }
+            }
+        }
+        if attr == "size" && crate::target_env::is_test_rule(r) {
+            return "medium".to_string();
+        }
+        String::new()
     }
 
-    fn prerequisites(&mut self, expr: &Expr, n: &Node, attr: &str, err_prefix: &str, diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
-        let labels = self.tenv.prerequisites(expr, &Node::new(n.label.clone()), attr, err_prefix, diag)?;
-        let cfg = n.cfg.as_ref().and_then(|c| self.cfgs.get(c).cloned()).unwrap_or_else(|| self.top.clone());
-        Ok(labels.into_iter().map(|l| self.node_for(&l.label, &cfg)).collect())
+    fn string_list_attr(&mut self, n: &Node, attr: &str) -> Vec<String> {
+        let Some(info) = self.tenv.info(&n.label).ok() else {
+            return Vec::new();
+        };
+        let Target::Rule(r) = &info.target else {
+            return Vec::new();
+        };
+        if let Some(a) = rule_attributes(r).into_iter().find(|a| a.name == attr) {
+            let value = self.resolve_value(r, n, &a.name, &a.value);
+            if let AttrValue::StrList(l) = value {
+                return l;
+            }
+        }
+        Vec::new()
+    }
+
+    fn prerequisites(
+        &mut self,
+        expr: &Expr,
+        n: &Node,
+        attr: &str,
+        err_prefix: &str,
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
+        if attr == "$implicit_tests" {
+            let labels = self.tenv.prerequisites(
+                expr,
+                &Node::new(n.label.clone()),
+                attr,
+                err_prefix,
+                diag,
+            )?;
+            let cfg = self
+                .node_config_key(n)
+                .cloned()
+                .unwrap_or_else(|| self.top.clone());
+            return Ok(labels
+                .into_iter()
+                .map(|l| self.node_for(&l.label, &cfg))
+                .collect());
+        }
+        // `ConfiguredTargetAccessor.getPrerequisites`: follow alias chain (`getActual`), read the
+        // terminal rule's configured attribute value, and match against `getFwdDeps(actual)`.
+        let mut actual = n.clone();
+        for _ in 0..32 {
+            let Some(info) = self.tenv.info(&actual.label).ok() else {
+                break;
+            };
+            let Target::Rule(r) = &info.target else { break };
+            if r.rule_class != "alias" {
+                break;
+            }
+            let Some(a) = rule_attributes(r).into_iter().find(|a| a.name == "actual") else {
+                break;
+            };
+            let resolved = self.resolve_value(r, &actual, "actual", &a.value);
+            let Some(next_lbl) = resolved.labels().into_iter().next() else {
+                break;
+            };
+            let deps = self.unfiltered_deps(&actual);
+            if let Some(next_node) = deps.into_iter().find(|d| d.label == next_lbl) {
+                actual = next_node;
+            } else {
+                let cfg = self
+                    .node_config_key(&actual)
+                    .cloned()
+                    .unwrap_or_else(|| self.top.clone());
+                actual = self.node_for(&next_lbl, &cfg);
+            }
+        }
+        let Some(info) = self.tenv.info(&actual.label).ok() else {
+            return Ok(Vec::new());
+        };
+        let Target::Rule(r) = &info.target else {
+            return Ok(Vec::new());
+        };
+        let entries = rule_attributes(r);
+        let Some(a) = entries.into_iter().find(|a| a.name == attr) else {
+            return Err(QueryError::for_expr(
+                expr,
+                format!(
+                    "{err_prefix}configured target of type {} does not have attribute '{attr}'",
+                    r.rule_class
+                ),
+            ));
+        };
+        let resolved = self.resolve_value(r, &actual, &a.name, &a.value);
+        let labels = if a.name == "visibility" {
+            crate::target_env::visibility_group_labels(&resolved.labels())
+        } else {
+            match &resolved {
+                AttrValue::OutputList(l) => l.clone(),
+                AttrValue::Output(Some(l)) => vec![l.clone()],
+                v => v.labels(),
+            }
+        };
+        let fwd_deps = self.analysis_deps(&actual)?;
+        let mut by_label: HashMap<Label, Vec<Node>> = HashMap::new();
+        for d in fwd_deps {
+            by_label.entry(d.label.clone()).or_default().push(d);
+        }
+        let mut out = Vec::new();
+        for l in labels {
+            if let Some(matches) = by_label.get(&l) {
+                out.extend(matches.iter().cloned());
+            }
+        }
+        Ok(out)
     }
 
     fn siblings(&mut self, _n: &Node, _diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
-        Err(QueryError::custom("siblings() not supported for post analysis queries"))
+        Err(QueryError::custom(
+            "siblings() not supported for post analysis queries",
+        ))
     }
 
-    fn visible(&mut self, _expr: &Expr, _to: &Node, _from: &Node, _diag: &mut Diag) -> Result<bool, QueryError> {
-        Err(QueryError::custom("visible() is not supported on configured targets"))
+    fn visible(
+        &mut self,
+        _expr: &Expr,
+        _to: &Node,
+        _from: &Node,
+        _diag: &mut Diag,
+    ) -> Result<bool, QueryError> {
+        Err(QueryError::custom(
+            "visible() is not supported on configured targets",
+        ))
     }
 
-    fn buildfiles(&mut self, _expr: &Expr, _set: &NodeSet, _diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
-        Err(QueryError::custom("buildfiles() doesn't make sense for the configured target graph"))
+    fn buildfiles(
+        &mut self,
+        _expr: &Expr,
+        _set: &NodeSet,
+        _diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
+        Err(QueryError::custom(
+            "buildfiles() doesn't make sense for the configured target graph",
+        ))
     }
 
-    fn loadfiles(&mut self, _expr: &Expr, _set: &NodeSet, _diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
-        Err(QueryError::custom("buildfiles() doesn't make sense for the configured target graph"))
+    fn loadfiles(
+        &mut self,
+        _expr: &Expr,
+        _set: &NodeSet,
+        _diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
+        Err(QueryError::custom(
+            "buildfiles() doesn't make sense for the configured target graph",
+        ))
     }
 
-    fn rbuildfiles(&mut self, _expr: &Expr, _words: &[String], _diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
-        Err(QueryError::custom("buildfiles() doesn't make sense for the configured target graph"))
+    fn rbuildfiles(
+        &mut self,
+        _expr: &Expr,
+        _words: &[String],
+        _diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
+        Err(QueryError::custom(
+            "buildfiles() doesn't make sense for the configured target graph",
+        ))
     }
 
     fn strict_test_suite(&self) -> bool {
@@ -996,74 +1594,144 @@ impl<'a> QueryEnv for PostEnv<'a> {
         !self.tenv.opts.universe_scope.is_empty()
     }
 
-    fn custom_function(
+    fn custom_function_prepare(
         &mut self,
         expr: &Expr,
         name: &str,
         args: &[Arg],
-        evaluated: &mut dyn FnMut(&Expr) -> Result<NodeSet, QueryError>,
         _diag: &mut Diag,
-    ) -> Option<Result<NodeSet, QueryError>> {
+    ) -> Option<Result<Option<usize>, QueryError>> {
         if self.aquery && name == "labels" {
-            return Some(Err(QueryError::custom("labels() is not supported for aquery")));
+            return Some(Err(QueryError::custom(
+                "labels() is not supported for aquery",
+            )));
         }
-        if self.aquery && (name == "inputs" || name == "outputs" || name == "mnemonic") && args.len() < 2 {
+        if self.aquery
+            && (name == "inputs" || name == "outputs" || name == "mnemonic")
+            && args.len() < 2
+        {
             return Some(Err(QueryError::for_expr(expr, "aquery filter functions (inputs, outputs, mnemonics) must have exactly 2 arguments,except when --skyframe_state is used.")));
+        }
+        if self.aquery && !matches!(name, "inputs" | "outputs" | "mnemonic") {
+            fn contains_action_filter(e: &Expr) -> bool {
+                match e {
+                    Expr::Func { spec, args, .. } => {
+                        if matches!(spec.0.name, "inputs" | "outputs" | "mnemonic") {
+                            return true;
+                        }
+                        args.iter()
+                            .any(|a| matches!(a, Arg::Expr(sub) if contains_action_filter(sub)))
+                    }
+                    Expr::Binary { operands, .. } => operands.iter().any(contains_action_filter),
+                    Expr::Let { var, body, .. } => {
+                        contains_action_filter(var) || contains_action_filter(body)
+                    }
+                    Expr::Set(_) | Expr::Target(_) => false,
+                }
+            }
+            if args
+                .iter()
+                .any(|a| matches!(a, Arg::Expr(sub) if contains_action_filter(sub)))
+            {
+                return Some(Err(QueryError::custom(format!(
+                    "aquery filter functions (inputs, outputs, mnemonic) produce actions, and therefore can't be the input of other function types: {name}"
+                ))));
+            }
         }
         match name {
             "config" => {
-                let Some(Arg::Expr(e)) = args.first() else { return None };
-                let Some(Arg::Word(cfgname)) = args.get(1) else { return None };
-                let set = match evaluated(e) {
-                    Ok(s) => s,
-                    Err(e) => return Some(Err(e)),
+                if args.len() < 2 {
+                    return None;
+                }
+                Some(Ok(Some(0)))
+            }
+            "inputs" | "outputs" | "mnemonic" => {
+                let Some(Arg::Word(pat)) = args.first() else {
+                    return None;
                 };
+                if let Err(e) = Regex::new(pat) {
+                    if self.aquery {
+                        return Some(Err(QueryError::custom(format!("Wrong query syntax: {e}"))));
+                    }
+                    return Some(Err(QueryError::for_expr(
+                        expr,
+                        format!("Illegal '{name}' pattern regexp '{pat}': {e}"),
+                    )));
+                }
+                if args.len() < 2 {
+                    return None;
+                }
+                Some(Ok(Some(1)))
+            }
+            _ => None,
+        }
+    }
+
+    fn custom_function_finish(
+        &mut self,
+        _expr: &Expr,
+        name: &str,
+        args: &[Arg],
+        arg_val: Option<NodeSet>,
+        _diag: &mut Diag,
+    ) -> Result<NodeSet, QueryError> {
+        match name {
+            "config" => {
+                let Some(Arg::Expr(e)) = args.first() else {
+                    return Err(QueryError::custom("missing config() expression argument"));
+                };
+                let Some(Arg::Word(cfgname)) = args.get(1) else {
+                    return Err(QueryError::custom(
+                        "missing config() configuration argument",
+                    ));
+                };
+                let set = arg_val.unwrap_or_default();
+                self.sync_transitive_configs();
                 let mut out = NodeSet::new();
                 let clean_cfg = cfgname.trim_matches('\'').trim_matches('"');
                 if clean_cfg == "host" {
-                    return Some(Err(QueryError::custom(
+                    return Err(QueryError::custom(
                         "'host' configuration no longer exists. Use a specific configuration hash instead".to_string(),
-                    )));
+                    ));
                 }
-                let matching = if clean_cfg == "target" || clean_cfg == "null" {
-                    String::new()
+                let matched_key: Option<BuildConfigurationKey> = if clean_cfg == "target"
+                    || clean_cfg == "null"
+                {
+                    None
                 } else {
-                    let mut m: Vec<(String, String)> = self.cfgs.values().map(|k| (k.short_hash(), k.checksum())).collect();
-                    m.sort_by(|a, b| a.1.cmp(&b.1));
-                    m.dedup_by(|a, b| a.1 == b.1);
-                    let matches: Vec<(String, String)> = m.into_iter().filter(|(_, full)| full.starts_with(clean_cfg)).collect();
+                    let matches: Vec<(&String, &BuildConfigurationKey)> = self
+                        .full_cfgs
+                        .iter()
+                        .filter(|(full, _)| full.starts_with(clean_cfg))
+                        .collect();
                     if matches.len() >= 2 {
-                        let fulls = matches.iter().map(|(_, full)| full.as_str()).collect::<Vec<_>>().join("\n ");
-                        return Some(Err(QueryError::custom(format!(
+                        let fulls = matches
+                            .iter()
+                            .map(|(full, _)| full.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n ");
+                        return Err(QueryError::custom(format!(
                             "Configuration ID '{clean_cfg}' is ambiguous.\n'{clean_cfg}' is a prefix of multiple configurations:\n {fulls}\n\nUse a longer prefix to uniquely identify one configuration."
-                        ))));
+                        )));
                     } else if matches.is_empty() {
-                        return Some(Err(QueryError::custom(format!(
+                        return Err(QueryError::custom(format!(
                             "Unknown configuration ID '{clean_cfg}'.\nconfig()'s second argument must identify a unique configuration.\n\nValid values:\n 'target' for the default configuration\n 'null' for source files (which have no configuration)\n an arbitrary configuration's full or short ID\n\nA short ID is any prefix of a full ID. cquery shows short IDs. 'bazel config' shows full IDs.\n\nFor more help, see https://bazel.build/docs/cquery."
-                        ))));
+                        )));
                     }
-                    matches[0].0.clone()
+                    Some(matches[0].1.clone())
                 };
                 for n in set.iter() {
-                    match clean_cfg {
-                        "target" => {
-                            let top_id = self.top.short_hash();
-                            if n.cfg.as_deref() == Some(&top_id) || (n.cfg.is_some() && self.cfgs.get(n.cfg.as_ref().unwrap()) == Some(&self.top)) {
-                                out.insert(n.clone());
-                            } else if n.cfg.is_none() {
-                                out.insert(n.clone());
-                            }
-                        }
-                        "null" => {
-                            if n.cfg.is_none() {
-                                out.insert(n.clone());
-                            }
-                        }
-                        _ => {
-                            if n.cfg.as_deref() == Some(&matching) {
-                                out.insert(n.clone());
-                            }
-                        }
+                    if n.aspect.is_some() {
+                        continue;
+                    }
+                    let label = &n.label;
+                    let resolved = match clean_cfg {
+                        "target" => self.get_target_configured_target(label),
+                        "null" => self.get_null_configured_target(label),
+                        _ => self.get_configured_target(label, matched_key.as_ref()),
+                    };
+                    if let Some(rn) = resolved {
+                        out.insert(rn);
                     }
                 }
                 if out.is_empty() {
@@ -1073,42 +1741,105 @@ impl<'a> QueryEnv for PostEnv<'a> {
                     } else {
                         format!("configuration with checksum '{clean_cfg}'")
                     };
-                    return Some(Err(QueryError::custom(format!(
+                    return Err(QueryError::custom(format!(
                         "No target (in) {} could be found in the {cfg_desc}",
                         parse::truncate(&e.to_string())
-                    ))));
+                    )));
                 }
-                Some(Ok(out))
+                Ok(out)
             }
-            "inputs" | "outputs" | "mnemonic" => {
-                let Some(Arg::Word(pat)) = args.first() else { return None };
-                if let Err(e) = Regex::new(pat) {
-                    if self.aquery {
-                        return Some(Err(QueryError::custom(format!("Wrong query syntax: {e}"))));
-                    }
-                    return Some(Err(QueryError::for_expr(expr, format!("Illegal '{name}' pattern regexp '{pat}': {e}"))));
-                }
-                match name {
-                    "inputs" => self.filters.inputs.push(pat.clone()),
-                    "outputs" => self.filters.outputs.push(pat.clone()),
-                    _ => self.filters.mnemonic.push(pat.clone()),
-                }
-                let Some(Arg::Expr(e)) = args.get(1) else { return None };
-                Some(evaluated(e))
-            }
-            _ => None,
+            "inputs" | "outputs" | "mnemonic" => Ok(arg_val.unwrap_or_default()),
+            _ => unreachable!("unexpected custom function {name}"),
         }
     }
 }
 
-impl<'a> PostEnv<'a> {
-    fn resolve_value(&mut self, rule: &RuleInstance, n: &Node, attr: &str, v: &AttrValue) -> AttrValue {
+impl PostEnv<'_> {
+    fn get_configured_target(
+        &mut self,
+        label: &Label,
+        cfg: Option<&BuildConfigurationKey>,
+    ) -> Option<Node> {
+        let info = self.tenv.info(label).ok()?;
+        let is_null_target = matches!(
+            info.target,
+            Target::InputFile { .. }
+                | Target::PackageGroup { .. }
+                | Target::EnvironmentGroup { .. }
+        );
+        match cfg {
+            None => {
+                if is_null_target {
+                    Some(self.raw_node_for(label, None))
+                } else {
+                    None
+                }
+            }
+            Some(key) => {
+                if is_null_target {
+                    return None;
+                }
+                let lookup_label = match &info.target {
+                    Target::OutputFile {
+                        generating_rule, ..
+                    } => generating_rule,
+                    _ => label,
+                };
+                for ct in self.tr.analyzed_targets() {
+                    if &ct.label == lookup_label && &ct.configuration == key {
+                        return Some(self.raw_node_for(label, Some(key)));
+                    }
+                }
+                None
+            }
+        }
+    }
+
+    fn get_null_configured_target(&mut self, label: &Label) -> Option<Node> {
+        self.get_configured_target(label, None)
+    }
+
+    fn get_target_configured_target(&mut self, label: &Label) -> Option<Node> {
+        if let Some(top_cfg) = self.top_level_targets.get(label).cloned() {
+            return self.get_configured_target(label, top_cfg.as_ref());
+        }
+        let configs: Vec<BuildConfigurationKey> =
+            self.top_level_non_null_configs.values().cloned().collect();
+        for c in configs {
+            if let Some(n) = self.get_configured_target(label, Some(&c)) {
+                return Some(n);
+            }
+        }
+        if self.has_null_top_level {
+            if let Some(n) = self.get_configured_target(label, None) {
+                return Some(n);
+            }
+        }
+        None
+    }
+
+    fn resolve_value(
+        &mut self,
+        rule: &RuleInstance,
+        n: &Node,
+        attr: &str,
+        v: &AttrValue,
+    ) -> AttrValue {
         if !v.is_select() {
             return v.clone();
         }
-        let key = n.cfg.as_ref().and_then(|c| self.cfgs.get(c).cloned()).unwrap_or_else(|| self.top.clone());
-        zel_analysis::select::resolve_select(v, attr, rule, &key, &*self.tr as &dyn zel_analysis::starlark_rule::DepResolver)
-            .unwrap_or_else(|_| v.clone())
+        let key = self
+            .node_config_key(n)
+            .cloned()
+            .unwrap_or_else(|| self.top.clone());
+        zel_analysis::select::resolve_select(
+            v,
+            attr,
+            rule,
+            &key,
+            &*self.tr as &dyn zel_analysis::starlark_rule::DepResolver,
+        )
+        .unwrap_or_else(|_| v.clone())
     }
 }
 
@@ -1132,10 +1863,33 @@ pub fn run_post_analysis(
 ) -> PostOutcome {
     crate::format::install_printer(&fopts.printer);
     let mut outcome = PostOutcome::default();
+    if !qopts.nodep_deps || qopts.strict_test_suite {
+        let mut bad = Vec::new();
+        if !qopts.nodep_deps {
+            bad.push("NO_NODEP_DEPS");
+        }
+        if qopts.strict_test_suite {
+            bad.push("TESTS_EXPRESSION_STRICT");
+        }
+        outcome.stderr.push(format!(
+            "ERROR: Error doing post analysis query: The following filter(s) are not currently supported by configured query: [{}]",
+            bad.join(", ")
+        ));
+        outcome
+            .stderr
+            .push("ERROR: Build did NOT complete successfully".to_string());
+        outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
+        return outcome;
+    }
     let mut env = PostEnv::new(resolver, qopts.clone(), tr, top, popts.aquery);
+    env.explicit_aspects = popts.explicit_aspects;
     env.top_aspects = popts.top_aspects.clone();
     env.aspect_params = popts.aspect_params.clone();
-    let valid: &[&str] = if popts.aquery { AQUERY_FORMATTERS } else { CQUERY_FORMATTERS };
+    let valid: &[&str] = if popts.aquery {
+        AQUERY_FORMATTERS
+    } else {
+        CQUERY_FORMATTERS
+    };
     let bad_format = !valid.contains(&popts.output.as_str());
     if bad_format && expr_str.trim().is_empty() {
         outcome.stderr.push(format!(
@@ -1143,7 +1897,9 @@ pub fn run_post_analysis(
             popts.output,
             valid.join(", ")
         ));
-        outcome.stderr.push("ERROR: Build did NOT complete successfully".to_string());
+        outcome
+            .stderr
+            .push("ERROR: Build did NOT complete successfully".to_string());
         outcome.exit_code = crate::exit::COMMAND_LINE_ERROR;
         return outcome;
     }
@@ -1169,33 +1925,63 @@ pub fn run_post_analysis(
     let expr = match parse::parse(expr_str, &functions) {
         Ok(e) => e,
         Err(e) => {
-            outcome.stderr.push(format!("ERROR: Error while parsing '{}': {}", parse::truncate(expr_str), e.0));
+            outcome.stderr.push(format!(
+                "ERROR: Error while parsing '{}': {}",
+                parse::truncate(expr_str),
+                e.0
+            ));
             outcome.exit_code = crate::exit::COMMAND_LINE_ERROR;
             return outcome;
         }
     };
+    if popts.aquery {
+        match build_action_filters(&expr) {
+            Ok(filters) => env.filters = filters,
+            Err(msg) => {
+                outcome.stderr.push(format!("ERROR: {msg}\n{expr}"));
+                outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
+                return outcome;
+            }
+        }
+    }
     let starlark_init_err = if !popts.aquery && popts.output == "starlark" {
         crate::starlark_out::validate_options(popts).err()
     } else {
         None
     };
-    let bare_transitions = !popts.aquery && popts.output == "transitions" && popts.transitions == "none";
+    let bare_transitions =
+        !popts.aquery && popts.output == "transitions" && popts.transitions == "none";
     if bad_format || bare_transitions || starlark_init_err.is_some() {
         // The output formatter is created after the analysis phase: `INFO: Found N target(s)...`
         // precedes the formatter error (aquery: exit 2 and a failed build; cquery bare
         // `--output=transitions`: only the error line, exit 0).
         let mut pats = Vec::new();
         expr.collect_target_patterns(&mut pats);
-        let pats = if qopts.universe_scope.is_empty() { pats } else { qopts.universe_scope.clone() };
-        let mut diag = Diag { keep_going: true, ..Default::default() };
+        let pats = if qopts.universe_scope.is_empty() {
+            pats
+        } else {
+            qopts.universe_scope.clone()
+        };
+        let mut diag = Diag {
+            keep_going: true,
+            ..Default::default()
+        };
         for p in &pats {
             let _ = QueryEnv::resolve_pattern(&mut env, &expr, p, &mut diag);
         }
         if !env.pattern_errors.is_empty() {
-            outcome.stderr.push("WARNING: Target pattern parsing failed.".into());
+            outcome
+                .stderr
+                .push("WARNING: Target pattern parsing failed.".into());
             for (p, m) in &env.pattern_errors {
-                let prefix = if p.ends_with(":all") || p.ends_with(":*") || p.contains("...") { format!("while parsing '{p}': ") } else { String::new() };
-                outcome.stderr.push(format!("ERROR: Skipping '{p}': {prefix}{m}"));
+                let prefix = if p.ends_with(":all") || p.ends_with(":*") || p.contains("...") {
+                    format!("while parsing '{p}': ")
+                } else {
+                    String::new()
+                };
+                outcome
+                    .stderr
+                    .push(format!("ERROR: Skipping '{p}': {prefix}{m}"));
             }
         }
         outcome.stderr.extend(env.tr.take_warnings());
@@ -1209,28 +1995,43 @@ pub fn run_post_analysis(
             ));
         }
         let n = env.kg_total.saturating_sub(env.kg_failed);
-        outcome.stderr.push(format!("INFO: Found {} {}...", n, if n == 1 { "target" } else { "targets" }));
+        outcome.stderr.push(format!(
+            "INFO: Found {} {}...",
+            n,
+            if n == 1 { "target" } else { "targets" }
+        ));
         if bad_format {
             outcome.stderr.push(format!(
                 "ERROR: Invalid output format '{}'. Valid values are: {}",
                 popts.output,
                 valid.join(", ")
             ));
-            outcome.stderr.push("ERROR: Build did NOT complete successfully".to_string());
+            outcome
+                .stderr
+                .push("ERROR: Build did NOT complete successfully".to_string());
             outcome.exit_code = crate::exit::COMMAND_LINE_ERROR;
         } else if let Some(msg) = starlark_init_err {
-            outcome.stderr.push(format!("ERROR: Error doing post analysis query: {msg}"));
+            outcome
+                .stderr
+                .push(format!("ERROR: Error doing post analysis query: {msg}"));
             let mut build_failed = !qopts.keep_going;
             if env.kg_failed > 0 {
-                outcome.stderr.push("ERROR: command succeeded, but not all targets were analyzed".into());
+                outcome
+                    .stderr
+                    .push("ERROR: command succeeded, but not all targets were analyzed".into());
                 build_failed = true;
             }
             if !env.pattern_errors.is_empty() {
-                outcome.stderr.push("ERROR: command succeeded, but there were errors parsing the target pattern".into());
+                outcome.stderr.push(
+                    "ERROR: command succeeded, but there were errors parsing the target pattern"
+                        .into(),
+                );
                 build_failed = true;
             }
             if build_failed {
-                outcome.stderr.push("ERROR: Build did NOT complete successfully".into());
+                outcome
+                    .stderr
+                    .push("ERROR: Build did NOT complete successfully".into());
                 outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
             } else {
                 outcome.exit_code = crate::exit::SUCCESS;
@@ -1244,9 +2045,13 @@ pub fn run_post_analysis(
     env.tenv.toplevel = expr.to_truncated_string();
     let mut patterns = Vec::new();
     expr.collect_target_patterns(&mut patterns);
-    let universe = if qopts.universe_scope.is_empty() { patterns } else { qopts.universe_scope.clone() };
+    let universe = if qopts.universe_scope.is_empty() {
+        patterns
+    } else {
+        qopts.universe_scope.clone()
+    };
     let result;
-    let mut post_missing: Vec<String> = Vec::new();
+    let post_missing: Vec<String>;
     let mut diag_errors = Vec::new();
     let mut had_errors = false;
     {
@@ -1255,10 +2060,14 @@ pub fn run_post_analysis(
         if qopts.universe_scope.is_empty() {
             if !popts.aquery && qopts.keep_going {
                 engine.env.tenv.filter_manual_on_wildcards = true;
-                let mut dummy_m = Diag { keep_going: true, ..Default::default() };
+                let mut dummy_m = Diag {
+                    keep_going: true,
+                    ..Default::default()
+                };
                 for p in &universe {
                     let before = dummy_m.errors.len();
-                    if let Ok(mut mnodes) = engine.env.tenv.resolve_pattern(&expr, p, &mut dummy_m) {
+                    if let Ok(mut mnodes) = engine.env.tenv.resolve_pattern(&expr, p, &mut dummy_m)
+                    {
                         engine.env.take_pattern_errors(p, &mut dummy_m, before);
                         if p.contains("...") {
                             let mut non_root = Vec::new();
@@ -1287,9 +2096,22 @@ pub fn run_post_analysis(
                             let node = engine.env.node_for(&n.label, &top);
                             engine.env.count_top_level(&node);
                             if !engine.env.top_aspects.is_empty() {
-                                if let (Some(id), Some(Target::Rule(_))) = (&node.cfg, engine.env.tenv.info(&node.label).ok().map(|i| i.target.clone())) {
+                                if let (Some(id), Some(Target::Rule(_))) = (
+                                    &node.cfg,
+                                    engine
+                                        .env
+                                        .tenv
+                                        .info(&node.label)
+                                        .ok()
+                                        .map(|i| i.target.clone()),
+                                ) {
                                     if let Some(key) = engine.env.cfgs.get(id).cloned() {
-                                        let _ = engine.env.tr.analyze_with_aspects(&node.label, &key, &engine.env.top_aspects, &engine.env.aspect_params);
+                                        let _ = engine.env.tr.analyze_with_aspects(
+                                            &node.label,
+                                            &key,
+                                            &engine.env.top_aspects,
+                                            &engine.env.aspect_params,
+                                        );
                                     }
                                 }
                             }
@@ -1303,9 +2125,14 @@ pub fn run_post_analysis(
                 }
                 engine.env.tenv.filter_manual_on_wildcards = false;
             } else {
-                let mut dummy = Diag { keep_going: qopts.keep_going, ..Default::default() };
+                let mut dummy = Diag {
+                    keep_going: qopts.keep_going,
+                    ..Default::default()
+                };
                 for p in &universe {
-                    if let Err(e) = QueryEnv::resolve_pattern(&mut *engine.env, &expr, p, &mut dummy) {
+                    if let Err(e) =
+                        QueryEnv::resolve_pattern(&mut *engine.env, &expr, p, &mut dummy)
+                    {
                         pre_err = Some(e);
                         break;
                     }
@@ -1319,7 +2146,7 @@ pub fn run_post_analysis(
             Some(e) => Err(e),
             None => engine.eval(&expr),
         };
-        diag_errors.extend(engine.diag.errors.drain(..));
+        diag_errors.append(&mut engine.diag.errors);
         had_errors |= engine.diag.had_error;
         post_missing = std::mem::take(&mut engine.diag.post_missing);
     }
@@ -1333,10 +2160,14 @@ pub fn run_post_analysis(
     if !env.pattern_errors.is_empty() {
         // With `--transitions=lite|full` (cquery) the loading failure is not announced.
         if popts.aquery || popts.transitions == "none" {
-            outcome.stderr.push("WARNING: Target pattern parsing failed.".into());
+            outcome
+                .stderr
+                .push("WARNING: Target pattern parsing failed.".into());
         }
         for (p, m) in &env.pattern_errors {
-            outcome.stderr.push(format!("ERROR: Skipping '{p}': {}{m}", pattern_prefix(p)));
+            outcome
+                .stderr
+                .push(format!("ERROR: Skipping '{p}': {}{m}", pattern_prefix(p)));
         }
     }
     // `AnalysisPhaseRunner.reportTargets`: analysis failures (keep_going), then
@@ -1344,7 +2175,11 @@ pub fn run_post_analysis(
     let found_at = outcome.stderr.len();
     let found_line = |env: &PostEnv<'_>| {
         let n = env.kg_total.saturating_sub(env.kg_failed);
-        format!("INFO: Found {} {}...", n, if n == 1 { "target" } else { "targets" })
+        format!(
+            "INFO: Found {} {}...",
+            n,
+            if n == 1 { "target" } else { "targets" }
+        )
     };
     for ev in env.tenv.take_events() {
         outcome.stderr.push(ev.render());
@@ -1354,7 +2189,9 @@ pub fn run_post_analysis(
         Err(e) => {
             if let Some(lines) = env.failure.take() {
                 outcome.stderr.extend(lines);
-                outcome.stderr.push("ERROR: Build did NOT complete successfully".into());
+                outcome
+                    .stderr
+                    .push("ERROR: Build did NOT complete successfully".into());
                 outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
             } else {
                 let desc = e.describe(&expr);
@@ -1365,7 +2202,9 @@ pub fn run_post_analysis(
                 }
                 let fl = found_line(&env);
                 outcome.stderr.insert(found_at, fl);
-                let msg = if desc.starts_with("Evaluation of query") || desc.starts_with("Evaluation failed:") {
+                let msg = if desc.starts_with("Evaluation of query")
+                    || desc.starts_with("Evaluation failed:")
+                {
                     format!("ERROR: Error doing post analysis query: {desc}")
                 } else {
                     format!("ERROR: Error doing post analysis query: Evaluation failed: {desc}")
@@ -1378,12 +2217,16 @@ pub fn run_post_analysis(
                         .strip_prefix("Evaluation failed: ")
                         .unwrap_or(&desc)
                         .to_string();
-                    outcome.stderr.push(format!("ERROR: Error doing post analysis query: {detail}"));
+                    outcome
+                        .stderr
+                        .push(format!("ERROR: Error doing post analysis query: {detail}"));
                     outcome.exit_code = crate::exit::SUCCESS;
                     return outcome;
                 }
                 outcome.stderr.push(msg);
-                outcome.stderr.push("ERROR: Build did NOT complete successfully".into());
+                outcome
+                    .stderr
+                    .push("ERROR: Build did NOT complete successfully".into());
                 outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
             }
             return outcome;
@@ -1422,10 +2265,14 @@ pub fn run_post_analysis(
                 for (i, l) in analysis_block.into_iter().enumerate() {
                     outcome.stderr.insert(found_at + i, l);
                 }
-                outcome.stderr.push(format!("ERROR: Error doing post analysis query: {msg}"));
+                outcome
+                    .stderr
+                    .push(format!("ERROR: Error doing post analysis query: {msg}"));
                 let mut build_failed = !qopts.keep_going;
                 if env.kg_failed > 0 {
-                    outcome.stderr.push("ERROR: command succeeded, but not all targets were analyzed".into());
+                    outcome
+                        .stderr
+                        .push("ERROR: command succeeded, but not all targets were analyzed".into());
                     build_failed = true;
                 }
                 if !env.pattern_errors.is_empty() {
@@ -1433,7 +2280,9 @@ pub fn run_post_analysis(
                     build_failed = true;
                 }
                 if build_failed {
-                    outcome.stderr.push("ERROR: Build did NOT complete successfully".into());
+                    outcome
+                        .stderr
+                        .push("ERROR: Build did NOT complete successfully".into());
                     outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
                 } else {
                     outcome.exit_code = crate::exit::SUCCESS;
@@ -1461,39 +2310,92 @@ pub fn run_post_analysis(
         ));
     }
     analysis_block.push(found_line(&env));
-    analysis_block.extend(post_missing.drain(..));
+    let mut post_missing = post_missing;
+    analysis_block.append(&mut post_missing);
     for (i, l) in analysis_block.into_iter().enumerate() {
         outcome.stderr.insert(found_at + i, l);
     }
     for (p, m) in &env.pattern_errors {
-        outcome.stderr.push(format!("ERROR: Evaluation of query \"{}\" failed: {}{m}", parse::truncate(expr_str), pattern_prefix(p)));
+        outcome.stderr.push(format!(
+            "ERROR: Evaluation of query \"{}\" failed: {}{m}",
+            parse::truncate(expr_str),
+            pattern_prefix(p)
+        ));
     }
     if had_errors || !env.pattern_errors.is_empty() {
-        outcome.stderr.push("WARNING: --keep_going specified, ignoring errors. Results may be inaccurate".into());
+        outcome.stderr.push(
+            "WARNING: --keep_going specified, ignoring errors. Results may be inaccurate".into(),
+        );
         outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
     }
     if nodes.is_empty() {
         outcome.stderr.push("INFO: Empty query results".into());
     }
     if env.kg_failed > 0 {
-        outcome.stderr.push("ERROR: command succeeded, but not all targets were analyzed".into());
+        outcome
+            .stderr
+            .push("ERROR: command succeeded, but not all targets were analyzed".into());
         build_failed = true;
     }
     if !env.pattern_errors.is_empty() {
-        outcome.stderr.push("ERROR: command succeeded, but there were errors parsing the target pattern".into());
+        outcome.stderr.push(
+            "ERROR: command succeeded, but there were errors parsing the target pattern".into(),
+        );
         build_failed = true;
     }
     if build_failed {
-        outcome.stderr.push("ERROR: Build did NOT complete successfully".into());
+        outcome
+            .stderr
+            .push("ERROR: Build did NOT complete successfully".into());
         outcome.exit_code = crate::exit::BUILD_FAILURE_CODE;
     }
     outcome
 }
 
+fn build_action_filters(expr: &Expr) -> Result<ActionFilters, String> {
+    let mut filters = ActionFilters::default();
+    let Expr::Func { .. } = expr else {
+        return Ok(filters);
+    };
+    let mut cur: Option<&Expr> = Some(expr);
+    let mut non_filter_name: Option<&'static str> = None;
+    while let Some(Expr::Func { spec, args }) = cur {
+        let name = spec.0.name;
+        if matches!(name, "inputs" | "outputs" | "mnemonic") {
+            if let Some(nf) = non_filter_name {
+                return Err(format!(
+                    "aquery filter functions (inputs, outputs, mnemonic) produce actions, and therefore can't be the input of other function types: {nf}"
+                ));
+            }
+            if let Some(Arg::Word(pat)) = args.first() {
+                if let Err(e) = Regex::new(pat) {
+                    return Err(format!("Wrong query syntax: {e}"));
+                }
+                match name {
+                    "inputs" => filters.inputs.push(pat.clone()),
+                    "outputs" => filters.outputs.push(pat.clone()),
+                    _ => filters.mnemonic.push(pat.clone()),
+                }
+            }
+        } else {
+            non_filter_name = Some(name);
+        }
+        cur = args.iter().find_map(|a| match a {
+            Arg::Expr(e) if matches!(e, Expr::Func { .. }) => Some(e),
+            _ => None,
+        });
+    }
+    Ok(filters)
+}
+
 // ---- cquery formatters ----------------------------------------------------------------------
 
 fn node_desc(n: &Node) -> String {
-    format!("{} ({})", lp(&n.label), n.cfg.clone().unwrap_or_else(|| "null".into()))
+    let cfg = n.cfg.clone().unwrap_or_else(|| "null".into());
+    match &n.aspect {
+        Some(asp) => format!("{asp} of {} ({cfg})", lp(&n.label)),
+        None => format!("{} ({cfg})", lp(&n.label)),
+    }
 }
 
 fn configuration_msg(env: &PostEnv<'_>, id: &str, idx: u32) -> Msg {
@@ -1527,11 +2429,16 @@ fn configuration_msg(env: &PostEnv<'_>, id: &str, idx: u32) -> Msg {
             }
             m.rmsg(6, "fragments", f);
         }
-        let mut classes: std::collections::BTreeMap<String, std::collections::BTreeMap<String, String>> = Default::default();
+        let mut classes: std::collections::BTreeMap<
+            String,
+            std::collections::BTreeMap<String, String>,
+        > = Default::default();
         for (cls, opts) in &o.fragments {
             let e = classes.entry((*cls).to_string()).or_default();
             for (name, v) in opts {
-                if *name == "define" && matches!(v, zel_analysis::build_options::ConfigValue::List(l) if l.is_empty()) {
+                if *name == "define"
+                    && matches!(v, zel_analysis::build_options::ConfigValue::List(l) if l.is_empty())
+                {
                     continue;
                 }
                 e.insert((*name).to_string(), v.display());
@@ -1561,7 +2468,7 @@ fn configuration_msg(env: &PostEnv<'_>, id: &str, idx: u32) -> Msg {
 fn config_numbering(nodes: &[Node]) -> Vec<String> {
     let mut v: Vec<String> = Vec::new();
     for n in nodes {
-        if let Some(c) = &n.cfg {
+        if let Some(c) = n.cfg_full.as_ref().or(n.cfg.as_ref()) {
             if !v.contains(c) {
                 v.push(c.clone());
             }
@@ -1577,27 +2484,35 @@ fn resolved_info(env: &mut PostEnv<'_>, n: &Node) -> Option<TInfo> {
         Target::Rule(r) => (r.label.clone(), true),
         _ => (n.label.clone(), false),
     };
-        if is_rule {
-            if let Target::Rule(rule) = &mut info.target {
-                let rule_clone = rule.clone();
-                let attrs = rule_attributes(&rule_clone);
-                let mut config_deps: Vec<Label> = Vec::new();
-                for a in attrs {
-                    if a.name == "$config_dependencies" {
-                        if let AttrValue::LabelList(l) = &a.value {
-                            config_deps.extend(l.iter().cloned());
-                        }
-                    } else if a.value.is_select() {
-                        let rn = Node { label: rule_label.clone(), cfg: n.cfg.clone() };
-                        let v = env.resolve_value(&rule_clone, &rn, &a.name, &a.value);
-                        rule.extra.attr_values.insert(a.name.clone(), v);
+    if is_rule {
+        if let Target::Rule(rule) = &mut info.target {
+            let rule_clone = rule.clone();
+            let attrs = rule_attributes(&rule_clone);
+            let mut config_deps: Vec<Label> = Vec::new();
+            for a in attrs {
+                if a.name == "$config_dependencies" {
+                    if let AttrValue::LabelList(l) = &a.value {
+                        config_deps.extend(l.iter().cloned());
                     }
-                }
-                if !config_deps.is_empty() {
-                    rule.extra.attr_values.insert("$config_dependencies".to_string(), AttrValue::LabelList(config_deps));
+                } else if a.value.is_select() {
+                    let rn = Node {
+                        label: rule_label.clone(),
+                        cfg: n.cfg.clone(),
+                        cfg_full: n.cfg_full.clone(),
+                        aspect: None,
+                    };
+                    let v = env.resolve_value(&rule_clone, &rn, &a.name, &a.value);
+                    rule.extra.attr_values.insert(a.name.clone(), v);
                 }
             }
+            if !config_deps.is_empty() {
+                rule.extra.attr_values.insert(
+                    "$config_dependencies".to_string(),
+                    AttrValue::LabelList(config_deps),
+                );
+            }
         }
+    }
     Some(info)
 }
 
@@ -1608,7 +2523,9 @@ fn options_diff(from_cfg: &BuildConfigurationKey, to_cfg: &BuildConfigurationKey
     let to = to_cfg.build_options();
     let mut diffs = Vec::new();
     for (cls, o1) in &from.fragments {
-        let Some(o2) = to.fragments.get(cls) else { continue };
+        let Some(o2) = to.fragments.get(cls) else {
+            continue;
+        };
         for (name, v1) in o1 {
             if let Some(v2) = o2.get(name) {
                 if v1 != v2 {
@@ -1638,42 +2555,44 @@ fn options_diff(from_cfg: &BuildConfigurationKey, to_cfg: &BuildConfigurationKey
 }
 
 fn add_config_setting_fragments(r: &zel_packages::RuleInstance, fragments: &mut BTreeSet<String>) {
-    if let Some(v) = r.attrs.get("values") {
-        if let zel_starlark::Value::Dict(d) = v {
-            let guard = d.lock().unwrap();
-            for (k, _) in &guard.entries {
-                let key = k.to_string();
-                if key == "platforms" {
-                    fragments.insert("PlatformOptions".to_string());
-                } else {
-                    fragments.insert("CoreOptions".to_string());
-                }
+    if let Some(zel_starlark::Value::Dict(d)) = r.attrs.get("values") {
+        let guard = d.lock().unwrap();
+        for (k, _) in &guard.entries {
+            let key = k.to_string();
+            if key == "platforms" {
+                fragments.insert("PlatformOptions".to_string());
+            } else {
+                fragments.insert("CoreOptions".to_string());
             }
         }
     }
-    if let Some(v) = r.attrs.get("define_values") {
-        if let zel_starlark::Value::Dict(d) = v {
-            let guard = d.lock().unwrap();
-            for (k, _) in &guard.entries {
-                fragments.insert(format!("--define:{}", k));
-            }
+    if let Some(zel_starlark::Value::Dict(d)) = r.attrs.get("define_values") {
+        let guard = d.lock().unwrap();
+        for (k, _) in &guard.entries {
+            fragments.insert(format!("--define:{}", k));
         }
     }
-    if let Some(v) = r.attrs.get("flag_values") {
-        if let zel_starlark::Value::Dict(d) = v {
-            let guard = d.lock().unwrap();
-            for (k, _) in &guard.entries {
-                fragments.insert(k.to_string());
-            }
+    if let Some(zel_starlark::Value::Dict(d)) = r.attrs.get("flag_values") {
+        let guard = d.lock().unwrap();
+        for (k, _) in &guard.entries {
+            fragments.insert(k.to_string());
         }
     }
 }
 
 fn target_direct_fragments(env: &PostEnv<'_>, n: &Node, fragments: &mut BTreeSet<String>) {
-    let Some(info) = env.info_of(&n.label) else { return };
+    let Some(info) = env.info_of(&n.label) else {
+        return;
+    };
     if let Target::Rule(r) = &info.target {
         let rc_name = &r.rule_class;
-        if rc_name == "platform" || rc_name == "constraint_value" || rc_name == "constraint_setting" || rc_name == "toolchain_type" || rc_name == "toolchain" || r.label.name() == "host_platform" {
+        if rc_name == "platform"
+            || rc_name == "constraint_value"
+            || rc_name == "constraint_setting"
+            || rc_name == "toolchain_type"
+            || rc_name == "toolchain"
+            || r.label.name() == "host_platform"
+        {
             return;
         }
         fragments.insert("BazelRuleClassProvider$StrictActionEnvConfiguration".to_string());
@@ -1699,7 +2618,11 @@ fn target_direct_fragments(env: &PostEnv<'_>, n: &Node, fragments: &mut BTreeSet
         } else if rc_name.starts_with("proto_") {
             fragments.insert("ProtoConfiguration".to_string());
             fragments.insert("PlatformOptions".to_string());
-        } else if rc_name == "sh_binary" || rc_name == "sh_test" || rc_name == "sh_library" || rc_name == "genrule" {
+        } else if rc_name == "sh_binary"
+            || rc_name == "sh_test"
+            || rc_name == "sh_library"
+            || rc_name == "genrule"
+        {
             fragments.insert("PlatformOptions".to_string());
             fragments.insert("ShellConfiguration".to_string());
         } else if rc_name == "config_setting" {
@@ -1740,8 +2663,13 @@ fn target_direct_fragments(env: &PostEnv<'_>, n: &Node, fragments: &mut BTreeSet
             }
         }
 
-        if (rc_name == "label_flag" || rc_name == "label_setting" || r.attrs.contains_key("build_setting") || r.attrs.contains_key("build_setting_default"))
-            && rc_name != "config_setting" && rc_name != "constraint_setting" {
+        if (rc_name == "label_flag"
+            || rc_name == "label_setting"
+            || r.attrs.contains_key("build_setting")
+            || r.attrs.contains_key("build_setting_default"))
+            && rc_name != "config_setting"
+            && rc_name != "constraint_setting"
+        {
             fragments.insert(r.label.canonical_form());
         }
 
@@ -1771,7 +2699,8 @@ fn required_config_fragments(env: &mut PostEnv<'_>, n: &Node, mode: &str) -> Str
     let mut fragments = BTreeSet::new();
 
     let mut to_visit = vec![n.clone()];
-    let mut visited: std::collections::HashSet<crate::engine::Node> = std::collections::HashSet::new();
+    let mut visited: std::collections::HashSet<crate::engine::Node> =
+        std::collections::HashSet::new();
 
     while let Some(curr) = to_visit.pop() {
         if !visited.insert(curr.clone()) {
@@ -1793,7 +2722,12 @@ fn required_config_fragments(env: &mut PostEnv<'_>, n: &Node, mode: &str) -> Str
     format!("[{}]", list.join(", "))
 }
 
-fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: &FormatOpts) -> Result<Vec<u8>, String> {
+fn format_cquery(
+    env: &mut PostEnv<'_>,
+    nodes: &[Node],
+    popts: &PostOpts,
+    fopts: &FormatOpts,
+) -> Result<Vec<u8>, String> {
     let lt = popts.line_terminator.clone();
     let mut results: Vec<String> = Vec::new();
     let mut unique = false;
@@ -1816,35 +2750,50 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
         }
         "files" => {
             unique = true;
+            let groups = determine_output_groups(&popts.output_groups);
             for n in nodes {
-                let Some(info) = env.info_of(&n.label) else { continue };
+                let Some(info) = env.info_of(&n.label) else {
+                    continue;
+                };
                 match &info.target {
                     Target::InputFile { label } => {
-                        let rel = label.package_identifier().package_fragment().get_relative_str(label.name());
+                        let rel = label
+                            .package_identifier()
+                            .package_fragment()
+                            .get_relative_str(label.name());
                         let path = if label.repository().is_main() {
                             rel.path_string().to_string()
                         } else {
-                            format!("external/{}/{}", label.repository().name(), rel.path_string())
+                            format!(
+                                "external/{}/{}",
+                                label.repository().name(),
+                                rel.path_string()
+                            )
                         };
                         results.push(path);
                     }
                     Target::PackageGroup { .. } | Target::EnvironmentGroup { .. } => {}
+                    Target::Rule(r) if r.rule_class.contains('$') => {}
                     _ => {
                         if let Some(ct) = env.analyzed(n).map_err(|e| e.message)? {
                             let mut files: Vec<&Artifact> = Vec::new();
-                            if !popts.output_groups.is_empty() {
-                                for g in &popts.output_groups {
-                                    if g == "default" {
-                                        files.extend(ct.default_info.files.iter());
-                                    } else if let Some(grp) = ct.output_groups.groups.get(g) {
-                                        files.extend(grp.iter());
-                                    }
+                            for g in &groups {
+                                if g.starts_with('_') {
+                                    continue;
                                 }
-                            } else {
-                                files.extend(ct.default_info.files.iter());
+                                if g == "default" {
+                                    files.extend(ct.default_info.files.iter());
+                                } else if let Some(grp) = ct.output_groups.groups.get(g) {
+                                    files.extend(grp.iter());
+                                }
                             }
                             if let Target::OutputFile { label, .. } = &info.target {
-                                files.retain(|a| a.owner_label == *label || a.root_relative_path.path_string().ends_with(label.name()));
+                                files.retain(|a| {
+                                    a.owner_label == *label
+                                        || a.root_relative_path
+                                            .path_string()
+                                            .ends_with(label.name())
+                                });
                             }
                             for a in files {
                                 results.push(a.exec_path.path_string().to_string());
@@ -1854,16 +2803,15 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
                                     if asp.configuration != ct.configuration {
                                         continue;
                                     }
-                                    let mut asp_files: Vec<&Artifact> = Vec::new();
-                                    if !popts.output_groups.is_empty() {
-                                        for g in &popts.output_groups {
-                                            if let Some(grp) = asp.output_groups.groups.get(g) {
-                                                asp_files.extend(grp.iter());
+                                    for g in &groups {
+                                        if g.starts_with('_') {
+                                            continue;
+                                        }
+                                        if let Some(grp) = asp.output_groups.groups.get(g) {
+                                            for a in grp {
+                                                results.push(a.exec_path.path_string().to_string());
                                             }
                                         }
-                                    }
-                                    for a in asp_files {
-                                        results.push(a.exec_path.path_string().to_string());
                                     }
                                 }
                             }
@@ -1876,11 +2824,20 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
             let mut out = String::new();
             let mut printed: BTreeSet<Label> = BTreeSet::new();
             for n in nodes {
-                let Some(info) = resolved_info(env, n) else { continue };
+                let Some(info) = resolved_info(env, n) else {
+                    continue;
+                };
                 let rule_info = match &info.target {
                     Target::Rule(_) => Some(info.clone()),
-                    Target::OutputFile { generating_rule, .. } => {
-                        let rn = Node { label: generating_rule.clone(), cfg: n.cfg.clone() };
+                    Target::OutputFile {
+                        generating_rule, ..
+                    } => {
+                        let rn = Node {
+                            label: generating_rule.clone(),
+                            cfg: n.cfg.clone(),
+                            cfg_full: n.cfg_full.clone(),
+                            aspect: None,
+                        };
                         resolved_info(env, &rn)
                     }
                     _ => None,
@@ -1901,13 +2858,18 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
         "transitions" => {
             for n in nodes {
                 let info_target = env.info_of(&n.label).map(|i| i.target.clone());
-                let is_alias = matches!(info_target, Some(Target::Rule(ref r)) if r.rule_class == "alias");
+                let is_alias =
+                    matches!(info_target, Some(Target::Rule(ref r)) if r.rule_class == "alias");
                 let prefix = match &info_target {
                     Some(Target::Rule(r)) => {
                         let own = r.extra.rule_class.as_ref().and_then(|rc| {
                             match rc.starlark.as_ref().and_then(|st| st.kwargs.get("cfg")) {
                                 Some(v) => starlark_transition_name(v),
-                                None if matches!(r.rule_class.as_str(), "constraint_value" | "constraint_setting") => {
+                                None if matches!(
+                                    r.rule_class.as_str(),
+                                    "constraint_value" | "constraint_setting"
+                                ) =>
+                                {
                                     Some("NoConfigTransition".to_string())
                                 }
                                 None => None,
@@ -1928,13 +2890,17 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
                         let mut attr_of: Vec<(Label, String)> = rule_deps(r, true, true);
                         for d in &deps {
                             if !attr_of.iter().any(|(l, _)| *l == d.label) {
-                                if let Some(Target::Rule(dr)) = env.info_of(&d.label).map(|i| i.target.clone()) {
+                                if let Some(Target::Rule(dr)) =
+                                    env.info_of(&d.label).map(|i| i.target.clone())
+                                {
                                     if dr.rule_class != "toolchain_type"
                                         && dr.rule_class != "platform"
                                         && dr.rule_class != "alias"
                                         && dr.rule_class != "config_setting"
                                     {
-                                        let tname = if crate::target_env::is_test_rule(r) && d.label.name() == "empty_toolchain" {
+                                        let tname = if crate::target_env::is_test_rule(r)
+                                            && d.label.name() == "empty_toolchain"
+                                        {
                                             "[toolchain dependency: test]".to_string()
                                         } else {
                                             "[toolchain dependency]".to_string()
@@ -1947,13 +2913,23 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
                         // Edges are reported in attribute order (`DependencyKind` order of
                         // `DependencyResolver`), not in the order the dependencies were analysed.
                         let mut ordered: Vec<&Node> = deps.iter().collect();
-                        ordered.sort_by_key(|d| attr_of.iter().position(|(l, _)| *l == d.label).unwrap_or(usize::MAX));
+                        ordered.sort_by_key(|d| {
+                            attr_of
+                                .iter()
+                                .position(|(l, _)| *l == d.label)
+                                .unwrap_or(usize::MAX)
+                        });
                         for d in ordered {
                             // `select()` condition targets are config conditions, not attribute edges.
-                            if matches!(env.info_of(&d.label).map(|i| i.target.clone()), Some(Target::Rule(ref cr)) if cr.rule_class == "config_setting") {
+                            if matches!(env.info_of(&d.label).map(|i| i.target.clone()), Some(Target::Rule(ref cr)) if cr.rule_class == "config_setting")
+                            {
                                 continue;
                             }
-                            let attr = attr_of.iter().find(|(l, _)| *l == d.label).map(|(_, a)| a.clone()).unwrap_or_default();
+                            let attr = attr_of
+                                .iter()
+                                .find(|(l, _)| *l == d.label)
+                                .map(|(_, a)| a.clone())
+                                .unwrap_or_default();
                             if attr == "_hidden_toolchain_types" {
                                 continue;
                             }
@@ -1983,9 +2959,15 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
                         let attr_tr = attr_tr.or_else(|| {
                             // The exec transition of an implicit/late-bound edge is recognised by the
                             // configuration it produced.
-                            d.cfg.as_ref().and_then(|c| env.config_key(c)).filter(|k| k.is_exec).map(|_| "exec".to_string())
+                            d.cfg
+                                .as_ref()
+                                .and_then(|c| env.config_key(c))
+                                .filter(|k| k.is_exec)
+                                .map(|_| "exec".to_string())
                         });
-                        let rule_tr = rule_transition_name(env.info_of(&d.label).map(|i| i.target.clone()).as_ref());
+                        let rule_tr = rule_transition_name(
+                            env.info_of(&d.label).map(|i| i.target.clone()).as_ref(),
+                        );
                         let name = match (attr_tr, rule_tr) {
                             (None, r) => r,
                             (Some(a), r) if r == "NoTransition" => a,
@@ -2004,7 +2986,9 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
                     ));
                     if popts.transitions == "full" && d.cfg.is_some() && d.cfg != n.cfg {
                         if let (Some(from_id), Some(to_id)) = (&n.cfg, &d.cfg) {
-                            if let (Some(from_cfg), Some(to_cfg)) = (env.config_key(from_id), env.config_key(to_id)) {
+                            if let (Some(from_cfg), Some(to_cfg)) =
+                                (env.config_key(from_id), env.config_key(to_id))
+                            {
                                 for diff_line in options_diff(from_cfg, to_cfg) {
                                     results.push(format!("    {diff_line}"));
                                 }
@@ -2032,7 +3016,35 @@ fn format_cquery(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts:
     Ok(out.into_bytes())
 }
 
-fn cquery_graph(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: &FormatOpts) -> String {
+fn determine_output_groups(requested: &[String]) -> BTreeSet<String> {
+    let mut current = BTreeSet::new();
+    let add_defaults = requested.is_empty()
+        || requested
+            .iter()
+            .all(|g| g.starts_with('+') || g.starts_with('-'));
+    if add_defaults {
+        current.insert("default".to_string());
+        current.insert("temp_files_INTERNAL_".to_string());
+        current.insert("_hidden_top_level_INTERNAL_".to_string());
+    }
+    for g in requested {
+        if let Some(name) = g.strip_prefix('+') {
+            current.insert(name.to_string());
+        } else if let Some(name) = g.strip_prefix('-') {
+            current.remove(name);
+        } else {
+            current.insert(g.clone());
+        }
+    }
+    current
+}
+
+fn cquery_graph(
+    env: &mut PostEnv<'_>,
+    nodes: &[Node],
+    popts: &PostOpts,
+    fopts: &FormatOpts,
+) -> String {
     let mut deps_of: HashMap<Node, Vec<Node>> = HashMap::new();
     for n in nodes {
         deps_of.insert(n.clone(), env.analysis_deps(n).unwrap_or_default());
@@ -2050,7 +3062,18 @@ fn cquery_graph(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
         let ra = norm(a.label.repository().name());
         let rb = norm(b.label.repository().name());
         ra.cmp(rb)
-            .then_with(|| a.label.package_identifier().package_fragment().path_string().cmp(b.label.package_identifier().package_fragment().path_string()))
+            .then_with(|| {
+                a.label
+                    .package_identifier()
+                    .package_fragment()
+                    .path_string()
+                    .cmp(
+                        b.label
+                            .package_identifier()
+                            .package_fragment()
+                            .path_string(),
+                    )
+            })
             .then_with(|| a.label.name().cmp(b.label.name()))
             .then_with(|| match (&a.cfg, &b.cfg) {
                 (None, None) => std::cmp::Ordering::Equal,
@@ -2071,15 +3094,30 @@ fn cquery_graph(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
     )
 }
 
-fn cquery_proto(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: &FormatOpts) -> Result<Vec<u8>, String> {
+fn cquery_proto(
+    env: &mut PostEnv<'_>,
+    nodes: &[Node],
+    popts: &PostOpts,
+    fopts: &FormatOpts,
+) -> Result<Vec<u8>, String> {
     let numbering = config_numbering(nodes);
     let mut results: Vec<Msg> = Vec::new();
     for n in nodes {
-        let Some(orig_info) = env.info_of(&n.label) else { continue };
-        let Some(info) = resolved_info(env, n) else { continue };
+        let Some(orig_info) = env.info_of(&n.label) else {
+            continue;
+        };
+        let Some(info) = resolved_info(env, n) else {
+            continue;
+        };
         let mut tmsg = format::target_proto_ex(&env.tenv, &info, fopts, true);
         if fopts.proto_rule_inputs_and_outputs {
-            if let (Target::Rule(orig_rule), Some(PbVal::Msg(r))) = (&orig_info.target, tmsg.fields.iter_mut().find(|f| f.num == 2).map(|f| &mut f.val)) {
+            if let (Target::Rule(orig_rule), Some(PbVal::Msg(r))) = (
+                &orig_info.target,
+                tmsg.fields
+                    .iter_mut()
+                    .find(|f| f.num == 2)
+                    .map(|f| &mut f.val),
+            ) {
                 r.fields.retain(|f| f.num != 5 && f.num != 6);
                 let mut inputs: Vec<Label> = crate::target_env::rule_deps_ext(
                     orig_rule,
@@ -2088,7 +3126,13 @@ fn cquery_proto(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
                     fopts.nodep_deps,
                 )
                 .into_iter()
-                .filter_map(|(l, attr)| if attr == "_hidden_toolchain_types" { None } else { Some(l) })
+                .filter_map(|(l, attr)| {
+                    if attr == "_hidden_toolchain_types" {
+                        None
+                    } else {
+                        Some(l)
+                    }
+                })
                 .collect();
                 inputs.sort_by(label_cmp);
                 for l in inputs {
@@ -2104,21 +3148,31 @@ fn cquery_proto(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
         if popts.proto_include_configurations {
             // Deprecated `ConfiguredTarget.configuration { checksum }`: `String.valueOf(checksum)`,
             // i.e. "null" for targets without a configuration (ProtoOutputFormatterCallback).
-            let checksum = n.cfg.as_ref().and_then(|c| env.config_key(c)).map(|k| k.checksum()).unwrap_or_else(|| "null".to_string());
+            let checksum = env
+                .node_config_key(n)
+                .map(|k| k.checksum())
+                .unwrap_or_else(|| "null".to_string());
             let mut cfg = Msg::new();
             cfg.str(4, "checksum", checksum);
             ct.msg(2, "configuration", cfg);
         }
-        if let Some(c) = &n.cfg {
-            let idx = numbering.iter().position(|x| x == c).map(|p| p as u32 + 1).unwrap_or(0);
+        if let Some(c) = n.cfg_full.as_ref().or(n.cfg.as_ref()) {
+            let idx = numbering
+                .iter()
+                .position(|x| x == c)
+                .map(|p| p as u32 + 1)
+                .unwrap_or(0);
             if idx != 0 {
                 ct.add(3, "configuration_id", PbVal::Uint32(idx));
             }
         }
         results.push(ct);
     }
-    let configs: Vec<Msg> =
-        numbering.iter().enumerate().map(|(i, id)| configuration_msg(env, id, i as u32 + 1)).collect();
+    let configs: Vec<Msg> = numbering
+        .iter()
+        .enumerate()
+        .map(|(i, id)| configuration_msg(env, id, i as u32 + 1))
+        .collect();
     let mut cr = Msg::new();
     for r in &results {
         cr.rmsg(1, "results", r.clone());
@@ -2132,7 +3186,8 @@ fn cquery_proto(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
         // Plain `QueryResult`: only the targets.
         let mut qr = Msg::new();
         for r in &results {
-            if let Some(PbVal::Msg(t)) = r.fields.iter().find(|f| f.num == 1).map(|f| f.val.clone()) {
+            if let Some(PbVal::Msg(t)) = r.fields.iter().find(|f| f.num == 1).map(|f| f.val.clone())
+            {
                 qr.rmsg(1, "target", t);
             }
         }
@@ -2160,7 +3215,9 @@ fn cquery_proto(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
                     out.extend(cq.encode_delimited());
                 } else {
                     let mut qr = Msg::new();
-                    if let Some(PbVal::Msg(t)) = r.fields.iter().find(|f| f.num == 1).map(|f| f.val.clone()) {
+                    if let Some(PbVal::Msg(t)) =
+                        r.fields.iter().find(|f| f.num == 1).map(|f| f.val.clone())
+                    {
                         qr.rmsg(1, "target", t);
                     }
                     out.extend(qr.encode_delimited());
@@ -2178,15 +3235,21 @@ fn cquery_proto(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts, fopts: 
     })
 }
 
-fn starlark_output(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Result<Vec<u8>, String> {
+fn starlark_output(
+    env: &mut PostEnv<'_>,
+    nodes: &[Node],
+    popts: &PostOpts,
+) -> Result<Vec<u8>, String> {
     crate::starlark_out::run(env, nodes, popts)
 }
 
 /// Helpers shared with `starlark_out` and `aquery`.
+#[allow(dead_code)]
 pub(crate) fn typed_actions(ct: &ConfiguredTarget) -> Vec<Action> {
     ct.typed_actions.clone()
 }
 
+#[allow(dead_code)]
 pub(crate) fn action_kind_name(a: &Action) -> &'static str {
     match &a.kind {
         ActionKind::Spawn { .. } => "Spawn",
@@ -2197,7 +3260,11 @@ pub(crate) fn action_kind_name(a: &Action) -> &'static str {
 }
 
 pub(crate) fn filters_of(env: &PostEnv<'_>) -> (Vec<String>, Vec<String>, Vec<String>) {
-    (env.filters.mnemonic.clone(), env.filters.inputs.clone(), env.filters.outputs.clone())
+    (
+        env.filters.mnemonic.clone(),
+        env.filters.inputs.clone(),
+        env.filters.outputs.clone(),
+    )
 }
 
 #[allow(dead_code)]
@@ -2235,14 +3302,18 @@ fn rule_transition_name(target: Option<&Target>) -> String {
         Some(Target::Rule(r)) => Some(r),
         _ => None,
     };
-    if rule.map_or(false, |r| r.rule_class == "alias") {
+    if rule.is_some_and(|r| r.rule_class == "alias") {
         return "NoTransition".to_string();
     }
     let own = rule.and_then(|r| {
         let rc = r.extra.rule_class.as_ref()?;
         match rc.starlark.as_ref().and_then(|st| st.kwargs.get("cfg")) {
             Some(v) => starlark_transition_name(v),
-            None if matches!(r.rule_class.as_str(), "platform" | "constraint_value" | "constraint_setting") => {
+            None if matches!(
+                r.rule_class.as_str(),
+                "platform" | "constraint_value" | "constraint_setting"
+            ) =>
+            {
                 Some("NoConfigTransition".to_string())
             }
             None => None,

@@ -77,14 +77,10 @@ impl Parser {
     }
 
     fn next(&mut self) -> Token {
-        let tok = self
-            .tokens
-            .get(self.pos)
-            .cloned()
-            .unwrap_or_else(|| Token {
-                kind: TokenKind::Eof,
-                location: Location::default(),
-            });
+        let tok = self.tokens.get(self.pos).cloned().unwrap_or_else(|| Token {
+            kind: TokenKind::Eof,
+            location: Location::default(),
+        });
         if self.pos < self.tokens.len() {
             self.pos += 1;
         }
@@ -168,7 +164,10 @@ impl Parser {
         while matches!(self.peek(), TokenKind::Semicolon) {
             self.next();
         }
-        if matches!(self.peek(), TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof) {
+        if matches!(
+            self.peek(),
+            TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+        ) {
             if matches!(self.peek(), TokenKind::Newline) {
                 self.next();
             }
@@ -180,13 +179,22 @@ impl Parser {
             while matches!(self.peek(), TokenKind::Semicolon) {
                 self.next();
             }
-            if matches!(self.peek(), TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof) {
+            if matches!(
+                self.peek(),
+                TokenKind::Newline | TokenKind::Dedent | TokenKind::Eof
+            ) {
                 break;
             }
             list.push(self.parse_small_stmt()?);
         }
         if matches!(self.peek(), TokenKind::Newline) {
             self.next();
+        } else if !matches!(self.peek(), TokenKind::Dedent | TokenKind::Eof) {
+            return Err(StarlarkError(format!(
+                "{}: syntax error at {}: expected newline",
+                self.loc(),
+                token_desc(self.peek())
+            )));
         }
         Ok(())
     }
@@ -264,7 +272,10 @@ impl Parser {
         // (e.g. `-> None`)
         // In Starlark lexer, `->` is minus followed by gt
         if matches!(self.peek(), TokenKind::Minus)
-            && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Gt))
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::Gt)
+            )
         {
             self.next();
             self.next();
@@ -400,8 +411,14 @@ impl Parser {
             }
             TokenKind::Ident(ref kw)
                 if kw == "type"
-                    && matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::Ident(_)))
-                    && matches!(self.tokens.get(self.pos + 2).map(|t| &t.kind), Some(TokenKind::Assign)) =>
+                    && matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                        Some(TokenKind::Ident(_))
+                    )
+                    && matches!(
+                        self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                        Some(TokenKind::Assign)
+                    ) =>
             {
                 // Type alias statement (`type T = struct[...]`): types are not checked; skip.
                 self.next();
@@ -474,48 +491,71 @@ impl Parser {
         }
     }
 
-    /// Parses a `for` loop target list: `a`, `a, b`, `(a, b)`, `a, (b, c)`, `[a, b]`.
+    /// Parses a `for` loop target list: `a`, `a, b`, `(a, b)`, `(a,)`, `[a]`, `a, (b, c)`, `[a, b]`.
     fn parse_var_list(&mut self) -> Result<Vec<Pattern>, StarlarkError> {
-        let mut vars = vec![self.parse_pattern()?];
+        let first = self.parse_pattern()?;
+        if !matches!(self.peek(), TokenKind::Comma) {
+            return Ok(vec![first]);
+        }
+        let mut vars = vec![first];
         while matches!(self.peek(), TokenKind::Comma) {
             self.next();
-            if matches!(self.peek(), TokenKind::In | TokenKind::RParen | TokenKind::RBracket) {
+            if matches!(
+                self.peek(),
+                TokenKind::In | TokenKind::RParen | TokenKind::RBracket
+            ) {
                 break;
             }
             vars.push(self.parse_pattern()?);
         }
-        // A lone parenthesised/bracketed tuple is the whole target list.
-        if vars.len() == 1 {
-            if let Pattern::Tuple(inner) = &vars[0] {
-                return Ok(inner.clone());
-            }
-        }
-        Ok(vars)
+        Ok(vec![Pattern::Tuple(vars)])
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, StarlarkError> {
-        let (close, tuple) = match self.peek() {
-            TokenKind::LParen => (TokenKind::RParen, true),
-            TokenKind::LBracket => (TokenKind::RBracket, true),
-            _ => (TokenKind::RParen, false),
-        };
-        if tuple {
-            self.next();
-            let mut items = Vec::new();
-            while self.peek() != &close {
-                items.push(self.parse_pattern()?);
-                if matches!(self.peek(), TokenKind::Comma) {
+        match self.peek() {
+            TokenKind::LParen => {
+                self.next();
+                if matches!(self.peek(), TokenKind::RParen) {
                     self.next();
-                } else {
-                    break;
+                    return Ok(Pattern::Tuple(Vec::new()));
                 }
+                let first = self.parse_pattern()?;
+                if !matches!(self.peek(), TokenKind::Comma) {
+                    self.eat(&TokenKind::RParen)?;
+                    return Ok(first);
+                }
+                let mut items = vec![first];
+                while matches!(self.peek(), TokenKind::Comma) {
+                    self.next();
+                    if matches!(self.peek(), TokenKind::RParen) {
+                        break;
+                    }
+                    items.push(self.parse_pattern()?);
+                }
+                self.eat(&TokenKind::RParen)?;
+                Ok(Pattern::Tuple(items))
             }
-            self.eat(&close)?;
-            return Ok(Pattern::Tuple(items));
-        }
-        match self.next().kind {
-            TokenKind::Ident(n) => Ok(Pattern::Name(n)),
-            _ => Err(StarlarkError(format!("{}: Expected variable name", self.loc()))),
+            TokenKind::LBracket => {
+                self.next();
+                let mut items = Vec::new();
+                while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
+                    items.push(self.parse_pattern()?);
+                    if matches!(self.peek(), TokenKind::Comma) {
+                        self.next();
+                    } else {
+                        break;
+                    }
+                }
+                self.eat(&TokenKind::RBracket)?;
+                Ok(Pattern::Tuple(items))
+            }
+            _ => match self.next().kind {
+                TokenKind::Ident(n) => Ok(Pattern::Name(n)),
+                _ => Err(StarlarkError(format!(
+                    "{}: Expected variable name",
+                    self.loc()
+                ))),
+            },
         }
     }
 
@@ -523,9 +563,14 @@ impl Parser {
         match e {
             Expr::Ident(n, _) => Ok(Pattern::Name(n)),
             Expr::Tuple(items, _) | Expr::List(items, _) => Ok(Pattern::Tuple(
-                items.into_iter().map(|i| Self::expr_to_pattern(i, loc)).collect::<Result<_, _>>()?,
+                items
+                    .into_iter()
+                    .map(|i| Self::expr_to_pattern(i, loc))
+                    .collect::<Result<_, _>>()?,
             )),
-            _ => Err(StarlarkError(format!("{loc}: cannot assign to non-lvalue expression"))),
+            _ => Err(StarlarkError(format!(
+                "{loc}: cannot assign to non-lvalue expression"
+            ))),
         }
     }
 
@@ -719,7 +764,10 @@ impl Parser {
                     Some(CmpOp::In)
                 }
                 TokenKind::Not => {
-                    if matches!(self.tokens.get(self.pos + 1).map(|t| &t.kind), Some(TokenKind::In)) {
+                    if matches!(
+                        self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                        Some(TokenKind::In)
+                    ) {
                         self.next(); // not
                         self.next(); // in
                         Some(CmpOp::NotIn)
@@ -991,18 +1039,19 @@ impl Parser {
                         if matches!(self.peek(), TokenKind::Colon) {
                             // [start:end:step]
                             self.next();
-                            let end = if matches!(self.peek(), TokenKind::Colon | TokenKind::RBracket) {
-                                None
-                            } else {
-                                Some(Box::new(self.parse_expr()?))
-                            };
+                            let end =
+                                if matches!(self.peek(), TokenKind::Colon | TokenKind::RBracket) {
+                                    None
+                                } else {
+                                    Some(Box::new(self.parse_expr()?))
+                                };
                             let step = if matches!(self.peek(), TokenKind::Colon) {
                                 self.next();
                                 if matches!(self.peek(), TokenKind::RBracket) {
-                                None
-                            } else {
-                                Some(Box::new(self.parse_expr()?))
-                            }
+                                    None
+                                } else {
+                                    Some(Box::new(self.parse_expr()?))
+                                }
                             } else {
                                 None
                             };

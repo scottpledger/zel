@@ -29,7 +29,10 @@ const BOOLS: &[(&str, bool)] = &[
     ("experimental_disable_external_package", false),
     ("experimental_sibling_repository_layout", false),
     ("incompatible_always_check_depset_elements", true),
-    ("incompatible_check_external_repo_source_dir_package_boundary", false),
+    (
+        "incompatible_check_external_repo_source_dir_package_boundary",
+        false,
+    ),
     ("incompatible_disallow_empty_glob", true),
     ("incompatible_package_group_has_public_syntax", true),
     ("incompatible_fix_package_group_reporoot_syntax", true),
@@ -56,7 +59,10 @@ const BOOLS: &[(&str, bool)] = &[
     ("incompatible_enable_deprecated_label_apis", true),
     ("incompatible_stop_exporting_build_file_path", false),
     ("incompatible_disallow_ctx_resolve_tools", true),
-    ("incompatible_simplify_unconditional_selects_in_rule_attrs", true),
+    (
+        "incompatible_simplify_unconditional_selects_in_rule_attrs",
+        true,
+    ),
     ("incompatible_locations_prefers_executable", true),
     ("incompatible_resolve_select_keys_eagerly", false),
     ("experimental_enable_starlark_set", true),
@@ -80,7 +86,11 @@ const OTHERS: &[(&str, &str)] = &[
 
 /// `overrides`: boolean flag name -> value given on the command line.
 pub fn stable_fingerprint(overrides: &BTreeMap<String, bool>) -> Vec<u8> {
-    let mut enabled: Vec<&str> = BOOLS.iter().filter(|(k, d)| overrides.get(*k).copied().unwrap_or(*d)).map(|(k, _)| *k).collect();
+    let mut enabled: Vec<&str> = BOOLS
+        .iter()
+        .filter(|(k, d)| overrides.get(*k).copied().unwrap_or(*d))
+        .map(|(k, _)| *k)
+        .collect();
     enabled.sort();
     let mut fp = Fingerprint::new();
     fp.add_strings(&enabled);
@@ -96,5 +106,8 @@ pub fn stable_fingerprint(overrides: &BTreeMap<String, bool>) -> Vec<u8> {
 
 /// The boolean semantics flags present in `parsed`.
 pub fn bool_overrides(parsed: &zel_options::ParsedCommandOptions) -> BTreeMap<String, bool> {
-    BOOLS.iter().filter_map(|(k, _)| parsed.get_bool(k).map(|v| (k.to_string(), v))).collect()
+    BOOLS
+        .iter()
+        .filter_map(|(k, _)| parsed.get_bool(k).map(|v| (k.to_string(), v)))
+        .collect()
 }

@@ -1,6 +1,7 @@
 //! End-to-end tests of the execution phase through the real `zel` binary: spawn strategies,
 //! sandboxing, persistent workers, the action cache, coverage, test flags and the output base
 //! layout.
+#![cfg(unix)]
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -9,13 +10,14 @@ fn zel() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_zel"))
 }
 
-
 /// A hermetic local registry built once per test process from the vendored closure under
 /// `third_party` (`scripts/make_vendored_registry.py`); no network is ever used.
 fn local_registry() -> PathBuf {
     static REG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     REG.get_or_init(|| {
-        let root = env!("CARGO_MANIFEST_DIR").strip_suffix("/crates/zel-client").unwrap_or("/Users/pledger/Development/zel");
+        let root = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/zel-client")
+            .unwrap_or("/Users/pledger/Development/zel");
         let dir = std::env::temp_dir().join(format!("zel-client-registry-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let st = std::process::Command::new("python3")
@@ -30,8 +32,11 @@ fn local_registry() -> PathBuf {
 }
 
 fn registry_flag(cmd: Option<&str>) -> Option<String> {
-    matches!(cmd, Some("build" | "test" | "run" | "coverage" | "query" | "cquery" | "aquery" | "fetch"))
-        .then(|| format!("--registry=file://{}", local_registry().display()))
+    matches!(
+        cmd,
+        Some("build" | "test" | "run" | "coverage" | "query" | "cquery" | "aquery" | "fetch")
+    )
+    .then(|| format!("--registry=file://{}", local_registry().display()))
 }
 
 /// Bazel 9 has no native `sh_*` rules: BUILD files load them from `@rules_shell`.
@@ -42,7 +47,9 @@ fn shell_loads(rel: &str, content: &str) -> String {
     let mut out = String::new();
     for name in ["sh_binary", "sh_test", "sh_library"] {
         if content.contains(&format!("{name}(")) {
-            out.push_str(&format!("load(\"@rules_shell//shell:{name}.bzl\", \"{name}\")\n"));
+            out.push_str(&format!(
+                "load(\"@rules_shell//shell:{name}.bzl\", \"{name}\")\n"
+            ));
         }
     }
     out.push_str(content);
@@ -60,8 +67,16 @@ fn ws(name: &str) -> Ws {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("ws")).unwrap();
     let root = std::fs::canonicalize(&root).unwrap();
-    let w = Ws { ws: root.join("ws"), ob: root.join("ob"), root };
-    std::fs::write(w.ws.join("MODULE.bazel"), "module(name = \"e2e\")\nbazel_dep(name = \"rules_shell\", version = \"0.6.1\")\n").unwrap();
+    let w = Ws {
+        ws: root.join("ws"),
+        ob: root.join("ob"),
+        root,
+    };
+    std::fs::write(
+        w.ws.join("MODULE.bazel"),
+        "module(name = \"e2e\")\nbazel_dep(name = \"rules_shell\", version = \"0.6.1\")\n",
+    )
+    .unwrap();
     w
 }
 
@@ -75,11 +90,37 @@ impl Ws {
     fn exe(&self, rel: &str, content: &str) {
         self.write(rel, content);
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(self.ws.join(rel), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(self.ws.join(rel), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
     }
 
     fn zel(&self, startup: &[&str], args: &[&str]) -> (i32, String) {
-        let o = Command::new(zel())
+        let mut c = Command::new(zel());
+        for var in [
+            "USE_ZEL_VERSION",
+            "USE_BAZEL_VERSION",
+            "USE_ZEL_FALLBACK_VERSION",
+            "USE_BAZEL_FALLBACK_VERSION",
+            "ZEL_SKIP_WRAPPER",
+            "BAZELISK_SKIP_WRAPPER",
+            "ZEL_WRAPPER",
+            "BAZEL_WRAPPER",
+            "ZEL_HOME",
+            "BAZELISK_HOME",
+            "ZEL_BASE_URL",
+            "BAZELISK_BASE_URL",
+            "ZEL_NO_DOWNLOAD",
+            "BAZELISK_NO_DOWNLOAD",
+            "ZEL_VERIFY_SHA256",
+            "BAZELISK_VERIFY_SHA256",
+            "ZEL_PRODUCT_PREFIX",
+            "ZEL_EMBED_LABEL",
+            "BAZEL_EMBED_LABEL",
+            "XDG_CACHE_HOME",
+        ] {
+            c.env_remove(var);
+        }
+        let o = c
             .current_dir(&self.ws)
             .arg(format!("--output_base={}", self.ob.display()))
             .args(startup)
@@ -152,16 +193,33 @@ fn strategies_sandbox_and_error_messages() {
     // Default strategies: sandboxed — the undeclared input is invisible.
     let (code, out) = w.build(&["//pkg:undecl"]);
     assert_eq!(code, 0, "{out}");
-    assert_eq!(std::fs::read_to_string(w.bin("pkg/u.txt")).unwrap(), "MISSING\n");
-    assert!(out.contains("INFO: 2 processes: 1 internal, 1 ") && out.contains("sandbox"), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(w.bin("pkg/u.txt")).unwrap(),
+        "MISSING\n"
+    );
+    assert!(
+        out.contains("INFO: 2 processes: 1 internal, 1 ") && out.contains("sandbox"),
+        "{out}"
+    );
     // --spawn_strategy=local: the symlink forest makes the whole workspace visible.
     // (The strategy is not part of the action key, so use a second target.)
     let (code, out) = w.build(&["//pkg:undecl_local", "--spawn_strategy=local"]);
     assert_eq!(code, 0, "{out}");
-    assert_eq!(std::fs::read_to_string(w.bin("pkg/ul.txt")).unwrap(), "hello\n");
-    assert!(out.contains("INFO: 2 processes: 1 internal, 1 local."), "{out}");
+    assert_eq!(
+        std::fs::read_to_string(w.bin("pkg/ul.txt")).unwrap(),
+        "hello\n"
+    );
+    assert!(
+        out.contains("INFO: 2 processes: 1 internal, 1 local."),
+        "{out}"
+    );
     // --genrule_strategy and --strategy precedence.
-    let (_, out) = w.build(&["//pkg:ok", "--genrule_strategy=local", "--strategy=Genrule=standalone", "--noincompatible_x_unknown"]);
+    let (_, out) = w.build(&[
+        "//pkg:ok",
+        "--genrule_strategy=local",
+        "--strategy=Genrule=standalone",
+        "--noincompatible_x_unknown",
+    ]);
     let _ = out;
     // Unknown strategy: exit 2 with Bazel's message.
     let (code, out) = w.build(&["//pkg:ok", "--strategy=Genrule=bogus"]);
@@ -175,15 +233,26 @@ fn strategies_sandbox_and_error_messages() {
     // executor (RemoteActionContextProvider.createForPlaceholder), so the name resolves and the spawn
     // fails to execute (a build failure, exit 1) rather than a registry error (exit 2).
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("Genrule spawn cannot be executed with any of the available strategies: [remote]"), "{out}");
+    assert!(
+        out.contains(
+            "Genrule spawn cannot be executed with any of the available strategies: [remote]"
+        ),
+        "{out}"
+    );
     // Bad regexp strategy value.
     let (code, out) = w.build(&["//pkg:ok", "--strategy_regexp=Gen=nope"]);
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("was requested for filter Gen but"), "{out}");
     // strategy_regexp routes by progress message.
-    let (code, out) = w.build(&["//pkg:fail", "--strategy_regexp=Executing genrule //pkg:fail=local"]);
+    let (code, out) = w.build(&[
+        "//pkg:fail",
+        "--strategy_regexp=Executing genrule //pkg:fail=local",
+    ]);
     assert_eq!(code, 1, "{out}");
-    assert!(out.contains("failed: (Exit 3): bash failed: error executing Genrule command"), "{out}");
+    assert!(
+        out.contains("failed: (Exit 3): bash failed: error executing Genrule command"),
+        "{out}"
+    );
     assert!(out.contains("INFO: 2 processes: 2 internal."), "{out}");
     // Sandboxed failure: hint to use --sandbox_debug.
     let (_, out) = w.build(&["//pkg:fail"]);
@@ -193,9 +262,17 @@ fn strategies_sandbox_and_error_messages() {
     assert!(!out.contains("Use --verbose_failures"), "{out}");
     // --sandbox_debug keeps the sandbox directories; a normal build cleans them.
     let sb = w.ob.join("sandbox");
-    assert!(std::fs::read_dir(&sb).map(|mut d| d.next().is_some()).unwrap_or(false), "sandbox kept with --sandbox_debug");
+    assert!(
+        std::fs::read_dir(&sb)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false),
+        "sandbox kept with --sandbox_debug"
+    );
     let (_, _) = w.build(&["//pkg:ok", "--nosandbox_debug"]);
-    assert!(!sb.join("processwrapper-sandbox").exists() && !sb.join("darwin-sandbox").exists(), "cleaned after build");
+    assert!(
+        !sb.join("processwrapper-sandbox").exists() && !sb.join("darwin-sandbox").exists(),
+        "cleaned after build"
+    );
     // Invalid resource flags.
     let (code, out) = w.build(&["//pkg:ok", "--jobs=lots"]);
     assert_eq!(code, 2, "{out}");
@@ -206,7 +283,12 @@ fn strategies_sandbox_and_error_messages() {
     let (code, out) = w.build(&["//pkg:ok", "--sandbox_add_mount_pair=/a::/b"]);
     assert_eq!(code, 2, "{out}");
     assert!(out.contains("contains one or more empty paths"), "{out}");
-    let (code, out) = w.build(&["//pkg:ok", "--jobs=3", "--local_resources=memory=HOST_RAM*.5", "--local_resources=cpu=2"]);
+    let (code, out) = w.build(&[
+        "//pkg:ok",
+        "--jobs=3",
+        "--local_resources=memory=HOST_RAM*.5",
+        "--local_resources=cpu=2",
+    ]);
     assert_eq!(code, 0, "{out}");
 }
 
@@ -247,17 +329,27 @@ fn output_base_layout_and_symlink_forest() {
     let (code, out) = w.build(&["//pkg:ok"]);
     assert_eq!(code, 0, "{out}");
     let er = w.ob.join("execroot/_main");
-    assert!(std::fs::symlink_metadata(er.join("pkg")).unwrap().file_type().is_symlink(), "top-level dirs are symlinks");
+    assert!(
+        std::fs::symlink_metadata(er.join("pkg"))
+            .unwrap()
+            .file_type()
+            .is_symlink(),
+        "top-level dirs are symlinks"
+    );
     assert!(er.join("pkg/in.txt").exists());
     assert!(er.join("MODULE.bazel").exists());
-    assert!(std::fs::symlink_metadata(er.join("bazel-out")).unwrap().is_dir());
+    assert!(std::fs::symlink_metadata(er.join("bazel-out"))
+        .unwrap()
+        .is_dir());
     let cl = std::fs::read_to_string(w.ob.join("command.log")).unwrap();
     assert!(cl.contains("Build completed successfully"), "{cl}");
     let install = std::fs::read_link(w.ob.join("install")).unwrap();
     assert!(install.is_absolute());
     let jl = std::fs::read_link(w.ob.join("java.log")).unwrap();
     assert!(jl.to_string_lossy().starts_with("java.log."), "{jl:?}");
-    assert!(std::fs::read_to_string(w.ob.join("java.log")).unwrap().contains("Command: build exit_code=0"));
+    assert!(std::fs::read_to_string(w.ob.join("java.log"))
+        .unwrap()
+        .contains("Command: build exit_code=0"));
     for d in ["action_cache", "execroot", "external", "server"] {
         assert!(w.ob.join(d).is_dir(), "{d}");
     }
@@ -316,20 +408,34 @@ fn persistent_worker_is_reused_within_a_build() {
         "tools/BUILD",
         "load(\":defs.bzl\", \"zworker\")\nsh_binary(name = \"worker\", srcs = [\"worker.sh\"], visibility = [\"//visibility:public\"])\nzworker(name = \"w1\", text = \"one\")\nzworker(name = \"w2\", text = \"two\")\n",
     );
-    w.exe("tools/worker.sh", &format!("#!/bin/sh\nexec {} \"$@\"\n", worker.display()));
+    w.exe(
+        "tools/worker.sh",
+        &format!("#!/bin/sh\nexec {} \"$@\"\n", worker.display()),
+    );
     let (code, out) = w.build(&["//tools:w1", "//tools:w2", "--jobs=1"]);
     assert_eq!(code, 0, "{out}");
     let a = std::fs::read_to_string(w.bin("tools/w1.out")).unwrap();
     let b = std::fs::read_to_string(w.bin("tools/w2.out")).unwrap();
     let f = |s: &str, i: usize| s.split(' ').nth(i).unwrap().to_string();
     assert_eq!(f(&a, 0), f(&b, 0), "same worker pid");
-    assert_eq!((f(&a, 1), f(&b, 1)), ("1".to_string(), "2".to_string()), "warm worker handled both");
+    assert_eq!(
+        (f(&a, 1), f(&b, 1)),
+        ("1".to_string(), "2".to_string()),
+        "warm worker handled both"
+    );
     assert!(out.contains("2 worker"), "{out}");
-    let logs: Vec<_> = std::fs::read_dir(w.ob.join("bazel-workers")).unwrap().collect();
+    let logs: Vec<_> = std::fs::read_dir(w.ob.join("bazel-workers"))
+        .unwrap()
+        .collect();
     assert!(!logs.is_empty());
     // --strategy=ZelWorker=local bypasses the worker (the tool would fail without a flagfile
     // protocol, so only check the strategy error path here).
-    let (code, out) = w.build(&["//tools:w1", "--strategy=ZelWorker=worker", "--worker_max_instances=ZelWorker=2", "--noworker_multiplex"]);
+    let (code, out) = w.build(&[
+        "//tools:w1",
+        "--strategy=ZelWorker=worker",
+        "--worker_max_instances=ZelWorker=2",
+        "--noworker_multiplex",
+    ]);
     assert_eq!(code, 0, "{out}");
     let (code, out) = w.build(&["//tools:w1", "--worker_max_instances=ZelWorker=x"]);
     assert_eq!(code, 2, "{out}");
@@ -356,37 +462,92 @@ fn test_command_cache_status_filters_and_sharding() {
     assert_eq!(code, 0, "{out}");
     assert!(out.contains("(cached) PASSED"), "{out}");
     // Sharding strategies.
-    let (code, out) = w.zel(&[], &["test", "//pkg:t", "--test_sharding_strategy=forced=3", "--test_output=all", "--cache_test_results=no"]);
+    let (code, out) = w.zel(
+        &[],
+        &[
+            "test",
+            "//pkg:t",
+            "--test_sharding_strategy=forced=3",
+            "--test_output=all",
+            "--cache_test_results=no",
+        ],
+    );
     assert_eq!(code, 0, "{out}");
-    assert!(out.contains("shards=3 idx=0") && out.contains("shards=3 idx=2"), "{out}");
+    assert!(
+        out.contains("shards=3 idx=0") && out.contains("shards=3 idx=2"),
+        "{out}"
+    );
     let (code, out) = w.zel(&[], &["test", "//pkg:t", "--test_sharding_strategy=bogus"]);
     assert_eq!(code, 2, "{out}");
-    assert!(out.contains("Not a valid test sharding strategy: 'bogus'"), "{out}");
+    assert!(
+        out.contains("Not a valid test sharding strategy: 'bogus'"),
+        "{out}"
+    );
     // Language filter: sh excluded => no tests found (exit 4).
     let (code, out) = w.zel(&[], &["test", "//pkg:t", "--test_lang_filters=-sh"]);
     assert_eq!(code, 4, "{out}");
-    let (code, out) = w.zel(&[], &["test", "//pkg:t", "--test_lang_filters=sh", "--cache_test_results=no"]);
+    let (code, out) = w.zel(
+        &[],
+        &[
+            "test",
+            "//pkg:t",
+            "--test_lang_filters=sh",
+            "--cache_test_results=no",
+        ],
+    );
     assert_eq!(code, 0, "{out}");
     // --check_up_to_date for the build part of a never-built target.
-    let (code, out) = w.zel(&[], &["build", "//pkg:t", "--check_up_to_date", "--noexperimental_nothing"]);
+    let (code, out) = w.zel(
+        &[],
+        &[
+            "build",
+            "//pkg:t",
+            "--check_up_to_date",
+            "--noexperimental_nothing",
+        ],
+    );
     let _ = (code, out);
 }
 
 #[test]
 fn coverage_command_produces_combined_lcov_report() {
     let w = ws("cov");
-    w.write("lib/BUILD", "sh_library(name = \"lib\", srcs = [\"lib.sh\"], visibility = [\"//visibility:public\"])\n");
+    w.write(
+        "lib/BUILD",
+        "sh_library(name = \"lib\", srcs = [\"lib.sh\"], visibility = [\"//visibility:public\"])\n",
+    );
     w.write("lib/lib.sh", "echo lib\n");
-    w.write("pkg/BUILD", "sh_test(name = \"t\", srcs = [\"t.sh\"], deps = [\"//lib:lib\"])\n");
+    w.write(
+        "pkg/BUILD",
+        "sh_test(name = \"t\", srcs = [\"t.sh\"], deps = [\"//lib:lib\"])\n",
+    );
     w.exe(
         "pkg/t.sh",
         "#!/bin/sh\ntest -n \"$COVERAGE_DIR\" || exit 9\ntest -f \"$COVERAGE_MANIFEST\" || exit 8\nmkdir -p \"$COVERAGE_DIR\"\nprintf 'SF:lib/lib.sh\\nDA:1,1\\nend_of_record\\nSF:pkg/t.sh\\nDA:1,1\\nend_of_record\\n' > \"$COVERAGE_DIR/x.dat\"\n",
     );
-    let (code, out) = w.zel(&[], &["coverage", "//pkg:t", "--combined_report=lcov", "--test_output=errors"]);
+    let (code, out) = w.zel(
+        &[],
+        &[
+            "coverage",
+            "//pkg:t",
+            "--combined_report=lcov",
+            "--test_output=errors",
+        ],
+    );
     assert_eq!(code, 0, "{out}");
-    let report = w.ob.join("execroot/_main/bazel-out/_coverage/_coverage_report.dat");
-    assert!(out.contains(&format!("INFO: LCOV coverage report is located at {}", report.display())), "{out}");
-    assert!(out.contains(" and execpath is bazel-out/_coverage/_coverage_report.dat"), "{out}");
+    let report =
+        w.ob.join("execroot/_main/bazel-out/_coverage/_coverage_report.dat");
+    assert!(
+        out.contains(&format!(
+            "INFO: LCOV coverage report is located at {}",
+            report.display()
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains(" and execpath is bazel-out/_coverage/_coverage_report.dat"),
+        "{out}"
+    );
     let rep = std::fs::read_to_string(&report).unwrap_or_default();
     assert!(rep.contains("SF:") && rep.contains("DA:1,1"), "{rep}");
     let cov = std::fs::read_to_string(w.ws.join("bazel-testlogs/pkg/t/coverage.dat")).unwrap();

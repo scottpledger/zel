@@ -59,13 +59,23 @@ impl Msg {
     }
 
     pub fn add(&mut self, num: u32, name: &'static str, val: PbVal) -> &mut Self {
-        self.fields.push(Field { num, name, val, rep: false });
+        self.fields.push(Field {
+            num,
+            name,
+            val,
+            rep: false,
+        });
         self
     }
 
     /// Adds an element of a repeated field.
     pub fn rep(&mut self, num: u32, name: &'static str, val: PbVal) -> &mut Self {
-        self.fields.push(Field { num, name, val, rep: true });
+        self.fields.push(Field {
+            num,
+            name,
+            val,
+            rep: true,
+        });
         self
     }
 
@@ -349,11 +359,21 @@ fn base64(b: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::new();
     for chunk in b.chunks(3) {
-        let n = (chunk[0] as u32) << 16 | (*chunk.get(1).unwrap_or(&0) as u32) << 8 | *chunk.get(2).unwrap_or(&0) as u32;
+        let n = ((chunk[0] as u32) << 16)
+            | ((*chunk.get(1).unwrap_or(&0) as u32) << 8)
+            | *chunk.get(2).unwrap_or(&0) as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if chunk.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -418,7 +438,11 @@ mod tests {
     #[test]
     fn encodes_all_formats() {
         let mut inner = Msg::new();
-        inner.str(1, "name", "//a:b").str(2, "rule_class", "genrule").rstr(5, "rule_input", "//x").rstr(5, "rule_input", "//y");
+        inner
+            .str(1, "name", "//a:b")
+            .str(2, "rule_class", "genrule")
+            .rstr(5, "rule_input", "//x")
+            .rstr(5, "rule_input", "//y");
         let mut t = Msg::new();
         t.en(1, "type", "RULE", 1).msg(2, "rule", inner);
         assert_eq!(

@@ -37,7 +37,11 @@ impl Json {
         }
     }
     pub fn as_str(&self) -> Option<&str> {
-        if let Json::Str(s) = self { Some(s) } else { None }
+        if let Json::Str(s) = self {
+            Some(s)
+        } else {
+            None
+        }
     }
     pub fn as_i64(&self) -> Option<i64> {
         match self {
@@ -54,15 +58,25 @@ impl Json {
         }
     }
     pub fn as_array(&self) -> Option<&[Json]> {
-        if let Json::Arr(a) = self { Some(a) } else { None }
+        if let Json::Arr(a) = self {
+            Some(a)
+        } else {
+            None
+        }
     }
     pub fn as_object(&self) -> Option<&[(String, Json)]> {
-        if let Json::Obj(o) = self { Some(o) } else { None }
+        if let Json::Obj(o) = self {
+            Some(o)
+        } else {
+            None
+        }
     }
 
     /// Key → value map view of an object.
     pub fn to_map(&self) -> BTreeMap<&str, &Json> {
-        self.as_object().map(|o| o.iter().map(|(k, v)| (k.as_str(), v)).collect()).unwrap_or_default()
+        self.as_object()
+            .map(|o| o.iter().map(|(k, v)| (k.as_str(), v)).collect())
+            .unwrap_or_default()
     }
 
     /// Compact serialization.
@@ -137,7 +151,7 @@ struct P<'a> {
     i: usize,
 }
 
-impl<'a> P<'a> {
+impl P<'_> {
     fn ws(&mut self) {
         while self.i < self.b.len() && matches!(self.b[self.i], b' ' | b'\n' | b'\r' | b'\t') {
             self.i += 1;
@@ -223,7 +237,12 @@ impl<'a> P<'a> {
 
     fn number(&mut self) -> Result<Json, String> {
         let s = self.i;
-        while self.i < self.b.len() && matches!(self.b[self.i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9') {
+        while self.i < self.b.len()
+            && matches!(
+                self.b[self.i],
+                b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
+            )
+        {
             self.i += 1;
         }
         let t = std::str::from_utf8(&self.b[s..self.i]).unwrap_or("");
@@ -233,19 +252,25 @@ impl<'a> P<'a> {
         if let Ok(i) = t.parse::<i64>() {
             return Ok(Json::Int(i));
         }
-        t.parse::<f64>().map(Json::Num).or_else(|_| self.err("bad number"))
+        t.parse::<f64>()
+            .map(Json::Num)
+            .or_else(|_| self.err("bad number"))
     }
 
     fn string(&mut self) -> Result<String, String> {
         self.i += 1;
         let mut out: Vec<u8> = Vec::new();
         loop {
-            let Some(&c) = self.b.get(self.i) else { return self.err("unterminated string") };
+            let Some(&c) = self.b.get(self.i) else {
+                return self.err("unterminated string");
+            };
             self.i += 1;
             match c {
                 b'"' => break,
                 b'\\' => {
-                    let Some(&e) = self.b.get(self.i) else { return self.err("bad escape") };
+                    let Some(&e) = self.b.get(self.i) else {
+                        return self.err("bad escape");
+                    };
                     self.i += 1;
                     let ch = match e {
                         b'n' => '\n',
@@ -258,11 +283,18 @@ impl<'a> P<'a> {
                         b'"' => '"',
                         b'u' => {
                             let hex = |p: &Self, at: usize| -> Option<u32> {
-                                std::str::from_utf8(p.b.get(at..at + 4)?).ok().and_then(|h| u32::from_str_radix(h, 16).ok())
+                                std::str::from_utf8(p.b.get(at..at + 4)?)
+                                    .ok()
+                                    .and_then(|h| u32::from_str_radix(h, 16).ok())
                             };
-                            let Some(mut cp) = hex(self, self.i) else { return self.err("bad \\u escape") };
+                            let Some(mut cp) = hex(self, self.i) else {
+                                return self.err("bad \\u escape");
+                            };
                             self.i += 4;
-                            if (0xD800..0xDC00).contains(&cp) && self.b.get(self.i) == Some(&b'\\') && self.b.get(self.i + 1) == Some(&b'u') {
+                            if (0xD800..0xDC00).contains(&cp)
+                                && self.b.get(self.i) == Some(&b'\\')
+                                && self.b.get(self.i + 1) == Some(&b'u')
+                            {
                                 if let Some(lo) = hex(self, self.i + 2) {
                                     if (0xDC00..0xE000).contains(&lo) {
                                         cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
@@ -305,9 +337,13 @@ mod tests {
 
     #[test]
     fn parse_and_roundtrip() {
-        let j = parse(br#"{"a":[1,2.5,"x\n\u00e9\ud83d\ude00"],"b":{"c":null,"d":true},"e":-7}"#).unwrap();
+        let j = parse(br#"{"a":[1,2.5,"x\n\u00e9\ud83d\ude00"],"b":{"c":null,"d":true},"e":-7}"#)
+            .unwrap();
         assert_eq!(j.get("e").unwrap().as_i64(), Some(-7));
-        assert_eq!(j.get("a").unwrap().as_array().unwrap()[2].as_str(), Some("x\né😀"));
+        assert_eq!(
+            j.get("a").unwrap().as_array().unwrap()[2].as_str(),
+            Some("x\né😀")
+        );
         assert_eq!(j.get("b").unwrap().get("d"), Some(&Json::Bool(true)));
         let again = parse(j.to_compact().as_bytes()).unwrap();
         assert_eq!(j, again);

@@ -45,7 +45,9 @@ fn base64_decode(input: &str) -> Result<Vec<u8>, String> {
 
 fn main() {
     let mut input = String::new();
-    std::io::stdin().read_to_string(&mut input).expect("read stdin");
+    std::io::stdin()
+        .read_to_string(&mut input)
+        .expect("read stdin");
     let bytes = match base64_decode(&input) {
         Ok(b) => b,
         Err(e) => {

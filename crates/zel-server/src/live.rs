@@ -24,15 +24,26 @@ use zel_events::ui::BufferOutErr;
 #[derive(Default)]
 pub struct LiveSink {
     buffers: Mutex<Vec<Arc<BufferOutErr>>>,
+    history: Mutex<(Vec<u8>, Vec<u8>)>,
 }
 
 impl LiveSink {
     /// Drains everything written so far: `(stdout, stderr)`.
     pub fn drain(&self) -> (Vec<u8>, Vec<u8>) {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        for b in self.buffers.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+        for b in self
+            .buffers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+        {
             out.extend(b.take_out());
             err.extend(b.take_err());
+        }
+        if !out.is_empty() || !err.is_empty() {
+            let mut h = self.history.lock().unwrap_or_else(|e| e.into_inner());
+            h.0.extend_from_slice(&out);
+            h.1.extend_from_slice(&err);
         }
         (out, err)
     }
@@ -47,11 +58,22 @@ pub fn set_current(sink: Option<Arc<LiveSink>>) {
     CURRENT.with(|c| *c.borrow_mut() = sink);
 }
 
+/// Takes any output already drained for live streaming on the current command thread.
+pub fn take_history() -> (Vec<u8>, Vec<u8>) {
+    CURRENT.with(|c| match c.borrow().as_ref() {
+        Some(s) => std::mem::take(&mut *s.history.lock().unwrap_or_else(|e| e.into_inner())),
+        None => (Vec::new(), Vec::new()),
+    })
+}
+
 /// Registers a UI output buffer with the current thread's sink (no-op when not streaming).
 pub fn register(buf: Arc<BufferOutErr>) {
     CURRENT.with(|c| {
         if let Some(s) = c.borrow().as_ref() {
-            s.buffers.lock().unwrap_or_else(|e| e.into_inner()).push(buf);
+            s.buffers
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(buf);
         }
     });
 }

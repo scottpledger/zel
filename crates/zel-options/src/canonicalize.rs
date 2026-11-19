@@ -41,9 +41,7 @@ impl Default for CanonicalizeCommandOptions {
 }
 
 /// Canonicalizes command options for a given target command.
-pub fn canonicalize_flags(
-    raw_args: &[String],
-) -> Result<Vec<String>, OptionsParsingError> {
+pub fn canonicalize_flags(raw_args: &[String]) -> Result<Vec<String>, OptionsParsingError> {
     let (before_dash, after_dash) = match raw_args.iter().position(|a| a == "--") {
         Some(idx) => (&raw_args[..idx], &raw_args[idx + 1..]),
         None => (raw_args, &[][..]),
@@ -64,29 +62,27 @@ pub fn canonicalize_flags(
         cmd_opts.include_default_values = idv;
     }
 
-    if !cmd_opts.invocation_policy.is_empty() {
-        if let Err(_) = InvocationPolicy::parse(&cmd_opts.invocation_policy) {
-            return Err(OptionsParsingError::new(format!(
-                "Malformed value of --invocation_policy: {}",
-                cmd_opts.invocation_policy
-            )));
-        }
+    if !cmd_opts.invocation_policy.is_empty()
+        && InvocationPolicy::parse(&cmd_opts.invocation_policy).is_err()
+    {
+        return Err(OptionsParsingError::new(format!(
+            "Malformed value of --invocation_policy: {}",
+            cmd_opts.invocation_policy
+        )));
     }
 
     if after_dash.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut parsed = match ParsedCommandOptions::parse_for_command(
-        &cmd_opts.for_command,
-        after_dash,
-    ) {
-        Ok(p) => p,
-        Err(mut e) => {
-            e.failed_arg = None;
-            return Err(e);
-        }
-    };
+    let mut parsed =
+        match ParsedCommandOptions::parse_for_command_no_edit(&cmd_opts.for_command, after_dash) {
+            Ok(p) => p,
+            Err(mut e) => {
+                e.failed_arg = None;
+                return Err(e);
+            }
+        };
 
     if !parsed.targets.is_empty() {
         return Err(OptionsParsingError::new(format!(
@@ -115,7 +111,10 @@ pub fn canonicalize_flags(
     let mut effective_canonical = Vec::new();
     for flag in parsed.canonical_flags.into_iter().rev() {
         let flag_name = flag.trim_start_matches('-').split('=').next().unwrap_or("");
-        let allow_multiple = cmd_map.get(flag_name).map(|d| d.allow_multiple).unwrap_or(false);
+        let allow_multiple = cmd_map
+            .get(flag_name)
+            .map(|d| d.allow_multiple)
+            .unwrap_or(false);
         if !allow_multiple {
             if seen_single.contains(flag_name) {
                 continue;
@@ -145,6 +144,9 @@ mod tests {
             "--keep_going".to_string(),
         ];
         let flags = canonicalize_flags(&args).unwrap();
-        assert_eq!(flags, vec!["--jobs=4", "--compilation_mode=opt", "--keep_going=1"]);
+        assert_eq!(
+            flags,
+            vec!["--jobs=4", "--compilation_mode=opt", "--keep_going=1"]
+        );
     }
 }

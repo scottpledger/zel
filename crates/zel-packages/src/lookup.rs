@@ -27,6 +27,11 @@ pub trait RepoResolver: Send + Sync {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment>;
     /// Repository mapping used when parsing labels that appear in files of `owner`.
     fn mapping(&self, owner: &RepositoryName) -> RepositoryMapping;
+    /// Optional `(module_name, module_version)` associated with `repo` (`module_name()` /
+    /// `module_version()`).
+    fn module_name_and_version(&self, _repo: &RepositoryName) -> Option<(String, String)> {
+        None
+    }
 }
 
 /// A per-runtime holder for the external repository resolver of the command currently running.
@@ -138,20 +143,47 @@ pub enum PackageLookup {
     Deleted(String),
     InvalidName(String),
     RepoNotFound(String),
+    IoError(String),
 }
 
-/// Looks up `BUILD.bazel` then `BUILD` in `pkg_dir`; both must be regular files (a *directory*
-/// named `BUILD` does not make a package).
-pub fn find_build_file(fs: &dyn FileSystem, pkg_dir: &PathFragment) -> Option<PathFragment> {
+/// Looks up `BUILD.bazel` then `BUILD` in `pkg_dir`; both must be files (regular or special, not
+/// a directory). Symlink cycles and non-NotFound I/O errors are returned as `Err`.
+pub fn find_build_file_checked(
+    fs: &dyn FileSystem,
+    pkg_dir: &PathFragment,
+) -> Result<Option<PathFragment>, String> {
     for name in ["BUILD.bazel", "BUILD"] {
         let p = pkg_dir.get_relative_str(name);
-        if let Ok(st) = fs.stat(&p, true) {
-            if st.is_file {
-                return Some(p);
+        match zel_vfs::resolve_symlink_chain(fs, &p) {
+            Ok(res) => {
+                if let Some(st) = res.status {
+                    if st.is_file || st.is_special_file {
+                        return Ok(Some(p));
+                    }
+                }
+            }
+            Err(zel_vfs::SymlinkError::Cycle { chain }) => {
+                let s: Vec<&str> = chain.iter().map(|x| x.path_string()).collect();
+                return Err(format!("Symlink cycle: {}", s.join("- > ")));
+            }
+            Err(zel_vfs::SymlinkError::InfiniteExpansion { chain }) => {
+                let s: Vec<&str> = chain.iter().map(|x| x.path_string()).collect();
+                return Err(format!("Infinite symlink expansion: {}", s.join("- > ")));
+            }
+            Err(zel_vfs::SymlinkError::Io(e)) => {
+                return Err(format!(
+                    "Encountered error while looking up BUILD file '{p}': {e}"
+                ));
             }
         }
     }
-    None
+    Ok(None)
+}
+
+/// Looks up `BUILD.bazel` then `BUILD` in `pkg_dir`; both must be files (a *directory* named
+/// `BUILD` does not make a package).
+pub fn find_build_file(fs: &dyn FileSystem, pkg_dir: &PathFragment) -> Option<PathFragment> {
+    find_build_file_checked(fs, pkg_dir).ok().flatten()
 }
 
 /// Parsed `REPO.bazel`.
@@ -178,45 +210,27 @@ pub fn parse_bazelignore(contents: &str) -> Result<Vec<PathFragment>, String> {
     Ok(out)
 }
 
-/// Everything needed to decide whether a directory is a package.
-pub struct PackageLookupConfig {
-    pub fs: Arc<dyn FileSystem>,
-    pub resolver: Arc<dyn RepoResolver>,
-    pub deleted_packages: BTreeSet<PackageIdentifier>,
+/// Pre-parsed `.bazelignore` prefixes and `REPO.bazel` `ignore_directories()` patterns
+/// (`IgnoredSubdirectories.java`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IgnoredSubdirectories {
+    pub prefixes: Vec<PathFragment>,
+    pub patterns: Vec<String>,
 }
 
-impl PackageLookupConfig {
-    /// Entries of `.bazelignore` in `repo_root` (main repository only in Bazel; applied to every
-    /// repo here since external repos may also ship one).
-    pub fn bazelignore(&self, repo_root: &PathFragment) -> Vec<PathFragment> {
-        match self.fs.read_file(&repo_root.get_relative_str(".bazelignore")) {
-            Ok(bytes) => parse_bazelignore(&String::from_utf8_lossy(&bytes)).unwrap_or_default(),
-            Err(_) => Vec::new(),
-        }
-    }
-
-    /// `ignore_directories()` patterns from `REPO.bazel`, if any.
-    pub fn repo_ignored_dirs(&self, repo_root: &PathFragment) -> Vec<String> {
-        crate::loader::parse_repo_file(self.fs.as_ref(), repo_root)
-            .map(|r| r.ignored_directories)
-            .unwrap_or_default()
-    }
-
-    /// Is `pkg` ignored by `.bazelignore`, returning the reason message.
-    pub fn ignored_reason(&self, pkg: &PackageIdentifier, repo_root: &PathFragment) -> Option<String> {
-        let frag = pkg.package_fragment();
-        for e in self.bazelignore(repo_root) {
-            if !e.is_empty() && frag.starts_with(&e) {
+impl IgnoredSubdirectories {
+    pub fn ignored_reason(&self, frag: &PathFragment) -> Option<String> {
+        for e in &self.prefixes {
+            if !e.is_empty() && frag.starts_with(e) {
                 return Some("Package is considered deleted due to .bazelignore".to_string());
             }
         }
-        let pats = self.repo_ignored_dirs(repo_root);
-        if !pats.is_empty() {
+        if !self.patterns.is_empty() {
             let segs: Vec<&str> = frag.segments();
-            for p in &pats {
+            for p in &self.patterns {
                 let psegs: Vec<&str> = p.split('/').collect();
                 // A directory is ignored if the pattern matches it or any of its ancestors.
-                for k in 1..=segs.len() {
+                for k in 0..=segs.len() {
                     if glob::path_matches(&psegs, &segs[..k]) {
                         return Some(
                             "Package is considered deleted due to ignore_directories() in REPO.bazel"
@@ -229,19 +243,72 @@ impl PackageLookupConfig {
         None
     }
 
+    pub fn is_ignored(&self, frag: &PathFragment) -> bool {
+        self.ignored_reason(frag).is_some()
+    }
+}
+
+/// Everything needed to decide whether a directory is a package.
+pub struct PackageLookupConfig {
+    pub fs: Arc<dyn FileSystem>,
+    pub resolver: Arc<dyn RepoResolver>,
+    pub deleted_packages: BTreeSet<PackageIdentifier>,
+}
+
+impl PackageLookupConfig {
+    /// Entries of `.bazelignore` in `repo_root` (main repository only in Bazel; applied to every
+    /// repo here since external repos may also ship one).
+    pub fn bazelignore(&self, repo_root: &PathFragment) -> Vec<PathFragment> {
+        match self
+            .fs
+            .read_file(&repo_root.get_relative_str(".bazelignore"))
+        {
+            Ok(bytes) => parse_bazelignore(&String::from_utf8_lossy(&bytes)).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
+    }
+
+    /// `ignore_directories()` patterns from `REPO.bazel`, if any.
+    pub fn repo_ignored_dirs(&self, repo_root: &PathFragment) -> Vec<String> {
+        crate::loader::parse_repo_file(self.fs.as_ref(), repo_root)
+            .map(|r| r.ignored_directories)
+            .unwrap_or_default()
+    }
+
+    /// Pre-parsed ignore rules for one repository (`IgnoredSubdirectories`).
+    pub fn ignored_subdirectories(&self, repo_root: &PathFragment) -> IgnoredSubdirectories {
+        IgnoredSubdirectories {
+            prefixes: self.bazelignore(repo_root),
+            patterns: self.repo_ignored_dirs(repo_root),
+        }
+    }
+
+    /// Is `pkg` ignored by `.bazelignore` or `REPO.bazel`, returning the reason message.
+    pub fn ignored_reason(
+        &self,
+        pkg: &PackageIdentifier,
+        repo_root: &PathFragment,
+    ) -> Option<String> {
+        self.ignored_subdirectories(repo_root)
+            .ignored_reason(pkg.package_fragment())
+    }
+
     pub fn lookup(&self, pkg: &PackageIdentifier) -> PackageLookup {
         let Some(root) = self.resolver.repo_root(pkg.repository()) else {
             let repo_display = if pkg.repository().is_main() {
                 pkg.repository().canonical_form()
             } else {
-                format!("@@[unknown repo '{}' requested from @@]", pkg.repository().name())
+                format!(
+                    "@@[unknown repo '{}' requested from @@]",
+                    pkg.repository().name()
+                )
             };
             return PackageLookup::RepoNotFound(format!(
                 "The repository '{repo_display}' could not be resolved: No repository visible as '@{}' from main repository",
                 pkg.repository().name()
             ));
         };
-        if pkg.repository().is_main() && self.deleted_packages.contains(pkg) {
+        if self.deleted_packages.contains(pkg) {
             return PackageLookup::Deleted(
                 "Package is considered deleted due to --deleted_packages".to_string(),
             );
@@ -250,19 +317,16 @@ impl PackageLookupConfig {
             return PackageLookup::Deleted(reason);
         }
         let dir = root.get_relative(pkg.package_fragment());
-        match find_build_file(self.fs.as_ref(), &dir) {
-            Some(build_file) => PackageLookup::Found { build_file },
-            None => PackageLookup::NoBuildFile,
+        match find_build_file_checked(self.fs.as_ref(), &dir) {
+            Ok(Some(build_file)) => PackageLookup::Found { build_file },
+            Ok(None) => PackageLookup::NoBuildFile,
+            Err(e) => PackageLookup::IoError(e),
         }
     }
 
     /// `PackageLookupFunction.explainNoBuildFileValue`.
     pub fn explain_no_build_file(&self, pkg: &PackageIdentifier) -> String {
         let educational = "Add a BUILD file to a directory to mark it as a package.";
-        if pkg.repository().is_main() && pkg.package_fragment().path_string() == "external" {
-            // `PackageFunction`: the `//external` package no longer exists.
-            return "//external package is not available since the WORKSPACE file is deprecated, please migrate to Bzlmod. See https://bazel.build/external/migration#bind-targets.".to_string();
-        }
         if pkg.repository().is_main() {
             format!(
                 "BUILD file not found in any of the following directories. {educational}\n - {}",
@@ -281,9 +345,10 @@ impl PackageLookupConfig {
     pub fn error_message(&self, pkg: &PackageIdentifier, lookup: &PackageLookup) -> String {
         match lookup {
             PackageLookup::NoBuildFile => self.explain_no_build_file(pkg),
-            PackageLookup::Deleted(r) | PackageLookup::InvalidName(r) | PackageLookup::RepoNotFound(r) => {
-                r.clone()
-            }
+            PackageLookup::Deleted(r)
+            | PackageLookup::InvalidName(r)
+            | PackageLookup::RepoNotFound(r)
+            | PackageLookup::IoError(r) => r.clone(),
             PackageLookup::Found { .. } => String::new(),
         }
     }
@@ -297,7 +362,9 @@ impl PackageLookupConfig {
         if segs.len() < 2 {
             return None;
         }
-        let _ = self.resolver.repo_root(label.package_identifier().repository())?;
+        let _ = self
+            .resolver
+            .repo_root(label.package_identifier().repository())?;
         let pkg_frag = label.package_identifier().package_fragment().clone();
         // Examine directories pkg/seg0, pkg/seg0/seg1, ... (all but the file itself); the deepest
         // existing sub-package wins.
@@ -305,7 +372,11 @@ impl PackageLookupConfig {
         let mut cur = pkg_frag.clone();
         for (i, seg) in segs[..segs.len() - 1].iter().enumerate() {
             cur = cur.get_relative_str(seg);
-            let id = PackageIdentifier::create(label.package_identifier().repository().clone(), cur.clone()).ok()?;
+            let id = PackageIdentifier::create(
+                label.package_identifier().repository().clone(),
+                cur.clone(),
+            )
+            .ok()?;
             if let PackageLookup::Found { .. } = self.lookup(&id) {
                 found = Some((i + 1, cur.clone()));
             }

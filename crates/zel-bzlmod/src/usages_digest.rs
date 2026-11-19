@@ -16,8 +16,8 @@
 //!
 //! `ModuleExtensionUsage.trimForEvaluation` clears all proxies (`"proxies":[]`).
 
-use crate::model::{AttrVal, ExtensionUsage, ModuleKey};
 use crate::hash::sha256;
+use crate::model::{AttrVal, ExtensionUsage, ModuleKey};
 
 /// One module that uses the extension (`AbridgedModule`).
 pub struct AbridgedModule {
@@ -133,7 +133,10 @@ pub fn usages_json(input: &UsagesDigestInput<'_>) -> String {
             json_str(&mut out, &t.tag_name);
             out.push_str(",\"attributeValues\":");
             json_attr(&mut out, &AttrVal::Dict(t.attrs.clone()));
-            out.push_str(&format!(",\"devDependency\":{},\"location\":{BUILTIN_LOCATION}}}", t.dev_dependency));
+            out.push_str(&format!(
+                ",\"devDependency\":{},\"location\":{BUILTIN_LOCATION}}}",
+                t.dev_dependency
+            ));
         }
         out.push_str("],\"repoOverrides\":{}}");
     }
@@ -194,7 +197,7 @@ pub fn usages_digest(input: &UsagesDigestInput<'_>) -> Vec<u8> {
 mod tests {
     use super::*;
     use crate::hash::base64_encode;
-    use crate::model::{Tag};
+    use crate::model::Tag;
 
     fn usage(bzl: &str, tags: Vec<Tag>) -> ExtensionUsage {
         ExtensionUsage {
@@ -215,13 +218,22 @@ mod tests {
         let root = ModuleKey::root();
         let u = usage(
             "//:ext.bzl",
-            vec![Tag { tag_name: "mk".into(), attrs: vec![("name".into(), AttrVal::Str("a".into()))], dev_dependency: false, location: "x:1:1".into() }],
+            vec![Tag {
+                tag_name: "mk".into(),
+                attrs: vec![("name".into(), AttrVal::Str("a".into()))],
+                dev_dependency: false,
+                location: "x:1:1".into(),
+            }],
         );
         let input = UsagesDigestInput {
             usages: vec![(&root, &u)],
             unique_name: "+ex",
             root_repo_name: "root",
-            abridged_modules: vec![AbridgedModule { name: "root".into(), version: "1.0".into(), key: "<root>".into() }],
+            abridged_modules: vec![AbridgedModule {
+                name: "root".into(),
+                version: "1.0".into(),
+                key: "<root>".into(),
+            }],
             repo_overrides: vec![],
         };
         let json = usages_json(&input);
@@ -229,7 +241,10 @@ mod tests {
             json,
             "{\"extensionUsages\":{\"<root>\":{\"extensionBzlFile\":\"@root//:ext.bzl\",\"extensionName\":\"ex\",\"proxies\":[],\"tags\":[{\"tagName\":\"mk\",\"attributeValues\":{\"name\":\"a\"},\"devDependency\":false,\"location\":{\"file\":\"<builtin>\",\"line\":0,\"column\":0}}],\"repoOverrides\":{}}},\"extensionUniqueName\":\"+ex\",\"abridgedModules\":[{\"name\":\"root\",\"version\":\"1.0\",\"key\":\"<root>\"}],\"repoMappings\":{},\"repoOverrides\":{}}"
         );
-        assert_eq!(base64_encode(&hash_unencoded_chars(&json)), "WXv8CruOzDCxfYYi3/901rT/qPeXmrpy0zjMxjtOINg=");
+        assert_eq!(
+            base64_encode(&hash_unencoded_chars(&json)),
+            "WXv8CruOzDCxfYYi3/901rT/qPeXmrpy0zjMxjtOINg="
+        );
     }
 
     #[test]
@@ -254,7 +269,10 @@ mod tests {
         };
         let json = usages_json(&input);
         assert!(json.contains("\"proxies\":[]"), "{json}");
-        assert!(json.ends_with("\"repoMappings\":{},\"repoOverrides\":{\"x\":\"mx+\"}}"), "{json}");
+        assert!(
+            json.ends_with("\"repoMappings\":{},\"repoOverrides\":{\"x\":\"mx+\"}}"),
+            "{json}"
+        );
     }
 
     #[test]

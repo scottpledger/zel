@@ -13,14 +13,40 @@
 // limitations under the License.
 
 use crate::types::list::StarlarkError;
+use crate::types::mutability::Mutability;
 use crate::types::value::Value;
+use std::sync::Arc;
 
 /// Insertion-ordered dictionary supporting any hashable key.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone)]
 pub struct StarlarkDict {
     pub entries: Vec<(Value, Value)>,
     pub frozen: bool,
     pub iter_count: usize,
+    pub mutability: Arc<Mutability>,
+}
+
+impl PartialEq for StarlarkDict {
+    fn eq(&self, other: &Self) -> bool {
+        if self.entries.len() != other.entries.len() {
+            return false;
+        }
+        for (k, v) in &self.entries {
+            match other.get(k) {
+                Some(v2) if v2 == v => {}
+                _ => return false,
+            }
+        }
+        true
+    }
+}
+
+impl Eq for StarlarkDict {}
+
+impl Default for StarlarkDict {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StarlarkDict {
@@ -29,6 +55,25 @@ impl StarlarkDict {
             entries: Vec::new(),
             frozen: false,
             iter_count: 0,
+            mutability: Mutability::create(),
+        }
+    }
+
+    pub fn new_in(mutability: Arc<Mutability>) -> Self {
+        Self {
+            entries: Vec::new(),
+            frozen: false,
+            iter_count: 0,
+            mutability,
+        }
+    }
+
+    pub fn empty_frozen() -> Self {
+        Self {
+            entries: Vec::new(),
+            frozen: true,
+            iter_count: 0,
+            mutability: Mutability::immutable(),
         }
     }
 
@@ -36,16 +81,25 @@ impl StarlarkDict {
         let mut dict = Self::new();
         for (k, v) in entries {
             if !k.is_hashable() {
-                return Err(StarlarkError(format!("unhashable type: '{}'", k.type_name())));
+                return Err(StarlarkError(format!(
+                    "unhashable type: '{}'",
+                    k.type_name()
+                )));
             }
             dict.insert(k, v)?;
         }
         Ok(dict)
     }
 
+    pub fn is_frozen(&self) -> bool {
+        self.frozen || self.mutability.is_frozen()
+    }
+
     pub fn check_mutable(&self) -> Result<(), StarlarkError> {
-        if self.frozen {
-            return Err(StarlarkError("trying to mutate a frozen dict value".to_string()));
+        if self.is_frozen() {
+            return Err(StarlarkError(
+                "trying to mutate a frozen dict value".to_string(),
+            ));
         }
         if self.iter_count > 0 {
             return Err(StarlarkError(
@@ -56,13 +110,30 @@ impl StarlarkDict {
     }
 
     pub fn freeze(&mut self) {
-        if !self.frozen {
+        if !self.is_frozen() {
             self.frozen = true;
             for (k, v) in &self.entries {
                 k.freeze();
                 v.freeze();
             }
         }
+    }
+
+    pub fn unsafe_shallow_freeze(&mut self) -> Result<(), StarlarkError> {
+        if self.is_frozen() {
+            return Err(StarlarkError(
+                "cannot call unsafeShallowFreeze() on an object whose Mutability is already frozen"
+                    .to_string(),
+            ));
+        }
+        if !self.mutability.allows_unsafe_shallow_freeze() {
+            return Err(StarlarkError(
+                "cannot call unsafeShallowFreeze() on an object whose Mutability does not allow it"
+                    .to_string(),
+            ));
+        }
+        self.mutability = Mutability::immutable();
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -84,7 +155,10 @@ impl StarlarkDict {
     pub fn insert(&mut self, key: Value, value: Value) -> Result<Option<Value>, StarlarkError> {
         self.check_mutable()?;
         if !key.is_hashable() {
-            return Err(StarlarkError(format!("unhashable type: '{}'", key.type_name())));
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                key.type_name()
+            )));
         }
         if let Some(pos) = self.entries.iter().position(|(k, _)| k == &key) {
             let old = std::mem::replace(&mut self.entries[pos].1, value);
@@ -108,7 +182,10 @@ impl StarlarkDict {
         } else if let Some(def) = default {
             Ok(def)
         } else {
-            Err(StarlarkError(format!("key {} not found in dictionary", key.repr())))
+            Err(StarlarkError(format!(
+                "key {} not found in dictionary",
+                key.repr()
+            )))
         }
     }
 
@@ -122,7 +199,10 @@ impl StarlarkDict {
     pub fn setdefault(&mut self, key: Value, default: Value) -> Result<Value, StarlarkError> {
         self.check_mutable()?;
         if !key.is_hashable() {
-            return Err(StarlarkError(format!("unhashable type: '{}'", key.type_name())));
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                key.type_name()
+            )));
         }
         if let Some(pos) = self.entries.iter().position(|(k, _)| k == &key) {
             Ok(self.entries[pos].1.clone())
@@ -153,9 +233,14 @@ impl StarlarkDict {
     }
 
     pub fn union(&self, other: &Self) -> Self {
-        let mut res = self.clone();
-        res.frozen = false;
-        res.iter_count = 0;
+        self.union_in(other, Mutability::create())
+    }
+
+    pub fn union_in(&self, other: &Self, mutability: Arc<Mutability>) -> Self {
+        let mut res = Self::new_in(mutability);
+        for (k, v) in &self.entries {
+            let _ = res.insert(k.clone(), v.clone());
+        }
         for (k, v) in &other.entries {
             let _ = res.insert(k.clone(), v.clone());
         }

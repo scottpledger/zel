@@ -143,7 +143,11 @@ impl CompactPersistentActionCache {
     }
 
     pub fn with_digest(digest: DigestFunction) -> Self {
-        Self { entries: Mutex::new(BTreeMap::new()), digest, load_warning: Mutex::new(None) }
+        Self {
+            entries: Mutex::new(BTreeMap::new()),
+            digest,
+            load_warning: Mutex::new(None),
+        }
     }
 
     pub fn digest_function(&self) -> DigestFunction {
@@ -155,9 +159,15 @@ impl CompactPersistentActionCache {
         Self::load_from_disk_with(fs, cache_file, DigestFunction::default())
     }
 
-    pub fn load_from_disk_with(fs: &dyn FileSystem, cache_file: &PathFragment, digest: DigestFunction) -> Self {
+    pub fn load_from_disk_with(
+        fs: &dyn FileSystem,
+        cache_file: &PathFragment,
+        digest: DigestFunction,
+    ) -> Self {
         let cache = Self::with_digest(digest);
-        let Ok(bytes) = fs.read_file(cache_file) else { return cache };
+        let Ok(bytes) = fs.read_file(cache_file) else {
+            return cache;
+        };
         match Self::decode(&bytes, digest) {
             Ok(map) => *cache.entries.lock().unwrap() = map,
             Err(e) => {
@@ -169,27 +179,40 @@ impl CompactPersistentActionCache {
         cache
     }
 
-    fn decode(b: &[u8], digest: DigestFunction) -> Result<BTreeMap<String, ActionCacheEntry>, String> {
+    fn decode(
+        b: &[u8],
+        digest: DigestFunction,
+    ) -> Result<BTreeMap<String, ActionCacheEntry>, String> {
         if b.len() < MAGIC.len() || &b[..MAGIC.len()] != MAGIC {
             return Err("bad magic / unsupported action cache version".into());
         }
         let mut pos = MAGIC.len();
         let trunc = || "truncated action cache".to_string();
         let name_len = get_varint(b, &mut pos).ok_or_else(trunc)? as usize;
-        let name = std::str::from_utf8(b.get(pos..pos + name_len).ok_or_else(trunc)?).map_err(|e| e.to_string())?;
+        let name = std::str::from_utf8(b.get(pos..pos + name_len).ok_or_else(trunc)?)
+            .map_err(|e| e.to_string())?;
         pos += name_len;
         if name != digest.name() {
-            return Err(format!("action cache was written with digest function {name}, current is {}", digest.name()));
+            return Err(format!(
+                "action cache was written with digest function {name}, current is {}",
+                digest.name()
+            ));
         }
         let n_strings = get_varint(b, &mut pos).ok_or_else(trunc)? as usize;
         let mut strings = Vec::with_capacity(n_strings);
         for _ in 0..n_strings {
             let l = get_varint(b, &mut pos).ok_or_else(trunc)? as usize;
-            let s = std::str::from_utf8(b.get(pos..pos + l).ok_or_else(trunc)?).map_err(|e| e.to_string())?;
+            let s = std::str::from_utf8(b.get(pos..pos + l).ok_or_else(trunc)?)
+                .map_err(|e| e.to_string())?;
             pos += l;
             strings.push(s.to_string());
         }
-        let s = |i: u64| strings.get(i as usize).cloned().ok_or_else(|| "bad string index".to_string());
+        let s = |i: u64| {
+            strings
+                .get(i as usize)
+                .cloned()
+                .ok_or_else(|| "bad string index".to_string())
+        };
         let n_entries = get_varint(b, &mut pos).ok_or_else(trunc)? as usize;
         let mut map = BTreeMap::new();
         for _ in 0..n_entries {
@@ -208,7 +231,8 @@ impl CompactPersistentActionCache {
             }
             let nd = get_varint(b, &mut pos).ok_or_else(trunc)?;
             for _ in 0..nd {
-                e.discovered_inputs.push(s(get_varint(b, &mut pos).ok_or_else(trunc)?)?);
+                e.discovered_inputs
+                    .push(s(get_varint(b, &mut pos).ok_or_else(trunc)?)?);
             }
             map.insert(key, e);
         }
@@ -224,7 +248,10 @@ impl CompactPersistentActionCache {
 
     pub fn encode(&self) -> Vec<u8> {
         let entries = self.entries.lock().unwrap();
-        let mut ix = Indexer { ids: BTreeMap::new(), list: Vec::new() };
+        let mut ix = Indexer {
+            ids: BTreeMap::new(),
+            list: Vec::new(),
+        };
         let mut body = Vec::new();
         put_varint(&mut body, entries.len() as u64);
         for (k, e) in entries.iter() {
@@ -304,7 +331,10 @@ impl CompactPersistentActionCache {
     }
 
     pub fn put_entry(&self, primary_output: &str, entry: ActionCacheEntry) {
-        self.entries.lock().unwrap().insert(primary_output.to_string(), entry);
+        self.entries
+            .lock()
+            .unwrap()
+            .insert(primary_output.to_string(), entry);
     }
 
     pub fn remove(&self, output_exec_path: &str) {
@@ -412,7 +442,9 @@ impl CompactPersistentActionCache {
         md_digest_of: &dyn Fn(&[String]) -> String,
         current_outputs: &[(String, Option<String>)],
     ) -> MustExecuteReason {
-        let Some(e) = self.get_entry(primary_output) else { return MustExecuteReason::NotCached };
+        let Some(e) = self.get_entry(primary_output) else {
+            return MustExecuteReason::NotCached;
+        };
         if e.action_key != action_key {
             return MustExecuteReason::DifferentActionKey;
         }
@@ -493,7 +525,8 @@ mod tests {
             assert_eq!(k.len(), f.digest_length() * 2, "{f:?}");
         }
         assert_ne!(
-            CompactPersistentActionCache::with_digest(DigestFunction::Sha1).compute_action_key(&parts()),
+            CompactPersistentActionCache::with_digest(DigestFunction::Sha1)
+                .compute_action_key(&parts()),
             base
         );
     }
@@ -501,10 +534,19 @@ mod tests {
     #[test]
     fn md_digest_depends_on_discovered_inputs_and_contents() {
         let c = CompactPersistentActionCache::new();
-        let a = c.compute_md_digest(&[("a.c".into(), Some("d1".into())), ("a.h".into(), Some("d2".into()))]);
-        let reordered = c.compute_md_digest(&[("a.h".into(), Some("d2".into())), ("a.c".into(), Some("d1".into()))]);
+        let a = c.compute_md_digest(&[
+            ("a.c".into(), Some("d1".into())),
+            ("a.h".into(), Some("d2".into())),
+        ]);
+        let reordered = c.compute_md_digest(&[
+            ("a.h".into(), Some("d2".into())),
+            ("a.c".into(), Some("d1".into())),
+        ]);
         assert_eq!(a, reordered);
-        let changed = c.compute_md_digest(&[("a.c".into(), Some("d1".into())), ("a.h".into(), Some("d3".into()))]);
+        let changed = c.compute_md_digest(&[
+            ("a.c".into(), Some("d1".into())),
+            ("a.h".into(), Some("d3".into())),
+        ]);
         assert_ne!(a, changed);
         let fewer = c.compute_md_digest(&[("a.c".into(), Some("d1".into()))]);
         assert_ne!(a, fewer);
@@ -515,7 +557,10 @@ mod tests {
         let c = CompactPersistentActionCache::new();
         let md = |paths: &[String]| paths.join(",");
         let out = vec![("a.o".to_string(), Some("od".to_string()))];
-        assert_eq!(c.must_execute("a.o", "k", "e", &md, &out), MustExecuteReason::NotCached);
+        assert_eq!(
+            c.must_execute("a.o", "k", "e", &md, &out),
+            MustExecuteReason::NotCached
+        );
         c.put_entry(
             "a.o",
             ActionCacheEntry {
@@ -526,15 +571,30 @@ mod tests {
                 discovered_inputs: vec!["a.h".into()],
             },
         );
-        assert_eq!(c.must_execute("a.o", "k", "e", &md, &out), MustExecuteReason::UpToDate);
-        assert_eq!(c.must_execute("a.o", "k2", "e", &md, &out), MustExecuteReason::DifferentActionKey);
-        assert_eq!(c.must_execute("a.o", "k", "e2", &md, &out), MustExecuteReason::DifferentEnvironment);
+        assert_eq!(
+            c.must_execute("a.o", "k", "e", &md, &out),
+            MustExecuteReason::UpToDate
+        );
+        assert_eq!(
+            c.must_execute("a.o", "k2", "e", &md, &out),
+            MustExecuteReason::DifferentActionKey
+        );
+        assert_eq!(
+            c.must_execute("a.o", "k", "e2", &md, &out),
+            MustExecuteReason::DifferentEnvironment
+        );
         assert_eq!(
             c.must_execute("a.o", "k", "e", &|_| "other".to_string(), &out),
             MustExecuteReason::DifferentDeps
         );
         assert_eq!(
-            c.must_execute("a.o", "k", "e", &md, &[("a.o".into(), Some("tampered".into()))]),
+            c.must_execute(
+                "a.o",
+                "k",
+                "e",
+                &md,
+                &[("a.o".into(), Some("tampered".into()))]
+            ),
             MustExecuteReason::DifferentFiles
         );
         assert_eq!(
@@ -554,18 +614,32 @@ mod tests {
                 action_key: "key".into(),
                 used_client_env_digest: "env".into(),
                 md_digest: "md".into(),
-                files: [("bazel-out/x/bin/a.o".to_string(), "dig".to_string()), ("bazel-out/x/bin/b.d".to_string(), "dig2".to_string())].into(),
+                files: [
+                    ("bazel-out/x/bin/a.o".to_string(), "dig".to_string()),
+                    ("bazel-out/x/bin/b.d".to_string(), "dig2".to_string()),
+                ]
+                .into(),
                 discovered_inputs: vec!["x.h".into(), "y.h".into()],
             },
         );
         c.save_to_disk(&fs, &file).unwrap();
         let loaded = CompactPersistentActionCache::load_from_disk(&fs, &file);
-        assert_eq!(loaded.get_entry("bazel-out/x/bin/a.o"), c.get_entry("bazel-out/x/bin/a.o"));
+        assert_eq!(
+            loaded.get_entry("bazel-out/x/bin/a.o"),
+            c.get_entry("bazel-out/x/bin/a.o")
+        );
         assert!(loaded.load_warning.lock().unwrap().is_none());
         // Wrong digest function discards the cache.
-        let other = CompactPersistentActionCache::load_from_disk_with(&fs, &file, DigestFunction::Blake3);
+        let other =
+            CompactPersistentActionCache::load_from_disk_with(&fs, &file, DigestFunction::Blake3);
         assert!(other.is_empty());
-        assert!(other.load_warning.lock().unwrap().as_ref().unwrap().contains("digest function SHA-256"));
+        assert!(other
+            .load_warning
+            .lock()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .contains("digest function SHA-256"));
         // Corrupt file.
         let mut bytes = fs.read_file(&file).unwrap();
         let n = bytes.len();
@@ -575,6 +649,10 @@ mod tests {
         assert!(bad.is_empty());
         assert!(bad.load_warning.lock().unwrap().is_some());
         fs.write_file(&file, b"junk").unwrap();
-        assert!(CompactPersistentActionCache::load_from_disk(&fs, &file).load_warning.lock().unwrap().is_some());
+        assert!(CompactPersistentActionCache::load_from_disk(&fs, &file)
+            .load_warning
+            .lock()
+            .unwrap()
+            .is_some());
     }
 }

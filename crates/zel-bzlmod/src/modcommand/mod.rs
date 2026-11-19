@@ -85,7 +85,10 @@ pub struct ModError {
 impl ModError {
     /// A message that has not been decorated with the "Type 'bazel help mod'..." suffix yet.
     pub(crate) fn raw(kind: ModErrorKind, message: impl Into<String>) -> ModError {
-        ModError { message: message.into(), kind }
+        ModError {
+            message: message.into(),
+            kind,
+        }
     }
 
     /// Process exit code of the failure (`COMMAND_LINE_ERROR` is 2).
@@ -99,10 +102,15 @@ impl ModError {
     /// `reportAndCreateFailureResult`: argument errors get a help suffix.
     fn finalize(self) -> ModError {
         match self.kind {
-            ModErrorKind::MissingArguments | ModErrorKind::TooManyArguments | ModErrorKind::InvalidArguments => {
+            ModErrorKind::MissingArguments
+            | ModErrorKind::TooManyArguments
+            | ModErrorKind::InvalidArguments => {
                 let dot = if self.message.ends_with('.') { "" } else { "." };
                 ModError {
-                    message: format!("{}{} Type 'bazel help mod' for syntax and help.", self.message, dot),
+                    message: format!(
+                        "{}{} Type 'bazel help mod' for syntax and help.",
+                        self.message, dot
+                    ),
                     kind: self.kind,
                 }
             }
@@ -179,7 +187,10 @@ fn join_english_list(values: &[&str]) -> String {
 fn enum_error(name: &str, desc: &str, input: &str, values: &[&str]) -> ModError {
     ModError::raw(
         ModErrorKind::OptionParsing,
-        format!("While parsing option --{name}={input}: Not a valid {desc}: '{input}' (should be {})", join_english_list(values)),
+        format!(
+            "While parsing option --{name}={input}: Not a valid {desc}: '{input}' (should be {})",
+            join_english_list(values)
+        ),
     )
 }
 
@@ -190,8 +201,15 @@ impl ModOptions {
         let list = |name: &str| -> Option<Vec<String>> {
             let desc = p.parsed_options.get(name)?;
             let mut raw: Vec<String> = match desc.value.as_list() {
-                Some(items) => items.iter().filter_map(|v| v.as_str().map(String::from)).collect(),
-                None => desc.value.as_str().map(|s| vec![s.to_string()]).unwrap_or_default(),
+                Some(items) => items
+                    .iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect(),
+                None => desc
+                    .value
+                    .as_str()
+                    .map(|s| vec![s.to_string()])
+                    .unwrap_or_default(),
             };
             if raw.is_empty() && !desc.raw_values.is_empty() {
                 raw = desc.raw_values.clone();
@@ -201,7 +219,9 @@ impl ModOptions {
             Some(if raw.iter().all(|r| r.is_empty()) {
                 vec![]
             } else {
-                raw.iter().flat_map(|r| r.split(',').map(String::from).collect::<Vec<_>>()).collect()
+                raw.iter()
+                    .flat_map(|r| r.split(',').map(String::from).collect::<Vec<_>>())
+                    .collect()
             })
         };
         if let Some(v) = list("from") {
@@ -243,14 +263,28 @@ impl ModOptions {
                 "usages" => ExtensionShow::Usages,
                 "repos" => ExtensionShow::Repos,
                 "all" => ExtensionShow::All,
-                _ => return Err(enum_error("extension_info", "extension show", s, &["hidden", "usages", "repos", "all"])),
+                _ => {
+                    return Err(enum_error(
+                        "extension_info",
+                        "extension show",
+                        s,
+                        &["hidden", "usages", "repos", "all"],
+                    ))
+                }
             };
         }
         if let Some(s) = p.get_str("charset") {
             o.charset = match s.to_ascii_lowercase().as_str() {
                 "utf8" => Charset::Utf8,
                 "ascii" => Charset::Ascii,
-                _ => return Err(enum_error("charset", "output charset", s, &["utf8", "ascii"])),
+                _ => {
+                    return Err(enum_error(
+                        "charset",
+                        "output charset",
+                        s,
+                        &["utf8", "ascii"],
+                    ))
+                }
             };
         }
         if let Some(s) = p.get_str("output") {
@@ -265,7 +299,13 @@ impl ModOptions {
                         "output",
                         "output format",
                         s,
-                        &["text", "json", "graph", "streamed_proto", "streamed_jsonproto"],
+                        &[
+                            "text",
+                            "json",
+                            "graph",
+                            "streamed_proto",
+                            "streamed_jsonproto",
+                        ],
                     ))
                 }
             };
@@ -315,8 +355,17 @@ impl ExtensionInfoProvider for NoExtensionInfo {
 }
 
 /// The subcommands in `ModSubcommand` order.
-const SUBCOMMANDS: [&str; 9] =
-    ["deps", "graph", "all_paths", "path", "explain", "show_repo", "show_extension", "dump_repo_mapping", "tidy"];
+const SUBCOMMANDS: [&str; 9] = [
+    "deps",
+    "graph",
+    "all_paths",
+    "path",
+    "explain",
+    "show_repo",
+    "show_extension",
+    "dump_repo_mapping",
+    "tidy",
+];
 
 fn is_graph_subcommand(s: &str) -> bool {
     matches!(s, "deps" | "graph" | "all_paths" | "path" | "explain")
@@ -356,7 +405,10 @@ fn validate_args(subcommand: &str, opts: &ModOptions, args: &[String]) -> Result
     }
 
     if subcommand == "show_repo" {
-        let selected = [opts.all_repos, opts.all_visible_repos, !args.is_empty()].iter().filter(|b| **b).count();
+        let selected = [opts.all_repos, opts.all_visible_repos, !args.is_empty()]
+            .iter()
+            .filter(|b| **b)
+            .count();
         if selected > 1 {
             return Err(ModError::raw(
                 ModErrorKind::TooManyArguments,
@@ -365,10 +417,14 @@ fn validate_args(subcommand: &str, opts: &ModOptions, args: &[String]) -> Result
         }
     } else {
         if opts.all_repos {
-            return Err(bad_args(format!("the '{subcommand}' command doesn't take the --all_repos option")));
+            return Err(bad_args(format!(
+                "the '{subcommand}' command doesn't take the --all_repos option"
+            )));
         }
         if opts.all_visible_repos {
-            return Err(bad_args(format!("the '{subcommand}' command doesn't take the --all_visible_repos option")));
+            return Err(bad_args(format!(
+                "the '{subcommand}' command doesn't take the --all_visible_repos option"
+            )));
         }
     }
     Ok(())
@@ -384,7 +440,12 @@ fn parse_option_list<T>(
         return Ok(vec![]);
     }
     let joined = values.join(",");
-    parse(&joined).map_err(|e| ModError::raw(ModErrorKind::OptionParsing, format!("While parsing option --{flag}={joined}: {e}")))
+    parse(&joined).map_err(|e| {
+        ModError::raw(
+            ModErrorKind::OptionParsing,
+            format!("While parsing option --{flag}={joined}: {e}"),
+        )
+    })
 }
 
 fn module_arg_list_to_keys(
@@ -421,21 +482,33 @@ fn repo_definition(
     }
     if let Some(m) = res.module_by_canonical(canonical) {
         if let Some(spec) = &m.repo_spec {
-            return Some(RepoDefinition::Found { name: canonical.to_string(), original_name: None, spec: spec.clone() });
+            return Some(RepoDefinition::Found {
+                name: canonical.to_string(),
+                original_name: None,
+                spec: spec.clone(),
+            });
         }
     }
     // Extension-generated repo: `<unique name>+<internal name>`.
     let mut original_name = None;
     for (id, unique) in &insp.extension_unique_names {
         if let Some(rest) = canonical.strip_prefix(&format!("{unique}+")) {
-            if ext_info.generated_repos(id).map(|r| r.iter().any(|x| x == rest)).unwrap_or(false) {
+            if ext_info
+                .generated_repos(id)
+                .map(|r| r.iter().any(|x| x == rest))
+                .unwrap_or(false)
+            {
                 original_name = Some(rest.to_string());
                 break;
             }
         }
     }
     let spec = provider.repo_spec(canonical)?;
-    Some(RepoDefinition::Found { name: canonical.to_string(), original_name, spec })
+    Some(RepoDefinition::Found {
+        name: canonical.to_string(),
+        original_name,
+        spec,
+    })
 }
 
 /// `getReposToShow`: (display key, canonical repo name) pairs.
@@ -462,7 +535,9 @@ fn repos_to_show(
             put(&mut out, format!("@@{canonical}"), canonical.clone());
         }
         for id in insp.extension_ids() {
-            let Some(unique) = res.extension_unique_names.get(&id) else { continue };
+            let Some(unique) = res.extension_unique_names.get(&id) else {
+                continue;
+            };
             for (i, repos) in &insp.extension_repos {
                 if *i != id {
                     continue;
@@ -511,12 +586,19 @@ pub fn run_mod(
     repo_provider: &dyn RepoSpecProvider,
     ext_info: &dyn ExtensionInfoProvider,
 ) -> Result<String, ModError> {
-    run_mod_inner(resolution, subcommand, args, opts, repo_provider, ext_info).map_err(ModError::finalize)
+    run_mod_inner(resolution, subcommand, args, opts, repo_provider, ext_info)
+        .map_err(ModError::finalize)
 }
 
 /// The checks `ModCommand` does before it evaluates anything: option values, subcommand, `validateArgs`.
-pub fn validate_early(subcommand_str: &str, args: &[String], opts: &ModOptions) -> Result<(), ModError> {
-    validate_early_inner(subcommand_str, args, opts).map(|_| ()).map_err(ModError::finalize)
+pub fn validate_early(
+    subcommand_str: &str,
+    args: &[String],
+    opts: &ModOptions,
+) -> Result<(), ModError> {
+    validate_early_inner(subcommand_str, args, opts)
+        .map(|_| ())
+        .map_err(ModError::finalize)
 }
 
 #[allow(clippy::type_complexity)]
@@ -524,7 +606,16 @@ fn validate_early_inner(
     subcommand_str: &str,
     args: &[String],
     opts: &ModOptions,
-) -> Result<(String, Vec<ModuleArg>, Vec<ModuleArg>, ModuleArg, Option<Vec<ExtensionArg>>), ModError> {
+) -> Result<
+    (
+        String,
+        Vec<ModuleArg>,
+        Vec<ModuleArg>,
+        ModuleArg,
+        Option<Vec<ExtensionArg>>,
+    ),
+    ModError,
+> {
     let values = format!("({})", SUBCOMMANDS.join(", "));
     if subcommand_str.is_empty() {
         return Err(ModError::raw(
@@ -542,17 +633,38 @@ fn validate_early_inner(
 
     // Option values given as strings are parsed up front, like the options parser would.
     let from_args = parse_option_list("from", &opts.from, ModuleArg::parse_list)?;
-    let usage_args = parse_option_list("extension_usages", &opts.extension_usages, ModuleArg::parse_list)?;
-    let base_module_arg = ModuleArg::parse(&opts.base_module)
-        .map_err(|e| ModError::raw(ModErrorKind::OptionParsing, format!("While parsing option --base_module={}: {e}", opts.base_module)))?;
+    let usage_args = parse_option_list(
+        "extension_usages",
+        &opts.extension_usages,
+        ModuleArg::parse_list,
+    )?;
+    let base_module_arg = ModuleArg::parse(&opts.base_module).map_err(|e| {
+        ModError::raw(
+            ModErrorKind::OptionParsing,
+            format!(
+                "While parsing option --base_module={}: {e}",
+                opts.base_module
+            ),
+        )
+    })?;
     let filter_args: Option<Vec<ExtensionArg>> = match &opts.extension_filter {
         None => None,
-        Some(v) => Some(parse_option_list("extension_filter", v, ExtensionArg::parse_list)?),
+        Some(v) => Some(parse_option_list(
+            "extension_filter",
+            v,
+            ExtensionArg::parse_list,
+        )?),
     };
 
     validate_args(&subcommand, opts, args)?;
 
-    Ok((subcommand, from_args, usage_args, base_module_arg, filter_args))
+    Ok((
+        subcommand,
+        from_args,
+        usage_args,
+        base_module_arg,
+        filter_args,
+    ))
 }
 
 fn run_mod_inner(
@@ -563,11 +675,15 @@ fn run_mod_inner(
     repo_provider: &dyn RepoSpecProvider,
     ext_info: &dyn ExtensionInfoProvider,
 ) -> Result<String, ModError> {
-    let (subcommand, from_args, usage_args, base_module_arg, filter_args) = validate_early_inner(subcommand_str, args, opts)?;
+    let (subcommand, from_args, usage_args, base_module_arg, filter_args) =
+        validate_early_inner(subcommand_str, args, opts)?;
     let subcommand = subcommand.as_str();
 
     if subcommand == "tidy" || subcommand == "dump_repo_mapping" {
-        return Err(ModError::raw(ModErrorKind::Unsupported, format!("{subcommand} not handled here")));
+        return Err(ModError::raw(
+            ModErrorKind::Unsupported,
+            format!("{subcommand} not handled here"),
+        ));
     }
 
     // Build the inspector.
@@ -610,7 +726,10 @@ fn run_mod_inner(
             ))
         })?
     };
-    let base_module = insp.dep_graph.get(&base_module_key).expect("base module exists");
+    let base_module = insp
+        .dep_graph
+        .get(&base_module_key)
+        .expect("base module exists");
     let base_deps = base_module.deps.clone();
     let base_unused = base_module.unused_deps.clone();
 
@@ -630,7 +749,10 @@ fn run_mod_inner(
             let base_mapping = RepoMapping {
                 entries: res.repo_mapping(&base_module_key),
                 ordered: res.repo_mapping_ordered(&base_module_key),
-                context_repo: insp.canonical_name(&base_module_key).unwrap_or("").to_string(),
+                context_repo: insp
+                    .canonical_name(&base_module_key)
+                    .unwrap_or("")
+                    .to_string(),
             };
             args_as_repos = repos_to_show(opts, &insp, res, &base_mapping, args)?;
         }
@@ -649,7 +771,13 @@ fn run_mod_inner(
                 let keys = ModuleArg::parse(arg)
                     .map_err(bad_args)
                     .and_then(|m| {
-                        m.resolve_to_module_keys(&insp, &base_deps, &base_unused, opts.include_unused, true)
+                        m.resolve_to_module_keys(
+                            &insp,
+                            &base_deps,
+                            &base_unused,
+                            opts.include_unused,
+                            true,
+                        )
                     })
                     .map_err(|e| bad_args(format!("In module argument {arg}: {}", e.message)))?;
                 for k in keys {
@@ -662,16 +790,34 @@ fn run_mod_inner(
     }
 
     // Extract and check the --from and --extension_usages arguments.
-    let from_keys = module_arg_list_to_keys(&from_args, &insp, &base_deps, &base_unused, opts.include_unused)
-        .map_err(|e| bad_args(format!("In --from {} option: {}", list_string(&from_args), e.message)))?;
-    let usage_keys = module_arg_list_to_keys(&usage_args, &insp, &base_deps, &base_unused, opts.include_unused)
-        .map_err(|e| {
-            bad_args(format!(
-                "In --extension_usages {} option: {} (Note that unused modules cannot be used here)",
-                list_string(&usage_args),
-                e.message
-            ))
-        })?;
+    let from_keys = module_arg_list_to_keys(
+        &from_args,
+        &insp,
+        &base_deps,
+        &base_unused,
+        opts.include_unused,
+    )
+    .map_err(|e| {
+        bad_args(format!(
+            "In --from {} option: {}",
+            list_string(&from_args),
+            e.message
+        ))
+    })?;
+    let usage_keys = module_arg_list_to_keys(
+        &usage_args,
+        &insp,
+        &base_deps,
+        &base_unused,
+        opts.include_unused,
+    )
+    .map_err(|e| {
+        bad_args(format!(
+            "In --extension_usages {} option: {} (Note that unused modules cannot be used here)",
+            list_string(&usage_args),
+            e.message
+        ))
+    })?;
 
     // Extract and check the --extension_filter argument.
     let mut filter_extensions: Option<MaybeCompleteExtSet> = None;
@@ -682,9 +828,16 @@ fn run_mod_inner(
             } else {
                 let mut ids = vec![];
                 for a in fa {
-                    ids.push(a.resolve_to_extension_id(&insp, &base_deps, &base_unused).map_err(|e| {
-                        bad_args(format!("In --extension_filter {} option: {}", list_string(fa), e.message))
-                    })?);
+                    ids.push(
+                        a.resolve_to_extension_id(&insp, &base_deps, &base_unused)
+                            .map_err(|e| {
+                                bad_args(format!(
+                                    "In --extension_filter {} option: {}",
+                                    list_string(fa),
+                                    e.message
+                                ))
+                            })?,
+                    );
                 }
                 filter_extensions = Some(MaybeCompleteExtSet::Set(sorted_unique_ext_ids(ids)));
             }
@@ -698,7 +851,9 @@ fn run_mod_inner(
         for (key, canonical) in &args_as_repos {
             match repo_definition(res, &insp, canonical, repo_provider, ext_info) {
                 Some(d) => definitions.push((key.clone(), d)),
-                None if explicit => return Err(bad_args(format!("In repo argument {key}: no such repo"))),
+                None if explicit => {
+                    return Err(bad_args(format!("In repo argument {key}: no such repo")))
+                }
                 None => {}
             }
         }

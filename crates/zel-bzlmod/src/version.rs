@@ -20,9 +20,17 @@ impl Identifier {
             let number = s
                 .parse::<u64>()
                 .map_err(|_| format!("numeric version segment is too large: {s}"))?;
-            Ok(Self { digits_only: true, number, text: s.to_string() })
+            Ok(Self {
+                digits_only: true,
+                number,
+                text: s.to_string(),
+            })
         } else {
-            Ok(Self { digits_only: false, number: 0, text: s.to_string() })
+            Ok(Self {
+                digits_only: false,
+                number: 0,
+                text: s.to_string(),
+            })
         }
     }
 }
@@ -43,7 +51,7 @@ impl PartialOrd for Identifier {
 }
 
 /// A module version. `Version::empty()` is used for the root module and non-registry overrides.
-#[derive(Debug, Clone, Eq, Hash)]
+#[derive(Debug, Clone, Eq)]
 pub struct Version {
     release: Vec<Identifier>,
     prerelease: Vec<Identifier>,
@@ -52,7 +60,11 @@ pub struct Version {
 
 impl Version {
     pub fn empty() -> Self {
-        Self { release: vec![], prerelease: vec![], normalized: String::new() }
+        Self {
+            release: vec![],
+            prerelease: vec![],
+            normalized: String::new(),
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -78,7 +90,11 @@ impl Version {
             None => (version, None),
         };
         if let Some(b) = build {
-            if b.is_empty() || !b.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+            if b.is_empty()
+                || !b
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+            {
                 return Err(bad());
             }
         }
@@ -86,12 +102,18 @@ impl Version {
             Some((r, p)) => (r, Some(p)),
             None => (rest, None),
         };
-        if release.is_empty() || !release.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') {
+        if release.is_empty()
+            || !release
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.')
+        {
             return Err(bad());
         }
         if let Some(p) = prerelease {
             if p.is_empty()
-                || !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+                || !p
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
             {
                 return Err(bad());
             }
@@ -111,13 +133,23 @@ impl Version {
             Some(p) => format!("{release}-{p}"),
             None => release.to_string(),
         };
-        Ok(Self { release: rel, prerelease: pre, normalized })
+        Ok(Self {
+            release: rel,
+            prerelease: pre,
+            normalized,
+        })
     }
 }
 
 impl PartialEq for Version {
     fn eq(&self, o: &Self) -> bool {
         self.normalized == o.normalized
+    }
+}
+
+impl std::hash::Hash for Version {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.normalized.hash(state);
     }
 }
 

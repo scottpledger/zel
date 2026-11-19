@@ -35,7 +35,10 @@ pub fn build_data() -> Vec<(String, String)> {
         .unwrap_or(0);
     vec![
         ("Build label".to_string(), build_label()),
-        ("Build target".to_string(), "@@//crates/zel-client:zel".to_string()),
+        (
+            "Build target".to_string(),
+            "@@//crates/zel-client:zel".to_string(),
+        ),
         ("Build time".to_string(), format!("{} ({ts})", ctime(ts))),
         ("Build timestamp".to_string(), ts.to_string()),
         ("Build timestamp as int".to_string(), ts.to_string()),
@@ -45,8 +48,9 @@ pub fn build_data() -> Vec<(String, String)> {
 /// `Thu Oct 19 17:47:24 2023` (UTC).
 pub fn ctime(ts: i64) -> String {
     const DAYS: [&str; 7] = ["Thu", "Fri", "Sat", "Sun", "Mon", "Tue", "Wed"];
-    const MONTHS: [&str; 12] =
-        ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let days = ts.div_euclid(86400);
     let secs = ts.rem_euclid(86400);
     // Civil-from-days (Howard Hinnant).
@@ -74,33 +78,52 @@ pub fn ctime(ts: i64) -> String {
 
 impl BlazeRuntime {
     /// `VersionCommand.exec`.
-    pub(crate) fn cmd_version(&self, args: &[String], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> ExitCode {
+    pub(crate) fn cmd_version(
+        &self,
+        args: &[String],
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
         // The client's `--version` fast path forwards `--startup_version`.
+        let filtered: Vec<String> = args
+            .iter()
+            .filter(|a| *a != "--startup_version")
+            .cloned()
+            .collect();
+        let parsed = match ParsedCommandOptions::parse_for_command("version", &filtered) {
+            Ok(p) => p,
+            Err(e) => {
+                writeln_bytes(stderr, &e.format_bazel_error());
+                return ExitCode::COMMAND_LINE_ERROR;
+            }
+        };
         let gnu = args.iter().any(|a| a == "--startup_version")
-            || match ParsedCommandOptions::parse_for_command(
-                "version",
-                &args.iter().filter(|a| *a != "--startup_version").cloned().collect::<Vec<_>>(),
-            ) {
-                Ok(p) => p.get_bool("gnu_format").unwrap_or(false),
-                Err(e) => {
-                    writeln_bytes(stderr, &e.format_bazel_error());
-                    return ExitCode::COMMAND_LINE_ERROR;
-                }
-            };
+            || parsed.get_bool("gnu_format").unwrap_or(false);
         // `@Command(allowResidue = false)`: `OptionsParser.parse` rejects any residue with
         // "Unrecognized arguments: <residue>" (all of it, space separated).
-        let residue: Vec<&String> = args.iter().filter(|a| !a.starts_with('-') && *a != "--startup_version").collect();
-        if !residue.is_empty() {
-            let joined: Vec<&str> = residue.iter().map(|s| s.as_str()).collect();
-            writeln_bytes(stderr, &format!("ERROR: Unrecognized arguments: {}", joined.join(" ")));
+        if !parsed.targets.is_empty() {
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "ERROR: Unrecognized arguments: {}",
+                    parsed.targets.join(" ")
+                ),
+            );
             return ExitCode::COMMAND_LINE_ERROR;
         }
         if gnu {
             let label = build_label();
-            let version = if label.is_empty() { "no_version".to_string() } else { label };
+            let version = if label.is_empty() {
+                "no_version".to_string()
+            } else {
+                label
+            };
             writeln_bytes(stdout, &format!("{} {version}", version_product_prefix()));
         } else {
-            let summary: Vec<String> = build_data().into_iter().map(|(k, v)| format!("{k}: {v}")).collect();
+            let summary: Vec<String> = build_data()
+                .into_iter()
+                .map(|(k, v)| format!("{k}: {v}"))
+                .collect();
             writeln_bytes(stdout, &summary.join("\n"));
         }
         ExitCode::SUCCESS
@@ -122,7 +145,13 @@ impl BlazeRuntime {
             }
         };
         if !parsed.targets.is_empty() {
-            writeln_bytes(stderr, &format!("ERROR: Unrecognized arguments: {}", parsed.targets.join(" ")));
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "ERROR: Unrecognized arguments: {}",
+                    parsed.targets.join(" ")
+                ),
+            );
             return ExitCode::COMMAND_LINE_ERROR;
         }
         let limit = parsed.get_int("iff_heap_size_greater_than").unwrap_or(0) as i64;

@@ -114,10 +114,21 @@ impl P<'_> {
             }
             Some(c) if c == b'-' || c.is_ascii_digit() => {
                 let s = self.i;
-                while self.i < self.b.len() && (self.b[self.i] == b'-' || self.b[self.i] == b'+' || self.b[self.i] == b'.' || self.b[self.i] == b'e' || self.b[self.i] == b'E' || self.b[self.i].is_ascii_digit()) {
+                while self.i < self.b.len()
+                    && (self.b[self.i] == b'-'
+                        || self.b[self.i] == b'+'
+                        || self.b[self.i] == b'.'
+                        || self.b[self.i] == b'e'
+                        || self.b[self.i] == b'E'
+                        || self.b[self.i].is_ascii_digit())
+                {
                     self.i += 1;
                 }
-                std::str::from_utf8(&self.b[s..self.i]).unwrap().parse().map(Json::Num).map_err(|_| "bad number".to_string())
+                std::str::from_utf8(&self.b[s..self.i])
+                    .unwrap()
+                    .parse()
+                    .map(Json::Num)
+                    .map_err(|_| "bad number".to_string())
             }
             _ => Err(format!("unexpected token at offset {}", self.i)),
         }
@@ -140,7 +151,10 @@ impl P<'_> {
                         b'f' => out.push(12),
                         b'/' | b'\\' | b'"' => out.push(e),
                         b'u' => {
-                            let h = std::str::from_utf8(self.b.get(self.i..self.i + 4).ok_or("bad \\u")?).map_err(|e| e.to_string())?;
+                            let h = std::str::from_utf8(
+                                self.b.get(self.i..self.i + 4).ok_or("bad \\u")?,
+                            )
+                            .map_err(|e| e.to_string())?;
                             let cp = u32::from_str_radix(h, 16).map_err(|e| e.to_string())?;
                             self.i += 4;
                             let ch = char::from_u32(cp).unwrap_or('\u{fffd}');
@@ -173,8 +187,14 @@ fn json_escape(s: &str) -> String {
 
 /// Parses a credential-helper response into request headers.
 pub fn parse_helper_response(out: &str) -> Result<Vec<Header>, String> {
-    let v = P { b: out.as_bytes(), i: 0 }.value()?;
-    let Json::Obj(m) = v else { return Err("credential helper output is not a JSON object".into()) };
+    let v = P {
+        b: out.as_bytes(),
+        i: 0,
+    }
+    .value()?;
+    let Json::Obj(m) = v else {
+        return Err("credential helper output is not a JSON object".into());
+    };
     let mut headers = Vec::new();
     match m.get("headers") {
         Some(Json::Obj(h)) => {
@@ -211,7 +231,14 @@ pub fn helper_applies(spec: &str, uri: &str) -> Option<String> {
         .unwrap_or("")
         .rsplit_once(':')
         .map(|(h, _)| h)
-        .unwrap_or_else(|| uri.split("://").last().unwrap_or(uri).split('/').next().unwrap_or(""));
+        .unwrap_or_else(|| {
+            uri.split("://")
+                .last()
+                .unwrap_or(uri)
+                .split('/')
+                .next()
+                .unwrap_or("")
+        });
     match spec.split_once('=') {
         Some((scope, path)) => {
             let ok = match scope.strip_prefix("*.") {
@@ -226,7 +253,9 @@ pub fn helper_applies(spec: &str, uri: &str) -> Option<String> {
 
 /// Runs the helper (`<path> get`) for `uri` and returns the headers to attach.
 pub fn run_credential_helper(spec: &str, uri: &str) -> Result<Vec<Header>, String> {
-    let Some(path) = helper_applies(spec, uri) else { return Ok(vec![]) };
+    let Some(path) = helper_applies(spec, uri) else {
+        return Ok(vec![]);
+    };
     let mut child = Command::new(&path)
         .arg("get")
         .stdin(Stdio::piped())
@@ -265,15 +294,27 @@ mod tests {
         assert!(h.contains(&("x-multi".to_string(), "a,b".to_string())));
         assert!(parse_helper_response("[]").is_err());
         assert!(parse_helper_response(r#"{"headers":{"a":"s"}}"#).is_err());
-        assert_eq!(parse_helper_response(r#"{"headers":{"k":["v\u00e9\n"]}}"#).unwrap()[0].1, "vé\n");
+        assert_eq!(
+            parse_helper_response(r#"{"headers":{"k":["v\u00e9\n"]}}"#).unwrap()[0].1,
+            "vé\n"
+        );
     }
 
     #[test]
     fn scopes() {
-        assert_eq!(helper_applies("/bin/h", "grpc://a.b:1"), Some("/bin/h".into()));
-        assert_eq!(helper_applies("*.b=/bin/h", "grpc://a.b:1"), Some("/bin/h".into()));
+        assert_eq!(
+            helper_applies("/bin/h", "grpc://a.b:1"),
+            Some("/bin/h".into())
+        );
+        assert_eq!(
+            helper_applies("*.b=/bin/h", "grpc://a.b:1"),
+            Some("/bin/h".into())
+        );
         assert_eq!(helper_applies("*.b=/bin/h", "grpc://x.c:1"), None);
-        assert_eq!(helper_applies("a.b=/bin/h", "grpc://a.b"), Some("/bin/h".into()));
+        assert_eq!(
+            helper_applies("a.b=/bin/h", "grpc://a.b"),
+            Some("/bin/h".into())
+        );
     }
 
     #[cfg(unix)]
@@ -286,7 +327,13 @@ mod tests {
         std::fs::write(&script, "#!/bin/sh\nread req\ncase \"$1\" in get) echo '{\"headers\":{\"Authorization\":[\"Bearer from-helper\"]}}';; *) exit 1;; esac\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         let h = run_credential_helper(script.to_str().unwrap(), "grpc://h:1").unwrap();
-        assert_eq!(h, vec![("authorization".to_string(), "Bearer from-helper".to_string())]);
+        assert_eq!(
+            h,
+            vec![(
+                "authorization".to_string(),
+                "Bearer from-helper".to_string()
+            )]
+        );
         assert!(run_credential_helper("/nonexistent/helper", "grpc://h:1").is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }

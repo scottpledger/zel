@@ -19,8 +19,8 @@
 use std::collections::BTreeMap;
 use std::sync::{Condvar, Mutex};
 
-pub use zel_util::resource_converter::{HostResources, FLAG_SYNTAX};
 use zel_util::resource_converter::{self as rc, IntegerSpec};
+pub use zel_util::resource_converter::{HostResources, FLAG_SYNTAX};
 
 /// `BuildRequestOptions.MAX_JOBS`.
 pub const MAX_JOBS: i64 = rc::MAX_JOBS as i64;
@@ -31,13 +31,17 @@ pub const MAX_JOBS: i64 = rc::MAX_JOBS as i64;
 /// same converter `zel-options` runs at flag-parse time (the raw flag string is preserved in
 /// `OptionValueDescription::raw_values`, and evaluated again here against `host`).
 pub fn convert_jobs(input: &str, host: &HostResources) -> Result<usize, String> {
-    IntegerSpec::JOBS.convert_with_host(input, host).map(|v| v as usize)
+    IntegerSpec::JOBS
+        .convert_with_host(input, host)
+        .map(|v| v as usize)
 }
 
 /// `ExecutionOptions.LocalTestJobsConverter`: `0..=i32::MAX`; `auto` is 0 (= limited by local
 /// resources rather than by a slot count).
 pub fn convert_local_test_jobs(input: &str, host: &HostResources) -> Result<usize, String> {
-    IntegerSpec::LOCAL_TEST_JOBS.convert_with_host(input, host).map(|v| v as usize)
+    IntegerSpec::LOCAL_TEST_JOBS
+        .convert_with_host(input, host)
+        .map(|v| v as usize)
 }
 
 /// `--local_resources=name=value` assignment (`ResourceConverter.AssignmentConverter`).
@@ -57,7 +61,11 @@ pub struct ResourceSet {
 impl ResourceSet {
     /// `AbstractAction.DEFAULT_RESOURCE_SET`: 250 MB, 1 CPU.
     pub fn default_action() -> Self {
-        Self { memory_mb: 250.0, cpu: 1.0, ..Default::default() }
+        Self {
+            memory_mb: 250.0,
+            cpu: 1.0,
+            ..Default::default()
+        }
     }
 
     /// `TestTargetProperties`: resources by test size, adjusted by `cpu:N` and
@@ -70,7 +78,12 @@ impl ResourceSet {
             "enormous" => (800.0, 1.0),
             _ => (100.0, 1.0),
         };
-        let mut rs = ResourceSet { memory_mb: ram, cpu, local_test_count: 1, extra: BTreeMap::new() };
+        let mut rs = ResourceSet {
+            memory_mb: ram,
+            cpu,
+            local_test_count: 1,
+            extra: BTreeMap::new(),
+        };
         for t in tags {
             if let Some(n) = t.strip_prefix("cpu:") {
                 if let Ok(v) = n.parse::<f64>() {
@@ -130,7 +143,11 @@ impl Drop for ResourceHandle<'_> {
 impl ResourceManager {
     /// Builds the manager like `ResourceManager.setAvailableResources(getLocalResources())`:
     /// cpu = host CPUs, memory = 0.67 × host RAM, overridden by `--local_resources`.
-    pub fn from_options(local_resources: &[String], local_test_jobs: usize, host: &HostResources) -> Result<Self, String> {
+    pub fn from_options(
+        local_resources: &[String],
+        local_test_jobs: usize,
+        host: &HostResources,
+    ) -> Result<Self, String> {
         let mut avail: BTreeMap<String, f64> = BTreeMap::new();
         avail.insert("cpu".into(), host.cpus);
         avail.insert("memory".into(), 0.67 * host.memory_mb);
@@ -152,7 +169,13 @@ impl ResourceManager {
             allow_one_when_unavailable: true,
             cpu_load_scheduling: false,
             memory_load_scheduling: false,
-            used: Mutex::new(Used { cpu: 0.0, mem: 0.0, tests: 0, extra: BTreeMap::new(), active: 0 }),
+            used: Mutex::new(Used {
+                cpu: 0.0,
+                mem: 0.0,
+                tests: 0,
+                extra: BTreeMap::new(),
+                active: 0,
+            }),
             cv: Condvar::new(),
         }
     }
@@ -177,7 +200,10 @@ impl ResourceManager {
             let cap = self.available_extra.get(k).copied().unwrap_or(0.0);
             u.extra.get(k).copied().unwrap_or(0.0) + v <= cap
         });
-        test_ok && extra_ok && u.cpu + rs.cpu <= self.available_cpu && u.mem + rs.memory_mb <= self.available_mem_mb
+        test_ok
+            && extra_ok
+            && u.cpu + rs.cpu <= self.available_cpu
+            && u.mem + rs.memory_mb <= self.available_mem_mb
     }
 
     /// Blocks until the resources can be granted.
@@ -193,7 +219,10 @@ impl ResourceManager {
             *u.extra.entry(k.clone()).or_insert(0.0) += v;
         }
         u.active += 1;
-        ResourceHandle { mgr: self, rs: rs.clone() }
+        ResourceHandle {
+            mgr: self,
+            rs: rs.clone(),
+        }
     }
 
     fn release(&self, rs: &ResourceSet) {
@@ -223,7 +252,10 @@ mod tests {
     use std::sync::Arc;
 
     fn host() -> HostResources {
-        HostResources { cpus: 8.0, memory_mb: 16384.0 }
+        HostResources {
+            cpus: 8.0,
+            memory_mb: 16384.0,
+        }
     }
 
     #[test]
@@ -235,7 +267,10 @@ mod tests {
         assert_eq!(convert_jobs("12", &h).unwrap(), 12);
         assert_eq!(convert_jobs("99999", &h).unwrap(), 5000);
         assert_eq!(convert_jobs("HOST_RAM*.5", &h).unwrap(), 5000); // 8192 capped
-        assert_eq!(convert_jobs("0", &h).unwrap_err(), "Value '(0)' must be at least 1.");
+        assert_eq!(
+            convert_jobs("0", &h).unwrap_err(),
+            "Value '(0)' must be at least 1."
+        );
         assert!(convert_jobs("lots", &h).unwrap_err().starts_with("Parameter 'lots' does not follow correct syntax. This flag takes an integer, or a keyword"));
         assert!(convert_jobs("HOST_CPUS/2", &h).is_err());
         assert_eq!(convert_local_test_jobs("0", &h).unwrap(), 0);
@@ -251,7 +286,12 @@ mod tests {
     #[test]
     fn local_resources_assignments_override_defaults() {
         let h = host();
-        let m = ResourceManager::from_options(&["cpu=2".into(), "memory=HOST_RAM*.5".into(), "gpu=1".into()], 0, &h).unwrap();
+        let m = ResourceManager::from_options(
+            &["cpu=2".into(), "memory=HOST_RAM*.5".into(), "gpu=1".into()],
+            0,
+            &h,
+        )
+        .unwrap();
         assert_eq!(m.available_cpu, 2.0);
         assert_eq!(m.available_mem_mb, 8192.0);
         assert_eq!(m.available_extra["gpu"], 1.0);
@@ -271,7 +311,11 @@ mod tests {
             for _ in 0..8 {
                 let (m, peak, cur) = (m.clone(), peak.clone(), cur.clone());
                 s.spawn(move || {
-                    let _h = m.acquire(&ResourceSet { cpu: 1.0, memory_mb: 10.0, ..Default::default() });
+                    let _h = m.acquire(&ResourceSet {
+                        cpu: 1.0,
+                        memory_mb: 10.0,
+                        ..Default::default()
+                    });
                     let n = cur.fetch_add(1, Ordering::SeqCst) + 1;
                     peak.fetch_max(n, Ordering::SeqCst);
                     std::thread::sleep(std::time::Duration::from_millis(30));
@@ -281,7 +325,11 @@ mod tests {
         });
         assert_eq!(peak.load(Ordering::SeqCst), 2);
         // An over-sized action still runs when idle.
-        let _h = m.acquire(&ResourceSet { cpu: 100.0, memory_mb: 1e9, ..Default::default() });
+        let _h = m.acquire(&ResourceSet {
+            cpu: 100.0,
+            memory_mb: 1e9,
+            ..Default::default()
+        });
         assert_eq!(m.in_use().0, 100.0);
     }
 
@@ -307,14 +355,21 @@ mod tests {
                 });
             }
         });
-        assert_eq!(peak.load(Ordering::SeqCst), 2, "local_test_jobs=2 caps tests");
+        assert_eq!(
+            peak.load(Ordering::SeqCst),
+            2,
+            "local_test_jobs=2 caps tests"
+        );
         let gpu_peak = Arc::new(AtomicUsize::new(0));
         let gcur = Arc::new(AtomicUsize::new(0));
         std::thread::scope(|s| {
             for _ in 0..4 {
                 let (m, gcur, gpu_peak) = (m.clone(), gcur.clone(), gpu_peak.clone());
                 s.spawn(move || {
-                    let _h = m.acquire(&ResourceSet::for_test("small", &["resources:gpu:1".to_string()]));
+                    let _h = m.acquire(&ResourceSet::for_test(
+                        "small",
+                        &["resources:gpu:1".to_string()],
+                    ));
                     let n = gcur.fetch_add(1, Ordering::SeqCst) + 1;
                     gpu_peak.fetch_max(n, Ordering::SeqCst);
                     std::thread::sleep(std::time::Duration::from_millis(20));

@@ -2,6 +2,7 @@
 
 use zel_sandbox::process_wrapper::{parse_args, run, Termination};
 
+#[cfg(unix)]
 extern "C" {
     fn signal(sig: i32, handler: usize) -> usize;
     fn kill(pid: i32, sig: i32) -> i32;
@@ -31,11 +32,14 @@ fn main() {
     match outcome.termination {
         // The C++ wrapper re-raises the child's (or the timeout's) signal with the default
         // disposition so that its own parent observes death by signal.
-        Termination::Signaled(sig) => unsafe {
-            signal(sig, 0);
-            kill(getpid(), sig);
+        Termination::Signaled(sig) => {
+            #[cfg(unix)]
+            unsafe {
+                signal(sig, 0);
+                kill(getpid(), sig);
+            }
             std::process::exit(128 + sig);
-        },
+        }
         Termination::Exited(c) => std::process::exit(c),
     }
 }

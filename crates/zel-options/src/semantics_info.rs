@@ -41,13 +41,18 @@ pub fn starlark_semantics_string(
         let is_num = key_default.ends_with('L') || key_default.chars().all(|c| c.is_ascii_digit());
         let is_enum = key_default.contains("Mode.");
         let (shown, default_shown) = if is_list {
-            let items: Vec<String> =
-                given.iter().flat_map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_string)).collect();
+            let items: Vec<String> = given
+                .iter()
+                .flat_map(|v| v.split(',').filter(|s| !s.is_empty()).map(str::to_string))
+                .collect();
             (format!("[{}]", items.join(", ")), "[]".to_string())
         } else if is_num {
             let n = given.last().unwrap().trim();
             let n = n.strip_prefix('+').unwrap_or(n);
-            let norm = n.parse::<i64>().map(|v| v.to_string()).unwrap_or_else(|_| n.to_string());
+            let norm = n
+                .parse::<i64>()
+                .map(|v| v.to_string())
+                .unwrap_or_else(|_| n.to_string());
             (norm, key_default.trim_end_matches('L').to_string())
         } else if is_enum {
             let d = key_default.rsplit('.').next().unwrap_or("").to_string();
@@ -77,7 +82,10 @@ mod tests {
     #[test]
     fn defaults_show_only_utf8_byte_strings() {
         let s = starlark_semantics_string(&|_| None, &|_| Vec::new());
-        assert_eq!(s, "StarlarkSemantics{internal_bazel_only_utf_8_byte_strings=true}");
+        assert_eq!(
+            s,
+            "StarlarkSemantics{internal_bazel_only_utf_8_byte_strings=true}"
+        );
     }
 
     #[test]
@@ -88,7 +96,13 @@ mod tests {
                 "incompatible_disallow_empty_glob" => Some(false),
                 _ => None,
             },
-            &|f| if f == "max_computation_steps" { vec!["5".into()] } else { Vec::new() },
+            &|f| {
+                if f == "max_computation_steps" {
+                    vec!["5".into()]
+                } else {
+                    Vec::new()
+                }
+            },
         );
         assert_eq!(
             s,

@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use crate::bigint::BigInt;
+use crate::syntax::checks::did_you_mean;
 use crate::types::dict::StarlarkDict;
 use crate::types::list::{StarlarkError, StarlarkList};
+use crate::types::mutability::Mutability;
 use crate::types::range::RangeList;
 use crate::types::set::StarlarkSet;
 use crate::types::value::Value;
@@ -22,10 +24,260 @@ use std::cmp::Ordering;
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
+pub const DICT_METHODS: &[&str] = &[
+    "clear",
+    "get",
+    "items",
+    "keys",
+    "pop",
+    "popitem",
+    "setdefault",
+    "update",
+    "values",
+];
+pub const LIST_METHODS: &[&str] = &[
+    "append", "clear", "extend", "index", "insert", "pop", "remove",
+];
+pub const SET_METHODS: &[&str] = &[
+    "add",
+    "clear",
+    "difference",
+    "difference_update",
+    "discard",
+    "intersection",
+    "intersection_update",
+    "isdisjoint",
+    "issubset",
+    "issuperset",
+    "pop",
+    "remove",
+    "symmetric_difference",
+    "symmetric_difference_update",
+    "union",
+    "update",
+];
+pub const STRING_METHODS: &[&str] = &[
+    "capitalize",
+    "count",
+    "elems",
+    "endswith",
+    "find",
+    "format",
+    "index",
+    "isalnum",
+    "isalpha",
+    "isdigit",
+    "islower",
+    "isspace",
+    "istitle",
+    "isupper",
+    "join",
+    "lower",
+    "lstrip",
+    "partition",
+    "removeprefix",
+    "removesuffix",
+    "replace",
+    "rfind",
+    "rindex",
+    "rpartition",
+    "rsplit",
+    "rstrip",
+    "split",
+    "splitlines",
+    "startswith",
+    "strip",
+    "title",
+    "upper",
+];
+pub const LABEL_FIELDS: &[&str] = &[
+    "name",
+    "package",
+    "repo_name",
+    "workspace_name",
+    "workspace_root",
+];
+pub const LABEL_METHODS: &[&str] = &["package_relative", "relative", "same_package_label"];
+
+pub fn dir_attrs(x: &Value) -> Vec<String> {
+    let mut attrs = Vec::new();
+    match x {
+        Value::Struct(s) => attrs.extend(s.fields.keys().cloned()),
+        Value::ProviderInstance { fields, .. } => attrs.extend(fields.keys().cloned()),
+        Value::Dict(_) => attrs.extend(DICT_METHODS.iter().map(|s| (*s).to_string())),
+        Value::List(_) => attrs.extend(LIST_METHODS.iter().map(|s| (*s).to_string())),
+        Value::Set(_) => attrs.extend(SET_METHODS.iter().map(|s| (*s).to_string())),
+        Value::String(_) => attrs.extend(STRING_METHODS.iter().map(|s| (*s).to_string())),
+        Value::Depset(_) => attrs.push("to_list".to_string()),
+        Value::Label(_) => {
+            attrs.extend(LABEL_FIELDS.iter().map(|s| (*s).to_string()));
+            attrs.extend(LABEL_METHODS.iter().map(|s| (*s).to_string()));
+        }
+        Value::Host(kind, _) => match kind.as_str() {
+            "target" => attrs.extend(
+                [
+                    "actions",
+                    "data_runfiles",
+                    "default_runfiles",
+                    "files",
+                    "files_to_run",
+                    "label",
+                    "output_groups",
+                ]
+                .iter()
+                .map(|s| (*s).to_string()),
+            ),
+            "file" => attrs.extend(
+                [
+                    "basename",
+                    "dirname",
+                    "extension",
+                    "is_directory",
+                    "is_source",
+                    "is_symlink",
+                    "owner",
+                    "path",
+                    "root",
+                    "short_path",
+                    "tree_relative_path",
+                ]
+                .iter()
+                .map(|s| (*s).to_string()),
+            ),
+            "dotted_version" => {
+                attrs.extend(["compare_to", "version"].iter().map(|s| (*s).to_string()))
+            }
+            "repository_ctx" => attrs.extend(
+                [
+                    "attr",
+                    "delete",
+                    "download",
+                    "download_and_extract",
+                    "execute",
+                    "extract",
+                    "file",
+                    "getenv",
+                    "name",
+                    "original_name",
+                    "os",
+                    "patch",
+                    "path",
+                    "read",
+                    "rename",
+                    "repo_metadata",
+                    "report_progress",
+                    "symlink",
+                    "template",
+                    "watch",
+                    "watch_tree",
+                    "which",
+                    "workspace_root",
+                ]
+                .iter()
+                .map(|s| (*s).to_string()),
+            ),
+            "module_ctx" => attrs.extend(
+                [
+                    "download",
+                    "download_and_extract",
+                    "execute",
+                    "extension_metadata",
+                    "extract",
+                    "facts",
+                    "file",
+                    "getenv",
+                    "is_dev_dependency",
+                    "modules",
+                    "os",
+                    "path",
+                    "read",
+                    "report_progress",
+                    "root_module_has_non_dev_dependency",
+                    "tag_sort_key",
+                    "watch",
+                    "which",
+                ]
+                .iter()
+                .map(|s| (*s).to_string()),
+            ),
+            "path" => attrs.extend(
+                [
+                    "basename",
+                    "dirname",
+                    "exists",
+                    "get_child",
+                    "is_dir",
+                    "readdir",
+                    "realpath",
+                ]
+                .iter()
+                .map(|s| (*s).to_string()),
+            ),
+            "exec_result" => attrs.extend(
+                ["return_code", "stderr", "stdout"]
+                    .iter()
+                    .map(|s| (*s).to_string()),
+            ),
+            "pending_download" => attrs.push("wait".to_string()),
+            _ => {}
+        },
+        _ => {}
+    }
+    attrs.sort();
+    attrs.dedup();
+    attrs
+}
+
+pub fn fallible_merge_sort<T: Clone, F>(items: &mut [T], cmp: &mut F) -> Result<(), StarlarkError>
+where
+    F: FnMut(&T, &T) -> Result<Ordering, StarlarkError>,
+{
+    let n = items.len();
+    if n <= 1 {
+        return Ok(());
+    }
+    let mid = n / 2;
+    fallible_merge_sort(&mut items[..mid], cmp)?;
+    fallible_merge_sort(&mut items[mid..], cmp)?;
+    let left = items[..mid].to_vec();
+    let right = items[mid..].to_vec();
+    let (mut i, mut j, mut k) = (0, 0, 0);
+    while i < left.len() && j < right.len() {
+        if cmp(&left[i], &right[j])? != Ordering::Greater {
+            items[k] = left[i].clone();
+            i += 1;
+        } else {
+            items[k] = right[j].clone();
+            j += 1;
+        }
+        k += 1;
+    }
+    while i < left.len() {
+        items[k] = left[i].clone();
+        i += 1;
+        k += 1;
+    }
+    while j < right.len() {
+        items[k] = right[j].clone();
+        j += 1;
+        k += 1;
+    }
+    Ok(())
+}
+
 pub fn eval_universal_function(
     name: &str,
     pos_args: &[Value],
     kw_args: &BTreeMap<String, Value>,
+) -> Result<Option<Value>, StarlarkError> {
+    eval_universal_function_in(name, pos_args, kw_args, &Mutability::create())
+}
+
+pub fn eval_universal_function_in(
+    name: &str,
+    pos_args: &[Value],
+    kw_args: &BTreeMap<String, Value>,
+    mutability: &Arc<Mutability>,
 ) -> Result<Option<Value>, StarlarkError> {
     match name {
         "abs" => {
@@ -70,18 +322,18 @@ pub fn eval_universal_function(
             Ok(Some(Value::Bool(b)))
         }
         "dict" => {
-            let mut dict = StarlarkDict::new();
+            let mut dict = StarlarkDict::new_in(Arc::clone(mutability));
             if let Some(first) = pos_args.first() {
                 match first {
                     Value::Dict(d) => {
-                        let guard = d.lock().unwrap();
-                        for (k, v) in &guard.entries {
-                            let _ = dict.insert(k.clone(), v.clone());
+                        let entries = d.lock().unwrap().entries.clone();
+                        for (k, v) in entries {
+                            let _ = dict.insert(k, v);
                         }
                     }
                     Value::List(l) => {
-                        let guard = l.lock().unwrap();
-                        for item in &guard.elements {
+                        let elems = l.lock().unwrap().elements.clone();
+                        for item in &elems {
                             let (k, v) = unpack_pair(item)?;
                             dict.insert(k, v)?;
                         }
@@ -109,186 +361,18 @@ pub fn eval_universal_function(
             let x = pos_args
                 .first()
                 .ok_or_else(|| StarlarkError("dir() takes exactly one argument".to_string()))?;
-            let mut attrs = Vec::new();
-            match x {
-                Value::Struct(s) => {
-                    attrs.extend(s.fields.keys().cloned());
-                }
-                Value::Dict(_) => {
-                    attrs.extend(vec![
-                        "clear".to_string(),
-                        "get".to_string(),
-                        "items".to_string(),
-                        "keys".to_string(),
-                        "pop".to_string(),
-                        "popitem".to_string(),
-                        "setdefault".to_string(),
-                        "update".to_string(),
-                        "values".to_string(),
-                    ]);
-                }
-                Value::List(_) => {
-                    attrs.extend(vec![
-                        "append".to_string(),
-                        "clear".to_string(),
-                        "extend".to_string(),
-                        "index".to_string(),
-                        "insert".to_string(),
-                        "pop".to_string(),
-                        "remove".to_string(),
-                    ]);
-                }
-                Value::Set(_) => {
-                    attrs.extend(vec![
-                        "add".to_string(),
-                        "clear".to_string(),
-                        "difference".to_string(),
-                        "difference_update".to_string(),
-                        "discard".to_string(),
-                        "intersection".to_string(),
-                        "intersection_update".to_string(),
-                        "isdisjoint".to_string(),
-                        "issubset".to_string(),
-                        "issuperset".to_string(),
-                        "pop".to_string(),
-                        "remove".to_string(),
-                        "symmetric_difference".to_string(),
-                        "symmetric_difference_update".to_string(),
-                        "union".to_string(),
-                        "update".to_string(),
-                    ]);
-                }
-                Value::String(_) => {
-                    attrs.extend(vec![
-                        "capitalize".to_string(),
-                        "count".to_string(),
-                        "elems".to_string(),
-                        "endswith".to_string(),
-                        "find".to_string(),
-                        "format".to_string(),
-                        "index".to_string(),
-                        "isalnum".to_string(),
-                        "isalpha".to_string(),
-                        "isdigit".to_string(),
-                        "islower".to_string(),
-                        "isspace".to_string(),
-                        "istitle".to_string(),
-                        "isupper".to_string(),
-                        "join".to_string(),
-                        "lower".to_string(),
-                        "lstrip".to_string(),
-                        "partition".to_string(),
-                        "removeprefix".to_string(),
-                        "removesuffix".to_string(),
-                        "replace".to_string(),
-                        "rfind".to_string(),
-                        "rindex".to_string(),
-                        "rpartition".to_string(),
-                        "rsplit".to_string(),
-                        "rstrip".to_string(),
-                        "split".to_string(),
-                        "splitlines".to_string(),
-                        "startswith".to_string(),
-                        "strip".to_string(),
-                        "title".to_string(),
-                        "upper".to_string(),
-                    ]);
-                }
-                Value::Host(kind, _) => match kind.as_str() {
-                    "target" => {
-                        attrs.extend(vec![
-                            "actions".to_string(),
-                            "data_runfiles".to_string(),
-                            "default_runfiles".to_string(),
-                            "files".to_string(),
-                            "files_to_run".to_string(),
-                            "label".to_string(),
-                            "output_groups".to_string(),
-                        ]);
-                    }
-                    "repository_ctx" => {
-                        attrs.extend(vec![
-                            "attr".to_string(),
-                            "delete".to_string(),
-                            "download".to_string(),
-                            "download_and_extract".to_string(),
-                            "execute".to_string(),
-                            "extract".to_string(),
-                            "file".to_string(),
-                            "getenv".to_string(),
-                            "name".to_string(),
-                            "original_name".to_string(),
-                            "os".to_string(),
-                            "patch".to_string(),
-                            "path".to_string(),
-                            "read".to_string(),
-                            "rename".to_string(),
-                            "repo_metadata".to_string(),
-                            "report_progress".to_string(),
-                            "symlink".to_string(),
-                            "template".to_string(),
-                            "watch".to_string(),
-                            "watch_tree".to_string(),
-                            "which".to_string(),
-                            "workspace_root".to_string(),
-                        ]);
-                    }
-                    "module_ctx" => {
-                        attrs.extend(vec![
-                            "download".to_string(),
-                            "download_and_extract".to_string(),
-                            "execute".to_string(),
-                            "extension_metadata".to_string(),
-                            "extract".to_string(),
-                            "facts".to_string(),
-                            "file".to_string(),
-                            "getenv".to_string(),
-                            "is_dev_dependency".to_string(),
-                            "modules".to_string(),
-                            "os".to_string(),
-                            "path".to_string(),
-                            "read".to_string(),
-                            "report_progress".to_string(),
-                            "root_module_has_non_dev_dependency".to_string(),
-                            "tag_sort_key".to_string(),
-                            "watch".to_string(),
-                            "which".to_string(),
-                        ]);
-                    }
-                    "path" => {
-                        attrs.extend(vec![
-                            "basename".to_string(),
-                            "dirname".to_string(),
-                            "exists".to_string(),
-                            "get_child".to_string(),
-                            "is_dir".to_string(),
-                            "readdir".to_string(),
-                            "realpath".to_string(),
-                        ]);
-                    }
-                    "exec_result" => {
-                        attrs.extend(vec![
-                            "return_code".to_string(),
-                            "stderr".to_string(),
-                            "stdout".to_string(),
-                        ]);
-                    }
-                    "pending_download" => {
-                        attrs.extend(vec!["wait".to_string()]);
-                    }
-                    _ => {}
-                },
-                _ => {}
-            }
-            attrs.sort();
-            Ok(Some(Value::List(Arc::new(Mutex::new(StarlarkList::new(
-                attrs.into_iter().map(Value::String).collect(),
-            ))))))
+            let attrs = dir_attrs(x);
+            Ok(Some(Value::List(Arc::new(Mutex::new(
+                StarlarkList::new_in(
+                    attrs.into_iter().map(Value::String).collect(),
+                    Arc::clone(mutability),
+                ),
+            )))))
         }
         "enumerate" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("enumerate() takes at least 1 argument".to_string()))?;
+            let x = pos_args.first().ok_or_else(|| {
+                StarlarkError("enumerate() takes at least 1 argument".to_string())
+            })?;
             let start = pos_args
                 .get(1)
                 .or_else(|| kw_args.get("start"))
@@ -300,7 +384,9 @@ pub fn eval_universal_function(
                 let idx = BigInt::from_i64(start + i as i64);
                 pairs.push(Value::Tuple(vec![Value::Int(idx), item]));
             }
-            Ok(Some(Value::List(Arc::new(Mutex::new(StarlarkList::new(pairs))))))
+            Ok(Some(Value::List(Arc::new(Mutex::new(
+                StarlarkList::new_in(pairs, Arc::clone(mutability)),
+            )))))
         }
         "float" => {
             if pos_args.is_empty() {
@@ -334,13 +420,12 @@ pub fn eval_universal_function(
             Ok(Some(Value::Float(val)))
         }
         "getattr" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("getattr() requires at least 2 arguments".to_string()))?;
-            let name = pos_args
-                .get(1)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| StarlarkError("getattr() attribute name must be string".to_string()))?;
+            let x = pos_args.first().ok_or_else(|| {
+                StarlarkError("getattr() requires at least 2 arguments".to_string())
+            })?;
+            let name = pos_args.get(1).and_then(|v| v.as_str()).ok_or_else(|| {
+                StarlarkError("getattr() attribute name must be string".to_string())
+            })?;
             let default = pos_args
                 .get(2)
                 .cloned()
@@ -357,29 +442,49 @@ pub fn eval_universal_function(
                         }
                     }
                 },
-                Value::Dict(d) => {
-                    let guard = d.lock().unwrap();
-                    if let Some(val) = guard.get(&Value::String(name.to_string())) {
-                        Ok(Some(val.clone()))
-                    } else if let Some(def) = default {
-                        Ok(Some(def))
-                    } else {
-                        Err(StarlarkError(format!("attribute {name:?} not found")))
-                    }
-                }
                 Value::ProviderInstance { fields, .. } => match fields.get(name) {
                     Some(v) => Ok(Some(v.clone())),
                     None => match default {
                         Some(d) => Ok(Some(d)),
-                        None => Err(StarlarkError(format!("field '{name}' not found"))),
+                        None => {
+                            let dym = did_you_mean(name, fields.keys().map(|s| s.as_str()));
+                            Err(StarlarkError(format!(
+                                "'{}' value has no field or method '{name}'{dym}",
+                                x.type_name()
+                            )))
+                        }
+                    },
+                },
+                Value::Label(l) => match name {
+                    "name" => Ok(Some(Value::String(l.name().to_string()))),
+                    "package" => Ok(Some(Value::String(l.package_name().to_string()))),
+                    "repo_name" | "workspace_name" => {
+                        Ok(Some(Value::String(l.repository().name().to_string())))
+                    }
+                    "workspace_root" => Ok(Some(Value::String(if l.repository().is_main() {
+                        String::new()
+                    } else {
+                        format!("external/{}", l.repository().name())
+                    }))),
+                    _ => match default {
+                        Some(d) => Ok(Some(d)),
+                        None => {
+                            let attrs = dir_attrs(x);
+                            let dym = did_you_mean(name, attrs.iter().map(|s| s.as_str()));
+                            Err(StarlarkError(format!(
+                                "'Label' value has no field or method '{name}'{dym}"
+                            )))
+                        }
                     },
                 },
                 _ => {
                     if let Some(def) = default {
                         Ok(Some(def))
                     } else {
+                        let attrs = dir_attrs(x);
+                        let dym = did_you_mean(name, attrs.iter().map(|s| s.as_str()));
                         Err(StarlarkError(format!(
-                            "type '{}' has no attribute '{name}'",
+                            "'{}' value has no field or method '{name}'{dym}",
                             x.type_name()
                         )))
                     }
@@ -387,33 +492,27 @@ pub fn eval_universal_function(
             }
         }
         "hasattr" => {
-            let x = pos_args
-                .first()
-                .ok_or_else(|| StarlarkError("hasattr() requires at least 2 arguments".to_string()))?;
-            let name = pos_args
-                .get(1)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| StarlarkError("hasattr() attribute name must be string".to_string()))?;
+            let x = pos_args.first().ok_or_else(|| {
+                StarlarkError("hasattr() requires at least 2 arguments".to_string())
+            })?;
+            let name = pos_args.get(1).and_then(|v| v.as_str()).ok_or_else(|| {
+                StarlarkError("hasattr() attribute name must be string".to_string())
+            })?;
 
             let res = match x {
                 Value::Struct(s) => s.fields.contains_key(name),
-                Value::Dict(_) => [
-                    "clear", "get", "items", "keys", "pop", "popitem", "setdefault", "update", "values",
-                ]
-                .contains(&name),
+                Value::Dict(_) => DICT_METHODS.contains(&name),
                 Value::ProviderInstance { fields, .. } => fields.contains_key(name),
                 Value::Depset(_) => name == "to_list",
-                Value::Label(_) => ["relative", "package_relative", "same_package_label"].contains(&name),
-                Value::List(_) => ["append", "clear", "extend", "index", "insert", "pop", "remove"].contains(&name),
+                Value::Label(_) => LABEL_FIELDS.contains(&name) || LABEL_METHODS.contains(&name),
+                Value::List(_) => LIST_METHODS.contains(&name),
+                Value::Set(_) => SET_METHODS.contains(&name),
                 Value::Tuple(_) => false,
-                Value::String(_) => [
-                    "capitalize", "count", "elems", "endswith", "find", "format", "index", "isalnum",
-                    "isalpha", "isdigit", "islower", "isspace", "istitle", "isupper", "join", "lower",
-                    "lstrip", "partition", "removeprefix", "removesuffix", "replace", "rfind", "rindex",
-                    "rpartition", "rsplit", "rstrip", "split", "splitlines", "startswith", "strip",
-                    "title", "upper",
-                ]
-                .contains(&name),
+                Value::String(_) => STRING_METHODS.contains(&name),
+                Value::Host(kind, _) => match kind.as_str() {
+                    "dotted_version" => name == "compare_to" || name == "version",
+                    _ => false,
+                },
                 _ => false,
             };
             Ok(Some(Value::Bool(res)))
@@ -423,11 +522,15 @@ pub fn eval_universal_function(
                 Some(Value::String(s)) => s.as_str(),
                 Some(other) => {
                     return Err(StarlarkError(format!(
-                        "in call to hash(), parameter 'value' got value of type '{}', want 'string'",
-                        other.type_name()
-                    )))
+                    "in call to hash(), parameter 'value' got value of type '{}', want 'string'",
+                    other.type_name()
+                )))
                 }
-                None => return Err(StarlarkError("hash() missing 1 required positional argument: value".to_string())),
+                None => {
+                    return Err(StarlarkError(
+                        "hash() missing 1 required positional argument: value".to_string(),
+                    ))
+                }
             };
             // Deterministic Java String.hashCode() returning 32-bit integer
             let mut h: i32 = 0;
@@ -449,10 +552,7 @@ pub fn eval_universal_function(
             let val = match &pos_args[0] {
                 Value::Int(i) => i.clone(),
                 Value::Float(f) => {
-                    if f.is_nan() || f.is_infinite() {
-                        return Err(StarlarkError("cannot convert float NaN or Inf to int".to_string()));
-                    }
-                    BigInt::from_i64(*f as i64)
+                    crate::bigint::finite_double_to_int_exact(*f).map_err(StarlarkError)?
                 }
                 Value::Bool(b) => BigInt::from_u64(if *b { 1 } else { 0 }),
                 Value::String(s) => {
@@ -494,25 +594,40 @@ pub fn eval_universal_function(
         }
         "list" => {
             if pos_args.is_empty() {
-                return Ok(Some(Value::List(Arc::new(Mutex::new(StarlarkList::new(
-                    Vec::new(),
-                ))))));
+                return Ok(Some(Value::List(Arc::new(Mutex::new(
+                    StarlarkList::new_in(Vec::new(), Arc::clone(mutability)),
+                )))));
             }
             let items = value_to_sequence(&pos_args[0])?;
-            Ok(Some(Value::List(Arc::new(Mutex::new(StarlarkList::new(
-                items,
-            ))))))
+            Ok(Some(Value::List(Arc::new(Mutex::new(
+                StarlarkList::new_in(items, Arc::clone(mutability)),
+            )))))
         }
         "max" => {
+            for k in kw_args.keys() {
+                if k != "key" {
+                    return Err(StarlarkError(format!(
+                        "max() got unexpected keyword argument: {k}"
+                    )));
+                }
+            }
             let items = if pos_args.len() == 1 {
                 value_to_sequence(&pos_args[0])?
             } else if pos_args.is_empty() {
-                return Err(StarlarkError("max() expected at least 1 argument, got 0".to_string()));
+                return Err(StarlarkError("expected at least one item".to_string()));
             } else {
                 pos_args.to_vec()
             };
             if items.is_empty() {
-                return Err(StarlarkError("max() arg is an empty sequence".to_string()));
+                return Err(StarlarkError("expected at least one item".to_string()));
+            }
+            if let Some(k) = kw_args.get("key") {
+                if !matches!(k, Value::None) && !is_callable(k) {
+                    return Err(StarlarkError(format!(
+                        "parameter 'key' got value of type '{}', want 'callable or NoneType'",
+                        k.type_name()
+                    )));
+                }
             }
             let mut max_item = items[0].clone();
             for item in &items[1..] {
@@ -523,15 +638,30 @@ pub fn eval_universal_function(
             Ok(Some(max_item))
         }
         "min" => {
+            for k in kw_args.keys() {
+                if k != "key" {
+                    return Err(StarlarkError(format!(
+                        "min() got unexpected keyword argument: {k}"
+                    )));
+                }
+            }
             let items = if pos_args.len() == 1 {
                 value_to_sequence(&pos_args[0])?
             } else if pos_args.is_empty() {
-                return Err(StarlarkError("min() expected at least 1 argument, got 0".to_string()));
+                return Err(StarlarkError("expected at least one item".to_string()));
             } else {
                 pos_args.to_vec()
             };
             if items.is_empty() {
-                return Err(StarlarkError("min() arg is an empty sequence".to_string()));
+                return Err(StarlarkError("expected at least one item".to_string()));
+            }
+            if let Some(k) = kw_args.get("key") {
+                if !matches!(k, Value::None) && !is_callable(k) {
+                    return Err(StarlarkError(format!(
+                        "parameter 'key' got value of type '{}', want 'callable or NoneType'",
+                        k.type_name()
+                    )));
+                }
             }
             let mut min_item = items[0].clone();
             for item in &items[1..] {
@@ -554,7 +684,11 @@ pub fn eval_universal_function(
                     stop_val.as_i64().unwrap_or(0),
                     step_val.as_i64().unwrap_or(1),
                 ),
-                _ => return Err(StarlarkError("range() requires 1 to 3 arguments".to_string())),
+                _ => {
+                    return Err(StarlarkError(
+                        "range() requires 1 to 3 arguments".to_string(),
+                    ))
+                }
             };
             let r = RangeList::new(start, stop, step)?;
             Ok(Some(Value::Range(r)))
@@ -569,11 +703,15 @@ pub fn eval_universal_function(
                 .ok_or_else(|| StarlarkError("reversed() requires 1 argument".to_string()))?;
             let mut items = value_to_sequence(x)?;
             items.reverse();
-            Ok(Some(Value::List(Arc::new(Mutex::new(StarlarkList::new(items))))))
+            Ok(Some(Value::List(Arc::new(Mutex::new(
+                StarlarkList::new_in(items, Arc::clone(mutability)),
+            )))))
         }
         "set" => {
             if pos_args.is_empty() {
-                return Ok(Some(Value::Set(Arc::new(Mutex::new(StarlarkSet::new())))));
+                return Ok(Some(Value::Set(Arc::new(Mutex::new(StarlarkSet::new_in(
+                    Arc::clone(mutability),
+                ))))));
             }
             if pos_args.len() > 1 {
                 return Err(StarlarkError(
@@ -581,10 +719,17 @@ pub fn eval_universal_function(
                 ));
             }
             let items = value_to_sequence(&pos_args[0])?;
-            let s = StarlarkSet::from_elements(items)?;
+            let s = StarlarkSet::from_elements_in(items, Arc::clone(mutability))?;
             Ok(Some(Value::Set(Arc::new(Mutex::new(s)))))
         }
         "sorted" => {
+            for k in kw_args.keys() {
+                if k != "key" && k != "reverse" {
+                    return Err(StarlarkError(format!(
+                        "sorted() got unexpected keyword argument: {k}"
+                    )));
+                }
+            }
             let x = pos_args
                 .first()
                 .ok_or_else(|| StarlarkError("sorted() requires 1 argument".to_string()))?;
@@ -592,17 +737,22 @@ pub fn eval_universal_function(
                 .get("reverse")
                 .map(|v| v.is_truthy())
                 .unwrap_or(false);
-            let mut items = value_to_sequence(x)?;
-            // Stable sort
-            items.sort_by(|a, b| {
-                let ord = compare_values(a, b).unwrap_or(Ordering::Equal);
-                if reverse {
-                    ord.reverse()
-                } else {
-                    ord
+            if let Some(k) = kw_args.get("key") {
+                if !matches!(k, Value::None) && !is_callable(k) {
+                    return Err(StarlarkError(format!(
+                        "parameter 'key' got value of type '{}', want 'callable or NoneType'",
+                        k.type_name()
+                    )));
                 }
-            });
-            Ok(Some(Value::List(Arc::new(Mutex::new(StarlarkList::new(items))))))
+            }
+            let mut items = value_to_sequence(x)?;
+            fallible_merge_sort(&mut items, &mut |a, b| {
+                let ord = compare_values(a, b)?;
+                Ok(if reverse { ord.reverse() } else { ord })
+            })?;
+            Ok(Some(Value::List(Arc::new(Mutex::new(
+                StarlarkList::new_in(items, Arc::clone(mutability)),
+            )))))
         }
         "str" => {
             let s = match pos_args.first() {
@@ -627,9 +777,9 @@ pub fn eval_universal_function(
         }
         "zip" => {
             if pos_args.is_empty() {
-                return Ok(Some(Value::List(Arc::new(Mutex::new(StarlarkList::new(
-                    Vec::new(),
-                ))))));
+                return Ok(Some(Value::List(Arc::new(Mutex::new(
+                    StarlarkList::new_in(Vec::new(), Arc::clone(mutability)),
+                )))));
             }
             let mut seqs = Vec::new();
             for arg in pos_args {
@@ -641,7 +791,9 @@ pub fn eval_universal_function(
                 let tuple_items: Vec<Value> = seqs.iter().map(|s| s[i].clone()).collect();
                 out.push(Value::Tuple(tuple_items));
             }
-            Ok(Some(Value::List(Arc::new(Mutex::new(StarlarkList::new(out))))))
+            Ok(Some(Value::List(Arc::new(Mutex::new(
+                StarlarkList::new_in(out, Arc::clone(mutability)),
+            )))))
         }
         _ => Ok(None),
     }
@@ -652,7 +804,11 @@ pub fn value_to_sequence(val: &Value) -> Result<Vec<Value>, StarlarkError> {
         Value::List(l) => Ok(l.lock().unwrap().elements.clone()),
         Value::Tuple(t) => Ok(t.clone()),
         Value::Set(s) => Ok(s.lock().unwrap().elements.clone()),
-        Value::Range(r) => Ok(r.to_vec().into_iter().map(|i| Value::Int(BigInt::from_i64(i))).collect()),
+        Value::Range(r) => Ok(r
+            .to_vec()
+            .into_iter()
+            .map(|i| Value::Int(BigInt::from_i64(i)))
+            .collect()),
         Value::Dict(d) => Ok(d.lock().unwrap().keys()),
         Value::String(s) => Ok(s.chars().map(|c| Value::String(c.to_string())).collect()),
         other => Err(StarlarkError(format!(
@@ -669,17 +825,23 @@ pub fn unpack_pair(item: &Value) -> Result<(Value, Value), StarlarkError> {
             if guard.elements.len() == 2 {
                 Ok((guard.elements[0].clone(), guard.elements[1].clone()))
             } else {
-                Err(StarlarkError("dictionary item must be a 2-element sequence".to_string()))
+                Err(StarlarkError(
+                    "dictionary item must be a 2-element sequence".to_string(),
+                ))
             }
         }
         Value::Tuple(t) => {
             if t.len() == 2 {
                 Ok((t[0].clone(), t[1].clone()))
             } else {
-                Err(StarlarkError("dictionary item must be a 2-element sequence".to_string()))
+                Err(StarlarkError(
+                    "dictionary item must be a 2-element sequence".to_string(),
+                ))
             }
         }
-        _ => Err(StarlarkError("dictionary item must be a 2-element sequence".to_string())),
+        _ => Err(StarlarkError(
+            "dictionary item must be a 2-element sequence".to_string(),
+        )),
     }
 }
 
@@ -697,41 +859,40 @@ pub fn compare_values(a: &Value, b: &Value) -> Result<Ordering, StarlarkError> {
                 Ok(f1.partial_cmp(f2).unwrap_or(Ordering::Equal))
             }
         }
-        (Value::Int(i), Value::Float(f)) => {
-            if f.is_nan() {
-                Ok(Ordering::Less)
-            } else {
-                let f_int = BigInt::from_i64(*f as i64);
-                Ok(i.cmp(&f_int))
-            }
-        }
+        (Value::Int(i), Value::Float(f)) => Ok(crate::bigint::compare_int_and_float(i, *f)),
         (Value::Float(f), Value::Int(i)) => {
-            if f.is_nan() {
-                Ok(Ordering::Greater)
-            } else {
-                let f_int = BigInt::from_i64(*f as i64);
-                Ok(f_int.cmp(i))
-            }
+            Ok(crate::bigint::compare_int_and_float(i, *f).reverse())
         }
-        (Value::String(s1), Value::String(s2)) => Ok(s1.cmp(s2)),
+        (Value::String(s1), Value::String(s2)) => Ok(s1.encode_utf16().cmp(s2.encode_utf16())),
         (Value::Bool(b1), Value::Bool(b2)) => Ok(b1.cmp(b2)),
         // Apple `DottedVersion` host objects are comparable.
-        (Value::Host(k1, v1), Value::Host(k2, v2)) if k1 == "dotted_version" && k2 == "dotted_version" => {
+        (Value::Host(k1, v1), Value::Host(k2, v2))
+            if k1 == "dotted_version" && k2 == "dotted_version" =>
+        {
             Ok(dotted_version_cmp(v1, v2))
         }
         (Value::List(l1), Value::List(l2)) => {
-            let g1 = l1.lock().unwrap();
-            let g2 = l2.lock().unwrap();
-            for (x, y) in g1.elements.iter().zip(g2.elements.iter()) {
+            if Arc::ptr_eq(l1, l2) {
+                return Ok(Ordering::Equal);
+            }
+            let e1 = l1.lock().unwrap().elements.clone();
+            let e2 = l2.lock().unwrap().elements.clone();
+            for (x, y) in e1.iter().zip(e2.iter()) {
+                if x == y {
+                    continue;
+                }
                 let ord = compare_values(x, y)?;
                 if ord != Ordering::Equal {
                     return Ok(ord);
                 }
             }
-            Ok(g1.elements.len().cmp(&g2.elements.len()))
+            Ok(e1.len().cmp(&e2.len()))
         }
         (Value::Tuple(t1), Value::Tuple(t2)) => {
             for (x, y) in t1.iter().zip(t2.iter()) {
+                if x == y {
+                    continue;
+                }
                 let ord = compare_values(x, y)?;
                 if ord != Ordering::Equal {
                     return Ok(ord);
@@ -777,4 +938,56 @@ pub fn dotted_version_cmp(a: &str, b: &str) -> Ordering {
         }
     }
     Ordering::Equal
+}
+
+pub fn is_callable(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::UserFunction(_)
+            | Value::BuiltinFunction(_)
+            | Value::Provider { .. }
+            | Value::RuleCallable { .. }
+    ) || matches!(
+        v,
+        Value::Host(k, _)
+            if matches!(
+                k.as_str(),
+                "provider" | "provider_raw" | "rule" | "repository_rule" | "module_extension" | "aspect" | "tag_class"
+            )
+    )
+}
+
+/// Stable merge sort over `(key, item)` pairs that propagates comparison errors cleanly.
+pub fn merge_sort_keyed(
+    mut items: Vec<(Value, Value)>,
+    reverse: bool,
+) -> Result<Vec<(Value, Value)>, StarlarkError> {
+    let n = items.len();
+    if n <= 1 {
+        return Ok(items);
+    }
+    let mid = n / 2;
+    let right = merge_sort_keyed(items.split_off(mid), reverse)?;
+    let left = merge_sort_keyed(items, reverse)?;
+    let mut out = Vec::with_capacity(n);
+    let mut li = 0;
+    let mut ri = 0;
+    while li < left.len() && ri < right.len() {
+        let ord = compare_values(&left[li].0, &right[ri].0)?;
+        let take_left = if reverse {
+            ord != Ordering::Less
+        } else {
+            ord != Ordering::Greater
+        };
+        if take_left {
+            out.push(left[li].clone());
+            li += 1;
+        } else {
+            out.push(right[ri].clone());
+            ri += 1;
+        }
+    }
+    out.extend_from_slice(&left[li..]);
+    out.extend_from_slice(&right[ri..]);
+    Ok(out)
 }

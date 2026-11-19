@@ -126,7 +126,10 @@ impl Json {
     }
 
     pub fn parse(s: &str) -> Result<Json, String> {
-        let mut p = Parser { b: s.as_bytes(), i: 0 };
+        let mut p = Parser {
+            b: s.as_bytes(),
+            i: 0,
+        };
         p.ws();
         let v = p.value()?;
         p.ws();
@@ -333,7 +336,9 @@ impl Parser<'_> {
                                     {
                                         self.i += 2;
                                         let lo = self.hex4()?;
-                                        cp = 0x10000 + ((cp - 0xD800) << 10) + (lo.wrapping_sub(0xDC00));
+                                        cp = 0x10000
+                                            + ((cp - 0xD800) << 10)
+                                            + (lo.wrapping_sub(0xDC00));
                                     }
                                     let ch = char::from_u32(cp).unwrap_or('\u{fffd}');
                                     let mut buf = [0u8; 4];
@@ -363,11 +368,16 @@ impl Parser<'_> {
                 let st = self.i;
                 self.i += 1;
                 while self.i < self.b.len()
-                    && matches!(self.b[self.i], b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-')
+                    && matches!(
+                        self.b[self.i],
+                        b'0'..=b'9' | b'.' | b'e' | b'E' | b'+' | b'-'
+                    )
                 {
                     self.i += 1;
                 }
-                Ok(Json::Num(String::from_utf8_lossy(&self.b[st..self.i]).into_owned()))
+                Ok(Json::Num(
+                    String::from_utf8_lossy(&self.b[st..self.i]).into_owned(),
+                ))
             }
             _ => self.err("unexpected character"),
         }

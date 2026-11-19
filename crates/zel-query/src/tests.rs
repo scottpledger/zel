@@ -44,7 +44,9 @@ sh_test = rule(implementation = _bin, test = True, attrs = _attrs)
 "#;
 
 fn uses_shell_rules(c: &str) -> bool {
-    ["sh_binary(", "sh_test(", "sh_library("].iter().any(|n| c.contains(n))
+    ["sh_binary(", "sh_test(", "sh_library("]
+        .iter()
+        .any(|n| c.contains(n))
 }
 
 /// Prepends `load()`s for the `sh_*` rules a BUILD file uses.
@@ -52,7 +54,10 @@ pub(crate) fn shell_loads(path: &str, content: &str) -> String {
     if !(path == "BUILD" || path.ends_with("/BUILD")) || !uses_shell_rules(content) {
         return content.to_string();
     }
-    let mut used: Vec<&str> = ["sh_binary", "sh_test", "sh_library"].into_iter().filter(|n| content.contains(&format!("{n}("))).collect();
+    let mut used: Vec<&str> = ["sh_binary", "sh_test", "sh_library"]
+        .into_iter()
+        .filter(|n| content.contains(&format!("{n}(")))
+        .collect();
     used.sort();
     let names: Vec<String> = used.iter().map(|n| format!("\"{n}\"")).collect();
     format!("load(\"//shstub:sh.bzl\", {})\n{content}", names.join(", "))
@@ -70,22 +75,43 @@ impl Ws {
         fs.create_directory_and_parents(&root).unwrap();
         let ws = Ws { fs, root };
         let bt_root = PathFragment::create("/embedded_tools");
-        ws.fs.create_directory_and_parents(&bt_root.get_relative_str("tools/genrule")).unwrap();
-        ws.fs.write_file(&bt_root.get_relative_str("tools/genrule/BUILD"), b"exports_files(['genrule-setup.sh'])\n").unwrap();
-        ws.fs.write_file(&bt_root.get_relative_str("tools/genrule/genrule-setup.sh"), b"#!/bin/sh\n").unwrap();
-        ws.fs.write_file(&bt_root.get_relative_str("WORKSPACE"), b"").unwrap();
+        ws.fs
+            .create_directory_and_parents(&bt_root.get_relative_str("tools/genrule"))
+            .unwrap();
+        ws.fs
+            .write_file(
+                &bt_root.get_relative_str("tools/genrule/BUILD"),
+                b"exports_files(['genrule-setup.sh'])\n",
+            )
+            .unwrap();
+        ws.fs
+            .write_file(
+                &bt_root.get_relative_str("tools/genrule/genrule-setup.sh"),
+                b"#!/bin/sh\n",
+            )
+            .unwrap();
+        ws.fs
+            .write_file(&bt_root.get_relative_str("WORKSPACE"), b"")
+            .unwrap();
         for (p, c) in files {
             let path = ws.root.get_relative_str(p);
-            ws.fs.create_directory_and_parents(&path.parent_directory().unwrap()).unwrap();
+            ws.fs
+                .create_directory_and_parents(&path.parent_directory().unwrap())
+                .unwrap();
             let content = shell_loads(p, c);
             ws.fs.write_file(&path, content.as_bytes()).unwrap();
         }
-        if files.iter().any(|(p, c)| (*p == "BUILD" || p.ends_with("/BUILD")) && uses_shell_rules(c)) {
+        if files
+            .iter()
+            .any(|(p, c)| (*p == "BUILD" || p.ends_with("/BUILD")) && uses_shell_rules(c))
+        {
             // Bazel 9 has no native `sh_*` rules; in-memory workspaces get a stand-in for `@rules_shell`.
             let d = ws.root.get_relative_str("shstub");
             ws.fs.create_directory_and_parents(&d).unwrap();
             ws.fs.write_file(&d.get_relative_str("BUILD"), b"").unwrap();
-            ws.fs.write_file(&d.get_relative_str("sh.bzl"), SH_STUB.as_bytes()).unwrap();
+            ws.fs
+                .write_file(&d.get_relative_str("sh.bzl"), SH_STUB.as_bytes())
+                .unwrap();
         }
         ws
     }
@@ -94,19 +120,34 @@ impl Ws {
         let mut repos = SimpleRepoResolver::new(self.root.clone());
         let bt_root = PathFragment::create("/embedded_tools");
         repos.external.insert("bazel_tools".to_string(), bt_root);
-        repos.apparent.insert("bazel_tools".to_string(), zel_cmdline::RepositoryName::bazel_tools());
+        repos.apparent.insert(
+            "bazel_tools".to_string(),
+            zel_cmdline::RepositoryName::bazel_tools(),
+        );
         let cfg = LoaderConfig::new(self.fs.clone(), Arc::new(repos));
         PatternResolver::new(PackageLoader::new(cfg), PathFragment::empty())
     }
 
-    pub(crate) fn post(&self, expr: &str, configure: impl FnOnce(&mut QueryOpts, &mut FormatOpts, &mut PostOpts)) -> PostOutcome {
+    pub(crate) fn post(
+        &self,
+        expr: &str,
+        configure: impl FnOnce(&mut QueryOpts, &mut FormatOpts, &mut PostOpts),
+    ) -> PostOutcome {
         let resolver = self.resolver();
         let tr = TargetResolver::new(resolver.loader().clone(), AnalysisConfig::default());
         let mut qopts = QueryOpts::default();
         let mut fopts = FormatOpts::default();
         let mut popts = PostOpts::default();
         configure(&mut qopts, &mut fopts, &mut popts);
-        run_post_analysis(&resolver, tr, BuildConfigurationKey::default(), expr, &qopts, &fopts, &popts)
+        run_post_analysis(
+            &resolver,
+            tr,
+            BuildConfigurationKey::default(),
+            expr,
+            &qopts,
+            &fopts,
+            &popts,
+        )
     }
 }
 
@@ -133,7 +174,11 @@ pub(crate) fn tree() -> Ws {
     ])
 }
 
-pub(crate) fn q(ws: &Ws, expr: &str, extra: impl FnOnce(&mut QueryOpts, &mut FormatOpts)) -> QueryOutcome {
+pub(crate) fn q(
+    ws: &Ws,
+    expr: &str,
+    extra: impl FnOnce(&mut QueryOpts, &mut FormatOpts),
+) -> QueryOutcome {
     let resolver = ws.resolver();
     let mut o = QueryOpts::default();
     let mut f = FormatOpts::default();
@@ -142,7 +187,10 @@ pub(crate) fn q(ws: &Ws, expr: &str, extra: impl FnOnce(&mut QueryOpts, &mut For
 }
 
 pub(crate) fn lines(o: &QueryOutcome) -> Vec<String> {
-    String::from_utf8_lossy(&o.stdout).lines().map(|s| s.to_string()).collect()
+    String::from_utf8_lossy(&o.stdout)
+        .lines()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn ql(ws: &Ws, expr: &str) -> Vec<String> {
@@ -154,7 +202,17 @@ fn ql(ws: &Ws, expr: &str) -> Vec<String> {
 #[test]
 fn labels_and_sorted_default_order() {
     let ws = tree();
-    assert_eq!(ql(&ws, "//app:all"), vec!["//app:all_tests", "//app:app", "//app:app_test", "//app:other", "//app:slow_test", "//app:suite"]);
+    assert_eq!(
+        ql(&ws, "//app:all"),
+        vec![
+            "//app:all_tests",
+            "//app:app",
+            "//app:app_test",
+            "//app:other",
+            "//app:slow_test",
+            "//app:suite"
+        ]
+    );
     assert_eq!(ql(&ws, "//lib:l + //app:app"), vec!["//app:app", "//lib:l"]);
     // Residue words joined by the command: operators without quotes.
     assert_eq!(ql(&ws, "//lib:all - //lib:l"), vec!["//lib:fg"]);
@@ -165,13 +223,33 @@ fn deps_cross_package_and_depth() {
     let ws = tree();
     assert_eq!(
         ql(&ws, "deps(//app:other)"),
-        vec!["//app:app", "//app:in.txt", "//app:other", "//lib:data.txt", "//lib:l", "@@bazel_tools//tools/genrule:genrule-setup.sh"]
+        vec![
+            "//app:app",
+            "//app:in.txt",
+            "//app:other",
+            "//lib:data.txt",
+            "//lib:l",
+            "@@bazel_tools//tools/genrule:genrule-setup.sh"
+        ]
     );
     assert_eq!(ql(&ws, "deps(//app:other, 0)"), vec!["//app:other"]);
-    assert_eq!(ql(&ws, "deps(//app:other, 1)"), vec!["//app:app", "//app:other", "@@bazel_tools//tools/genrule:genrule-setup.sh"]);
+    assert_eq!(
+        ql(&ws, "deps(//app:other, 1)"),
+        vec![
+            "//app:app",
+            "//app:other",
+            "@@bazel_tools//tools/genrule:genrule-setup.sh"
+        ]
+    );
     assert_eq!(
         ql(&ws, "deps(//app:other, 2)"),
-        vec!["//app:app", "//app:in.txt", "//app:other", "//lib:l", "@@bazel_tools//tools/genrule:genrule-setup.sh"]
+        vec![
+            "//app:app",
+            "//app:in.txt",
+            "//app:other",
+            "//lib:l",
+            "@@bazel_tools//tools/genrule:genrule-setup.sh"
+        ]
     );
 }
 
@@ -182,14 +260,40 @@ fn rdeps_and_allrdeps() {
         ql(&ws, "rdeps(//app:other, //lib:l)"),
         vec!["//app:app", "//app:other", "//lib:l"]
     );
-    assert_eq!(ql(&ws, "rdeps(//app:other, //lib:l, 1)"), vec!["//app:app", "//lib:l"]);
-    let o = q(&ws, "allrdeps(//lib:l)", |o, _| o.infer_universe_scope = true);
-    assert_eq!(lines(&o), vec!["//lib:l"], "the universe is inferred from the expression's patterns");
+    assert_eq!(
+        ql(&ws, "rdeps(//app:other, //lib:l, 1)"),
+        vec!["//app:app", "//lib:l"]
+    );
+    let o = q(&ws, "allrdeps(//lib:l)", |o, _| {
+        o.infer_universe_scope = true
+    });
+    assert_eq!(
+        lines(&o),
+        vec!["//lib:l"],
+        "the universe is inferred from the expression's patterns"
+    );
     let o = q(&ws, "allrdeps(//lib:l)", |_, _| {});
-    assert_eq!(o.exit_code, 2, "allrdeps only exists in SkyQuery mode (universe scope + streamed output)");
-    let o = q(&ws, "allrdeps(//lib:l)", |o, _| o.universe_scope = vec!["//app:all".into()]);
-    assert_eq!(lines(&o), vec!["//app:all_tests", "//app:app", "//app:app_test", "//app:other", "//app:suite", "//lib:l"]);
-    let o = q(&ws, "allrdeps(//lib:l, 1)", |o, _| o.universe_scope = vec!["//...".into()]);
+    assert_eq!(
+        o.exit_code, 2,
+        "allrdeps only exists in SkyQuery mode (universe scope + streamed output)"
+    );
+    let o = q(&ws, "allrdeps(//lib:l)", |o, _| {
+        o.universe_scope = vec!["//app:all".into()]
+    });
+    assert_eq!(
+        lines(&o),
+        vec![
+            "//app:all_tests",
+            "//app:app",
+            "//app:app_test",
+            "//app:other",
+            "//app:suite",
+            "//lib:l"
+        ]
+    );
+    let o = q(&ws, "allrdeps(//lib:l, 1)", |o, _| {
+        o.universe_scope = vec!["//...".into()]
+    });
     assert_eq!(lines(&o), vec!["//app:app", "//lib:fg", "//lib:l"]);
 }
 
@@ -197,11 +301,18 @@ fn rdeps_and_allrdeps() {
 fn paths() {
     let ws = tree();
     assert_eq!(
-        lines(&q(&ws, "somepath(//app:other, //lib:l)", |_, f| f.order = OrderOutput::No)),
+        lines(&q(&ws, "somepath(//app:other, //lib:l)", |_, f| f.order =
+            OrderOutput::No)),
         vec!["//app:other", "//app:app", "//lib:l"]
     );
-    assert_eq!(ql(&ws, "somepath(//app:other, //lib:l)"), vec!["//app:other", "//app:app", "//lib:l"]);
-    assert_eq!(ql(&ws, "somepath(//lib:l, //app:other)"), Vec::<String>::new());
+    assert_eq!(
+        ql(&ws, "somepath(//app:other, //lib:l)"),
+        vec!["//app:other", "//app:app", "//lib:l"]
+    );
+    assert_eq!(
+        ql(&ws, "somepath(//lib:l, //app:other)"),
+        Vec::<String>::new()
+    );
     assert_eq!(
         ql(&ws, "allpaths(//app:other, //lib:data.txt)"),
         vec!["//app:app", "//app:other", "//lib:data.txt", "//lib:l"]
@@ -211,17 +322,42 @@ fn paths() {
 #[test]
 fn filters() {
     let ws = tree();
-    assert_eq!(ql(&ws, "kind('genrule rule', //app:all)"), vec!["//app:app", "//app:other"]);
-    assert_eq!(ql(&ws, "kind('source file', deps(//app:app))"), vec!["//app:in.txt", "//lib:data.txt", "@@bazel_tools//tools/genrule:genrule-setup.sh"]);
-    assert_eq!(ql(&ws, "filter('_test$', //app:all)"), vec!["//app:app_test", "//app:slow_test"]);
+    assert_eq!(
+        ql(&ws, "kind('genrule rule', //app:all)"),
+        vec!["//app:app", "//app:other"]
+    );
+    assert_eq!(
+        ql(&ws, "kind('source file', deps(//app:app))"),
+        vec![
+            "//app:in.txt",
+            "//lib:data.txt",
+            "@@bazel_tools//tools/genrule:genrule-setup.sh"
+        ]
+    );
+    assert_eq!(
+        ql(&ws, "filter('_test$', //app:all)"),
+        vec!["//app:app_test", "//app:slow_test"]
+    );
     // test_suite and Starlark test rules (`sh_test` from @rules_shell) are testonly by default.
     assert_eq!(
         ql(&ws, "attr(testonly, 1, //app:all)"),
-        vec!["//app:all_tests", "//app:app_test", "//app:other", "//app:slow_test", "//app:suite"]
+        vec![
+            "//app:all_tests",
+            "//app:app_test",
+            "//app:other",
+            "//app:slow_test",
+            "//app:suite"
+        ]
     );
     assert_eq!(ql(&ws, "attr(tags, 'manual', //lib:all)"), vec!["//lib:fg"]);
-    assert_eq!(ql(&ws, "attr(tags, '\\bslow\\b', //app:all)"), vec!["//app:slow_test", "//app:suite"]);
-    assert_eq!(ql(&ws, "attr(srcs, 'in\\.txt', //app:all)"), vec!["//app:app"]);
+    assert_eq!(
+        ql(&ws, "attr(tags, '\\bslow\\b', //app:all)"),
+        vec!["//app:slow_test", "//app:suite"]
+    );
+    assert_eq!(
+        ql(&ws, "attr(srcs, 'in\\.txt', //app:all)"),
+        vec!["//app:app"]
+    );
 }
 
 #[test]
@@ -238,47 +374,94 @@ fn regex_errors_report_java_message() {
 #[test]
 fn labels_function_and_some() {
     let ws = tree();
-    assert_eq!(ql(&ws, "labels(srcs, //app:app)"), vec!["//app:in.txt", "//lib:l"]);
+    assert_eq!(
+        ql(&ws, "labels(srcs, //app:app)"),
+        vec!["//app:in.txt", "//lib:l"]
+    );
     assert_eq!(ql(&ws, "labels(deps, //app:app_test)"), vec!["//app:app"]);
     assert_eq!(ql(&ws, "some(//app:all)").len(), 1);
     let o = q(&ws, "some(//app:all - //app:all)", |_, _| {});
     assert_eq!(o.exit_code, 7);
-    assert!(o.stderr[0].contains("failed (did you want to use --keep_going?): argument set is empty") || o.stderr[0].contains("argument set is empty"), "{:?}", o.stderr);
+    assert!(
+        o.stderr[0].contains("failed (did you want to use --keep_going?): argument set is empty")
+            || o.stderr[0].contains("argument set is empty"),
+        "{:?}",
+        o.stderr
+    );
 }
 
 #[test]
 fn tests_function_expands_suites() {
     let ws = tree();
     assert_eq!(ql(&ws, "tests(//app:suite)"), vec!["//app:app_test"]);
-    assert_eq!(ql(&ws, "tests(//app:all_tests)"), vec!["//app:app_test", "//app:slow_test"]);
-    assert_eq!(ql(&ws, "tests(//app:all)"), vec!["//app:app_test", "//app:slow_test"]);
+    assert_eq!(
+        ql(&ws, "tests(//app:all_tests)"),
+        vec!["//app:app_test", "//app:slow_test"]
+    );
+    assert_eq!(
+        ql(&ws, "tests(//app:all)"),
+        vec!["//app:app_test", "//app:slow_test"]
+    );
 }
 
 #[test]
 fn siblings_and_same_pkg_direct_rdeps() {
     let ws = tree();
-    assert_eq!(ql(&ws, "siblings(//lib:l)"), vec!["//lib:BUILD", "//lib:data.txt", "//lib:fg", "//lib:l", "//lib:l.out"]);
-    assert_eq!(ql(&ws, "same_pkg_direct_rdeps(//app:app)"), vec!["//app:app.out", "//app:app_test", "//app:other"]);
+    assert_eq!(
+        ql(&ws, "siblings(//lib:l)"),
+        vec![
+            "//lib:BUILD",
+            "//lib:data.txt",
+            "//lib:fg",
+            "//lib:l",
+            "//lib:l.out"
+        ]
+    );
+    assert_eq!(
+        ql(&ws, "same_pkg_direct_rdeps(//app:app)"),
+        vec!["//app:app.out", "//app:app_test", "//app:other"]
+    );
 }
 
 #[test]
 fn buildfiles_and_visible() {
     let ws = tree();
     // `sh_*` rules are loaded from a .bzl (the `@rules_shell` stand-in `//shstub:sh.bzl`).
-    assert_eq!(ql(&ws, "buildfiles(//app:app)"), vec!["//app:BUILD", "//shstub:BUILD", "//shstub:sh.bzl"]);
+    assert_eq!(
+        ql(&ws, "buildfiles(//app:app)"),
+        vec!["//app:BUILD", "//shstub:BUILD", "//shstub:sh.bzl"]
+    );
     assert!(ql(&ws, "visible(//app:app, //lib:all)").contains(&"//lib:l".to_string()));
 }
 
 #[test]
 fn let_set_and_operators() {
     let ws = tree();
-    assert_eq!(ql(&ws, "let x = //lib:l in deps(//app:app) - $x"), vec!["//app:app", "//app:in.txt", "//lib:data.txt", "@@bazel_tools//tools/genrule:genrule-setup.sh"]);
-    assert_eq!(ql(&ws, "set(//lib:l //app:app)"), vec!["//app:app", "//lib:l"]);
+    assert_eq!(
+        ql(&ws, "let x = //lib:l in deps(//app:app) - $x"),
+        vec![
+            "//app:app",
+            "//app:in.txt",
+            "//lib:data.txt",
+            "@@bazel_tools//tools/genrule:genrule-setup.sh"
+        ]
+    );
+    assert_eq!(
+        ql(&ws, "set(//lib:l //app:app)"),
+        vec!["//app:app", "//lib:l"]
+    );
     assert_eq!(ql(&ws, "//lib:all ^ //lib:l"), vec!["//lib:l"]);
-    assert_eq!(ql(&ws, "//lib:l union //app:app except //app:app"), vec!["//lib:l"]);
+    assert_eq!(
+        ql(&ws, "//lib:l union //app:app except //app:app"),
+        vec!["//lib:l"]
+    );
     let o = q(&ws, "deps($x)", |_, _| {});
     assert_eq!(o.exit_code, 7);
-    assert!(o.stderr[0].contains("undefined variable 'x'"), "{:?}", o.stderr);
+    assert!(
+        o.stderr[0].contains("undefined variable 'x'"),
+        "{:?}",
+        o.stderr
+    );
 }
 
 #[test]
@@ -286,7 +469,10 @@ fn syntax_errors_exit_2() {
     let ws = tree();
     let o = q(&ws, "deps(//app:app", |_, _| {});
     assert_eq!(o.exit_code, 2);
-    assert_eq!(o.stderr, vec!["ERROR: Error while parsing 'deps(//app:app': premature end of input"]);
+    assert_eq!(
+        o.stderr,
+        vec!["ERROR: Error while parsing 'deps(//app:app': premature end of input"]
+    );
     let o = q(&ws, "kind(//a)", |_, _| {});
     assert_eq!(o.exit_code, 2);
 }
@@ -296,8 +482,16 @@ fn missing_targets_report_errors() {
     let ws = tree();
     let o = q(&ws, "//app:nope", |_, _| {});
     assert_eq!(o.exit_code, 7);
-    assert!(o.stderr[0].starts_with("ERROR: no such target '//app:nope'"), "{:?}", o.stderr);
-    assert!(o.stderr[0].contains("no such target '//app:nope'"), "{:?}", o.stderr);
+    assert!(
+        o.stderr[0].starts_with("ERROR: no such target '//app:nope'"),
+        "{:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr[0].contains("no such target '//app:nope'"),
+        "{:?}",
+        o.stderr
+    );
     // The previously buggy behaviour: an empty result must not print the literal.
     let o = q(&ws, "//app:all - //app:all", |_, _| {});
     assert_eq!(o.exit_code, 0);
@@ -307,11 +501,20 @@ fn missing_targets_report_errors() {
 
 #[test]
 fn keep_going_exit_3() {
-    let ws = Ws::new(&[("a/BUILD", "filegroup(name='a', srcs=['//b:missing'])"), ("b/BUILD", "filegroup(name='b')")]);
+    let ws = Ws::new(&[
+        ("a/BUILD", "filegroup(name='a', srcs=['//b:missing'])"),
+        ("b/BUILD", "filegroup(name='b')"),
+    ]);
     let o = q(&ws, "deps(//a:a)", |o, _| o.keep_going = true);
     assert_eq!(o.exit_code, 3, "{:?}", o.stderr);
     assert_eq!(lines(&o), vec!["//a:a"]);
-    assert!(o.stderr.iter().any(|l| l.contains("--keep_going specified, ignoring errors")), "{:?}", o.stderr);
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.contains("--keep_going specified, ignoring errors")),
+        "{:?}",
+        o.stderr
+    );
     let o = q(&ws, "deps(//a:a)", |_, _| {});
     assert_eq!(o.exit_code, 7);
 }
@@ -320,16 +523,24 @@ fn keep_going_exit_3() {
 fn label_kind_package_location_and_null_terminator() {
     let ws = tree();
     let o = q(&ws, "//lib:all", |_, f| f.output = "label_kind".into());
-    assert_eq!(lines(&o), vec!["filegroup rule //lib:fg", "genrule rule //lib:l"]);
+    assert_eq!(
+        lines(&o),
+        vec!["filegroup rule //lib:fg", "genrule rule //lib:l"]
+    );
     let o = q(&ws, "deps(//app:app)", |_, f| f.output = "package".into());
-    assert_eq!(lines(&o), vec!["@@bazel_tools//tools/genrule", "app", "lib"]);
+    assert_eq!(
+        lines(&o),
+        vec!["@@bazel_tools//tools/genrule", "app", "lib"]
+    );
     let o = q(&ws, "//lib:l", |_, f| f.output = "location".into());
     assert_eq!(lines(&o), vec!["/ws/lib/BUILD:1:8: genrule rule //lib:l"]);
     let o = q(&ws, "//lib:l", |_, f| f.relative_locations = true);
     assert_eq!(lines(&o), vec!["//lib:l"]);
     let o = q(&ws, "//lib:all", |_, f| f.line_terminator = "\0".into());
     assert_eq!(o.stdout, b"//lib:fg\0//lib:l\0".to_vec());
-    let o = q(&ws, "buildfiles(//lib:l)", |_, f| f.output = "location".into());
+    let o = q(&ws, "buildfiles(//lib:l)", |_, f| {
+        f.output = "location".into()
+    });
     assert_eq!(o.exit_code, 2);
 }
 
@@ -337,7 +548,17 @@ fn label_kind_package_location_and_null_terminator() {
 fn order_output_deps_and_full() {
     let ws = tree();
     let full = q(&ws, "deps(//app:other)", |_, f| f.order = OrderOutput::Full);
-    assert_eq!(lines(&full), vec!["//app:other", "//app:app", "//lib:l", "@@bazel_tools//tools/genrule:genrule-setup.sh", "//lib:data.txt", "//app:in.txt"]);
+    assert_eq!(
+        lines(&full),
+        vec![
+            "//app:other",
+            "//app:app",
+            "//lib:l",
+            "@@bazel_tools//tools/genrule:genrule-setup.sh",
+            "//lib:data.txt",
+            "//app:in.txt"
+        ]
+    );
     let deps = q(&ws, "deps(//app:other)", |_, f| f.order = OrderOutput::Deps);
     let l = lines(&deps);
     assert_eq!(l.first().map(String::as_str), Some("//app:other"));
@@ -348,9 +569,29 @@ fn order_output_deps_and_full() {
 fn minrank_maxrank() {
     let ws = tree();
     let o = q(&ws, "deps(//app:other)", |_, f| f.output = "minrank".into());
-    assert_eq!(lines(&o), vec!["0 //app:other", "1 //app:app", "1 @@bazel_tools//tools/genrule:genrule-setup.sh", "2 //lib:l", "2 //app:in.txt", "3 //lib:data.txt"]);
+    assert_eq!(
+        lines(&o),
+        vec![
+            "0 //app:other",
+            "1 //app:app",
+            "1 @@bazel_tools//tools/genrule:genrule-setup.sh",
+            "2 //lib:l",
+            "2 //app:in.txt",
+            "3 //lib:data.txt"
+        ]
+    );
     let o = q(&ws, "deps(//app:other)", |_, f| f.output = "maxrank".into());
-    assert_eq!(lines(&o), vec!["0 //app:other", "1 //app:app", "2 //lib:l", "2 //app:in.txt", "3 //lib:data.txt", "3 @@bazel_tools//tools/genrule:genrule-setup.sh"]);
+    assert_eq!(
+        lines(&o),
+        vec![
+            "0 //app:other",
+            "1 //app:app",
+            "2 //lib:l",
+            "2 //app:in.txt",
+            "3 //lib:data.txt",
+            "3 @@bazel_tools//tools/genrule:genrule-setup.sh"
+        ]
+    );
 }
 
 #[test]
@@ -399,7 +640,10 @@ fn implicit_deps_flag_hides_default_label_attributes() {
     assert_eq!(ql(&ws, "deps(//pkg:s)"), vec!["//pkg:s", "//tools:t"]);
     let o = q(&ws, "deps(//pkg:s)", |o, _| o.implicit_deps = false);
     assert_eq!(lines(&o), vec!["//pkg:s"]);
-    assert_eq!(ql(&ws, "deps(//pkg:r)"), vec!["//pkg:friends", "//pkg:r", "//pkg:s", "//tools:t"]);
+    assert_eq!(
+        ql(&ws, "deps(//pkg:r)"),
+        vec!["//pkg:friends", "//pkg:r", "//pkg:s", "//tools:t"]
+    );
 }
 
 #[test]
@@ -407,7 +651,13 @@ fn select_branches_all_count_as_dependencies() {
     let ws = rich();
     assert_eq!(
         ql(&ws, "deps(//pkg:fg)"),
-        vec!["//pkg:a.txt", "//pkg:b.txt", "//pkg:c.txt", "//pkg:fg", "//pkg:opt"]
+        vec![
+            "//pkg:a.txt",
+            "//pkg:b.txt",
+            "//pkg:c.txt",
+            "//pkg:fg",
+            "//pkg:opt"
+        ]
     );
     assert_eq!(ql(&ws, "attr(srcs, 'a.txt', //pkg:fg)"), vec!["//pkg:fg"]);
     assert_eq!(ql(&ws, "attr(testonly, 1, //pkg:all)"), vec!["//pkg:fg"]);
@@ -417,9 +667,25 @@ fn select_branches_all_count_as_dependencies() {
 fn build_file_target_and_buildfiles_loadfiles() {
     let ws = rich();
     assert_eq!(ql(&ws, "//pkg:BUILD"), vec!["//pkg:BUILD"]);
-    assert_eq!(ql(&ws, "loadfiles(//pkg:r)"), vec!["//:defs.bzl", "//shstub:sh.bzl", "//tools:helper.bzl"]);
-    assert_eq!(ql(&ws, "buildfiles(//pkg:r)"), vec!["//:BUILD", "//:defs.bzl", "//pkg:BUILD", "//shstub:BUILD", "//shstub:sh.bzl", "//tools:BUILD", "//tools:helper.bzl"]);
-    let o = q(&ws, "rbuildfiles(tools/helper.bzl)", |o, _| o.universe_scope = vec!["//...".into()]);
+    assert_eq!(
+        ql(&ws, "loadfiles(//pkg:r)"),
+        vec!["//:defs.bzl", "//shstub:sh.bzl", "//tools:helper.bzl"]
+    );
+    assert_eq!(
+        ql(&ws, "buildfiles(//pkg:r)"),
+        vec![
+            "//:BUILD",
+            "//:defs.bzl",
+            "//pkg:BUILD",
+            "//shstub:BUILD",
+            "//shstub:sh.bzl",
+            "//tools:BUILD",
+            "//tools:helper.bzl"
+        ]
+    );
+    let o = q(&ws, "rbuildfiles(tools/helper.bzl)", |o, _| {
+        o.universe_scope = vec!["//...".into()]
+    });
     assert_eq!(lines(&o), vec!["//pkg:BUILD"], "{:?}", o.stderr);
     assert_eq!(ql(&ws, "executables(//pkg:all)"), vec!["//pkg:bin"]);
 }
@@ -433,7 +699,10 @@ fn visibility_and_visible_function() {
         ("b/BUILD", "filegroup(name='b')"),
         ("c/BUILD", "filegroup(name='c')"),
     ]);
-    assert_eq!(ql(&ws2, "visible(//b:b, //a:all)"), vec!["//a:a", "//a:pub"]);
+    assert_eq!(
+        ql(&ws2, "visible(//b:b, //a:all)"),
+        vec!["//a:a", "//a:pub"]
+    );
     assert_eq!(ql(&ws2, "visible(//c:c, //a:all)"), vec!["//a:pub"]);
     assert_eq!(ql(&ws2, "visible(//c:c + //b:b, //a:all)"), vec!["//a:pub"]);
 }
@@ -453,12 +722,28 @@ fn build_output_formats_selects_and_package_groups() {
 #[test]
 fn xml_output_has_java_layout() {
     let ws = rich();
-    let o = q(&ws, "//pkg:fg + //pkg:a.txt + //pkg:friends", |_, f| f.output = "xml".into());
+    let o = q(&ws, "//pkg:fg + //pkg:a.txt + //pkg:friends", |_, f| {
+        f.output = "xml".into()
+    });
     let out = String::from_utf8_lossy(&o.stdout).to_string();
-    assert!(out.starts_with("<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n") || out.starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n"), "{out}");
+    assert!(
+        out.starts_with(
+            "<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n"
+        ) || out.starts_with(
+            "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n"
+        ),
+        "{out}"
+    );
     assert!(out.contains("    <rule class=\"filegroup\" location=\"/ws/pkg/BUILD:7:10\" name=\"//pkg:fg\">\n        <string name=\"name\" value=\"fg\"/>\n        <boolean name=\"testonly\" value=\"true\"/>\n        <list name=\"srcs\">"), "{out}");
-    assert!(out.contains("<source-file location=\"/ws/pkg/a.txt:1:1\" name=\"//pkg:a.txt\"/>") || out.contains("name=\"//pkg:a.txt\""), "{out}");
-    assert!(out.contains("<package-group location=\"/ws/pkg/BUILD:3:14\" name=\"//pkg:friends\">"), "{out}");
+    assert!(
+        out.contains("<source-file location=\"/ws/pkg/a.txt:1:1\" name=\"//pkg:a.txt\"/>")
+            || out.contains("name=\"//pkg:a.txt\""),
+        "{out}"
+    );
+    assert!(
+        out.contains("<package-group location=\"/ws/pkg/BUILD:3:14\" name=\"//pkg:friends\">"),
+        "{out}"
+    );
     assert!(out.trim_end().ends_with("</query>"), "{out}");
 }
 
@@ -468,15 +753,27 @@ fn proto_family_is_consistent() {
     let bin = q(&ws, "//pkg:s", |_, f| f.output = "proto".into());
     assert_eq!(bin.exit_code, 0, "{:?}", bin.stderr);
     let s = String::from_utf8_lossy(&bin.stdout).to_string();
-    assert!(s.contains("//pkg:s") && s.contains("my_rule") && s.contains("//tools:t"), "{s:?}");
-    let streamed = q(&ws, "//pkg:s + //pkg:r", |_, f| f.output = "streamed_proto".into());
+    assert!(
+        s.contains("//pkg:s") && s.contains("my_rule") && s.contains("//tools:t"),
+        "{s:?}"
+    );
+    let streamed = q(&ws, "//pkg:s + //pkg:r", |_, f| {
+        f.output = "streamed_proto".into()
+    });
     // Each message is length-delimited: first byte is the varint length of the Target message.
     let b = &streamed.stdout;
     let len = b[0] as usize;
     assert!(len < 0x80 || b[0] & 0x80 != 0);
-    let js = q(&ws, "//pkg:s", |_, f| f.output = "streamed_jsonproto".into());
+    let js = q(&ws, "//pkg:s", |_, f| {
+        f.output = "streamed_jsonproto".into()
+    });
     let line = String::from_utf8_lossy(&js.stdout).to_string();
-    assert!(line.starts_with("{\"type\":\"RULE\",\"rule\":{\"name\":\"//pkg:s\",\"ruleClass\":\"my_rule\""), "{line}");
+    assert!(
+        line.starts_with(
+            "{\"type\":\"RULE\",\"rule\":{\"name\":\"//pkg:s\",\"ruleClass\":\"my_rule\""
+        ),
+        "{line}"
+    );
     assert!(line.contains("\"ruleInput\":[\"//tools:t\"]"), "{line}");
     assert!(line.contains("{\"name\":\"$tool\",\"type\":\"LABEL\",\"stringValue\":\"//tools:t\",\"explicitlySpecified\":false,\"nodep\":false}"), "{line}");
     let no_defaults = q(&ws, "//pkg:s", |_, f| {
@@ -486,7 +783,10 @@ fn proto_family_is_consistent() {
         f.proto_locations = false;
     });
     let l = String::from_utf8_lossy(&no_defaults.stdout).to_string();
-    assert!(!l.contains("location") && !l.contains("ruleInput") && !l.contains("$tool"), "{l}");
+    assert!(
+        !l.contains("location") && !l.contains("ruleInput") && !l.contains("$tool"),
+        "{l}"
+    );
 }
 
 #[test]
@@ -495,13 +795,26 @@ fn order_no_and_null_and_keep_going_and_universe() {
     let o = q(&ws, "deps(//app:app)", |_, f| f.order = OrderOutput::No);
     assert_eq!(o.exit_code, 0);
     assert_eq!(lines(&o).len(), 5);
-    let o = q(&ws, "allrdeps(//lib:data.txt)", |o, _| o.infer_universe_scope = true);
+    let o = q(&ws, "allrdeps(//lib:data.txt)", |o, _| {
+        o.infer_universe_scope = true
+    });
     // Inferred universe = patterns of the expression: just data.txt.
     assert_eq!(lines(&o), vec!["//lib:data.txt"]);
-    let o = q(&ws, "allrdeps(//lib:data.txt)", |o, _| o.universe_scope = vec!["//lib:all".into(), "//app:all".into()]);
+    let o = q(&ws, "allrdeps(//lib:data.txt)", |o, _| {
+        o.universe_scope = vec!["//lib:all".into(), "//app:all".into()]
+    });
     assert_eq!(
         lines(&o),
-        vec!["//app:all_tests", "//app:app", "//app:app_test", "//app:other", "//app:suite", "//lib:data.txt", "//lib:fg", "//lib:l"]
+        vec![
+            "//app:all_tests",
+            "//app:app",
+            "//app:app_test",
+            "//app:other",
+            "//app:suite",
+            "//lib:data.txt",
+            "//lib:fg",
+            "//lib:l"
+        ]
     );
 }
 
@@ -509,7 +822,10 @@ fn order_no_and_null_and_keep_going_and_universe() {
 fn rdeps_requires_target_in_universe() {
     let ws = tree();
     assert_eq!(ql(&ws, "rdeps(//lib:l, //app:app)"), Vec::<String>::new());
-    assert_eq!(ql(&ws, "rdeps(//lib:l + //app:app, //app:app + //lib:l)"), vec!["//app:app", "//lib:l"]);
+    assert_eq!(
+        ql(&ws, "rdeps(//lib:l + //app:app, //app:app + //lib:l)"),
+        vec!["//app:app", "//lib:l"]
+    );
 }
 
 #[test]
@@ -519,15 +835,25 @@ fn query_expression_error_texts() {
     assert_eq!(o.exit_code, 2);
     assert!(o.stderr[0].starts_with("ERROR: Error while parsing 'foo(//app:app)': unknown function 'foo' at 'foo ( //app:app'; expected one of ['allpaths', 'attr', 'buildfiles', 'deps', 'executables', 'filter', 'kind', 'labels', 'loadfiles', 'rdeps', 'same_pkg_direct_rdeps', 'siblings', 'some', 'somepath', 'tests', 'visible']"), "{:?}", o.stderr);
     let o = q(&ws, "'unclosed", |_, _| {});
-    assert_eq!(o.stderr, vec!["ERROR: Error while parsing ''unclosed': unclosed quotation"]);
+    assert_eq!(
+        o.stderr,
+        vec!["ERROR: Error while parsing ''unclosed': unclosed quotation"]
+    );
     let o = q(&ws, "deps(//app:app) deps(//app:app)", |_, _| {});
     assert_eq!(o.exit_code, 2);
-    assert!(o.stderr[0].contains("unexpected token 'deps' after query expression 'deps(//app:app)'"), "{:?}", o.stderr);
+    assert!(
+        o.stderr[0].contains("unexpected token 'deps' after query expression 'deps(//app:app)'"),
+        "{:?}",
+        o.stderr
+    );
 }
 
 #[test]
 fn missing_dependency_reports_loading_error_then_closure_error() {
-    let ws = Ws::new(&[("foo/BUILD", "filegroup(name='a', srcs=[':b', '//other:doesnotexist'])\nfilegroup(name='b')")]);
+    let ws = Ws::new(&[(
+        "foo/BUILD",
+        "filegroup(name='a', srcs=[':b', '//other:doesnotexist'])\nfilegroup(name='b')",
+    )]);
     let o = q(&ws, "deps(//foo:a)", |_, _| {});
     assert_eq!(o.exit_code, 7, "{:?}", o.stderr);
     // Without --keep_going the Skyframe preload throws before any located edge error is reported.
@@ -538,21 +864,38 @@ fn missing_dependency_reports_loading_error_then_closure_error() {
     );
     let o = q(&ws, "deps(//foo:a) + //foo:b", |_, _| {});
     assert!(o.stderr.last().unwrap().starts_with("ERROR: Evaluation of subquery \"deps(//foo:a)\" failed (did you want to use --keep_going?): preloading transitive closure failed:"), "{:?}", o.stderr);
-    for expr in ["somepath(//foo:a, //foo:b)", "deps(//foo:a)", "rdeps(//foo:a, //foo:b)", "allpaths(//foo:a, //foo:b)"] {
+    for expr in [
+        "somepath(//foo:a, //foo:b)",
+        "deps(//foo:a)",
+        "rdeps(//foo:a, //foo:b)",
+        "allpaths(//foo:a, //foo:b)",
+    ] {
         let o = q(&ws, expr, |o, f| {
             o.keep_going = true;
             f.output = "label_kind".into();
         });
         assert_eq!(o.exit_code, 3, "{expr}: {:?}", o.stderr);
         let out = String::from_utf8_lossy(&o.stdout).to_string();
-        assert!(out.contains("filegroup rule //foo:a") && out.contains("filegroup rule //foo:b"), "{expr}: {out}");
-        assert!(o.stderr.iter().any(|l| l.contains("errors were encountered while computing transitive closure")), "{expr}: {:?}", o.stderr);
+        assert!(
+            out.contains("filegroup rule //foo:a") && out.contains("filegroup rule //foo:b"),
+            "{expr}: {out}"
+        );
+        assert!(
+            o.stderr
+                .iter()
+                .any(|l| l.contains("errors were encountered while computing transitive closure")),
+            "{expr}: {:?}",
+            o.stderr
+        );
     }
 }
 
 #[test]
 fn universe_scope_is_strict_in_sky_mode() {
-    let ws = Ws::new(&[("a/BUILD", "filegroup(name='a')"), ("b/BUILD", "filegroup(name='b')")]);
+    let ws = Ws::new(&[
+        ("a/BUILD", "filegroup(name='a')"),
+        ("b/BUILD", "filegroup(name='b')"),
+    ]);
     let o = q(&ws, "//a:a + //b:b", |o, _| {
         o.universe_scope = vec!["//a:a".into()];
         o.infer_universe_scope = true;
@@ -561,9 +904,17 @@ fn universe_scope_is_strict_in_sky_mode() {
     // deps are "missing from graph" (see `round9_out_of_universe_targets_warn_instead_of_failing`).
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
     assert_eq!(lines(&o), vec!["//a:a", "//b:b"]);
-    let o = q(&ws, "deps(//b:b)", |o, _| o.universe_scope = vec!["//a:a".into()]);
+    let o = q(&ws, "deps(//b:b)", |o, _| {
+        o.universe_scope = vec!["//a:a".into()]
+    });
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
-    assert!(o.stderr.iter().any(|l| l.contains("Targets were missing from graph: [//b:b]")), "{:?}", o.stderr);
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.contains("Targets were missing from graph: [//b:b]")),
+        "{:?}",
+        o.stderr
+    );
     let o = q(&ws, "//a:a + //b:b", |o, _| o.infer_universe_scope = true);
     assert_eq!(lines(&o), vec!["//a:a", "//b:b"]);
 }
@@ -581,8 +932,14 @@ fn cquery_show_config_fragments_direct_and_transitive() {
     // Plain Starlark rule has universal fragments
     let ws2 = Ws::new(&[
         ("BUILD", ""),
-        ("defs.bzl", "def _impl(ctx): pass\nmy_rule = rule(implementation = _impl)\n"),
-        ("pkg/BUILD", "load('//:defs.bzl', 'my_rule')\nmy_rule(name = 'r')\n"),
+        (
+            "defs.bzl",
+            "def _impl(ctx): pass\nmy_rule = rule(implementation = _impl)\n",
+        ),
+        (
+            "pkg/BUILD",
+            "load('//:defs.bzl', 'my_rule')\nmy_rule(name = 'r')\n",
+        ),
     ]);
     let o2 = ws2.post("//pkg:r", |_, _, popts| {
         popts.show_config_fragments = "direct".into();
@@ -597,7 +954,13 @@ fn cquery_config_semantics_rejects_host_and_accepts_target_null() {
     let ws = tree();
     let o = ws.post("config(//lib:data.txt, host)", |_, _, _| {});
     assert_eq!(o.exit_code, 1, "{:?}", o.stderr);
-    assert!(o.stderr.iter().any(|l| l.contains("'host' configuration no longer exists")), "{:?}", o.stderr);
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.contains("'host' configuration no longer exists")),
+        "{:?}",
+        o.stderr
+    );
 
     let o = ws.post("config(//lib:data.txt, null)", |_, _, _| {});
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
@@ -609,12 +972,30 @@ fn cquery_config_semantics_rejects_host_and_accepts_target_null() {
 
     let o = ws.post("config(//lib:l, null)", |_, _, _| {});
     assert_eq!(o.exit_code, 1, "{:?}", o.stderr);
-    assert!(o.stderr.iter().any(|l| l.contains("No target (in) //lib:l could be found in the 'null' configuration")), "{:?}", o.stderr);
+    assert!(
+        o.stderr.iter().any(
+            |l| l.contains("No target (in) //lib:l could be found in the 'null' configuration")
+        ),
+        "{:?}",
+        o.stderr
+    );
 
     let o = ws.post("config(//lib:l, exec)", |_, _, _| {});
     assert_eq!(o.exit_code, 1, "{:?}", o.stderr);
-    assert!(o.stderr.iter().any(|l| l.contains("Unknown configuration ID 'exec'.")), "{:?}", o.stderr);
-    assert!(o.stderr.iter().any(|l| l.contains("A short ID is any prefix of a full ID. cquery shows short IDs.")), "{:?}", o.stderr);
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.contains("Unknown configuration ID 'exec'.")),
+        "{:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.contains("A short ID is any prefix of a full ID. cquery shows short IDs.")),
+        "{:?}",
+        o.stderr
+    );
 }
 
 #[test]
@@ -630,32 +1011,51 @@ fn cquery_consistent_labels_printer_installed() {
 
 #[test]
 fn aquery_output_commands_escapes_newlines_and_unicode_like_bazel() {
-    let ws = Ws::new(&[
-        (
-            "pkg/BUILD",
-            "genrule(name = 'g', outs = ['g.out'], cmd = 'echo a\\necho b > $@')\n",
-        ),
-    ]);
+    let ws = Ws::new(&[(
+        "pkg/BUILD",
+        "genrule(name = 'g', outs = ['g.out'], cmd = 'echo a\\necho b > $@')\n",
+    )]);
     let o = ws.post("//pkg:g", |_, _, popts| {
         popts.aquery = true;
         popts.output = "commands".into();
     });
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
     let out = String::from_utf8_lossy(&o.stdout);
-    assert!(out.contains("\\u000A"), "commands output must contain \\u000A for newlines: {out}");
+    assert!(
+        out.contains("\\u000A"),
+        "commands output must contain \\u000A for newlines: {out}"
+    );
 }
 
 #[test]
 fn cquery_starlark_real_target_object_and_providers() {
     let ws = tree();
-    // Test indexing provider: target[DefaultInfo] and string indexing target["DefaultInfo"]
+    // `providers(target)` exposes DefaultInfo & FileProvider; string indexing and `'...' in target` error like Bazel.
     let o = ws.post("//app:app", |_, _, popts| {
         popts.output = "starlark".into();
-        popts.starlark_expr = "str(target['DefaultInfo'] != None) + ':' + str('DefaultInfo' in target) + ':' + str(target.label.name)".into();
+        popts.starlark_expr =
+            "str('DefaultInfo' in providers(target)) + ':' + str(target.label.name)".into();
     });
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
     let out = String::from_utf8_lossy(&o.stdout);
-    assert_eq!(out.trim(), "True:True:app");
+    assert_eq!(out.trim(), "True:app");
+
+    for bad_expr in [
+        "target['DefaultInfo']",
+        "'DefaultInfo' in target",
+        "target.DefaultInfo",
+        "target[provider()]",
+    ] {
+        let o_bad = ws.post("//app:app", |_, _, popts| {
+            popts.output = "starlark".into();
+            popts.starlark_expr = bad_expr.into();
+        });
+        assert!(
+            String::from_utf8_lossy(&o_bad.stdout).trim().is_empty(),
+            "{bad_expr}"
+        );
+        assert!(!o_bad.stderr.is_empty(), "{bad_expr} should error");
+    }
 
     // Test returning non-string directly (Label)
     let o = ws.post("//app:app", |_, _, popts| {
@@ -666,14 +1066,14 @@ fn cquery_starlark_real_target_object_and_providers() {
     let out = String::from_utf8_lossy(&o.stdout);
     assert_eq!(out.trim(), "@@//app:app");
 
-    // Test target.files is depset
+    // Test target.files is depset and target.actions exposes Action objects
     let o = ws.post("//app:app", |_, _, popts| {
         popts.output = "starlark".into();
-        popts.starlark_expr = "type(target.files) + ':' + str(len(target.files.to_list()))".into();
+        popts.starlark_expr = "type(target.files) + ':' + str(len(target.files.to_list())) + ':' + target.actions[0].mnemonic".into();
     });
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
     let out = String::from_utf8_lossy(&o.stdout);
-    assert_eq!(out.trim(), "depset:1");
+    assert_eq!(out.trim(), "depset:1:Genrule");
 
     // Test str(target) prints label
     let o = ws.post("//app:app", |_, _, popts| {
@@ -702,10 +1102,7 @@ fn query_nodep_deps_filtering() {
             "filegroup(name = 'g', srcs = [':dep'], visibility = ['//vis:friends'])\n\
              filegroup(name = 'dep')\n",
         ),
-        (
-            "vis/BUILD",
-            "package_group(name = 'friends')\n",
-        ),
+        ("vis/BUILD", "package_group(name = 'friends')\n"),
     ]);
     // With nodep_deps = true (default), visibility dependency //vis:friends is traversed
     let o = q(&ws, "deps(//pkg:g)", |_, _| {});
@@ -762,15 +1159,24 @@ fn macro_instantiation_and_definition_stacks_parity() {
     ]);
     let o = q(&ws, "//pkg:m_gen", |_, f| f.output = "build".into());
     let out = String::from_utf8_lossy(&o.stdout).to_string();
-    assert!(out.contains("# /ws/pkg/BUILD:2:2\nmy_rule(\n  name = \"m_gen\","), "Header must be BUILD call site: {out}");
-    assert!(out.contains("generator_location = \"pkg/BUILD:2:2\""), "generator_location must be relative: {out}");
+    assert!(
+        out.contains("# /ws/pkg/BUILD:2:2\nmy_rule(\n  name = \"m_gen\","),
+        "Header must be BUILD call site: {out}"
+    );
+    assert!(
+        out.contains("generator_location = \"pkg/BUILD:2:2\""),
+        "generator_location must be relative: {out}"
+    );
     assert!(out.contains("generator_function = \"f\""), "{out}");
     assert!(out.contains("# Rule m_gen instantiated at (most recent call last):\n#   /ws/pkg/BUILD:2:2 in <toplevel>\n#   /ws/inc.bzl:5:6   in f\n#   /ws/inc.bzl:3:12  in g"), "Instantiation stack must have correct function names: {out}");
     assert!(out.contains("# Rule my_rule defined at (most recent call last):\n#   /ws/defs.bzl:3:15 in <toplevel>"), "Definition stack must contain line:col: {out}");
 
     let o_loc = q(&ws, "//pkg:m_gen", |_, f| f.output = "location".into());
     let loc_out = String::from_utf8_lossy(&o_loc.stdout).to_string();
-    assert!(loc_out.contains("/ws/pkg/BUILD:2:2: my_rule rule //pkg:m_gen"), "{loc_out}");
+    assert!(
+        loc_out.contains("/ws/pkg/BUILD:2:2: my_rule rule //pkg:m_gen"),
+        "{loc_out}"
+    );
 
     let o_proto = q(&ws, "//pkg:m_gen", |_, f| {
         f.output = "proto".into();
@@ -778,10 +1184,16 @@ fn macro_instantiation_and_definition_stacks_parity() {
         f.proto_definition_stack = true;
     });
     let proto_out = String::from_utf8_lossy(&o_proto.stdout).to_string();
-    assert!(proto_out.contains("pkg/BUILD:2:2: <toplevel>"), "{proto_out}");
+    assert!(
+        proto_out.contains("pkg/BUILD:2:2: <toplevel>"),
+        "{proto_out}"
+    );
     assert!(proto_out.contains("inc.bzl:5:6: f"), "{proto_out}");
     assert!(proto_out.contains("inc.bzl:3:12: g"), "{proto_out}");
-    assert!(proto_out.contains("defs.bzl:3:15: <toplevel>"), "{proto_out}");
+    assert!(
+        proto_out.contains("defs.bzl:3:15: <toplevel>"),
+        "{proto_out}"
+    );
 }
 
 #[test]
@@ -825,11 +1237,20 @@ fn cquery_transitions_exact_format_and_names() {
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
     let out = String::from_utf8_lossy(&o.stdout);
     // Same config dependency has NoTransition and nothing after ->
-    assert!(out.contains("#NoTransition ->\n") || out.contains("#NoTransition -> \n"), "{out}");
+    assert!(
+        out.contains("#NoTransition ->\n") || out.contains("#NoTransition -> \n"),
+        "{out}"
+    );
     // Null config dependency (source file) has (null transition) and nothing after ->
-    assert!(out.contains("#(null transition) ->\n") || out.contains("#(null transition) -> \n"), "{out}");
+    assert!(
+        out.contains("#(null transition) ->\n") || out.contains("#(null transition) -> \n"),
+        "{out}"
+    );
     // Check diff format does NOT contain double brackets [[...]]
-    assert!(!out.contains("[["), "Must not contain double brackets: {out}");
+    assert!(
+        !out.contains("[["),
+        "Must not contain double brackets: {out}"
+    );
 }
 
 #[test]
@@ -853,16 +1274,27 @@ fn aspects_in_query_and_post_analysis_graph() {
 
     // 1. query deps(//pkg:top) includes //t:tool
     let o = q(&ws, "deps(//pkg:top)", |_, _| {});
-    assert!(lines(&o).contains(&"//t:tool".to_string()), "{:?}", lines(&o));
+    assert!(
+        lines(&o).contains(&"//t:tool".to_string()),
+        "{:?}",
+        lines(&o)
+    );
 
     // 2. query with aspect_deps=off omits //t:tool
     let o_off = q(&ws, "deps(//pkg:top)", |o, _| o.aspect_deps = "off".into());
-    assert!(!lines(&o_off).contains(&"//t:tool".to_string()), "{:?}", lines(&o_off));
+    assert!(
+        !lines(&o_off).contains(&"//t:tool".to_string()),
+        "{:?}",
+        lines(&o_off)
+    );
 
     // 3. xml output includes rule-input name="//t:tool"
     let o_xml = q(&ws, "//pkg:top", |_, f| f.output = "xml".into());
     let xml_out = String::from_utf8_lossy(&o_xml.stdout);
-    assert!(xml_out.contains("<rule-input name=\"//t:tool\"/>"), "{xml_out}");
+    assert!(
+        xml_out.contains("<rule-input name=\"//t:tool\"/>"),
+        "{xml_out}"
+    );
 
     // 4. cquery deps(//pkg:top) includes //t:tool
     let o_cq = ws.post("deps(//pkg:top)", |_, _, _| {});
@@ -878,7 +1310,10 @@ fn aspects_in_query_and_post_analysis_graph() {
     });
     let aq_out = String::from_utf8_lossy(&o_aq.stdout);
     eprintln!("AQ_OUT: {aq_out}");
-    assert!(aq_out.contains("AspectDescriptors: [//pkg:defs.bzl%my_asp()]"), "{aq_out}");
+    assert!(
+        aq_out.contains("AspectDescriptors: [//pkg:defs.bzl%my_asp()]"),
+        "{aq_out}"
+    );
 }
 
 #[test]
@@ -886,14 +1321,26 @@ fn keep_going_skips_bad_patterns_before_other_output() {
     let ws = Ws::new(&[("foo/BUILD", "filegroup(name='a', srcs=['x.txt'])")]);
     let o = q(&ws, "//nope:all + //foo:a", |o, _| o.keep_going = true);
     assert_eq!(o.exit_code, 3, "{:?}", o.stderr);
-    assert!(o.stderr[0].starts_with("ERROR: Skipping '//nope:all': no such package 'nope'"), "{:?}", o.stderr);
-    let w = o.stderr.iter().position(|l| l.starts_with("WARNING: --keep_going specified")).unwrap();
+    assert!(
+        o.stderr[0].starts_with("ERROR: Skipping '//nope:all': no such package 'nope'"),
+        "{:?}",
+        o.stderr
+    );
+    let w = o
+        .stderr
+        .iter()
+        .position(|l| l.starts_with("WARNING: --keep_going specified"))
+        .unwrap();
     assert_eq!(w, 1, "{:?}", o.stderr);
     assert_eq!(lines(&o), vec!["//foo:a"]);
     // Without --keep_going the preload failure is reported verbatim.
     let o = q(&ws, "//nope:all + //foo:a", |_, _| {});
     assert_eq!(o.exit_code, 7);
-    assert!(o.stderr[0].starts_with("ERROR: no such package 'nope'"), "{:?}", o.stderr);
+    assert!(
+        o.stderr[0].starts_with("ERROR: no such package 'nope'"),
+        "{:?}",
+        o.stderr
+    );
 }
 
 #[test]
@@ -914,14 +1361,37 @@ fn closure_errors_are_reported_by_label_visitor_and_path_visitor() {
         "foo/BUILD",
         "filegroup(name='bad', srcs=['//gone:x'])\nfilegroup(name='top', srcs=[':bad'])",
     )]);
-    let loc_err = |l: &String| l.starts_with("ERROR: /ws/foo/BUILD:1:") && l.contains("and referenced by '//foo:bad'");
+    let loc_err = |l: &String| {
+        l.starts_with("ERROR: /ws/foo/BUILD:1:") && l.contains("and referenced by '//foo:bad'")
+    };
     // deps: the Skyframe preload and the label visitor both report the edge.
     let o = q(&ws, "deps(//foo:top)", |o, _| o.keep_going = true);
-    assert_eq!(o.stderr.iter().filter(|l| loc_err(l)).count(), 2, "{:?}", o.stderr);
+    assert_eq!(
+        o.stderr.iter().filter(|l| loc_err(l)).count(),
+        2,
+        "{:?}",
+        o.stderr
+    );
     // allpaths (graphless): preload + the path visitor, which blames the discoverer of `bad`.
-    let o = q(&ws, "allpaths(//foo:top, //foo:bad)", |o, _| o.keep_going = true);
-    assert!(o.stderr.iter().any(|l| l.starts_with("ERROR: /ws/foo/BUILD:2:") && l.ends_with("and referenced by '//foo:top'")), "{:?}", o.stderr);
-    assert!(o.stderr.iter().any(|l| l.contains("failed: errors were encountered while computing transitive closure")), "{:?}", o.stderr);
+    let o = q(&ws, "allpaths(//foo:top, //foo:bad)", |o, _| {
+        o.keep_going = true
+    });
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.starts_with("ERROR: /ws/foo/BUILD:2:")
+                && l.ends_with("and referenced by '//foo:top'")),
+        "{:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l
+                .contains("failed: errors were encountered while computing transitive closure")),
+        "{:?}",
+        o.stderr
+    );
 }
 
 // ---- round 6A -------------------------------------------------------------------------------
@@ -939,14 +1409,21 @@ fn package_defaults_are_not_explicitly_specified() {
     // `Rule.isAttributeValueExplicitlySpecified` is false for package() defaults: build output omits them.
     let o = q(&ws, "//p:a", |_, f| f.output = "build".into());
     let out = String::from_utf8_lossy(&o.stdout).to_string();
-    assert!(!out.contains("testonly") && !out.contains("deprecation") && !out.contains("visibility"), "{out}");
+    assert!(
+        !out.contains("testonly") && !out.contains("deprecation") && !out.contains("visibility"),
+        "{out}"
+    );
     let o = q(&ws, "//t:b", |_, f| f.output = "build".into());
     let out = String::from_utf8_lossy(&o.stdout).to_string();
     assert!(!out.contains("testonly"), "{out}");
     // features: only the rule's own value is shown (package features merge elsewhere).
     assert!(out.contains("features = [\"own\"]"), "{out}");
     let o = q(&ws, "//t:c", |_, f| f.output = "build".into());
-    assert!(!String::from_utf8_lossy(&o.stdout).contains("features"), "{:?}", o.stdout);
+    assert!(
+        !String::from_utf8_lossy(&o.stdout).contains("features"),
+        "{:?}",
+        o.stdout
+    );
 }
 
 #[test]
@@ -960,10 +1437,19 @@ fn package_group_packages_are_ordered_by_category() {
         f.package_group_build_output = true;
     });
     let out = String::from_utf8_lossy(&o.stdout).to_string();
-    let pos = |s: &str| out.find(s).unwrap_or_else(|| panic!("{s} missing in {out}"));
+    let pos = |s: &str| {
+        out.find(s)
+            .unwrap_or_else(|| panic!("{s} missing in {out}"))
+    };
     // single positives, `...` positives, single negatives, `...` negatives, public
-    assert!(pos("\"//b\"") < pos("\"//e\"") && pos("\"//e\"") < pos("\"//a/...\""), "{out}");
-    assert!(pos("\"//a/...\"") < pos("\"-//c\"") && pos("\"-//c\"") < pos("\"-//d/...\""), "{out}");
+    assert!(
+        pos("\"//b\"") < pos("\"//e\"") && pos("\"//e\"") < pos("\"//a/...\""),
+        "{out}"
+    );
+    assert!(
+        pos("\"//a/...\"") < pos("\"-//c\"") && pos("\"-//c\"") < pos("\"-//d/...\""),
+        "{out}"
+    );
 }
 
 #[test]
@@ -971,15 +1457,31 @@ fn deps_without_depth_reports_located_missing_package_error() {
     let ws = Ws::new(&[("foo/BUILD", "filegroup(name='bad', srcs=['//gone:x'])\n")]);
     let o = q(&ws, "deps(//foo:bad)", |_, _| {});
     assert_eq!(o.exit_code, 7, "{:?}", o.stderr);
-    assert!(o.stderr.iter().any(|l| l.starts_with("ERROR: /ws/foo/BUILD:1:") && l.ends_with("and referenced by '//foo:bad'")), "{:?}", o.stderr);
-    assert!(o.stderr.iter().any(|l| l.contains("preloading transitive closure failed")), "{:?}", o.stderr);
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.starts_with("ERROR: /ws/foo/BUILD:1:")
+                && l.ends_with("and referenced by '//foo:bad'")),
+        "{:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.contains("preloading transitive closure failed")),
+        "{:?}",
+        o.stderr
+    );
 }
 
 #[test]
 fn visible_treats_external_public_visibility_as_public() {
     // `//visibility:public` is the special label in every repository: here the main repository.
     let ws = Ws::new(&[
-        ("a/BUILD", "filegroup(name='x', srcs=[], visibility=['//visibility:public'])\n"),
+        (
+            "a/BUILD",
+            "filegroup(name='x', srcs=[], visibility=['//visibility:public'])\n",
+        ),
         ("b/BUILD", "filegroup(name='y', srcs=['//a:x'])\n"),
     ]);
     assert_eq!(ql(&ws, "visible(//b:y, //a:x)"), vec!["//a:x"]);
@@ -993,11 +1495,32 @@ fn run_genquery_formats_expression_with_opts() {
     let text = String::from_utf8_lossy(&out).to_string();
     assert!(text.lines().any(|l| l == "//app:app"), "{text}");
     assert!(text.lines().any(|l| l == "//lib:l"), "{text}");
-    let kinds = crate::run_genquery(&loader, "//lib:l", &[], false, &["--output=label_kind".to_string()]).unwrap();
+    let kinds = crate::run_genquery(
+        &loader,
+        "//lib:l",
+        &[],
+        false,
+        &["--output=label_kind".to_string()],
+    )
+    .unwrap();
     assert_eq!(String::from_utf8_lossy(&kinds), "genrule rule //lib:l\n");
     // options that `GenQuery.java` rejects
-    assert!(crate::run_genquery(&loader, "//lib:l", &[], false, &["--keep_going".to_string()]).is_err());
-    assert!(crate::run_genquery(&loader, "//lib:l", &[], false, &["--universe_scope=//lib:l".to_string()]).is_err());
+    assert!(crate::run_genquery(
+        &loader,
+        "//lib:l",
+        &[],
+        false,
+        &["--keep_going".to_string()]
+    )
+    .is_err());
+    assert!(crate::run_genquery(
+        &loader,
+        "//lib:l",
+        &[],
+        false,
+        &["--universe_scope=//lib:l".to_string()]
+    )
+    .is_err());
     assert!(crate::run_genquery(&loader, "nonsense(", &[], false, &[]).is_err());
 }
 
@@ -1016,20 +1539,34 @@ fn aquery_expands_top_level_test_suites_without_analysing_them() {
     });
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
     assert!(!String::from_utf8_lossy(&o.stdout).contains("Visibility error"));
-    assert!(o.stderr.iter().all(|l| !l.contains("Visibility error")), "{:?}", o.stderr);
+    assert!(
+        o.stderr.iter().all(|l| !l.contains("Visibility error")),
+        "{:?}",
+        o.stderr
+    );
 }
 
 #[test]
 fn round9_out_of_universe_targets_warn_instead_of_failing() {
     let ws = tree();
     // `SkyQueryEnvironment.getFwdDeps`: targets outside the universe have no graph node.
-    let o = q(&ws, "deps(//lib:l)", |o, _| o.universe_scope = vec!["//app:app".into()]);
+    let o = q(&ws, "deps(//lib:l)", |o, _| {
+        o.universe_scope = vec!["//app:app".into()]
+    });
     // //lib:l is inside the closure of //app:app; nothing is missing.
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
-    let o = q(&ws, "deps(//lib:fg)", |o, _| o.universe_scope = vec!["//app:app".into()]);
+    let o = q(&ws, "deps(//lib:fg)", |o, _| {
+        o.universe_scope = vec!["//app:app".into()]
+    });
     assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
     assert_eq!(lines(&o), vec!["//lib:fg"]);
-    assert!(o.stderr.iter().any(|l| l == "WARNING: Targets were missing from graph: [//lib:fg]"), "{:?}", o.stderr);
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l == "WARNING: Targets were missing from graph: [//lib:fg]"),
+        "{:?}",
+        o.stderr
+    );
 }
 
 #[test]
@@ -1040,11 +1577,22 @@ fn round9_environment_group_is_a_target() {
     )]);
     assert_eq!(ql(&ws, "//pkgs:envs"), vec!["//pkgs:envs"]);
     let o = q(&ws, "//pkgs:envs", |_, f| f.output = "label_kind".into());
-    assert_eq!(lines(&o), vec!["environment group //pkgs:envs"], "{:?}", o.stderr);
+    assert_eq!(
+        lines(&o),
+        vec!["environment group //pkgs:envs"],
+        "{:?}",
+        o.stderr
+    );
     let o = q(&ws, "//pkgs:envs", |_, f| f.output = "xml".into());
     let out = String::from_utf8_lossy(&o.stdout).to_string();
-    assert!(out.contains("<environment-group location=") && out.contains("name=\"//pkgs:envs\""), "{out}");
-    assert!(out.contains("<list name=\"environments\">") && out.contains("<label value=\"//pkgs:a\"/>"), "{out}");
+    assert!(
+        out.contains("<environment-group location=") && out.contains("name=\"//pkgs:envs\""),
+        "{out}"
+    );
+    assert!(
+        out.contains("<list name=\"environments\">") && out.contains("<label value=\"//pkgs:a\"/>"),
+        "{out}"
+    );
     assert!(out.contains("<list name=\"defaults\">"), "{out}");
     assert_eq!(ql(&ws, "deps(//pkgs:envs)"), vec!["//pkgs:envs"]);
 }
@@ -1052,13 +1600,619 @@ fn round9_environment_group_is_a_target() {
 #[test]
 fn round9_labels_crossing_a_subpackage_boundary_are_not_assumed_input_files() {
     let ws = Ws::new(&[
-        ("deep/x/BUILD", "filegroup(name = 'x', srcs = ['y/f', '//deep/x/y:g'])\n"),
+        (
+            "deep/x/BUILD",
+            "filegroup(name = 'x', srcs = ['y/f', '//deep/x/y:g'])\n",
+        ),
         ("deep/x/y/BUILD", "exports_files(['f', 'g'])\n"),
         ("deep/x/y/f", ""),
         ("deep/x/y/g", ""),
     ]);
     let o = q(&ws, "deps(//deep/x:x)", |o, _| o.keep_going = true);
     let l = lines(&o);
-    assert!(!l.iter().any(|t| t == "//deep/x:y/f"), "{l:?} {:?}", o.stderr);
+    assert!(
+        !l.iter().any(|t| t == "//deep/x:y/f"),
+        "{l:?} {:?}",
+        o.stderr
+    );
     assert!(l.contains(&"//deep/x/y:g".to_string()), "{l:?}");
+}
+
+// ---- Bazel 9.3.2 parity tests ----------------------------------------------------------------
+
+#[test]
+fn sky_rdeps_and_allrdeps_use_unfiltered_universe_and_bounded_seeds() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        (
+            "defs.bzl",
+            "def _impl(ctx):\n    pass\nmy_rule = rule(implementation = _impl, attrs = {'deps': attr.label_list(), '_imp': attr.label(default = '//pkg:imp_dep')})\n",
+        ),
+        ("pkg/tool.sh", "#!/bin/sh\n"),
+        ("pkg/imp.txt", ""),
+        ("pkg/vis_allowed", ""),
+        ("vis/BUILD", "package_group(name = 'pg')\n"),
+        (
+            "pkg/BUILD",
+            "load('//:defs.bzl', 'my_rule')\n\
+             filegroup(name = 'tool_src', srcs = ['tool.sh'])\n\
+             sh_binary(name = 'tool', srcs = [':tool_src'])\n\
+             genrule(name = 'gen', outs = ['g.out'], tools = [':tool'], cmd = 'echo > $@', visibility = ['//vis:pg'])\n\
+             filegroup(name = 'imp_src', srcs = ['imp.txt'])\n\
+             filegroup(name = 'imp_dep', srcs = [':imp_src'])\n\
+             my_rule(name = 'top', deps = [':gen'])\n\
+             filegroup(name = 'outside')\n",
+        ),
+    ]);
+
+    // Sky mode + --notool_deps: //pkg:tool is reachable in the unfiltered universe, so as a seed it
+    // is emitted, while the tool edge //pkg:gen -> //pkg:tool is dropped.
+    let o = q(&ws, "rdeps(//pkg:gen, //pkg:tool)", |o, _| {
+        o.infer_universe_scope = true;
+        o.tool_deps = false;
+    });
+    assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
+    assert_eq!(lines(&o), vec!["//pkg:tool"]);
+
+    // Allowed reverse edge //pkg:tool -> //pkg:tool_src still counts, then stops at tool edge //pkg:gen -> //pkg:tool.
+    let o = q(&ws, "rdeps(//pkg:gen, //pkg:tool_src)", |o, _| {
+        o.infer_universe_scope = true;
+        o.tool_deps = false;
+    });
+    assert_eq!(lines(&o), vec!["//pkg:tool", "//pkg:tool_src"]);
+
+    // Sky mode + --noimplicit_deps: //pkg:imp_dep and //pkg:imp_src are in the unfiltered universe.
+    let o = q(&ws, "rdeps(//pkg:top, //pkg:imp_src)", |o, _| {
+        o.infer_universe_scope = true;
+        o.implicit_deps = false;
+    });
+    assert_eq!(lines(&o), vec!["//pkg:imp_dep", "//pkg:imp_src"]);
+
+    // Sky mode + --nonodep_deps: visibility target //vis:pg stays in the unfiltered universe.
+    let o = q(&ws, "rdeps(//pkg:gen, //vis:pg)", |o, _| {
+        o.infer_universe_scope = true;
+        o.nodep_deps = false;
+    });
+    assert_eq!(lines(&o), vec!["//vis:pg"]);
+
+    // allrdeps with --notool_deps and --universe_scope=//pkg:gen walks unfiltered nodes, filtered edges.
+    let o = q(&ws, "allrdeps(//pkg:tool_src)", |o, _| {
+        o.universe_scope = vec!["//pkg:gen".into()];
+        o.tool_deps = false;
+    });
+    assert_eq!(lines(&o), vec!["//pkg:tool", "//pkg:tool_src"]);
+
+    // Bounded rdeps in Sky mode emits out-of-universe seeds at depth 0, negative depth does not expand,
+    // and i32::MAX does not wrap.
+    let o = q(&ws, "rdeps(//pkg:gen, //pkg:outside, 1)", |o, _| {
+        o.infer_universe_scope = true
+    });
+    assert_eq!(lines(&o), vec!["//pkg:outside"]);
+    let o = q(&ws, "rdeps(//pkg:gen, //pkg:tool_src, '-1')", |o, _| {
+        o.infer_universe_scope = true
+    });
+    assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
+    assert_eq!(lines(&o), vec!["//pkg:tool_src"]);
+    let o = q(
+        &ws,
+        "rdeps(//pkg:gen, //pkg:tool_src, 2147483647)",
+        |o, _| o.infer_universe_scope = true,
+    );
+    assert_eq!(lines(&o), vec!["//pkg:gen", "//pkg:tool", "//pkg:tool_src"]);
+}
+
+#[test]
+fn set_variable_references_and_universe_patterns() {
+    let ws = tree();
+    // `set($x //app:app)` must not preload `$x` as a pattern.
+    let o = q(&ws, "let x = //lib:l in set($x //app:app)", |_, _| {});
+    assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
+    assert_eq!(lines(&o), vec!["//app:app", "//lib:l"]);
+
+    let o = q(&ws, "let x = //lib:l in set($x //app:app)", |o, _| {
+        o.infer_universe_scope = true
+    });
+    assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
+    assert_eq!(lines(&o), vec!["//app:app", "//lib:l"]);
+
+    // `$1`, `$a-b`, `$ü` are NOT valid var references and are treated as target patterns.
+    for non_var in ["$1", "$a-b", "$ü"] {
+        let mut pats = Vec::new();
+        let expr = crate::parse::parse(&format!("set({non_var})"), crate::parse::DEFAULT_FUNCTIONS)
+            .unwrap();
+        expr.collect_target_patterns(&mut pats);
+        assert_eq!(pats, vec![non_var.to_string()], "{non_var}");
+    }
+}
+
+#[test]
+fn attr_omits_null_defaults_and_concatenates_select_combinations() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        (
+            "defs.bzl",
+            "def _impl(ctx):\n    pass\nstr_int = rule(implementation = _impl, attrs = {'s': attr.string(), 'n': attr.int(), 'l': attr.label_list(allow_files = True)})\n",
+        ),
+        (
+            "pkg/BUILD",
+            "load('//:defs.bzl', 'str_int')\n\
+             config_setting(name = 'c1', values = {'compilation_mode': 'opt'})\n\
+             config_setting(name = 'c2', values = {'compilation_mode': 'dbg'})\n\
+             filegroup(name = 'fg', srcs = ['a.txt'])\n\
+             filegroup(name = 'dep_empty', deprecation = '')\n\
+             str_int(\n\
+                 name = 'si',\n\
+                 s = 'pre_' + select({':c1': 'alpha', ':c2': 'beta', '//conditions:default': 'gamma'}),\n\
+                 n = select({':c1': 2147483647, ':c2': 1, '//conditions:default': 5}) + select({':c1': 1, ':c2': 2, '//conditions:default': 10}),\n\
+                 l = select({':c1': ['a.txt'], '//conditions:default': ['b.txt']}) + ['c.txt'],\n\
+             )\n",
+        ),
+        ("pkg/a.txt", ""),
+        ("pkg/b.txt", ""),
+        ("pkg/c.txt", ""),
+    ]);
+
+    // Unset null-default string attribute `deprecation` must not match `.*` or `^$`.
+    assert_eq!(
+        ql(&ws, "attr(deprecation, '.*', //pkg:all)"),
+        vec!["//pkg:dep_empty"]
+    );
+    assert_eq!(
+        ql(&ws, "attr(deprecation, '^$', //pkg:all)"),
+        vec!["//pkg:dep_empty"]
+    );
+
+    // Scalar string select concatenation joins prefix + branch.
+    assert_eq!(
+        ql(&ws, "attr(s, '^pre_alpha$', //pkg:all)"),
+        vec!["//pkg:si"]
+    );
+    assert_eq!(
+        ql(&ws, "attr(s, '^alpha$', //pkg:all)"),
+        Vec::<String>::new()
+    );
+
+    // Integer select concatenation sums with signed 32-bit wrap and specializes identical keysets.
+    assert_eq!(
+        ql(&ws, "attr(n, '^-2147483648$', //pkg:all)"),
+        vec!["//pkg:si"]
+    );
+    assert_eq!(ql(&ws, "attr(n, '^3$', //pkg:all)"), vec!["//pkg:si"]);
+    assert_eq!(ql(&ws, "attr(n, '^2$', //pkg:all)"), Vec::<String>::new());
+
+    // List select evaluates each combination separately, not one superset.
+    assert_eq!(
+        ql(
+            &ws,
+            "attr(l, '^\\[//pkg:a\\.txt, //pkg:c\\.txt\\]$', //pkg:all)"
+        ),
+        vec!["//pkg:si"]
+    );
+    assert_eq!(
+        ql(&ws, "attr(l, 'a\\.txt.*b\\.txt', //pkg:all)"),
+        Vec::<String>::new()
+    );
+}
+
+#[test]
+fn tests_function_size_tags_plus_manual_and_implicit_tests_attr() {
+    let ws = Ws::new(&[(
+        "pkg/BUILD",
+        "sh_test(name = 't_small', srcs = ['t.sh'], size = 'small')\n\
+         sh_test(name = 't_default', srcs = ['t.sh'], tags = ['slow'])\n\
+         sh_test(name = 't_plus_lit', srcs = ['t.sh'], tags = ['+slow'])\n\
+         sh_test(name = 't_manual', srcs = ['t.sh'], tags = ['manual'])\n\
+         test_suite(name = 's_small', tests = [':t_small', ':t_default'], tags = ['small'])\n\
+         test_suite(name = 's_med', tests = [':t_small', ':t_default'], tags = ['medium'])\n\
+         test_suite(name = 's_not_med', tests = [':t_small', ':t_default'], tags = ['-medium'])\n\
+         test_suite(name = 's_plus', tests = [':t_default', ':t_plus_lit'], tags = ['+slow'])\n\
+         test_suite(name = 's_plus_small', tests = [':t_small', ':t_default'], tags = ['+small'])\n\
+         test_suite(name = 's_manual', tests = [':t_small'], tags = ['manual'])\n\
+         test_suite(name = 's_plus_manual', tests = [':t_small', ':t_manual'], tags = ['+manual'])\n\
+         test_suite(name = 's_implicit_manual', tags = ['manual'])\n",
+    ), ("pkg/t.sh", "#!/bin/sh\n")]);
+
+    assert_eq!(ql(&ws, "tests(//pkg:s_small)"), vec!["//pkg:t_small"]);
+    assert_eq!(ql(&ws, "tests(//pkg:s_med)"), vec!["//pkg:t_default"]);
+    assert_eq!(ql(&ws, "tests(//pkg:s_not_med)"), vec!["//pkg:t_small"]);
+    assert_eq!(ql(&ws, "tests(//pkg:s_plus)"), vec!["//pkg:t_default"]);
+    assert_eq!(ql(&ws, "tests(//pkg:s_plus_small)"), vec!["//pkg:t_small"]);
+    assert_eq!(ql(&ws, "tests(//pkg:s_manual)"), vec!["//pkg:t_small"]);
+    assert_eq!(
+        ql(&ws, "tests(//pkg:s_plus_manual)"),
+        vec!["//pkg:t_manual"]
+    );
+    assert_eq!(
+        ql(&ws, "tests(//pkg:s_implicit_manual)"),
+        vec!["//pkg:t_default", "//pkg:t_plus_lit", "//pkg:t_small"]
+    );
+
+    // `labels(tests, ...)` keeps empty `tests` empty; `$implicit_tests` holds the implicit tests.
+    assert_eq!(
+        ql(&ws, "labels(tests, //pkg:s_implicit_manual)"),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        ql(&ws, "labels('$implicit_tests', //pkg:s_implicit_manual)"),
+        vec!["//pkg:t_default", "//pkg:t_plus_lit", "//pkg:t_small"]
+    );
+}
+
+#[test]
+fn function_expression_preserves_inner_errors_and_keep_going() {
+    let ws = tree();
+    let o = ws.post("config(//nope:missing, target)", |_, _, _| {});
+    assert_ne!(o.exit_code, 0);
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.contains("no such package 'nope'")),
+        "must preserve inner error rather than reporting 'No target': {:?}",
+        o.stderr
+    );
+
+    let o = ws.post(
+        "config(//nope:missing + //app:app, target)",
+        |qopts, _, _| {
+            qopts.keep_going = true;
+        },
+    );
+    assert!(
+        String::from_utf8_lossy(&o.stdout).contains("//app:app"),
+        "{:?}",
+        o.stderr
+    );
+    assert!(
+        o.stderr
+            .iter()
+            .any(|l| l.contains("Skipping '//nope:missing'")),
+        "{:?}",
+        o.stderr
+    );
+}
+
+#[test]
+fn aquery_filter_chain_and_top_level_test_suite_behavior() {
+    let ws = tree();
+
+    // Nested filter under non-filter function fails before analysis.
+    let o = ws.post("deps(inputs('.*', //app:app))", |_, _, popts| {
+        popts.aquery = true;
+    });
+    assert_eq!(o.exit_code, 1, "{:?}", o.stderr);
+    assert!(
+        o.stderr.iter().any(|l| l.contains("aquery filter functions (inputs, outputs, mnemonic) produce actions, and therefore can't be the input of other function types: deps")),
+        "{:?}",
+        o.stderr
+    );
+
+    // Non-chain filters (binary union / let) do not filter actions.
+    let o = ws.post(
+        "inputs('nonexistent_xyz', //app:app) + //lib:l",
+        |_, _, popts| {
+            popts.aquery = true;
+            popts.output = "text".into();
+        },
+    );
+    assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("Target: //app:app") && out.contains("Target: //lib:l"),
+        "{out}"
+    );
+
+    let o = ws.post(
+        "let x = mnemonic('NonExistent', //app:app) in $x",
+        |_, _, popts| {
+            popts.aquery = true;
+            popts.output = "text".into();
+        },
+    );
+    assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
+    assert!(String::from_utf8_lossy(&o.stdout).contains("Target: //app:app"));
+
+    // Top-level test_suite is excluded even if a configured target for it already exists in TargetResolver.
+    let resolver = ws.resolver();
+    let tr = TargetResolver::new(resolver.loader().clone(), AnalysisConfig::default());
+    let top = BuildConfigurationKey::default();
+    let _ = crate::post_analysis::run_post_analysis(
+        &resolver,
+        tr.clone(),
+        top.clone(),
+        "//app:suite",
+        &QueryOpts::default(),
+        &FormatOpts::default(),
+        &PostOpts::default(),
+    );
+    let aq = crate::post_analysis::run_post_analysis(
+        &resolver,
+        tr,
+        top,
+        "//app:suite",
+        &QueryOpts::default(),
+        &FormatOpts::default(),
+        &PostOpts {
+            aquery: true,
+            output: "text".into(),
+            ..Default::default()
+        },
+    );
+    assert_eq!(aq.exit_code, 0, "{:?}", aq.stderr);
+    assert!(
+        String::from_utf8_lossy(&aq.stdout).is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&aq.stdout)
+    );
+}
+
+#[test]
+fn cquery_and_aquery_dep_filtering_and_explicit_aspects() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        (
+            "defs.bzl",
+            "MyInfo = provider()\n\
+             def _asp_impl(target, ctx):\n    return [MyInfo()]\n\
+             my_asp = aspect(implementation = _asp_impl, attrs = {'_asp_dep': attr.label(default = '//pkg:asp_dep')})\n\
+             def _rule_impl(ctx):\n    pass\n\
+             my_rule = rule(implementation = _rule_impl, attrs = {'deps': attr.label_list(aspects = [my_asp]), '_imp': attr.label(default = '//pkg:imp_dep')})\n",
+        ),
+        ("pkg/src.txt", ""),
+        ("pkg/tool_src.txt", ""),
+        (
+            "pkg/BUILD",
+            "load('//:defs.bzl', 'my_rule')\n\
+             filegroup(name = 'asp_dep')\n\
+             filegroup(name = 'imp_dep')\n\
+             filegroup(name = 'tool_dep', srcs = ['tool_src.txt'])\n\
+             genrule(name = 'gen', srcs = ['src.txt'], outs = ['g.out'], tools = [':tool_dep'], cmd = 'echo > $@')\n\
+             my_rule(name = 'leaf')\n\
+             my_rule(name = 'top', deps = [':leaf'])\n\
+             alias(name = 'al', actual = ':leaf')\n",
+        ),
+    ]);
+
+    // --nonodep_deps is rejected in post-analysis queries.
+    let o = ws.post("//pkg:gen", |qopts, _, _| qopts.nodep_deps = false);
+    assert_eq!(o.exit_code, 1);
+    assert!(
+        o.stderr.iter().any(|l| l.contains("NO_NODEP_DEPS")),
+        "{:?}",
+        o.stderr
+    );
+
+    // --noimplicit_deps drops implicit, target platform, toolchains, and aspect-only deps,
+    // while keeping explicit deps, alias actual, and OutputFile's generating rule.
+    let o = ws.post("deps(//pkg:top)", |qopts, _, _| qopts.implicit_deps = false);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("//pkg:top") && out.contains("//pkg:leaf"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("//pkg:imp_dep") && !out.contains("//pkg:asp_dep"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("host_platform") && !out.contains("empty_toolchain"),
+        "{out}"
+    );
+
+    let o_alias = ws.post("deps(//pkg:al)", |qopts, _, _| qopts.implicit_deps = false);
+    let out_alias = String::from_utf8_lossy(&o_alias.stdout);
+    assert!(
+        out_alias.contains("//pkg:al") && out_alias.contains("//pkg:leaf"),
+        "{out_alias}"
+    );
+
+    let o_out = ws.post("deps(//pkg:g.out)", |qopts, _, _| {
+        qopts.implicit_deps = false
+    });
+    let out_out = String::from_utf8_lossy(&o_out.stdout);
+    assert!(
+        out_out.contains("//pkg:g.out") && out_out.contains("//pkg:gen"),
+        "{out_out}"
+    );
+
+    // rdeps & allpaths with --noimplicit_deps work in cquery.
+    let o_rd = ws.post("rdeps(//pkg:top, //pkg:leaf)", |qopts, _, _| {
+        qopts.implicit_deps = false
+    });
+    let out_rd = String::from_utf8_lossy(&o_rd.stdout);
+    assert!(
+        out_rd.contains("//pkg:top") && out_rd.contains("//pkg:leaf"),
+        "{out_rd}"
+    );
+    let o_ap = ws.post("allpaths(//pkg:top, //pkg:leaf)", |qopts, _, _| {
+        qopts.implicit_deps = false
+    });
+    let out_ap = String::from_utf8_lossy(&o_ap.stdout);
+    assert!(
+        out_ap.contains("//pkg:top") && out_ap.contains("//pkg:leaf"),
+        "{out_ap}"
+    );
+
+    // --notool_deps: target-config parent drops exec deps and keeps null-config sources;
+    // exec-config parent keeps exec deps and drops null-config sources.
+    let o_nt = ws.post("deps(//pkg:gen)", |qopts, _, _| qopts.tool_deps = false);
+    let out_nt = String::from_utf8_lossy(&o_nt.stdout);
+    assert!(out_nt.contains("//pkg:src.txt"), "{out_nt}");
+    assert!(!out_nt.contains("//pkg:tool_dep"), "{out_nt}");
+
+    let o_exec = ws.post("deps(//pkg:gen)", |_, _, _| {});
+    let exec_line = String::from_utf8_lossy(&o_exec.stdout)
+        .lines()
+        .find(|l| l.starts_with("//pkg:tool_dep "))
+        .unwrap()
+        .to_string();
+    let exec_hash = exec_line
+        .rsplit('(')
+        .next()
+        .unwrap()
+        .trim_end_matches(')')
+        .to_string();
+    let o_exec_nt = ws.post(
+        &format!("deps(config(//pkg:tool_dep, {exec_hash}))"),
+        |qopts, _, _| {
+            qopts.universe_scope = vec!["//pkg:gen".into()];
+            qopts.tool_deps = false;
+        },
+    );
+    let out_exec_nt = String::from_utf8_lossy(&o_exec_nt.stdout);
+    assert!(out_exec_nt.contains("//pkg:tool_dep"), "{out_exec_nt}");
+    assert!(
+        !out_exec_nt.contains("//pkg:tool_src.txt"),
+        "exec parent must drop null-config source under --notool_deps: {out_exec_nt}"
+    );
+
+    // --experimental_explicit_aspects emits aspect nodes in cquery, and providers(aspect_node) is None.
+    let o_ea = ws.post("deps(//pkg:top)", |_, _, popts| {
+        popts.explicit_aspects = true
+    });
+    let out_ea = String::from_utf8_lossy(&o_ea.stdout);
+    assert!(out_ea.contains("my_asp of //pkg:leaf"), "{out_ea}");
+}
+
+#[test]
+fn cquery_config_labels_files_and_starlark_semantics() {
+    let ws = Ws::new(&[
+        ("BUILD", ""),
+        (
+            "pkg/defs.bzl",
+            "def _asp_impl(target, ctx):\n\
+                 \x20   f = ctx.actions.declare_file(target.label.name + '.asp')\n\
+                 \x20   ctx.actions.write(f, 'x')\n\
+                 \x20   return [OutputGroupInfo(default = depset([f]), custom = depset([f]))]\n\
+             top_asp = aspect(implementation = _asp_impl)\n\
+             def _rule_impl(ctx):\n\
+                 \x20   f1 = ctx.actions.declare_file('f1.txt')\n\
+                 \x20   ctx.actions.write(f1, '1')\n\
+                 \x20   f2 = ctx.actions.declare_file('f2.txt')\n\
+                 \x20   ctx.actions.write(f2, '2')\n\
+                 \x20   return [DefaultInfo(files = depset([f1])), OutputGroupInfo(custom = depset([f2]))]\n\
+             my_rule = rule(implementation = _rule_impl, attrs = {'deps': attr.label_list()})\n",
+        ),
+        ("pkg/a.txt", ""),
+        ("pkg/b.txt", ""),
+        (
+            "pkg/BUILD",
+            "load('//pkg:defs.bzl', 'my_rule')\n\
+             config_setting(name = 'opt', values = {'compilation_mode': 'opt'})\n\
+             filegroup(name = 'fg', srcs = select({':opt': ['a.txt'], '//conditions:default': ['b.txt']}))\n\
+             alias(name = 'fg_alias', actual = ':fg')\n\
+             genrule(name = 'gen', srcs = ['a.txt'], outs = ['g.out'], tools = [':fg'], cmd = 'echo > $@')\n\
+             my_rule(name = 'r')\n\
+             package_group(name = 'pg')\n",
+        ),
+    ]);
+
+    // `config(..., target)` drops null-configured deps when no top-level target is null-configured.
+    let o = ws.post("config(deps(//pkg:fg), target)", |_, _, _| {});
+    assert_eq!(o.exit_code, 0, "{:?}", o.stderr);
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("//pkg:fg ") && !out.contains("//pkg:b.txt"),
+        "{out} stderr={:?}",
+        o.stderr
+    );
+
+    // `labels()` in cquery follows alias chain, uses configured select branch, preserves exec config,
+    // and errors on missing attributes.
+    let o = ws.post("labels(srcs, //pkg:fg_alias)", |_, _, _| {});
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(
+        out.contains("//pkg:b.txt") && !out.contains("//pkg:a.txt"),
+        "{out}"
+    );
+
+    let o_tools = ws.post("labels(tools, //pkg:gen)", |_, _, _| {});
+    let tools_out = String::from_utf8_lossy(&o_tools.stdout);
+    let o_fg_target = ws.post("//pkg:fg", |_, _, _| {});
+    let fg_target_line = String::from_utf8_lossy(&o_fg_target.stdout);
+    assert!(
+        tools_out.contains("//pkg:fg ") && tools_out.trim() != fg_target_line.trim(),
+        "tools dep must be in exec cfg: {tools_out} vs {fg_target_line}"
+    );
+
+    let o_missing_attr = ws.post("labels(no_such_attr, //pkg:fg_alias)", |_, _, _| {});
+    assert_ne!(o_missing_attr.exit_code, 0);
+    assert!(
+        o_missing_attr.stderr.iter().any(|l| l.contains(
+            "configured target of type filegroup does not have attribute 'no_such_attr'"
+        )),
+        "{:?}",
+        o_missing_attr.stderr
+    );
+
+    // `cquery --output=files` supports `+group` / `-group` syntax.
+    let o_plus = ws.post("//pkg:r", |_, _, popts| {
+        popts.output = "files".into();
+        popts.output_groups = vec!["+custom".into()];
+    });
+    let plus_out = String::from_utf8_lossy(&o_plus.stdout);
+    assert!(
+        plus_out.contains("f1.txt") && plus_out.contains("f2.txt"),
+        "{plus_out}"
+    );
+
+    let o_minus = ws.post("//pkg:r", |_, _, popts| {
+        popts.output = "files".into();
+        popts.output_groups = vec!["-default".into()];
+    });
+    let minus_out = String::from_utf8_lossy(&o_minus.stdout);
+    assert!(!minus_out.contains("f1.txt"), "{minus_out}");
+
+    // Top-level aspect outputs appear in `cquery --output=files` with `--include_aspects` and not with `--noinclude_aspects`.
+    let resolver = ws.resolver();
+    let asp_lbl = zel_cmdline::Label::parse_canonical("//pkg:defs.bzl").unwrap();
+    let top_asp = resolver
+        .loader()
+        .load_bzl_export(&asp_lbl, "top_asp")
+        .unwrap();
+    let o_asp = ws.post("//pkg:r", |_, _, popts| {
+        popts.output = "files".into();
+        popts.top_aspects = vec![top_asp.clone()];
+    });
+    let asp_out = String::from_utf8_lossy(&o_asp.stdout);
+    assert!(asp_out.contains("r.asp"), "{asp_out}");
+
+    let o_noasp = ws.post("//pkg:r", |qopts, _, popts| {
+        qopts.include_aspects = false;
+        popts.output = "files".into();
+        popts.top_aspects = vec![top_asp];
+    });
+    let noasp_out = String::from_utf8_lossy(&o_noasp.stdout);
+    assert!(!noasp_out.contains("r.asp"), "{noasp_out}");
+
+    // `cquery --output=starlark`: OutputFile repr & providers, PackageGroup -> None,
+    // and `--incompatible_disable_target_default_provider_fields`.
+    let o_of = ws.post("//pkg:g.out", |_, _, popts| {
+        popts.output = "starlark".into();
+        popts.starlark_expr = "str(target) + ':' + str('InstrumentedFilesInfo' in providers(target)) + ':' + str(target.actions)".into();
+    });
+    assert_eq!(
+        String::from_utf8_lossy(&o_of.stdout).trim(),
+        "<output file target //pkg:g.out>:True:None"
+    );
+
+    let o_pg = ws.post("//pkg:pg", |_, _, popts| {
+        popts.output = "starlark".into();
+        popts.starlark_expr = "str(providers(target))".into();
+    });
+    assert_eq!(String::from_utf8_lossy(&o_pg.stdout).trim(), "None");
+
+    let o_dis = ws.post("//pkg:r", |_, _, popts| {
+        popts.output = "starlark".into();
+        popts.starlark_expr = "target.files".into();
+        popts.incompatible_disable_target_default_provider_fields = true;
+    });
+    assert!(String::from_utf8_lossy(&o_dis.stdout).trim().is_empty());
+    assert!(
+        o_dis
+            .stderr
+            .iter()
+            .any(|l| l.contains("incompatible_disable_target_default_provider_fields")),
+        "{:?}",
+        o_dis.stderr
+    );
 }

@@ -108,12 +108,16 @@ impl DigestFunction {
 static SERVER_DIGEST: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 
 pub fn set_server_digest_function(f: DigestFunction) {
-    let v = DigestFunction::ALL.iter().position(|x| *x == f).unwrap_or(1) as u8;
+    let v = DigestFunction::ALL
+        .iter()
+        .position(|x| *x == f)
+        .unwrap_or(1) as u8;
     SERVER_DIGEST.store(v, std::sync::atomic::Ordering::SeqCst);
 }
 
 pub fn server_digest_function() -> DigestFunction {
-    DigestFunction::ALL[SERVER_DIGEST.load(std::sync::atomic::Ordering::SeqCst) as usize % DigestFunction::ALL.len()]
+    DigestFunction::ALL[SERVER_DIGEST.load(std::sync::atomic::Ordering::SeqCst) as usize
+        % DigestFunction::ALL.len()]
 }
 
 /// Extracts `--digest_function=<value>` from raw startup options (last one wins) and validates it.
@@ -145,7 +149,12 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
     for chunk in msg.chunks(64) {
         let mut w = [0u32; 80];
         for i in 0..16 {
-            w[i] = u32::from_be_bytes([chunk[4 * i], chunk[4 * i + 1], chunk[4 * i + 2], chunk[4 * i + 3]]);
+            w[i] = u32::from_be_bytes([
+                chunk[4 * i],
+                chunk[4 * i + 1],
+                chunk[4 * i + 2],
+                chunk[4 * i + 3],
+            ]);
         }
         for i in 16..80 {
             w[i] = (w[i - 3] ^ w[i - 8] ^ w[i - 14] ^ w[i - 16]).rotate_left(1);
@@ -158,7 +167,12 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
                 40..=59 => ((b & c) | (b & d) | (c & d), 0x8F1BBCDC),
                 _ => (b ^ c ^ d, 0xCA62C1D6u32),
             };
-            let t = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(*wi);
+            let t = a
+                .rotate_left(5)
+                .wrapping_add(f)
+                .wrapping_add(e)
+                .wrapping_add(k)
+                .wrapping_add(*wi);
             e = d;
             d = c;
             c = b.rotate_left(30);
@@ -181,22 +195,86 @@ pub fn sha1(data: &[u8]) -> [u8; 20] {
 // ------------------------------------------------------------------------ SHA-384 / SHA-512
 
 const K512: [u64; 80] = [
-    0x428a2f98d728ae22, 0x7137449123ef65cd, 0xb5c0fbcfec4d3b2f, 0xe9b5dba58189dbbc, 0x3956c25bf348b538,
-    0x59f111f1b605d019, 0x923f82a4af194f9b, 0xab1c5ed5da6d8118, 0xd807aa98a3030242, 0x12835b0145706fbe,
-    0x243185be4ee4b28c, 0x550c7dc3d5ffb4e2, 0x72be5d74f27b896f, 0x80deb1fe3b1696b1, 0x9bdc06a725c71235,
-    0xc19bf174cf692694, 0xe49b69c19ef14ad2, 0xefbe4786384f25e3, 0x0fc19dc68b8cd5b5, 0x240ca1cc77ac9c65,
-    0x2de92c6f592b0275, 0x4a7484aa6ea6e483, 0x5cb0a9dcbd41fbd4, 0x76f988da831153b5, 0x983e5152ee66dfab,
-    0xa831c66d2db43210, 0xb00327c898fb213f, 0xbf597fc7beef0ee4, 0xc6e00bf33da88fc2, 0xd5a79147930aa725,
-    0x06ca6351e003826f, 0x142929670a0e6e70, 0x27b70a8546d22ffc, 0x2e1b21385c26c926, 0x4d2c6dfc5ac42aed,
-    0x53380d139d95b3df, 0x650a73548baf63de, 0x766a0abb3c77b2a8, 0x81c2c92e47edaee6, 0x92722c851482353b,
-    0xa2bfe8a14cf10364, 0xa81a664bbc423001, 0xc24b8b70d0f89791, 0xc76c51a30654be30, 0xd192e819d6ef5218,
-    0xd69906245565a910, 0xf40e35855771202a, 0x106aa07032bbd1b8, 0x19a4c116b8d2d0c8, 0x1e376c085141ab53,
-    0x2748774cdf8eeb99, 0x34b0bcb5e19b48a8, 0x391c0cb3c5c95a63, 0x4ed8aa4ae3418acb, 0x5b9cca4f7763e373,
-    0x682e6ff3d6b2b8a3, 0x748f82ee5defb2fc, 0x78a5636f43172f60, 0x84c87814a1f0ab72, 0x8cc702081a6439ec,
-    0x90befffa23631e28, 0xa4506cebde82bde9, 0xbef9a3f7b2c67915, 0xc67178f2e372532b, 0xca273eceea26619c,
-    0xd186b8c721c0c207, 0xeada7dd6cde0eb1e, 0xf57d4f7fee6ed178, 0x06f067aa72176fba, 0x0a637dc5a2c898a6,
-    0x113f9804bef90dae, 0x1b710b35131c471b, 0x28db77f523047d84, 0x32caab7b40c72493, 0x3c9ebe0a15c9bebc,
-    0x431d67c49c100d4c, 0x4cc5d4becb3e42b6, 0x597f299cfc657e2a, 0x5fcb6fab3ad6faec, 0x6c44198c4a475817,
+    0x428a2f98d728ae22,
+    0x7137449123ef65cd,
+    0xb5c0fbcfec4d3b2f,
+    0xe9b5dba58189dbbc,
+    0x3956c25bf348b538,
+    0x59f111f1b605d019,
+    0x923f82a4af194f9b,
+    0xab1c5ed5da6d8118,
+    0xd807aa98a3030242,
+    0x12835b0145706fbe,
+    0x243185be4ee4b28c,
+    0x550c7dc3d5ffb4e2,
+    0x72be5d74f27b896f,
+    0x80deb1fe3b1696b1,
+    0x9bdc06a725c71235,
+    0xc19bf174cf692694,
+    0xe49b69c19ef14ad2,
+    0xefbe4786384f25e3,
+    0x0fc19dc68b8cd5b5,
+    0x240ca1cc77ac9c65,
+    0x2de92c6f592b0275,
+    0x4a7484aa6ea6e483,
+    0x5cb0a9dcbd41fbd4,
+    0x76f988da831153b5,
+    0x983e5152ee66dfab,
+    0xa831c66d2db43210,
+    0xb00327c898fb213f,
+    0xbf597fc7beef0ee4,
+    0xc6e00bf33da88fc2,
+    0xd5a79147930aa725,
+    0x06ca6351e003826f,
+    0x142929670a0e6e70,
+    0x27b70a8546d22ffc,
+    0x2e1b21385c26c926,
+    0x4d2c6dfc5ac42aed,
+    0x53380d139d95b3df,
+    0x650a73548baf63de,
+    0x766a0abb3c77b2a8,
+    0x81c2c92e47edaee6,
+    0x92722c851482353b,
+    0xa2bfe8a14cf10364,
+    0xa81a664bbc423001,
+    0xc24b8b70d0f89791,
+    0xc76c51a30654be30,
+    0xd192e819d6ef5218,
+    0xd69906245565a910,
+    0xf40e35855771202a,
+    0x106aa07032bbd1b8,
+    0x19a4c116b8d2d0c8,
+    0x1e376c085141ab53,
+    0x2748774cdf8eeb99,
+    0x34b0bcb5e19b48a8,
+    0x391c0cb3c5c95a63,
+    0x4ed8aa4ae3418acb,
+    0x5b9cca4f7763e373,
+    0x682e6ff3d6b2b8a3,
+    0x748f82ee5defb2fc,
+    0x78a5636f43172f60,
+    0x84c87814a1f0ab72,
+    0x8cc702081a6439ec,
+    0x90befffa23631e28,
+    0xa4506cebde82bde9,
+    0xbef9a3f7b2c67915,
+    0xc67178f2e372532b,
+    0xca273eceea26619c,
+    0xd186b8c721c0c207,
+    0xeada7dd6cde0eb1e,
+    0xf57d4f7fee6ed178,
+    0x06f067aa72176fba,
+    0x0a637dc5a2c898a6,
+    0x113f9804bef90dae,
+    0x1b710b35131c471b,
+    0x28db77f523047d84,
+    0x32caab7b40c72493,
+    0x3c9ebe0a15c9bebc,
+    0x431d67c49c100d4c,
+    0x4cc5d4becb3e42b6,
+    0x597f299cfc657e2a,
+    0x5fcb6fab3ad6faec,
+    0x6c44198c4a475817,
 ];
 
 fn sha512_core(data: &[u8], init: [u64; 8]) -> [u64; 8] {
@@ -217,13 +295,20 @@ fn sha512_core(data: &[u8], init: [u64; 8]) -> [u64; 8] {
         for i in 16..80 {
             let s0 = w[i - 15].rotate_right(1) ^ w[i - 15].rotate_right(8) ^ (w[i - 15] >> 7);
             let s1 = w[i - 2].rotate_right(19) ^ w[i - 2].rotate_right(61) ^ (w[i - 2] >> 6);
-            w[i] = w[i - 16].wrapping_add(s0).wrapping_add(w[i - 7]).wrapping_add(s1);
+            w[i] = w[i - 16]
+                .wrapping_add(s0)
+                .wrapping_add(w[i - 7])
+                .wrapping_add(s1);
         }
         let mut v = h;
         for i in 0..80 {
             let s1 = v[4].rotate_right(14) ^ v[4].rotate_right(18) ^ v[4].rotate_right(41);
             let ch = (v[4] & v[5]) ^ (!v[4] & v[6]);
-            let t1 = v[7].wrapping_add(s1).wrapping_add(ch).wrapping_add(K512[i]).wrapping_add(w[i]);
+            let t1 = v[7]
+                .wrapping_add(s1)
+                .wrapping_add(ch)
+                .wrapping_add(K512[i])
+                .wrapping_add(w[i]);
             let s0 = v[0].rotate_right(28) ^ v[0].rotate_right(34) ^ v[0].rotate_right(39);
             let maj = (v[0] & v[1]) ^ (v[0] & v[2]) ^ (v[1] & v[2]);
             let t2 = s0.wrapping_add(maj);
@@ -247,8 +332,14 @@ pub fn sha512(data: &[u8]) -> [u8; 64] {
     let h = sha512_core(
         data,
         [
-            0x6a09e667f3bcc908, 0xbb67ae8584caa73b, 0x3c6ef372fe94f82b, 0xa54ff53a5f1d36f1, 0x510e527fade682d1,
-            0x9b05688c2b3e6c1f, 0x1f83d9abfb41bd6b, 0x5be0cd19137e2179,
+            0x6a09e667f3bcc908,
+            0xbb67ae8584caa73b,
+            0x3c6ef372fe94f82b,
+            0xa54ff53a5f1d36f1,
+            0x510e527fade682d1,
+            0x9b05688c2b3e6c1f,
+            0x1f83d9abfb41bd6b,
+            0x5be0cd19137e2179,
         ],
     );
     let mut out = [0u8; 64];
@@ -262,8 +353,14 @@ pub fn sha384(data: &[u8]) -> [u8; 48] {
     let h = sha512_core(
         data,
         [
-            0xcbbb9d5dc1059ed8, 0x629a292a367cd507, 0x9159015a3070dd17, 0x152fecd8f70e5939, 0x67332667ffc00b31,
-            0x8eb44a8768581511, 0xdb0c2e0d64f98fa7, 0x47b5481dbefa4fa4,
+            0xcbbb9d5dc1059ed8,
+            0x629a292a367cd507,
+            0x9159015a3070dd17,
+            0x152fecd8f70e5939,
+            0x67332667ffc00b31,
+            0x8eb44a8768581511,
+            0xdb0c2e0d64f98fa7,
+            0x47b5481dbefa4fa4,
         ],
     );
     let mut out = [0u8; 48];
@@ -307,10 +404,30 @@ fn b3_round(s: &mut [u32; 16], m: &[u32; 16]) {
     g(s, 3, 4, 9, 14, m[14], m[15]);
 }
 
-fn b3_compress(cv: &[u32; 8], block: &[u32; 16], counter: u64, block_len: u32, flags: u32) -> [u32; 16] {
+fn b3_compress(
+    cv: &[u32; 8],
+    block: &[u32; 16],
+    counter: u64,
+    block_len: u32,
+    flags: u32,
+) -> [u32; 16] {
     let mut s = [
-        cv[0], cv[1], cv[2], cv[3], cv[4], cv[5], cv[6], cv[7], B3_IV[0], B3_IV[1], B3_IV[2], B3_IV[3],
-        counter as u32, (counter >> 32) as u32, block_len, flags,
+        cv[0],
+        cv[1],
+        cv[2],
+        cv[3],
+        cv[4],
+        cv[5],
+        cv[6],
+        cv[7],
+        B3_IV[0],
+        B3_IV[1],
+        B3_IV[2],
+        B3_IV[3],
+        counter as u32,
+        (counter >> 32) as u32,
+        block_len,
+        flags,
     ];
     let mut m = *block;
     for r in 0..7 {
@@ -348,13 +465,25 @@ struct B3Output {
 
 impl B3Output {
     fn chaining_value(&self) -> [u32; 8] {
-        let o = b3_compress(&self.input_cv, &self.block_words, self.counter, self.block_len, self.flags);
+        let o = b3_compress(
+            &self.input_cv,
+            &self.block_words,
+            self.counter,
+            self.block_len,
+            self.flags,
+        );
         let mut cv = [0u32; 8];
         cv.copy_from_slice(&o[..8]);
         cv
     }
     fn root_bytes(&self) -> [u8; 32] {
-        let o = b3_compress(&self.input_cv, &self.block_words, 0, self.block_len, self.flags | ROOT);
+        let o = b3_compress(
+            &self.input_cv,
+            &self.block_words,
+            0,
+            self.block_len,
+            self.flags | ROOT,
+        );
         let mut out = [0u8; 32];
         for i in 0..8 {
             out[4 * i..4 * i + 4].copy_from_slice(&o[i].to_le_bytes());
@@ -373,7 +502,13 @@ struct ChunkState {
 
 impl ChunkState {
     fn new(counter: u64) -> Self {
-        Self { cv: B3_IV, counter, block: [0; 64], block_len: 0, blocks_compressed: 0 }
+        Self {
+            cv: B3_IV,
+            counter,
+            block: [0; 64],
+            block_len: 0,
+            blocks_compressed: 0,
+        }
     }
     fn len(&self) -> usize {
         64 * self.blocks_compressed as usize + self.block_len
@@ -416,7 +551,13 @@ fn parent_output(left: [u32; 8], right: [u32; 8]) -> B3Output {
     let mut w = [0u32; 16];
     w[..8].copy_from_slice(&left);
     w[8..].copy_from_slice(&right);
-    B3Output { input_cv: B3_IV, block_words: w, counter: 0, block_len: 64, flags: PARENT }
+    B3Output {
+        input_cv: B3_IV,
+        block_words: w,
+        counter: 0,
+        block_len: 64,
+        flags: PARENT,
+    }
 }
 
 /// BLAKE3 (default 256-bit output, unkeyed).
@@ -452,10 +593,18 @@ mod tests {
 
     #[test]
     fn sha1_vectors() {
-        assert_eq!(to_hex(&sha1(b"")), "da39a3ee5e6b4b0d3255bfef95601890afd80709");
-        assert_eq!(to_hex(&sha1(b"abc")), "a9993e364706816aba3e25717850c26c9cd0d89d");
         assert_eq!(
-            to_hex(&sha1(b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq")),
+            to_hex(&sha1(b"")),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709"
+        );
+        assert_eq!(
+            to_hex(&sha1(b"abc")),
+            "a9993e364706816aba3e25717850c26c9cd0d89d"
+        );
+        assert_eq!(
+            to_hex(&sha1(
+                b"abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"
+            )),
             "84983e441c3bd26ebaae4aa1f95129e5e54670f1"
         );
     }
@@ -478,28 +627,64 @@ mod tests {
 
     #[test]
     fn blake3_vectors() {
-        assert_eq!(to_hex(&blake3(b"")), "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262");
-        assert_eq!(to_hex(&blake3(b"abc")), "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85");
+        assert_eq!(
+            to_hex(&blake3(b"")),
+            "af1349b9f5f9a1a6a0404dea36dcc9499bcb25c9adc112b7cc9a93cae41f3262"
+        );
+        assert_eq!(
+            to_hex(&blake3(b"abc")),
+            "6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+        );
     }
 
     #[test]
     fn blake3_multi_chunk_matches_reference_vectors() {
         // Official test vectors use input bytes i % 251.
         let input = |n: usize| -> Vec<u8> { (0..n).map(|i| (i % 251) as u8).collect() };
-        assert_eq!(to_hex(&blake3(&input(1))), "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213");
-        assert_eq!(to_hex(&blake3(&input(1023))), "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11");
-        assert_eq!(to_hex(&blake3(&input(1024))), "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7");
-        assert_eq!(to_hex(&blake3(&input(1025))), "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444");
-        assert_eq!(to_hex(&blake3(&input(2048))), "e776b6028c7cd22a4d0ba182a8bf62205d2ef576467e838ed6f2529b85fba24a");
-        assert_eq!(to_hex(&blake3(&input(31744))), "62b6960e1a44bcc1eb1a611a8d6235b6b4b78f32e7abc4fb4c6cdcce94895c47");
+        assert_eq!(
+            to_hex(&blake3(&input(1))),
+            "2d3adedff11b61f14c886e35afa036736dcd87a74d27b5c1510225d0f592e213"
+        );
+        assert_eq!(
+            to_hex(&blake3(&input(1023))),
+            "10108970eeda3eb932baac1428c7a2163b0e924c9a9e25b35bba72b28f70bd11"
+        );
+        assert_eq!(
+            to_hex(&blake3(&input(1024))),
+            "42214739f095a406f3fc83deb889744ac00df831c10daa55189b5d121c855af7"
+        );
+        assert_eq!(
+            to_hex(&blake3(&input(1025))),
+            "d00278ae47eb27b34faecf67b4fe263f82d5412916c1ffd97c8cb7fb814b8444"
+        );
+        assert_eq!(
+            to_hex(&blake3(&input(2048))),
+            "e776b6028c7cd22a4d0ba182a8bf62205d2ef576467e838ed6f2529b85fba24a"
+        );
+        assert_eq!(
+            to_hex(&blake3(&input(31744))),
+            "62b6960e1a44bcc1eb1a611a8d6235b6b4b78f32e7abc4fb4c6cdcce94895c47"
+        );
     }
 
     #[test]
     fn converter_matches_bazel() {
-        assert_eq!(DigestFunction::parse("sha256").unwrap(), DigestFunction::Sha256);
-        assert_eq!(DigestFunction::parse("SHA-1").unwrap(), DigestFunction::Sha1);
-        assert_eq!(DigestFunction::parse("blake3").unwrap(), DigestFunction::Blake3);
-        assert_eq!(DigestFunction::parse("Sha512").unwrap(), DigestFunction::Sha512);
+        assert_eq!(
+            DigestFunction::parse("sha256").unwrap(),
+            DigestFunction::Sha256
+        );
+        assert_eq!(
+            DigestFunction::parse("SHA-1").unwrap(),
+            DigestFunction::Sha1
+        );
+        assert_eq!(
+            DigestFunction::parse("blake3").unwrap(),
+            DigestFunction::Blake3
+        );
+        assert_eq!(
+            DigestFunction::parse("Sha512").unwrap(),
+            DigestFunction::Sha512
+        );
         assert_eq!(
             DigestFunction::parse("MD5").unwrap_err(),
             "'MD5' is not a valid hash function. Possible values are: BLAKE3, SHA-1, SHA-256, SHA-384, SHA-512"

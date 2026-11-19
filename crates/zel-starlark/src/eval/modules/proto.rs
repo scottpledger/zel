@@ -53,17 +53,15 @@ fn encode_field(
         Value::List(l) => {
             let guard = l.lock().unwrap();
             for (i, elem) in guard.elements.iter().enumerate() {
-                encode_field_element(name, elem, out, indent).map_err(|e| {
-                    StarlarkError(format!("at list index {i}: {}", e.0))
-                })?;
+                encode_field_element(name, elem, out, indent)
+                    .map_err(|e| StarlarkError(format!("at list index {i}: {}", e.0)))?;
             }
             Ok(())
         }
         Value::Tuple(items) => {
             for (i, elem) in items.iter().enumerate() {
-                encode_field_element(name, elem, out, indent).map_err(|e| {
-                    StarlarkError(format!("at tuple index {i}: {}", e.0))
-                })?;
+                encode_field_element(name, elem, out, indent)
+                    .map_err(|e| StarlarkError(format!("at tuple index {i}: {}", e.0)))?;
             }
             Ok(())
         }

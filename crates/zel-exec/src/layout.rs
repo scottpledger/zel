@@ -35,13 +35,17 @@ use std::path::{Path, PathBuf};
 /// `SymlinkForest.symlinkShouldBePlanted`: links not starting with `<product>-` (the output
 /// convenience symlinks), not `external`, and not ignored via `.bazelignore`.
 pub fn symlink_should_be_planted(prefix: &str, ignored: &[String], base_name: &str) -> bool {
-    !base_name.starts_with(prefix) && base_name != "external" && !ignored.iter().any(|i| i == base_name)
+    !base_name.starts_with(prefix)
+        && base_name != "external"
+        && !ignored.iter().any(|i| i == base_name)
 }
 
 /// Top-level entries of `.bazelignore` (`IgnoredSubdirectories`): one path per line, `#` comments,
 /// only the first path segment matters for the top-level forest.
 pub fn read_bazelignore(workspace: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(workspace.join(".bazelignore")) else { return Vec::new() };
+    let Ok(text) = std::fs::read_to_string(workspace.join(".bazelignore")) else {
+        return Vec::new();
+    };
     let mut v = Vec::new();
     for l in text.lines() {
         let l = l.trim();
@@ -76,6 +80,24 @@ pub fn delete_trees_below_not_prefixed(dir: &Path, prefix: &str) -> io::Result<(
     Ok(())
 }
 
+#[cfg(not(unix))]
+fn copy_tree_fallback(src: &Path, dst: &Path) -> io::Result<()> {
+    let md = std::fs::metadata(src)?;
+    if md.is_dir() {
+        std::fs::create_dir_all(dst)?;
+        for entry in std::fs::read_dir(src)? {
+            let entry = entry?;
+            copy_tree_fallback(&entry.path(), &dst.join(entry.file_name()))?;
+        }
+    } else {
+        if let Some(p) = dst.parent() {
+            std::fs::create_dir_all(p)?;
+        }
+        std::fs::copy(src, dst)?;
+    }
+    Ok(())
+}
+
 /// `eagerlyPlantSymlinkForestSinglePackagePath`: replaces the execroot's contents by one symlink
 /// per top-level entry of the source root. Returns the potentially case-conflicting base names
 /// (lowercase) that were *not* planted.
@@ -90,7 +112,10 @@ pub fn plant_symlink_forest(
     let mut by_lower: BTreeMap<String, Vec<PathBuf>> = BTreeMap::new();
     for e in std::fs::read_dir(source_root)? {
         let e = e?;
-        by_lower.entry(e.file_name().to_string_lossy().to_lowercase()).or_default().push(e.path());
+        by_lower
+            .entry(e.file_name().to_string_lossy().to_lowercase())
+            .or_default()
+            .push(e.path());
     }
     let mut conflicts = BTreeSet::new();
     for (lower, targets) in by_lower {
@@ -100,6 +125,8 @@ pub fn plant_symlink_forest(
             if symlink_should_be_planted(prefix, ignored, &base) {
                 #[cfg(unix)]
                 std::os::unix::fs::symlink(target, execroot.join(&base))?;
+                #[cfg(not(unix))]
+                copy_tree_fallback(target, &execroot.join(&base))?;
             }
         } else {
             conflicts.insert(lower);
@@ -113,7 +140,9 @@ pub fn plant_symlink_forest(
 pub fn plant_external_repo_links(execroot: &Path, output_base: &Path) -> io::Result<Vec<PathBuf>> {
     let ext = output_base.join("external");
     let mut planted = Vec::new();
-    let Ok(rd) = std::fs::read_dir(&ext) else { return Ok(planted) };
+    let Ok(rd) = std::fs::read_dir(&ext) else {
+        return Ok(planted);
+    };
     let mut names: Vec<String> = rd
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
@@ -132,6 +161,8 @@ pub fn plant_external_repo_links(execroot: &Path, output_base: &Path) -> io::Res
         }
         #[cfg(unix)]
         std::os::unix::fs::symlink(ext.join(&n), &link)?;
+        #[cfg(not(unix))]
+        copy_tree_fallback(&ext.join(&n), &link)?;
         planted.push(link);
     }
     Ok(planted)
@@ -191,7 +222,11 @@ pub fn parse_workspace_name(text: &str) -> Option<String> {
     while let Some(p) = cleaned[idx..].find("workspace(") {
         let start = idx + p;
         // Must not be a suffix of another identifier (e.g. `local_workspace(`).
-        let before_ok = start == 0 || !cleaned[..start].chars().last().map_or(false, |c| c.is_alphanumeric() || c == '_');
+        let before_ok = start == 0
+            || !cleaned[..start]
+                .chars()
+                .last()
+                .is_some_and(|c| c.is_alphanumeric() || c == '_');
         if before_ok {
             let rest = &cleaned[start + "workspace(".len()..];
             let end = rest.find(')')?;
@@ -212,7 +247,10 @@ pub fn parse_workspace_name(text: &str) -> Option<String> {
 }
 
 /// Creates the standard output base directories and the `install` symlink.
-pub fn ensure_output_base_layout(output_base: &Path, install_base: Option<&Path>) -> io::Result<()> {
+pub fn ensure_output_base_layout(
+    output_base: &Path,
+    install_base: Option<&Path>,
+) -> io::Result<()> {
     for d in ["execroot", "external", "server", "action_cache"] {
         std::fs::create_dir_all(output_base.join(d))?;
     }
@@ -231,9 +269,9 @@ pub fn ensure_output_base_layout(output_base: &Path, install_base: Option<&Path>
     Ok(())
 }
 
+#[cfg(unix)]
 extern "C" {
     fn gethostname(name: *mut u8, len: usize) -> i32;
-    #[cfg(unix)]
     fn localtime_r(timep: *const i64, result: *mut Tm) -> *mut Tm;
 }
 
@@ -254,15 +292,29 @@ struct Tm {
 }
 
 pub fn hostname() -> String {
-    let mut buf = [0u8; 256];
-    // SAFETY: valid buffer of the stated length.
-    let rc = unsafe { gethostname(buf.as_mut_ptr(), buf.len()) };
-    if rc != 0 {
-        return "localhost".into();
+    #[cfg(unix)]
+    {
+        let mut buf = [0u8; 256];
+        // SAFETY: valid buffer of the stated length.
+        let rc = unsafe { gethostname(buf.as_mut_ptr(), buf.len()) };
+        if rc != 0 {
+            return "localhost".into();
+        }
+        let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
+        let raw = String::from_utf8_lossy(&buf[..end]);
+        raw.split('.')
+            .next()
+            .unwrap_or("localhost")
+            .to_ascii_lowercase()
     }
-    let end = buf.iter().position(|b| *b == 0).unwrap_or(buf.len());
-    let raw = String::from_utf8_lossy(&buf[..end]);
-    raw.split('.').next().unwrap_or("localhost").to_ascii_lowercase()
+    #[cfg(not(unix))]
+    {
+        std::env::var("COMPUTERNAME")
+            .ok()
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "localhost".into())
+            .to_ascii_lowercase()
+    }
 }
 
 pub fn local_civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
@@ -295,11 +347,19 @@ pub fn write_command_log(output_base: &Path, stdout: &[u8], stderr: &[u8]) -> io
 /// The server log analog of `java.log`: a per-server log file
 /// `java.log.<host>.<user>.log.java.<date>.<pid>` with `java.log` as a symlink to it. Returns the
 /// file path; `line` is appended (one `Ymmdd ...` style line per event).
-pub fn append_server_log(output_base: &Path, pid: u32, started_secs: u64, line: &str) -> io::Result<PathBuf> {
+pub fn append_server_log(
+    output_base: &Path,
+    pid: u32,
+    started_secs: u64,
+    line: &str,
+) -> io::Result<PathBuf> {
     use std::io::Write;
     let user = std::env::var("USER").unwrap_or_else(|_| "unknown".into());
     let (y, mo, d, h, mi, s) = local_civil_from_unix(started_secs);
-    let name = format!("java.log.{}.{user}.log.java.{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}.{pid}", hostname());
+    let name = format!(
+        "java.log.{}.{user}.log.java.{y:04}{mo:02}{d:02}-{h:02}{mi:02}{s:02}.{pid}",
+        hostname()
+    );
     let file = output_base.join(&name);
     let link = output_base.join("java.log");
     if std::fs::read_link(&link).ok().as_deref() != Some(Path::new(&name)) {
@@ -307,8 +367,16 @@ pub fn append_server_log(output_base: &Path, pid: u32, started_secs: u64, line: 
         #[cfg(unix)]
         std::os::unix::fs::symlink(&name, &link)?;
     }
-    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(&file)?;
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&file)?;
     writeln!(f, "{line}")?;
+    #[cfg(not(unix))]
+    {
+        drop(f);
+        let _ = std::fs::copy(&file, &link);
+    }
     Ok(file)
 }
 
@@ -326,7 +394,14 @@ pub fn civil_from_unix(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     let y = if m <= 2 { y + 1 } else { y };
-    (y, m, d, (rem / 3600) as u32, ((rem % 3600) / 60) as u32, (rem % 60) as u32)
+    (
+        y,
+        m,
+        d,
+        (rem / 3600) as u32,
+        ((rem % 3600) / 60) as u32,
+        (rem % 60) as u32,
+    )
 }
 
 #[cfg(test)]
@@ -359,19 +434,38 @@ mod tests {
         let c = plant_symlink_forest(&er, &ws, "bazel-", &["skipme".to_string()]).unwrap();
         assert!(c.is_empty());
         assert_eq!(std::fs::read_to_string(er.join("pkg/a.txt")).unwrap(), "a");
-        assert!(std::fs::symlink_metadata(er.join("pkg")).unwrap().file_type().is_symlink());
+        #[cfg(unix)]
+        assert!(std::fs::symlink_metadata(er.join("pkg"))
+            .unwrap()
+            .file_type()
+            .is_symlink());
         assert!(er.join("MODULE.bazel").exists());
         assert!(!er.join("external").exists(), "external/ is never linked");
-        assert!(!er.join("skipme").exists(), ".bazelignore'd dir is not linked");
+        assert!(
+            !er.join("skipme").exists(),
+            ".bazelignore'd dir is not linked"
+        );
         assert!(!er.join("stale_dir").exists(), "stale entries are deleted");
-        assert!(er.join("bazel-out/k8-fastbuild/bin/keep").exists(), "bazel-* kept");
-        assert!(std::fs::symlink_metadata(er.join("bazel-out")).unwrap().is_dir(), "bazel-out stays a real dir");
+        assert!(
+            er.join("bazel-out/k8-fastbuild/bin/keep").exists(),
+            "bazel-* kept"
+        );
+        assert!(
+            std::fs::symlink_metadata(er.join("bazel-out"))
+                .unwrap()
+                .is_dir(),
+            "bazel-out stays a real dir"
+        );
     }
 
     #[test]
     fn bazelignore_and_external_links() {
         let root = tmp("ext");
-        std::fs::write(root.join(".bazelignore"), "# c\nnode_modules\n./vendor/\nnested/dir\n\n").unwrap();
+        std::fs::write(
+            root.join(".bazelignore"),
+            "# c\nnode_modules\n./vendor/\nnested/dir\n\n",
+        )
+        .unwrap();
         assert_eq!(read_bazelignore(&root), ["node_modules", "vendor"]);
         let ob = root.join("ob");
         std::fs::create_dir_all(ob.join("external/rules_x+")).unwrap();
@@ -382,7 +476,10 @@ mod tests {
         let planted = plant_external_repo_links(&er, &ob).unwrap();
         assert_eq!(planted, [er.join("external/rules_x+")]);
         assert!(er.join("external/rules_x+").exists());
-        assert!(plant_external_repo_links(&er, &ob).unwrap().is_empty(), "idempotent");
+        assert!(
+            plant_external_repo_links(&er, &ob).unwrap().is_empty(),
+            "idempotent"
+        );
     }
 
     #[test]
@@ -392,7 +489,11 @@ mod tests {
         assert_eq!(execroot_workspace_name(&d, false), "__main__");
         std::fs::write(d.join("WORKSPACE"), "# workspace(name = \"commented\")\nload(\"x\", \"y\")\nworkspace(\n    name = \"my_ws\",\n)\n").unwrap();
         assert_eq!(execroot_workspace_name(&d, false), "my_ws");
-        std::fs::write(d.join("WORKSPACE.bazel"), "local_workspace(name = \"no\")\nworkspace(name='single')").unwrap();
+        std::fs::write(
+            d.join("WORKSPACE.bazel"),
+            "local_workspace(name = \"no\")\nworkspace(name='single')",
+        )
+        .unwrap();
         assert_eq!(execroot_workspace_name(&d, false), "single");
         assert_eq!(execroot_workspace_name(&d, true), "_main");
         assert_eq!(parse_workspace_name("workspace()"), None);
@@ -408,17 +509,28 @@ mod tests {
         for d in ["execroot", "external", "server", "action_cache"] {
             assert!(ob.join(d).is_dir(), "{d}");
         }
+        #[cfg(unix)]
         assert_eq!(std::fs::read_link(ob.join("install")).unwrap(), ib);
         ensure_output_base_layout(&ob, Some(&ib)).unwrap();
         write_command_log(&ob, b"out\n", b"err\n").unwrap();
-        assert_eq!(std::fs::read_to_string(ob.join("command.log")).unwrap(), "err\nout\n");
+        assert_eq!(
+            std::fs::read_to_string(ob.join("command.log")).unwrap(),
+            "err\nout\n"
+        );
         let f = append_server_log(&ob, 4242, 1_700_000_000, "I command: build").unwrap();
         let f2 = append_server_log(&ob, 4242, 1_700_000_000, "I command: test").unwrap();
         assert_eq!(f, f2);
-        assert!(f.file_name().unwrap().to_string_lossy().starts_with("java.log."));
+        assert!(f
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("java.log."));
         let s = f.file_name().unwrap().to_string_lossy();
         assert!(s.contains(".log.java.20231114-") && s.ends_with(".4242"));
-        assert_eq!(std::fs::read_to_string(ob.join("java.log")).unwrap(), "I command: build\nI command: test\n");
+        assert_eq!(
+            std::fs::read_to_string(ob.join("java.log")).unwrap(),
+            "I command: build\nI command: test\n"
+        );
         assert_eq!(civil_from_unix(0), (1970, 1, 1, 0, 0, 0));
     }
 }

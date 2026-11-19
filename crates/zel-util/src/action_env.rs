@@ -50,7 +50,10 @@ impl EnvVar {
         match input.find('=') {
             Some(0) => Ok(EnvVar::Unset(input[1..].to_string())),
             None => Ok(EnvVar::Inherit(input.to_string())),
-            Some(pos) => Ok(EnvVar::Set(input[..pos].to_string(), input[pos + 1..].to_string())),
+            Some(pos) => Ok(EnvVar::Set(
+                input[..pos].to_string(),
+                input[pos + 1..].to_string(),
+            )),
         }
     }
 
@@ -71,7 +74,9 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    raw.into_iter().filter_map(|s| EnvVar::parse(s.as_ref()).ok()).collect()
+    raw.into_iter()
+        .filter_map(|s| EnvVar::parse(s.as_ref()).ok())
+        .collect()
 }
 
 /// Fixed values, variables inherited from the client environment and explicitly unset variables.
@@ -95,7 +100,11 @@ impl ActionEnvironment {
         inherited: BTreeSet<String>,
         unset: BTreeSet<String>,
     ) -> Self {
-        Self { fixed, inherited, unset }
+        Self {
+            fixed,
+            inherited,
+            unset,
+        }
     }
 
     /// `ActionEnvironment.create(fixed)`.
@@ -138,7 +147,11 @@ impl ActionEnvironment {
 
     /// `ActionEnvironment.resolve`: fixed values, then values inherited from `client_env` (these
     /// win over fixed ones), then removal of the unset variables.
-    pub fn resolve(&self, result: &mut BTreeMap<String, String>, client_env: &BTreeMap<String, String>) {
+    pub fn resolve(
+        &self,
+        result: &mut BTreeMap<String, String>,
+        client_env: &BTreeMap<String, String>,
+    ) {
         for (k, v) in &self.fixed {
             result.insert(k.clone(), v.clone());
         }
@@ -161,7 +174,10 @@ impl ActionEnvironment {
 
     /// `ActionCacheChecker.computeEffectiveEnvironment`: the inherited variables that exist in
     /// the client environment, with their values.
-    pub fn used_client_env(&self, client_env: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    pub fn used_client_env(
+        &self,
+        client_env: &BTreeMap<String, String>,
+    ) -> BTreeMap<String, String> {
         self.inherited
             .iter()
             .filter_map(|k| client_env.get(k).map(|v| (k.clone(), v.clone())))
@@ -190,7 +206,12 @@ impl ActionEnvironment {
         for (k, v) in vars {
             fixed.insert(k.clone(), v.clone());
         }
-        let unset = self.unset.iter().filter(|u| !vars.contains_key(*u)).cloned().collect();
+        let unset = self
+            .unset
+            .iter()
+            .filter(|u| !vars.contains_key(*u))
+            .cloned()
+            .collect();
         Self::create(fixed, self.inherited.clone(), unset)
     }
 }
@@ -211,8 +232,12 @@ pub fn create_spawn_action_environment(
             .filter(|n| !environment.contains_key(*n))
             .cloned()
             .collect();
-        ActionEnvironment::create(configuration.fixed.clone(), filtered, configuration.unset.clone())
-            .with_additional_fixed_variables(environment)
+        ActionEnvironment::create(
+            configuration.fixed.clone(),
+            filtered,
+            configuration.unset.clone(),
+        )
+        .with_additional_fixed_variables(environment)
     } else if use_default_shell_env {
         configuration.clone()
     } else {
@@ -281,7 +306,11 @@ impl EnvConfig {
         }
         // Options take precedence over the defaults; the latest occurrence of a name wins.
         let mut unset = BTreeSet::new();
-        let vars = if is_exec { &self.host_action_env } else { &self.action_env };
+        let vars = if is_exec {
+            &self.host_action_env
+        } else {
+            &self.action_env
+        };
         for v in vars {
             match v {
                 EnvVar::Set(n, val) => {
@@ -404,8 +433,13 @@ pub fn repository_environments(
 }
 
 /// `RunCommand.ENV_VARIABLES_TO_CLEAR_UNCONDITIONALLY`.
-pub const RUN_ENV_VARIABLES_TO_CLEAR_UNCONDITIONALLY: &[&str] =
-    &["JAVA_RUNFILES", "RUNFILES_DIR", "RUNFILES_MANIFEST_FILE", "RUNFILES_MANIFEST_ONLY", "TEST_SRCDIR"];
+pub const RUN_ENV_VARIABLES_TO_CLEAR_UNCONDITIONALLY: &[&str] = &[
+    "JAVA_RUNFILES",
+    "RUNFILES_DIR",
+    "RUNFILES_MANIFEST_FILE",
+    "RUNFILES_MANIFEST_ONLY",
+    "TEST_SRCDIR",
+];
 
 /// `RunCommand.getCommandLineInfo` for a non-test target: the environment of `bazel run` and the
 /// variables to clear in the client's own environment.
@@ -448,7 +482,11 @@ pub fn run_environment(
         }
     }
     target_env.resolve(&mut env, client_env);
-    clear.extend(RUN_ENV_VARIABLES_TO_CLEAR_UNCONDITIONALLY.iter().map(|s| s.to_string()));
+    clear.extend(
+        RUN_ENV_VARIABLES_TO_CLEAR_UNCONDITIONALLY
+            .iter()
+            .map(|s| s.to_string()),
+    );
     (env, clear)
 }
 
@@ -468,17 +506,30 @@ mod tests {
     use super::*;
 
     fn m(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     fn cfg(strict: bool, action_env: &[&str]) -> EnvConfig {
-        EnvConfig { strict_action_env: strict, action_env: parse_env_vars(action_env), ..Default::default() }
+        EnvConfig {
+            strict_action_env: strict,
+            action_env: parse_env_vars(action_env),
+            ..Default::default()
+        }
     }
 
     #[test]
     fn converter_forms() {
-        assert_eq!(EnvVar::parse("A=b=c"), Ok(EnvVar::Set("A".into(), "b=c".into())));
-        assert_eq!(EnvVar::parse("A="), Ok(EnvVar::Set("A".into(), String::new())));
+        assert_eq!(
+            EnvVar::parse("A=b=c"),
+            Ok(EnvVar::Set("A".into(), "b=c".into()))
+        );
+        assert_eq!(
+            EnvVar::parse("A="),
+            Ok(EnvVar::Set("A".into(), String::new()))
+        );
         assert_eq!(EnvVar::parse("A"), Ok(EnvVar::Inherit("A".into())));
         assert_eq!(EnvVar::parse("=A"), Ok(EnvVar::Unset("A".into())));
         assert!(EnvVar::parse("").is_err());
@@ -489,11 +540,21 @@ mod tests {
     #[test]
     fn strict_default_environment() {
         let e = cfg(true, &[]).action_environment_for_os(false, "linux");
-        assert_eq!(e.fixed_env(), &m(&[("PATH", "/bin:/usr/bin:/usr/local/bin")]));
+        assert_eq!(
+            e.fixed_env(),
+            &m(&[("PATH", "/bin:/usr/bin:/usr/local/bin")])
+        );
         assert!(e.inherited_env().is_empty());
         // The client's PATH is irrelevant under strict env.
-        let client = m(&[("PATH", "/opt/x"), ("LD_LIBRARY_PATH", "/lib"), ("FOO", "1")]);
-        assert_eq!(e.resolved(&client), m(&[("PATH", "/bin:/usr/bin:/usr/local/bin")]));
+        let client = m(&[
+            ("PATH", "/opt/x"),
+            ("LD_LIBRARY_PATH", "/lib"),
+            ("FOO", "1"),
+        ]);
+        assert_eq!(
+            e.resolved(&client),
+            m(&[("PATH", "/bin:/usr/bin:/usr/local/bin")])
+        );
     }
 
     #[test]
@@ -510,7 +571,11 @@ mod tests {
         assert!(e.fixed_env().is_empty());
         let inh: Vec<_> = e.inherited_env().iter().cloned().collect();
         assert_eq!(inh, vec!["LD_LIBRARY_PATH".to_string(), "PATH".to_string()]);
-        let client = m(&[("PATH", "/opt/x:/bin"), ("LD_LIBRARY_PATH", "/lib"), ("FOO", "1")]);
+        let client = m(&[
+            ("PATH", "/opt/x:/bin"),
+            ("LD_LIBRARY_PATH", "/lib"),
+            ("FOO", "1"),
+        ]);
         assert_eq!(
             e.resolved(&client),
             m(&[("PATH", "/opt/x:/bin"), ("LD_LIBRARY_PATH", "/lib")])
@@ -522,8 +587,18 @@ mod tests {
 
     #[test]
     fn action_env_set_inherit_unset_last_wins() {
-        let e = cfg(true, &["FOO=bar", "HOME", "FOO=baz", "BAZ=1", "=BAZ", "PATH=/custom"])
-            .action_environment_for_os(false, "linux");
+        let e = cfg(
+            true,
+            &[
+                "FOO=bar",
+                "HOME",
+                "FOO=baz",
+                "BAZ=1",
+                "=BAZ",
+                "PATH=/custom",
+            ],
+        )
+        .action_environment_for_os(false, "linux");
         assert_eq!(e.fixed_env()["FOO"], "baz");
         assert_eq!(e.fixed_env()["PATH"], "/custom");
         assert!(!e.fixed_env().contains_key("BAZ"));
@@ -565,13 +640,22 @@ mod tests {
 
     #[test]
     fn runfiles_disabled_sets_manifest_only() {
-        let c = EnvConfig { runfiles_enabled: false, ..Default::default() };
-        assert_eq!(c.action_environment_for_os(false, "linux").fixed_env()["RUNFILES_MANIFEST_ONLY"], "1");
+        let c = EnvConfig {
+            runfiles_enabled: false,
+            ..Default::default()
+        };
+        assert_eq!(
+            c.action_environment_for_os(false, "linux").fixed_env()["RUNFILES_MANIFEST_ONLY"],
+            "1"
+        );
     }
 
     #[test]
     fn test_env_layers() {
-        let c = EnvConfig { test_env: parse_env_vars(["FOO=baz", "BAR", "=HOME", "X=1", "X=2"]), ..Default::default() };
+        let c = EnvConfig {
+            test_env: parse_env_vars(["FOO=baz", "BAR", "=HOME", "X=1", "X=2"]),
+            ..Default::default()
+        };
         let t = c.test_environment();
         assert_eq!(t.fixed_env(), &m(&[("FOO", "baz"), ("X", "2")]));
         assert!(t.inherited_env().contains("BAR"));
@@ -596,7 +680,10 @@ mod tests {
         assert_eq!(e.fixed_env(), &explicit);
         assert!(e.inherited_env().is_empty());
         // Default env without explicit: the configuration's environment.
-        assert_eq!(create_spawn_action_environment(&cfg, true, &BTreeMap::new()), cfg);
+        assert_eq!(
+            create_spawn_action_environment(&cfg, true, &BTreeMap::new()),
+            cfg
+        );
         // Default env + explicit: explicit overrides inherited variables of the same name.
         let e = create_spawn_action_environment(&cfg, true, &explicit);
         assert_eq!(e.fixed_env()["KEEP"], "explicit");
@@ -643,10 +730,20 @@ mod tests {
         let client = m(&[("PATH", "/p"), ("HOME", "/h"), ("SECRET", "s")]);
         let vars = parse_env_vars(["A=%bazel_workspace%/x", "SECRET", "MISSING", "=HOME"]);
         let (strict, nonstrict) = repository_environments(&client, &vars, true, Some("/ws"));
-        assert_eq!(strict, m(&[("PATH", "/p"), ("A", "/ws/x"), ("SECRET", "s")]));
-        assert_eq!(nonstrict, m(&[("PATH", "/p"), ("A", "/ws/x"), ("SECRET", "s")]));
-        let (loose, nonstrict) = repository_environments(&client, &parse_env_vars(["B=1"]), false, None);
-        assert_eq!(loose, m(&[("PATH", "/p"), ("HOME", "/h"), ("SECRET", "s"), ("B", "1")]));
+        assert_eq!(
+            strict,
+            m(&[("PATH", "/p"), ("A", "/ws/x"), ("SECRET", "s")])
+        );
+        assert_eq!(
+            nonstrict,
+            m(&[("PATH", "/p"), ("A", "/ws/x"), ("SECRET", "s")])
+        );
+        let (loose, nonstrict) =
+            repository_environments(&client, &parse_env_vars(["B=1"]), false, None);
+        assert_eq!(
+            loose,
+            m(&[("PATH", "/p"), ("HOME", "/h"), ("SECRET", "s"), ("B", "1")])
+        );
         assert_eq!(loose, nonstrict);
         // `--action_env` never feeds the repository environment (no such input at all).
         let (strict_only, full) = repository_environments(&client, &[], true, None);
@@ -680,14 +777,25 @@ mod tests {
         assert!(clear.contains("TEST_SRCDIR") && clear.contains("RUNFILES_DIR"));
         assert!(!env.contains_key("NOPE"));
         // A later `NAME=` cancels an earlier `=NAME`.
-        let (_, clear) = run_environment(BTreeMap::new(), &parse_env_vars(["=X", "X=1"]), &ActionEnvironment::EMPTY, &client);
+        let (_, clear) = run_environment(
+            BTreeMap::new(),
+            &parse_env_vars(["=X", "X=1"]),
+            &ActionEnvironment::EMPTY,
+            &client,
+        );
         assert!(!clear.contains("X"));
     }
 
     #[test]
     fn client_env_arg_parsing() {
-        assert_eq!(parse_client_env_arg("--client_env=A=b=c"), Some(("A".into(), "b=c".into())));
-        assert_eq!(parse_client_env_arg("--client_env=A="), Some(("A".into(), String::new())));
+        assert_eq!(
+            parse_client_env_arg("--client_env=A=b=c"),
+            Some(("A".into(), "b=c".into()))
+        );
+        assert_eq!(
+            parse_client_env_arg("--client_env=A="),
+            Some(("A".into(), String::new()))
+        );
         assert_eq!(parse_client_env_arg("--client_env=A"), None);
         assert_eq!(parse_client_env_arg("--other=A=b"), None);
     }

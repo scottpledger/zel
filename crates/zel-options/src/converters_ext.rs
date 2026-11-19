@@ -43,7 +43,9 @@ fn guava_split(input: &str, sep: char) -> Vec<&str> {
 
 /// `java.util.regex.Pattern.compile` syntax check. `Err` carries `PatternSyntaxException.getMessage()`.
 fn java_pattern_check(pattern: &str) -> Result<(), String> {
-    zel_util::java_regex::Regex::new(pattern).map(|_| ()).map_err(|e| e.to_string())
+    zel_util::java_regex::Regex::new(pattern)
+        .map(|_| ())
+        .map_err(|e| e.to_string())
 }
 
 /// `CoreOptionConverters.convertOptionsLabel` with a null conversion context.
@@ -54,7 +56,9 @@ pub(crate) fn convert_options_label(input: &str) -> Result<(), OptionsParsingErr
         owned = format!("//{input}");
         s = &owned;
     }
-    zel_cmdline::Label::parse_canonical(s).map(|_| ()).map_err(|e| err(e.to_string()))
+    zel_cmdline::Label::parse_canonical(s)
+        .map(|_| ())
+        .map_err(|e| err(e.to_string()))
 }
 
 /// `RepositoryName.validateUserProvidedRepoName`: `[a-zA-Z0-9][-.\w]*`.
@@ -71,7 +75,11 @@ fn valid_user_provided_repo_name(name: &str) -> bool {
 fn valid_canonical_repo_name(name: &str) -> bool {
     name.is_empty()
         || name == "_builtins"
-        || (name != "." && name != ".." && name.chars().all(|c| c.is_ascii_alphanumeric() || "_-.+".contains(c)))
+        || (name != "."
+            && name != ".."
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "_-.+".contains(c)))
 }
 
 /// `RepositoryName.VALID_MODULE_NAME`: `[a-z]([a-z0-9._-]*[a-z0-9])?`.
@@ -85,12 +93,16 @@ fn valid_module_name(name: &str) -> bool {
     }
     let last = b[b.len() - 1];
     (last.is_ascii_lowercase() || last.is_ascii_digit())
-        && b[1..].iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(c))
+        && b[1..]
+            .iter()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || b"._-".contains(c))
 }
 
 fn repository_injection(raw: &str) -> R {
     if !raw.contains('=') {
-        return Err(err("Repository injections must be of the form 'repository-name=path'"));
+        return Err(err(
+            "Repository injections must be of the form 'repository-name=path'",
+        ));
     }
     let name = &raw[..raw.find('=').unwrap()];
     if !valid_user_provided_repo_name(name) {
@@ -101,11 +113,17 @@ fn repository_injection(raw: &str) -> R {
 
 fn repository_override(raw: &str) -> R {
     let Some(i) = raw.find('=') else {
-        return Err(err("Repository overrides must be of the form 'repository-name=path'"));
+        return Err(err(
+            "Repository overrides must be of the form 'repository-name=path'",
+        ));
     };
     let name = &raw[..i];
     let apparent = !name.is_empty() && !name.contains('+');
-    let valid = if apparent { valid_user_provided_repo_name(name) } else { valid_canonical_repo_name(name) };
+    let valid = if apparent {
+        valid_user_provided_repo_name(name)
+    } else {
+        valid_canonical_repo_name(name)
+    };
     if !valid {
         return Err(err("Invalid repository name given to override"));
     }
@@ -115,7 +133,9 @@ fn repository_override(raw: &str) -> R {
 /// `RepositoryOptions.parseModuleNameAndPath`.
 fn module_name_and_path(raw: &str, kind: &str) -> R {
     let Some(i) = raw.find('=') else {
-        return Err(err(format!("{kind} must be of the form 'module-name=path'")));
+        return Err(err(format!(
+            "{kind} must be of the form 'module-name=path'"
+        )));
     };
     let name = &raw[..i];
     if !valid_module_name(name) {
@@ -128,10 +148,13 @@ fn module_name_and_path(raw: &str, kind: &str) -> R {
 
 /// `ClientOptions.OptionOverrideConverter`.
 fn option_override(raw: &str) -> R {
-    const MSG: &str = "option overrides must be in form rcfile:command=option, where rcfile is a nonzero integer";
+    const MSG: &str =
+        "option overrides must be in form rcfile:command=option, where rcfile is a nonzero integer";
     let colon = raw.find(':');
     let assign = raw.find('=');
-    let Some(colon) = colon else { return Err(err(MSG)) };
+    let Some(colon) = colon else {
+        return Err(err(MSG));
+    };
     match assign {
         Some(a) if a > colon + 1 => {}
         _ => return Err(err(MSG)),
@@ -177,7 +200,12 @@ fn regex_filter(input: &str) -> Result<(), OptionsParsingError> {
             _ => (false, piece.clone()),
         };
         if !body.is_empty() {
-            if excluded { &mut exclusions } else { &mut inclusions }.push(body);
+            if excluded {
+                &mut exclusions
+            } else {
+                &mut inclusions
+            }
+            .push(body);
         }
     }
     for list in [inclusions, exclusions] {
@@ -202,17 +230,18 @@ fn regex_pattern(input: &str) -> R {
 }
 
 /// `Converters.AssignmentToListOfValuesConverter` with `AllowEmptyKeys.NO`.
-fn assignment_to_list(
-    raw: &str,
-    key_check: impl Fn(&str) -> Result<(), OptionsParsingError>,
-) -> R {
+fn assignment_to_list(raw: &str, key_check: impl Fn(&str) -> Result<(), OptionsParsingError>) -> R {
     let pos = raw.find('=');
     let Some(pos) = pos.filter(|p| *p > 0) else {
-        return Err(err("Must be in the form of a 'key=value[,value]' assignment"));
+        return Err(err(
+            "Must be in the form of a 'key=value[,value]' assignment",
+        ));
     };
     let values = guava_split(&raw[pos + 1..], ',');
     if values.contains(&"") && values.len() > 1 {
-        return Err(err("Variable definitions must not contain empty strings or leading / trailing commas"));
+        return Err(err(
+            "Variable definitions must not contain empty strings or leading / trailing commas",
+        ));
     }
     key_check(&raw[..pos])?;
     ok(raw)
@@ -230,23 +259,38 @@ fn enum_filter(raw: &str, pretty: &str, all: &[&str]) -> R {
         let s = if exclude { &value[1..] } else { value };
         let up = s.to_uppercase();
         match all.iter().find(|a| **a == up) {
-            Some(a) => if exclude { &mut excluded } else { &mut included }.push(a),
+            Some(a) => if exclude {
+                &mut excluded
+            } else {
+                &mut included
+            }
+            .push(a),
             None => {
-                return Err(err(format!("Invalid {pretty} filter '{value}' in the input '{raw}'")));
+                return Err(err(format!(
+                    "Invalid {pretty} filter '{value}' in the input '{raw}'"
+                )));
             }
         }
     }
     let result: Vec<&str> = if included.is_empty() {
-        all.iter().copied().filter(|a| !excluded.contains(a)).collect()
+        all.iter()
+            .copied()
+            .filter(|a| !excluded.contains(a))
+            .collect()
     } else {
-        included.into_iter().filter(|a| !excluded.contains(a)).collect()
+        included
+            .into_iter()
+            .filter(|a| !excluded.contains(a))
+            .collect()
     };
     if result.is_empty() {
         let mut cap = pretty.to_string();
         if let Some(f) = cap.get_mut(0..1) {
             f.make_ascii_uppercase();
         }
-        return Err(err(format!("{cap} filter '{raw}' definition cannot match any tests")));
+        return Err(err(format!(
+            "{cap} filter '{raw}' definition cannot match any tests"
+        )));
     }
     ok(raw)
 }
@@ -283,7 +327,8 @@ fn prefixed_uuid(raw: &str) -> R {
         return ok(raw);
     }
     let units: Vec<u16> = raw.encode_utf16().collect();
-    let good = units.len() >= 36 && java_uuid_ok(&String::from_utf16_lossy(&units[units.len() - 36..]));
+    let good =
+        units.len() >= 36 && java_uuid_ok(&String::from_utf16_lossy(&units[units.len() - 36..]));
     if !good {
         return Err(err(format!("Value '{raw}' does not end in a valid UUID.")));
     }
@@ -331,15 +376,31 @@ fn memory_mode(raw: &str) -> R {
     if items.len() != 3 {
         return Err(err("Should be in the form: <flags>:<node type>:<node>"));
     }
-    if !["STARLARK_MODULE", "PACKAGE", "CONFIGURED_TARGET"].contains(&items[1].to_uppercase().as_str()) {
+    if !["STARLARK_MODULE", "PACKAGE", "CONFIGURED_TARGET"]
+        .contains(&items[1].to_uppercase().as_str())
+    {
         return Err(err("Invalid subject type"));
     }
     ok(raw)
 }
 
 const EVENT_KINDS: &[&str] = &[
-    "FATAL", "ERROR", "WARNING", "INFO", "PROGRESS", "DEBUG", "START", "FINISH", "SUBCOMMAND", "STDOUT", "STDERR",
-    "PASS", "FAIL", "TIMEOUT", "CANCELLED", "DEPCHECKER",
+    "FATAL",
+    "ERROR",
+    "WARNING",
+    "INFO",
+    "PROGRESS",
+    "DEBUG",
+    "START",
+    "FINISH",
+    "SUBCOMMAND",
+    "STDOUT",
+    "STDERR",
+    "PASS",
+    "FAIL",
+    "TIMEOUT",
+    "CANCELLED",
+    "DEPCHECKER",
 ];
 
 fn enum_convert(type_name: &str, values: &[&str], input: &str) -> Result<(), OptionsParsingError> {
@@ -348,7 +409,10 @@ fn enum_convert(type_name: &str, values: &[&str], input: &str) -> Result<(), Opt
     }
     let lower: Vec<String> = values.iter().map(|v| v.to_ascii_lowercase()).collect();
     let refs: Vec<&str> = lower.iter().map(|s| s.as_str()).collect();
-    Err(err(format!("Not a valid {type_name}: '{input}' (should be {})", join_english_list(&refs))))
+    Err(err(format!(
+        "Not a valid {type_name}: '{input}' (should be {})",
+        join_english_list(&refs)
+    )))
 }
 
 /// `UiOptions.EventFiltersConverter`.
@@ -368,7 +432,11 @@ fn event_filters(raw: &str) -> R {
 /// `BuildEventProtocolOptions.BuildEventOutputGroupModeConverter`.
 fn build_event_output_group_mode(raw: &str) -> R {
     let (_k, v) = convert_assignment(raw)?;
-    enum_convert("Output group file reporting mode", &["NAMED_SET_OF_FILES_ONLY", "INLINE_ONLY", "BOTH"], &v)?;
+    enum_convert(
+        "Output group file reporting mode",
+        &["NAMED_SET_OF_FILES_ONLY", "INLINE_ONLY", "BOTH"],
+        &v,
+    )?;
     ok(raw)
 }
 
@@ -394,7 +462,10 @@ fn modify_execution_info(raw: &str) -> R {
         let bytes = spec.as_bytes();
         let mut found: Option<usize> = None;
         for i in (1..bytes.len().saturating_sub(2)).rev() {
-            if bytes[i] == b'=' && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-') && i + 2 < bytes.len() {
+            if bytes[i] == b'='
+                && (bytes[i + 1] == b'+' || bytes[i + 1] == b'-')
+                && i + 2 < bytes.len()
+            {
                 found = Some(i);
                 break;
             }
@@ -402,7 +473,8 @@ fn modify_execution_info(raw: &str) -> R {
         let Some(i) = found else {
             return Err(err(format!("malformed expression '{spec}'")));
         };
-        java_pattern_check(&spec[..i]).map_err(|m| err(format!("Not a valid regular expression: {m}")))?;
+        java_pattern_check(&spec[..i])
+            .map_err(|m| err(format!("Not a valid regular expression: {m}")))?;
     }
     ok(raw)
 }
@@ -424,7 +496,9 @@ fn version_ok(v: &str) -> Result<(), String> {
         return Ok(());
     }
     let bad = || format!("bad version (does not match regex): {v}");
-    let release_end = v.find(|c: char| !(c.is_ascii_alphanumeric() || c == '.')).unwrap_or(v.len());
+    let release_end = v
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.'))
+        .unwrap_or(v.len());
     if release_end == 0 {
         return Err(bad());
     }
@@ -432,7 +506,9 @@ fn version_ok(v: &str) -> Result<(), String> {
     let mut rest = &v[release_end..];
     let mut prerelease = "";
     if let Some(r) = rest.strip_prefix('-') {
-        let end = r.find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-')).unwrap_or(r.len());
+        let end = r
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '.' || c == '-'))
+            .unwrap_or(r.len());
         if end == 0 {
             return Err(bad());
         }
@@ -440,7 +516,11 @@ fn version_ok(v: &str) -> Result<(), String> {
         rest = &r[end..];
     }
     if let Some(r) = rest.strip_prefix('+') {
-        if r.is_empty() || !r.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') {
+        if r.is_empty()
+            || !r
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-')
+        {
             return Err(bad());
         }
         rest = "";
@@ -448,7 +528,15 @@ fn version_ok(v: &str) -> Result<(), String> {
     if !rest.is_empty() {
         return Err(bad());
     }
-    for ident in release.split('.').chain(if prerelease.is_empty() { None } else { Some(prerelease) }.into_iter().flat_map(|p| p.split('.'))) {
+    for ident in release.split('.').chain(
+        if prerelease.is_empty() {
+            None
+        } else {
+            Some(prerelease)
+        }
+        .into_iter()
+        .flat_map(|p| p.split('.')),
+    ) {
         let numeric = !ident.is_empty() && ident.chars().all(|c| c.is_ascii_digit());
         if ident.is_empty() || (numeric && ident.parse::<i64>().is_err()) {
             return Err(format!("error parsing version: {v}"));
@@ -481,7 +569,9 @@ fn module_arg(input: &str) -> Result<(), OptionsParsingError> {
     if let Some(at) = input.find('@') {
         let version = &input[at + 1..];
         if version.is_empty() {
-            return Err(err(format!("invalid argument '{input}': use _ for the empty version")));
+            return Err(err(format!(
+                "invalid argument '{input}': use _ for the empty version"
+            )));
         }
         if version != "_" {
             version_ok(version).map_err(|m| err(format!("invalid argument '{input}': {m}")))?;
@@ -492,12 +582,18 @@ fn module_arg(input: &str) -> Result<(), OptionsParsingError> {
 
 /// `SeparatedOptionListConverter` (`allowEmptyValues == false`) over `,`.
 fn comma_list_non_empty(raw: &str) -> Result<Vec<&str>, OptionsParsingError> {
-    let items: Vec<&str> = if raw.is_empty() { Vec::new() } else { raw.split(',').collect() };
+    let items: Vec<&str> = if raw.is_empty() {
+        Vec::new()
+    } else {
+        raw.split(',').collect()
+    };
     if items.iter().any(|s| s.is_empty()) {
         if items.len() == 1 {
             return Ok(Vec::new());
         }
-        return Err(err("Empty values are not allowed as part of this comma-separated list of options"));
+        return Err(err(
+            "Empty values are not allowed as part of this comma-separated list of options",
+        ));
     }
     Ok(items)
 }
@@ -516,7 +612,11 @@ fn extension_arg(input: &str) -> Result<(), OptionsParsingError> {
     };
     match input.find('%') {
         Some(p) if p >= slash => {}
-        _ => return Err(err(format!("Invalid argument {input}: missing extension name"))),
+        _ => {
+            return Err(err(format!(
+                "Invalid argument {input}: missing extension name"
+            )))
+        }
     }
     module_arg(&input[..slash])
 }
@@ -561,7 +661,9 @@ fn caffeine_spec(raw: &str) -> R {
         }
         let kv: Vec<&str> = option.split('=').collect();
         if kv.len() > 2 || kv.is_empty() {
-            return bad(format!("key-value pair {option} with more than one equals sign"));
+            return bad(format!(
+                "key-value pair {option} with more than one equals sign"
+            ));
         }
         let key = kv[0];
         let value = kv.get(1).copied();
@@ -582,18 +684,22 @@ fn caffeine_spec(raw: &str) -> R {
                 Ok(v) => return bad(format!("key {key} value set to {v}, must be integer")),
                 Err(m) => return bad(m),
             },
-            "expireAfterAccess" | "expireAfterWrite" | "refreshAfterWrite" => match needs_value(key, value) {
-                Ok(v) => {
-                    let (num, unit) = v.split_at(v.len().saturating_sub(1));
-                    if num.is_empty()
-                        || num.parse::<i64>().is_err()
-                        || !["d", "h", "m", "s"].contains(&unit)
-                    {
-                        return bad(format!("key {key} value set to {v}, must be positive duration with a unit"));
+            "expireAfterAccess" | "expireAfterWrite" | "refreshAfterWrite" => {
+                match needs_value(key, value) {
+                    Ok(v) => {
+                        let (num, unit) = v.split_at(v.len().saturating_sub(1));
+                        if num.is_empty()
+                            || num.parse::<i64>().is_err()
+                            || !["d", "h", "m", "s"].contains(&unit)
+                        {
+                            return bad(format!(
+                                "key {key} value set to {v}, must be positive duration with a unit"
+                            ));
+                        }
                     }
+                    Err(m) => return bad(m),
                 }
-                Err(m) => return bad(m),
-            },
+            }
             "weakKeys" | "weakValues" | "softValues" | "recordStats" => {
                 if value.is_some() {
                     return bad(format!("key {key} does not take a value"));
@@ -609,7 +715,9 @@ fn caffeine_spec(raw: &str) -> R {
 fn default_visibility(raw: &str) -> R {
     match raw {
         "public" | "private" => ok(raw),
-        _ => Err(err(format!("Not a valid default visibility: '{raw}' (should be 'public' or 'private'"))),
+        _ => Err(err(format!(
+            "Not a valid default visibility: '{raw}' (should be 'public' or 'private'"
+        ))),
     }
 }
 
@@ -689,7 +797,10 @@ fn signal_list(raw: &str) -> R {
         let t = p.trim();
         // Guava `Ints.tryParse`: optional '-', decimal digits, fits in an int.
         let good = !t.is_empty()
-            && t.strip_prefix('-').unwrap_or(t).bytes().all(|b| b.is_ascii_digit())
+            && t.strip_prefix('-')
+                .unwrap_or(t)
+                .bytes()
+                .all(|b| b.is_ascii_digit())
             && t.parse::<i32>().map(|n| n > 0).unwrap_or(false);
         if !good {
             return Err(err(format!("No such signal {t}")));
@@ -733,7 +844,10 @@ fn dotted_version(raw: &str) -> R {
             break;
         }
         let b = comp.as_bytes();
-        if b.is_empty() || !b[0].is_ascii_digit() || !comp.chars().all(|c| c.is_ascii_alphanumeric()) {
+        if b.is_empty()
+            || !b[0].is_ascii_digit()
+            || !comp.chars().all(|c| c.is_ascii_alphanumeric())
+        {
             return Err(illegal());
         }
         let lead: String = comp.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -863,7 +977,8 @@ fn run_under(raw: &str) -> R {
         return Err(err("Empty command"));
     };
     if first.starts_with("//") || first.starts_with('@') {
-        convert_options_label(first).map_err(|e| err(format!("Not a valid label {}", e.message)))?;
+        convert_options_label(first)
+            .map_err(|e| err(format!("Not a valid label {}", e.message)))?;
     }
     ok(raw)
 }
@@ -887,7 +1002,9 @@ fn credential_helper(raw: &str) -> R {
 
 /// `ResourceConverter.IntegerConverter` based converters.
 fn resource(spec: zel_util::resource_converter::IntegerSpec, raw: &str) -> R {
-    spec.convert_detected(raw).map(|_| OptionValue::String(raw.to_string())).map_err(err)
+    spec.convert_detected(raw)
+        .map(|_| OptionValue::String(raw.to_string()))
+        .map_err(err)
 }
 
 /// `TestShardingStrategy.ShardingStrategyConverter`.
@@ -897,7 +1014,8 @@ fn sharding_strategy(raw: &str) -> R {
         return ok(raw);
     }
     if let Some(rest) = lower.strip_prefix("forced=") {
-        let n = crate::converters::convert_int(&raw["forced=".len()..]).map_err(|e| err(e.message))?;
+        let n =
+            crate::converters::convert_int(&raw["forced=".len()..]).map_err(|e| err(e.message))?;
         let _ = rest;
         if n < 0 {
             return Err(err("Forced shards count cannot be negative."));
@@ -913,9 +1031,13 @@ fn sharding_strategy(raw: &str) -> R {
 fn memory_profile_stable_heap(raw: &str) -> R {
     let values: Vec<&str> = raw.split(',').collect();
     if values.len() % 2 != 0 {
-        return Err(err("Expected even number of comma-separated integer values"));
+        return Err(err(
+            "Expected even number of comma-separated integer values",
+        ));
     }
-    let parse_err = || err("Expected even number of comma-separated integer values, could not parse integer in list");
+    let parse_err = || {
+        err("Expected even number of comma-separated integer values, could not parse integer in list")
+    };
     for pair in values.chunks(2) {
         let n = crate::converters::java_integer_value_of(pair[0]).ok_or_else(parse_err)?;
         let secs = crate::converters::java_integer_value_of(pair[1]).ok_or_else(parse_err)?;
@@ -923,7 +1045,9 @@ fn memory_profile_stable_heap(raw: &str) -> R {
             return Err(err("Number of times to GC must be positive"));
         }
         if secs < 0 {
-            return Err(err("Number of seconds to sleep between GC's must be non-negative"));
+            return Err(err(
+                "Number of seconds to sleep between GC's must be non-negative",
+            ));
         }
     }
     ok(raw)
@@ -931,11 +1055,22 @@ fn memory_profile_stable_heap(raw: &str) -> R {
 
 /// `RemoteAnalysisCachingOptions.RemoteAnalysisCacheModeConverter`.
 fn remote_analysis_cache_mode(raw: &str) -> R {
-    const VALUES: &[&str] = &["UPLOAD", "DUMP_UPLOAD_MANIFEST_ONLY", "DOWNLOAD", "ASYNC_BIDI", "ASYNC_UPLOAD", "BIDI", "OFF"];
+    const VALUES: &[&str] = &[
+        "UPLOAD",
+        "DUMP_UPLOAD_MANIFEST_ONLY",
+        "DOWNLOAD",
+        "ASYNC_BIDI",
+        "ASYNC_UPLOAD",
+        "BIDI",
+        "OFF",
+    ];
     if VALUES.iter().any(|v| v.eq_ignore_ascii_case(raw)) {
         return ok(raw);
     }
-    Err(err(format!("Not a valid remote analysis cache mode: '{raw}' (should be {})", VALUES.join(", "))))
+    Err(err(format!(
+        "Not a valid remote analysis cache mode: '{raw}' (should be {})",
+        VALUES.join(", ")
+    )))
 }
 
 /// `ResourceConverter.AssignmentConverter` (`--experimental_sandbox_limits`).
@@ -949,8 +1084,11 @@ fn resource_assignment(raw: &str) -> R {
 }
 
 /// Converter classes whose (Java `EnumConverter`) conversion is handled by explicit code in `converters.rs`.
-const EXPLICIT_ENUM_CONVERTERS: &[&str] =
-    &["IncludeConfigFragmentsEnumConverter", "ShowRequiredConfigFragmentsConverter", "TransitionsConverter"];
+const EXPLICIT_ENUM_CONVERTERS: &[&str] = &[
+    "IncludeConfigFragmentsEnumConverter",
+    "ShowRequiredConfigFragmentsConverter",
+    "TransitionsConverter",
+];
 
 fn enum_type_name(def: &OptionDefinition, converter: &str) -> &'static str {
     ENUM_TYPE_NAMES
@@ -962,10 +1100,16 @@ fn enum_type_name(def: &OptionDefinition, converter: &str) -> &'static str {
 
 /// Validating conversion for `OptionType::Custom` options; `None` when the converter is not modelled here.
 pub(crate) fn convert_custom_ext(def: &OptionDefinition, name: &str, raw: &str) -> Option<R> {
-    if !EXPLICIT_ENUM_CONVERTERS.contains(&name) && !def.enum_values.is_empty() && name.ends_with("Converter") {
+    if !EXPLICIT_ENUM_CONVERTERS.contains(&name)
+        && !def.enum_values.is_empty()
+        && name.ends_with("Converter")
+    {
         let converted = enum_convert(enum_type_name(def, name), def.enum_values, raw);
         // `BoolOrEnumConverter`: the enum constants win, otherwise the standard boolean spellings are accepted.
-        if converted.is_err() && def.boolean_syntax && crate::converters::convert_boolean(raw).is_ok() {
+        if converted.is_err()
+            && def.boolean_syntax
+            && crate::converters::convert_boolean(raw).is_ok()
+        {
             return Some(ok(raw));
         }
         return Some(converted.map(|_| OptionValue::String(raw.to_string())));
@@ -978,8 +1122,14 @@ pub(crate) fn convert_custom_ext(def: &OptionDefinition, name: &str, raw: &str) 
         ("OptionOverrideConverter", _) => option_override(raw),
         ("RegexFilterAssignmentConverter", _) => assignment_to_list(raw, regex_filter),
         ("LabelToStringListConverter", _) => assignment_to_list(raw, convert_options_label),
-        ("TestSizeFilterConverter", _) => enum_filter(raw, "test size", &["SMALL", "MEDIUM", "LARGE", "ENORMOUS"]),
-        ("TestTimeoutFilterConverter", _) => enum_filter(raw, "test timeout", &["SHORT", "MODERATE", "LONG", "ETERNAL"]),
+        ("TestSizeFilterConverter", _) => {
+            enum_filter(raw, "test size", &["SMALL", "MEDIUM", "LARGE", "ENORMOUS"])
+        }
+        ("TestTimeoutFilterConverter", _) => enum_filter(
+            raw,
+            "test timeout",
+            &["SHORT", "MODERATE", "LONG", "ETERNAL"],
+        ),
         ("LibcTopLabelConverter", _) => libc_top_label(raw),
         ("CommaSeparatedExtensionArgListConverter", _) => extension_arg_list(raw),
         ("CommaSeparatedModuleArgListConverter", _) => module_arg_list(raw),
@@ -992,12 +1142,16 @@ pub(crate) fn convert_custom_ext(def: &OptionDefinition, name: &str, raw: &str) 
         ("Md5Converter", _) => md5(raw),
         ("BuildEventOutputGroupModeConverter", _) => build_event_output_group_mode(raw),
         ("RegexPatternConverter", _) => regex_pattern(raw),
-        ("RegexFilterConverter", _) => regex_filter(raw).map(|_| OptionValue::String(raw.to_string())),
+        ("RegexFilterConverter", _) => {
+            regex_filter(raw).map(|_| OptionValue::String(raw.to_string()))
+        }
         ("Converter", "modify_execution_info") => modify_execution_info(raw),
         ("PlatformMappingKeyConverter", _) => platform_mapping_key(raw),
         ("HostPlatformConverter", _) => host_platform(raw),
         ("CommaSeparatedPackageNameListConverter", _) => package_name_list(raw),
-        ("OptionConverter", "experimental_lazy_macro_expansion_packages") => lazy_macro_packages(raw),
+        ("OptionConverter", "experimental_lazy_macro_expansion_packages") => {
+            lazy_macro_packages(raw)
+        }
         ("Converter", "experimental_tool_command_line") => tool_command_line(raw),
         ("ParallelismConverter", "experimental_include_scanning_parallelism") => {
             resource(zel_util::resource_converter::IntegerSpec::THREADS_MIN0, raw)
@@ -1022,14 +1176,23 @@ pub(crate) fn convert_custom_ext(def: &OptionDefinition, name: &str, raw: &str) 
         ("PerLabelOptionsConverter", _) => per_label_options(raw),
         ("RunUnderConverter", _) => run_under(raw),
         ("CredentialHelperOptionConverter", _) => credential_helper(raw),
-        ("CpuResourceConverter", _) => resource(zel_util::resource_converter::IntegerSpec::CPU, raw),
-        ("RamResourceConverter", _) => resource(zel_util::resource_converter::IntegerSpec::RAM, raw),
-        ("ParallelismConverter", _) => resource(zel_util::resource_converter::IntegerSpec::THREADS_MIN1, raw),
-        ("AsyncTreeDeletesConverter", _) => resource(zel_util::resource_converter::IntegerSpec::THREADS_MIN0, raw),
+        ("CpuResourceConverter", _) => {
+            resource(zel_util::resource_converter::IntegerSpec::CPU, raw)
+        }
+        ("RamResourceConverter", _) => {
+            resource(zel_util::resource_converter::IntegerSpec::RAM, raw)
+        }
+        ("ParallelismConverter", _) => {
+            resource(zel_util::resource_converter::IntegerSpec::THREADS_MIN1, raw)
+        }
+        ("AsyncTreeDeletesConverter", _) => {
+            resource(zel_util::resource_converter::IntegerSpec::THREADS_MIN0, raw)
+        }
         _ => return None,
     })
 }
 
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1040,11 +1203,23 @@ mod tests {
 
     #[test]
     fn overrides() {
-        assert_eq!(m(repository_injection("x")), "Repository injections must be of the form 'repository-name=path'");
-        assert_eq!(m(repository_injection("_x=/p")), "Invalid repository name given to inject");
+        assert_eq!(
+            m(repository_injection("x")),
+            "Repository injections must be of the form 'repository-name=path'"
+        );
+        assert_eq!(
+            m(repository_injection("_x=/p")),
+            "Invalid repository name given to inject"
+        );
         assert!(repository_injection("x=/p").is_ok());
-        assert_eq!(m(repository_override("x")), "Repository overrides must be of the form 'repository-name=path'");
-        assert_eq!(m(repository_override("-x=/p")), "Invalid repository name given to override");
+        assert_eq!(
+            m(repository_override("x")),
+            "Repository overrides must be of the form 'repository-name=path'"
+        );
+        assert_eq!(
+            m(repository_override("-x=/p")),
+            "Invalid repository name given to override"
+        );
         assert!(repository_override("a+b=/p").is_ok());
         assert_eq!(
             m(module_name_and_path("Foo=/p", "Module overrides")),
@@ -1062,28 +1237,43 @@ mod tests {
         assert_eq!(m(uuid("x")), "Value 'x' is not a value UUID.");
         assert!(uuid("1-1-1-1-1").is_ok());
         assert!(uuid("123e4567-e89b-12d3-a456-426614174000").is_ok());
-        assert_eq!(m(prefixed_uuid("short")), "Value 'short' does not end in a valid UUID.");
+        assert_eq!(
+            m(prefixed_uuid("short")),
+            "Value 'short' does not end in a valid UUID."
+        );
         assert!(prefixed_uuid("pre-123e4567-e89b-12d3-a456-426614174000").is_ok());
     }
 
     #[test]
     fn filters() {
-        assert_eq!(m(enum_filter("x", "test size", &["SMALL"])), "Invalid test size filter 'x' in the input 'x'");
+        assert_eq!(
+            m(enum_filter("x", "test size", &["SMALL"])),
+            "Invalid test size filter 'x' in the input 'x'"
+        );
         assert!(enum_filter("small,-large", "test size", &["SMALL", "LARGE"]).is_ok());
         assert_eq!(
             m(enum_filter("-small", "test size", &["SMALL"])),
             "Test size filter '-small' definition cannot match any tests"
         );
-        assert_eq!(m(regex_filter("--x").map(|_| OptionValue::Void)).starts_with("Failed to build filter"), true);
-        assert!(m(regex_filter("(").map(|_| OptionValue::Void)).starts_with("Failed to build valid regular expression: Unclosed group"));
-        assert_eq!(m(assignment_to_list("x", regex_filter)), "Must be in the form of a 'key=value[,value]' assignment");
+        assert!(
+            m(regex_filter("--x").map(|_| OptionValue::Void)).starts_with("Failed to build filter")
+        );
+        assert!(m(regex_filter("(").map(|_| OptionValue::Void))
+            .starts_with("Failed to build valid regular expression: Unclosed group"));
+        assert_eq!(
+            m(assignment_to_list("x", regex_filter)),
+            "Must be in the form of a 'key=value[,value]' assignment"
+        );
     }
 
     #[test]
     fn memory_and_events() {
         assert_eq!(m(memory_mode("x")), "Unrecognized word 'x'");
         assert_eq!(m(memory_mode("deep")), "No display mode specified");
-        assert_eq!(m(memory_mode("deep,count")), "Should be in the form: <flags>:<node type>:<node>");
+        assert_eq!(
+            m(memory_mode("deep,count")),
+            "Should be in the form: <flags>:<node type>:<node>"
+        );
         assert!(memory_mode("full,count").is_ok());
         assert_eq!(m(event_filters("x")), "Not a valid event kind: 'x' (should be fatal, error, warning, info, progress, debug, start, finish, subcommand, stdout, stderr, pass, fail, timeout, cancelled or depchecker)");
         assert!(event_filters("-info,+debug").is_ok());
@@ -1093,7 +1283,10 @@ mod tests {
     fn execution_info() {
         assert_eq!(m(modify_execution_info("x")), "malformed expression 'x'");
         assert!(modify_execution_info("Foo=+key,Bar=-k").is_ok());
-        assert_eq!(m(md5("x")), "Blaze checksum must be exactly 32 hex characters");
+        assert_eq!(
+            m(md5("x")),
+            "Blaze checksum must be exactly 32 hex characters"
+        );
     }
 }
 
@@ -1147,7 +1340,9 @@ fn wire_format_ok(mut b: &[u8]) -> bool {
         None
     }
     while !b.is_empty() {
-        let Some(tag) = varint(&mut b) else { return false };
+        let Some(tag) = varint(&mut b) else {
+            return false;
+        };
         if tag >> 3 == 0 {
             return false;
         }
@@ -1164,7 +1359,9 @@ fn wire_format_ok(mut b: &[u8]) -> bool {
                 b = &b[8..];
             }
             2 => {
-                let Some(len) = varint(&mut b) else { return false };
+                let Some(len) = varint(&mut b) else {
+                    return false;
+                };
                 if len > b.len() as u64 {
                     return false;
                 }
@@ -1189,7 +1386,9 @@ fn tool_command_line(raw: &str) -> Result<OptionValue, OptionsParsingError> {
     }
     if let Some(bytes) = guava_base64_decode(raw) {
         if !wire_format_ok(&bytes) {
-            return Err(err(format!("Malformed value of --experimental_tool_command_line: {raw}")));
+            return Err(err(format!(
+                "Malformed value of --experimental_tool_command_line: {raw}"
+            )));
         }
     }
     Ok(OptionValue::String(raw.to_string()))

@@ -13,8 +13,12 @@ fn err<T>(m: impl Into<String>) -> Result<T, StarlarkError> {
 fn flag_native(name: &str) -> Option<Value> {
     Some(match name {
         "java_common_internal_do_not_use._google_legacy_api_enabled" => Value::Bool(false),
-        "java_common_internal_do_not_use._incompatible_java_info_merge_runtime_module_flags" => Value::Bool(false),
-        "java_common_internal_do_not_use.incompatible_disable_non_executable_java_binary" => Value::Bool(false),
+        "java_common_internal_do_not_use._incompatible_java_info_merge_runtime_module_flags" => {
+            Value::Bool(false)
+        }
+        "java_common_internal_do_not_use.incompatible_disable_non_executable_java_binary" => {
+            Value::Bool(false)
+        }
         "cc_common.check_experimental_cc_shared_library" => Value::Bool(true),
         "cc_common.incompatible_disable_objc_library_transition" => Value::Bool(false),
         "cc_common.add_go_exec_groups_to_binary_rules" => Value::Bool(false),
@@ -30,13 +34,18 @@ fn dotted_version(pos: &[Value]) -> Result<Value, StarlarkError> {
     match pos.first() {
         Some(Value::String(s)) => {
             if s.is_empty() || !s.chars().next().unwrap().is_ascii_digit() {
-                return err(format!("Dotted version components must start with a number: {s}"));
+                return err(format!(
+                    "Dotted version components must start with a number: {s}"
+                ));
             }
             Ok(Value::Host("dotted_version".into(), s.clone()))
         }
         Some(Value::None) | None => Ok(Value::None),
         Some(v @ Value::Host(k, _)) if k == "dotted_version" => Ok(v.clone()),
-        Some(other) => err(format!("dotted_version: got value of type '{}', want 'string'", other.type_name())),
+        Some(other) => err(format!(
+            "dotted_version: got value of type '{}', want 'string'",
+            other.type_name()
+        )),
     }
 }
 
@@ -81,8 +90,10 @@ pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkE
     use crate::cc_features::{self, FeatureConfiguration, Variables};
     let kwv = |k: &str, i: usize| _kw.get(k).cloned().or_else(|| pos.get(i).cloned());
     let fc_of = |v: Option<Value>| -> Result<Arc<FeatureConfiguration>, StarlarkError> {
-        v.and_then(|v| cc_features::lookup::<FeatureConfiguration>(&v, cc_features::KIND_FEATURE_CONFIGURATION))
-            .ok_or_else(|| StarlarkError("feature_configuration must be a FeatureConfiguration".into()))
+        v.and_then(|v| {
+            cc_features::lookup::<FeatureConfiguration>(&v, cc_features::KIND_FEATURE_CONFIGURATION)
+        })
+        .ok_or_else(|| StarlarkError("feature_configuration must be a FeatureConfiguration".into()))
     };
     let action_of = |v: Option<Value>| match v {
         Some(Value::String(s)) => Ok(s),
@@ -90,7 +101,8 @@ pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkE
     };
     let vars_of = |v: Option<Value>| -> Result<Arc<Variables>, StarlarkError> {
         match v {
-            Some(v) => cc_features::variables_of(&v).ok_or_else(|| StarlarkError("variables must be CcToolchainVariables".into())),
+            Some(v) => cc_features::variables_of(&v)
+                .ok_or_else(|| StarlarkError("variables must be CcToolchainVariables".into())),
             None => Err(StarlarkError("variables is required".into())),
         }
     };
@@ -133,16 +145,28 @@ pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkE
 }
 
 /// Methods/attributes of `DottedVersion` objects (`method:dotted_version.<m>`, `attr:dotted_version.<a>`).
-pub fn dotted_version_member(is_method: bool, member: &str, pos: &[Value]) -> Result<Value, StarlarkError> {
-    let Some(Value::Host(_, v)) = pos.first() else { return err("invalid DottedVersion") };
+pub fn dotted_version_member(
+    is_method: bool,
+    member: &str,
+    pos: &[Value],
+) -> Result<Value, StarlarkError> {
+    let Some(Value::Host(_, v)) = pos.first() else {
+        return err("invalid DottedVersion");
+    };
     match (is_method, member) {
         (true, "compare_to") => match pos.get(1) {
-            Some(Value::Host(k, o)) if k == "dotted_version" => Ok(Value::Int(compare(v, o).into())),
+            Some(Value::Host(k, o)) if k == "dotted_version" => {
+                Ok(Value::Int(compare(v, o).into()))
+            }
             _ => err("DottedVersion.compare_to: argument must be a DottedVersion"),
         },
-        (false, "compare_to") => Ok(Value::BuiltinFunction("host:method:dotted_version.compare_to".into())),
+        (false, "compare_to") => Ok(Value::BuiltinFunction(
+            "host:method:dotted_version.compare_to".into(),
+        )),
         (_, "__str__") | (false, "version") => Ok(Value::String(v.clone())),
-        _ => err(format!("'DottedVersion' value has no field or method '{member}'")),
+        _ => err(format!(
+            "'DottedVersion' value has no field or method '{member}'"
+        )),
     }
 }
 

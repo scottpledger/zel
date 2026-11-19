@@ -1,3 +1,4 @@
+#![cfg(unix)]
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -30,7 +31,9 @@ fn shell_loads(rel: &str, content: &str) -> String {
     let mut out = String::new();
     for name in ["sh_binary", "sh_test", "sh_library"] {
         if content.contains(&format!("{name}(")) && !content.contains(&format!("\"{name}\")")) {
-            out.push_str(&format!("load(\"@rules_shell//shell:{name}.bzl\", \"{name}\")\n"));
+            out.push_str(&format!(
+                "load(\"@rules_shell//shell:{name}.bzl\", \"{name}\")\n"
+            ));
         }
     }
     out.push_str(content);
@@ -50,7 +53,11 @@ fn make_ws(name: &str) -> Ws {
     std::fs::create_dir_all(&ws_dir).unwrap();
     let root = std::fs::canonicalize(&root).unwrap();
     let ws_dir = root.join("ws");
-    std::fs::write(ws_dir.join("MODULE.bazel"), "module(name = \"w\")\nbazel_dep(name = \"rules_shell\", version = \"0.6.1\")\n").unwrap();
+    std::fs::write(
+        ws_dir.join("MODULE.bazel"),
+        "module(name = \"w\")\nbazel_dep(name = \"rules_shell\", version = \"0.6.1\")\n",
+    )
+    .unwrap();
     std::fs::write(ws_dir.join("BUILD"), "").unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(LocalFileSystem::default());
     let p = |s: &str| PathFragment::create(root.join(s).to_str().unwrap());
@@ -94,9 +101,20 @@ impl Ws {
     }
 
     fn run(&self, args: &[&str]) -> CmdOut {
-        let root = env!("CARGO_MANIFEST_DIR").strip_suffix("/crates/zel-server").unwrap_or("/Users/pledger/Development/zel");
-        let reg = format!("--registry=file://{}", local_registry(root).display());
+        let root = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/zel-server")
+            .unwrap_or("/Users/pledger/Development/zel");
+        let reg = format!(
+            "--registry={}",
+            zel_bzlmod::file_url_for_path(&local_registry(root))
+        );
         let mut full_args = vec![args[0], &reg];
+        let path_env = std::env::var("PATH")
+            .ok()
+            .map(|p| format!("--client_env=PATH={p}"));
+        if let Some(ref pe) = path_env {
+            full_args.push(pe);
+        }
         full_args.extend_from_slice(&args[1..]);
         let arg: Vec<Vec<u8>> = full_args.iter().map(|a| a.as_bytes().to_vec()).collect();
         let req = RunRequest {
@@ -120,7 +138,12 @@ fn test_build_empty_target_warning() {
     let w = make_ws("empty-target");
     let res = w.run(&["build"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.err.contains("WARNING: Usage: bazel build <options> <targets>."), "{}", res.err);
+    assert!(
+        res.err
+            .contains("WARNING: Usage: bazel build <options> <targets>."),
+        "{}",
+        res.err
+    );
     assert!(res.err.contains("Nothing will be built."), "{}", res.err);
 }
 
@@ -140,18 +163,39 @@ sh_binary(name = "tagged", srcs = ["tagged.sh"], tags = ["manual"])
     // Without --build_manual_tests, //pkg/... should only build //pkg:normal
     let res = w.run(&["build", "//pkg/..."]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.err.contains("Target //pkg:normal up-to-date:"), "{}", res.err);
-    assert!(!res.err.contains("Target //pkg:tagged up-to-date:"), "{}", res.err);
+    assert!(
+        res.err.contains("Target //pkg:normal up-to-date:"),
+        "{}",
+        res.err
+    );
+    assert!(
+        !res.err.contains("Target //pkg:tagged up-to-date:"),
+        "{}",
+        res.err
+    );
 
     // With --build_manual_tests, //pkg/... builds both
-    let res2 = w.run(&["build", "--show_result=10", "--build_manual_tests", "//pkg/..."]);
+    let res2 = w.run(&[
+        "build",
+        "--show_result=10",
+        "--build_manual_tests",
+        "//pkg/...",
+    ]);
     assert_eq!(res2.code, 0, "{}", res2.err);
-    assert!(res2.err.contains("Target //pkg:tagged up-to-date:"), "{}", res2.err);
+    assert!(
+        res2.err.contains("Target //pkg:tagged up-to-date:"),
+        "{}",
+        res2.err
+    );
 
     // Explicitly targeting //pkg:tagged builds it even without --build_manual_tests
     let res3 = w.run(&["build", "//pkg:tagged"]);
     assert_eq!(res3.code, 0, "{}", res3.err);
-    assert!(res3.err.contains("Target //pkg:tagged up-to-date:"), "{}", res3.err);
+    assert!(
+        res3.err.contains("Target //pkg:tagged up-to-date:"),
+        "{}",
+        res3.err
+    );
 }
 
 #[test]
@@ -160,13 +204,27 @@ fn test_convenience_symlinks_false() {
     w.write("pkg/BUILD", "sh_binary(name = 'b', srcs = ['b.sh'])\n");
     w.write("pkg/b.sh", "#!/bin/sh\nexit 0\n");
 
-    let res = w.run(&["build", "--experimental_convenience_symlinks=false", "//pkg:b"]);
+    let res = w.run(&[
+        "build",
+        "--experimental_convenience_symlinks=false",
+        "//pkg:b",
+    ]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(!w.ws.join("bazel-bin").exists(), "bazel-bin should not exist when convenience_symlinks=false");
+    assert!(
+        !w.ws.join("bazel-bin").exists(),
+        "bazel-bin should not exist when convenience_symlinks=false"
+    );
 
-    let res2 = w.run(&["build", "--experimental_convenience_symlinks=normal", "//pkg:b"]);
+    let res2 = w.run(&[
+        "build",
+        "--experimental_convenience_symlinks=normal",
+        "//pkg:b",
+    ]);
     assert_eq!(res2.code, 0, "{}", res2.err);
-    assert!(w.ws.join("bazel-bin").exists(), "bazel-bin should exist when convenience_symlinks=normal");
+    assert!(
+        w.ws.join("bazel-bin").exists(),
+        "bazel-bin should exist when convenience_symlinks=normal"
+    );
 }
 
 #[test]
@@ -194,9 +252,19 @@ genrule(
     assert!(!res2.err.contains("bazel-bin/pkg/out.txt"), "{}", res2.err);
 
     // `--incompatible_fail_on_unknown_output_groups` only exists in Bazel HEAD; 9.3.2 rejects it.
-    let res3 = w.run(&["build", "--incompatible_fail_on_unknown_output_groups", "--output_groups=nonexistent", "//pkg:g"]);
+    let res3 = w.run(&[
+        "build",
+        "--incompatible_fail_on_unknown_output_groups",
+        "--output_groups=nonexistent",
+        "//pkg:g",
+    ]);
     assert_eq!(res3.code, 2, "{}", res3.err);
-    assert!(res3.err.contains("Unrecognized option: --incompatible_fail_on_unknown_output_groups"), "{}", res3.err);
+    assert!(
+        res3.err
+            .contains("Unrecognized option: --incompatible_fail_on_unknown_output_groups"),
+        "{}",
+        res3.err
+    );
 }
 
 #[test]
@@ -214,7 +282,11 @@ sh_binary(name = "bin2", srcs = ["bin2.sh"])
 
     let res = w.run(&["run", "//pkg:all"]);
     assert_eq!(res.code, 2, "{}", res.err);
-    assert!(res.err.contains("ERROR: Only a single target can be run"), "{}", res.err);
+    assert!(
+        res.err.contains("ERROR: Only a single target can be run"),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -225,8 +297,15 @@ fn test_run_norun_flag() {
 
     let res = w.run(&["run", "--norun", "//pkg:b"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.err.contains("INFO: Runnable command line:"), "{}", res.err);
-    assert!(res.exec.is_none(), "exec_request should be None with --norun");
+    assert!(
+        res.err.contains("INFO: Runnable command line:"),
+        "{}",
+        res.err
+    );
+    assert!(
+        res.exec.is_none(),
+        "exec_request should be None with --norun"
+    );
 }
 
 #[test]
@@ -238,7 +317,10 @@ fn test_run_in_cwd() {
     let res = w.run(&["run", "--run_in_cwd", "--client_cwd=/custom/cwd", "//pkg:b"]);
     assert_eq!(res.code, 0, "{}", res.err);
     let req = res.exec.expect("should have exec_request");
-    assert_eq!(String::from_utf8_lossy(&req.working_directory), "/custom/cwd");
+    assert_eq!(
+        String::from_utf8_lossy(&req.working_directory),
+        "/custom/cwd"
+    );
 }
 
 #[test]
@@ -257,11 +339,23 @@ sh_binary(name = "target", srcs = ["target.sh"])
     let res = w.run(&["run", "--run_under=//pkg:wrapper --arg", "//pkg:target"]);
     assert_eq!(res.code, 0, "{}", res.err);
     let req = res.exec.expect("should have exec_request");
-    let argv: Vec<String> = req.argv.iter().map(|a| String::from_utf8_lossy(a).to_string()).collect();
+    let argv: Vec<String> = req
+        .argv
+        .iter()
+        .map(|a| String::from_utf8_lossy(a).to_string())
+        .collect();
     assert!(argv.len() >= 3, "{:?}", argv);
-    assert!(argv[0].contains("wrapper"), "first arg should be wrapper: {:?}", argv);
+    assert!(
+        argv[0].contains("wrapper"),
+        "first arg should be wrapper: {:?}",
+        argv
+    );
     assert_eq!(argv[1], "--arg");
-    assert!(argv[2].contains("target"), "third arg should be target: {:?}", argv);
+    assert!(
+        argv[2].contains("target"),
+        "third arg should be target: {:?}",
+        argv
+    );
 }
 
 #[test]
@@ -276,15 +370,28 @@ fn test_run_test_env_vars() {
     let env: BTreeMap<String, String> = req
         .environment_variable
         .iter()
-        .map(|ev| (String::from_utf8_lossy(&ev.name).to_string(), String::from_utf8_lossy(&ev.value).to_string()))
+        .map(|ev| {
+            (
+                String::from_utf8_lossy(&ev.name).to_string(),
+                String::from_utf8_lossy(&ev.value).to_string(),
+            )
+        })
         .collect();
     assert_eq!(env.get("TEST_TARGET").map(|s| s.as_str()), Some("//pkg:t"));
     assert!(env.contains_key("TEST_TMPDIR"), "{:?}", env);
     assert!(env.contains_key("TEST_SRCDIR"), "{:?}", env);
     assert!(env.contains_key("TEST_WORKSPACE"), "{:?}", env);
 
-    let to_clear: Vec<String> = req.environment_variable_to_clear.iter().map(|b| String::from_utf8_lossy(b).to_string()).collect();
-    assert!(to_clear.contains(&"RUNFILES_DIR".to_string()), "{:?}", to_clear);
+    let to_clear: Vec<String> = req
+        .environment_variable_to_clear
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).to_string())
+        .collect();
+    assert!(
+        to_clear.contains(&"RUNFILES_DIR".to_string()),
+        "{:?}",
+        to_clear
+    );
 }
 
 #[test]
@@ -295,8 +402,17 @@ fn test_test_zero_tests_found_no_dangling_stats() {
 
     let res = w.run(&["test", "//pkg:b"]);
     assert_eq!(res.code, 4, "{}", res.err);
-    assert!(res.err.contains("ERROR: No test targets were found, yet testing was requested"), "{}", res.err);
-    assert!(!res.err.contains("Executed 0 out of 0 tests: ."), "{}", res.err);
+    assert!(
+        res.err
+            .contains("ERROR: No test targets were found, yet testing was requested"),
+        "{}",
+        res.err
+    );
+    assert!(
+        !res.err.contains("Executed 0 out of 0 tests: ."),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -307,18 +423,35 @@ fn test_test_output_streamed_warning_and_execution() {
 
     let res = w.run(&["test", "--test_output=streamed", "//pkg:t"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.err.contains("WARNING: Streamed test output requested."), "{}", res.err);
+    assert!(
+        res.err.contains("WARNING: Streamed test output requested."),
+        "{}",
+        res.err
+    );
     assert!(res.out.contains("hello from test"), "{}", res.out);
-    assert!(!res.out.contains("==================== Test output for //pkg:t:"), "{}", res.out);
+    assert!(
+        !res.out
+            .contains("==================== Test output for //pkg:t:"),
+        "{}",
+        res.out
+    );
 }
 
 #[test]
 fn test_test_max_output_bytes_truncation() {
     let w = make_ws("max-output");
     w.write("pkg/BUILD", "sh_test(name = 't', srcs = ['t.sh'])\n");
-    w.write("pkg/t.sh", "#!/bin/sh\necho '0123456789012345678901234567890123456789'\nexit 1\n");
+    w.write(
+        "pkg/t.sh",
+        "#!/bin/sh\necho '0123456789012345678901234567890123456789'\nexit 1\n",
+    );
 
-    let res = w.run(&["test", "--test_output=errors", "--max_test_output_bytes=10", "//pkg:t"]);
+    let res = w.run(&[
+        "test",
+        "--test_output=errors",
+        "--max_test_output_bytes=10",
+        "//pkg:t",
+    ]);
     assert_eq!(res.code, 3, "{}", res.err);
     assert!(res.out.contains("Test log too large ("), "{}", res.out);
 }
@@ -342,11 +475,22 @@ fn coverage_default_body() {
 
     let res = w.run(&["coverage", "--instrument_test_targets", "//pkg:t"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.err.contains("INFO: LCOV coverage report is located at"), "{}", res.err);
-    assert!(w.ob.join("bazel-out/_coverage/_coverage_report.dat").exists() || res.err.contains("_coverage_report.dat"));
+    assert!(
+        res.err.contains("INFO: LCOV coverage report is located at"),
+        "{}",
+        res.err
+    );
+    assert!(
+        w.ob.join("bazel-out/_coverage/_coverage_report.dat")
+            .exists()
+            || res.err.contains("_coverage_report.dat")
+    );
     // Baseline coverage file created
     let baseline = w.ws.join("bazel-testlogs/pkg/t/baseline_coverage.dat");
-    assert!(baseline.exists() || res.err.contains("coverage"), "baseline coverage should be generated");
+    assert!(
+        baseline.exists() || res.err.contains("coverage"),
+        "baseline coverage should be generated"
+    );
 }
 
 #[test]
@@ -366,10 +510,21 @@ fn test_test_summary_modes() {
     assert!(!res2.err.contains("PASSED in "), "{}", res2.err);
 
     // --test_summary=testcase should omit per-target summary and show Test cases line
-    let res3 = w.run(&["test", "--test_summary=testcase", "--cache_test_results=no", "//pkg:pass"]);
+    let res3 = w.run(&[
+        "test",
+        "--test_summary=testcase",
+        "--cache_test_results=no",
+        "//pkg:pass",
+    ]);
     assert_eq!(res3.code, 0, "{}", res3.out);
     assert!(!res3.err.contains("PASSED in "), "{}", res3.err);
-    assert!(res3.out.contains("Test cases: finished with 1 passing, 0 skipped and 0 failing out of 1 test cases"), "{}", res3.out);
+    assert!(
+        res3.out.contains(
+            "Test cases: finished with 1 passing, 0 skipped and 0 failing out of 1 test cases"
+        ),
+        "{}",
+        res3.out
+    );
 }
 
 #[test]
@@ -385,7 +540,13 @@ sh_test(name = "t2_pass", srcs = ["t2.sh"])
     w.write("pkg/t1.sh", "#!/bin/sh\nexit 1\n");
     w.write("pkg/t2.sh", "#!/bin/sh\nexit 0\n");
 
-    let res = w.run(&["test", "--notest_keep_going", "--jobs=1", "//pkg:t1_fail", "//pkg:t2_pass"]);
+    let res = w.run(&[
+        "test",
+        "--notest_keep_going",
+        "--jobs=1",
+        "//pkg:t1_fail",
+        "//pkg:t2_pass",
+    ]);
     assert_eq!(res.code, 3, "{}", res.err);
 }
 
@@ -399,7 +560,12 @@ genrule(name = "g", outs = ["g.out"], cmd = "echo 'my message' >&2; echo hi > $@
 "#,
     );
     let explain_file = w.ws.join("explain.txt");
-    let res = w.run(&["build", &format!("--explain={}", explain_file.display()), "--output_filter=nomatch", "//pkg:g"]);
+    let res = w.run(&[
+        "build",
+        &format!("--explain={}", explain_file.display()),
+        "--output_filter=nomatch",
+        "//pkg:g",
+    ]);
     assert_eq!(res.code, 0, "{}", res.err);
     assert!(explain_file.exists(), "explain file should be created");
 }
@@ -410,13 +576,23 @@ fn test_run_portable_paths_and_omit_args() {
     w.write("pkg/BUILD", "sh_binary(name = 'b', srcs = ['b.sh'])\n");
     w.write("pkg/b.sh", "#!/bin/sh\nexit 0\n");
 
-    let res = w.run(&["run", "--portable_paths", "--omit_run_args", "//pkg:b", "--", "secret_arg"]);
+    let res = w.run(&[
+        "run",
+        "--portable_paths",
+        "--omit_run_args",
+        "//pkg:b",
+        "--",
+        "secret_arg",
+    ]);
     assert_eq!(res.code, 0, "{}", res.err);
     assert!(res.err.contains("<args omitted>"), "{}", res.err);
     assert!(!res.err.contains("secret_arg"), "{}", res.err);
 
     let req = res.exec.expect("should have exec request");
-    assert!(!req.path_to_replace.is_empty(), "path_to_replace should not be empty with --portable_paths");
+    assert!(
+        !req.path_to_replace.is_empty(),
+        "path_to_replace should not be empty with --portable_paths"
+    );
 }
 
 #[test]
@@ -427,8 +603,17 @@ fn test_test_nobuild() {
 
     let res = w.run(&["test", "--nobuild", "//pkg:pass"]);
     assert_eq!(res.code, 1, "{}", res.err);
-    assert!(res.err.contains("ERROR: Couldn't start the build. Unable to run tests"), "{}", res.err);
-    assert!(res.err.contains("INFO: Found 1 test target..."), "{}", res.err);
+    assert!(
+        res.err
+            .contains("ERROR: Couldn't start the build. Unable to run tests"),
+        "{}",
+        res.err
+    );
+    assert!(
+        res.err.contains("INFO: Found 1 test target..."),
+        "{}",
+        res.err
+    );
     assert!(!res.err.contains("Executed 1 out of 1"), "{}", res.err);
     assert!(!res.err.contains("fails locally"), "{}", res.err);
 }
@@ -452,17 +637,29 @@ sh_test(name = "test1", srcs = ["test1.sh"])
 
     let res2 = w.run(&["test", "//pkg:test1"]);
     assert_eq!(res2.code, 0, "{}", res2.err);
-    assert!(res2.err.contains("INFO: Found 1 test target..."), "{}", res2.err);
+    assert!(
+        res2.err.contains("INFO: Found 1 test target..."),
+        "{}",
+        res2.err
+    );
 }
 
 #[test]
 fn test_target_nothing_to_build() {
     let w = make_ws("nothing-to-build");
-    w.write("pkg/BUILD", "genrule(name = 'g', outs = ['out.txt'], cmd = 'echo hi > $@')\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = 'g', outs = ['out.txt'], cmd = 'echo hi > $@')\n",
+    );
 
     let res = w.run(&["build", "--output_groups=nonexistent", "//pkg:g"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.err.contains("Target //pkg:g up-to-date (nothing to build)"), "{}", res.err);
+    assert!(
+        res.err
+            .contains("Target //pkg:g up-to-date (nothing to build)"),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -484,7 +681,12 @@ sh_binary(name = "t6", srcs = ["t.sh"])
     let res = w.run(&["run", "//pkg/..."]);
     assert_eq!(res.code, 2, "{}", res.err);
     assert!(res.err.contains("[TRUNCATED]"), "{}", res.err);
-    assert!(res.err.contains("//pkg:t1, //pkg:t2, //pkg:t3, //pkg:t4, //pkg:t5[TRUNCATED]"), "{}", res.err);
+    assert!(
+        res.err
+            .contains("//pkg:t1, //pkg:t2, //pkg:t3, //pkg:t4, //pkg:t5[TRUNCATED]"),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -510,16 +712,31 @@ fn test_run_test_target_full_env_and_setup_script() {
 
     let res = w.run(&["run", "//pkg:t"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.err.contains("INFO: Running command line: external/bazel_tools/tools/test/test-setup.sh ./t"), "{}", res.err);
+    assert!(
+        res.err.contains(
+            "INFO: Running command line: external/bazel_tools/tools/test/test-setup.sh pkg/t"
+        ),
+        "{}",
+        res.err
+    );
     let req = res.exec.expect("should have exec request");
     let env: BTreeMap<String, String> = req
         .environment_variable
         .iter()
-        .map(|ev| (String::from_utf8_lossy(&ev.name).to_string(), String::from_utf8_lossy(&ev.value).to_string()))
+        .map(|ev| {
+            (
+                String::from_utf8_lossy(&ev.name).to_string(),
+                String::from_utf8_lossy(&ev.value).to_string(),
+            )
+        })
         .collect();
     assert_eq!(env.get("TEST_TARGET").map(|s| s.as_str()), Some("//pkg:t"));
-    assert_eq!(env.get("TEST_BINARY").map(|s| s.as_str()), Some("./t"));
-    assert!(env.get("TEST_TMPDIR").unwrap().contains("_tmp"), "{:?}", env.get("TEST_TMPDIR"));
+    assert_eq!(env.get("TEST_BINARY").map(|s| s.as_str()), Some("pkg/t"));
+    assert!(
+        env.get("TEST_TMPDIR").unwrap().contains("_tmp"),
+        "{:?}",
+        env.get("TEST_TMPDIR")
+    );
     assert!(env.contains_key("XML_OUTPUT_FILE"), "{:?}", env);
     assert!(env.contains_key("TEST_WARNINGS_OUTPUT_FILE"), "{:?}", env);
     assert!(env.contains_key("TEST_PREMATURE_EXIT_FILE"), "{:?}", env);
@@ -539,8 +756,17 @@ fn test_check_tests_up_to_date_trailer_and_message() {
 
     let res = w.run(&["test", "--check_tests_up_to_date", "//pkg:t"]);
     assert_eq!(res.code, 1, "{}", res.err);
-    assert!(res.err.contains("ERROR: Testing //pkg:t is not up-to-date"), "{}", res.err);
-    assert!(res.out.contains("Finished with 0 passing and 0 failing tests up to date, 1 out of date."), "{}", res.out);
+    assert!(
+        res.err.contains("ERROR: Testing //pkg:t is not up-to-date"),
+        "{}",
+        res.err
+    );
+    assert!(
+        res.out
+            .contains("Finished with 0 passing and 0 failing tests up to date, 1 out of date."),
+        "{}",
+        res.out
+    );
 }
 
 #[test]
@@ -556,28 +782,59 @@ sh_test(name = "t2_pass", srcs = ["t2.sh"])
     w.write("pkg/t1.sh", "#!/bin/sh\nexit 1\n");
     w.write("pkg/t2.sh", "#!/bin/sh\nexit 0\n");
 
-    let res = w.run(&["test", "--test_summary=detailed", "--notest_keep_going", "--jobs=1", "--test_strategy=exclusive", "//pkg:t1_fail", "//pkg:t2_pass"]);
+    let res = w.run(&[
+        "test",
+        "--test_summary=detailed",
+        "--notest_keep_going",
+        "--jobs=1",
+        "--test_strategy=exclusive",
+        "//pkg:t1_fail",
+        "//pkg:t2_pass",
+    ]);
     assert_eq!(res.code, 3, "{}", res.err);
-    assert!(res.err.contains("INFO: Build completed, 1 test FAILED"), "{}", res.err);
+    assert!(
+        res.err.contains("INFO: Build completed, 1 test FAILED"),
+        "{}",
+        res.err
+    );
     assert!(res.out.contains("and 1 was skipped."), "{}", res.out);
-    assert!(res.out.contains("//pkg:t2_pass") && res.out.contains("NO STATUS"), "{}", res.out);
+    assert!(
+        res.out.contains("//pkg:t2_pass") && res.out.contains("NO STATUS"),
+        "{}",
+        res.out
+    );
 }
 
 #[test]
 fn test_explain_created_when_no_actions_run() {
     let w = make_ws("explain-no-act");
-    w.write("pkg/BUILD", "genrule(name = 'g', outs = ['g.out'], cmd = 'echo hi > $@')\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = 'g', outs = ['g.out'], cmd = 'echo hi > $@')\n",
+    );
     // Build once so it is up-to-date
     let res1 = w.run(&["build", "//pkg:g"]);
     assert_eq!(res1.code, 0, "{}", res1.err);
 
     let explain_file = w.ws.join("explain_no_act.txt");
-    let res2 = w.run(&["build", &format!("--explain={}", explain_file.display()), "//pkg:g"]);
+    let res2 = w.run(&[
+        "build",
+        &format!("--explain={}", explain_file.display()),
+        "//pkg:g",
+    ]);
     assert_eq!(res2.code, 0, "{}", res2.err);
-    assert!(explain_file.exists(), "explain file must be created even when no actions run");
+    assert!(
+        explain_file.exists(),
+        "explain file must be created even when no actions run"
+    );
     let content = std::fs::read_to_string(&explain_file).unwrap();
     assert!(content.contains("Build options:"), "{}", content);
-    assert!(res2.err.contains("INFO: Writing explanation of rebuilds to"), "{}", res2.err);
+    assert!(
+        res2.err
+            .contains("INFO: Writing explanation of rebuilds to"),
+        "{}",
+        res2.err
+    );
 }
 
 #[test]
@@ -586,7 +843,11 @@ fn test_coverage_support_nonexistent_label_fails() {
     w.write("pkg/BUILD", "sh_test(name = 't', srcs = ['t.sh'])\n");
     w.write("pkg/t.sh", "#!/bin/sh\nexit 0\n");
 
-    let res = w.run(&["coverage", "--coverage_support=//pkg:nonexistent", "//pkg:t"]);
+    let res = w.run(&[
+        "coverage",
+        "--coverage_support=//pkg:nonexistent",
+        "//pkg:t",
+    ]);
     assert_eq!(res.code, 1, "{}", res.err);
     // Real bazel 9.3.2: the tests implicitly depend on the label.
     assert!(
@@ -594,7 +855,12 @@ fn test_coverage_support_nonexistent_label_fails() {
         "{}",
         res.err
     );
-    assert!(res.err.contains("ERROR: Analysis of target '//pkg:t' failed; build aborted: Analysis failed"), "{}", res.err);
+    assert!(
+        res.err
+            .contains("ERROR: Analysis of target '//pkg:t' failed; build aborted: Analysis failed"),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -630,9 +896,19 @@ genrule(name = "g2", outs = ["g2.out"], cmd = "echo 2 > $@")
     assert_eq!(res1.code, 0, "{}", res1.err);
 
     // `--bust_action_caches` only exists in Bazel HEAD; 9.3.2 rejects it.
-    let res2 = w.run(&["build", "--bust_action_caches=//pkg:g1", "//pkg:g1", "//pkg:g2"]);
+    let res2 = w.run(&[
+        "build",
+        "--bust_action_caches=//pkg:g1",
+        "//pkg:g1",
+        "//pkg:g2",
+    ]);
     assert_eq!(res2.code, 2, "{}", res2.err);
-    assert!(res2.err.contains("Unrecognized option: --bust_action_caches=//pkg:g1"), "{}", res2.err);
+    assert!(
+        res2.err
+            .contains("Unrecognized option: --bust_action_caches=//pkg:g1"),
+        "{}",
+        res2.err
+    );
 }
 
 #[test]
@@ -649,8 +925,16 @@ sh_binary(name = "b2", srcs = ["b2.sh"])
     w.write("pkg/b2.sh", "#!/bin/sh\necho \"b2\"\n");
     let res = w.run(&["run", "//pkg:b1", "//pkg:b2"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.err.contains("Target //pkg:b1 up-to-date:"), "{}", res.err);
-    assert!(!res.err.contains("Target //pkg:b2 up-to-date:"), "{}", res.err);
+    assert!(
+        res.err.contains("Target //pkg:b1 up-to-date:"),
+        "{}",
+        res.err
+    );
+    assert!(
+        !res.err.contains("Target //pkg:b2 up-to-date:"),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -665,7 +949,12 @@ sh_test(name = "t", srcs = ["t.sh"])
     w.write("pkg/t.sh", "#!/bin/sh\nexit 0\n");
     let res = w.run(&["run", "--test_sharding_strategy=forced=2", "//pkg:t"]);
     assert_eq!(res.code, 2, "{}", res.err);
-    assert!(res.err.contains("ERROR: 'run' only works with tests with one shard"), "{}", res.err);
+    assert!(
+        res.err
+            .contains("ERROR: 'run' only works with tests with one shard"),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -681,7 +970,11 @@ sh_binary(name = "b", srcs = ["b.sh"])
     let sp = w.ws.join("sp.sh");
     let res = w.run(&["run", &format!("--script_path={}", sp.display()), "//pkg:b"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(!res.err.contains("INFO: Running command line:"), "{}", res.err);
+    assert!(
+        !res.err.contains("INFO: Running command line:"),
+        "{}",
+        res.err
+    );
     let script_content = std::fs::read_to_string(&sp).unwrap();
     assert!(script_content.contains("\"$@\""), "{script_content}");
 }
@@ -698,7 +991,11 @@ sh_test(name = "t", srcs = ["t.sh"])
     w.write("pkg/t.sh", "#!/bin/sh\nexit 0\n");
     let res = w.run(&["test", "//pkg:t"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.err.contains("Target //pkg:t up-to-date:"), "{}", res.err);
+    assert!(
+        res.err.contains("Target //pkg:t up-to-date:"),
+        "{}",
+        res.err
+    );
     assert!(res.err.contains("bazel-bin/pkg/t"), "{}", res.err);
 
     // With --symlink_prefix=foo-
@@ -726,7 +1023,13 @@ genrule(name = "g", outs = ["g.out"], cmd = "echo 1 > $@")
     // test --nobuild: exit 1, Couldn't start the build. Unable to run tests
     let res_t = w.run(&["test", "--nobuild", "//pkg:t"]);
     assert_eq!(res_t.code, 1, "{}", res_t.err);
-    assert!(res_t.err.contains("ERROR: Couldn't start the build. Unable to run tests"), "{}", res_t.err);
+    assert!(
+        res_t
+            .err
+            .contains("ERROR: Couldn't start the build. Unable to run tests"),
+        "{}",
+        res_t.err
+    );
 }
 
 #[test]
@@ -743,10 +1046,19 @@ sh_test(name = "shard", srcs = ["s.sh"], shard_count = 2)
     let res1 = w.run(&["test", "//pkg:shard"]);
     assert_eq!(res1.code, 3, "{}", res1.err);
     assert!(res1.out.contains("NO STATUS"), "{}", res1.out);
-    assert!(res1.err.contains("Sharding requested, but the test runner did not advertise support"), "{}", res1.err);
+    assert!(
+        res1.err
+            .contains("Sharding requested, but the test runner did not advertise support"),
+        "{}",
+        res1.err
+    );
 
     // With --noincompatible_check_sharding_support (present in 9.3.2): the check is skipped and the test passes.
-    let res2 = w.run(&["test", "--noincompatible_check_sharding_support", "//pkg:shard"]);
+    let res2 = w.run(&[
+        "test",
+        "--noincompatible_check_sharding_support",
+        "//pkg:shard",
+    ]);
     assert_eq!(res2.code, 0, "{}", res2.err);
     assert!(!res2.out.contains("NO STATUS"), "{}", res2.out);
 }
@@ -766,9 +1078,18 @@ sh_test(name = "t", srcs = ["t.sh"], size = "medium")
     assert!(res.out.contains("There were tests whose specified size is too big. Use the --test_verbose_timeout_warnings"), "{}", res.out);
 
     // Cached results never carry the warning (`TestResultAggregator`: `!result.isCached()`).
-    let res_v = w.run(&["test", "--cache_test_results=no", "--test_verbose_timeout_warnings", "//pkg:t"]);
+    let res_v = w.run(&[
+        "test",
+        "--cache_test_results=no",
+        "--test_verbose_timeout_warnings",
+        "//pkg:t",
+    ]);
     assert_eq!(res_v.code, 0, "{}", res_v.err);
-    assert!(res_v.out.contains("WARNING: //pkg:t: Test execution time"), "{}", res_v.out);
+    assert!(
+        res_v.out.contains("WARNING: //pkg:t: Test execution time"),
+        "{}",
+        res_v.out
+    );
     assert!(res_v.out.contains("outside of range for MODERATE tests. Consider setting timeout=\"short\" or size=\"small\"."), "{}", res_v.out);
 }
 
@@ -785,7 +1106,10 @@ sh_test(name = "t", srcs = ["t.sh"])
     let res = w.run(&["test", "//pkg:t"]);
     assert_eq!(res.code, 0, "{}", res.err);
     let log_dir = w.ws.join("testlogs/pkg/t");
-    assert!(!log_dir.join("test.cache_key").exists(), "test.cache_key must not be written to disk");
+    assert!(
+        !log_dir.join("test.cache_key").exists(),
+        "test.cache_key must not be written to disk"
+    );
 }
 
 #[test]
@@ -799,8 +1123,16 @@ genrule(name = "so", outs = ["so.out"], cmd = "echo hello-stdout; echo warn >&2;
     );
     let res = w.run(&["build", "//pkg:so"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert_eq!(res.out, "hello-stdout\n", "action stdout goes to the command's stdout");
-    assert!(res.err.contains("INFO: From Executing genrule //pkg:so:\nwarn\n"), "{}", res.err);
+    assert_eq!(
+        res.out, "hello-stdout\n",
+        "action stdout goes to the command's stdout"
+    );
+    assert!(
+        res.err
+            .contains("INFO: From Executing genrule //pkg:so:\nwarn\n"),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -824,7 +1156,12 @@ genrule(name = "user", srcs = ["//dep:old"], outs = ["u.out"], cmd = "cat $< > $
     assert_eq!(res.code, 0, "{}", res.err);
     assert!(res.err.contains("in genrule rule //pkg:user: target '//pkg:user' depends on deprecated target '//dep:old': use new"), "{}", res.err);
     let res = w.run(&["build", "//dep:old"]);
-    assert!(res.err.contains("target '//dep:old' is deprecated: use new"), "{}", res.err);
+    assert!(
+        res.err
+            .contains("target '//dep:old' is deprecated: use new"),
+        "{}",
+        res.err
+    );
     let res = w.run(&["build", "//dep:f.txt"]);
     assert!(res.err.contains("//dep:f.txt is a source file, nothing will be built for it. If you want to build a target that consumes this file, try --compile_one_dependency"), "{}", res.err);
 }
@@ -836,24 +1173,53 @@ fn round7_invalid_test_strategy_and_directory_output() {
     w.write("pkg/t.sh", "#!/bin/sh\nexit 0\n");
     let res = w.run(&["test", "--test_strategy=sandboxed", "//pkg:t"]);
     assert_eq!(res.code, 2, "{}", res.err);
-    assert!(res.err.contains("available identifiers are: [exclusive, standalone]"), "{}", res.err);
+    assert!(
+        res.err
+            .contains("available identifiers are: [exclusive, standalone]"),
+        "{}",
+        res.err
+    );
     let res = w.run(&["build", "//pkg:d"]);
     assert_eq!(res.code, 1, "{}", res.err);
-    assert!(res.err.contains("output 'pkg/dout' of //pkg:d is a directory but was not declared as such"), "{}", res.err);
+    assert!(
+        res.err
+            .contains("output 'pkg/dout' of //pkg:d is a directory but was not declared as such"),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
 fn round7_flaky_attempts_are_reported() {
     let w = make_ws("r7-flaky");
-    w.write("pkg/BUILD", "sh_test(name = \"t\", srcs = [\"t.sh\"], flaky = True)\n");
+    w.write(
+        "pkg/BUILD",
+        "sh_test(name = \"t\", srcs = [\"t.sh\"], flaky = True)\n",
+    );
     w.write("pkg/t.sh", "#!/bin/bash\ncase \"$XML_OUTPUT_FILE\" in\n  *attempt_1.tmp*) exit 1 ;;\n  *) exit 0 ;;\nesac\n");
     let res = w.run(&["test", "--test_output=all", "//pkg:t"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.out.contains("FLAKY, failed in 1 out of 2"), "{}", res.out);
-    assert!(res.out.contains("test_attempts/attempt_1.log"), "{}", res.out);
-    assert!(res.err.contains("FAIL: //pkg:t (Exit 1) (see "), "{}", res.err);
+    assert!(
+        res.out.contains("FLAKY, failed in 1 out of 2"),
+        "{}",
+        res.out
+    );
+    assert!(
+        res.out.contains("test_attempts/attempt_1.log"),
+        "{}",
+        res.out
+    );
+    assert!(
+        res.err.contains("FAIL: //pkg:t (Exit 1) (see "),
+        "{}",
+        res.err
+    );
     assert!(res.err.contains("FLAKY: //pkg:t (Summary)"), "{}", res.err);
-    assert!(!res.out.contains("specified size is too big"), "{}", res.out);
+    assert!(
+        !res.out.contains("specified size is too big"),
+        "{}",
+        res.out
+    );
 }
 
 #[test]
@@ -865,7 +1231,9 @@ fn test_run_script_path_write_failure_matches_bazel() {
     // `RunCommand`: SCRIPT_WRITE_FAILURE (exit 6) with the Java IOException text.
     assert_eq!(res.code, 6, "{}", res.err);
     assert!(
-        res.err.contains("ERROR: Error writing run script: /nonexistent-dir-zel/x (No such file or directory)"),
+        res.err.contains(
+            "ERROR: Error writing run script: /nonexistent-dir-zel/x (No such file or directory)"
+        ),
         "{}",
         res.err
     );
@@ -883,10 +1251,19 @@ fn test_process_summary_counts_internal_and_test_spawns() {
     let res = w.run(&["test", "//pkg:t"]);
     assert_eq!(res.code, 0, "{}", res.err);
     // (`sh_test` comes from `@rules_shell` here; the e2e harness against bazel covers the exact 7/6/2.)
-    assert!(res.err.contains(" internal, 2 ") && res.err.contains(" processes: "), "{}", res.err);
+    assert!(
+        res.err.contains(" internal, 2 ") && res.err.contains(" processes: "),
+        "{}",
+        res.err
+    );
     assert!(res.err.contains("total actions"), "{}", res.err);
     let res = w.run(&["test", "//pkg:t"]);
-    assert!(res.err.contains("INFO: 1 process: 1 action cache hit, 1 internal."), "{}", res.err);
+    assert!(
+        res.err
+            .contains("INFO: 1 process: 1 action cache hit, 1 internal."),
+        "{}",
+        res.err
+    );
     let res = w.run(&["build", "--nobuild", "//pkg:t"]);
     assert!(res.err.contains("INFO: 0 processes."), "{}", res.err);
 }
@@ -894,16 +1271,30 @@ fn test_process_summary_counts_internal_and_test_spawns() {
 #[test]
 fn test_unknown_spawn_strategy_prints_build_trailer() {
     let w = make_ws("bogus-strategy");
-    w.write("pkg/BUILD", "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n",
+    );
     let res = w.run(&["build", "--spawn_strategy=bogus", "//pkg:g"]);
     assert_eq!(res.code, 2, "{}", res.err);
     let all: Vec<&str> = res.err.lines().collect();
-    let at = all.iter().position(|l| l.contains("'bogus' was requested")).expect(&res.err);
+    let at = all
+        .iter()
+        .position(|l| l.contains("'bogus' was requested"))
+        .expect(&res.err);
     let lines = &all[at..];
-    assert!(lines[0].contains("'bogus' was requested for explicit default strategies"), "{}", res.err);
+    assert!(
+        lines[0].contains("'bogus' was requested for explicit default strategies"),
+        "{}",
+        res.err
+    );
     assert!(lines[1].starts_with("INFO: Elapsed time: "), "{}", res.err);
     assert_eq!(lines[2], "INFO: 0 processes.", "{}", res.err);
-    assert_eq!(lines[3], "ERROR: Build did NOT complete successfully", "{}", res.err);
+    assert_eq!(
+        lines[3], "ERROR: Build did NOT complete successfully",
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -916,28 +1307,56 @@ fn test_build_tag_filters_do_not_drop_tests_under_test_command() {
     w.write("pkg/t.sh", "#!/bin/sh\nexit 0\n");
     let res = w.run(&["test", "--build_tag_filters=tagA", "//pkg:all"]);
     assert_eq!(res.code, 0, "{}", res.err);
-    assert!(res.out.contains("Executed 2 out of 2 tests"), "{}{}", res.out, res.err);
+    assert!(
+        res.out.contains("Executed 2 out of 2 tests"),
+        "{}{}",
+        res.out,
+        res.err
+    );
 }
 
 #[test]
 fn test_workspace_status_failure_precedes_analysis_error() {
     let w = make_ws("wsc-order");
-    w.write("pkg/BUILD", "genrule(name = \"g\", outs = [\"o\"], cmd = \"echo $(NOSUCHVAR) > $@\")\n");
-    let res = w.run(&["build", "--workspace_status_command=/nonexistent/wsc", "//pkg:g"]);
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"echo $(NOSUCHVAR) > $@\")\n",
+    );
+    let res = w.run(&[
+        "build",
+        "--workspace_status_command=/nonexistent/wsc",
+        "//pkg:g",
+    ]);
     assert_eq!(res.code, 1, "{}", res.err);
-    assert!(res.err.contains("BazelWorkspaceStatusAction stable-status.txt failed"), "{}", res.err);
+    assert!(
+        res.err
+            .contains("BazelWorkspaceStatusAction stable-status.txt failed"),
+        "{}",
+        res.err
+    );
     assert!(!res.err.contains("Analysis of target"), "{}", res.err);
-    assert!(res.err.contains("INFO: 1 process: 1 internal."), "{}", res.err);
+    assert!(
+        res.err.contains("INFO: 1 process: 1 internal."),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
 fn test_missing_input_action_is_not_announced_or_counted() {
     let w = make_ws("missing-input-s");
-    w.write("pkg/BUILD", "genrule(name = \"g\", srcs = [\"nope.txt\"], outs = [\"o\"], cmd = \"cat $< > $@\")\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", srcs = [\"nope.txt\"], outs = [\"o\"], cmd = \"cat $< > $@\")\n",
+    );
     let res = w.run(&["build", "-s", "//pkg:g"]);
     assert_eq!(res.code, 1, "{}", res.err);
     assert!(!res.err.contains("SUBCOMMAND"), "{}", res.err);
-    assert!(res.err.contains("INFO: 1 process: 1 internal."), "{}", res.err);
+    assert!(
+        res.err.contains("INFO: 1 process: 1 internal."),
+        "{}",
+        res.err
+    );
 }
 
 #[test]
@@ -950,77 +1369,151 @@ fn test_keep_going_analysis_failure_analyzed_line_before_warning() {
     let res = w.run(&["build", "--keep_going", "//pkg:bad", "//pkg:ok"]);
     assert_eq!(res.code, 1, "{}", res.err);
     let a = res.err.find("INFO: Analyzed 2 targets").expect(&res.err);
-    let wn = res.err.find("WARNING: errors encountered while analyzing target '//pkg:bad'").expect(&res.err);
+    let wn = res
+        .err
+        .find("WARNING: errors encountered while analyzing target '//pkg:bad'")
+        .expect(&res.err);
     assert!(a < wn, "{}", res.err);
 }
 
 #[test]
 fn test_unknown_and_missing_aspects_match_bazel() {
     let w = make_ws("aspect-errs");
-    w.write("pkg/BUILD", "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n",
+    );
     let r = w.run(&["build", "--aspects=//pkg:x", "//pkg:g"]);
     assert_eq!(r.code, 1, "{}", r.err);
-    assert!(r.err.contains("ERROR: Aspect '//pkg:x' is unknown\n"), "{}", r.err);
+    assert!(
+        r.err.contains("ERROR: Aspect '//pkg:x' is unknown\n"),
+        "{}",
+        r.err
+    );
     assert!(r.err.contains("INFO: 0 processes."), "{}", r.err);
     let r = w.run(&["build", "--aspects=//pkg:x%y", "//pkg:g"]);
     assert_eq!(r.code, 1, "{}", r.err);
-    assert!(r.err.contains("ERROR: cannot load '//pkg:x': no such file\n"), "{}", r.err);
+    assert!(
+        r.err
+            .contains("ERROR: cannot load '//pkg:x': no such file\n"),
+        "{}",
+        r.err
+    );
     assert!(r.err.contains("ERROR: Analysis of aspects '[//pkg:x%y] with parameters {} on //pkg:g' failed; build aborted: cannot load '//pkg:x': no such file"), "{}", r.err);
 }
 
 #[test]
 fn test_override_repository_of_invisible_repo_is_exit_48() {
     let w = make_ws("override-invisible");
-    w.write("pkg/BUILD", "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n",
+    );
     let r = w.run(&["build", "--override_repository=foo=/tmp", "//pkg:g"]);
     assert_eq!(r.code, 48, "{}", r.err);
     assert!(r.err.contains("ERROR: no repository visible as '@foo' from the main repository, but overridden with --override_repository. Use --inject_repository to add new repositories."), "{}", r.err);
-    let r = w.run(&["build", "--override_repository=rules_shell=/tmp/none", "//pkg:g"]);
+    let r = w.run(&[
+        "build",
+        "--override_repository=rules_shell=/tmp/none",
+        "//pkg:g",
+    ]);
     assert_ne!(r.code, 48, "{}", r.err);
 }
 
 #[test]
 fn test_shell_executable_is_used_for_genrules() {
     let w = make_ws("shell-exec");
-    w.write("pkg/BUILD", "genrule(name = \"g\", outs = [\"o\"], cmd = \"echo hi > $@\")\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"echo hi > $@\")\n",
+    );
     let r = w.run(&["build", "-s", "--shell_executable=/bin/sh", "//pkg:g"]);
     assert_eq!(r.code, 0, "{}", r.err);
-    assert!(r.err.contains("/bin/sh -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh;"), "{}", r.err);
+    assert!(
+        r.err
+            .contains("/bin/sh -c 'source external/bazel_tools/tools/genrule/genrule-setup.sh;"),
+        "{}",
+        r.err
+    );
     let r = w.run(&["build", "--shell_executable=/nonexistent", "//pkg:g"]);
     assert_eq!(r.code, 1, "{}", r.err);
-    assert!(r.err.contains("Executing genrule //pkg:g failed"), "{}", r.err);
+    assert!(
+        r.err.contains("Executing genrule //pkg:g failed"),
+        "{}",
+        r.err
+    );
 }
 
 #[test]
 fn test_unexecutable_shell_reports_process_wrapper_text() {
     let w = make_ws("shell-missing");
-    w.write("pkg/BUILD", "genrule(name = \"g\", outs = [\"o\"], cmd = \"echo hi > $@\")\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"echo hi > $@\")\n",
+    );
     let r = w.run(&["build", "--shell_executable=/nonexistent", "//pkg:g"]);
     assert_eq!(r.code, 1, "{}", r.err);
-    assert!(r.err.contains("failed: (Exit 1): nonexistent failed:"), "{}", r.err);
-    assert!(r.err.contains("src/main/tools/linux-sandbox-pid1.cc:584: \"execvp(/nonexistent, ") && r.err.contains("\": No such file or directory"), "{}", r.err);
+    assert!(
+        r.err.contains("failed: (Exit 1): nonexistent failed:"),
+        "{}",
+        r.err
+    );
+    assert!(
+        (r.err
+            .contains("src/main/tools/linux-sandbox-pid1.cc:584: \"execvp(/nonexistent, ")
+            || r.err
+                .contains("src/main/tools/process-wrapper-legacy.cc:80: \"execvp(/nonexistent, "))
+            && r.err.contains("\": No such file or directory"),
+        "{}",
+        r.err
+    );
 }
 
 #[test]
 fn test_invalid_platform_flags_match_bazel() {
     let w = make_ws("platform-flags");
-    w.write("pkg/BUILD", "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n",
+    );
     let r = w.run(&["build", "--platforms=//pkg:nonexistent", "//pkg:g"]);
     assert_eq!(r.code, 2, "{}", r.err);
     let r = w.run(&["build", "--host_platform=//pkg:nonexistent", "//pkg:g"]);
     assert_eq!(r.code, 1, "{}", r.err);
     assert!(r.err.contains("INFO: 0 processes."), "{}", r.err);
-    let r = w.run(&["build", "--extra_execution_platforms=//pkg:nonexistent", "//pkg:g"]);
+    let r = w.run(&[
+        "build",
+        "--extra_execution_platforms=//pkg:nonexistent",
+        "//pkg:g",
+    ]);
     assert_eq!(r.code, 1, "{}", r.err);
-    assert!(r.err.contains("While resolving toolchains for target //pkg:g ("), "{}", r.err);
-    assert!(r.err.contains("invalid registered execution platform '//pkg:nonexistent'"), "{}", r.err);
-    assert!(r.err.contains("ERROR: Analysis of target '//pkg:g' failed; build aborted"), "{}", r.err);
+    assert!(
+        r.err
+            .contains("While resolving toolchains for target //pkg:g ("),
+        "{}",
+        r.err
+    );
+    assert!(
+        r.err
+            .contains("invalid registered execution platform '//pkg:nonexistent'"),
+        "{}",
+        r.err
+    );
+    assert!(
+        r.err
+            .contains("ERROR: Analysis of target '//pkg:g' failed; build aborted"),
+        "{}",
+        r.err
+    );
 }
 
 #[test]
 fn test_unreachable_remote_cache_fails_first_spawn_with_remote_error() {
     let w = make_ws("remote-down");
-    w.write("pkg/BUILD", "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"touch $@\")\n",
+    );
     let r = w.run(&["build", "--remote_cache=grpc://localhost:1", "//pkg:g"]);
     assert_eq!(r.code, 34, "{}", r.err);
     assert!(r.err.contains("INFO: Invocation ID: "), "{}", r.err);
@@ -1034,7 +1527,10 @@ fn test_unreachable_remote_cache_fails_first_spawn_with_remote_error() {
 #[test]
 fn test_disk_cache_hit_materializes_top_level_output() {
     let w = make_ws("disk-cache-hit");
-    w.write("pkg/BUILD", "genrule(name = \"g\", outs = [\"o\"], cmd = \"echo hi > $@\")\n");
+    w.write(
+        "pkg/BUILD",
+        "genrule(name = \"g\", outs = [\"o\"], cmd = \"echo hi > $@\")\n",
+    );
     let dc = w.ws.join("dc");
     let flag = format!("--disk_cache={}", dc.display());
     let r = w.run(&["build", &flag, "//pkg:g"]);
@@ -1043,14 +1539,20 @@ fn test_disk_cache_hit_materializes_top_level_output() {
     let r = w.run(&["build", &flag, "//pkg:g"]);
     assert_eq!(r.code, 0, "{}", r.err);
     assert!(r.err.contains("1 disk cache hit"), "{}", r.err);
-    assert_eq!(std::fs::read_to_string(w.ws.join("bazel-bin/pkg/o")).unwrap(), "hi\n");
+    assert_eq!(
+        std::fs::read_to_string(w.ws.join("bazel-bin/pkg/o")).unwrap(),
+        "hi\n"
+    );
 }
 
 #[test]
 fn test_empty_test_filter_still_sets_testbridge_env() {
     let w = make_ws("empty-filter");
     w.write("pkg/BUILD", "sh_test(name = \"t\", srcs = [\"t.sh\"])\n");
-    w.write("pkg/t.sh", "#!/bin/sh\nif [ \"${TESTBRIDGE_TEST_ONLY+set}\" = set ]; then echo HAS_FILTER; fi\n");
+    w.write(
+        "pkg/t.sh",
+        "#!/bin/sh\nif [ \"${TESTBRIDGE_TEST_ONLY+set}\" = set ]; then echo HAS_FILTER; fi\n",
+    );
     let r = w.run(&["test", "--test_filter=", "--test_output=all", "//pkg:t"]);
     assert_eq!(r.code, 0, "{}", r.err);
     assert!(r.out.contains("HAS_FILTER"), "{}{}", r.out, r.err);
@@ -1062,6 +1564,10 @@ fn test_single_target_of_package_with_errors_fails_pattern_without_keep_going() 
     w.write("pkg/BUILD", "genrule(name = \"a\", outs = [\"same.txt\"], cmd = \"touch $@\")\ngenrule(name = \"b\", outs = [\"same.txt\"], cmd = \"touch $@\")\n");
     let r = w.run(&["build", "//pkg:a"]);
     assert_eq!(r.code, 1, "{}", r.err);
-    assert!(r.err.contains("WARNING: Target pattern parsing failed."), "{}", r.err);
+    assert!(
+        r.err.contains("WARNING: Target pattern parsing failed."),
+        "{}",
+        r.err
+    );
     assert!(r.err.contains("ERROR: Skipping '//pkg:a': Error evaluating '//pkg:a': error loading package 'pkg': Package 'pkg' contains errors"), "{}", r.err);
 }

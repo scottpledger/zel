@@ -88,7 +88,8 @@ fn escape(s: &str) -> String {
 }
 
 pub const CORE_OPTIONS: &str = "com.google.devtools.build.lib.analysis.config.CoreOptions";
-pub const TEST_OPTIONS: &str = "com.google.devtools.build.lib.analysis.test.TestConfiguration$TestOptions";
+pub const TEST_OPTIONS: &str =
+    "com.google.devtools.build.lib.analysis.test.TestConfiguration$TestOptions";
 
 /// `option name -> (class, schema)`.
 pub fn find_option(name: &str) -> Option<(&'static str, &'static ConfigOption)> {
@@ -231,7 +232,7 @@ fn is_plain_string_type(t: &str) -> bool {
 }
 
 fn env_var_string(raw: &str) -> String {
-    if let Some(n) = raw.strip_prefix('-') {
+    if let Some(n) = raw.strip_prefix('=') {
         format!("Unset[name={n}]")
     } else if let Some((n, v)) = raw.split_once('=') {
         format!("Set[name={n}, value={v}]")
@@ -265,18 +266,42 @@ pub fn convert_raws(
                 Ok(format!("{k}={v}"))
             }
             "Map.Entry<Label,String>" => {
-                let (k, v) = raw.split_once('=').ok_or_else(|| format!("Expected 'label=value': '{raw}'"))?;
+                let (k, v) = raw
+                    .split_once('=')
+                    .ok_or_else(|| format!("Expected 'label=value': '{raw}'"))?;
                 Ok(format!("{}={v}", canon(k)?))
             }
             "CompilationMode" => Ok(enum_string("CompilationMode", raw)),
             "PerLabelOptions" => {
                 if conv.ends_with("RunsPerTestConverter") {
-                    // `N` or `regex@N`.
-                    let (filter, n) = match raw.split_once('@') {
+                    // `N` or `regex@N` (split on the first `@`).
+                    let (filter, n_raw) = match raw.split_once('@') {
                         Some((f, n)) => (f.to_string(), n.to_string()),
                         None => (".*".to_string(), raw.to_string()),
                     };
-                    return Ok(format!("{} Options: [{n}]", regex_filter_string(&filter)));
+                    let count: i32 = n_raw.trim().parse().map_err(|_| {
+                        format!("'{raw}' is not a valid runs_per_test value: '{n_raw}' is not a positive integer")
+                    })?;
+                    if count <= 0 {
+                        return Err(format!(
+                            "'{raw}' is not a valid runs_per_test value: count must be positive"
+                        ));
+                    }
+                    let filter_str = regex_filter_string(&filter);
+                    // Validate regex syntax of each piece.
+                    for piece in split_unescaped_commas(&filter) {
+                        let p = piece.replace("\\,", ",");
+                        let pat = p
+                            .strip_prefix('-')
+                            .or_else(|| p.strip_prefix('+'))
+                            .unwrap_or(&p);
+                        if !pat.is_empty() {
+                            zel_util::java_regex::Regex::new(pat).map_err(|e| {
+                                format!("Invalid regex in runs_per_test '{raw}': {e}")
+                            })?;
+                        }
+                    }
+                    return Ok(format!("{filter_str} Options: [{count}]"));
                 }
                 match raw.split_once('@') {
                     None => Ok(format!("{} Options: []", regex_filter_string(raw))),
@@ -286,7 +311,11 @@ pub fn convert_raws(
                             .filter(|s| !s.trim().is_empty())
                             .map(|s| s.replace("\\,", ","))
                             .collect();
-                        Ok(format!("{} Options: [{}]", regex_filter_string(f), opts.join(", ")))
+                        Ok(format!(
+                            "{} Options: [{}]",
+                            regex_filter_string(f),
+                            opts.join(", ")
+                        ))
                     }
                 }
             }
@@ -306,9 +335,14 @@ pub fn convert_raws(
                         } else {
                             return Err(format!("malformed expression '{spec}'"));
                         };
-                        exprs.push(format!("Expression{{regex={pat}, remove={remove}, key={key}}}"));
+                        exprs.push(format!(
+                            "Expression{{regex={pat}, remove={remove}, key={key}}}"
+                        ));
                     }
-                    Ok(format!("ExecutionInfoModifier{{option={raw}, expressions=[{}]}}", exprs.join(", ")))
+                    Ok(format!(
+                        "ExecutionInfoModifier{{option={raw}, expressions=[{}]}}",
+                        exprs.join(", ")
+                    ))
                 }
             }
             other => Ok(other.to_string()),
@@ -316,7 +350,9 @@ pub fn convert_raws(
     };
     let is_list = t.starts_with("List<") || t.starts_with("ImmutableList<");
     if is_list {
-        let comma = conv.contains("CommaSeparated") || conv.ends_with("LabelListConverter") || conv.ends_with("LabelOrderedSetConverter");
+        let comma = conv.contains("CommaSeparated")
+            || conv.ends_with("LabelListConverter")
+            || conv.ends_with("LabelOrderedSetConverter");
         let mut out: Vec<String> = Vec::new();
         if conv.ends_with("EmptyListConverter") {
             return Ok(ConfigValue::List(vec![]));
@@ -344,10 +380,16 @@ pub fn convert_raws(
         for raw in raws {
             if comma {
                 for piece in raw.split(',').filter(|p| !p.is_empty()) {
-                    out.push(elem(piece)?);
+                    let v = elem(piece)?;
+                    if !conv.ends_with("SetConverter") || !out.contains(&v) {
+                        out.push(v);
+                    }
                 }
             } else {
-                out.push(elem(raw)?);
+                let v = elem(raw)?;
+                if !conv.ends_with("SetConverter") || !out.contains(&v) {
+                    out.push(v);
+                }
             }
         }
         // Non-multiple set/list options keep only the last occurrence's elements.
@@ -357,12 +399,22 @@ pub fn convert_raws(
     Ok(match t {
         "boolean" | "Boolean" => ConfigValue::Scalar(parse_bool(raw)?.to_string()),
         "int" | "Integer" | "long" | "Long" => {
-            let n: i64 = raw.trim().parse().map_err(|_| format!("'{raw}' is not an int"))?;
+            let n: i64 = raw
+                .trim()
+                .parse()
+                .map_err(|_| format!("'{raw}' is not an int"))?;
             ConfigValue::Scalar(n.to_string())
         }
         "double" | "Double" => {
-            let d: f64 = raw.trim().parse().map_err(|_| format!("'{raw}' is not a double"))?;
-            ConfigValue::Scalar(if d.fract() == 0.0 { format!("{d:.1}") } else { d.to_string() })
+            let d: f64 = raw
+                .trim()
+                .parse()
+                .map_err(|_| format!("'{raw}' is not a double"))?;
+            ConfigValue::Scalar(if d.fract() == 0.0 {
+                format!("{d:.1}")
+            } else {
+                d.to_string()
+            })
         }
         "Void" => ConfigValue::Null,
         "TriState" => ConfigValue::Scalar(tri_state(raw)),
@@ -376,18 +428,42 @@ pub fn convert_raws(
         "RegexFilter" => ConfigValue::Scalar(regex_filter_string(raw)),
         "PlatformMappingKey" => ConfigValue::Scalar(format!(
             "PlatformMappingKey{{path={}, wasExplicitlySetByUser={}}}",
-            if raw.is_empty() { "platform_mappings" } else { raw },
+            if raw.is_empty() {
+                "platform_mappings"
+            } else {
+                raw
+            },
             !raw.is_empty()
         )),
         "Map<TestTimeout,Duration>" => {
-            let defaults = [("short", 60), ("moderate", 300), ("long", 900), ("eternal", 3600)];
-            let secs: Vec<i64> = raw.split(',').filter_map(|p| p.trim().parse().ok()).collect();
+            let defaults = [
+                ("short", 60),
+                ("moderate", 300),
+                ("long", 900),
+                ("eternal", 3600),
+            ];
+            let secs: Vec<i64> = if raw.is_empty() {
+                vec![]
+            } else {
+                raw.split(',')
+                    .map(|p| {
+                        p.trim()
+                            .parse::<i64>()
+                            .map_err(|_| format!("'{raw}' is not a valid test_timeout"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            };
             let vals: Vec<i64> = match secs.len() {
                 1 if secs[0] > 0 => vec![secs[0]; 4],
                 4 => secs,
+                0 => defaults.iter().map(|d| d.1).collect(),
                 _ => defaults.iter().map(|d| d.1).collect(),
             };
-            let parts: Vec<String> = defaults.iter().zip(vals).map(|((n, _), v)| format!("{n}={}", duration_string(v))).collect();
+            let parts: Vec<String> = defaults
+                .iter()
+                .zip(vals)
+                .map(|((n, _), v)| format!("{n}={}", duration_string(v)))
+                .collect();
             ConfigValue::Scalar(format!("{{{}}}", parts.join(", ")))
         }
         "Map<String,Label>" => {
@@ -411,13 +487,22 @@ pub fn convert_raws(
         }
         "RunUnder" => {
             // `RunUnderConverter`: shell-tokenized; a first word starting with `//` or `@` is a label.
-            let words: Vec<String> = raw.split_whitespace().map(str::to_string).collect();
-            let rest = format!("[{}]", words.iter().skip(1).cloned().collect::<Vec<_>>().join(", "));
+            let words = crate::location::shell_tokenize(raw)
+                .map_err(|e| format!("Invalid run_under value '{raw}': {e}"))?;
+            let rest = format!(
+                "[{}]",
+                words.iter().skip(1).cloned().collect::<Vec<_>>().join(", ")
+            );
             let first = words.first().cloned().unwrap_or_default();
             if first.starts_with("//") || first.starts_with('@') {
-                ConfigValue::Scalar(format!("LabelRunUnder[value={raw}, options={rest}, label={}]", canon(&first)?))
+                ConfigValue::Scalar(format!(
+                    "LabelRunUnder[value={raw}, options={rest}, label={}]",
+                    canon(&first)?
+                ))
             } else {
-                ConfigValue::Scalar(format!("CommandRunUnder[value={raw}, options={rest}, command={first}]"))
+                ConfigValue::Scalar(format!(
+                    "CommandRunUnder[value={raw}, options={rest}, command={first}]"
+                ))
             }
         }
         t if is_plain_string_type(t) => {
@@ -450,7 +535,11 @@ pub fn auto_host_cpu() -> &'static str {
 fn initial_value(opt: &ConfigOption, host_cpu: &str) -> ConfigValue {
     let is_list = opt.java_type.starts_with("List<") || opt.java_type.starts_with("ImmutableList<");
     if opt.default == "null" {
-        return if is_list { ConfigValue::List(vec![]) } else { ConfigValue::Null };
+        return if is_list {
+            ConfigValue::List(vec![])
+        } else {
+            ConfigValue::Null
+        };
     }
     if opt.java_type == "Void" {
         return ConfigValue::Null;
@@ -458,12 +547,16 @@ fn initial_value(opt: &ConfigOption, host_cpu: &str) -> ConfigValue {
     if opt.java_type == "RunUnder" {
         return ConfigValue::Null;
     }
-    let raws: Vec<String> = if opt.default.is_empty() && is_list { vec![] } else { vec![opt.default.to_string()] };
+    let raws: Vec<String> = if opt.default.is_empty() && is_list {
+        vec![]
+    } else {
+        vec![opt.default.to_string()]
+    };
     convert_raws(opt, &raws, &canonical_label_default, host_cpu).unwrap_or(ConfigValue::Null)
 }
 
 /// Full option state of a configuration.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct BuildOptions {
     /// class -> option name -> value (every option of every fragment class present).
     pub fragments: BTreeMap<&'static str, BTreeMap<&'static str, ConfigValue>>,
@@ -471,6 +564,26 @@ pub struct BuildOptions {
     pub starlark: BTreeMap<String, String>,
     /// Scope of Starlark flags (`BuildOptions.scopes`), label string -> `toString()` of the scope.
     pub scopes: BTreeMap<String, String>,
+}
+
+impl PartialEq for BuildOptions {
+    fn eq(&self, other: &Self) -> bool {
+        self.checksum() == other.checksum()
+    }
+}
+
+impl Eq for BuildOptions {}
+
+fn label_sort_key(k: &str) -> (String, String, String) {
+    if let Ok(l) = zel_cmdline::Label::parse_canonical(k) {
+        (
+            l.repository().name().to_string(),
+            l.package_name().to_string(),
+            l.name().to_string(),
+        )
+    } else {
+        (String::new(), k.to_string(), String::new())
+    }
 }
 
 impl BuildOptions {
@@ -484,9 +597,16 @@ impl BuildOptions {
             }
             fragments.insert(*cls, m);
         }
-        let mut b = BuildOptions { fragments, starlark: BTreeMap::new(), scopes: BTreeMap::new() };
+        let mut b = BuildOptions {
+            fragments,
+            starlark: BTreeMap::new(),
+            scopes: BTreeMap::new(),
+        };
         // PlatformOptions: an empty `--platforms` means the host platform.
-        let host = b.get("host_platform").map(|v| v.display()).unwrap_or_default();
+        let host = b
+            .get("host_platform")
+            .map(|v| v.display())
+            .unwrap_or_default();
         if b.get("platforms") == Some(&ConfigValue::List(vec![])) {
             b.set("platforms", ConfigValue::List(vec![host]));
         }
@@ -524,7 +644,10 @@ impl BuildOptions {
         fn normalize_entries(entries: Vec<String>) -> Vec<String> {
             let mut m: Vec<(String, String)> = Vec::new();
             for e in entries {
-                let (k, v) = e.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())).unwrap_or((e.clone(), String::new()));
+                let (k, v) = e
+                    .split_once('=')
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .unwrap_or((e.clone(), String::new()));
                 match m.iter_mut().find(|(mk, _)| *mk == k) {
                     Some(slot) => slot.1 = v,
                     None => m.push((k, v)),
@@ -540,7 +663,12 @@ impl BuildOptions {
         fn normalize_env(entries: Vec<String>) -> Vec<String> {
             let name = |e: &str| -> String {
                 let inner = e.split_once('[').map(|x| x.1).unwrap_or(e);
-                inner.trim_start_matches("name=").split([',', ']']).next().unwrap_or("").to_string()
+                inner
+                    .trim_start_matches("name=")
+                    .split([',', ']'])
+                    .next()
+                    .unwrap_or("")
+                    .to_string()
             };
             let mut out: Vec<(String, String)> = Vec::new();
             for e in entries {
@@ -566,14 +694,23 @@ impl BuildOptions {
             for f in list(self, "features") {
                 if let Some(n) = f.strip_prefix('-') {
                     state.insert(n.to_string(), false);
+                } else if f == "no_layering_check" {
+                    state.insert("layering_check".to_string(), false);
                 } else {
                     state.entry(f).or_insert(true);
                 }
             }
             for (k, v) in state {
-                if v { enabled.insert(k); } else { disabled.insert(k); }
+                if v {
+                    enabled.insert(k);
+                } else {
+                    disabled.insert(k);
+                }
             }
-            enabled.into_iter().chain(disabled.into_iter().map(|d| format!("-{d}"))).collect::<Vec<_>>()
+            enabled
+                .into_iter()
+                .chain(disabled.into_iter().map(|d| format!("-{d}")))
+                .collect::<Vec<_>>()
         };
         let action_env = normalize_env(list(self, "action_env"));
         let host_action_env = normalize_env(list(self, "host_action_env"));
@@ -648,7 +785,11 @@ impl BuildOptions {
         if let Some(d) = src.get("define") {
             o.set("define", d.clone());
         }
-        if src.get("incompatible_exclude_starlark_flags_from_exec_config").map(|v| v.display()) != Some("true".into()) {
+        if src
+            .get("incompatible_exclude_starlark_flags_from_exec_config")
+            .map(|v| v.display())
+            != Some("true".into())
+        {
             o.starlark = src.starlark.clone();
         }
         let get = |o: &BuildOptions, n: &str| o.get(n).cloned().unwrap_or(ConfigValue::Null);
@@ -670,20 +811,35 @@ impl BuildOptions {
         o.set("features", host_features);
         o.set("experimental_action_listener", ConfigValue::List(vec![]));
         // AndroidConfiguration.Options / AppleCommandLineOptions / ConfigFeatureFlagOptions
-        o.set("Android configuration distinguisher", ConfigValue::Scalar("MAIN".into()));
+        o.set(
+            "Android configuration distinguisher",
+            ConfigValue::Scalar("MAIN".into()),
+        );
         let host_min_os = get(&o, "host_macos_minimum_os");
         o.set("macos_minimum_os", host_min_os);
         o.set("apple_platform_type", ConfigValue::Scalar("macos".into()));
-        o.set("enforce_transitive_configs_for_config_feature_flag", ConfigValue::Scalar("false".into()));
+        o.set(
+            "enforce_transitive_configs_for_config_feature_flag",
+            ConfigValue::Scalar("false".into()),
+        );
         // CppOptions
-        let g0: Vec<String> = if cfg!(windows) { vec![] } else { vec!["-g0".to_string()] };
-        let with_g0 = |v: ConfigValue| ConfigValue::List(list(v).into_iter().chain(g0.clone()).collect());
+        let g0: Vec<String> = if cfg!(windows) {
+            vec![]
+        } else {
+            vec!["-g0".to_string()]
+        };
+        let with_g0 =
+            |v: ConfigValue| ConfigValue::List(list(v).into_iter().chain(g0.clone()).collect());
         let host_grte = get(&o, "host_grte_top");
         o.set("grte_top", host_grte);
         let (c, cx) = (get(&o, "host_copt"), get(&o, "host_cxxopt"));
         o.set("copt", with_g0(c));
         o.set("cxxopt", with_g0(cx));
-        for (to, from) in [("conlyopt", "host_conlyopt"), ("per_file_copt", "host_per_file_copt"), ("linkopt", "host_linkopt")] {
+        for (to, from) in [
+            ("conlyopt", "host_conlyopt"),
+            ("per_file_copt", "host_per_file_copt"),
+            ("linkopt", "host_linkopt"),
+        ] {
             let v = get(&o, from);
             o.set(to, v);
         }
@@ -719,8 +875,15 @@ impl BuildOptions {
                 o.set(name, v.clone());
             }
         }
-        o.set("platforms", ConfigValue::List(vec![exec_platform.to_string()]));
-        let suffix = if orig.get("experimental_exec_configuration_distinguisher").map(|v| v.display().to_ascii_uppercase()) == Some("LEGACY".to_string()) {
+        o.set(
+            "platforms",
+            ConfigValue::List(vec![exec_platform.to_string()]),
+        );
+        let suffix = if orig
+            .get("experimental_exec_configuration_distinguisher")
+            .map(|v| v.display().to_ascii_uppercase())
+            == Some("LEGACY".to_string())
+        {
             let mut h: i32 = 0;
             for u in exec_platform.encode_utf16() {
                 h = h.wrapping_mul(31).wrapping_add(u as i32);
@@ -743,10 +906,34 @@ impl BuildOptions {
         b
     }
 
+    /// `BuildOptions.hasNoConfig`: true when the only fragment is `CoreOptions`.
+    pub fn has_no_config(&self) -> bool {
+        self.fragments.len() == 1 && self.fragments.contains_key(CORE_OPTIONS)
+    }
+
+    /// `BuildOptions.matches`: compares fragment options present in both and treats `other`'s
+    /// Starlark options as a subset of `self`'s.
+    pub fn matches(&self, other: &BuildOptions) -> bool {
+        for (cls, opts) in &self.fragments {
+            let Some(other_opts) = other.fragments.get(cls) else {
+                continue;
+            };
+            if opts != other_opts {
+                return false;
+            }
+        }
+        other
+            .starlark
+            .iter()
+            .all(|(k, v)| self.starlark.get(k) == Some(v))
+    }
+
     /// `FragmentOptions.cacheKey()` of one class.
     pub fn cache_key_of(cls: &str, opts: &BTreeMap<&'static str, ConfigValue>) -> String {
         let mut s = format!("{cls}{{");
-        s.push_str(&map_to_cache_key(opts.iter().map(|(k, v)| ((*k).to_string(), v.cache_key()))));
+        s.push_str(&map_to_cache_key(
+            opts.iter().map(|(k, v)| ((*k).to_string(), v.cache_key())),
+        ));
         s.push('}');
         s
     }
@@ -760,12 +947,18 @@ impl BuildOptions {
         for (cls, opts) in &self.fragments {
             add_string(&mut buf, &Self::cache_key_of(cls, opts));
         }
-        // starlarkOptionsMap: value rendered as a scalar (`"<toString>"`).
+        // `starlarkOptionsMap`: sorted by Label (`(repo, package, name)`), so `//a:b/c` sorts before `//a/b:a`.
+        let mut starlark_sorted: Vec<(&String, &String)> = self.starlark.iter().collect();
+        starlark_sorted.sort_by(|(a, _), (b, _)| label_sort_key(a).cmp(&label_sort_key(b)));
         add_string(
             &mut buf,
-            &map_to_cache_key(self.starlark.iter().map(|(k, v)| {
+            &map_to_cache_key(starlark_sorted.into_iter().map(|(k, v)| {
                 // A list-typed flag renders as `[a, b]`; `mapToCacheKey` prints an empty list as `EMPTY`.
-                let value = if v == "[]" { ConfigValue::List(vec![]) } else { ConfigValue::Scalar(v.clone()) };
+                let value = if v == "[]" {
+                    ConfigValue::List(vec![])
+                } else {
+                    ConfigValue::Scalar(v.clone())
+                };
                 (k.clone(), value.cache_key())
             })),
         );
@@ -778,11 +971,19 @@ impl BuildOptions {
             } else {
                 "DEFAULT"
             };
-            scopes.entry(k.clone()).or_insert_with(|| def_scope.to_string());
+            scopes
+                .entry(k.clone())
+                .or_insert_with(|| def_scope.to_string());
         }
+        let mut scopes_sorted: Vec<(&String, &String)> = scopes.iter().collect();
+        scopes_sorted.sort_by(|(a, _), (b, _)| label_sort_key(a).cmp(&label_sort_key(b)));
         add_string(
             &mut buf,
-            &map_to_cache_key(scopes.iter().map(|(k, v)| (k.clone(), ConfigValue::Scalar(v.clone()).cache_key()))),
+            &map_to_cache_key(
+                scopes_sorted
+                    .into_iter()
+                    .map(|(k, v)| (k.clone(), ConfigValue::Scalar(v.clone()).cache_key())),
+            ),
         );
         zel_util::sha256::hex_digest(&buf)
     }
@@ -793,7 +994,9 @@ fn trim_run_under(v: &ConfigValue) -> ConfigValue {
         ConfigValue::Scalar(s) if s.starts_with("LabelRunUnder[") => {
             // Keep only the label.
             match s.rfind("label=") {
-                Some(i) => ConfigValue::Scalar(format!("LabelRunUnder[value=, options=[], {}", &s[i..])),
+                Some(i) => {
+                    ConfigValue::Scalar(format!("LabelRunUnder[value=, options=[], {}", &s[i..]))
+                }
                 None => ConfigValue::Null,
             }
         }
@@ -842,7 +1045,11 @@ mod tests {
 
     #[test]
     fn empty_options_are_zeros() {
-        let b = BuildOptions { fragments: BTreeMap::new(), starlark: BTreeMap::new(), scopes: BTreeMap::new() };
+        let b = BuildOptions {
+            fragments: BTreeMap::new(),
+            starlark: BTreeMap::new(),
+            scopes: BTreeMap::new(),
+        };
         assert_eq!(b.checksum(), "0".repeat(64));
     }
 
@@ -859,7 +1066,10 @@ mod tests {
         assert_eq!(b.get("compilation_mode").unwrap().display(), "fastbuild");
         assert_eq!(b.get("stamp").unwrap().display(), "false");
         assert_eq!(b.get("platform_suffix"), Some(&ConfigValue::Null));
-        assert_eq!(b.get("platforms").unwrap().display(), "[@@bazel_tools//tools:host_platform]");
+        assert_eq!(
+            b.get("platforms").unwrap().display(),
+            "[@@bazel_tools//tools:host_platform]"
+        );
     }
 
     /// Oracle: `bazel config` (9.3.2) lists the no-config configuration as `c07488d3...` on a
@@ -886,7 +1096,9 @@ mod tests {
         for (cls, opts) in &b.fragments {
             out.push_str(&format!("FragmentOptions {cls} {{\n"));
             for (k, v) in opts {
-                if *k == "define" { continue; }
+                if *k == "define" {
+                    continue;
+                }
                 out.push_str(&format!("  {k}: {}\n", v.display()));
             }
             out.push_str("}\n");
@@ -913,5 +1125,64 @@ mod tests {
         let t = b.trim_test_configuration();
         assert_eq!(t.fragments.len() + 1, b.fragments.len());
         assert_ne!(t.checksum(), b.checksum());
+    }
+
+    #[test]
+    fn starlark_label_sorting_and_scope_equality() {
+        let mut a = BuildOptions::defaults("k8");
+        a.starlark.insert("//a:b/c".into(), "1".into());
+        a.starlark.insert("//a/b:a".into(), "2".into());
+        let mut b = a.clone();
+        b.scopes.insert("//a:b/c".into(), "DEFAULT".into());
+        b.scopes.insert("//a/b:a".into(), "DEFAULT".into());
+        assert_eq!(a, b);
+        assert_eq!(a.checksum(), b.checksum());
+        assert!(a.core_only().has_no_config());
+    }
+
+    #[test]
+    fn converters_for_env_runs_per_test_timeout_and_run_under() {
+        let (_, env_opt) = find_option("test_env").unwrap();
+        let v = convert_raws(
+            env_opt,
+            &["=FOO".into(), "-BAR".into()],
+            &canonical_label_default,
+            "k8",
+        )
+        .unwrap();
+        assert_eq!(v.display(), "[Unset[name=FOO], Inherit[name=-BAR]]");
+
+        let (_, rpt_opt) = find_option("runs_per_test").unwrap();
+        assert!(convert_raws(
+            rpt_opt,
+            &["foo@bar@3".into()],
+            &canonical_label_default,
+            "k8"
+        )
+        .is_err());
+        assert!(convert_raws(rpt_opt, &["[a@1".into()], &canonical_label_default, "k8").is_err());
+        let ok = convert_raws(rpt_opt, &[".*@+3".into()], &canonical_label_default, "k8").unwrap();
+        assert_eq!(ok.display(), "[(?:(?>.*)) Options: [3]]");
+
+        let (_, to_opt) = find_option("test_timeout").unwrap();
+        assert!(convert_raws(to_opt, &["abc".into()], &canonical_label_default, "k8").is_err());
+        let ok = convert_raws(to_opt, &["+30".into()], &canonical_label_default, "k8").unwrap();
+        assert_eq!(
+            ok.display(),
+            "{short=PT30S, moderate=PT30S, long=PT30S, eternal=PT30S}"
+        );
+
+        let (_, ru_opt) = find_option("run_under").unwrap();
+        let ru = convert_raws(
+            ru_opt,
+            &["//pkg:bin \"a b\"".into()],
+            &canonical_label_default,
+            "k8",
+        )
+        .unwrap();
+        assert_eq!(
+            ru.display(),
+            "LabelRunUnder[value=//pkg:bin \"a b\", options=[a b], label=@@//pkg:bin]"
+        );
     }
 }

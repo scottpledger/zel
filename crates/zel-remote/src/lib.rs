@@ -89,4 +89,3 @@ impl Profiler {
         fs.write_file(path, json.as_bytes())
     }
 }
-

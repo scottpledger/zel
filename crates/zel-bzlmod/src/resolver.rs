@@ -2,7 +2,6 @@
 //! `<output_base>/external/<canonical>` and labels are resolved through repo mappings.
 
 use crate::rt::Rt;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use zel_cmdline::{RepositoryMapping, RepositoryName};
 use zel_packages::lookup::RepoResolver;
@@ -16,19 +15,24 @@ pub struct BzlmodRepoResolver {
 
 impl BzlmodRepoResolver {
     pub fn new(rt: Arc<Rt>) -> Self {
-        Self { rt, errors: Mutex::new(vec![]) }
+        Self {
+            rt,
+            errors: Mutex::new(vec![]),
+        }
     }
 }
 
 impl RepoResolver for BzlmodRepoResolver {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
         if repo.is_main() || repo.name() == "_main" {
-            return Some(PathFragment::create(&self.rt.opts.workspace_root.display().to_string()));
+            return Some(PathFragment::create(
+                &self.rt.opts.workspace_root.display().to_string(),
+            ));
         }
         match self.rt.fetch_repo(repo.name()) {
             Ok(dir) => Some(PathFragment::create(&dir.display().to_string())),
             Err(e) => {
-                self.errors.lock().unwrap().push(format!("{e}"));
+                self.errors.lock().unwrap().push(e.to_string());
                 None
             }
         }
@@ -63,7 +67,12 @@ pub struct LazyBzlmodResolver {
 
 impl LazyBzlmodResolver {
     pub fn new(cfg: crate::session::BzlmodConfig) -> Self {
-        Self { cfg, session: Mutex::new(None), errors: Mutex::new(vec![]), fail_code: Mutex::new(None) }
+        Self {
+            cfg,
+            session: Mutex::new(None),
+            errors: Mutex::new(vec![]),
+            fail_code: Mutex::new(None),
+        }
     }
 
     /// Eagerly resolves the module graph (Bazel computes the main repository mapping before
@@ -95,7 +104,11 @@ impl LazyBzlmodResolver {
                     *self.fail_code.lock().unwrap() = Some(e.exit_code);
                     let mut es = self.errors.lock().unwrap();
                     for w in &e.warnings {
-                        es.push(if w.starts_with("ERROR:") { w.clone() } else { format!("WARNING: {w}") });
+                        es.push(if w.starts_with("ERROR:") {
+                            w.clone()
+                        } else {
+                            format!("WARNING: {w}")
+                        });
                     }
                     es.push(format!("ERROR: {}", e.message));
                     Err(e.message)
@@ -127,13 +140,22 @@ impl LazyBzlmodResolver {
 impl RepoResolver for LazyBzlmodResolver {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
         if repo.is_main() || repo.name() == "_main" {
-            return Some(PathFragment::create(&self.cfg.workspace.display().to_string()));
+            return Some(PathFragment::create(
+                &self.cfg.workspace.display().to_string(),
+            ));
         }
         let s = self.session()?;
         match s.rt.fetch_repo(repo.name()) {
             Ok(dir) => Some(PathFragment::create(&dir.display().to_string())),
             Err(e) => {
-                self.errors.lock().unwrap().push(if e.starts_with("INFO: ") { e } else { format!("ERROR: {e}") });
+                self.errors
+                    .lock()
+                    .unwrap()
+                    .push(if e.starts_with("INFO: ") {
+                        e
+                    } else {
+                        format!("ERROR: {e}")
+                    });
                 None
             }
         }
@@ -144,9 +166,14 @@ impl RepoResolver for LazyBzlmodResolver {
         if !self.cfg.workspace.join("MODULE.bazel").exists() {
             return RepositoryMapping::always_fallback();
         }
-        let Some(s) = self.session() else { return RepositoryMapping::always_fallback() };
+        let Some(s) = self.session() else {
+            return RepositoryMapping::always_fallback();
+        };
         let mut entries: Vec<(String, RepositoryName)> =
-            s.rt.repo_mapping_ordered_of(owner.name()).into_iter().map(|(a, c)| (a, RepositoryName::create_unvalidated(c))).collect();
+            s.rt.repo_mapping_ordered_of(owner.name())
+                .into_iter()
+                .map(|(a, c)| (a, RepositoryName::create_unvalidated(c)))
+                .collect();
         for repo in entries.iter().map(|(_, r)| r.clone()).collect::<Vec<_>>() {
             if !entries.iter().any(|(a, _)| a == repo.name()) {
                 entries.push((repo.name().to_string(), repo.clone()));
@@ -177,8 +204,20 @@ impl CommandResolver {
     /// Installs a [`LazyBzlmodResolver`] as the external repository resolver for `command`
     /// (parsing the command's options for registries, overrides, lockfile mode, ...).
     /// Parse failures leave the resolver uninstalled (the command reports its own option errors).
-    pub fn install_for_command(&self, command: &str, args: &[String], workspace: &std::path::Path, output_base: &std::path::Path) {
-        self.install_for_command_with_env(command, args, workspace, output_base, std::env::vars().collect())
+    pub fn install_for_command(
+        &self,
+        command: &str,
+        args: &[String],
+        workspace: &std::path::Path,
+        output_base: &std::path::Path,
+    ) {
+        self.install_for_command_with_env(
+            command,
+            args,
+            workspace,
+            output_base,
+            std::env::vars().collect(),
+        )
     }
 
     /// Like [`install_for_command`](Self::install_for_command) with the command's client
@@ -192,8 +231,15 @@ impl CommandResolver {
         client_env: std::collections::BTreeMap<String, String>,
     ) {
         let installed = (|| {
-            let parsed = zel_options::ParsedCommandOptions::parse_for_command(command, args).ok()?;
-            let mut cfg = crate::session::BzlmodConfig::from_parsed(&parsed, workspace, output_base, client_env).ok()?;
+            let parsed =
+                zel_options::ParsedCommandOptions::parse_for_command(command, args).ok()?;
+            let mut cfg = crate::session::BzlmodConfig::from_parsed(
+                &parsed,
+                workspace,
+                output_base,
+                client_env,
+            )
+            .ok()?;
             // Build/query/... compute the main repository mapping first: registry I/O failures
             // there are EXTERNAL_DEPS errors (32), not the internal error `mod` reports.
             cfg.main_mapping_errors = true;
@@ -279,13 +325,12 @@ impl LazyBzlmodResolver {
             return None;
         }
         let s = self.session()?;
-        let platforms_repo = s
-            .rt
-            .repo_mapping_of("bazel_tools")
-            .get("platforms")
-            .cloned()
-            .or_else(|| s.rt.repo_mapping_of("").get("platforms").cloned())
-            .unwrap_or_else(|| "platforms".to_string());
+        let platforms_repo =
+            s.rt.repo_mapping_of("bazel_tools")
+                .get("platforms")
+                .cloned()
+                .or_else(|| s.rt.repo_mapping_of("").get("platforms").cloned())
+                .unwrap_or_else(|| "platforms".to_string());
         Some(Registrations {
             toolchains: s.resolution.registered_toolchains(),
             execution_platforms: s.resolution.registered_execution_platforms(),
@@ -309,32 +354,84 @@ mod tests {
     fn loads_external_package_through_bzlmod() {
         let base = tmpdir("resolver1");
         let src = base.join("a-src");
-        write(&src, "a-1.0/MODULE.bazel", "module(name='a', version='1.0')\n");
-        write(&src, "a-1.0/BUILD.bazel", "filegroup(name = 'lib', srcs = ['x.txt'], visibility = ['//visibility:public'])\n");
+        write(
+            &src,
+            "a-1.0/MODULE.bazel",
+            "module(name='a', version='1.0')\n",
+        );
+        write(
+            &src,
+            "a-1.0/BUILD.bazel",
+            "filegroup(name = 'lib', srcs = ['x.txt'], visibility = ['//visibility:public'])\n",
+        );
         write(&src, "a-1.0/x.txt", "x");
-        write(&src, "a-1.0/defs.bzl", "def mk(name):\n    native.filegroup(name = name, srcs = [])\n");
+        write(
+            &src,
+            "a-1.0/defs.bzl",
+            "def mk(name):\n    native.filegroup(name = name, srcs = [])\n",
+        );
         let tgz = base.join("a.tar.gz");
-        assert!(std::process::Command::new("tar").args(["czf", tgz.to_str().unwrap(), "-C", src.to_str().unwrap(), "a-1.0"]).status().unwrap().success());
-        let integrity = format!("sha256-{}", base64_encode(&sha256(&std::fs::read(&tgz).unwrap())));
+        assert!(std::process::Command::new("tar")
+            .args([
+                "czf",
+                tgz.to_str().unwrap(),
+                "-C",
+                src.to_str().unwrap(),
+                "a-1.0"
+            ])
+            .status()
+            .unwrap()
+            .success());
+        let integrity = format!(
+            "sha256-{}",
+            base64_encode(&sha256(&std::fs::read(&tgz).unwrap()))
+        );
         let reg = base.join("registry");
-        add_module(&reg, "a", "1.0", "module(name='a', version='1.0')\n", &format!(r#"{{"url":"file://{}","integrity":"{integrity}","strip_prefix":"a-1.0"}}"#, tgz.display()));
+        add_module(
+            &reg,
+            "a",
+            "1.0",
+            "module(name='a', version='1.0')\n",
+            &format!(
+                r#"{{"url":"{}","integrity":"{integrity}","strip_prefix":"a-1.0"}}"#,
+                crate::file_url_for_path(&tgz)
+            ),
+        );
         let ws = base.join("ws");
-        write(&ws, "MODULE.bazel", "module(name='root')\nbazel_dep(name='a', version='1.0', repo_name='my_a')\n");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name='a', version='1.0', repo_name='my_a')\n",
+        );
         write(&ws, "BUILD.bazel", "load('@my_a//:defs.bzl', 'mk')\nmk(name = 'made')\nfilegroup(name = 'g', srcs = ['@my_a//:lib'])\n");
-        let parsed = zel_options::ParsedCommandOptions::parse_for_command("build", &[format!("--registry=file://{}", reg.display())]).unwrap();
-        let cfg = BzlmodConfig::from_parsed(&parsed, &ws, &base.join("ob"), std::env::vars().collect()).unwrap();
+        let parsed = zel_options::ParsedCommandOptions::parse_for_command(
+            "build",
+            &[format!("--registry={}", crate::file_url_for_path(&reg))],
+        )
+        .unwrap();
+        let cfg =
+            BzlmodConfig::from_parsed(&parsed, &ws, &base.join("ob"), std::env::vars().collect())
+                .unwrap();
         let session = Session::open(cfg).unwrap_or_else(|e| panic!("{}", e.message));
         let resolver = Arc::new(BzlmodRepoResolver::new(session.rt.clone()));
         let fs = Arc::new(LocalFileSystem::new(DigestHashFunction::Sha256));
         let loader = PackageLoader::new(LoaderConfig::new(fs, resolver.clone()));
-        let pkg = loader.load_package(&PackageIdentifier::create_in_main_repo("").unwrap()).unwrap_or_else(|e| panic!("{e:?}"));
+        let pkg = loader
+            .load_package(&PackageIdentifier::create_in_main_repo("").unwrap())
+            .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(!pkg.contains_errors, "{:?}", pkg.events);
         assert!(pkg.targets.contains_key("made"));
         let g = pkg.rules().find(|r| r.label.name() == "g").unwrap();
         assert!(format!("{:?}", g.srcs).contains("a+"), "{:?}", g.srcs);
         // Loading a package that lives in the external repo itself.
         let ext_pkg = loader
-            .load_package(&PackageIdentifier::create(RepositoryName::create_unvalidated("a+"), PathFragment::empty()).unwrap())
+            .load_package(
+                &PackageIdentifier::create(
+                    RepositoryName::create_unvalidated("a+"),
+                    PathFragment::empty(),
+                )
+                .unwrap(),
+            )
             .unwrap_or_else(|e| panic!("{e:?}"));
         assert!(ext_pkg.targets.contains_key("lib"));
         assert!(resolver.errors.lock().unwrap().is_empty());
@@ -350,12 +447,21 @@ mod tests {
             "MODULE.bazel",
             "module(name='root')\nregister_toolchains('//tc:all', '//other:t')\nregister_execution_platforms('//plat:p')\n",
         );
-        let parsed = zel_options::ParsedCommandOptions::parse_for_command("build", &[format!("--registry=file://{}", reg.display())]).unwrap();
-        let cfg = BzlmodConfig::from_parsed(&parsed, &ws, &base.join("ob"), std::env::vars().collect()).unwrap();
+        let parsed = zel_options::ParsedCommandOptions::parse_for_command(
+            "build",
+            &[format!("--registry={}", crate::file_url_for_path(&reg))],
+        )
+        .unwrap();
+        let cfg =
+            BzlmodConfig::from_parsed(&parsed, &ws, &base.join("ob"), std::env::vars().collect())
+                .unwrap();
         let r = LazyBzlmodResolver::new(cfg);
         let regs = r.registrations().expect("registrations");
         // The root module's registrations come first; bazel_tools registers its own after them.
-        assert_eq!(&regs.toolchains[..2], ["@@//tc:all".to_string(), "@@//other:t".to_string()]);
+        assert_eq!(
+            &regs.toolchains[..2],
+            ["@@//tc:all".to_string(), "@@//other:t".to_string()]
+        );
         assert_eq!(regs.execution_platforms, vec!["@@//plat:p".to_string()]);
         assert_eq!(regs.platforms_repo, "platforms");
     }

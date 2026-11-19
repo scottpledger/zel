@@ -89,6 +89,66 @@ fn host_method(
             "has_separate_genfiles_directory" => Ok(Value::Bool(false)),
             other => err(format!("'configuration' value has no field or method '{other}'")),
         },
+        "toolchains" => match method {
+            "toolchain_types" => {
+                check_kwargs("toolchain_types", pos, kw, &[])?;
+                if !has_toolchain_context(st) {
+                    return Ok(mk_list(vec![]));
+                }
+                let list: Vec<Value> = st
+                    .inputs
+                    .toolchains
+                    .keys()
+                    .filter_map(|k| Label::parse_canonical(k).ok())
+                    .map(Value::Label)
+                    .collect();
+                Ok(mk_list(list))
+            }
+            other => err(format!("'toolchains' value has no field or method '{other}'")),
+        },
+        "exec_group_toolchains" => match method {
+            "toolchain_types" => {
+                check_kwargs("toolchain_types", pos, kw, &[])?;
+                let Value::Host(_, group) = recv else { return err("invalid exec group toolchains") };
+                let tcs = st.inputs.exec_group_toolchains.get(group);
+                let list: Vec<Value> = tcs
+                    .into_iter()
+                    .flat_map(|m| m.keys())
+                    .filter_map(|k| Label::parse_canonical(k).ok())
+                    .map(Value::Label)
+                    .collect();
+                Ok(mk_list(list))
+            }
+            other => err(format!("'exec_group_toolchains' value has no field or method '{other}'")),
+        },
+        "rule_toolchains" => match method {
+            "toolchain_types" => {
+                check_kwargs("toolchain_types", pos, kw, &[])?;
+                let list: Vec<Value> = st
+                    .base_toolchains
+                    .keys()
+                    .filter_map(|k| Label::parse_canonical(k).ok())
+                    .map(Value::Label)
+                    .collect();
+                Ok(mk_list(list))
+            }
+            other => err(format!("'toolchains' value has no field or method '{other}'")),
+        },
+        "rule_exec_group_toolchains" => match method {
+            "toolchain_types" => {
+                check_kwargs("toolchain_types", pos, kw, &[])?;
+                let Value::Host(_, group) = recv else { return err("invalid exec group toolchains") };
+                let tcs = st.base_exec_group_toolchains.get(group);
+                let list: Vec<Value> = tcs
+                    .into_iter()
+                    .flat_map(|m| m.keys())
+                    .filter_map(|k| Label::parse_canonical(k).ok())
+                    .map(Value::Label)
+                    .collect();
+                Ok(mk_list(list))
+            }
+            other => err(format!("'exec_group_toolchains' value has no field or method '{other}'")),
+        },
         other => err(format!("'{other}' value has no field or method '{method}'")),
     }
 }
@@ -112,10 +172,22 @@ fn depset_nested(
 
 fn collect_attr_runfiles(st: &Arc<CtxState>, data: bool) -> Runfiles {
     let mut out = Runfiles::default();
+    let always_files_in_data = st
+        .cfg
+        .bool_option("incompatible_always_include_files_in_data", true);
     for attr in ["data", "srcs", "deps"] {
         let is_data_attr = attr == "data";
         if let Some(ts) = st.deps.get(attr) {
             for t in ts {
+                if !is_data_attr && (t.rule_class == "source file" || t.rule_class == "generated file") {
+                    continue;
+                }
+                if is_data_attr && always_files_in_data {
+                    out = out.merge(&Runfiles {
+                        artifacts: t.default_info.files.clone(),
+                        ..Default::default()
+                    });
+                }
                 out = out.merge(&target_runfiles(t, is_data_attr || data));
             }
         }
@@ -135,15 +207,41 @@ pub fn target_runfiles(t: &ConfiguredTarget, data: bool) -> Runfiles {
             Runfiles::default()
         };
     }
-    if let Some(Value::ProviderInstance { fields, .. }) = t.providers.get("DefaultInfo") {
+    let mut rf = if let Some(Value::ProviderInstance { fields, .. }) = t.providers.get("DefaultInfo") {
         let key = if data { "data_runfiles" } else { "default_runfiles" };
         if let Some(r) = fields.get(key).and_then(runfiles_of) {
-            // A rule's `RunfilesProvider` is authoritative even when empty (its `DefaultInfo.files`
-            // are not implicitly runfiles): only targets without one fall back to their files.
-            return (*r).clone();
+            (*r).clone()
+        } else {
+            Runfiles { artifacts: t.default_info.files.clone(), ..Default::default() }
         }
+    } else {
+        Runfiles { artifacts: t.default_info.files.clone(), ..Default::default() }
+    };
+    if data {
+        // `--incompatible_always_include_files_in_data` (default true in Bazel 9):
+        // targets in `data` also contribute their `DefaultInfo.files`.
+        rf = rf.merge(&Runfiles { artifacts: t.default_info.files.clone(), ..Default::default() });
     }
-    Runfiles { artifacts: t.default_info.files.clone(), ..Default::default() }
+    rf
+}
+
+fn repo_mapping_for_target(st: &CtxState) -> zel_cmdline::RepositoryMapping {
+    let owner = st.label.repository().clone();
+    let entries = st
+        .inputs
+        .resolver
+        .repo_mapping_entries(owner.name())
+        .into_iter()
+        .map(|(a, c)| (a, zel_cmdline::RepositoryName::create_unvalidated(c)))
+        .collect();
+    zel_cmdline::RepositoryMapping::new(entries, owner)
+}
+
+fn insert_target_location_keys(map: &mut BTreeMap<Label, Vec<Artifact>>, t: &ConfiguredTarget, files: Vec<Artifact>) {
+    map.entry(t.label.clone()).or_default().extend(files.iter().cloned());
+    for al in &t.alias_targets {
+        map.entry(al.clone()).or_default().extend(files.iter().cloned());
+    }
 }
 
 fn ctx_method(
@@ -156,11 +254,13 @@ fn ctx_method(
     match method {
         // `StarlarkRuleContext.tokenize`: ShellUtils.tokenize.
         "tokenize" => {
+            st.check_mutable("tokenize")?;
+            check_kwargs("tokenize", pos, kw, &["option"])?;
             let v = arg(pos, kw, 0, "option").ok_or_else(|| StarlarkError("tokenize() missing 1 required positional argument: option".into()))?;
             let s = want_str(v, "tokenize", "option")?;
             shell_tokenize(&s)
                 .map(|t| mk_list(t.into_iter().map(Value::String).collect()))
-                .map_err(StarlarkError)
+                .map_err(|e| StarlarkError(format!("{e} while tokenizing '{s}'")))
         }
         "target_platform_has_constraint" => {
             check_kwargs("target_platform_has_constraint", pos, kw, &["constraint_value"])?;
@@ -190,31 +290,85 @@ fn ctx_method(
                 kw,
                 &["files", "transitive_files", "collect_data", "collect_default", "symlinks", "root_symlinks", "skip_conflict_checking"],
             )?;
-            let mut r = Runfiles::default();
-            if let Some(f) = arg(pos, kw, 0, "files") {
-                r.artifacts = files_in(f, "files")?;
+            let skip_conflict_checking = arg(pos, kw, 6, "skip_conflict_checking").map(|v| v.is_truthy()).unwrap_or(false);
+            let mut out = Runfiles::default();
+            let mut transitive_sets: Vec<crate::nested_set::NSet<(String, String)>> = Vec::new();
+            let mut collected: Vec<Runfiles> = Vec::new();
+            // `StarlarkRuleContext.runfiles`: collect_data, then collect_default, then files,
+            // then transitive_files, then symlinks, then root_symlinks.
+            for (idx, data) in [(2usize, true), (3, false)] {
+                if arg(pos, kw, idx, if data { "collect_data" } else { "collect_default" }).map(|v| v.is_truthy()).unwrap_or(false) {
+                    out = out.merge(&collect_attr_runfiles(st, data));
+                    let always_files_in_data = st
+                        .cfg
+                        .bool_option("incompatible_always_include_files_in_data", true);
+                    for attr in ["data", "srcs", "deps"] {
+                        let is_data_attr = attr == "data";
+                        if let Some(ts) = st.deps.get(attr) {
+                            for t in ts {
+                                if is_data_attr && always_files_in_data {
+                                    collected.push(Runfiles {
+                                        artifacts: t.default_info.files.clone(),
+                                        ..Default::default()
+                                    });
+                                }
+                                collected.push(target_runfiles(t, is_data_attr || data));
+                            }
+                        }
+                    }
+                }
+            }
+            for c in &collected {
+                transitive_sets.push(c.nested_set());
+            }
+            let explicit: Vec<Artifact> = match arg(pos, kw, 0, "files") {
+                Some(f) => files_in(f, "files")?,
+                None => Vec::new(),
+            };
+            if !explicit.is_empty() {
+                out = out.merge(&Runfiles { artifacts: explicit.clone(), ..Default::default() });
             }
             if let Some(t) = none_or(arg(pos, kw, 1, "transitive_files")) {
-                let Value::Depset(_) = t else {
+                let Value::Depset(d) = t else {
                     return err(format!(
                         "in call to runfiles(), parameter 'transitive_files' got value of type '{}', want 'depset or NoneType'",
                         type_name(t)
                     ));
                 };
-                r.artifacts.extend(files_in(t, "transitive_files")?);
+                if !matches!(d.order, DepsetOrder::Default | DepsetOrder::Postorder) {
+                    return err(format!(
+                        "order '{}' is invalid for transitive_files",
+                        d.order.as_str()
+                    ));
+                }
+                let trans_files = files_in(t, "transitive_files")?;
+                if !trans_files.is_empty() {
+                    out = out.merge(&Runfiles { artifacts: trans_files, ..Default::default() });
+                }
+                let mut memo = std::collections::HashMap::new();
+                transitive_sets.push(depset_nested(d, &mut memo));
             }
+            let mut has_symlinks = false;
             for (idx, name, root) in [(4usize, "symlinks", false), (5, "root_symlinks", true)] {
                 if let Some(s) = none_or(arg(pos, kw, idx, name)) {
-                    let target = if root { &mut r.root_symlinks } else { &mut r.symlinks };
+                    let target = if root { &mut out.root_symlinks } else { &mut out.symlinks };
                     match s {
                         Value::Dict(d) => {
-                            for (k, v) in d.lock().unwrap().items() {
+                            let items = d.lock().unwrap().items();
+                            if !items.is_empty() {
+                                has_symlinks = true;
+                            }
+                            for (k, v) in items {
                                 let Value::String(k) = k else { return err(format!("{name} keys must be strings")) };
                                 target.insert(k, want_file(&v, "runfiles", name)?);
                             }
                         }
                         other => {
-                            for e in sequence(other).unwrap_or_default() {
+                            let entries = sequence(other).unwrap_or_default();
+                            if !entries.is_empty() {
+                                has_symlinks = true;
+                            }
+                            for e in entries {
                                 let Value::Struct(sv) = &e else {
                                     return err(format!("expected a dict or a depset of SymlinkEntry for {name}"));
                                 };
@@ -226,65 +380,51 @@ fn ctx_method(
                     }
                 }
             }
-            let mut out = r;
-            // `Runfiles.Builder` structure of the artifact set: the collected runfiles of the
-            // dependencies and the `transitive_files` set are transitive children, `files` direct.
-            let mut transitive_sets: Vec<crate::nested_set::NSet<(String, String)>> = Vec::new();
-            let direct_files: Vec<Artifact> = out.artifacts.clone();
-            let mut collected: Vec<Runfiles> = Vec::new();
-            for (idx, data) in [(2usize, true), (3, false)] {
-                if arg(pos, kw, idx, if data { "collect_data" } else { "collect_default" }).map(|v| v.is_truthy()).unwrap_or(false) {
-                    out = out.merge(&collect_attr_runfiles(st, data));
-                    for attr in ["data", "srcs", "deps"] {
-                        let is_data_attr = attr == "data";
-                        if let Some(ts) = st.deps.get(attr) {
-                            for t in ts {
-                                collected.push(target_runfiles(t, is_data_attr || data));
-                            }
-                        }
-                    }
-                }
+            if has_symlinks && !skip_conflict_checking {
+                out.conflict_policy_error = true;
             }
-            for c in &collected {
-                transitive_sets.push(c.nested_set());
-            }
-            if let Some(Value::Depset(d)) = none_or(arg(pos, kw, 1, "transitive_files")) {
-                let mut memo = std::collections::HashMap::new();
-                transitive_sets.push(depset_nested(d, &mut memo));
-                // `files` of the call are direct elements: take them from the explicit list only.
-            }
-            let explicit: Vec<Artifact> = match arg(pos, kw, 0, "files") {
-                Some(f) => files_in(f, "files")?,
-                None => Vec::new(),
-            };
-            let _ = direct_files;
             out.nested = Runfiles::build_nested(&explicit, transitive_sets);
             Ok(runfiles_value(out))
         }
         "expand_location" => {
+            st.check_mutable("expand_location")?;
             check_kwargs("expand_location", pos, kw, &["input", "targets", "short_paths"])?;
             let input = want_str(
                 arg(pos, kw, 0, "input").ok_or_else(|| StarlarkError("expand_location() missing 1 required positional argument: input".into()))?,
                 "expand_location",
                 "input",
             )?;
+            // `StarlarkRuleContext.makeLabelMap`: only `targets` (default []), rejects duplicates,
+            // follows aliases, and under `--incompatible_locations_prefers_executable` prefers the
+            // executable when `files_to_build` is not a singleton.
+            let prefers_exe = st.cfg.bool_option("incompatible_locations_prefers_executable", true);
             let mut map: BTreeMap<Label, Vec<Artifact>> = BTreeMap::new();
-            for attr in ["srcs", "deps", "tools"] {
-                if let Some(ts) = st.deps.get(attr) {
-                    for t in ts {
-                        map.entry(t.label.clone()).or_default().extend(target_files(t));
-                    }
-                }
-            }
-            if let Some(t) = arg(pos, kw, 1, "targets") {
-                for item in sequence(t).unwrap_or_default() {
+            if let Some(t) = none_or(arg(pos, kw, 1, "targets")) {
+                let items = sequence(t).ok_or_else(|| {
+                    StarlarkError(format!(
+                        "in call to expand_location(), parameter 'targets' got value of type '{}', want 'sequence'",
+                        type_name(t)
+                    ))
+                })?;
+                for item in items {
                     let ct = target_of(&item).ok_or_else(|| {
                         StarlarkError(format!(
                             "expected value of type 'Target' for a member of parameter 'targets' but got {} instead",
                             type_name(&item)
                         ))
                     })?;
-                    map.insert(ct.label.clone(), target_files(&ct));
+                    let key_label = ct.alias_chain.first().cloned().unwrap_or_else(|| ct.label.clone());
+                    if map.contains_key(&key_label) {
+                        return err(format!("Label '{}' is found more than once in 'targets' list.", key_label.canonical_form()));
+                    }
+                    let files = target_files(&ct);
+                    let exe = ct.default_info.executable.clone();
+                    let expansion = if prefers_exe && exe.is_some() && files.len() != 1 {
+                        vec![exe.unwrap()]
+                    } else {
+                        files
+                    };
+                    map.insert(key_label, expansion);
                 }
             }
             // `short_paths` (keyword-only, undocumented): runfiles paths instead of exec paths.
@@ -293,11 +433,13 @@ fn ctx_method(
             } else {
                 LocationMode::Exec
             };
-            expand_locations(&input, &map, &st.label, mode, &st.inputs.workspace_name)
+            let repo_map = st.repo_mapping();
+            expand_locations_with_mapping(&input, &map, &st.label, mode, &st.inputs.workspace_name, Some(&repo_map))
                 .map(Value::String)
                 .map_err(StarlarkError)
         }
         "expand_make_variables" => {
+            st.check_mutable("expand_make_variables")?;
             check_kwargs("expand_make_variables", pos, kw, &["attribute_name", "command", "additional_substitutions"])?;
             let attr_name = want_str(arg(pos, kw, 0, "attribute_name").ok_or_else(|| StarlarkError("expand_make_variables() missing argument: attribute_name".into()))?, "expand_make_variables", "attribute_name")?;
             let command = want_str(arg(pos, kw, 1, "command").ok_or_else(|| StarlarkError("expand_make_variables() missing argument: command".into()))?, "expand_make_variables", "command")?;
@@ -306,13 +448,18 @@ fn ctx_method(
                 None => BTreeMap::new(),
             };
             let lookup = |n: &str| extra.get(n).cloned().or_else(|| st.make_vars.get(n).cloned());
-            expand_make_variables(&command, &lookup)
-                .map(Value::String)
-                .map_err(|e| StarlarkError(format!("attribute {attr_name}: {e}")))
+            match expand_make_variables(&command, &lookup) {
+                Ok(s) => Ok(Value::String(s)),
+                Err(e) => {
+                    st.rule_errors.lock().unwrap().push(format!("in {attr_name} attribute of {} rule {}: {e}", st.rule.rule_class, st.label.canonical_form()));
+                    Ok(Value::String(command))
+                }
+            }
         }
         // `StarlarkRuleContext.resolveCommand`: expands `$(location)` / make variables in a shell
-        // command and returns `(inputs, ["/bin/bash", "-c", command], input_manifests)`.
+        // command and returns `(inputs, [shell, "-c", command], input_manifests)`.
         "resolve_command" => {
+            st.check_mutable("resolve_command")?;
             check_kwargs(
                 "resolve_command",
                 pos,
@@ -324,66 +471,154 @@ fn ctx_method(
                 None => String::new(),
             };
             let attr_name = match arg(pos, kw, 1, "attribute") {
-                Some(Value::None) | None => "command".to_string(),
-                Some(v) => want_str(v, "resolve_command", "attribute")?,
+                Some(Value::None) | None => None,
+                Some(v) => Some(want_str(v, "resolve_command", "attribute")?),
             };
             let expand_loc = arg(pos, kw, 2, "expand_locations").map(|v| v.is_truthy()).unwrap_or(false);
-            let extra = match arg(pos, kw, 3, "make_variables") {
-                Some(Value::None) | None => BTreeMap::new(),
-                Some(v) => str_dict(v, "make_variables")?,
+            let make_vars = match arg(pos, kw, 3, "make_variables") {
+                Some(Value::None) | None => None,
+                Some(v) => Some(str_dict(v, "make_variables")?),
             };
             let mut map: BTreeMap<Label, Vec<Artifact>> = BTreeMap::new();
             let mut inputs: Vec<Artifact> = Vec::new();
-            for t in arg(pos, kw, 4, "tools").and_then(sequence).unwrap_or_default() {
-                let ct = target_of(&t).ok_or_else(|| StarlarkError("resolve_command: tools must be targets".into()))?;
-                let files = target_files(&ct);
-                inputs.extend(files.iter().cloned());
-                map.insert(ct.label.clone(), files);
-            }
             if let Some(Value::Dict(d)) = arg(pos, kw, 5, "label_dict") {
                 for (k, v) in d.lock().unwrap().entries.iter() {
-                    let key_label = match k {
-                        Value::Label(l) => l.clone(),
-                        other => target_of(other)
-                            .ok_or_else(|| StarlarkError("resolve_command: label_dict keys must be Labels or targets".into()))?
-                            .label
-                            .clone(),
+                    let Value::Label(key_label) = k else {
+                        return err(format!("invalid key {} in 'label_dict'", k.repr()));
                     };
+                    let items = sequence(v).ok_or_else(|| {
+                        StarlarkError(format!("invalid value {} in 'label_dict': expected iterable, but got '{}'", v.repr(), type_name(v)))
+                    })?;
                     let mut files = Vec::new();
-                    for f in sequence(v).unwrap_or_default() {
-                        if let Some(a) = artifact_of(&f) {
-                            files.push(a);
-                        }
+                    for f in items {
+                        let a = artifact_of(&f).ok_or_else(|| StarlarkError(format!("invalid value {} in 'label_dict'", v.repr())))?;
+                        files.push(a);
                     }
-                    inputs.extend(files.iter().cloned());
-                    map.insert(key_label, files);
+                    map.entry(key_label.clone()).or_default().extend(files);
+                }
+            }
+            for t in arg(pos, kw, 4, "tools").and_then(sequence).unwrap_or_default() {
+                let ct = target_of(&t).ok_or_else(|| StarlarkError("resolve_command: tools must be targets".into()))?;
+                // `CommandHelper`: skip tool deps without `FilesToRunProvider`.
+                let Some(Value::ProviderInstance { fields, .. }) = ct.providers.get("DefaultInfo").and_then(|d| match d {
+                    Value::ProviderInstance { fields, .. } => fields.get("files_to_run"),
+                    _ => None,
+                }) else {
+                    continue;
+                };
+                let files_to_build = target_files(&ct);
+                inputs.extend(files_to_build.iter().cloned());
+                let key_label = ct.dependency_label().clone();
+                if let Some(exe) = fields.get("executable").and_then(artifact_of) {
+                    map.entry(key_label).or_default().push(exe.clone());
+                    if let Some(rs) = &ct.runfiles_support {
+                        inputs.push(rs.manifest.clone());
+                        inputs.extend(rs.runfiles.artifacts.iter().cloned());
+                        inputs.push(rs.executable.clone());
+                    } else if let Some(r) = fields.get("_runfiles").and_then(runfiles_of) {
+                        inputs.extend(r.artifacts.iter().cloned());
+                    }
+                } else {
+                    map.entry(key_label).or_default().extend(files_to_build);
                 }
             }
             let mut cmd = command;
             if expand_loc {
-                cmd = expand_locations(&cmd, &map, &st.label, LocationMode::Exec, &st.inputs.workspace_name)
-                    .map_err(|e| StarlarkError(format!("attribute {attr_name}: {e}")))?;
+                let repo_map = st.repo_mapping();
+                let attr_s = attr_name.as_deref().unwrap_or("command");
+                cmd = expand_locations_with_mapping(&cmd, &map, &st.label, LocationMode::Exec, &st.inputs.workspace_name, Some(&repo_map))
+                    .map_err(|e| StarlarkError(format!("attribute {attr_s}: {e}")))?;
             }
-            let lookup = |n: &str| extra.get(n).cloned().or_else(|| st.make_vars.get(n).cloned());
-            let cmd = expand_make_variables(&cmd, &lookup).map_err(|e| StarlarkError(format!("attribute {attr_name}: {e}")))?;
+            if let Some(extra) = make_vars {
+                let attr_s = attr_name.as_deref().unwrap_or("command");
+                let lookup = |n: &str| extra.get(n).cloned().or_else(|| st.make_vars.get(n).cloned());
+                cmd = expand_make_variables(&cmd, &lookup).map_err(|e| StarlarkError(format!("attribute {attr_s}: {e}")))?;
+            }
+            let shell_exe = st
+                .cfg
+                .option_str("shell_executable")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "/bin/bash".to_string());
             Ok(Value::Tuple(vec![
                 mk_list(dedup(inputs).iter().map(file_value).collect()),
-                mk_list(vec![Value::String("/bin/bash".into()), Value::String("-c".into()), Value::String(cmd)]),
+                mk_list(vec![Value::String(shell_exe), Value::String("-c".into()), Value::String(cmd)]),
                 mk_list(vec![]),
             ]))
         }
         "coverage_instrumented" => Ok(Value::Bool(coverage_enabled(&st.cfg))),
         "resolve_tools" => {
+            st.check_mutable("resolve_tools")?;
             check_kwargs("resolve_tools", pos, kw, &["tools"])?;
+            if st.cfg.bool_option("incompatible_disallow_ctx_resolve_tools", true) {
+                return err(
+                    "Pass an executable or tools argument to ctx.actions.run or ctx.actions.run_shell instead of calling ctx.resolve_tools.\nUse --noincompatible_disallow_ctx_resolve_tools to temporarily disable this check.",
+                );
+            }
             let mut files = Vec::new();
             for t in arg(pos, kw, 0, "tools").and_then(sequence).unwrap_or_default() {
                 let ct = target_of(&t).ok_or_else(|| StarlarkError("resolve_tools: tools must be targets".into()))?;
                 files.extend(target_files(&ct));
+                if let Some(rs) = &ct.runfiles_support {
+                    files.push(rs.manifest.clone());
+                    files.extend(rs.runfiles.artifacts.iter().cloned());
+                    files.push(rs.executable.clone());
+                }
             }
-            Ok(mk_struct(vec![
-                ("inputs", files_depset(&dedup(files))),
-                ("input_manifests", mk_list(vec![])),
-            ]))
+            Ok(Value::Tuple(vec![files_depset(&dedup(files)), mk_list(vec![])]))
+        }
+        "created_actions" => {
+            st.check_mutable("created_actions")?;
+            check_kwargs("created_actions", pos, kw, &[])?;
+            Ok(Value::None)
+        }
+        "check_placeholders" => {
+            st.check_mutable("check_placeholders")?;
+            check_kwargs("check_placeholders", pos, kw, &["template", "allowed_placeholders"])?;
+            let template = want_str(
+                arg(pos, kw, 0, "template").ok_or_else(|| StarlarkError("check_placeholders() missing 1 required positional argument: template".into()))?,
+                "check_placeholders",
+                "template",
+            )?;
+            let allowed_v = arg(pos, kw, 1, "allowed_placeholders")
+                .ok_or_else(|| StarlarkError("check_placeholders() missing 1 required positional argument: allowed_placeholders".into()))?;
+            let allowed: BTreeSet<String> = sequence(allowed_v)
+                .ok_or_else(|| StarlarkError("check_placeholders(): allowed_placeholders must be a sequence".into()))?
+                .into_iter()
+                .map(|x| want_str(&x, "check_placeholders", "allowed_placeholders"))
+                .collect::<Result<_, _>>()?;
+            let mut rest = template.as_str();
+            while let Some(i) = rest.find("%{") {
+                let after = &rest[i + 2..];
+                if let Some(j) = after.find('}') {
+                    let ph = &after[..j];
+                    if !allowed.contains(ph) {
+                        return Ok(Value::Bool(false));
+                    }
+                    rest = &after[j + 1..];
+                } else {
+                    break;
+                }
+            }
+            Ok(Value::Bool(true))
+        }
+        "package_relative_label" => {
+            st.check_mutable("package_relative_label")?;
+            check_kwargs("package_relative_label", pos, kw, &["input"])?;
+            let input = arg(pos, kw, 0, "input")
+                .ok_or_else(|| StarlarkError("package_relative_label() missing 1 required positional argument: input".into()))?;
+            match input {
+                Value::Label(l) => Ok(Value::Label(l.clone())),
+                Value::String(s) => {
+                    let rm = st.repo_mapping();
+                    crate::location::parse_label_with_mapping(s, st.label.package_identifier(), Some(&rm))
+                        .map(Value::Label)
+                        .map_err(|e| StarlarkError(format!("invalid label in ctx.package_relative_label: {e}")))
+                }
+                other => err(format!(
+                    "in call to package_relative_label(), parameter 'input' got value of type '{}', want 'Label or string'",
+                    type_name(other)
+                )),
+            }
         }
         other => err(format!("'ctx' value has no field or method '{other}'")),
     }
@@ -447,19 +682,27 @@ fn declare(st: &Arc<CtxState>, what: &str, pos: &[Value], kw: &BTreeMap<String, 
     let mut a = st.derived(frag);
     if tree {
         a.is_tree_artifact = true;
+        if st.declared_files.lock().unwrap().contains(a.exec_path.path_string()) {
+            return err(format!("'{filename}' has already been declared as a regular file, not directory."));
+        }
         st.declared_trees.lock().unwrap().insert(a.exec_path.path_string().to_string());
-    } else if st.declared_trees.lock().unwrap().contains(a.exec_path.path_string()) {
-        return err(format!("'{filename}' has already been declared as a directory, not a regular file."));
+    } else {
+        if st.declared_trees.lock().unwrap().contains(a.exec_path.path_string()) {
+            return err(format!("'{filename}' has already been declared as a directory, not a regular file."));
+        }
+        st.declared_files.lock().unwrap().insert(a.exec_path.path_string().to_string());
     }
     if symlink {
         a.is_unresolved_symlink = true;
     }
+    st.declared_artifacts.lock().unwrap().push(a.clone());
     Ok(file_value(&a))
 }
 
 fn command_line(
     args: &Value,
     what: &str,
+    dir_inputs: &mut Vec<Artifact>,
 ) -> Result<Vec<CommandLineArgs>, StarlarkError> {
     let items = sequence(args).ok_or_else(|| {
         StarlarkError(format!(
@@ -477,7 +720,9 @@ fn command_line(
                     out.push(CommandLineArgs { args: std::mem::take(&mut strings), param_file: None });
                 }
                 let a = args_of(&v).unwrap();
-                out.push(a.lock().unwrap().finish());
+                let guard = a.lock().unwrap();
+                dir_inputs.extend(guard.directory_artifacts.iter().cloned());
+                out.push(guard.finish());
             }
             other => {
                 return err(format!(
@@ -533,9 +778,23 @@ fn actions_method(
         "do_nothing" => {
             st.check_mutable("actions.do_nothing")?;
             check_kwargs("do_nothing", pos, kw, &["mnemonic", "inputs"])?;
-            if arg(pos, kw, 0, "mnemonic").is_none() {
-                return err("do_nothing() missing 1 required positional argument: mnemonic");
-            }
+            let mnemonic = want_str(
+                arg(pos, kw, 0, "mnemonic").ok_or_else(|| StarlarkError("do_nothing() missing 1 required positional argument: mnemonic".into()))?,
+                "do_nothing",
+                "mnemonic",
+            )?;
+            let inputs = match none_or(arg(pos, kw, 1, "inputs")) {
+                Some(v) => files_in(v, "inputs")?,
+                None => Vec::new(),
+            };
+            let mut a = Action::new(
+                st.label.clone(),
+                &mnemonic,
+                ActionKind::Spawn { executable: String::new(), arguments: Vec::new(), shell_command: None },
+            );
+            a.is_pseudo = true;
+            a.inputs = inputs;
+            st.register(a)?;
             Ok(Value::None)
         }
         "write" => {
@@ -587,6 +846,12 @@ fn actions_method(
             if let Some(Value::Host(k, id)) = none_or(arg(pos, kw, 4, "computed_substitutions")) {
                 if k == "template_dict" {
                     computed = crate::objects::template_dict_entries(id).unwrap_or_default();
+                }
+            }
+            let mut seen_keys = std::collections::HashSet::new();
+            for (k, _) in subs.iter().chain(computed.iter()) {
+                if !seen_keys.insert(k.clone()) {
+                    return err(format!("Multiple entries with same key: {k}"));
                 }
             }
             let mut a = Action::new(
@@ -647,6 +912,7 @@ fn actions_method(
             let tp = none_or(arg(pos, kw, 2, "target_path"));
             let tt = none_or(kw.get("target_type"));
             let is_exec = arg(pos, kw, 3, "is_executable").map(|v| v.is_truthy()).unwrap_or(false);
+            let use_exec_root_for_source = none_or(kw.get("use_exec_root_for_source")).map(|v| v.is_truthy()).unwrap_or(false);
             if tf.is_some() == tp.is_some() {
                 return err("Exactly one of \"target_file\" or \"target_path\" is required");
             }
@@ -676,6 +942,8 @@ fn actions_method(
                     if is_exec { "ExecutableSymlink" } else { "Symlink" },
                     ActionKind::Symlink { target_file: Some(input.clone()), target_path: None, is_executable: is_exec },
                 );
+                a.symlink_target_type = if is_exec { crate::SymlinkTargetType::Executable } else { crate::SymlinkTargetType::Other };
+                a.use_exec_root_for_source = use_exec_root_for_source;
                 a.inputs.push(input);
             } else {
                 if !out.is_unresolved_symlink {
@@ -684,11 +952,14 @@ fn actions_method(
                 if is_exec {
                     return err("\"is_executable\" cannot be True when using \"target_path\"");
                 }
+                let mut sym_tt = crate::SymlinkTargetType::Unspecified;
                 if let Some(t) = tt {
                     let t = want_str(t, "symlink", "target_type")?;
-                    if t != "file" && t != "directory" {
-                        return err("\"target_type\" must be one of \"file\" or \"directory\"");
-                    }
+                    sym_tt = match t.as_str() {
+                        "file" => crate::SymlinkTargetType::File,
+                        "directory" => crate::SymlinkTargetType::Directory,
+                        _ => return err("\"target_type\" must be one of \"file\" or \"directory\""),
+                    };
                 }
                 let path = want_str(tp.unwrap(), "symlink", "target_path")?;
                 a = Action::new(
@@ -696,9 +967,13 @@ fn actions_method(
                     "UnresolvedSymlink",
                     ActionKind::Symlink { target_file: None, target_path: Some(path), is_executable: false },
                 );
+                a.symlink_target_type = sym_tt;
             }
-            a.progress_message = Some(progress.unwrap_or_else(|| "Creating symlink {output}".replace("{output}", out.root_relative_path.path_string())));
-            a.outputs.push(out);
+            a.outputs.push(out.clone());
+            a.progress_message = Some(match progress {
+                Some(p) => substitute_progress(&p, &st.label, &a.inputs, &a.outputs),
+                None => format!("Creating symlink {}", out.root_relative_path),
+            });
             st.register(a)?;
             Ok(Value::None)
         }
@@ -813,10 +1088,12 @@ fn run_action(
     }
 
     // arguments
+    let mut dir_inputs: Vec<Artifact> = Vec::new();
     let arguments = match get("arguments") {
-        Some(v) => command_line(v, func)?,
+        Some(v) => command_line(v, func, &mut dir_inputs)?,
         None => Vec::new(),
     };
+    inputs.extend(dir_inputs);
 
     let mut spawn_exec: String;
     let mut spawn_args: Vec<CommandLineArgs> = Vec::new();
@@ -826,9 +1103,14 @@ fn run_action(
             .get("command")
             .ok_or_else(|| StarlarkError("run_shell() missing 1 required keyword-only argument: command".into()))?;
         let pad = !arguments.is_empty();
+        let shell_exe = st
+            .cfg
+            .option_str("shell_executable")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| "/bin/bash".to_string());
         match cmd {
             Value::String(c) => {
-                spawn_exec = "/bin/bash".to_string();
+                spawn_exec = shell_exe;
                 let mut head = vec!["-c".to_string(), c.clone()];
                 if pad {
                     head.push(String::new());
@@ -855,13 +1137,28 @@ fn run_action(
             Value::String(s) => spawn_exec = s.clone(),
             v if artifact_of(v).is_some() => {
                 let a = artifact_of(v).unwrap();
-                spawn_exec = a.exec_path.path_string().to_string();
+                spawn_exec = crate::location::callable_path(a.exec_path.path_string());
+                // `StarlarkActionFactory.run`: if `executable` came from a dependency's
+                // `FilesToRunProvider`, include its runfiles too (`getExecutableRunfiles`).
+                for deps in st.deps.values() {
+                    for dep in deps {
+                        if let Some(Value::ProviderInstance { fields, .. }) = dep.providers.get("DefaultInfo") {
+                            if let Some(Value::ProviderInstance { provider_name, fields: ftr }) = fields.get("files_to_run") {
+                                if provider_name == "FilesToRunProvider"
+                                    && ftr.get("executable").and_then(artifact_of).as_ref().map(|e| &e.exec_path) == Some(&a.exec_path)
+                                {
+                                    add_files_to_run_inputs(ftr, &mut tool_files);
+                                }
+                            }
+                        }
+                    }
+                }
                 tool_files.push(a);
             }
             Value::ProviderInstance { provider_name, fields } if provider_name == "FilesToRunProvider" => {
                 match fields.get("executable").and_then(artifact_of) {
                     Some(a) => {
-                        spawn_exec = a.exec_path.path_string().to_string();
+                        spawn_exec = crate::location::callable_path(a.exec_path.path_string());
                         add_files_to_run_inputs(fields, &mut tool_files);
                     }
                     None => return err("run(): FilesToRunProvider has no executable"),
@@ -882,8 +1179,8 @@ fn run_action(
     let mnemonic = match get("mnemonic") {
         Some(m) => {
             let m = want_str(m, func, "mnemonic")?;
-            if m.is_empty() || !m.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' ) {
-                return err(format!("Action mnemonic '{m}' must only contain [A-Za-z0-9_]"));
+            if m.is_empty() || !m.chars().all(|c| c.is_alphanumeric()) {
+                return err(format!("mnemonic must only contain letters and/or digits, and have non-zero length, was: \"{m}\""));
             }
             m
         }
@@ -894,30 +1191,56 @@ fn run_action(
         Some(v) => str_dict(v, "env")?,
         None => BTreeMap::new(),
     };
-    let exec_req = match get("execution_requirements") {
-        Some(v) => str_dict(v, "execution_requirements")?,
+    let mut exec_req = match get("execution_requirements") {
+        Some(v) => str_dict(v, "execution_requirements")?
+            .into_iter()
+            .filter(|(k, _)| is_legal_exec_info_key(k))
+            .collect(),
         None => BTreeMap::new(),
     };
+    if st.cfg.bool_option("incompatible_allow_tags_propagation", true) {
+        if let Some(zel_packages::attr::AttrValue::StrList(tags)) = st.rule.attr_or_default("tags") {
+            for tag in tags {
+                if is_legal_exec_info_key(&tag) {
+                    exec_req.entry(tag).or_insert_with(String::new);
+                }
+            }
+        }
+    }
     let exec_group = match get("exec_group") {
         Some(g) => {
             let g = want_str(g, func, "exec_group")?;
-            if g != "default" && !st.exec_groups.contains(&g) {
+            if !st.exec_groups.contains(&g) {
                 return err(format!("Action declared for non-existent exec group '{g}'."));
+            }
+            if g == "default-exec-group" || !is_valid_starlark_ident(&g) {
+                return err(format!("Invalid name for exec group '{g}'."));
             }
             Some(g)
         }
         None => None,
     };
+    inputs.extend(tool_files.iter().cloned());
     let mut resource_set = ResourceSet::default();
     if let Some(rs) = get("resource_set") {
         let os = if cfg!(target_os = "macos") { "osx" } else { "linux" };
         let d = match rs {
             Value::Dict(_) => rs.clone(),
-            f @ (Value::UserFunction(_) | Value::BuiltinFunction(_)) => ctx.call_value(
-                f.clone(),
-                vec![Value::String(os.to_string()), Value::Int(BigInt::from_i64(inputs.len() as i64))],
-                BTreeMap::new(),
-            )?,
+            f @ (Value::UserFunction(_) | Value::BuiltinFunction(_)) => {
+                if let Value::UserFunction(u) = f {
+                    if !u.closure.scopes.is_empty() || u.name == "<lambda>" {
+                        return err(format!(
+                            "to avoid unintended retention of analysis data structures, the function (declared at {}) must be declared by a top-level def statement",
+                            u.location
+                        ));
+                    }
+                }
+                ctx.call_value(
+                    f.clone(),
+                    vec![Value::String(os.to_string()), Value::Int(BigInt::from_i64(inputs.len() as i64))],
+                    BTreeMap::new(),
+                )?
+            }
             other => {
                 return err(format!(
                     "in call to {func}(), parameter 'resource_set' got value of type '{}', want 'callable, dict or NoneType'",
@@ -926,23 +1249,32 @@ fn run_action(
             }
         };
         let Value::Dict(dd) = d else { return err("resource_set callback must return a dict") };
-        for (k, v) in dd.lock().unwrap().items() {
+        let items_rs = dd.lock().unwrap().items();
+        let mut illegal = Vec::new();
+        for (k, _) in &items_rs {
             let Value::String(k) = k else { return err("resource_set keys must be strings") };
+            if !matches!(k.as_str(), "cpu" | "memory" | "local_test") {
+                illegal.push(k.clone());
+            }
+        }
+        if !illegal.is_empty() {
+            return err(format!("Illegal resource keys: ({})", illegal.join(",")));
+        }
+        for (k, v) in items_rs {
+            let Value::String(k) = k else { unreachable!() };
             let num = match &v {
                 Value::Int(i) => i.to_f64(),
                 Value::Float(f) => *f,
-                _ => return err(format!("resource_set value for '{k}' must be a number")),
+                _ => return err(format!("Illegal resource value type for key {k}: got {}, want int or float", type_name(&v))),
             };
             match k.as_str() {
                 "cpu" => resource_set.cpu = num,
                 "memory" => resource_set.memory_mb = num,
                 "local_test" => resource_set.local_test_count = num as i32,
-                other => return err(format!("Illegal resource keys: ({other})")),
+                _ => unreachable!(),
             }
         }
     }
-
-    inputs.extend(tool_files.iter().cloned());
     let progress = get("progress_message")
         .map(|p| want_str(p, func, "progress_message"))
         .transpose()?
@@ -969,9 +1301,33 @@ fn run_action(
     Ok(Value::None)
 }
 
+fn is_legal_exec_info_key(tag: &str) -> bool {
+    tag.starts_with("block-")
+        || tag.starts_with("requires-")
+        || tag.starts_with("no-")
+        || tag.starts_with("supports-")
+        || tag.starts_with("disable-")
+        || tag.starts_with("cpu:")
+        || tag.starts_with("resources:")
+        || tag == "local"
+        || tag == "worker-key-mnemonic"
+}
+
+fn is_valid_starlark_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else { return false };
+    (first.is_ascii_alphabetic() || first == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 fn add_files_to_run_inputs(fields: &BTreeMap<String, Value>, out: &mut Vec<Artifact>) {
     if let Some(e) = fields.get("executable").and_then(artifact_of) {
         out.push(e);
+    }
+    if let Some(m) = fields.get("runfiles_manifest").and_then(artifact_of) {
+        out.push(m);
+    }
+    if let Some(rm) = fields.get("repo_mapping_manifest").and_then(artifact_of) {
+        out.push(rm);
     }
     if let Some(r) = fields.get("_runfiles").and_then(runfiles_of) {
         out.extend(r.artifacts.iter().cloned());

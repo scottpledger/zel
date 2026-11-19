@@ -13,6 +13,8 @@
 // limitations under the License.
 
 use crate::syntax::location::Location;
+use std::collections::HashSet;
+use std::sync::Arc;
 
 /// Activation frame representing a function call on the call stack.
 #[derive(Debug, Clone)]
@@ -22,11 +24,15 @@ pub struct CallFrame {
     pub function_id: usize,
     pub location: Location,
     pub locals: crate::syntax::ast::Scope,
+    /// Names that belong to this function's local scope (params + any variable assigned in body).
+    pub local_names: Arc<HashSet<String>>,
     /// Captured scopes of enclosing functions, innermost first.
     pub parents: Vec<crate::syntax::ast::Scope>,
+    /// Local-name sets parallel to `parents`.
+    pub parent_local_names: Vec<Arc<HashSet<String>>>,
     /// Defining module of the running function when it differs from the module being evaluated;
     /// free variables then resolve against that module's globals.
-    pub module: Option<std::sync::Arc<crate::syntax::ast::ModuleEnv>>,
+    pub module: Option<Arc<crate::syntax::ast::ModuleEnv>>,
 }
 
 impl CallFrame {
@@ -36,7 +42,9 @@ impl CallFrame {
             function_id: 0,
             location,
             locals: Default::default(),
+            local_names: Arc::new(HashSet::new()),
             parents: Vec::new(),
+            parent_local_names: Vec::new(),
             module: None,
         }
     }

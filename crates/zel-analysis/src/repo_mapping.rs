@@ -25,7 +25,11 @@ pub fn repo_mapping_entries(
     }
     for k in runfiles.manifest_entries(workspace_name).keys() {
         let seg = k.split('/').next().unwrap_or("");
-        in_paths.insert(if seg == workspace_name { String::new() } else { seg.to_string() });
+        in_paths.insert(if seg == workspace_name {
+            String::new()
+        } else {
+            seg.to_string()
+        });
     }
     let mut sources: BTreeSet<String> = in_paths.clone();
     sources.insert(own_repo.to_string());
@@ -42,7 +46,13 @@ pub fn repo_mapping_entries(
         v.sort_by(|x, y| x.0.cmp(&y.0));
         v
     };
-    let dir = |c: &str| if c.is_empty() { workspace_name.to_string() } else { c.to_string() };
+    let dir = |c: &str| {
+        if c.is_empty() {
+            workspace_name.to_string()
+        } else {
+            c.to_string()
+        }
+    };
     let names: Vec<String> = sources.into_iter().collect();
     let mut out = Vec::new();
     let mut i = 0;

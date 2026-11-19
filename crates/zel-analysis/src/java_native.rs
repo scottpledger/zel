@@ -6,61 +6,6 @@
 // Not yet ported (explicit errors): create_compilation_action, create_header_compilation_action,
 // create_jvm_compile_action (JavaCompileActionBuilder / JavaHeaderCompileAction).
 
-/// `ShellUtils.tokenize`: Bourne-shell-like word splitting with quotes and backslash escapes.
-fn shell_tokenize(s: &str) -> Result<Vec<String>, String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_word = false;
-    let mut quote: Option<char> = None;
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match quote {
-            Some(q) => {
-                if c == q {
-                    quote = None;
-                } else if c == '\\' && q == '"' {
-                    match chars.next() {
-                        Some(n) => cur.push(n),
-                        None => return Err("unterminated escape".into()),
-                    }
-                } else {
-                    cur.push(c);
-                }
-            }
-            None => match c {
-                '\'' | '"' => {
-                    quote = Some(c);
-                    in_word = true;
-                }
-                '\\' => {
-                    in_word = true;
-                    match chars.next() {
-                        Some(n) => cur.push(n),
-                        None => return Err("unterminated escape".into()),
-                    }
-                }
-                c if c.is_whitespace() => {
-                    if in_word {
-                        out.push(std::mem::take(&mut cur));
-                        in_word = false;
-                    }
-                }
-                c => {
-                    cur.push(c);
-                    in_word = true;
-                }
-            },
-        }
-    }
-    if quote.is_some() {
-        return Err(format!("unterminated quotation in: {s}"));
-    }
-    if in_word {
-        out.push(cur);
-    }
-    Ok(out)
-}
-
 fn java_native(
     st: &Arc<CtxState>,
     name: &str,
@@ -156,16 +101,27 @@ fn java_native(
             for k in ["srcs", "deps", "data", "tools", "resources"] {
                 if let Some(ts) = st.deps.get(k) {
                     for t in ts {
-                        map.entry(t.label.clone()).or_default().extend(target_files(t));
+                        insert_target_location_keys(&mut map, t, target_files(t));
                     }
                 }
             }
             let mode = if exec_paths { LocationMode::Exec } else { LocationMode::Runfiles };
             let lookup = |n: &str| st.make_vars.get(n).cloned();
+            let repo_map = st.repo_mapping();
             let mut out = Vec::new();
             for s in raw {
-                let s = expand_make_variables(&s, &lookup).map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))?;
-                let s = expand_locations(&s, &map, &st.label, mode, &st.inputs.workspace_name).map_err(StarlarkError)?;
+                let s = expand_with_locations(
+                    &s,
+                    &lookup,
+                    &map,
+                    &st.label,
+                    mode,
+                    &st.inputs.workspace_name,
+                    Some(&repo_map),
+                    cfg!(windows),
+                )
+                .map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))?
+                .text;
                 if tokenize {
                     for t in shell_tokenize(&s).map_err(|e| StarlarkError(format!("attribute {attr}: {e}")))? {
                         out.push(Value::String(t));
@@ -324,7 +280,7 @@ fn java_exec_info(st: &Arc<CtxState>, toolchain: &Value, workers: bool, jdeps: O
             }
         }
     }
-    let inmemory = st.cfg.options.get("experimental_inmemory_jdeps_files").map_or(true, |v| v == "true" || v == "1");
+    let inmemory = st.cfg.options.get("experimental_inmemory_jdeps_files").is_none_or(|v| v == "true" || v == "1");
     if let (true, Some(d)) = (inmemory, jdeps) {
         m.insert("internal-inline-outputs".to_string(), d.exec_path.path_string().to_string());
     }

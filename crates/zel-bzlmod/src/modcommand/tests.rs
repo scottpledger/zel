@@ -44,7 +44,9 @@ fn aug_root(name: &str, version: &str) -> AB {
 impl AB {
     fn dep(mut self, name: &str, v: &str) -> AB {
         self.0.deps.push((name.to_string(), key(name, v)));
-        self.0.dep_reasons.push((name.to_string(), ResolutionReason::Original));
+        self.0
+            .dep_reasons
+            .push((name.to_string(), ResolutionReason::Original));
         self
     }
     fn changed_dep(mut self, name: &str, v: &str, old: &str, reason: ResolutionReason) -> AB {
@@ -78,7 +80,11 @@ fn insp_of(mods: Vec<AB>) -> Inspector {
 
 /// `ModOptions.getDefaultOptions()` of the Java tests.
 fn test_opts() -> ModOptions {
-    ModOptions { depth: i32::MAX, cycles: false, ..ModOptions::default() }
+    ModOptions {
+        depth: i32::MAX,
+        cycles: false,
+        ..ModOptions::default()
+    }
 }
 
 fn text_out(lines: &[&str]) -> String {
@@ -101,8 +107,16 @@ fn dump(g: &ResultGraph) -> String {
         for (c, m) in n.children_sorted_by_edge_type() {
             s.push_str(&format!(
                 " {c}[{}{}{}]",
-                if m.expanded == IsExpanded::True { "E" } else { "-" },
-                if m.indirect == IsIndirect::True { "I" } else { "-" },
+                if m.expanded == IsExpanded::True {
+                    "E"
+                } else {
+                    "-"
+                },
+                if m.indirect == IsIndirect::True {
+                    "I"
+                } else {
+                    "-"
+                },
                 if m.cycle == IsCycle::True { "C" } else { "-" }
             ));
         }
@@ -119,8 +133,12 @@ fn dump(g: &ResultGraph) -> String {
 fn expand_from_targets_first() {
     let insp = insp_of(vec![
         aug_root("aaa", "1.0").dep("bbb", "1.0"),
-        aug(key("bbb", "1.0")).still_dependant(root()).dep("ccc", "1.0"),
-        aug(key("ccc", "1.0")).still_dependant(key("bbb", "1.0")).dep("ddd", "1.0"),
+        aug(key("bbb", "1.0"))
+            .still_dependant(root())
+            .dep("ccc", "1.0"),
+        aug(key("ccc", "1.0"))
+            .still_dependant(key("bbb", "1.0"))
+            .dep("ddd", "1.0"),
         aug(key("ddd", "1.0")).still_dependant(key("ccc", "1.0")),
     ]);
     let opts = test_opts();
@@ -151,22 +169,41 @@ fn paths_depth1_contains_all_targets_with_nested_indirect() {
     // <root> -> bbb -> ccc -> ddd -> eee -> fff -> ggg -> hhh, with eee -> ddd cycle.
     let insp = insp_of(vec![
         aug_root("aaa", "1.0").dep("bbb", "1.0"),
-        aug(key("bbb", "1.0")).still_dependant(root()).dep("ccc", "1.0"),
-        aug(key("ccc", "1.0")).still_dependant(key("bbb", "1.0")).dep("ddd", "1.0"),
+        aug(key("bbb", "1.0"))
+            .still_dependant(root())
+            .dep("ccc", "1.0"),
+        aug(key("ccc", "1.0"))
+            .still_dependant(key("bbb", "1.0"))
+            .dep("ddd", "1.0"),
         aug(key("ddd", "1.0"))
             .still_dependant(key("ccc", "1.0"))
             .still_dependant(key("eee", "1.0"))
             .dep("eee", "1.0"),
-        aug(key("eee", "1.0")).still_dependant(key("ddd", "1.0")).dep("fff", "1.0").dep("ddd", "1.0"),
-        aug(key("fff", "1.0")).still_dependant(key("eee", "1.0")).dep("ggg", "1.0"),
-        aug(key("ggg", "1.0")).still_dependant(key("fff", "1.0")).dep("hhh", "1.0"),
+        aug(key("eee", "1.0"))
+            .still_dependant(key("ddd", "1.0"))
+            .dep("fff", "1.0")
+            .dep("ddd", "1.0"),
+        aug(key("fff", "1.0"))
+            .still_dependant(key("eee", "1.0"))
+            .dep("ggg", "1.0"),
+        aug(key("ggg", "1.0"))
+            .still_dependant(key("fff", "1.0"))
+            .dep("hhh", "1.0"),
         aug(key("hhh", "1.0")).still_dependant(key("ggg", "1.0")),
     ]);
-    let opts = ModOptions { cycles: true, depth: 1, ..test_opts() };
+    let opts = ModOptions {
+        cycles: true,
+        depth: 1,
+        ..test_opts()
+    };
     let mut ex = ModExecutor::new(&insp, None, &opts);
-    let result = ex.expand_paths_to_targets(&[root()], &[key("eee", "1.0"), key("hhh", "1.0")], false);
+    let result =
+        ex.expand_paths_to_targets(&[root()], &[key("eee", "1.0"), key("hhh", "1.0")], false);
     let mut expected = ResultGraph::new();
-    expected.insert(root(), ResultNode::new().with_child(&key("bbb", "1.0"), IsExpanded::True, IsIndirect::False));
+    expected.insert(
+        root(),
+        ResultNode::new().with_child(&key("bbb", "1.0"), IsExpanded::True, IsIndirect::False),
+    );
     expected.insert(
         key("bbb", "1.0"),
         ResultNode::new().with_child(&key("ddd", "1.0"), IsExpanded::True, IsIndirect::True),
@@ -177,9 +214,11 @@ fn paths_depth1_contains_all_targets_with_nested_indirect() {
     );
     expected.insert(
         key("eee", "1.0"),
-        ResultNode::new()
-            .with_target(true)
-            .with_child(&key("ggg", "1.0"), IsExpanded::True, IsIndirect::True),
+        ResultNode::new().with_target(true).with_child(
+            &key("ggg", "1.0"),
+            IsExpanded::True,
+            IsIndirect::True,
+        ),
     );
     expected.insert(
         key("ggg", "1.0"),
@@ -194,8 +233,13 @@ fn paths_depth1_contains_all_targets_with_nested_indirect() {
 fn paths_depth1_target_parent_is_direct_and_indirect_child() {
     let insp = insp_of(vec![
         aug_root("aaa", "1.0").dep("bbb", "1.0"),
-        aug(key("bbb", "1.0")).still_dependant(root()).dep("ccc", "1.0").dep("ddd", "1.0"),
-        aug(key("ccc", "1.0")).still_dependant(key("bbb", "1.0")).dep("ddd", "1.0"),
+        aug(key("bbb", "1.0"))
+            .still_dependant(root())
+            .dep("ccc", "1.0")
+            .dep("ddd", "1.0"),
+        aug(key("ccc", "1.0"))
+            .still_dependant(key("bbb", "1.0"))
+            .dep("ddd", "1.0"),
         aug(key("ddd", "1.0"))
             .still_dependant(key("bbb", "1.0"))
             .still_dependant(key("ccc", "1.0"))
@@ -206,11 +250,18 @@ fn paths_depth1_target_parent_is_direct_and_indirect_child() {
             .still_dependant(key("eee", "1.0"))
             .dep("ddd", "1.0"),
     ]);
-    let opts = ModOptions { cycles: true, depth: 1, ..test_opts() };
+    let opts = ModOptions {
+        cycles: true,
+        depth: 1,
+        ..test_opts()
+    };
     let mut ex = ModExecutor::new(&insp, None, &opts);
     let result = ex.expand_paths_to_targets(&[root()], &[key("eee", "1.0")], false);
     let mut expected = ResultGraph::new();
-    expected.insert(root(), ResultNode::new().with_child(&key("bbb", "1.0"), IsExpanded::True, IsIndirect::False));
+    expected.insert(
+        root(),
+        ResultNode::new().with_child(&key("bbb", "1.0"), IsExpanded::True, IsIndirect::False),
+    );
     expected.insert(
         key("bbb", "1.0"),
         ResultNode::new().with_child(&key("ddd", "1.0"), IsExpanded::True, IsIndirect::False),
@@ -246,10 +297,19 @@ fn explanation_graph() -> Inspector {
 #[test]
 fn resolution_explanation_most_cases() {
     let insp = explanation_graph();
-    let opts = ModOptions { verbose: true, include_unused: true, ..test_opts() };
+    let opts = ModOptions {
+        verbose: true,
+        include_unused: true,
+        ..test_opts()
+    };
     let result = ResultGraph::new();
     let imports = ImportsTable::default();
-    let ctx = FormatCtx { result: &result, insp: &insp, ext_imports: &imports, opts: &opts };
+    let ctx = FormatCtx {
+        result: &result,
+        insp: &insp,
+        ext_imports: &imports,
+        opts: &opts,
+    };
     let ex = |k: ModuleKey, p: ModuleKey| ctx.extra_resolution_explanation(&k, &p);
     assert_eq!(ex(root(), root()), None);
     assert_eq!(ex(key("B", "1.0"), root()), None);
@@ -311,14 +371,29 @@ fn unused_and_indirect_mods() -> Vec<AB> {
             .changed_dep("C", "1.0", "0.1", ResolutionReason::SingleVersionOverride)
             .changed_dep("Y", "2.0", "1.0", ResolutionReason::MinimalVersionSelection),
         aug(key("C", "0.1")).original_dependant(key("B", "1.0")),
-        aug(key("C", "1.0")).dependant(key("B", "1.0")).dep("D", "1.0"),
-        aug(key("D", "1.0")).still_dependant(key("C", "1.0")).still_dependant(key("E", "1.0")).dep("E", "1.0"),
-        aug(key("E", "1.0")).still_dependant(key("D", "1.0")).dep("F", "1.0").dep("D", "1.0"),
-        aug(key("F", "1.0")).still_dependant(key("E", "1.0")).dep("G", "1.0"),
-        aug(key("G", "1.0")).still_dependant(key("F", "1.0")).dep("H", "1.0").dep("Y", "2.0"),
+        aug(key("C", "1.0"))
+            .dependant(key("B", "1.0"))
+            .dep("D", "1.0"),
+        aug(key("D", "1.0"))
+            .still_dependant(key("C", "1.0"))
+            .still_dependant(key("E", "1.0"))
+            .dep("E", "1.0"),
+        aug(key("E", "1.0"))
+            .still_dependant(key("D", "1.0"))
+            .dep("F", "1.0")
+            .dep("D", "1.0"),
+        aug(key("F", "1.0"))
+            .still_dependant(key("E", "1.0"))
+            .dep("G", "1.0"),
+        aug(key("G", "1.0"))
+            .still_dependant(key("F", "1.0"))
+            .dep("H", "1.0")
+            .dep("Y", "2.0"),
         aug(key("H", "1.0")).still_dependant(key("G", "1.0")),
         aug(key("Y", "1.0")).original_dependant(key("B", "1.0")),
-        aug(key("Y", "2.0")).dependant(key("B", "1.0")).still_dependant(key("G", "1.0")),
+        aug(key("Y", "2.0"))
+            .dependant(key("B", "1.0"))
+            .still_dependant(key("G", "1.0")),
     ]
 }
 
@@ -346,7 +421,10 @@ fn text_and_graph_output_indirect_and_nested_target_paths_with_unused() {
         let mut ex = ModExecutor::new(&insp, None, &opts);
         let result = ex.expand_paths_to_targets(&[root()], &targets, false);
         let mut expected = ResultGraph::new();
-        expected.insert(root(), ResultNode::new().with_child(&key("B", "1.0"), IsExpanded::True, IsIndirect::False));
+        expected.insert(
+            root(),
+            ResultNode::new().with_child(&key("B", "1.0"), IsExpanded::True, IsIndirect::False),
+        );
         expected.insert(
             key("B", "1.0"),
             ResultNode::new()
@@ -358,7 +436,11 @@ fn text_and_graph_output_indirect_and_nested_target_paths_with_unused() {
         expected.insert(key("C", "0.1"), ResultNode::new().with_target(true));
         expected.insert(
             key("C", "1.0"),
-            ResultNode::new().with_target(true).with_child(&key("D", "1.0"), IsExpanded::True, IsIndirect::False),
+            ResultNode::new().with_target(true).with_child(
+                &key("D", "1.0"),
+                IsExpanded::True,
+                IsIndirect::False,
+            ),
         );
         expected.insert(
             key("D", "1.0"),
@@ -366,7 +448,11 @@ fn text_and_graph_output_indirect_and_nested_target_paths_with_unused() {
         );
         expected.insert(
             key("E", "1.0"),
-            ResultNode::new().with_target(true).with_child(&key("G", "1.0"), IsExpanded::True, IsIndirect::True),
+            ResultNode::new().with_target(true).with_child(
+                &key("G", "1.0"),
+                IsExpanded::True,
+                IsIndirect::True,
+            ),
         );
         expected.insert(
             key("G", "1.0"),
@@ -378,7 +464,7 @@ fn text_and_graph_output_indirect_and_nested_target_paths_with_unused() {
         expected.insert(key("Y", "1.0"), ResultNode::new().with_target(true));
         expected.insert(key("Y", "2.0"), ResultNode::new().with_target(true));
         assert_eq!(dump(&result), dump(&expected));
-    assert_eq!(result, expected);
+        assert_eq!(result, expected);
     }
     let mut ex = ModExecutor::new(&insp, None, &opts);
     ex.all_paths(&[root()], &targets);
@@ -441,7 +527,10 @@ fn unused_marker_without_verbose_and_ascii_charset() {
         ..test_opts()
     };
     let mut ex = ModExecutor::new(&insp, None, &opts);
-    ex.all_paths(&[root()], &[key("C", "0.1"), key("C", "1.0"), key("E", "1.0")]);
+    ex.all_paths(
+        &[root()],
+        &[key("C", "0.1"), key("C", "1.0"), key("E", "1.0")],
+    );
     assert_eq!(
         ex.take_output(),
         text_out(&[
@@ -456,7 +545,11 @@ fn unused_marker_without_verbose_and_ascii_charset() {
 }
 
 fn id(pkg: &str, name: &str) -> ExtensionId {
-    ExtensionId { bzl_file: format!("@@//{pkg}:{pkg}"), name: name.to_string(), isolation_key: None }
+    ExtensionId {
+        bzl_file: format!("@@//{pkg}:{pkg}"),
+        name: name.to_string(),
+        isolation_key: None,
+    }
 }
 
 fn usage(
@@ -475,7 +568,10 @@ fn usage(
                 proxy_name: String::new(),
                 dev_dependency: false,
                 location: loc.to_string(),
-                imports: imports.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect(),
+                imports: imports
+                    .iter()
+                    .map(|(a, b)| (a.to_string(), b.to_string()))
+                    .collect(),
                 containing_module_file: "MODULE.bazel".into(),
             }],
             tags,
@@ -498,9 +594,33 @@ fn extension_fixture() -> (Inspector, ExtensionId, ExtensionId) {
     let gradle = id("extensions", "gradle");
     let mut usages = vec![];
     for (k, (i, u)) in [
-        (key("C", "1.0"), usage(&maven, "C@1.0/MODULE.bazel:2:23", &[("repo1", "repo1"), ("repo3", "repo3")], vec![])),
-        (key("D", "1.0"), usage(&maven, "D@1.0/MODULE.bazel:1:10", &[("repo1", "repo1"), ("repo2", "repo2")], vec![])),
-        (key("Y", "2.0"), usage(&gradle, "Y@2.0/MODULE.bazel:2:13", &[("repo2", "repo2")], vec![])),
+        (
+            key("C", "1.0"),
+            usage(
+                &maven,
+                "C@1.0/MODULE.bazel:2:23",
+                &[("repo1", "repo1"), ("repo3", "repo3")],
+                vec![],
+            ),
+        ),
+        (
+            key("D", "1.0"),
+            usage(
+                &maven,
+                "D@1.0/MODULE.bazel:1:10",
+                &[("repo1", "repo1"), ("repo2", "repo2")],
+                vec![],
+            ),
+        ),
+        (
+            key("Y", "2.0"),
+            usage(
+                &gradle,
+                "Y@2.0/MODULE.bazel:2:13",
+                &[("repo2", "repo2")],
+                vec![],
+            ),
+        ),
         (
             key("Y", "2.0"),
             usage(
@@ -514,7 +634,10 @@ fn extension_fixture() -> (Inspector, ExtensionId, ExtensionId) {
                         "pom",
                         vec![(
                             "pom_xmls",
-                            AttrVal::List(vec![AttrVal::Str("//:pom.xml".into()), AttrVal::Str("@bar//:pom.xml".into())]),
+                            AttrVal::List(vec![
+                                AttrVal::Str("//:pom.xml".into()),
+                                AttrVal::Str("@bar//:pom.xml".into()),
+                            ]),
                         )],
                     ),
                 ],
@@ -524,16 +647,39 @@ fn extension_fixture() -> (Inspector, ExtensionId, ExtensionId) {
         usages.push((i, k, u));
     }
     let repos = vec![
-        (maven.clone(), ["repo6", "repo1", "repo2", "repo3", "repo4", "repo5"].iter().map(|s| s.to_string()).collect()),
-        (gradle.clone(), ["repo1", "repo2"].iter().map(|s| s.to_string()).collect()),
+        (
+            maven.clone(),
+            ["repo6", "repo1", "repo2", "repo3", "repo4", "repo5"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+        ),
+        (
+            gradle.clone(),
+            ["repo1", "repo2"].iter().map(|s| s.to_string()).collect(),
+        ),
     ];
-    (Inspector::assemble(graph_of(unused_and_indirect_mods()), vec![], usages, repos, BTreeMap::new()), maven, gradle)
+    (
+        Inspector::assemble(
+            graph_of(unused_and_indirect_mods()),
+            vec![],
+            usages,
+            repos,
+            BTreeMap::new(),
+        ),
+        maven,
+        gradle,
+    )
 }
 
 #[test]
 fn extensions_info_text_and_graph() {
     let (insp, maven, _) = extension_fixture();
-    let mut opts = ModOptions { output: OutputFormat::Text, extension_info: ExtensionShow::All, ..test_opts() };
+    let mut opts = ModOptions {
+        output: OutputFormat::Text,
+        extension_info: ExtensionShow::All,
+        ..test_opts()
+    };
     let mut ex = ModExecutor::new(&insp, None, &opts);
     ex.graph(&[root()]);
     assert_eq!(
@@ -685,29 +831,61 @@ fn extensions_info_usages_repos_and_json() {
     assert_eq!(y.get("apparentName"), None);
     let usages = y.get("extensionUsages").unwrap().as_arr().unwrap();
     assert_eq!(usages.len(), 2);
-    assert_eq!(usages[0].get("key").unwrap().as_str(), Some("@@//extensions:extensions%gradle"));
+    assert_eq!(
+        usages[0].get("key").unwrap().as_str(),
+        Some("@@//extensions:extensions%gradle")
+    );
     assert_eq!(usages[0].get("unexpanded").unwrap().as_bool(), Some(false));
-    assert_eq!(usages[0].get("used_repos").unwrap().as_arr().unwrap()[0].as_str(), Some("repo2"));
-    assert_eq!(usages[0].get("unused_repos").unwrap().as_arr().unwrap()[0].as_str(), Some("repo1"));
-    assert_eq!(usages[1].get("key").unwrap().as_str(), Some("@@//extensions:extensions%maven"));
+    assert_eq!(
+        usages[0].get("used_repos").unwrap().as_arr().unwrap()[0].as_str(),
+        Some("repo2")
+    );
+    assert_eq!(
+        usages[0].get("unused_repos").unwrap().as_arr().unwrap()[0].as_str(),
+        Some("repo1")
+    );
+    assert_eq!(
+        usages[1].get("key").unwrap().as_str(),
+        Some("@@//extensions:extensions%maven")
+    );
 }
 
 #[test]
 fn path_and_all_paths_in_complex_graph() {
     // <root> -> A -> B -> C -> D;  A -> E -> F -> C;  <root> -> G -> H;  <root> -> I -> D
     let insp = insp_of(vec![
-        aug_root("main", "1.0").dep("A", "1.0").dep("G", "1.0").dep("I", "1.0"),
-        aug(key("A", "1.0")).still_dependant(root()).dep("B", "1.0").dep("E", "1.0"),
-        aug(key("B", "1.0")).still_dependant(key("A", "1.0")).dep("C", "1.0"),
-        aug(key("C", "1.0")).still_dependant(key("B", "1.0")).still_dependant(key("F", "1.0")).dep("D", "1.0"),
-        aug(key("D", "1.0")).still_dependant(key("C", "1.0")).still_dependant(key("I", "1.0")),
-        aug(key("E", "1.0")).still_dependant(key("A", "1.0")).dep("F", "1.0"),
-        aug(key("F", "1.0")).still_dependant(key("E", "1.0")).dep("C", "1.0"),
+        aug_root("main", "1.0")
+            .dep("A", "1.0")
+            .dep("G", "1.0")
+            .dep("I", "1.0"),
+        aug(key("A", "1.0"))
+            .still_dependant(root())
+            .dep("B", "1.0")
+            .dep("E", "1.0"),
+        aug(key("B", "1.0"))
+            .still_dependant(key("A", "1.0"))
+            .dep("C", "1.0"),
+        aug(key("C", "1.0"))
+            .still_dependant(key("B", "1.0"))
+            .still_dependant(key("F", "1.0"))
+            .dep("D", "1.0"),
+        aug(key("D", "1.0"))
+            .still_dependant(key("C", "1.0"))
+            .still_dependant(key("I", "1.0")),
+        aug(key("E", "1.0"))
+            .still_dependant(key("A", "1.0"))
+            .dep("F", "1.0"),
+        aug(key("F", "1.0"))
+            .still_dependant(key("E", "1.0"))
+            .dep("C", "1.0"),
         aug(key("G", "1.0")).still_dependant(root()).dep("H", "1.0"),
         aug(key("H", "1.0")).still_dependant(key("G", "1.0")),
         aug(key("I", "1.0")).still_dependant(root()).dep("D", "1.0"),
     ]);
-    let opts = ModOptions { output: OutputFormat::Text, ..test_opts() };
+    let opts = ModOptions {
+        output: OutputFormat::Text,
+        ..test_opts()
+    };
     let run = |f: &dyn Fn(&mut ModExecutor)| {
         let mut ex = ModExecutor::new(&insp, None, &opts);
         f(&mut ex);
@@ -746,7 +924,12 @@ fn path_and_all_paths_in_complex_graph() {
     );
     assert_eq!(
         run(&|ex| ex.path(&[root()], &[d.clone(), g.clone()])),
-        text_out(&["<root> (main@1.0)", "├───G@1.0 # ", "└───I@1.0 ", "    └───D@1.0 # "])
+        text_out(&[
+            "<root> (main@1.0)",
+            "├───G@1.0 # ",
+            "└───I@1.0 ",
+            "    └───D@1.0 # "
+        ])
     );
     assert_eq!(
         run(&|ex| ex.all_paths(&[key("E", "1.0")], &[d.clone()])),
@@ -759,7 +942,10 @@ fn path_and_all_paths_in_complex_graph() {
         ])
     );
     // Messages for empty queries.
-    assert_eq!(run(&|ex| ex.path(&[root()], &[])), "No target modules specified.\n");
+    assert_eq!(
+        run(&|ex| ex.path(&[root()], &[])),
+        "No target modules specified.\n"
+    );
     assert_eq!(
         run(&|ex| ex.path(&[key("H", "1.0")], &[key("A", "1.0")])),
         "No path found to the specified target modules.\n"
@@ -770,21 +956,40 @@ fn path_and_all_paths_in_complex_graph() {
 fn graph_with_cycle() {
     let insp = insp_of(vec![
         aug_root("main", "1.0").dep("A", "1.0"),
-        aug(key("A", "1.0")).still_dependant(root()).still_dependant(key("B", "1.0")).dep("B", "1.0"),
-        aug(key("B", "1.0")).still_dependant(key("A", "1.0")).dep("A", "1.0"),
+        aug(key("A", "1.0"))
+            .still_dependant(root())
+            .still_dependant(key("B", "1.0"))
+            .dep("B", "1.0"),
+        aug(key("B", "1.0"))
+            .still_dependant(key("A", "1.0"))
+            .dep("A", "1.0"),
     ]);
-    let opts = ModOptions { cycles: true, ..test_opts() };
+    let opts = ModOptions {
+        cycles: true,
+        ..test_opts()
+    };
     let mut ex = ModExecutor::new(&insp, None, &opts);
     ex.graph(&[root()]);
     assert_eq!(
         ex.take_output(),
-        text_out(&["<root> (main@1.0)", "└───A@1.0 ", "    └───B@1.0 ", "        └───A@1.0 (cycle) "])
+        text_out(&[
+            "<root> (main@1.0)",
+            "└───A@1.0 ",
+            "    └───B@1.0 ",
+            "        └───A@1.0 (cycle) "
+        ])
     );
     // Without --cycles the back edge is dropped.
-    let opts = ModOptions { cycles: false, ..test_opts() };
+    let opts = ModOptions {
+        cycles: false,
+        ..test_opts()
+    };
     let mut ex = ModExecutor::new(&insp, None, &opts);
     ex.graph(&[root()]);
-    assert_eq!(ex.take_output(), text_out(&["<root> (main@1.0)", "└───A@1.0 ", "    └───B@1.0 "]));
+    assert_eq!(
+        ex.take_output(),
+        text_out(&["<root> (main@1.0)", "└───A@1.0 ", "    └───B@1.0 "])
+    );
 }
 
 #[test]
@@ -800,12 +1005,20 @@ fn graph_with_extension_filter_on_root() {
         vec![(maven.clone(), vec!["repo1".to_string()])],
         BTreeMap::new(),
     );
-    let opts = ModOptions { output: OutputFormat::Text, extension_info: ExtensionShow::All, ..test_opts() };
+    let opts = ModOptions {
+        output: OutputFormat::Text,
+        extension_info: ExtensionShow::All,
+        ..test_opts()
+    };
     let mut ex = ModExecutor::new(&insp, Some(MaybeCompleteExtSet::Set(vec![maven])), &opts);
     ex.graph(&[root()]);
     assert_eq!(
         ex.take_output(),
-        text_out(&["<root> (main@1.0)", "└───$@@//extensions:extensions%maven ", "    └───repo1"])
+        text_out(&[
+            "<root> (main@1.0)",
+            "└───$@@//extensions:extensions%maven ",
+            "    └───repo1"
+        ])
     );
 }
 
@@ -818,8 +1031,14 @@ fn graph_with_extension_filter_and_cycle() {
     };
     let mods = vec![
         aug_root("main", "1.0").dep("A", "1.0").dep("B", "1.0"),
-        aug(key("A", "1.0")).still_dependant(root()).still_dependant(key("B", "1.0")).dep("B", "1.0"),
-        aug(key("B", "1.0")).still_dependant(root()).still_dependant(key("A", "1.0")).dep("A", "1.0"),
+        aug(key("A", "1.0"))
+            .still_dependant(root())
+            .still_dependant(key("B", "1.0"))
+            .dep("B", "1.0"),
+        aug(key("B", "1.0"))
+            .still_dependant(root())
+            .still_dependant(key("A", "1.0"))
+            .dep("A", "1.0"),
     ];
     let (i1, u1) = usage(&ext, "MODULE.bazel:1:1", &[("repo1", "repo1")], vec![]);
     let (i2, u2) = usage(&ext, "MODULE.bazel:1:1", &[("repo2", "repo2")], vec![]);
@@ -868,10 +1087,19 @@ fn graph_with_extension_filter_and_cycle() {
 fn json_output_with_cycle() {
     let insp = insp_of(vec![
         aug_root("main", "1.0").dep("A", "1.0"),
-        aug(key("A", "1.0")).still_dependant(root()).still_dependant(key("B", "1.0")).dep("B", "1.0"),
-        aug(key("B", "1.0")).still_dependant(key("A", "1.0")).dep("A", "1.0"),
+        aug(key("A", "1.0"))
+            .still_dependant(root())
+            .still_dependant(key("B", "1.0"))
+            .dep("B", "1.0"),
+        aug(key("B", "1.0"))
+            .still_dependant(key("A", "1.0"))
+            .dep("A", "1.0"),
     ]);
-    let opts = ModOptions { cycles: true, output: OutputFormat::Json, ..test_opts() };
+    let opts = ModOptions {
+        cycles: true,
+        output: OutputFormat::Json,
+        ..test_opts()
+    };
     let mut ex = ModExecutor::new(&insp, None, &opts);
     ex.graph(&[root()]);
     let expected = r#"{
@@ -933,9 +1161,14 @@ fn add(reg: &Path, name: &str, ver: &str, body: &str) {
 /// Root depends on a, b, c@1.0; a -> c@1.0, b -> c@1.2 (so c@1.0 loses to c@1.2 by MVS).
 fn mvs_resolution(tag: &str) -> Resolution {
     let reg = tmpdir(&format!("modreg-{tag}"));
-    let url = format!("file://{}", reg.display());
+    let url = crate::file_url_for_path(&reg);
     add(&reg, "a", "1.0", "bazel_dep(name='c', version='1.0')");
-    add(&reg, "b", "1.0", "bazel_dep(name='c', version='1.2')\nbazel_dep(name='d', version='1.0')");
+    add(
+        &reg,
+        "b",
+        "1.0",
+        "bazel_dep(name='c', version='1.2')\nbazel_dep(name='d', version='1.0')",
+    );
     add(&reg, "c", "1.0", "");
     add(&reg, "c", "1.2", "");
     add(&reg, "d", "1.0", "");
@@ -975,26 +1208,48 @@ fn e2e_graph_and_deps() {
     // deps defaults to depth 2.
     assert_eq!(
         run(&res, "deps", &["b"], &opts).unwrap(),
-        text_out(&["<root> (root@_)", "└───b@1.0 ", "    ├───c@1.2 ", "    └───d@1.0 "])
+        text_out(&[
+            "<root> (root@_)",
+            "└───b@1.0 ",
+            "    ├───c@1.2 ",
+            "    └───d@1.0 "
+        ])
     );
     assert_eq!(
         run(&res, "deps", &[], &opts).unwrap(),
         text_out(&["<root> (root@_)"])
     );
     // An explicit --depth overrides the per-subcommand default.
-    let o1 = ModOptions { depth: 1, ..ModOptions::default() };
+    let o1 = ModOptions {
+        depth: 1,
+        ..ModOptions::default()
+    };
     assert_eq!(
         run(&res, "graph", &[], &o1).unwrap(),
         text_out(&["<root> (root@_)", "├───a@1.0 ", "├───b@1.0 ", "└───c@1.2 "])
     );
     // --include_unused adds the unused original dependency c@1.0.
-    let ou = ModOptions { include_unused: true, depth: 1, ..ModOptions::default() };
+    let ou = ModOptions {
+        include_unused: true,
+        depth: 1,
+        ..ModOptions::default()
+    };
     assert_eq!(
         run(&res, "graph", &[], &ou).unwrap(),
-        text_out(&["<root> (root@_)", "├───a@1.0 ", "├───b@1.0 ", "├───c@1.0 (unused) ", "└───c@1.2 "])
+        text_out(&[
+            "<root> (root@_)",
+            "├───a@1.0 ",
+            "├───b@1.0 ",
+            "├───c@1.0 (unused) ",
+            "└───c@1.2 "
+        ])
     );
     // ASCII charset.
-    let oa = ModOptions { charset: Charset::Ascii, depth: 1, ..ModOptions::default() };
+    let oa = ModOptions {
+        charset: Charset::Ascii,
+        depth: 1,
+        ..ModOptions::default()
+    };
     assert_eq!(
         run(&res, "graph", &[], &oa).unwrap(),
         text_out(&["<root> (root@_)", "|___a@1.0 ", "|___b@1.0 ", "|___c@1.2 "])
@@ -1004,7 +1259,10 @@ fn e2e_graph_and_deps() {
 #[test]
 fn e2e_explain_and_verbose() {
     let res = mvs_resolution("explain");
-    let o = ModOptions { verbose: true, ..ModOptions::default() };
+    let o = ModOptions {
+        verbose: true,
+        ..ModOptions::default()
+    };
     assert_eq!(
         run(&res, "explain", &["c"], &o).unwrap(),
         text_out(&[
@@ -1021,7 +1279,11 @@ fn e2e_explain_and_verbose() {
 #[test]
 fn e2e_explain_with_unused() {
     let res = mvs_resolution("explain-unused");
-    let ou = ModOptions { verbose: true, include_unused: true, ..ModOptions::default() };
+    let ou = ModOptions {
+        verbose: true,
+        include_unused: true,
+        ..ModOptions::default()
+    };
     assert_eq!(
         run(&res, "all_paths", &["c@1.0"], &ou).unwrap(),
         text_out(&[
@@ -1041,20 +1303,34 @@ fn e2e_path_and_all_paths() {
         run(&res, "all_paths", &["d"], &o).unwrap(),
         text_out(&["<root> (root@_)", "└───b@1.0 ", "    └───d@1.0 # "])
     );
-    assert_eq!(run(&res, "path", &["c"], &o).unwrap(), text_out(&["<root> (root@_)", "└───c@1.2 # "]));
+    assert_eq!(
+        run(&res, "path", &["c"], &o).unwrap(),
+        text_out(&["<root> (root@_)", "└───c@1.2 # "])
+    );
     // --from selects the start of the path search.
-    let of = ModOptions { from: vec!["b".into()], ..ModOptions::default() };
+    let of = ModOptions {
+        from: vec!["b".into()],
+        ..ModOptions::default()
+    };
     assert_eq!(
         run(&res, "path", &["d"], &of).unwrap(),
         text_out(&["<root> (root@_)", "└───b@1.0 ", "    └───d@1.0 # "])
     );
-    assert_eq!(run(&res, "path", &[], &o).unwrap(), "No target modules specified.\n");
+    assert_eq!(
+        run(&res, "path", &[], &o).unwrap(),
+        "No target modules specified.\n"
+    );
 }
 
 #[test]
 fn e2e_graphviz_and_json() {
     let res = mvs_resolution("fmt");
-    let og = ModOptions { output: OutputFormat::Graph, verbose: true, depth: 1, ..ModOptions::default() };
+    let og = ModOptions {
+        output: OutputFormat::Graph,
+        verbose: true,
+        depth: 1,
+        ..ModOptions::default()
+    };
     assert_eq!(
         run(&res, "graph", &[], &og).unwrap(),
         graph_out(&[
@@ -1068,16 +1344,27 @@ fn e2e_graphviz_and_json() {
             "}",
         ])
     );
-    let oj = ModOptions { output: OutputFormat::Json, verbose: true, depth: 1, ..ModOptions::default() };
+    let oj = ModOptions {
+        output: OutputFormat::Json,
+        verbose: true,
+        depth: 1,
+        ..ModOptions::default()
+    };
     let out = run(&res, "graph", &[], &oj).unwrap();
     let j = crate::json::Json::parse(&out).unwrap();
     assert_eq!(j.get("root").unwrap().as_bool(), Some(true));
     let deps = j.get("dependencies").unwrap().as_arr().unwrap();
     assert_eq!(deps.len(), 3);
     assert_eq!(deps[2].get("key").unwrap().as_str(), Some("c@1.2"));
-    assert_eq!(deps[2].get("originalVersion").unwrap().as_str(), Some("1.0"));
+    assert_eq!(
+        deps[2].get("originalVersion").unwrap().as_str(),
+        Some("1.0")
+    );
     // Faithful to Bazel: "resolutionReason" carries the changed version.
-    assert_eq!(deps[2].get("resolutionReason").unwrap().as_str(), Some("1.0"));
+    assert_eq!(
+        deps[2].get("resolutionReason").unwrap().as_str(),
+        Some("1.0")
+    );
     assert_eq!(deps[2].get("apparentName").unwrap().as_str(), Some("c"));
     assert!(out.ends_with("}\n"));
 }
@@ -1126,46 +1413,104 @@ fn e2e_errors() {
         e.message,
         "In module argument @zzz: No module with the apparent repo name @zzz exists in the dependency graph. Type 'bazel help mod' for syntax and help."
     );
-    let bad_out = ModOptions { output: OutputFormat::Graph, ..ModOptions::default() };
+    let bad_out = ModOptions {
+        output: OutputFormat::Graph,
+        ..ModOptions::default()
+    };
     let e = run(&res, "show_extension", &[], &bad_out).unwrap_err();
     assert_eq!(
         e.message,
         "Invalid --output 'graph' for the 'show_extension' subcommand. Only 'text' is supported. Type 'bazel help mod' for syntax and help."
     );
-    let bad_out = ModOptions { output: OutputFormat::StreamedProto, ..ModOptions::default() };
+    let bad_out = ModOptions {
+        output: OutputFormat::StreamedProto,
+        ..ModOptions::default()
+    };
     let e = run(&res, "graph", &[], &bad_out).unwrap_err();
     assert_eq!(
         e.message,
         "Invalid --output 'streamed_proto' for the 'graph' subcommand. Only 'text', 'json', and 'graph' are supported. Type 'bazel help mod' for syntax and help."
     );
-    let both = ModOptions { all_repos: true, all_visible_repos: true, ..ModOptions::default() };
+    let both = ModOptions {
+        all_repos: true,
+        all_visible_repos: true,
+        ..ModOptions::default()
+    };
     let e = run(&res, "show_repo", &[], &both).unwrap_err();
     assert_eq!(e.kind, ModErrorKind::TooManyArguments);
     assert_eq!(
         e.message,
         "the 'show_repo' command requires exactly one of --all_repos, --all_visible_repos, or a list of repo arguments. Type 'bazel help mod' for syntax and help."
     );
-    let e = run(&res, "graph", &[], &ModOptions { all_repos: true, ..ModOptions::default() }).unwrap_err();
+    let e = run(
+        &res,
+        "graph",
+        &[],
+        &ModOptions {
+            all_repos: true,
+            ..ModOptions::default()
+        },
+    )
+    .unwrap_err();
     assert_eq!(
         e.message,
         "the 'graph' command doesn't take the --all_repos option. Type 'bazel help mod' for syntax and help."
     );
     // Bad --from / --base_module values.
-    let e = run(&res, "graph", &[], &ModOptions { from: vec!["c@1.0".into()], ..ModOptions::default() }).unwrap_err();
-    assert!(e.message.starts_with("In --from [c@1.0] option: Module version c@1.0 is unused"), "{}", e.message);
-    let e = run(&res, "graph", &[], &ModOptions { base_module: "c@1.0".into(), ..ModOptions::default() }).unwrap_err();
-    assert!(e.message.starts_with("In --base_module c@1.0 option: Module version c@1.0 does not exist"), "{}", e.message);
-    assert!(e.message.contains("(Note that unused modules cannot be used here)"));
+    let e = run(
+        &res,
+        "graph",
+        &[],
+        &ModOptions {
+            from: vec!["c@1.0".into()],
+            ..ModOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        e.message
+            .starts_with("In --from [c@1.0] option: Module version c@1.0 is unused"),
+        "{}",
+        e.message
+    );
+    let e = run(
+        &res,
+        "graph",
+        &[],
+        &ModOptions {
+            base_module: "c@1.0".into(),
+            ..ModOptions::default()
+        },
+    )
+    .unwrap_err();
+    assert!(
+        e.message
+            .starts_with("In --base_module c@1.0 option: Module version c@1.0 does not exist"),
+        "{}",
+        e.message
+    );
+    assert!(e
+        .message
+        .contains("(Note that unused modules cannot be used here)"));
     // tidy / dump_repo_mapping are handled by the caller.
-    assert_eq!(run(&res, "tidy", &[], &o).unwrap_err().message, "tidy not handled here");
+    assert_eq!(
+        run(&res, "tidy", &[], &o).unwrap_err().message,
+        "tidy not handled here"
+    );
 }
 
 #[test]
 fn e2e_base_module_and_apparent_names() {
     let res = mvs_resolution("base");
     // Relative to b, @d is its dependency and `deps @d` works; relative to root it does not.
-    let ob = ModOptions { base_module: "b@1.0".into(), ..ModOptions::default() };
-    assert_eq!(run(&res, "deps", &["@d"], &ob).unwrap(), text_out(&["<root> (root@_)", "└╌╌╌d@1.0 "]));
+    let ob = ModOptions {
+        base_module: "b@1.0".into(),
+        ..ModOptions::default()
+    };
+    assert_eq!(
+        run(&res, "deps", &["@d"], &ob).unwrap(),
+        text_out(&["<root> (root@_)", "└╌╌╌d@1.0 "])
+    );
     assert!(run(&res, "deps", &["@d"], &ModOptions::default()).is_err());
     // @@canonical names.
     assert_eq!(
@@ -1193,13 +1538,16 @@ impl RepoSpecProvider for TestProvider {
 
 impl ExtensionInfoProvider for TestProvider {
     fn generated_repos(&self, id: &ExtensionId) -> Option<Vec<String>> {
-        self.repos.iter().find(|(i, _)| i == id).map(|(_, r)| r.clone())
+        self.repos
+            .iter()
+            .find(|(i, _)| i == id)
+            .map(|(_, r)| r.clone())
     }
 }
 
 fn ext_resolution(tag: &str) -> Resolution {
     let reg = tmpdir(&format!("modreg-ext-{tag}"));
-    let url = format!("file://{}", reg.display());
+    let url = crate::file_url_for_path(&reg);
     add(&reg, "b", "1.0", "bazel_dep(name='a', version='1.0')");
     add(&reg, "a", "1.0", "");
     let ws = tmpdir(&format!("modws-ext-{tag}"));
@@ -1223,11 +1571,18 @@ fn ext_resolution(tag: &str) -> Resolution {
 #[test]
 fn e2e_show_extension_and_extension_info() {
     let res = ext_resolution("t0");
-    let ext_id = res.extension_ids().into_iter().find(|i| i.name == "myext").unwrap();
+    let ext_id = res
+        .extension_ids()
+        .into_iter()
+        .find(|i| i.name == "myext")
+        .unwrap();
     assert_eq!(ext_id.bzl_file, "@@b+//:ext.bzl");
     let provider = TestProvider {
         specs: BTreeMap::new(),
-        repos: vec![(ext_id.clone(), vec!["hub".into(), "repo2".into(), "other".into()])],
+        repos: vec![(
+            ext_id.clone(),
+            vec!["hub".into(), "repo2".into(), "other".into()],
+        )],
     };
     let o = ModOptions::default();
     let args = vec!["@b//:ext.bzl%myext".to_string()];
@@ -1240,13 +1595,21 @@ fn e2e_show_extension_and_extension_info() {
     assert!(usage_part.starts_with(" <root> from "), "{usage_part}");
     assert!(usage_part.contains("MODULE.bazel"), "{usage_part}");
     assert!(
-        usage_part.contains("\nmyext.dep(name=\"x\", coords=[\"junit\", \"guava\"], flag=True, n=3)\n"),
+        usage_part
+            .contains("\nmyext.dep(name=\"x\", coords=[\"junit\", \"guava\"], flag=True, n=3)\n"),
         "{usage_part}"
     );
-    assert!(usage_part.ends_with("use_repo(\n  myext,\n  \"hub\",\n  alias=\"repo2\",\n)\n\n"), "{usage_part}");
+    assert!(
+        usage_part.ends_with("use_repo(\n  myext,\n  \"hub\",\n  alias=\"repo2\",\n)\n\n"),
+        "{usage_part}"
+    );
 
     // Innate extensions (use_repo_rule) are printed as use_repo_rule calls.
-    let innate = res.extension_ids().into_iter().find(|i| i.is_innate()).unwrap();
+    let innate = res
+        .extension_ids()
+        .into_iter()
+        .find(|i| i.is_innate())
+        .unwrap();
     assert_eq!(innate.name, "@b//:r.bzl myrule");
     let iarg = format!("//:MODULE.bazel%{}", innate.name);
     let _ = iarg;
@@ -1254,7 +1617,10 @@ fn e2e_show_extension_and_extension_info() {
         &res,
         "show_extension",
         &["@b//:ext.bzl%myext".to_string()],
-        &ModOptions { extension_usages: vec!["<root>".into()], ..ModOptions::default() },
+        &ModOptions {
+            extension_usages: vec!["<root>".into()],
+            ..ModOptions::default()
+        },
         &provider,
         &provider,
     )
@@ -1262,14 +1628,29 @@ fn e2e_show_extension_and_extension_info() {
     assert!(out.contains("## Usage in <root> from "));
 
     // Unknown extension.
-    let e = run_mod(&res, "show_extension", &["@b//:nope.bzl%nope".to_string()], &o, &provider, &provider)
-        .unwrap_err();
+    let e = run_mod(
+        &res,
+        "show_extension",
+        &["@b//:nope.bzl%nope".to_string()],
+        &o,
+        &provider,
+        &provider,
+    )
+    .unwrap_err();
     assert_eq!(
         e.message,
         "No extension @@b+//:nope.bzl%nope exists in the dependency graph. Type 'bazel help mod' for syntax and help."
     );
     // Bad extension argument.
-    let e = run_mod(&res, "show_extension", &["nolabel".to_string()], &o, &provider, &provider).unwrap_err();
+    let e = run_mod(
+        &res,
+        "show_extension",
+        &["nolabel".to_string()],
+        &o,
+        &provider,
+        &provider,
+    )
+    .unwrap_err();
     assert_eq!(
         e.message,
         "In extension argument nolabel: Invalid argument nolabel: missing .bzl label. Type 'bazel help mod' for syntax and help."
@@ -1279,12 +1660,19 @@ fn e2e_show_extension_and_extension_info() {
 #[test]
 fn e2e_graph_with_extension_info() {
     let res = ext_resolution("t1");
-    let ext_id = res.extension_ids().into_iter().find(|i| i.name == "myext").unwrap();
+    let ext_id = res
+        .extension_ids()
+        .into_iter()
+        .find(|i| i.name == "myext")
+        .unwrap();
     let provider = TestProvider {
         specs: BTreeMap::new(),
         repos: vec![(ext_id, vec!["hub".into(), "repo2".into(), "other".into()])],
     };
-    let og = ModOptions { extension_info: ExtensionShow::All, ..ModOptions::default() };
+    let og = ModOptions {
+        extension_info: ExtensionShow::All,
+        ..ModOptions::default()
+    };
     let out = run_mod(&res, "graph", &[], &og, &provider, &provider).unwrap();
     assert_eq!(
         out,
@@ -1307,9 +1695,16 @@ fn e2e_graph_with_extension_info() {
         ..ModOptions::default()
     };
     let out = run_mod(&res, "graph", &[], &of, &provider, &provider).unwrap();
-    assert_eq!(out, text_out(&["<root> (root@_)", "└───$@@b+//:ext.bzl%myext "]).replace("└───$", "└───$"));
+    assert_eq!(
+        out,
+        text_out(&["<root> (root@_)", "└───$@@b+//:ext.bzl%myext "])
+    );
     // An empty filter list means "all extensions".
-    let oe = ModOptions { extension_filter: Some(vec![]), extension_info: ExtensionShow::Usages, ..ModOptions::default() };
+    let oe = ModOptions {
+        extension_filter: Some(vec![]),
+        extension_info: ExtensionShow::Usages,
+        ..ModOptions::default()
+    };
     let out = run_mod(&res, "graph", &[], &oe, &provider, &provider).unwrap();
     assert!(out.contains("$@@b+//:ext.bzl%myext"), "{out}");
 }
@@ -1317,20 +1712,46 @@ fn e2e_graph_with_extension_info() {
 #[test]
 fn e2e_show_repo() {
     let res = mvs_resolution("showrepo");
-    let ext_id = ExtensionId { bzl_file: "@@b+//:ext.bzl".into(), name: "myext".into(), isolation_key: None };
+    let ext_id = ExtensionId {
+        bzl_file: "@@b+//:ext.bzl".into(),
+        name: "myext".into(),
+        isolation_key: None,
+    };
     let mut specs = BTreeMap::new();
     specs.insert(
         "b++myext+hub".to_string(),
         RepoSpec::new(
             "@@b+//:ext.bzl",
             "data_repo",
-            vec![("name".into(), AttrVal::Str("hub".into())), ("data".into(), AttrVal::Str("x".into()))],
+            vec![
+                ("name".into(), AttrVal::Str("hub".into())),
+                ("data".into(), AttrVal::Str("x".into())),
+            ],
         ),
     );
-    let provider = TestProvider { specs, repos: vec![(ext_id, vec!["hub".into()])] };
+    let provider = TestProvider {
+        specs,
+        repos: vec![(ext_id, vec!["hub".into()])],
+    };
     let o = ModOptions::default();
-    let out = run_mod(&res, "show_repo", &["a".to_string()], &o, &provider, &provider).unwrap();
-    let spec = res.dep_graph.iter().find(|(k, _)| k.name == "a").unwrap().1.repo_spec.clone().unwrap();
+    let out = run_mod(
+        &res,
+        "show_repo",
+        &["a".to_string()],
+        &o,
+        &provider,
+        &provider,
+    )
+    .unwrap();
+    let spec = res
+        .dep_graph
+        .iter()
+        .find(|(k, _)| k.name == "a")
+        .unwrap()
+        .1
+        .repo_spec
+        .clone()
+        .unwrap();
     let mut expected = String::from("## a@1.0:\n");
     expected.push_str(
         "load(\"@@bazel_tools//tools/build_defs/repo:http.bzl\", \"http_archive\")\nhttp_archive(\n  name = \"a+\",\n",
@@ -1340,39 +1761,105 @@ fn e2e_show_repo() {
     }
     expected.push_str(")\n\n");
     assert_eq!(out, expected);
-    assert!(expected.contains("  urls = [\"https://example.com/x.tgz\"],\n"), "{expected}");
+    assert!(
+        expected.contains("  urls = [\"https://example.com/x.tgz\"],\n"),
+        "{expected}"
+    );
 
-    let out = run_mod(&res, "show_repo", &["@@c+".to_string()], &o, &provider, &provider).unwrap();
+    let out = run_mod(
+        &res,
+        "show_repo",
+        &["@@c+".to_string()],
+        &o,
+        &provider,
+        &provider,
+    )
+    .unwrap();
     assert!(out.starts_with("## @@c+:\nload("), "{out}");
-    let e = run_mod(&res, "show_repo", &["c@1.0".to_string()], &o, &provider, &provider).unwrap_err();
+    let e = run_mod(
+        &res,
+        "show_repo",
+        &["c@1.0".to_string()],
+        &o,
+        &provider,
+        &provider,
+    )
+    .unwrap_err();
     assert_eq!(
         e.message,
         "In repo argument c@1.0: Module version c@1.0 does not exist, available versions: [c@1.2]. (Note that unused modules cannot be used here). Type 'bazel help mod' for syntax and help."
     );
     // The root has no repo definition.
-    let e = run_mod(&res, "show_repo", &["<root>".to_string()], &o, &provider, &provider).unwrap_err();
-    assert_eq!(e.message, "In repo argument <root>: no such repo. Type 'bazel help mod' for syntax and help.");
+    let e = run_mod(
+        &res,
+        "show_repo",
+        &["<root>".to_string()],
+        &o,
+        &provider,
+        &provider,
+    )
+    .unwrap_err();
+    assert_eq!(
+        e.message,
+        "In repo argument <root>: no such repo. Type 'bazel help mod' for syntax and help."
+    );
     // Builtin repos are printed as overrides.
-    let out = run_mod(&res, "show_repo", &["@@bazel_tools".to_string()], &o, &provider, &provider).unwrap();
-    assert_eq!(out, "## @@bazel_tools:\nBuiltin or overridden repo located at: /install/embedded_tools\n\n");
+    let out = run_mod(
+        &res,
+        "show_repo",
+        &["@@bazel_tools".to_string()],
+        &o,
+        &provider,
+        &provider,
+    )
+    .unwrap();
+    assert_eq!(
+        out,
+        "## @@bazel_tools:\nBuiltin or overridden repo located at: /install/embedded_tools\n\n"
+    );
     // Apparent names are resolved relative to --base_module.
-    let ob = ModOptions { base_module: "b@1.0".into(), ..ModOptions::default() };
-    let out = run_mod(&res, "show_repo", &["@d".to_string()], &ob, &provider, &provider).unwrap();
+    let ob = ModOptions {
+        base_module: "b@1.0".into(),
+        ..ModOptions::default()
+    };
+    let out = run_mod(
+        &res,
+        "show_repo",
+        &["@d".to_string()],
+        &ob,
+        &provider,
+        &provider,
+    )
+    .unwrap();
     assert!(out.starts_with("## @d:\nload("), "{out}");
-    let e = run_mod(&res, "show_repo", &["@zzz".to_string()], &o, &provider, &provider).unwrap_err();
+    let e = run_mod(
+        &res,
+        "show_repo",
+        &["@zzz".to_string()],
+        &o,
+        &provider,
+        &provider,
+    )
+    .unwrap_err();
     assert_eq!(
         e.message,
         "In repo argument @zzz: No repo visible as zzz from @main repository (Note that unused modules cannot be used here). Type 'bazel help mod' for syntax and help."
     );
     // --all_visible_repos lists everything visible from the base module, under apparent names.
-    let oa = ModOptions { all_visible_repos: true, ..ModOptions::default() };
+    let oa = ModOptions {
+        all_visible_repos: true,
+        ..ModOptions::default()
+    };
     let out = run_mod(&res, "show_repo", &[], &oa, &provider, &provider).unwrap();
     let headers: Vec<&str> = out.lines().filter(|l| l.starts_with("## ")).collect();
     for h in ["## @a:", "## @b:", "## @c:", "## @bazel_tools:"] {
         assert!(headers.contains(&h), "{headers:?}");
     }
     // --all_repos lists canonical names, excluding the main repo.
-    let oall = ModOptions { all_repos: true, ..ModOptions::default() };
+    let oall = ModOptions {
+        all_repos: true,
+        ..ModOptions::default()
+    };
     let out = run_mod(&res, "show_repo", &[], &oall, &provider, &provider).unwrap();
     let headers: Vec<&str> = out.lines().filter(|l| l.starts_with("## ")).collect();
     for h in ["## @@a+:", "## @@b+:", "## @@c+:", "## @@d+:"] {
@@ -1380,30 +1867,70 @@ fn e2e_show_repo() {
     }
     assert!(!headers.contains(&"## @@:"));
     // Streamed proto and jsonproto outputs are supported.
-    let op_json = ModOptions { output: OutputFormat::StreamedJsonProto, ..ModOptions::default() };
-    let json_out = run_mod(&res, "show_repo", &["a".to_string()], &op_json, &provider, &provider).unwrap();
+    let op_json = ModOptions {
+        output: OutputFormat::StreamedJsonProto,
+        ..ModOptions::default()
+    };
+    let json_out = run_mod(
+        &res,
+        "show_repo",
+        &["a".to_string()],
+        &op_json,
+        &provider,
+        &provider,
+    )
+    .unwrap();
     assert!(json_out.contains("canonicalName"));
 
-    let op_proto = ModOptions { output: OutputFormat::StreamedProto, ..ModOptions::default() };
-    let proto_out = run_mod(&res, "show_repo", &["a".to_string()], &op_proto, &provider, &provider).unwrap();
+    let op_proto = ModOptions {
+        output: OutputFormat::StreamedProto,
+        ..ModOptions::default()
+    };
+    let proto_out = run_mod(
+        &res,
+        "show_repo",
+        &["a".to_string()],
+        &op_proto,
+        &provider,
+        &provider,
+    )
+    .unwrap();
     assert!(!proto_out.is_empty());
 }
 
 #[test]
 fn e2e_show_repo_extension_generated() {
     let res = ext_resolution("t2");
-    let ext_id = res.extension_ids().into_iter().find(|i| i.name == "myext").unwrap();
+    let ext_id = res
+        .extension_ids()
+        .into_iter()
+        .find(|i| i.name == "myext")
+        .unwrap();
     let mut specs = BTreeMap::new();
     specs.insert(
         "b++myext+hub".to_string(),
         RepoSpec::new(
             "@@b+//:ext.bzl",
             "data_repo",
-            vec![("name".into(), AttrVal::Str("hub".into())), ("data".into(), AttrVal::Str("x".into()))],
+            vec![
+                ("name".into(), AttrVal::Str("hub".into())),
+                ("data".into(), AttrVal::Str("x".into())),
+            ],
         ),
     );
-    let provider = TestProvider { specs, repos: vec![(ext_id, vec!["hub".into()])] };
-    let out = run_mod(&res, "show_repo", &["@hub".to_string()], &ModOptions::default(), &provider, &provider).unwrap();
+    let provider = TestProvider {
+        specs,
+        repos: vec![(ext_id, vec!["hub".into()])],
+    };
+    let out = run_mod(
+        &res,
+        "show_repo",
+        &["@hub".to_string()],
+        &ModOptions::default(),
+        &provider,
+        &provider,
+    )
+    .unwrap();
     assert_eq!(
         out,
         "## @hub:\nload(\"@@b+//:ext.bzl\", \"data_repo\")\ndata_repo(\n  name = \"b++myext+hub\",\n  _original_name = \"hub\",\n  data = \"x\",\n)\n\n"
@@ -1452,11 +1979,13 @@ fn mod_options_from_parsed_flags() {
     assert_eq!(d.charset, Charset::Utf8);
 }
 
-
 #[test]
 fn option_parsing_errors_have_no_help_suffix_and_bazel_enum_lists() {
     // `While parsing option ...` failures come from the options parser: no `Type 'bazel help mod'` suffix.
-    let o = ModOptions { extension_filter: Some(vec!["nonexist".into()]), ..ModOptions::default() };
+    let o = ModOptions {
+        extension_filter: Some(vec!["nonexist".into()]),
+        ..ModOptions::default()
+    };
     let res = mvs_resolution("optparse");
     let e = run(&res, "graph", &[], &o).unwrap_err();
     assert_eq!(e.message, "While parsing option --extension_filter=nonexist: Invalid argument nonexist: missing .bzl label");
@@ -1465,7 +1994,19 @@ fn option_parsing_errors_have_no_help_suffix_and_bazel_enum_lists() {
 
 #[test]
 fn enum_lists_are_joined_like_bazel() {
-    assert_eq!(super::join_english_list(&["text", "json", "graph", "streamed_proto", "streamed_jsonproto"]), "text, json, graph, streamed_proto or streamed_jsonproto");
-    assert_eq!(super::join_english_list(&["utf8", "ascii"]), "utf8 or ascii");
+    assert_eq!(
+        super::join_english_list(&[
+            "text",
+            "json",
+            "graph",
+            "streamed_proto",
+            "streamed_jsonproto"
+        ]),
+        "text, json, graph, streamed_proto or streamed_jsonproto"
+    );
+    assert_eq!(
+        super::join_english_list(&["utf8", "ascii"]),
+        "utf8 or ascii"
+    );
     assert_eq!(super::join_english_list(&["a"]), "a");
 }

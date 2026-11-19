@@ -76,10 +76,7 @@ pub enum AssignOp {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompClause {
-    For {
-        var_names: Vec<Pattern>,
-        iter: Expr,
-    },
+    For { var_names: Vec<Pattern>, iter: Expr },
     If(Expr),
 }
 
@@ -109,14 +106,8 @@ pub fn pattern_names(ps: &[Pattern]) -> Vec<String> {
 pub enum AssignTarget {
     Ident(String),
     Tuple(Vec<Pattern>),
-    Index {
-        target: Box<Expr>,
-        index: Box<Expr>,
-    },
-    Attr {
-        target: Box<Expr>,
-        attr: String,
-    },
+    Index { target: Box<Expr>, index: Box<Expr> },
+    Attr { target: Box<Expr>, attr: String },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -136,10 +127,18 @@ pub struct ParamDef {
 #[derive(Default)]
 pub struct ModuleEnv {
     pub globals: std::sync::Mutex<std::collections::BTreeMap<String, crate::types::value::Value>>,
+    /// Names bound at module top level (`def`, `=`, `load` when global), used to report
+    /// `global variable '<name>' is referenced before assignment.` if read before assignment.
+    pub declared_globals: std::sync::Mutex<std::collections::HashSet<String>>,
     /// For a `.bzl` module: the package it lives in and the repository mapping of its
     /// repository, so that `Label("//x:y")` in a function body resolves against the
     /// defining repository even when the function is called later (e.g. at analysis time).
-    pub label_ctx: std::sync::Mutex<Option<(zel_cmdline::PackageIdentifier, zel_cmdline::RepositoryMapping)>>,
+    pub label_ctx: std::sync::Mutex<
+        Option<(
+            zel_cmdline::PackageIdentifier,
+            zel_cmdline::RepositoryMapping,
+        )>,
+    >,
     /// Label of the `.bzl` file as Bazel prints it in `<function f from LABEL>` (`//:e.bzl`, `@@repo+//p:f.bzl`).
     pub label_string: std::sync::Mutex<Option<String>>,
 }
@@ -158,21 +157,30 @@ impl PartialEq for ModuleEnv {
 
 /// A shared, mutable scope of local variables. Frames own one; closures capture them so that inner
 /// functions see (and observe later assignments to) variables of their enclosing functions.
-pub type Scope = Arc<std::sync::Mutex<std::collections::BTreeMap<String, crate::types::value::Value>>>;
+pub type Scope =
+    Arc<std::sync::Mutex<std::collections::BTreeMap<String, crate::types::value::Value>>>;
 
 /// The enclosing function scopes captured by a nested `def`/`lambda`, innermost first.
 #[derive(Clone, Default)]
-pub struct ClosureEnv(pub Vec<Scope>);
+pub struct ClosureEnv {
+    pub scopes: Vec<Scope>,
+    pub local_names: Vec<Arc<std::collections::HashSet<String>>>,
+}
 
 impl std::fmt::Debug for ClosureEnv {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ClosureEnv({})", self.0.len())
+        write!(f, "ClosureEnv({})", self.scopes.len())
     }
 }
 
 impl PartialEq for ClosureEnv {
     fn eq(&self, other: &Self) -> bool {
-        self.0.len() == other.0.len() && self.0.iter().zip(&other.0).all(|(a, b)| Arc::ptr_eq(a, b))
+        self.scopes.len() == other.scopes.len()
+            && self
+                .scopes
+                .iter()
+                .zip(&other.scopes)
+                .all(|(a, b)| Arc::ptr_eq(a, b))
     }
 }
 

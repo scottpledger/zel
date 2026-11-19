@@ -71,7 +71,7 @@ fn test_typed_converters_full_suite() {
     // Integers / Long / Double
     assert_eq!(convert_int("42").unwrap(), 42);
     assert_eq!(convert_long("10000000000").unwrap(), 10000000000);
-    assert_eq!(convert_double("3.1415").unwrap(), 3.1415);
+    assert_eq!(convert_double("2.5").unwrap(), 2.5);
 
     // Duration
     assert_eq!(convert_duration("0").unwrap(), Duration::ZERO);
@@ -79,10 +79,19 @@ fn test_typed_converters_full_suite() {
     assert_eq!(convert_duration("10m").unwrap(), Duration::from_secs(600));
     assert_eq!(convert_duration("2h").unwrap(), Duration::from_secs(7200));
     assert_eq!(convert_duration("1d").unwrap(), Duration::from_secs(86400));
-    assert_eq!(convert_duration("250ms").unwrap(), Duration::from_millis(250));
-    assert_eq!(convert_duration("100ns").unwrap(), Duration::from_nanos(100));
+    assert_eq!(
+        convert_duration("250ms").unwrap(),
+        Duration::from_millis(250)
+    );
+    assert_eq!(
+        convert_duration("100ns").unwrap(),
+        Duration::from_nanos(100)
+    );
     // Unlike RemoteDurationConverter, `DurationConverter` requires a unit (except for `0`).
-    assert_eq!(convert_duration("120").unwrap_err().message, "Illegal duration '120'.");
+    assert_eq!(
+        convert_duration("120").unwrap_err().message,
+        "Illegal duration '120'."
+    );
     assert!(convert_duration("xyz").is_err());
 
     // ByteSize
@@ -154,27 +163,35 @@ fn test_residue_and_target_loss_fix() {
 #[test]
 fn test_boolean_flag_syntax_variety() {
     // --flag
-    let p1 = ParsedCommandOptions::parse_for_command("build", &["--subcommands".to_string()]).unwrap();
+    let p1 =
+        ParsedCommandOptions::parse_for_command("build", &["--subcommands".to_string()]).unwrap();
     assert!(p1.subcommands);
 
     // --noflag
-    let p2 = ParsedCommandOptions::parse_for_command("build", &["--nosubcommands".to_string()]).unwrap();
+    let p2 =
+        ParsedCommandOptions::parse_for_command("build", &["--nosubcommands".to_string()]).unwrap();
     assert!(!p2.subcommands);
 
     // --flag=true / 1 / yes
-    let p3 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=true".to_string()]).unwrap();
+    let p3 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=true".to_string()])
+        .unwrap();
     assert!(p3.subcommands);
-    let p4 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=1".to_string()]).unwrap();
+    let p4 =
+        ParsedCommandOptions::parse_for_command("build", &["--subcommands=1".to_string()]).unwrap();
     assert!(p4.subcommands);
-    let p5 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=yes".to_string()]).unwrap();
+    let p5 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=yes".to_string()])
+        .unwrap();
     assert!(p5.subcommands);
 
     // --flag=false / 0 / no
-    let p6 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=false".to_string()]).unwrap();
+    let p6 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=false".to_string()])
+        .unwrap();
     assert!(!p6.subcommands);
-    let p7 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=0".to_string()]).unwrap();
+    let p7 =
+        ParsedCommandOptions::parse_for_command("build", &["--subcommands=0".to_string()]).unwrap();
     assert!(!p7.subcommands);
-    let p8 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=no".to_string()]).unwrap();
+    let p8 = ParsedCommandOptions::parse_for_command("build", &["--subcommands=no".to_string()])
+        .unwrap();
     assert!(!p8.subcommands);
 
     // Short flag -k and -k-
@@ -195,15 +212,24 @@ fn test_starlark_flags_and_aliasing() {
     ];
     let parsed = ParsedCommandOptions::parse_for_command("build", &args).unwrap();
     assert_eq!(
-        parsed.starlark_options.get("//tools/build:custom_flag").unwrap(),
+        parsed
+            .starlark_options
+            .get("//tools/build:custom_flag")
+            .unwrap(),
         "opt_value"
     );
     assert_eq!(
-        parsed.starlark_options.get("@rules_cc//cc:linkstatic").unwrap(),
+        parsed
+            .starlark_options
+            .get("@rules_cc//cc:linkstatic")
+            .unwrap(),
         "true"
     );
     assert_eq!(
-        parsed.starlark_options.get("//settings:debug_mode").unwrap(),
+        parsed
+            .starlark_options
+            .get("//settings:debug_mode")
+            .unwrap(),
         "false"
     );
     assert_eq!(
@@ -221,7 +247,10 @@ fn test_rc_command_inheritance() {
     );
     rc.sections.insert(
         "build".to_string(),
-        vec![("-c".to_string(), "rc".to_string()), ("opt".to_string(), "rc".to_string())],
+        vec![
+            ("-c".to_string(), "rc".to_string()),
+            ("opt".to_string(), "rc".to_string()),
+        ],
     );
     rc.sections.insert(
         "test".to_string(),
@@ -232,7 +261,13 @@ fn test_rc_command_inheritance() {
     let (expanded, _) = expand_command_args(&rc, "test", &["//test:t1".to_string()]).unwrap();
     assert_eq!(
         expanded,
-        vec!["--verbose_failures", "-c", "opt", "--test_output=all", "//test:t1"]
+        vec![
+            "--verbose_failures",
+            "-c",
+            "opt",
+            "--test_output=all",
+            "//test:t1"
+        ]
     );
 
     let parsed = ParsedCommandOptions::parse_for_command("test", &expanded).unwrap();
@@ -251,18 +286,29 @@ fn test_config_expansion_diamond_and_cycles() {
     );
     rc.sections.insert(
         "build:confA".to_string(),
-        vec![("--config=shared".to_string(), "rc".to_string()), ("-c".to_string(), "rc".to_string()), ("opt".to_string(), "rc".to_string())],
+        vec![
+            ("--config=shared".to_string(), "rc".to_string()),
+            ("-c".to_string(), "rc".to_string()),
+            ("opt".to_string(), "rc".to_string()),
+        ],
     );
     rc.sections.insert(
         "build:confB".to_string(),
-        vec![("--config=shared".to_string(), "rc".to_string()), ("--subcommands".to_string(), "rc".to_string())],
+        vec![
+            ("--config=shared".to_string(), "rc".to_string()),
+            ("--subcommands".to_string(), "rc".to_string()),
+        ],
     );
     rc.sections.insert(
         "build:diamond".to_string(),
-        vec![("--config=confA".to_string(), "rc".to_string()), ("--config=confB".to_string(), "rc".to_string())],
+        vec![
+            ("--config=confA".to_string(), "rc".to_string()),
+            ("--config=confB".to_string(), "rc".to_string()),
+        ],
     );
 
-    let (expanded, _) = expand_command_args(&rc, "build", &["--config=diamond".to_string()]).unwrap();
+    let (expanded, _) =
+        expand_command_args(&rc, "build", &["--config=diamond".to_string()]).unwrap();
     assert_eq!(
         expanded,
         vec!["--jobs=32", "-c", "opt", "--jobs=32", "--subcommands"]
@@ -312,7 +358,9 @@ fn test_rc_imports_and_loop_detection() {
     .unwrap();
 
     let mut config = BazelrcConfig::default();
-    config.parse_file(&root_rc, Some(&ws), &fs, "7.0.0").unwrap();
+    config
+        .parse_file(&root_rc, Some(&ws), &fs, "7.0.0")
+        .unwrap();
 
     let (expanded, _) = expand_command_args(&config, "build", &[]).unwrap();
     assert_eq!(expanded, vec!["--subcommands", "--jobs=16", "-c", "opt"]);
@@ -331,7 +379,12 @@ fn test_rc_imports_and_loop_detection() {
 
     let mut loop_config = BazelrcConfig::default();
     let err = loop_config
-        .parse_file(&ws.get_relative_str("loop1.bazelrc"), Some(&ws), &fs, "7.0.0")
+        .parse_file(
+            &ws.get_relative_str("loop1.bazelrc"),
+            Some(&ws),
+            &fs,
+            "7.0.0",
+        )
         .unwrap_err();
     assert!(err.message.contains("Import loop detected:"));
 }
@@ -342,11 +395,8 @@ fn test_rc_try_import_and_version_conditional() {
     let ws = PathFragment::create("/workspace");
     fs.create_directory_and_parents(&ws).unwrap();
 
-    fs.write_file(
-        &ws.get_relative_str("extra.bazelrc"),
-        b"build --jobs=64\n",
-    )
-    .unwrap();
+    fs.write_file(&ws.get_relative_str("extra.bazelrc"), b"build --jobs=64\n")
+        .unwrap();
 
     let rc_content = "\
 try-import %workspace%/does_not_exist.bazelrc
@@ -356,7 +406,13 @@ build -c opt
 ";
     let mut config = BazelrcConfig::default();
     config
-        .parse_str(rc_content, "/workspace/.bazelrc", &ws, &fs, &mut HashSet::new())
+        .parse_str(
+            rc_content,
+            "/workspace/.bazelrc",
+            &ws,
+            &fs,
+            &mut HashSet::new(),
+        )
         .unwrap();
 
     let (expanded, _) = expand_command_args(&config, "build", &[]).unwrap();
@@ -369,24 +425,33 @@ fn test_rc_discovery_order_and_ignore_all_rc() {
     let ws = PathFragment::create("/workspace");
     fs.create_directory_and_parents(&ws).unwrap();
 
-    fs.write_file(&ws.get_relative_str(".bazelrc"), b"build --jobs=8\n").unwrap();
-    fs.write_file(&ws.get_relative_str("custom.bazelrc"), b"build --jobs=16\n").unwrap();
+    fs.write_file(&ws.get_relative_str(".bazelrc"), b"build --jobs=8\n")
+        .unwrap();
+    fs.write_file(&ws.get_relative_str("custom.bazelrc"), b"build --jobs=16\n")
+        .unwrap();
 
     let mut startup = StartupOptions::default();
-    startup.bazelrc_files.push("/workspace/custom.bazelrc".to_string());
+    startup
+        .bazelrc_files
+        .push("/workspace/custom.bazelrc".to_string());
 
     let cwd = PathFragment::create("/workspace");
-    let cfg = discover_and_load_rc_files(&mut startup, Some(&ws), None, &cwd, &fs, "7.0.0").unwrap();
+    let cfg =
+        discover_and_load_rc_files(&mut startup, Some(&ws), None, &cwd, &fs, "7.0.0").unwrap();
 
     let (expanded, _) = expand_command_args(&cfg, "build", &[]).unwrap();
     assert_eq!(expanded, vec!["--jobs=8", "--jobs=16"]);
 
     // Test --ignore_all_rc_files ignores all rc files (including --bazelrc) matching Bazel
-    let mut ignore_startup = StartupOptions::default();
-    ignore_startup.ignore_all_rc_files = true;
-    ignore_startup.bazelrc_files.push("/workspace/custom.bazelrc".to_string());
+    let mut ignore_startup = StartupOptions {
+        ignore_all_rc_files: true,
+        bazelrc_files: vec!["/workspace/custom.bazelrc".to_string()],
+        ..Default::default()
+    };
 
-    let ignore_cfg = discover_and_load_rc_files(&mut ignore_startup, Some(&ws), None, &cwd, &fs, "7.0.0").unwrap();
+    let ignore_cfg =
+        discover_and_load_rc_files(&mut ignore_startup, Some(&ws), None, &cwd, &fs, "7.0.0")
+            .unwrap();
     let (ignore_expanded, _) = expand_command_args(&ignore_cfg, "build", &[]).unwrap();
     assert_eq!(ignore_expanded, Vec::<String>::new());
 }
@@ -415,7 +480,11 @@ flag_policies {
 
     let mut parsed = ParsedCommandOptions::parse_for_command(
         "test",
-        &["--test_output=summary".to_string(), "-c".to_string(), "dbg".to_string()],
+        &[
+            "--test_output=summary".to_string(),
+            "-c".to_string(),
+            "dbg".to_string(),
+        ],
     )
     .unwrap();
 
@@ -442,14 +511,16 @@ flag_policies {
 "#;
     let policy = InvocationPolicy::parse(text_policy).unwrap();
 
-    let mut parsed = ParsedCommandOptions::parse_for_command(
-        "build",
-        &["--subcommands".to_string()],
-    )
-    .unwrap();
+    let mut parsed =
+        ParsedCommandOptions::parse_for_command("build", &["--subcommands".to_string()]).unwrap();
 
-    let err = parsed.apply_invocation_policy(&policy, "build").unwrap_err();
-    assert_eq!(err.message, "Subcommands are strictly disallowed by company policy");
+    let err = parsed
+        .apply_invocation_policy(&policy, "build")
+        .unwrap_err();
+    assert_eq!(
+        err.message,
+        "Subcommands are strictly disallowed by company policy"
+    );
 }
 
 #[test]
@@ -475,12 +546,22 @@ fn test_rc_relative_bazelrc_against_cwd() {
     let ws = PathFragment::create("/workspace");
     let cwd = PathFragment::create("/workspace/sub");
     fs.create_directory_and_parents(&cwd).unwrap();
-    fs.write_file(&cwd.get_relative_str("my.rc"), b"build --verbose_failures\n").unwrap();
+    fs.write_file(
+        &cwd.get_relative_str("my.rc"),
+        b"build --verbose_failures\n",
+    )
+    .unwrap();
 
     let mut startup = StartupOptions::default();
     startup.bazelrc_files.push("my.rc".to_string());
-    let config = discover_and_load_rc_files(&mut startup, Some(&ws), None, &cwd, &fs, "0.0.1").unwrap();
-    assert!(config.sections.get("build").unwrap().iter().any(|(flag, _)| flag == "--verbose_failures"));
+    let config =
+        discover_and_load_rc_files(&mut startup, Some(&ws), None, &cwd, &fs, "0.0.1").unwrap();
+    assert!(config
+        .sections
+        .get("build")
+        .unwrap()
+        .iter()
+        .any(|(flag, _)| flag == "--verbose_failures"));
 }
 
 #[test]
@@ -489,11 +570,21 @@ fn test_rc_unknown_startup_option_fatal() {
     let ws = PathFragment::create("/workspace");
     let cwd = PathFragment::create("/workspace");
     fs.create_directory_and_parents(&ws).unwrap();
-    fs.write_file(&ws.get_relative_str(".bazelrc"), b"startup --nosuchstartupflag\n").unwrap();
+    fs.write_file(
+        &ws.get_relative_str(".bazelrc"),
+        b"startup --nosuchstartupflag\n",
+    )
+    .unwrap();
 
     let mut startup = StartupOptions::default();
-    let err = discover_and_load_rc_files(&mut startup, Some(&ws), None, &cwd, &fs, "0.0.1").unwrap_err();
-    assert!(err.message.contains("FATAL: Unknown startup option: '--nosuchstartupflag'"), "{}", err.message);
+    let err =
+        discover_and_load_rc_files(&mut startup, Some(&ws), None, &cwd, &fs, "0.0.1").unwrap_err();
+    assert!(
+        err.message
+            .contains("FATAL: Unknown startup option: '--nosuchstartupflag'"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]
@@ -502,25 +593,216 @@ fn test_rc_only_bazelrc_read_no_zelrc() {
     let ws = PathFragment::create("/workspace");
     let cwd = PathFragment::create("/workspace");
     fs.create_directory_and_parents(&ws).unwrap();
-    fs.write_file(&ws.get_relative_str(".zelrc"), b"build --verbose_failures\n").unwrap();
+    fs.write_file(
+        &ws.get_relative_str(".zelrc"),
+        b"build --verbose_failures\n",
+    )
+    .unwrap();
 
     let mut startup = StartupOptions::default();
-    let config = discover_and_load_rc_files(&mut startup, Some(&ws), None, &cwd, &fs, "0.0.1").unwrap();
-    assert!(config.sections.get("build").is_none());
+    let config =
+        discover_and_load_rc_files(&mut startup, Some(&ws), None, &cwd, &fs, "0.0.1").unwrap();
+    assert!(!config.sections.contains_key("build"));
 }
 
 #[test]
 fn test_canonicalize_flags_invocation_policy_malformed() {
     let args = vec!["--invocation_policy=malformed".to_string()];
     let err = canonicalize_flags(&args).unwrap_err();
-    assert!(err.message.contains("Malformed value of --invocation_policy: malformed"), "{}", err.message);
+    assert!(
+        err.message
+            .contains("Malformed value of --invocation_policy: malformed"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]
 fn test_canonicalize_flags_options_before_double_dash_not_canonicalized() {
     let args = vec!["--keep_going".to_string()];
     let canon = canonicalize_flags(&args).unwrap();
-    assert!(canon.is_empty(), "Options before double-dash must not be canonicalized: {canon:?}");
+    assert!(
+        canon.is_empty(),
+        "Options before double-dash must not be canonicalized: {canon:?}"
+    );
 }
 
+#[test]
+fn test_enable_platform_specific_config_post_expansion_and_last_wins() {
+    let plat = get_platform_name();
+    let mut rc = BazelrcConfig::default();
+    rc.sections.insert(
+        format!("build:{plat}"),
+        vec![("--jobs=42".to_string(), "rc".to_string())],
+    );
+    rc.sections.insert(
+        "build:enable_plat".to_string(),
+        vec![(
+            "--enable_platform_specific_config=yes".to_string(),
+            "rc".to_string(),
+        )],
+    );
+    rc.sections.insert(
+        "build:disable_plat".to_string(),
+        vec![(
+            "--noenable_platform_specific_config".to_string(),
+            "rc".to_string(),
+        )],
+    );
 
+    // Config body enables platform-specific config
+    let (expanded, _) =
+        expand_command_args(&rc, "build", &["--config=enable_plat".to_string()]).unwrap();
+    let parsed = ParsedCommandOptions::parse_for_command("build", &expanded).unwrap();
+    assert_eq!(parsed.jobs, 42, "{expanded:?}");
+
+    // Later --noenable_platform_specific_config disables earlier enable
+    let (expanded2, _) = expand_command_args(
+        &rc,
+        "build",
+        &[
+            "--config=enable_plat".to_string(),
+            "--noenable_platform_specific_config".to_string(),
+        ],
+    )
+    .unwrap();
+    let parsed2 = ParsedCommandOptions::parse_for_command("build", &expanded2).unwrap();
+    assert_ne!(parsed2.jobs, 42, "{expanded2:?}");
+
+    // Config body disables earlier enable
+    let (expanded3, _) = expand_command_args(
+        &rc,
+        "build",
+        &[
+            "--enable_platform_specific_config=t".to_string(),
+            "--config=disable_plat".to_string(),
+        ],
+    )
+    .unwrap();
+    let parsed3 = ParsedCommandOptions::parse_for_command("build", &expanded3).unwrap();
+    assert_ne!(parsed3.jobs, 42, "{expanded3:?}");
+
+    // Explicit --config=<plat> + --enable_platform_specific_config does not warn duplicate <plat>
+    let (_exp4, warns4) = expand_command_args(
+        &rc,
+        "build",
+        &[
+            format!("--config={plat}"),
+            "--enable_platform_specific_config".to_string(),
+        ],
+    )
+    .unwrap();
+    assert!(
+        !warns4.iter().any(|w| w.contains("expanded more than once")),
+        "{warns4:?}"
+    );
+}
+
+#[test]
+fn test_edit_options_priorities_and_commands() {
+    // coverage forces --collect_code_coverage at SoftwareRequirement (beats --nocollect_code_coverage)
+    // and sets --test_timeout=300,600,1200,3600 at ComputedDefault (overridden by CLI --test_timeout=10)
+    let cov = ParsedCommandOptions::parse_for_command(
+        "coverage",
+        &[
+            "--nocollect_code_coverage".to_string(),
+            "--test_timeout=10".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(cov.get_bool("collect_code_coverage"), Some(true));
+    assert_eq!(cov.parsed_options["test_timeout"].raw_values, vec!["10"]);
+
+    let cov_default = ParsedCommandOptions::parse_for_command("coverage", &[]).unwrap();
+    assert_eq!(
+        cov_default.parsed_options["test_timeout"].raw_values,
+        vec!["300,600,1200,3600"]
+    );
+
+    // test --test_output=streamed forces SoftwareRequirement sharding/strategy
+    let streamed = ParsedCommandOptions::parse_for_command(
+        "test",
+        &[
+            "--test_output=streamed".to_string(),
+            "--test_sharding_strategy=explicit".to_string(),
+            "--test_strategy=standalone".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(streamed.get_str("test_sharding_strategy"), Some("disabled"));
+    assert_eq!(streamed.get_str("test_strategy"), Some("exclusive"));
+
+    // cquery forces nobuild, build_manual_tests, noexpand_test_suites, nobuild_tests_only, output=transitions
+    let cq = ParsedCommandOptions::parse_for_command(
+        "cquery",
+        &[
+            "--transitions=lite".to_string(),
+            "--show_config_fragments=direct".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(cq.get_bool("build"), Some(false));
+    assert_eq!(cq.get_bool("build_manual_tests"), Some(true));
+    assert_eq!(cq.get_bool("expand_test_suites"), Some(false));
+    assert_eq!(cq.get_bool("build_tests_only"), Some(false));
+    assert_eq!(cq.get_str("output"), Some("transitions"));
+    assert_eq!(
+        cq.get_str("include_config_fragments_provider"),
+        Some("direct")
+    );
+
+    // aquery forces --nobuild
+    let aq = ParsedCommandOptions::parse_for_command("aquery", &[]).unwrap();
+    assert_eq!(aq.get_bool("build"), Some(false));
+}
+
+#[test]
+fn test_starlark_flag_syntax_and_command_gating() {
+    // Non-analyzing commands reject --//...
+    for cmd in ["version", "info", "clean", "query"] {
+        let err = ParsedCommandOptions::parse_for_command(cmd, &["--//pkg:flag=val".to_string()])
+            .unwrap_err();
+        assert!(
+            err.message.contains("Unrecognized option"),
+            "{cmd}: {}",
+            err.message
+        );
+    }
+
+    // --no//pkg:flag=value keeps `no//pkg:flag` as the name
+    let parsed = ParsedCommandOptions::parse_for_command(
+        "build",
+        &[
+            "--no//pkg:flag=val".to_string(),
+            "--//pkg:bare".to_string(),
+            "5".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(parsed.raw_starlark_args[0].flag_name, "no//pkg:flag");
+    assert_eq!(parsed.raw_starlark_args[0].value.as_deref(), Some("val"));
+    assert!(!parsed.raw_starlark_args[0].negated);
+    assert_eq!(parsed.raw_starlark_args[1].flag_name, "//pkg:bare");
+    assert_eq!(parsed.raw_starlark_args[1].value, None);
+    assert_eq!(
+        parsed.raw_starlark_args[1].next_non_flag_token.as_deref(),
+        Some("5")
+    );
+}
+
+#[test]
+fn test_extract_client_env_both_forms_and_empty_when_absent() {
+    assert!(ParsedCommandOptions::extract_client_env(&["//a:b".to_string()]).is_empty());
+    let env = ParsedCommandOptions::extract_client_env(&[
+        "--client_env=A=1=2".to_string(),
+        "--client_env".to_string(),
+        "B=".to_string(),
+        "--client_env".to_string(),
+        "A=override".to_string(),
+        "--".to_string(),
+        "--client_env=C=ignored".to_string(),
+    ]);
+    assert_eq!(env.get("A").map(String::as_str), Some("override"));
+    assert_eq!(env.get("B").map(String::as_str), Some(""));
+    assert!(!env.contains_key("C"));
+}

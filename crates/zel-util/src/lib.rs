@@ -175,8 +175,11 @@ impl DetailedExitCode {
         match code {
             None => 0,
             Some(c) => {
-                (if c.exit_code.infrastructure_failure { 4 } else { 2 })
-                    + i32::from(c.failure_detail.is_some())
+                (if c.exit_code.infrastructure_failure {
+                    4
+                } else {
+                    2
+                }) + i32::from(c.failure_detail.is_some())
             }
         }
     }
@@ -195,7 +198,9 @@ impl DetailedExitCode {
 
     /// Serialized `FailureDetail` proto for `--failure_detail_out` / `failure_detail.rawproto`.
     pub fn failure_detail_rawproto(&self) -> Option<Vec<u8>> {
-        self.failure_detail.as_ref().map(FailureDetail::encode_to_vec)
+        self.failure_detail
+            .as_ref()
+            .map(FailureDetail::encode_to_vec)
     }
 }
 
@@ -575,7 +580,10 @@ mod exit_code_tests {
         // Ties keep the first.
         let a = DetailedExitCode::from_exit_code(ExitCode::BUILD_FAILURE);
         let b = DetailedExitCode::from_exit_code(ExitCode::TESTS_FAILED);
-        assert_eq!(DetailedExitCode::choose_more_important(Some(a.clone()), Some(b)), Some(a));
+        assert_eq!(
+            DetailedExitCode::choose_more_important(Some(a.clone()), Some(b)),
+            Some(a)
+        );
     }
 
     #[test]
@@ -584,7 +592,10 @@ mod exit_code_tests {
         let d = DetailedExitCode::of_detail(fd).unwrap();
         assert_eq!(d.exit_code.code, 1);
         let fd = FailureDetail::new("m", Category::Interrupted(InterruptedCode::Interrupted));
-        assert_eq!(DetailedExitCode::of_detail(fd).unwrap().exit_code, ExitCode::INTERRUPTED);
+        assert_eq!(
+            DetailedExitCode::of_detail(fd).unwrap().exit_code,
+            ExitCode::INTERRUPTED
+        );
         assert!(d.failure_detail_rawproto().is_some());
     }
 }

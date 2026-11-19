@@ -65,14 +65,14 @@ fn record_dir(p: &PathFragment) {
     });
 }
 
-/// Converts an absolute path into a `RootedPath` rooted at `/` (canonical form for recorded
-/// dependencies).
+/// Converts an absolute path into a `RootedPath` rooted at its drive/filesystem root (`/` or `C:/`).
 pub fn rooted(p: &PathFragment) -> Option<RootedPath> {
     if !p.is_absolute() {
         return None;
     }
-    let rel = p.path_string().trim_start_matches('/').to_string();
-    RootedPath::to_rooted_path(PathFragment::create("/"), PathFragment::create(&rel)).ok()
+    let dlen = p.drive_str_length();
+    let (root, rel) = p.path_string().split_at(dlen);
+    RootedPath::to_rooted_path(PathFragment::create(root), PathFragment::create(rel)).ok()
 }
 
 /// Skyframe dependency keys for everything in `rec`.
@@ -96,8 +96,37 @@ pub struct RecordingFileSystem {
 }
 
 impl RecordingFileSystem {
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(inner: Arc<dyn FileSystem>) -> Arc<dyn FileSystem> {
         Arc::new(Self { inner })
+    }
+
+    fn record_with_symlinks(&self, path: &PathFragment, follow: bool) {
+        record_file(path);
+        if !follow {
+            return;
+        }
+        let mut cur = path.clone();
+        for _ in 0..32 {
+            let Ok(st) = self.inner.stat(&cur, false) else {
+                break;
+            };
+            if !st.is_symlink {
+                break;
+            }
+            let Ok(target) = self.inner.read_symbolic_link(&cur) else {
+                break;
+            };
+            let next = if target.is_absolute() {
+                target
+            } else if let Some(parent) = cur.parent_directory() {
+                parent.get_relative(&target)
+            } else {
+                break;
+            };
+            record_file(&next);
+            cur = next;
+        }
     }
 }
 
@@ -106,11 +135,11 @@ impl FileSystem for RecordingFileSystem {
         self.inner.digest_hash_function()
     }
     fn stat(&self, path: &PathFragment, follow_symlinks: bool) -> io::Result<FileStatus> {
-        record_file(path);
+        self.record_with_symlinks(path, follow_symlinks);
         self.inner.stat(path, follow_symlinks)
     }
     fn read_file(&self, path: &PathFragment) -> io::Result<Vec<u8>> {
-        record_file(path);
+        self.record_with_symlinks(path, true);
         self.inner.read_file(path)
     }
     fn write_file(&self, path: &PathFragment, content: &[u8]) -> io::Result<()> {
@@ -132,7 +161,11 @@ impl FileSystem for RecordingFileSystem {
     fn rename(&self, source: &PathFragment, target: &PathFragment) -> io::Result<()> {
         self.inner.rename(source, target)
     }
-    fn create_symbolic_link(&self, link_path: &PathFragment, target: &PathFragment) -> io::Result<()> {
+    fn create_symbolic_link(
+        &self,
+        link_path: &PathFragment,
+        target: &PathFragment,
+    ) -> io::Result<()> {
         self.inner.create_symbolic_link(link_path, target)
     }
     fn read_symbolic_link(&self, link_path: &PathFragment) -> io::Result<PathFragment> {
@@ -149,8 +182,10 @@ mod tests {
     #[test]
     fn records_reads_stats_and_listings_per_thread() {
         let fs = Arc::new(InMemoryFileSystem::default());
-        fs.create_directory_and_parents(&PathFragment::create("/w/a")).unwrap();
-        fs.write_file(&PathFragment::create("/w/a/f"), b"x").unwrap();
+        fs.create_directory_and_parents(&PathFragment::create("/w/a"))
+            .unwrap();
+        fs.write_file(&PathFragment::create("/w/a/f"), b"x")
+            .unwrap();
         let rfs = RecordingFileSystem::new(fs);
         // Not recording: nothing is captured.
         let _ = rfs.read_file(&PathFragment::create("/w/a/f"));
@@ -170,5 +205,42 @@ mod tests {
         assert_eq!(rec.dirs.len(), 1);
         assert_eq!(dependency_keys(&rec).len(), 3);
         assert!(finish_recording().files.is_empty());
+    }
+
+    #[test]
+    fn records_symlink_target_as_file_state() {
+        let fs = Arc::new(InMemoryFileSystem::default());
+        fs.create_directory_and_parents(&PathFragment::create("/w/ext"))
+            .unwrap();
+        fs.create_directory_and_parents(&PathFragment::create("/w/real"))
+            .unwrap();
+        fs.write_file(
+            &PathFragment::create("/w/real/BUILD.bazel"),
+            b"filegroup(name='a')",
+        )
+        .unwrap();
+        fs.create_symbolic_link(
+            &PathFragment::create("/w/ext/BUILD.bazel"),
+            &PathFragment::create("/w/real/BUILD.bazel"),
+        )
+        .unwrap();
+        let rfs = RecordingFileSystem::new(fs);
+        start_recording();
+        let _ = rfs
+            .read_file(&PathFragment::create("/w/ext/BUILD.bazel"))
+            .unwrap();
+        let rec = finish_recording();
+        assert!(
+            rec.files
+                .contains(&PathFragment::create("/w/ext/BUILD.bazel")),
+            "{:?}",
+            rec.files
+        );
+        assert!(
+            rec.files
+                .contains(&PathFragment::create("/w/real/BUILD.bazel")),
+            "{:?}",
+            rec.files
+        );
     }
 }

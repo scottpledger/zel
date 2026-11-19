@@ -30,10 +30,20 @@ fn handle(req: &WorkRequest, count: u64) -> WorkResponse {
         std::thread::sleep(std::time::Duration::from_millis(sleep));
     }
     if let Some(o) = out {
-        let base = if req.sandbox_dir.is_empty() { o.clone() } else { format!("{}/{}", req.sandbox_dir, o) };
+        let base = if req.sandbox_dir.is_empty() {
+            o.clone()
+        } else {
+            format!("{}/{}", req.sandbox_dir, o)
+        };
         let _ = std::fs::write(
             base,
-            format!("{} {} {} inputs={}\n", std::process::id(), count, text, req.inputs.len()),
+            format!(
+                "{} {} {} inputs={}\n",
+                std::process::id(),
+                count,
+                text,
+                req.inputs.len()
+            ),
         );
     }
     WorkResponse {

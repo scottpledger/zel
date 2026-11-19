@@ -85,7 +85,10 @@ pub fn terminal_columns() -> Option<usize> {
             return Some(c as usize);
         }
     }
-    std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()).filter(|c| *c > 0)
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .filter(|c| *c > 0)
 }
 
 /// Whether `$TERM` indicates a terminal without cursor control (`dumb`/unset).

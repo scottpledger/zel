@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKSPACE_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 TEST_TMP="$(mktemp -d "${TMPDIR:-/tmp}/zel-pkg-test.XXXXXX")"
-trap 'rm -rf "${TEST_TMP}"' EXIT
+trap 'if [[ -n "${ZEL_BIN:-}" && -x "${ZEL_BIN:-}" ]]; then "${ZEL_BIN}" --output_base="${OB_DIR}" shutdown >/dev/null 2>&1 || true; fi; rm -rf "${TEST_TMP}"' EXIT
 
 READ_VERSION="$(cat "${WORKSPACE_ROOT}/.bazelversion" 2>/dev/null | tr -d '[:space:]' || echo "9.3.2")"
 REL_DIR="${TEST_TMP}/release"
@@ -88,8 +88,13 @@ if command -v bazelisk &>/dev/null; then
 fi
 if command -v "${BAZELISK_BIN}" &>/dev/null; then
   BAZELISK_OUT="$(cd "${WORKSPACE_ROOT}" && USE_BAZEL_VERSION="${BAZEL_BIN}" "${BAZELISK_BIN}" --output_base="${OB_DIR}" info release)"
-  if [[ "${BAZELISK_OUT}" != *"zel"* ]]; then
-    echo "FAIL: Bazelisk did not invoke zel: ${BAZELISK_OUT}" >&2
+  if [[ "${BAZELISK_OUT}" != "release ${READ_VERSION}" ]]; then
+    echo "FAIL: Bazelisk info release expected 'release ${READ_VERSION}', got '${BAZELISK_OUT}'" >&2
+    exit 1
+  fi
+  SRV_PID="$(cat "${OB_DIR}/server/server.pid.txt" 2>/dev/null || true)"
+  if [[ -z "${SRV_PID}" ]] || ! ps -p "${SRV_PID}" -o args= | grep -q -- "--internal_server_daemon"; then
+    echo "FAIL: Bazelisk did not invoke zel daemon on ${OB_DIR}" >&2
     exit 1
   fi
 fi
@@ -165,11 +170,18 @@ if command -v bazelisk &>/dev/null || command -v bazel &>/dev/null; then
     exit 1
   fi
 
-  BZK_REL_OUT="$(cd "${BZK_WS}" && BAZELISK_HOME="${CACHE_HOME}" "${BAZELISK_CMD}" --output_base="${OB_DIR}" info release)"
-  if [[ "${BZK_REL_OUT}" != *"zel"* ]]; then
-    echo "FAIL: Expected zel release info from bazelisk, got '${BZK_REL_OUT}'" >&2
+  BZK_OB="${TEST_TMP}/bzk_ob"
+  BZK_REL_OUT="$(cd "${BZK_WS}" && BAZELISK_HOME="${CACHE_HOME}" "${BAZELISK_CMD}" --output_base="${BZK_OB}" info release)"
+  if [[ "${BZK_REL_OUT}" != "release ${READ_VERSION}" ]]; then
+    echo "FAIL: Expected 'release ${READ_VERSION}' from bazelisk, got '${BZK_REL_OUT}'" >&2
     exit 1
   fi
+  BZK_PID="$(cat "${BZK_OB}/server/server.pid.txt" 2>/dev/null || true)"
+  if [[ -z "${BZK_PID}" ]] || ! ps -p "${BZK_PID}" -o args= | grep -q -- "--internal_server_daemon"; then
+    echo "FAIL: Bazelisk did not invoke zel daemon on ${BZK_OB}" >&2
+    exit 1
+  fi
+  "${ZEL_BIN}" --output_base="${BZK_OB}" shutdown >/dev/null 2>&1 || true
 fi
 
 # 6. Verify self-hosting query on `//crates:all`

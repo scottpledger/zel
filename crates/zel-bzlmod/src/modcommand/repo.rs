@@ -34,9 +34,17 @@ fn unambiguous_label(label: &str) -> String {
 pub fn print_starlark(key: &str, def: &RepoDefinition, _external_directory: &str) -> String {
     let mut out = String::new();
     match def {
-        RepoDefinition::Found { name, original_name, spec } => {
+        RepoDefinition::Found {
+            name,
+            original_name,
+            spec,
+        } => {
             out.push_str(&format!("## {key}:\n"));
-            out.push_str(&format!("load(\"{}\", \"{}\")\n", unambiguous_label(&spec.bzl_file), spec.rule_name));
+            out.push_str(&format!(
+                "load(\"{}\", \"{}\")\n",
+                unambiguous_label(&spec.bzl_file),
+                spec.rule_name
+            ));
             out.push_str(&format!("{}(\n", spec.rule_name));
             out.push_str(&format!("  name = \"{name}\",\n"));
             if let Some(o) = original_name {
@@ -52,7 +60,9 @@ pub fn print_starlark(key: &str, def: &RepoDefinition, _external_directory: &str
             out.push('\n');
         }
         RepoDefinition::RepoOverride { path } => {
-            out.push_str(&format!("## {key}:\nBuiltin or overridden repo located at: {path}\n\n"));
+            out.push_str(&format!(
+                "## {key}:\nBuiltin or overridden repo located at: {path}\n\n"
+            ));
         }
     }
     out
@@ -62,14 +72,18 @@ pub fn print_starlark(key: &str, def: &RepoDefinition, _external_directory: &str
 pub fn serialize_repo_definition_as_proto(
     key: &str,
     def: &RepoDefinition,
-    external_directory: &str,
+    _external_directory: &str,
 ) -> Option<zel_proto::dynamic::Msg> {
     match def {
-        RepoDefinition::Found { name, original_name, spec } => {
+        RepoDefinition::Found {
+            name,
+            original_name,
+            spec,
+        } => {
             let mut pb = zel_proto::dynamic::Msg::new("blaze_query.Repository");
             pb.set_str("canonical_name", name);
             pb.set_str("repo_rule_name", &spec.rule_name);
-            pb.set_str("repo_rule_bzl_label", &unambiguous_label(&spec.bzl_file));
+            pb.set_str("repo_rule_bzl_label", unambiguous_label(&spec.bzl_file));
 
             if key.starts_with('@') {
                 if !key.starts_with("@@") {
@@ -114,7 +128,8 @@ pub fn serialize_repo_definition_as_proto(
                     crate::model::AttrVal::Dict(d) => {
                         attr_pb.set_enum("type", "STRING_DICT");
                         for (dk, dv) in d {
-                            let mut entry = zel_proto::dynamic::Msg::new("blaze_query.StringDictEntry");
+                            let mut entry =
+                                zel_proto::dynamic::Msg::new("blaze_query.StringDictEntry");
                             entry.set_str("key", dk);
                             entry.set_str("value", dv.as_str().unwrap_or(""));
                             attr_pb.set_msg("string_dict_value", entry);
@@ -178,14 +193,21 @@ mod tests {
             "@bazel_tools//tools/build_defs/repo:http.bzl",
             "http_archive",
             vec![
-                ("urls".into(), AttrVal::List(vec![AttrVal::Str("https://x/y.tgz".into())])),
+                (
+                    "urls".into(),
+                    AttrVal::List(vec![AttrVal::Str("https://x/y.tgz".into())]),
+                ),
                 ("integrity".into(), AttrVal::Str("sha256-abc".into())),
                 ("strip_prefix".into(), AttrVal::Str("".into())),
                 ("remote_patches".into(), AttrVal::Dict(vec![])),
                 ("remote_patch_strip".into(), AttrVal::Int(0)),
             ],
         );
-        let def = RepoDefinition::Found { name: "bar+".into(), original_name: None, spec };
+        let def = RepoDefinition::Found {
+            name: "bar+".into(),
+            original_name: None,
+            spec,
+        };
         assert_eq!(
             print_starlark("@bar_from_foo2", &def, "/ob/external"),
             "## @bar_from_foo2:\n\
@@ -196,13 +218,23 @@ mod tests {
 
     #[test]
     fn prints_extension_repo_with_original_name_and_override() {
-        let spec = RepoSpec::new("@@ext+//:ext.bzl", "data_repo", vec![("data".into(), AttrVal::Str("äöü€🌱".into()))]);
-        let def = RepoDefinition::Found { name: "ext++ext+repo3".into(), original_name: Some("repo3".into()), spec };
+        let spec = RepoSpec::new(
+            "@@ext+//:ext.bzl",
+            "data_repo",
+            vec![("data".into(), AttrVal::Str("äöü€🌱".into()))],
+        );
+        let def = RepoDefinition::Found {
+            name: "ext++ext+repo3".into(),
+            original_name: Some("repo3".into()),
+            spec,
+        };
         assert_eq!(
             print_starlark("@my_repo3", &def, "/e/"),
             "## @my_repo3:\nload(\"@@ext+//:ext.bzl\", \"data_repo\")\ndata_repo(\n  name = \"ext++ext+repo3\",\n  _original_name = \"repo3\",\n  data = \"äöü€🌱\",\n)\n\n"
         );
-        let ov = RepoDefinition::RepoOverride { path: "/x/embedded_tools".into() };
+        let ov = RepoDefinition::RepoOverride {
+            path: "/x/embedded_tools".into(),
+        };
         assert_eq!(
             print_starlark("@bazel_tools", &ov, "/e"),
             "## @bazel_tools:\nBuiltin or overridden repo located at: /x/embedded_tools\n\n"

@@ -80,20 +80,32 @@ impl AugmentedModule {
     }
 
     pub fn dep(&self, repo_name: &str) -> Option<&ModuleKey> {
-        self.deps.iter().find(|(n, _)| n == repo_name).map(|(_, k)| k)
+        self.deps
+            .iter()
+            .find(|(n, _)| n == repo_name)
+            .map(|(_, k)| k)
     }
 
     pub fn unused_dep(&self, repo_name: &str) -> Option<&ModuleKey> {
-        self.unused_deps.iter().find(|(n, _)| n == repo_name).map(|(_, k)| k)
+        self.unused_deps
+            .iter()
+            .find(|(n, _)| n == repo_name)
+            .map(|(_, k)| k)
     }
 
     /// The repo name under which this module refers to `key` (`deps().inverse().get(key)`).
     pub fn repo_name_of_dep(&self, key: &ModuleKey) -> Option<&str> {
-        self.deps.iter().find(|(_, k)| k == key).map(|(n, _)| n.as_str())
+        self.deps
+            .iter()
+            .find(|(_, k)| k == key)
+            .map(|(n, _)| n.as_str())
     }
 
     pub fn reason(&self, repo_name: &str) -> Option<ResolutionReason> {
-        self.dep_reasons.iter().find(|(n, _)| n == repo_name).map(|(_, r)| *r)
+        self.dep_reasons
+            .iter()
+            .find(|(n, _)| n == repo_name)
+            .map(|(_, r)| *r)
     }
 }
 
@@ -107,7 +119,9 @@ fn cmp_label(a: &str, b: &str) -> Ordering {
     }
     let (ra, pa, na) = split(a);
     let (rb, pb, nb) = split(b);
-    ra.cmp(rb).then_with(|| pa.cmp(&pb)).then_with(|| na.cmp(nb))
+    ra.cmp(rb)
+        .then_with(|| pa.cmp(&pb))
+        .then_with(|| na.cmp(nb))
 }
 
 /// `ModuleExtensionId.LEXICOGRAPHIC_COMPARATOR`.
@@ -230,7 +244,10 @@ fn put<V>(v: &mut Vec<(String, V)>, k: &str, val: V) {
 
 impl Inspector {
     /// Builds the inspector from a resolution (`computeAugmentedGraph` + extension tables).
-    pub fn from_resolution(res: &Resolution, extension_repos: Vec<(ExtensionId, Vec<String>)>) -> Inspector {
+    pub fn from_resolution(
+        res: &Resolution,
+        extension_repos: Vec<(ExtensionId, Vec<String>)>,
+    ) -> Inspector {
         let used: Vec<&ModuleKey> = res.dep_graph.keys.iter().collect();
         let mut builders: HashMap<ModuleKey, Builder> = HashMap::new();
         for (parent_key, parent) in res.unpruned_dep_graph.iter() {
@@ -254,7 +271,9 @@ impl Inspector {
                 let original_module = res.unpruned_dep_graph.get(&original_key);
                 let module = res.unpruned_dep_graph.get(key);
 
-                let ob = builders.entry(original_key.clone()).or_insert_with(|| Builder::new(&original_key));
+                let ob = builders
+                    .entry(original_key.clone())
+                    .or_insert_with(|| Builder::new(&original_key));
                 if let Some(om) = original_module {
                     ob.name = om.name.clone();
                     ob.version = om.version.clone();
@@ -281,9 +300,15 @@ impl Inspector {
                     ResolutionReason::Original
                 } else {
                     match res.overrides.get(&key.name) {
-                        Some(ModuleOverride::SingleVersion { .. }) => ResolutionReason::SingleVersionOverride,
-                        Some(ModuleOverride::MultipleVersion { .. }) => ResolutionReason::MultipleVersionOverride,
-                        Some(ModuleOverride::NonRegistry(_)) => ResolutionReason::NonRegistryOverride,
+                        Some(ModuleOverride::SingleVersion { .. }) => {
+                            ResolutionReason::SingleVersionOverride
+                        }
+                        Some(ModuleOverride::MultipleVersion { .. }) => {
+                            ResolutionReason::MultipleVersionOverride
+                        }
+                        Some(ModuleOverride::NonRegistry(_)) => {
+                            ResolutionReason::NonRegistryOverride
+                        }
                         None => ResolutionReason::MinimalVersionSelection,
                     }
                 };
@@ -299,7 +324,10 @@ impl Inspector {
             builders.into_iter().map(|(k, b)| (k, b.build())).collect();
         Inspector::assemble(
             dep_graph,
-            res.canonical_repo_names.iter().map(|(c, k)| (k.clone(), c.clone())).collect(),
+            res.canonical_repo_names
+                .iter()
+                .map(|(c, k)| (k.clone(), c.clone()))
+                .collect(),
             res.extension_usages.clone(),
             extension_repos,
             res.extension_unique_names.clone(),
@@ -316,16 +344,29 @@ impl Inspector {
     ) -> Inspector {
         let mut modules_index: BTreeMap<String, Vec<ModuleKey>> = BTreeMap::new();
         for m in dep_graph.values() {
-            modules_index.entry(m.name.clone()).or_default().push(m.key.clone());
+            modules_index
+                .entry(m.name.clone())
+                .or_default()
+                .push(m.key.clone());
         }
         for v in modules_index.values_mut() {
             v.sort();
         }
-        Inspector { dep_graph, modules_index, key_to_canonical, extension_usages, extension_repos, extension_unique_names }
+        Inspector {
+            dep_graph,
+            modules_index,
+            key_to_canonical,
+            extension_usages,
+            extension_repos,
+            extension_unique_names,
+        }
     }
 
     pub fn canonical_name(&self, key: &ModuleKey) -> Option<&str> {
-        self.key_to_canonical.iter().find(|(k, _)| k == key).map(|(_, c)| c.as_str())
+        self.key_to_canonical
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, c)| c.as_str())
     }
 
     pub fn module(&self, key: &ModuleKey) -> Option<&AugmentedModule> {

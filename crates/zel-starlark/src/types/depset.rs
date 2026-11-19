@@ -81,6 +81,15 @@ impl Depset {
         direct: Vec<Value>,
         transitive: Vec<Arc<Depset>>,
     ) -> Result<Self, StarlarkError> {
+        Self::new_checked(order, direct, transitive, true)
+    }
+
+    pub fn new_checked(
+        order: DepsetOrder,
+        direct: Vec<Value>,
+        transitive: Vec<Arc<Depset>>,
+        always_check_elements: bool,
+    ) -> Result<Self, StarlarkError> {
         // Incompatible order check
         for t in &transitive {
             if t.order != DepsetOrder::Default && order != DepsetOrder::Default && t.order != order
@@ -93,38 +102,57 @@ impl Depset {
             }
         }
 
-        // Element homogeneity and hashability check
-        if let Some(first) = direct.first() {
-            if !first.is_hashable() {
-                return Err(StarlarkError(format!(
-                    "depset elements must be hashable, got unhashable '{}'",
-                    first.type_name()
-                )));
+        // Element validation & homogeneity check (mirrors Bazel Depset.checkElement)
+        let mut first_type: Option<&'static str> = None;
+        let mut dedup_direct = Vec::with_capacity(direct.len());
+        #[allow(clippy::mutable_key_type)]
+        let mut seen_direct = HashSet::new();
+        for item in direct {
+            check_depset_element(&item, always_check_elements)?;
+            let tname = item.type_name();
+            match first_type {
+                None => first_type = Some(tname),
+                Some(ft) if ft != tname => {
+                    return Err(StarlarkError(format!(
+                        "depset elements must all have the same type, got '{ft}' and '{tname}'"
+                    )));
+                }
+                _ => {}
             }
-            let first_type = first.type_name();
-            for item in direct.iter().skip(1) {
-                if !item.is_hashable() {
-                    return Err(StarlarkError(format!(
-                        "depset elements must be hashable, got unhashable '{}'",
-                        item.type_name()
-                    )));
-                }
-                if item.type_name() != first_type {
-                    return Err(StarlarkError(format!(
-                        "depset elements must all have the same type, got '{}' and '{}'",
-                        first_type,
-                        item.type_name()
-                    )));
-                }
+            if seen_direct.insert(item.clone()) {
+                dedup_direct.push(item);
             }
         }
+
+        // NestedSet lays out each node's children according to its own order at construction:
+        // LINK_ORDER (Topological) reverses both direct elements and transitive sets (before dedup).
+        let stored_transitive = if order == DepsetOrder::Topological {
+            dedup_direct.reverse();
+            let mut seen_t = HashSet::new();
+            let mut out_t = Vec::with_capacity(transitive.len());
+            for t in transitive.into_iter().rev() {
+                if seen_t.insert(t.id) {
+                    out_t.push(t);
+                }
+            }
+            out_t
+        } else {
+            let mut seen_t = HashSet::new();
+            let mut out_t = Vec::with_capacity(transitive.len());
+            for t in transitive {
+                if seen_t.insert(t.id) {
+                    out_t.push(t);
+                }
+            }
+            out_t
+        };
 
         let id = DEPSET_ID_COUNTER.fetch_add(1, Ordering::Relaxed);
         Ok(Self {
             id,
             order,
-            direct,
-            transitive,
+            direct: dedup_direct,
+            transitive: stored_transitive,
         })
     }
 
@@ -136,24 +164,18 @@ impl Depset {
     pub fn to_list(&self) -> Vec<Value> {
         let mut raw = Vec::new();
         let mut visited_sets = HashSet::new();
-        match self.order {
-            DepsetOrder::Topological => {
-                // Topological sort: right-to-left postorder, then reverse
-                self.collect_right_to_left_postorder(&mut raw, &mut visited_sets);
-                raw.reverse();
-            }
-            // `NestedSet`: every node's children array is laid out according to *its own* order
-            // when it is built (preorder: direct members first; stable/postorder: transitive
-            // members first), so nodes of different orders can be nested.
-            _ => self.collect_nested(&mut raw, &mut visited_sets),
-        }
+        self.collect_nested(&mut raw, &mut visited_sets);
 
         let mut deduped = Vec::new();
+        #[allow(clippy::mutable_key_type)]
         let mut seen = HashSet::new();
         for item in raw {
             if seen.insert(item.clone()) {
                 deduped.push(item);
             }
+        }
+        if self.order == DepsetOrder::Topological {
+            deduped.reverse();
         }
         deduped
     }
@@ -162,64 +184,33 @@ impl Depset {
         if !visited.insert(self.id) {
             return;
         }
-        let transitive = |out: &mut Vec<Value>, visited: &mut HashSet<u64>| {
-            for t in &self.transitive {
-                if t.order == DepsetOrder::Topological {
-                    let mut sub = Vec::new();
-                    t.collect_right_to_left_postorder(&mut sub, visited);
-                    sub.reverse();
-                    out.extend(sub);
-                } else {
-                    t.collect_nested(out, visited);
-                }
-            }
-        };
         if self.order == DepsetOrder::Preorder {
             out.extend(self.direct.iter().cloned());
-            transitive(out, visited);
+            for t in &self.transitive {
+                t.collect_nested(out, visited);
+            }
         } else {
-            transitive(out, visited);
+            for t in &self.transitive {
+                t.collect_nested(out, visited);
+            }
             out.extend(self.direct.iter().cloned());
         }
     }
+}
 
-    #[allow(dead_code)]
-    fn collect_postorder(&self, out: &mut Vec<Value>, visited: &mut HashSet<u64>) {
-        if !visited.insert(self.id) {
-            return;
-        }
-        for t in &self.transitive {
-            t.collect_postorder(out, visited);
-        }
-        for d in &self.direct {
-            out.push(d.clone());
-        }
+fn check_depset_element(x: &Value, strict: bool) -> Result<(), StarlarkError> {
+    if strict && !x.is_immutable() {
+        return Err(StarlarkError(
+            "depset elements must not be mutable values".to_string(),
+        ));
     }
-
-    #[allow(dead_code)]
-    fn collect_preorder(&self, out: &mut Vec<Value>, visited: &mut HashSet<u64>) {
-        if !visited.insert(self.id) {
-            return;
-        }
-        for d in &self.direct {
-            out.push(d.clone());
-        }
-        for t in &self.transitive {
-            t.collect_preorder(out, visited);
-        }
+    if matches!(x, Value::List(_) | Value::Dict(_) | Value::Set(_)) {
+        return Err(StarlarkError(format!(
+            "depsets cannot contain items of type '{}'",
+            x.type_name()
+        )));
     }
-
-    fn collect_right_to_left_postorder(&self, out: &mut Vec<Value>, visited: &mut HashSet<u64>) {
-        if !visited.insert(self.id) {
-            return;
-        }
-        for t in self.transitive.iter().rev() {
-            t.collect_right_to_left_postorder(out, visited);
-        }
-        for d in self.direct.iter().rev() {
-            out.push(d.clone());
-        }
-    }
+    Ok(())
 }
 
 impl fmt::Display for Depset {

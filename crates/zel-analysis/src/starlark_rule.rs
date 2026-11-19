@@ -24,7 +24,10 @@
 //! `starlark_rule_driver.rs` (attribute conversion, implementation call, provider handling).
 
 use crate::args::{args_method, ArgsBuilder};
-use crate::location::{expand_locations, expand_make_variables, LocationMode};
+use crate::location::{
+    expand_locations_with_mapping, expand_make_variables, expand_with_locations, shell_tokenize,
+    LocationMode,
+};
 use crate::objects::*;
 use crate::{
     Action, ActionConflict, ActionGraph, ActionKind, Artifact, ArtifactRoot, BuildConfigurationKey,
@@ -99,6 +102,7 @@ pub trait DepResolver: Send + Sync {
 
     /// Resolves the toolchains `toolchains` (raw `aspect(toolchains = ...)` values) for an aspect
     /// applied to `owner` in `cfg`: toolchain type → `ToolchainInfo` plus extra Make variables.
+    #[allow(clippy::type_complexity)]
     fn aspect_toolchains(
         &self,
         _owner: &Label,
@@ -131,6 +135,8 @@ pub struct AnalysisInputs {
     pub exec_group_toolchains: BTreeMap<String, BTreeMap<String, Value>>,
     /// Exec group name → execution platform label.
     pub exec_group_platforms: BTreeMap<String, String>,
+    /// `--incompatible_allow_tags_propagation` (default true).
+    pub allow_tags_propagation: bool,
 }
 
 impl AnalysisInputs {
@@ -145,6 +151,7 @@ impl AnalysisInputs {
             exec_platform: None,
             exec_group_toolchains: BTreeMap::new(),
             exec_group_platforms: BTreeMap::new(),
+            allow_tags_propagation: true,
         }
     }
 }
@@ -153,16 +160,25 @@ impl AnalysisInputs {
 // Value helpers
 
 pub fn mk_list(v: Vec<Value>) -> Value {
-    Value::List(Arc::new(Mutex::new(StarlarkList::new(v))))
+    let val = Value::List(Arc::new(Mutex::new(StarlarkList::new(v))));
+    val.freeze();
+    val
 }
 
 pub fn mk_dict(items: Vec<(Value, Value)>) -> Value {
-    Value::Dict(Arc::new(Mutex::new(StarlarkDict::from_entries(items).unwrap_or_default())))
+    let val = Value::Dict(Arc::new(Mutex::new(
+        StarlarkDict::from_entries(items).unwrap_or_default(),
+    )));
+    val.freeze();
+    val
 }
 
 pub fn mk_struct(fields: Vec<(&str, Value)>) -> Value {
     Value::Struct(Arc::new(StructValue::new(
-        fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
     )))
 }
 
@@ -171,21 +187,30 @@ pub fn mk_depset(
     direct: Vec<Value>,
     transitive: Vec<Arc<Depset>>,
 ) -> Result<Value, StarlarkError> {
-    Ok(Value::Depset(Arc::new(Depset::new(order, direct, transitive)?)))
+    Ok(Value::Depset(Arc::new(Depset::new(
+        order, direct, transitive,
+    )?)))
 }
 
 /// Depset of files.
 pub fn files_depset(files: &[Artifact]) -> Value {
     Value::Depset(Arc::new(
-        Depset::new(DepsetOrder::Default, files.iter().map(file_value).collect(), Vec::new())
-            .expect("files are hashable"),
+        Depset::new(
+            DepsetOrder::Default,
+            files.iter().map(file_value).collect(),
+            Vec::new(),
+        )
+        .expect("files are hashable"),
     ))
 }
 
 pub fn provider_instance(name: &str, fields: Vec<(&str, Value)>) -> Value {
     Value::ProviderInstance {
         provider_name: name.to_string(),
-        fields: fields.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        fields: fields
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
     }
 }
 
@@ -266,6 +291,9 @@ struct CtxState {
     actions: Mutex<Vec<Action>>,
     graph: Mutex<ActionGraph>,
     declared_trees: Mutex<BTreeSet<String>>,
+    declared_files: Mutex<BTreeSet<String>>,
+    declared_artifacts: Mutex<Vec<Artifact>>,
+    rule_errors: Mutex<Vec<String>>,
     make_vars: BTreeMap<String, String>,
     frozen: Mutex<bool>,
     /// `ctx.rule` for aspects (`attr`, `file`, `files`, `executable`, `kind`).
@@ -274,11 +302,37 @@ struct CtxState {
     aspect_ids: Vec<String>,
     /// Fragments declared by the running aspect (`aspect(fragments = [...])`); empty for rules.
     aspect_fragments: Vec<String>,
+    /// Toolchains declared by the running aspect (`aspect(toolchains = [...])`); empty for rules.
+    aspect_toolchains_declared: Vec<Value>,
+    /// Base target's toolchains / exec groups exposed on `ctx.rule.toolchains` / `ctx.rule.exec_groups`.
+    base_toolchains: BTreeMap<String, Value>,
+    base_exec_groups: BTreeSet<String>,
+    base_exec_group_toolchains: BTreeMap<String, BTreeMap<String, Value>>,
+    base_exec_group_platforms: BTreeMap<String, String>,
     /// `ctx.split_attr` (rules only; `None` in aspects).
     split_attr: Value,
 }
 
 impl CtxState {
+    /// `RepositoryMapping` for the package of this target (used for label parsing in
+    /// `expand_location`, `package_relative_label`, `toolchains[...]`, etc.).
+    pub fn repo_mapping(&self) -> zel_cmdline::RepositoryMapping {
+        let owner = self.label.package_identifier().repository();
+        let entries = self.inputs.resolver.repo_mapping_entries(owner.name());
+        let ordered: Vec<(String, zel_cmdline::RepositoryName)> = entries
+            .into_iter()
+            .map(|(a, c)| {
+                let r = if c.is_empty() {
+                    zel_cmdline::RepositoryName::main()
+                } else {
+                    zel_cmdline::RepositoryName::create_unvalidated(&c)
+                };
+                (a, r)
+            })
+            .collect();
+        zel_cmdline::RepositoryMapping::new_ordered(ordered, owner.clone())
+    }
+
     /// Repo-mapping manifest entries for `runfiles` of this target (`RepoMappingManifestAction`).
     pub fn repo_mapping_for(&self, rf: &Runfiles) -> Vec<(String, String, String)> {
         let resolver = self.inputs.resolver.clone();
@@ -318,6 +372,14 @@ impl CtxState {
     fn register(&self, mut a: Action) -> Result<(), StarlarkError> {
         a.owner_kind = self.rule.rule_class.clone();
         a.owner_config = self.cfg.short_hash();
+        if a.exec_platform.is_none() {
+            a.exec_platform = a
+                .exec_group
+                .as_deref()
+                .and_then(|g| self.inputs.exec_group_platforms.get(g))
+                .or(self.inputs.exec_platform.as_ref())
+                .cloned();
+        }
         a.apply_configuration_env(&self.cfg);
         a.inputs = dedup(std::mem::take(&mut a.inputs));
         self.graph
@@ -326,6 +388,59 @@ impl CtxState {
             .register(&a)
             .map_err(|ActionConflict { message, .. }| StarlarkError(message))?;
         self.actions.lock().unwrap().push(a);
+        Ok(())
+    }
+
+    /// `StarlarkProviderValidationUtil.validateArtifacts`: checks for tree/file conflicts and
+    /// declared non-source artifacts with no generating action.
+    fn validate_artifacts(&self) -> Result<(), String> {
+        let trees = self.declared_trees.lock().unwrap();
+        let files = self.declared_files.lock().unwrap();
+        let conflicts: Vec<String> = self
+            .declared_artifacts
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.is_tree_artifact && files.contains(a.exec_path.path_string()))
+            .map(|a| a.root_relative_path.path_string().to_string())
+            .collect();
+        if !conflicts.is_empty() {
+            return Err(format!(
+                "The following directories were also declared as files:\n{}",
+                conflicts.join("\n")
+            ));
+        }
+        drop(trees);
+        drop(files);
+
+        let graph = self.graph.lock().unwrap();
+        let mut orphans: Vec<String> = Vec::new();
+        let mut seen = BTreeSet::new();
+        let mut check_art = |a: &Artifact| {
+            if !a.is_source
+                && seen.insert(a.exec_path.path_string().to_string())
+                && graph.generating_action(a.exec_path.path_string()).is_none()
+            {
+                orphans.push(a.root_relative_path.path_string().to_string());
+            }
+        };
+        for a in self.declared_artifacts.lock().unwrap().iter() {
+            check_art(a);
+        }
+        for a in &self.predeclared {
+            check_art(a);
+        }
+        if *self.default_executable_accessed.lock().unwrap() {
+            if let Some(exe) = &self.default_executable {
+                check_art(exe);
+            }
+        }
+        if !orphans.is_empty() {
+            return Err(format!(
+                "The following files have no generating action:\n{}",
+                orphans.join("\n")
+            ));
+        }
         Ok(())
     }
 }
@@ -360,7 +475,10 @@ fn check_kwargs(
     }
     for (i, _) in pos.iter().enumerate() {
         if kw.contains_key(names[i]) {
-            return err(format!("{func}() got multiple values for parameter '{}'", names[i]));
+            return err(format!(
+                "{func}() got multiple values for parameter '{}'",
+                names[i]
+            ));
         }
     }
     Ok(())
@@ -394,7 +512,10 @@ fn want_file(v: &Value, func: &str, param: &str) -> Result<Artifact, StarlarkErr
 
 fn str_dict(v: &Value, what: &str) -> Result<BTreeMap<String, String>, StarlarkError> {
     let Value::Dict(d) = v else {
-        return err(format!("expected value of type 'dict' for {what} but got {}", type_name(v)));
+        return err(format!(
+            "expected value of type 'dict' for {what} but got {}",
+            type_name(v)
+        ));
     };
     let mut m = BTreeMap::new();
     for (k, v) in d.lock().unwrap().items() {
@@ -411,7 +532,10 @@ fn str_dict(v: &Value, what: &str) -> Result<BTreeMap<String, String>, StarlarkE
 /// Like [`str_dict`] but keeps the dict's insertion order.
 fn str_dict_ordered(v: &Value, what: &str) -> Result<Vec<(String, String)>, StarlarkError> {
     let Value::Dict(d) = v else {
-        return err(format!("expected value of type 'dict' for {what} but got {}", type_name(v)));
+        return err(format!(
+            "expected value of type 'dict' for {what} but got {}",
+            type_name(v)
+        ));
     };
     let mut m: Vec<(String, String)> = Vec::new();
     for (k, v) in d.lock().unwrap().items() {

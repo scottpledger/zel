@@ -28,7 +28,9 @@ use zel_starlark::Value;
 
 /// Reads a `ConfigMatchingProvider` into `(matches, settings)`.
 pub fn matching_info(v: &Value) -> Option<(bool, Vec<String>)> {
-    let Value::ProviderInstance { fields, .. } = v else { return None };
+    let Value::ProviderInstance { fields, .. } = v else {
+        return None;
+    };
     let matches = matches!(fields.get("matches"), Some(Value::Bool(true)));
     let settings = match fields.get("settings") {
         Some(l) => zel_starlark::eval::builtins::value_to_sequence(l)
@@ -41,8 +43,44 @@ pub fn matching_info(v: &Value) -> Option<(bool, Vec<String>)> {
     Some((matches, settings))
 }
 
+fn split_settings(
+    items: &[String],
+) -> (
+    std::collections::BTreeSet<&str>,
+    std::collections::BTreeSet<&str>,
+    std::collections::BTreeSet<&str>,
+    std::collections::BTreeSet<&str>,
+) {
+    use std::collections::BTreeSet;
+    let (mut vals, mut defs, mut flags, mut cvs) = (
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+        BTreeSet::new(),
+    );
+    for s in items {
+        if s.starts_with("values:") {
+            vals.insert(s.as_str());
+        } else if s.starts_with("define:") {
+            defs.insert(s.as_str());
+        } else if s.starts_with("flag:") {
+            flags.insert(s.as_str());
+        } else if s.starts_with("constraint:") {
+            cvs.insert(s.as_str());
+        } else {
+            vals.insert(s.as_str());
+        }
+    }
+    (vals, defs, flags, cvs)
+}
+
 fn refines(a: &[String], b: &[String]) -> bool {
-    a.len() > b.len() && b.iter().all(|x| a.contains(x))
+    let (av, ad, af, ac) = split_settings(a);
+    let (bv, bd, bf, bc) = split_settings(b);
+    if !bv.is_subset(&av) || !bd.is_subset(&ad) || !bf.is_subset(&af) || !bc.is_subset(&ac) {
+        return false;
+    }
+    av.len() > bv.len() || ad.len() > bd.len() || af.len() > bf.len() || ac.len() > bc.len()
 }
 
 fn is_default(l: &Label) -> bool {
@@ -68,7 +106,9 @@ fn concat(a: AttrValue, b: AttrValue, attr: &str) -> Result<AttrValue, String> {
         (StrDict(mut x), StrDict(y)) => {
             for (k, v) in y {
                 if x.insert(k.clone(), v).is_some() {
-                    return Err(format!("Duplicate key '{k}' when concatenating dicts in attribute '{attr}'"));
+                    return Err(format!(
+                        "Duplicate key '{k}' when concatenating dicts in attribute '{attr}'"
+                    ));
                 }
             }
             StrDict(x)
@@ -76,7 +116,9 @@ fn concat(a: AttrValue, b: AttrValue, attr: &str) -> Result<AttrValue, String> {
         (StrListDict(mut x), StrListDict(y)) => {
             for (k, v) in y {
                 if x.insert(k.clone(), v).is_some() {
-                    return Err(format!("Duplicate key '{k}' when concatenating dicts in attribute '{attr}'"));
+                    return Err(format!(
+                        "Duplicate key '{k}' when concatenating dicts in attribute '{attr}'"
+                    ));
                 }
             }
             StrListDict(x)
@@ -85,7 +127,21 @@ fn concat(a: AttrValue, b: AttrValue, attr: &str) -> Result<AttrValue, String> {
             x.extend(y);
             LabelKeyedStrDict(x)
         }
-        (a, b) => return Err(format!("Cannot concatenate values of attribute '{attr}': {a:?} and {b:?}")),
+        (LabelListDict(mut x), LabelListDict(y)) => {
+            for (k, v) in y {
+                if let Some(slot) = x.iter_mut().find(|(xk, _)| xk == &k) {
+                    slot.1 = v;
+                } else {
+                    x.push((k, v));
+                }
+            }
+            LabelListDict(x)
+        }
+        (a, b) => {
+            return Err(format!(
+                "Cannot concatenate values of attribute '{attr}': {a:?} and {b:?}"
+            ))
+        }
     })
 }
 
@@ -97,14 +153,17 @@ pub fn resolve_select(
     cfg: &BuildConfigurationKey,
     resolver: &dyn DepResolver,
 ) -> Result<AttrValue, String> {
-    let AttrValue::Select(parts) = av else { return Ok(av.clone()) };
+    let AttrValue::Select(parts) = av else {
+        return Ok(av.clone());
+    };
     let mut acc: Option<AttrValue> = None;
     for part in parts {
         let v = match part {
             SelectPart::Plain(v) => resolve_select(v, attr, rule, cfg, resolver)?,
-            SelectPart::Select { entries, no_match_error } => {
-                resolve_selector(entries, no_match_error, attr, rule, cfg, resolver)?
-            }
+            SelectPart::Select {
+                entries,
+                no_match_error,
+            } => resolve_selector(entries, no_match_error, attr, rule, cfg, resolver)?,
         };
         acc = Some(match acc {
             None => v,
@@ -134,23 +193,51 @@ fn resolve_selector(
         }
         condition_labels.push(cond);
         let ct = resolver.configured_target(cond, cfg)?;
-        let _ = resolver.check_dependency(rule, attr, &ct);
+        resolver.check_dependency(rule, "$config_dependencies", &ct)?;
         // A constraint_value is a valid select() key: it matches when the target platform
         // has it (evaluated lazily to avoid cycles through the platform's own constraints).
         let synthesized;
         let info = if let Some(i) = ct.providers.get("ConfigMatchingProvider") {
             Some(i)
-        } else if ct.providers.contains_key("ConstraintValueInfo") {
-            let m = resolver.target_platform_has_constraint(cfg, cond)?;
-            synthesized = crate::starlark_rule::provider_instance(
-                "ConfigMatchingProvider",
-                vec![
-                    ("matches", Value::Bool(m)),
-                    ("settings", crate::starlark_rule::mk_list(vec![Value::String(format!("constraint:{}", cond.canonical_form()))])),
-                    ("label", Value::Label(cond.clone())),
-                ],
-            );
-            Some(&synthesized)
+        } else if let Some(Value::ProviderInstance {
+            fields: cv_fields, ..
+        }) = ct
+            .providers
+            .get("ConstraintValueInfo")
+            .filter(|_| !cfg.core_only)
+        {
+            let real_cv = match cv_fields.get("label") {
+                Some(Value::Label(l)) => l.clone(),
+                _ => cond.clone(),
+            };
+            match resolver.target_platform_has_constraint(cfg, &real_cv) {
+                Ok(m) => {
+                    let mut settings_vec = vec![Value::String(format!(
+                        "constraint:{}",
+                        real_cv.canonical_form()
+                    ))];
+                    if let Some(Value::List(refs)) = cv_fields.get("refines") {
+                        for r in &refs.lock().unwrap().elements {
+                            if let Value::Label(rl) = r {
+                                settings_vec.push(Value::String(format!(
+                                    "constraint:{}",
+                                    rl.canonical_form()
+                                )));
+                            }
+                        }
+                    }
+                    synthesized = crate::starlark_rule::provider_instance(
+                        "ConfigMatchingProvider",
+                        vec![
+                            ("matches", Value::Bool(m)),
+                            ("settings", crate::starlark_rule::mk_list(settings_vec)),
+                            ("label", Value::Label(cond.clone())),
+                        ],
+                    );
+                    Some(&synthesized)
+                }
+                Err(_) => None,
+            }
         } else {
             None
         };
@@ -163,7 +250,13 @@ fn resolve_selector(
         };
         if let Value::ProviderInstance { fields, .. } = info {
             if let Some(Value::List(l)) = fields.get("errors") {
-                let msgs: Vec<String> = l.lock().unwrap().elements.iter().filter_map(|v| v.as_str().map(str::to_string)).collect();
+                let msgs: Vec<String> = l
+                    .lock()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect();
                 if !msgs.is_empty() {
                     errors.push(format!(
                         "config_setting {} is unresolvable because: {}",

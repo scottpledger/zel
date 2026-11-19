@@ -56,7 +56,17 @@ static ENUM_SPEC_ORDER_OUTPUT: EnumSpec = EnumSpec {
 };
 static ENUM_SPEC_SKYFRAME: EnumSpec = EnumSpec {
     type_name: "Skyframe Dump option",
-    values: &["off", "summary", "count", "value", "deps", "rdeps", "function_graph", "active_directories", "active_directories_frontier_deps"],
+    values: &[
+        "off",
+        "summary",
+        "count",
+        "value",
+        "deps",
+        "rdeps",
+        "function_graph",
+        "active_directories",
+        "active_directories_frontier_deps",
+    ],
     true_value: None,
     false_value: None,
 };
@@ -26451,10 +26461,46 @@ pub static COMMAND_OPTION_CLASSES: &[(&str, &[&str], &[&str])] = &[
 ];
 
 /// Options classes common to all commands (`BlazeCommandUtils.getCommonOptions`).
-pub static COMMON_OPTION_CLASSES: &[&str] = &["com.google.devtools.build.lib.runtime.UiOptions", "com.google.devtools.build.lib.runtime.CommonCommandOptions", "com.google.devtools.build.lib.runtime.ClientOptions", "com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions", "com.google.devtools.build.lib.profiler.CommandProfilerModule$Options", "com.google.devtools.build.lib.authandtls.AuthAndTLSOptions", "com.google.devtools.build.lib.runtime.MemoryPressureOptions", "com.google.devtools.build.lib.skyframe.LocalDiffAwareness$Options", "com.google.devtools.build.lib.remote.options.RemoteOptions", "com.google.devtools.build.lib.bazel.repository.RepositoryOptions", "com.google.devtools.build.lib.bazel.debug.DebuggingOptions", "com.google.devtools.build.lib.packages.metrics.PackageMetricsModule$Options", "com.google.devtools.build.lib.buildeventstream.transports.BuildEventStreamOptions", "com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions", "com.google.devtools.build.lib.buildeventservice.BuildEventServiceOptions", "com.google.devtools.build.lib.metrics.PostGCMemoryUseRecorder$GcAfterBuildModule$Options", "com.google.devtools.build.lib.metrics.MetricsModule$Options"];
+pub static COMMON_OPTION_CLASSES: &[&str] = &[
+    "com.google.devtools.build.lib.runtime.UiOptions",
+    "com.google.devtools.build.lib.runtime.CommonCommandOptions",
+    "com.google.devtools.build.lib.runtime.ClientOptions",
+    "com.google.devtools.build.lib.packages.semantics.BuildLanguageOptions",
+    "com.google.devtools.build.lib.profiler.CommandProfilerModule$Options",
+    "com.google.devtools.build.lib.authandtls.AuthAndTLSOptions",
+    "com.google.devtools.build.lib.runtime.MemoryPressureOptions",
+    "com.google.devtools.build.lib.skyframe.LocalDiffAwareness$Options",
+    "com.google.devtools.build.lib.remote.options.RemoteOptions",
+    "com.google.devtools.build.lib.bazel.repository.RepositoryOptions",
+    "com.google.devtools.build.lib.bazel.debug.DebuggingOptions",
+    "com.google.devtools.build.lib.packages.metrics.PackageMetricsModule$Options",
+    "com.google.devtools.build.lib.buildeventstream.transports.BuildEventStreamOptions",
+    "com.google.devtools.build.lib.buildeventstream.BuildEventProtocolOptions",
+    "com.google.devtools.build.lib.buildeventservice.BuildEventServiceOptions",
+    "com.google.devtools.build.lib.metrics.PostGCMemoryUseRecorder$GcAfterBuildModule$Options",
+    "com.google.devtools.build.lib.metrics.MetricsModule$Options",
+];
 
 /// Options classes of the fragment registry (used by commands with `usesConfigurationOptions`).
-pub static FRAGMENT_OPTION_CLASSES: &[&str] = &["com.google.devtools.build.lib.analysis.ShellConfiguration$Options", "com.google.devtools.build.lib.analysis.PlatformOptions", "com.google.devtools.build.lib.bazel.rules.BazelRuleClassProvider$StrictActionEnvOptions", "com.google.devtools.build.lib.rules.proto.ProtoConfiguration$Options", "com.google.devtools.build.lib.rules.android.AndroidConfiguration$Options", "com.google.devtools.build.lib.rules.android.BazelAndroidConfiguration$Options", "com.google.devtools.build.lib.rules.python.PythonOptions", "com.google.devtools.build.lib.bazel.rules.python.BazelPythonConfiguration$Options", "com.google.devtools.build.lib.rules.cpp.CppOptions", "com.google.devtools.build.lib.rules.java.JavaOptions", "com.google.devtools.build.lib.rules.objc.ObjcCommandLineOptions", "com.google.devtools.build.lib.rules.apple.AppleCommandLineOptions", "com.google.devtools.build.lib.rules.objc.J2ObjcCommandLineOptions", "com.google.devtools.build.lib.rules.config.ConfigFeatureFlagOptions", "com.google.devtools.build.lib.analysis.test.TestConfiguration$TestOptions", "com.google.devtools.build.lib.analysis.config.CoreOptions", "com.google.devtools.build.lib.analysis.test.CoverageConfiguration$CoverageOptions"];
+pub static FRAGMENT_OPTION_CLASSES: &[&str] = &[
+    "com.google.devtools.build.lib.analysis.ShellConfiguration$Options",
+    "com.google.devtools.build.lib.analysis.PlatformOptions",
+    "com.google.devtools.build.lib.bazel.rules.BazelRuleClassProvider$StrictActionEnvOptions",
+    "com.google.devtools.build.lib.rules.proto.ProtoConfiguration$Options",
+    "com.google.devtools.build.lib.rules.android.AndroidConfiguration$Options",
+    "com.google.devtools.build.lib.rules.android.BazelAndroidConfiguration$Options",
+    "com.google.devtools.build.lib.rules.python.PythonOptions",
+    "com.google.devtools.build.lib.bazel.rules.python.BazelPythonConfiguration$Options",
+    "com.google.devtools.build.lib.rules.cpp.CppOptions",
+    "com.google.devtools.build.lib.rules.java.JavaOptions",
+    "com.google.devtools.build.lib.rules.objc.ObjcCommandLineOptions",
+    "com.google.devtools.build.lib.rules.apple.AppleCommandLineOptions",
+    "com.google.devtools.build.lib.rules.objc.J2ObjcCommandLineOptions",
+    "com.google.devtools.build.lib.rules.config.ConfigFeatureFlagOptions",
+    "com.google.devtools.build.lib.analysis.test.TestConfiguration$TestOptions",
+    "com.google.devtools.build.lib.analysis.config.CoreOptions",
+    "com.google.devtools.build.lib.analysis.test.CoverageConfiguration$CoverageOptions",
+];
 
 /// Returns a map from option name (and old names) to option definition. When several options classes declare
 /// the same name (for different commands), the first declaration wins; use [`is_command_allowed`] to pick the
@@ -26497,6 +26543,8 @@ pub fn is_command_allowed(command: &str, def: &OptionDefinition) -> bool {
 }
 
 /// Legacy helper for allowed classes; options now track commands directly.
-pub fn get_command_allowed_classes(_command: &str) -> Option<std::collections::HashSet<&'static str>> {
+pub fn get_command_allowed_classes(
+    _command: &str,
+) -> Option<std::collections::HashSet<&'static str>> {
     None
 }

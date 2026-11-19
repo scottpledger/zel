@@ -42,6 +42,7 @@ impl<'a> BitReader<'a> {
         Ok(val)
     }
 
+    #[allow(dead_code)]
     fn read_u8(&mut self) -> Result<u8, String> {
         self.read_bits(8).map(|v| v as u8)
     }
@@ -118,8 +119,8 @@ impl CanonicalHuffman {
 
         let mut pp = 0;
         for i in min_len..=max_len {
-            for j in 0..alphabet_size {
-                if lengths[j] as usize == i {
+            for (j, &len) in lengths.iter().enumerate().take(alphabet_size) {
+                if len as usize == i {
                     perm[pp] = j;
                     pp += 1;
                 }
@@ -130,8 +131,8 @@ impl CanonicalHuffman {
         for i in min_len..=max_len {
             base[i] = base_v;
             let mut count = 0i32;
-            for j in 0..alphabet_size {
-                if lengths[j] as usize == i {
+            for &len in lengths.iter().take(alphabet_size) {
+                if len as usize == i {
                     count += 1;
                 }
             }
@@ -208,7 +209,10 @@ fn bunzip2_stream(input: &[u8], decompressed: &mut Vec<u8>) -> Result<usize, Str
     }
     let block_size_char = input[3];
     if !(b'1'..=b'9').contains(&block_size_char) {
-        return Err(format!("Invalid bzip2 block size: {}", block_size_char as char));
+        return Err(format!(
+            "Invalid bzip2 block size: {}",
+            block_size_char as char
+        ));
     }
 
     let mut reader = BitReader::new(&input[4..]);
@@ -264,7 +268,9 @@ fn bunzip2_stream(input: &[u8], decompressed: &mut Vec<u8>) -> Result<usize, Str
         // Huffman tables (2 to 6)
         let num_tables = reader.read_bits(3)? as usize;
         if !(2..=6).contains(&num_tables) {
-            return Err(format!("Invalid number of bzip2 Huffman tables: {num_tables}"));
+            return Err(format!(
+                "Invalid number of bzip2 Huffman tables: {num_tables}"
+            ));
         }
 
         let num_selectors = reader.read_bits(15)? as usize;
@@ -293,7 +299,7 @@ fn bunzip2_stream(input: &[u8], decompressed: &mut Vec<u8>) -> Result<usize, Str
         for _ in 0..num_tables {
             let mut current_len = reader.read_bits(5)? as i32;
             let mut lengths = vec![0u8; total_symbols];
-            for sym in 0..total_symbols {
+            for slot in lengths.iter_mut().take(total_symbols) {
                 while reader.read_bit()? != 0 {
                     if reader.read_bit()? != 0 {
                         current_len -= 1;
@@ -304,7 +310,7 @@ fn bunzip2_stream(input: &[u8], decompressed: &mut Vec<u8>) -> Result<usize, Str
                 if !(1..=20).contains(&current_len) {
                     return Err("Huffman length out of range (1..20)".into());
                 }
-                lengths[sym] = current_len as u8;
+                *slot = current_len as u8;
             }
             tables.push(CanonicalHuffman::new(&lengths, total_symbols)?);
         }
@@ -312,8 +318,8 @@ fn bunzip2_stream(input: &[u8], decompressed: &mut Vec<u8>) -> Result<usize, Str
         // Decode symbols into BWT buffer
         // Build initial MTF table
         let mut mtf = Vec::with_capacity(alphabet_size);
-        for i in 0..256 {
-            if in_use[i] {
+        for (i, &used) in in_use.iter().enumerate() {
+            if used {
                 mtf.push(i as u8);
             }
         }
@@ -462,7 +468,7 @@ fn bunzip2_stream(input: &[u8], decompressed: &mut Vec<u8>) -> Result<usize, Str
             ));
         }
 
-        stream_crc = ((stream_crc << 1) | (stream_crc >> 31)) ^ computed_crc;
+        stream_crc = stream_crc.rotate_left(1) ^ computed_crc;
         decompressed.extend_from_slice(&block_out);
     }
 

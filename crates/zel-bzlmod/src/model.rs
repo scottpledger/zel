@@ -15,10 +15,16 @@ pub struct ModuleKey {
 
 impl ModuleKey {
     pub fn new(name: impl Into<String>, version: Version) -> Self {
-        Self { name: name.into(), version }
+        Self {
+            name: name.into(),
+            version,
+        }
     }
     pub fn root() -> Self {
-        Self { name: String::new(), version: Version::empty() }
+        Self {
+            name: String::new(),
+            version: Version::empty(),
+        }
     }
     pub fn is_root(&self) -> bool {
         self.name.is_empty() && self.version.is_empty()
@@ -50,8 +56,14 @@ impl ModuleKey {
         if s == "<root>" {
             return Ok(Self::root());
         }
-        let (n, v) = s.split_once('@').ok_or_else(|| format!("invalid module key '{s}'"))?;
-        let version = if v == "_" { Version::empty() } else { Version::parse(v)? };
+        let (n, v) = s
+            .split_once('@')
+            .ok_or_else(|| format!("invalid module key '{s}'"))?;
+        let version = if v == "_" {
+            Version::empty()
+        } else {
+            Version::parse(v)?
+        };
         Ok(Self::new(n, version))
     }
 }
@@ -65,7 +77,11 @@ impl fmt::Display for ModuleKey {
             f,
             "{}@{}",
             self.name,
-            if self.version.is_empty() { "_".to_string() } else { self.version.to_string() }
+            if self.version.is_empty() {
+                "_".to_string()
+            } else {
+                self.version.to_string()
+            }
         )
     }
 }
@@ -74,7 +90,9 @@ const STRING_ESCAPE_SEQUENCE: &str = "'";
 
 /// `AttributeValuesAdapter.serializeObjToString` for a `String`.
 pub(crate) fn escape_attr_string(s: &str) -> String {
-    if s.starts_with("@@") || (s.starts_with(STRING_ESCAPE_SEQUENCE) && s.ends_with(STRING_ESCAPE_SEQUENCE)) {
+    if s.starts_with("@@")
+        || (s.starts_with(STRING_ESCAPE_SEQUENCE) && s.ends_with(STRING_ESCAPE_SEQUENCE))
+    {
         format!("{STRING_ESCAPE_SEQUENCE}{s}{STRING_ESCAPE_SEQUENCE}")
     } else {
         s.to_string()
@@ -83,7 +101,8 @@ pub(crate) fn escape_attr_string(s: &str) -> String {
 
 /// `AttributeValuesAdapter.deserializeStringToObject` for a non-label string.
 fn unescape_attr_string(s: &str) -> String {
-    if s.len() >= 2 && s.starts_with(STRING_ESCAPE_SEQUENCE) && s.ends_with(STRING_ESCAPE_SEQUENCE) {
+    if s.len() >= 2 && s.starts_with(STRING_ESCAPE_SEQUENCE) && s.ends_with(STRING_ESCAPE_SEQUENCE)
+    {
         s[1..s.len() - 1].to_string()
     } else {
         s.to_string()
@@ -123,11 +142,21 @@ impl AttrVal {
         match v {
             Value::None => AttrVal::None,
             Value::Bool(b) => AttrVal::Bool(*b),
-            Value::Int(i) => i.to_i64().map(AttrVal::Int).unwrap_or_else(|| AttrVal::Str(i.to_string())),
+            Value::Int(i) => i
+                .to_i64()
+                .map(AttrVal::Int)
+                .unwrap_or_else(|| AttrVal::Str(i.to_string())),
             Value::Float(f) => AttrVal::Float(*f),
             Value::String(s) => AttrVal::Str(s.clone()),
             Value::Label(l) => AttrVal::Label(l.canonical_form()),
-            Value::List(l) => AttrVal::List(l.lock().unwrap().elements.iter().map(Self::from_value).collect()),
+            Value::List(l) => AttrVal::List(
+                l.lock()
+                    .unwrap()
+                    .elements
+                    .iter()
+                    .map(Self::from_value)
+                    .collect(),
+            ),
             Value::Tuple(t) => AttrVal::List(t.iter().map(Self::from_value).collect()),
             Value::Dict(d) => AttrVal::Dict(
                 d.lock()
@@ -175,7 +204,11 @@ impl AttrVal {
             AttrVal::Label(s) => Json::Str(s.clone()),
             AttrVal::Str(s) => Json::Str(escape_attr_string(s)),
             AttrVal::List(l) => Json::Arr(l.iter().map(|x| x.to_json()).collect()),
-            AttrVal::Dict(d) => Json::Obj(d.iter().map(|(k, v)| (escape_attr_string(k), v.to_json())).collect()),
+            AttrVal::Dict(d) => Json::Obj(
+                d.iter()
+                    .map(|(k, v)| (escape_attr_string(k), v.to_json()))
+                    .collect(),
+            ),
         }
     }
 
@@ -190,7 +223,11 @@ impl AttrVal {
             Json::Str(s) if s.starts_with("@@") => AttrVal::Label(s.clone()),
             Json::Str(s) => AttrVal::Str(unescape_attr_string(s)),
             Json::Arr(a) => AttrVal::List(a.iter().map(Self::from_json).collect()),
-            Json::Obj(o) => AttrVal::Dict(o.iter().map(|(k, v)| (unescape_attr_string(k), Self::from_json(v))).collect()),
+            Json::Obj(o) => AttrVal::Dict(
+                o.iter()
+                    .map(|(k, v)| (unescape_attr_string(k), Self::from_json(v)))
+                    .collect(),
+            ),
         }
     }
 
@@ -203,7 +240,10 @@ impl AttrVal {
 
     pub fn str_list(&self) -> Vec<String> {
         match self {
-            AttrVal::List(l) => l.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+            AttrVal::List(l) => l
+                .iter()
+                .filter_map(|x| x.as_str().map(String::from))
+                .collect(),
             AttrVal::Str(s) | AttrVal::Label(s) => vec![s.clone()],
             _ => vec![],
         }
@@ -233,7 +273,10 @@ impl AttrVal {
                 o.push('"');
                 o
             }
-            AttrVal::List(l) => format!("[{}]", l.iter().map(|x| x.repr()).collect::<Vec<_>>().join(", ")),
+            AttrVal::List(l) => format!(
+                "[{}]",
+                l.iter().map(|x| x.repr()).collect::<Vec<_>>().join(", ")
+            ),
             AttrVal::Dict(d) => format!(
                 "{{{}}}",
                 d.iter()
@@ -257,7 +300,11 @@ pub struct RepoSpec {
 
 impl RepoSpec {
     pub fn new(bzl_file: &str, rule_name: &str, attrs: Vec<(String, AttrVal)>) -> Self {
-        Self { bzl_file: bzl_file.into(), rule_name: rule_name.into(), attrs }
+        Self {
+            bzl_file: bzl_file.into(),
+            rule_name: rule_name.into(),
+            attrs,
+        }
     }
     pub fn attr(&self, k: &str) -> Option<&AttrVal> {
         self.attrs.iter().find(|(n, _)| n == k).map(|(_, v)| v)
@@ -285,7 +332,12 @@ impl RepoSpec {
             ("repoRuleId".into(), Json::Str(self.rule_id())),
             (
                 "attributes".into(),
-                Json::Obj(self.attrs.iter().map(|(k, v)| (k.clone(), v.to_json())).collect()),
+                Json::Obj(
+                    self.attrs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_json()))
+                        .collect(),
+                ),
             ),
         ])
     }
@@ -293,11 +345,21 @@ impl RepoSpec {
         let id = j.get("repoRuleId")?.as_str()?;
         let (bzl, name) = id.rsplit_once('%')?;
         let attrs = match j.get("attributes")? {
-            Json::Obj(o) => o.iter().map(|(k, v)| (k.clone(), AttrVal::from_json(v))).collect(),
+            Json::Obj(o) => o
+                .iter()
+                .map(|(k, v)| (k.clone(), AttrVal::from_json(v)))
+                .collect(),
             _ => vec![],
         };
-        let bzl = bzl.strip_prefix("@@bazel_tools//").map(|r| format!("@bazel_tools//{r}")).unwrap_or_else(|| bzl.to_string());
-        Some(RepoSpec { bzl_file: bzl, rule_name: name.to_string(), attrs })
+        let bzl = bzl
+            .strip_prefix("@@bazel_tools//")
+            .map(|r| format!("@bazel_tools//{r}"))
+            .unwrap_or_else(|| bzl.to_string());
+        Some(RepoSpec {
+            bzl_file: bzl,
+            rule_name: name.to_string(),
+            attrs,
+        })
     }
 }
 
@@ -325,7 +387,12 @@ pub enum ModuleOverride {
 impl std::fmt::Display for ModuleOverride {
     /// Java record `toString()` forms (`SingleVersionOverride[...]`, ...), used in error messages.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let label = |p: &String| p.strip_prefix("@@").filter(|r| r.starts_with("//")).unwrap_or(p).to_string();
+        let label = |p: &String| {
+            p.strip_prefix("@@")
+                .filter(|r| r.starts_with("//"))
+                .unwrap_or(p)
+                .to_string()
+        };
         match self {
             ModuleOverride::SingleVersion { version, registry, patches, patch_cmds, patch_strip } => write!(
                 f,
@@ -412,7 +479,10 @@ impl ExtensionUsage {
     }
     /// All imported (local -> exported) names in declaration order.
     pub fn imports(&self) -> Vec<(String, String)> {
-        self.proxies.iter().flat_map(|p| p.imports.clone()).collect()
+        self.proxies
+            .iter()
+            .flat_map(|p| p.imports.clone())
+            .collect()
     }
 }
 
@@ -441,7 +511,10 @@ impl InterimModule {
         m
     }
     pub fn dep(&self, repo_name: &str) -> Option<&ModuleKey> {
-        self.deps.iter().find(|(n, _)| n == repo_name).map(|(_, k)| k)
+        self.deps
+            .iter()
+            .find(|(n, _)| n == repo_name)
+            .map(|(_, k)| k)
     }
 }
 
@@ -466,10 +539,22 @@ mod tests {
     #[test]
     fn lockfile_attr_strings_are_escaped_like_gson_adapter() {
         // A string that looks like a label is wrapped in `'`; a Label is written as is.
-        assert_eq!(AttrVal::Str("@@//:x".into()).to_json(), Json::Str("'@@//:x'".into()));
-        assert_eq!(AttrVal::Label("@@//:x".into()).to_json(), Json::Str("@@//:x".into()));
-        assert_eq!(AttrVal::Str("'q'".into()).to_json(), Json::Str("''q''".into()));
-        assert_eq!(AttrVal::Str("plain".into()).to_json(), Json::Str("plain".into()));
+        assert_eq!(
+            AttrVal::Str("@@//:x".into()).to_json(),
+            Json::Str("'@@//:x'".into())
+        );
+        assert_eq!(
+            AttrVal::Label("@@//:x".into()).to_json(),
+            Json::Str("@@//:x".into())
+        );
+        assert_eq!(
+            AttrVal::Str("'q'".into()).to_json(),
+            Json::Str("''q''".into())
+        );
+        assert_eq!(
+            AttrVal::Str("plain".into()).to_json(),
+            Json::Str("plain".into())
+        );
         // Round trip, including dict keys.
         for v in [
             AttrVal::Str("@@//:x".into()),

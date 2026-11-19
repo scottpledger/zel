@@ -21,7 +21,9 @@ pub mod exec_log;
 pub mod profiler;
 pub mod ui;
 
-use bep::{ids, BepBuilder, BuildEventNode, BuildEventStreamer, BuildEventTransport, MemoryTransport};
+use bep::{
+    ids, BepBuilder, BuildEventNode, BuildEventStreamer, BuildEventTransport, MemoryTransport,
+};
 use std::fmt;
 use std::io;
 use std::sync::{Arc, Mutex};
@@ -325,7 +327,8 @@ impl Reporter {
     /// When set, [`BepEvent::Finished`] only records the exit code and the BEP file writers are
     /// no-ops: the owner finalizes the stream (see `BuildObserver::finish` in `zel-server`).
     pub fn set_deferred_finish(&self, on: bool) {
-        self.deferred_finish.store(on, std::sync::atomic::Ordering::SeqCst);
+        self.deferred_finish
+            .store(on, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// Exit code recorded by a deferred [`BepEvent::Finished`], if any.
@@ -334,7 +337,8 @@ impl Reporter {
     }
 
     fn is_deferred(&self) -> bool {
-        self.deferred_finish.load(std::sync::atomic::Ordering::SeqCst)
+        self.deferred_finish
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Configuration id used by the coarse [`BepEvent`] variants (`ConfigurationId.id`).
@@ -367,7 +371,14 @@ impl Reporter {
             }
         } else if matches!(
             event.kind,
-            EventKind::Error | EventKind::Warning | EventKind::Info | EventKind::Debug | EventKind::Fail | EventKind::Subcommand | EventKind::Cancelled | EventKind::Fatal
+            EventKind::Error
+                | EventKind::Warning
+                | EventKind::Info
+                | EventKind::Debug
+                | EventKind::Fail
+                | EventKind::Subcommand
+                | EventKind::Cancelled
+                | EventKind::Fatal
         ) {
             // The terminal text of these events also rides on BEP progress events.
             if let Some(s) = self.bep.lock().unwrap().streamer.clone() {
@@ -485,15 +496,32 @@ impl Reporter {
                 ));
             }
             BepEvent::TargetComplete { label, success } => {
-                s.post(BepBuilder::target_completed(&label, &cfg, success, &[], &[], None));
+                s.post(BepBuilder::target_completed(
+                    &label,
+                    &cfg,
+                    success,
+                    &[],
+                    &[],
+                    None,
+                ));
             }
             BepEvent::TestResult {
                 label,
                 status,
                 duration_ms,
             } => {
-                let st = if ["NO_STATUS", "PASSED", "FLAKY", "TIMEOUT", "FAILED", "INCOMPLETE", "REMOTE_FAILURE", "FAILED_TO_BUILD", "TOOL_HALTED_BEFORE_TESTING"]
-                    .contains(&status.as_str())
+                let st = if [
+                    "NO_STATUS",
+                    "PASSED",
+                    "FLAKY",
+                    "TIMEOUT",
+                    "FAILED",
+                    "INCOMPLETE",
+                    "REMOTE_FAILURE",
+                    "FAILED_TO_BUILD",
+                    "TOOL_HALTED_BEFORE_TESTING",
+                ]
+                .contains(&status.as_str())
                 {
                     status
                 } else {
@@ -522,8 +550,15 @@ impl Reporter {
                     *self.deferred_exit.lock().unwrap() = Some((exit_code_name, exit_code));
                     return;
                 }
-                s.post(BepBuilder::build_finished(&exit_code_name, exit_code, now_millis(), None));
-                s.post(BepBuilder::build_metrics(Msg::new("build_event_stream.BuildMetrics")));
+                s.post(BepBuilder::build_finished(
+                    &exit_code_name,
+                    exit_code,
+                    now_millis(),
+                    None,
+                ));
+                s.post(BepBuilder::build_metrics(Msg::new(
+                    "build_event_stream.BuildMetrics",
+                )));
                 s.post(BepBuilder::build_tool_logs(&[]));
                 s.post(BepBuilder::convenience_symlinks(&[]));
             }
@@ -540,7 +575,14 @@ impl Reporter {
 
     /// All BEP events emitted so far, as full `BuildEvent` protos.
     pub fn bep_history(&self) -> Vec<Msg> {
-        self.bep.lock().unwrap().history.events.lock().unwrap().clone()
+        self.bep
+            .lock()
+            .unwrap()
+            .history
+            .events
+            .lock()
+            .unwrap()
+            .clone()
     }
 
     /// Writes BEP JSON lines (`--build_event_json_file`) from the recorded history.
@@ -558,7 +600,12 @@ impl Reporter {
     }
 
     /// Writes BEP JSON lines regardless of deferral (after the stream has been finalized).
-    pub fn force_write_bep_file(&self, fs: &dyn FileSystem, path: &PathFragment, format: bep::BepFormat) -> io::Result<()> {
+    pub fn force_write_bep_file(
+        &self,
+        fs: &dyn FileSystem,
+        path: &PathFragment,
+        format: bep::BepFormat,
+    ) -> io::Result<()> {
         self.finish_bep();
         let mut out = Vec::new();
         for ev in self.bep_history() {
@@ -568,7 +615,11 @@ impl Reporter {
     }
 
     /// Writes the delimited binary BEP stream (`--build_event_binary_file`).
-    pub fn write_bep_binary_file(&self, fs: &dyn FileSystem, path: &PathFragment) -> io::Result<()> {
+    pub fn write_bep_binary_file(
+        &self,
+        fs: &dyn FileSystem,
+        path: &PathFragment,
+    ) -> io::Result<()> {
         if self.is_deferred() {
             return Ok(());
         }
@@ -667,9 +718,16 @@ mod tests {
         reporter.write_bep_json_file(&fs, &bep_path).unwrap();
         let content = String::from_utf8(fs.read_file(&bep_path).unwrap()).unwrap();
         let lines: Vec<&str> = content.lines().collect();
-        assert!(lines[0].starts_with("{\"id\":{\"started\":{}},\"children\":[{\"progress\":{}}"), "{}", lines[0]);
+        assert!(
+            lines[0].starts_with("{\"id\":{\"started\":{}},\"children\":[{\"progress\":{}}"),
+            "{}",
+            lines[0]
+        );
         assert!(content.contains("\"command\":\"build\""));
-        assert!(content.contains("\"exitCode\":{\"name\":\"SUCCESS\"}"), "{content}");
+        assert!(
+            content.contains("\"exitCode\":{\"name\":\"SUCCESS\"}"),
+            "{content}"
+        );
         assert!(content.contains("\"targetKind\":\"cc_library rule\""));
         assert!(lines.last().unwrap().contains("\"lastMessage\":true"));
     }
@@ -679,7 +737,11 @@ mod tests {
         let out = Arc::new(ui::BufferOutErr::default());
         let ui = ui::UiEventHandler::new(
             out.clone(),
-            ui::UiOptions { color: ui::TriState::No, curses: ui::TriState::No, ..Default::default() },
+            ui::UiOptions {
+                color: ui::TriState::No,
+                curses: ui::TriState::No,
+                ..Default::default()
+            },
         );
         let r = Reporter::new();
         r.add_handler(Arc::new(ui));
@@ -696,6 +758,17 @@ mod tests {
     fn event_kind_names() {
         assert_eq!(EventKind::from_name("warning"), Some(EventKind::Warning));
         assert_eq!(EventKind::Subcommand.prefix(), "SUBCOMMAND: ");
-        assert_eq!(Event::error(Some(Location { file: "a".into(), line: 1, column: 2 }), "m").to_string(), "ERROR: a:1:2: m");
+        assert_eq!(
+            Event::error(
+                Some(Location {
+                    file: "a".into(),
+                    line: 1,
+                    column: 2
+                }),
+                "m"
+            )
+            .to_string(),
+            "ERROR: a:1:2: m"
+        );
     }
 }

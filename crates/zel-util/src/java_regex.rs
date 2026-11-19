@@ -90,7 +90,6 @@ enum Pred {
     UniSpace,
     UniPunct,
     UniAlnum,
-    NotUniLetter,
     Any,
     JavaWhitespace,
     JavaLetter,
@@ -111,10 +110,14 @@ fn pred_matches(p: Pred, c: char) -> bool {
         NotSpace => !matches!(c, ' ' | '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r'),
         HSpace => matches!(
             c,
-            ' ' | '\t' | '\u{A0}' | '\u{1680}' | '\u{180e}' | '\u{2000}'..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
+            ' ' | '\t' | '\u{A0}' | '\u{1680}' | '\u{180e}' | '\u{2000}'
+                ..='\u{200a}' | '\u{202f}' | '\u{205f}' | '\u{3000}'
         ),
         NotHSpace => !pred_matches(HSpace, c),
-        VSpace => matches!(c, '\n' | '\u{0B}' | '\u{0C}' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'),
+        VSpace => matches!(
+            c,
+            '\n' | '\u{0B}' | '\u{0C}' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'
+        ),
         NotVSpace => !pred_matches(VSpace, c),
         Lower => c.is_ascii_lowercase(),
         Upper => c.is_ascii_uppercase(),
@@ -130,12 +133,14 @@ fn pred_matches(p: Pred, c: char) -> bool {
         UniLetter => c.is_alphabetic() && !c.is_numeric(),
         UniUpper => c.is_uppercase(),
         UniLower => c.is_lowercase(),
-        UniDigit => c.is_numeric() && c.to_digit(10).is_some() || (c.is_numeric() && !c.is_ascii()),
+        UniDigit => c.is_numeric() && c.is_ascii_digit() || (c.is_numeric() && !c.is_ascii()),
         UniNumber => c.is_numeric(),
         UniSpace => c.is_whitespace(),
-        UniPunct => c.is_ascii_punctuation() || (!c.is_ascii() && !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control()),
+        UniPunct => {
+            c.is_ascii_punctuation()
+                || (!c.is_ascii() && !c.is_alphanumeric() && !c.is_whitespace() && !c.is_control())
+        }
         UniAlnum => c.is_alphanumeric(),
-        NotUniLetter => !(c.is_alphabetic() && !c.is_numeric()),
         Any => true,
         JavaWhitespace => c.is_whitespace() && !matches!(c, '\u{A0}' | '\u{2007}' | '\u{202F}'),
         JavaLetter => c.is_alphabetic(),
@@ -165,7 +170,17 @@ fn class_matches(n: &ClassNode, c: char, ci: bool) -> bool {
             if pred_matches(*p, c) {
                 return true;
             }
-            if ci && matches!(p, Pred::Lower | Pred::Upper | Pred::UniLower | Pred::UniUpper | Pred::JavaLower | Pred::JavaUpper) {
+            if ci
+                && matches!(
+                    p,
+                    Pred::Lower
+                        | Pred::Upper
+                        | Pred::UniLower
+                        | Pred::UniUpper
+                        | Pred::JavaLower
+                        | Pred::JavaUpper
+                )
+            {
                 return case_variants(c).into_iter().any(|x| pred_matches(*p, x));
             }
             false
@@ -195,10 +210,17 @@ fn case_variants(c: char) -> Vec<char> {
 enum Node {
     Empty,
     Char(char, bool),
-    Any { dotall: bool, unix_lines: bool },
+    Any {
+        dotall: bool,
+        unix_lines: bool,
+    },
     Class(ClassNode, bool),
-    LineStart { multiline: bool },
-    LineEnd { multiline: bool },
+    LineStart {
+        multiline: bool,
+    },
+    LineEnd {
+        multiline: bool,
+    },
     InputStart,
     InputEnd,
     InputEndZ,
@@ -209,9 +231,18 @@ enum Node {
     Group(Box<Node>, usize),
     NonCapture(Box<Node>),
     Atomic(Box<Node>),
-    Repeat { node: Box<Node>, min: usize, max: usize, kind: RepKind },
+    Repeat {
+        node: Box<Node>,
+        min: usize,
+        max: usize,
+        kind: RepKind,
+    },
     Backref(usize, bool),
-    Look { node: Box<Node>, ahead: bool, negate: bool },
+    Look {
+        node: Box<Node>,
+        ahead: bool,
+        negate: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,9 +281,13 @@ struct Parser<'a> {
 
 const NO_MAX: usize = usize::MAX;
 
-impl<'a> Parser<'a> {
+impl Parser<'_> {
     fn err<T>(&self, desc: &str, idx: usize) -> Result<T, RegexError> {
-        Err(RegexError { description: desc.to_string(), index: Some(idx), pattern: self.pattern.to_string() })
+        Err(RegexError {
+            description: desc.to_string(),
+            index: Some(idx),
+            pattern: self.pattern.to_string(),
+        })
     }
 
     fn peek(&self) -> Option<char> {
@@ -293,7 +328,11 @@ impl<'a> Parser<'a> {
         while self.eat('|') {
             alts.push(self.parse_concat()?);
         }
-        Ok(if alts.len() == 1 { alts.pop().unwrap() } else { Node::Alt(alts) })
+        Ok(if alts.len() == 1 {
+            alts.pop().unwrap()
+        } else {
+            Node::Alt(alts)
+        })
     }
 
     fn parse_concat(&mut self) -> Result<Node, RegexError> {
@@ -354,7 +393,12 @@ impl<'a> Parser<'a> {
                 RepKind::Greedy
             };
             let _ = atom_start;
-            node = Node::Repeat { node: Box::new(node), min, max, kind };
+            node = Node::Repeat {
+                node: Box::new(node),
+                min,
+                max,
+                kind,
+            };
         }
     }
 
@@ -391,7 +435,11 @@ impl<'a> Parser<'a> {
         if start == self.pos {
             return None;
         }
-        self.src[start..self.pos].iter().collect::<String>().parse().ok()
+        self.src[start..self.pos]
+            .iter()
+            .collect::<String>()
+            .parse()
+            .ok()
     }
 
     fn parse_atom(&mut self) -> Result<Option<Node>, RegexError> {
@@ -402,9 +450,16 @@ impl<'a> Parser<'a> {
             return Ok(Some(Node::Char(c, self.flags.ci)));
         }
         Ok(Some(match c {
-            '.' => Node::Any { dotall: self.flags.dotall, unix_lines: self.flags.unix_lines },
-            '^' => Node::LineStart { multiline: self.flags.multiline },
-            '$' => Node::LineEnd { multiline: self.flags.multiline },
+            '.' => Node::Any {
+                dotall: self.flags.dotall,
+                unix_lines: self.flags.unix_lines,
+            },
+            '^' => Node::LineStart {
+                multiline: self.flags.multiline,
+            },
+            '$' => Node::LineEnd {
+                multiline: self.flags.multiline,
+            },
             '*' | '+' | '?' => {
                 return self.err(&format!("Dangling meta character '{c}'"), start);
             }
@@ -438,14 +493,22 @@ impl<'a> Parser<'a> {
                 }
                 '=' | '!' => {
                     let n = self.parse_alt()?;
-                    node = Node::Look { node: Box::new(n), ahead: true, negate: c == '!' };
+                    node = Node::Look {
+                        node: Box::new(n),
+                        ahead: true,
+                        negate: c == '!',
+                    };
                 }
                 '<' => match self.peek() {
                     Some('=') | Some('!') => {
                         let neg = self.peek() == Some('!');
                         self.pos += 1;
                         let n = self.parse_alt()?;
-                        node = Node::Look { node: Box::new(n), ahead: false, negate: neg };
+                        node = Node::Look {
+                            node: Box::new(n),
+                            ahead: false,
+                            negate: neg,
+                        };
                     }
                     _ => {
                         let name_start = self.pos;
@@ -454,10 +517,14 @@ impl<'a> Parser<'a> {
                         }
                         let name: String = self.src[name_start..self.pos].iter().collect();
                         if name.is_empty() || !name.chars().next().unwrap().is_ascii_alphabetic() {
-                            return self.err("capturing group name does not start with a Latin letter", self.pos);
+                            return self.err(
+                                "capturing group name does not start with a Latin letter",
+                                self.pos,
+                            );
                         }
                         if !self.eat('>') {
-                            return self.err("named capturing group is missing trailing '>'", self.pos);
+                            return self
+                                .err("named capturing group is missing trailing '>'", self.pos);
                         }
                         self.groups += 1;
                         let idx = self.groups;
@@ -565,7 +632,10 @@ impl<'a> Parser<'a> {
                     return self.err("Illegal character family", self.pos);
                 };
                 let Some(p) = property(&name) else {
-                    return self.err(&format!("Unknown character property name {{{name}}}"), self.pos - 1);
+                    return self.err(
+                        &format!("Unknown character property name {{{name}}}"),
+                        self.pos - 1,
+                    );
                 };
                 if neg {
                     Esc::Node(ClassNode::Negate(Box::new(ClassNode::Pred(p))))
@@ -621,7 +691,9 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 Esc::Ch(char::from_u32((ch as u32) ^ 64).unwrap_or(ch))
             }
-            'b' if in_class => return self.err("Illegal/unsupported escape sequence", self.pos - 1),
+            'b' if in_class => {
+                return self.err("Illegal/unsupported escape sequence", self.pos - 1)
+            }
             c if c.is_ascii_alphabetic() => {
                 if in_class {
                     return self.err("Illegal/unsupported escape sequence", self.pos - 1);
@@ -663,7 +735,10 @@ impl<'a> Parser<'a> {
         if c == 'k' {
             self.pos += 1;
             if !self.eat('<') {
-                return self.err("\\k is not followed by '<' for named capturing group", self.pos);
+                return self.err(
+                    "\\k is not followed by '<' for named capturing group",
+                    self.pos,
+                );
             }
             let s = self.pos;
             while matches!(self.peek(), Some(ch) if ch != '>') {
@@ -672,7 +747,10 @@ impl<'a> Parser<'a> {
             let name: String = self.src[s..self.pos].iter().collect();
             self.pos += 1;
             let Some((_, idx)) = self.named.iter().find(|(n, _)| *n == name) else {
-                return self.err(&format!("named capturing group <{name}> does not exist"), self.pos - 1);
+                return self.err(
+                    &format!("named capturing group <{name}> does not exist"),
+                    self.pos - 1,
+                );
             };
             return Ok(Some(Node::Backref(*idx, ci)));
         }
@@ -747,8 +825,12 @@ impl<'a> Parser<'a> {
                         ClassAtom::Ch(a) => {
                             // Range?
                             if self.peek() == Some('-')
-                                && self.src.get(self.pos + 1).is_some_and(|n| *n != ']' && *n != '[')
-                                && !(self.src.get(self.pos + 1) == Some(&'&') && self.src.get(self.pos + 2) == Some(&'&'))
+                                && self
+                                    .src
+                                    .get(self.pos + 1)
+                                    .is_some_and(|n| *n != ']' && *n != '[')
+                                && !(self.src.get(self.pos + 1) == Some(&'&')
+                                    && self.src.get(self.pos + 2) == Some(&'&'))
                             {
                                 self.pos += 1;
                                 let at = self.pos;
@@ -780,7 +862,11 @@ impl<'a> Parser<'a> {
             ClassNode::Intersect(intersect)
         };
         let _ = start;
-        Ok(if negate { ClassNode::Negate(Box::new(body)) } else { body })
+        Ok(if negate {
+            ClassNode::Negate(Box::new(body))
+        } else {
+            body
+        })
     }
 
     fn class_atom(&mut self) -> Result<ClassAtom, RegexError> {
@@ -854,7 +940,13 @@ fn property(name: &str) -> Option<Pred> {
         "L" | "IsL" | "IsLetter" | "Letter" => UniLetter,
         "Lu" | "IsLu" | "IsUppercase" | "Uppercase" => UniUpper,
         "Ll" | "IsLl" | "IsLowercase" | "Lowercase" => UniLower,
-        "N" | "Nd" | "IsN" | "IsNd" | "IsDigit" => if name.ends_with('d') { UniDigit } else { UniNumber },
+        "N" | "Nd" | "IsN" | "IsNd" | "IsDigit" => {
+            if name.ends_with('d') {
+                UniDigit
+            } else {
+                UniNumber
+            }
+        }
         "P" | "IsP" | "IsPunctuation" => UniPunct,
         "Z" | "Zs" | "IsWhite_Space" | "IsWhiteSpace" => UniSpace,
         "IsAlphabetic" | "Alphabetic" => JavaLetter,
@@ -876,7 +968,14 @@ impl Regex {
             pos: 0,
             groups: 0,
             pattern,
-            flags: Flags { ci: false, dotall: false, multiline: false, comments: false, unix_lines: false, literal: false },
+            flags: Flags {
+                ci: false,
+                dotall: false,
+                multiline: false,
+                comments: false,
+                unix_lines: false,
+                literal: false,
+            },
             named: Vec::new(),
         };
         let root = p.parse_alt()?;
@@ -884,7 +983,11 @@ impl Regex {
             // Only an unmatched ')' can stop the top-level parse.
             return p.err("Unmatched closing ')'", p.pos.saturating_sub(1));
         }
-        Ok(Regex { root, groups: p.groups, pattern: pattern.to_string() })
+        Ok(Regex {
+            root,
+            groups: p.groups,
+            pattern: pattern.to_string(),
+        })
     }
 
     pub fn pattern(&self) -> &str {
@@ -936,8 +1039,14 @@ fn is_word(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
-impl<'a> Matcher<'a> {
-    fn node(&self, n: &Node, pos: usize, caps: &mut Caps, k: &mut dyn FnMut(usize, &mut Caps) -> bool) -> bool {
+impl Matcher<'_> {
+    fn node(
+        &self,
+        n: &Node,
+        pos: usize,
+        caps: &mut Caps,
+        k: &mut dyn FnMut(usize, &mut Caps) -> bool,
+    ) -> bool {
         let cs = self.chars;
         match n {
             Node::Empty => k(pos, caps),
@@ -975,7 +1084,10 @@ impl<'a> Matcher<'a> {
                 let ok = pos == 0
                     || (*multiline
                         && pos <= cs.len()
-                        && matches!(cs[pos - 1], '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}')
+                        && matches!(
+                            cs[pos - 1],
+                            '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}'
+                        )
                         && !(cs[pos - 1] == '\r' && pos < cs.len() && cs[pos] == '\n')
                         && pos != cs.len());
                 if ok {
@@ -986,14 +1098,16 @@ impl<'a> Matcher<'a> {
             }
             Node::LineEnd { multiline } => {
                 let n = cs.len();
-                let is_term = |c: char| matches!(c, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}');
+                let is_term =
+                    |c: char| matches!(c, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}');
                 let ok = if pos == n {
                     true
                 } else if *multiline {
                     is_term(cs[pos]) && !(cs[pos] == '\n' && pos > 0 && cs[pos - 1] == '\r')
                 } else {
                     // Before a final line terminator.
-                    (pos == n - 1 && is_term(cs[pos])) || (pos == n - 2 && cs[pos] == '\r' && cs[pos + 1] == '\n')
+                    (pos == n - 1 && is_term(cs[pos]))
+                        || (pos == n - 2 && cs[pos] == '\r' && cs[pos + 1] == '\n')
                 };
                 if ok {
                     k(pos, caps)
@@ -1005,7 +1119,8 @@ impl<'a> Matcher<'a> {
             Node::InputEnd => pos == cs.len() && k(pos, caps),
             Node::InputEndZ => {
                 let n = cs.len();
-                let is_term = |c: char| matches!(c, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}');
+                let is_term =
+                    |c: char| matches!(c, '\n' | '\r' | '\u{85}' | '\u{2028}' | '\u{2029}');
                 let ok = pos == n
                     || (pos == n - 1 && is_term(cs[pos]))
                     || (pos + 2 == n && cs[pos] == '\r' && cs[pos + 1] == '\n');
@@ -1062,7 +1177,12 @@ impl<'a> Matcher<'a> {
                     false
                 }
             }
-            Node::Repeat { node, min, max, kind } => match kind {
+            Node::Repeat {
+                node,
+                min,
+                max,
+                kind,
+            } => match kind {
                 RepKind::Greedy => self.rep_greedy(node, *min, *max, 0, pos, caps, k),
                 RepKind::Lazy => self.rep_lazy(node, *min, *max, 0, pos, caps, k),
                 RepKind::Possessive => {
@@ -1106,7 +1226,11 @@ impl<'a> Matcher<'a> {
                 }
                 k(pos + len, caps)
             }
-            Node::Look { node, ahead, negate } => {
+            Node::Look {
+                node,
+                ahead,
+                negate,
+            } => {
                 let matched = if *ahead {
                     let mut c2 = caps.clone();
                     let r = self.node(node, pos, &mut c2, &mut |_, _| true);
@@ -1135,11 +1259,20 @@ impl<'a> Matcher<'a> {
         }
     }
 
-    fn seq(&self, items: &[Node], i: usize, pos: usize, caps: &mut Caps, k: &mut dyn FnMut(usize, &mut Caps) -> bool) -> bool {
+    fn seq(
+        &self,
+        items: &[Node],
+        i: usize,
+        pos: usize,
+        caps: &mut Caps,
+        k: &mut dyn FnMut(usize, &mut Caps) -> bool,
+    ) -> bool {
         if i == items.len() {
             return k(pos, caps);
         }
-        self.node(&items[i], pos, caps, &mut |p, caps: &mut Caps| self.seq(items, i + 1, p, caps, k))
+        self.node(&items[i], pos, caps, &mut |p, caps: &mut Caps| {
+            self.seq(items, i + 1, p, caps, k)
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1276,7 +1409,10 @@ mod tests {
         // `PatternSyntaxException.getMessage()` has no caret when the index is past the pattern end.
         assert_eq!(e.to_string(), "Unclosed group near index 3\n(ab");
         let e = Regex::new("*a").unwrap_err();
-        assert_eq!(e.to_string(), "Dangling meta character '*' near index 0\n*a\n^");
+        assert_eq!(
+            e.to_string(),
+            "Dangling meta character '*' near index 0\n*a\n^"
+        );
         let e = Regex::new("[a").unwrap_err();
         assert_eq!(e.description, "Unclosed character class");
         let e = Regex::new("a)").unwrap_err();

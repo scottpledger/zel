@@ -28,15 +28,25 @@ use std::sync::{Arc, Mutex};
 use zel_cmdline::Label;
 
 /// Embedder hook rendering `Host(kind, id)` values (`repr()`/`str()`), e.g. `<source file a/b>`.
-pub static HOST_REPR: std::sync::OnceLock<fn(&str, &str) -> Option<String>> = std::sync::OnceLock::new();
+pub static HOST_REPR: std::sync::OnceLock<fn(&str, &str) -> Option<String>> =
+    std::sync::OnceLock::new();
+
+/// Embedder hook checking whether a `Host(kind, id)` value is immutable (and therefore hashable).
+/// Used for unexported Starlark `provider()` symbols, which are not hashable until exported.
+pub static HOST_IS_IMMUTABLE: std::sync::OnceLock<fn(&str, &str) -> bool> =
+    std::sync::OnceLock::new();
 
 /// Java class name Bazel prints for repository-rule context objects without a `repr` override
 /// (`<unknown object com.google...>`).
 fn unknown_object_class(kind: &str) -> Option<&'static str> {
     match kind {
-        "repository_ctx" => Some("com.google.devtools.build.lib.bazel.repository.starlark.StarlarkRepositoryContext"),
+        "repository_ctx" => Some(
+            "com.google.devtools.build.lib.bazel.repository.starlark.StarlarkRepositoryContext",
+        ),
         "module_ctx" => Some("com.google.devtools.build.lib.bazel.bzlmod.ModuleExtensionContext"),
-        "exec_result" => Some("com.google.devtools.build.lib.bazel.repository.starlark.StarlarkExecutionResult"),
+        "exec_result" => {
+            Some("com.google.devtools.build.lib.bazel.repository.starlark.StarlarkExecutionResult")
+        }
         "module_extension" => Some("com.google.devtools.build.lib.bazel.bzlmod.ModuleExtension"),
         "tag_class" => Some("com.google.devtools.build.lib.bazel.bzlmod.TagClass"),
         _ => None,
@@ -48,7 +58,10 @@ fn user_function_repr(func: &crate::syntax::ast::UserFunctionDef) -> String {
     if let Some(repr) = &func.repr_override {
         return repr.clone();
     }
-    let label = func.module.as_ref().and_then(|m| m.label_string.lock().unwrap().clone());
+    let label = func
+        .module
+        .as_ref()
+        .and_then(|m| m.label_string.lock().unwrap().clone());
     match label {
         Some(l) => format!("<function {} from {l}>", func.name),
         None => format!("<function {}>", func.name),
@@ -145,8 +158,20 @@ impl Value {
             Self::Depset(_) => "depset",
             Self::SelectorList(_) => "select",
             Self::Label(_) => "Label",
-            Self::Struct(s) if s.opaque_class.as_deref().is_some_and(|c| c.ends_with(".StarlarkOS")) => "repository_os",
-            Self::Struct(s) if s.opaque_class.as_deref().is_some_and(|c| c.ends_with(".RepoDefinition")) => "RepoDefinition",
+            Self::Struct(s)
+                if s.opaque_class
+                    .as_deref()
+                    .is_some_and(|c| c.ends_with(".StarlarkOS")) =>
+            {
+                "repository_os"
+            }
+            Self::Struct(s)
+                if s.opaque_class
+                    .as_deref()
+                    .is_some_and(|c| c.ends_with(".RepoDefinition")) =>
+            {
+                "RepoDefinition"
+            }
             Self::Struct(_) => "struct",
             Self::Provider { .. } => "Provider",
             Self::ProviderInstance { .. } => "ProviderInstance",
@@ -177,25 +202,52 @@ impl Value {
         }
     }
 
-    pub fn is_hashable(&self) -> bool {
+    pub fn is_immutable(&self) -> bool {
         match self {
-            Self::None | Self::Bool(_) | Self::Int(_) | Self::String(_) | Self::Label(_) | Self::Range(_) | Self::Host(..) => true,
-            Self::Float(f) => !f.is_nan(),
-            Self::Tuple(items) => items.iter().all(|x| x.is_hashable()),
-            Self::Struct(_) => false,
-            Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_hashable_deep()),
-            Self::UserFunction(_) | Self::BuiltinFunction(_) | Self::Provider { .. } => true,
-            _ => false,
+            Self::None
+            | Self::Bool(_)
+            | Self::Int(_)
+            | Self::Float(_)
+            | Self::String(_)
+            | Self::Label(_)
+            | Self::Depset(_)
+            | Self::SelectorList(_)
+            | Self::UserFunction(_)
+            | Self::Provider { .. }
+            | Self::RuleCallable { .. } => true,
+            Self::List(l) => l.lock().unwrap().is_frozen(),
+            Self::Dict(d) => d.lock().unwrap().is_frozen(),
+            Self::Set(s) => s.lock().unwrap().is_frozen(),
+            Self::Tuple(items) => items.iter().all(|x| x.is_immutable()),
+            Self::Struct(s) => s.fields.values().all(|x| x.is_immutable()),
+            Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_immutable()),
+            Self::Host(k, id) => HOST_IS_IMMUTABLE.get().map(|f| f(k, id)).unwrap_or(true),
+            Self::Range(_) | Self::BuiltinFunction(_) => false,
         }
     }
 
-    /// Hashability of a value nested inside a struct/provider: frozen containers are hashable.
-    fn is_hashable_deep(&self) -> bool {
+    pub fn is_hashable(&self) -> bool {
         match self {
-            Self::List(l) => l.lock().unwrap().elements.iter().all(|x| x.is_hashable_deep()),
-            Self::Dict(d) => d.lock().unwrap().entries.iter().all(|(k, v)| k.is_hashable_deep() && v.is_hashable_deep()),
-            Self::Depset(_) => true,
-            other => other.is_hashable(),
+            Self::None
+            | Self::Bool(_)
+            | Self::Int(_)
+            | Self::Float(_)
+            | Self::String(_)
+            | Self::Label(_)
+            | Self::Depset(_)
+            | Self::UserFunction(_)
+            | Self::Provider { .. }
+            | Self::RuleCallable { .. } => true,
+            Self::Tuple(items) => items.iter().all(|x| x.is_hashable()),
+            Self::Struct(s) => s.fields.values().all(|x| x.is_immutable()),
+            Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_immutable()),
+            Self::Host(k, id) => HOST_IS_IMMUTABLE.get().map(|f| f(k, id)).unwrap_or(true),
+            Self::List(_)
+            | Self::Dict(_)
+            | Self::Set(_)
+            | Self::Range(_)
+            | Self::BuiltinFunction(_)
+            | Self::SelectorList(_) => false,
         }
     }
 
@@ -211,6 +263,11 @@ impl Value {
             }
             Self::Struct(s) => {
                 for v in s.fields.values() {
+                    v.freeze();
+                }
+            }
+            Self::ProviderInstance { fields, .. } => {
+                for v in fields.values() {
                     v.freeze();
                 }
             }
@@ -244,16 +301,15 @@ impl Value {
                 .resolve(&[])
                 .map(|v| v.to_string_list())
                 .unwrap_or_default(),
-            Self::Depset(d) => {
-                d.to_list()
-                    .iter()
-                    .filter_map(|v| match v {
-                        Self::String(s) => Some(s.clone()),
-                        Self::Label(lbl) => Some(lbl.canonical_form()),
-                        _ => None,
-                    })
-                    .collect()
-            }
+            Self::Depset(d) => d
+                .to_list()
+                .iter()
+                .filter_map(|v| match v {
+                    Self::String(s) => Some(s.clone()),
+                    Self::Label(lbl) => Some(lbl.canonical_form()),
+                    _ => None,
+                })
+                .collect(),
             _ => Vec::new(),
         }
     }
@@ -351,89 +407,178 @@ impl Value {
     }
 
     pub fn repr(&self) -> String {
+        let mut out = String::new();
+        let mut stack = Vec::new();
+        self.repr_into(&mut out, &mut stack);
+        out
+    }
+
+    pub fn repr_into(&self, out: &mut String, stack: &mut Vec<usize>) {
         match self {
-            Self::None => "None".to_string(),
-            Self::Bool(true) => "True".to_string(),
-            Self::Bool(false) => "False".to_string(),
-            Self::Int(i) => i.to_string(),
-            Self::Float(f) => format_float(*f),
-            Self::String(s) => format!("{s:?}"),
+            Self::None => out.push_str("None"),
+            Self::Bool(true) => out.push_str("True"),
+            Self::Bool(false) => out.push_str("False"),
+            Self::Int(i) => out.push_str(&i.to_string()),
+            Self::Float(f) => out.push_str(&format_float(*f)),
+            Self::String(s) => quote_starlark_string(s, out),
             Self::Label(l) => {
                 let f = l.unambiguous_canonical_form();
                 // The main repository is shown without its `@@`.
-                let shown = f.strip_prefix("@@").filter(|r| r.starts_with("//")).unwrap_or(&f).to_string();
-                format!("Label({shown:?})")
+                let shown = f
+                    .strip_prefix("@@")
+                    .filter(|r| r.starts_with("//"))
+                    .unwrap_or(&f);
+                out.push_str("Label(");
+                quote_starlark_string(shown, out);
+                out.push(')');
             }
             Self::List(l) => {
-                let guard = l.lock().unwrap();
-                let items: Vec<String> = guard.elements.iter().map(|x| x.repr()).collect();
-                format!("[{}]", items.join(", "))
+                let ptr = Arc::as_ptr(l) as usize;
+                if stack.contains(&ptr) {
+                    out.push_str("...");
+                    return;
+                }
+                stack.push(ptr);
+                let elems = l.lock().unwrap().elements.clone();
+                out.push('[');
+                for (i, item) in elems.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    item.repr_into(out, stack);
+                }
+                out.push(']');
+                stack.pop();
             }
             Self::Tuple(items) => {
-                let item_strs: Vec<String> = items.iter().map(|x| x.repr()).collect();
-                if item_strs.len() == 1 {
-                    format!("({},)", item_strs[0])
-                } else {
-                    format!("({})", item_strs.join(", "))
+                out.push('(');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    item.repr_into(out, stack);
                 }
+                if items.len() == 1 {
+                    out.push(',');
+                }
+                out.push(')');
             }
             Self::Dict(d) => {
-                let guard = d.lock().unwrap();
-                let pairs: Vec<String> = guard
-                    .entries
-                    .iter()
-                    .map(|(k, v)| format!("{}: {}", k.repr(), v.repr()))
-                    .collect();
-                format!("{{{}}}", pairs.join(", "))
+                let ptr = Arc::as_ptr(d) as usize;
+                if stack.contains(&ptr) {
+                    out.push_str("...");
+                    return;
+                }
+                stack.push(ptr);
+                let entries = d.lock().unwrap().entries.clone();
+                out.push('{');
+                for (i, (k, v)) in entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    k.repr_into(out, stack);
+                    out.push_str(": ");
+                    v.repr_into(out, stack);
+                }
+                out.push('}');
+                stack.pop();
             }
             Self::Set(s) => {
-                let guard = s.lock().unwrap();
-                if guard.elements.is_empty() {
-                    "set()".to_string()
+                let ptr = Arc::as_ptr(s) as usize;
+                if stack.contains(&ptr) {
+                    out.push_str("...");
+                    return;
+                }
+                let elems = s.lock().unwrap().elements.clone();
+                if elems.is_empty() {
+                    out.push_str("set()");
                 } else {
-                    let items: Vec<String> = guard.elements.iter().map(|x| x.repr()).collect();
-                    format!("set([{}])", items.join(", "))
+                    stack.push(ptr);
+                    out.push_str("set([");
+                    for (i, item) in elems.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        item.repr_into(out, stack);
+                    }
+                    out.push_str("])");
+                    stack.pop();
                 }
             }
-            Self::Range(r) => r.to_string(),
-            Self::Depset(d) => format!("{d}"),
-            Self::SelectorList(s) => format!("select({:?})", s.elements),
-            Self::Struct(s) => s.repr(),
-            Self::Provider { name } => format!("<provider {name}>"),
+            Self::Range(r) => out.push_str(&r.to_string()),
+            Self::Depset(d) => out.push_str(&d.to_string()),
+            Self::SelectorList(s) => out.push_str(&format!("select({:?})", s.elements)),
+            Self::Struct(s) => {
+                let ptr = Arc::as_ptr(s) as usize;
+                if stack.contains(&ptr) {
+                    out.push_str("...");
+                    return;
+                }
+                stack.push(ptr);
+                s.repr_into(out, stack);
+                stack.pop();
+            }
+            Self::Provider { name } => out.push_str(&format!("<provider {name}>")),
             Self::ProviderInstance {
                 provider_name,
                 fields,
             } => {
-                let flds: Vec<String> = fields
-                    .iter()
-                    .map(|(k, v)| format!("{k} = {}", v.repr()))
-                    .collect();
                 let shown = provider_name.rsplit('%').next().unwrap_or(provider_name);
-                format!("{shown}({})", flds.join(", "))
+                out.push_str(shown);
+                out.push('(');
+                for (i, (k, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(k);
+                    out.push_str(" = ");
+                    v.repr_into(out, stack);
+                }
+                out.push(')');
             }
-            Self::RuleCallable { rule_class, .. } => format!("<rule {rule_class}>"),
-            Self::UserFunction(func) => user_function_repr(func),
-            Self::BuiltinFunction(name) => builtin_function_repr(name),
+            Self::RuleCallable { rule_class, .. } => out.push_str(&format!("<rule {rule_class}>")),
+            Self::UserFunction(func) => out.push_str(&user_function_repr(func)),
+            Self::BuiltinFunction(name) => out.push_str(&builtin_function_repr(name)),
             Self::Host(k, id) => {
                 if k == "Facts" {
-                    "Facts(<opaque, inspect with print()>)".to_string()
+                    out.push_str("Facts(<opaque, inspect with print()>)");
                 } else if k == "path" {
-                    format!("{id:?}")
+                    quote_starlark_string(id, out);
                 } else if k == "pending_download" {
                     let path = id.split_once('|').map(|(_, p)| p).unwrap_or(id);
-                    format!("<pending download to '{path}'>")
+                    out.push_str(&format!("<pending download to '{path}'>"));
                 } else if k == "dotted_version" || k == "obj" {
-                    id.clone()
+                    out.push_str(id);
                 } else if let Some(r) = unknown_object_class(k) {
-                    format!("<unknown object {r}>")
+                    out.push_str(&format!("<unknown object {r}>"));
                 } else if let Some(r) = host_repr(k, id) {
-                    r
+                    out.push_str(&r);
                 } else {
-                    format!("<{k} {id}>")
+                    out.push_str(&format!("<{k} {id}>"));
                 }
             }
         }
     }
+}
+
+/// Quotes and escapes `s` matching Bazel's `Printer.appendQuoted` (`\"`, `\\`, `\r`, `\n`, `\t`,
+/// `\xHH` for `< 32`, and verbatim for `>= 32`).
+pub fn quote_starlark_string(s: &str, out: &mut String) {
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\r' => out.push_str("\\r"),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 32 => {
+                out.push_str(&format!("\\x{:02x}", c as u32));
+            }
+            other => out.push(other),
+        }
+    }
+    out.push('"');
 }
 
 pub fn format_float(v: f64) -> String {
@@ -441,13 +586,17 @@ pub fn format_float(v: f64) -> String {
         return "nan".to_string();
     }
     if v == f64::INFINITY {
-        return "inf".to_string();
+        return "+inf".to_string();
     }
     if v == f64::NEG_INFINITY {
         return "-inf".to_string();
     }
     if v == 0.0 {
-        return if v.is_sign_negative() { "-0.0".to_string() } else { "0.0".to_string() };
+        return if v.is_sign_negative() {
+            "-0.0".to_string()
+        } else {
+            "0.0".to_string()
+        };
     }
     // Shortest round-tripping digits (Rust's `{:e}`), laid out like Python's `repr(float)`: fixed notation
     // for decimal exponents in [-4, 16), scientific (`1e+20`, `1e-05`) otherwise.
@@ -460,59 +609,38 @@ pub fn format_float(v: f64) -> String {
         if exp >= 0 {
             let int_len = exp as usize + 1;
             let (int_part, frac) = if digits.len() <= int_len {
-                (format!("{digits}{}", "0".repeat(int_len - digits.len())), String::new())
+                (
+                    format!("{digits}{}", "0".repeat(int_len - digits.len())),
+                    String::new(),
+                )
             } else {
                 (digits[..int_len].to_string(), digits[int_len..].to_string())
             };
-            let frac = if frac.is_empty() { "0".to_string() } else { frac };
+            let frac = if frac.is_empty() {
+                "0".to_string()
+            } else {
+                frac
+            };
             format!("{sign}{int_part}.{frac}")
         } else {
             format!("{sign}0.{}{digits}", "0".repeat((-exp - 1) as usize))
         }
     } else {
-        let m = if digits.len() > 1 { format!("{}.{}", &digits[..1], &digits[1..]) } else { digits };
-        format!("{sign}{m}e{}{:02}", if exp < 0 { '-' } else { '+' }, exp.abs())
+        let m = if digits.len() > 1 {
+            format!("{}.{}", &digits[..1], &digits[1..])
+        } else {
+            digits
+        };
+        format!(
+            "{sign}{m}e{}{:02}",
+            if exp < 0 { '-' } else { '+' },
+            exp.abs()
+        )
     }
 }
 
 pub fn int_equals_float(x: &BigInt, y: f64) -> bool {
-    if y.is_nan() || y.is_infinite() {
-        return false;
-    }
-    let bits = y.to_bits();
-    let is_y_neg = (bits >> 63) != 0;
-    if x.is_zero() && y == 0.0 {
-        return true;
-    }
-    if x.is_negative() != is_y_neg {
-        return false;
-    }
-
-    let exp = ((bits >> 52) & 0x7FF) as i32;
-    let (mantissa_raw, shift) = if exp == 0 {
-        (bits & 0x000F_FFFF_FFFF_FFFF, -1022 - 52)
-    } else {
-        ((bits & 0x000F_FFFF_FFFF_FFFF) | (1u64 << 52), exp - 1023 - 52)
-    };
-
-    let x_abs = x.abs();
-    let y_mantissa = BigInt::from_u64(mantissa_raw);
-
-    if shift < 0 {
-        // x * 2^(-shift) == y_mantissa
-        if let Ok(x_shifted) = x_abs.shl((-shift) as i64) {
-            x_shifted == y_mantissa
-        } else {
-            false
-        }
-    } else {
-        // x == y_mantissa * 2^shift
-        if let Ok(y_shifted) = y_mantissa.shl(shift as i64) {
-            x_abs == y_shifted
-        } else {
-            false
-        }
-    }
+    !y.is_nan() && crate::bigint::compare_int_and_float(x, y) == std::cmp::Ordering::Equal
 }
 
 impl PartialEq for Value {
@@ -522,9 +650,7 @@ impl PartialEq for Value {
             (Self::Bool(a), Self::Bool(b)) => a == b,
             (Self::Int(a), Self::Int(b)) => a == b,
             (Self::Float(a), Self::Float(b)) => {
-                if a.is_nan() && b.is_nan() {
-                    true
-                } else if *a == 0.0 && *b == 0.0 {
+                if (a.is_nan() && b.is_nan()) || (*a == 0.0 && *b == 0.0) {
                     true
                 } else {
                     a == b
@@ -538,22 +664,22 @@ impl PartialEq for Value {
                 if Arc::ptr_eq(a, b) {
                     true
                 } else {
-                    let g1 = a.lock().unwrap();
-                    let g2 = b.lock().unwrap();
-                    g1.elements == g2.elements
+                    let e1 = a.lock().unwrap().elements.clone();
+                    let e2 = b.lock().unwrap().elements.clone();
+                    e1 == e2
                 }
             }
             (Self::Dict(a), Self::Dict(b)) => {
                 if Arc::ptr_eq(a, b) {
                     true
                 } else {
-                    let g1 = a.lock().unwrap();
-                    let g2 = b.lock().unwrap();
-                    if g1.len() != g2.len() {
+                    let e1 = a.lock().unwrap().entries.clone();
+                    let e2 = b.lock().unwrap().entries.clone();
+                    if e1.len() != e2.len() {
                         return false;
                     }
-                    for (k, v) in &g1.entries {
-                        match g2.get(k) {
+                    for (k, v) in &e1 {
+                        match e2.iter().find(|(k2, _)| k2 == k).map(|(_, v2)| v2) {
                             Some(v2) if v2 == v => {}
                             _ => return false,
                         }
@@ -565,9 +691,9 @@ impl PartialEq for Value {
                 if Arc::ptr_eq(a, b) {
                     true
                 } else {
-                    let g1 = a.lock().unwrap();
-                    let g2 = b.lock().unwrap();
-                    g1.len() == g2.len() && g1.issubset(&g2)
+                    let e1 = a.lock().unwrap().elements.clone();
+                    let e2 = b.lock().unwrap().elements.clone();
+                    e1.len() == e2.len() && e1.iter().all(|x| e2.iter().any(|y| x == y))
                 }
             }
             (Self::Range(a), Self::Range(b)) => a == b,
@@ -575,7 +701,10 @@ impl PartialEq for Value {
             (Self::Label(a), Self::Label(b)) => a == b,
             (Self::Struct(a), Self::Struct(b)) => a.fields == b.fields,
             (Self::SelectorList(a), Self::SelectorList(b)) => a == b,
-            (Self::RuleCallable { rule_class: r1, .. }, Self::RuleCallable { rule_class: r2, .. }) => r1 == r2,
+            (
+                Self::RuleCallable { rule_class: r1, .. },
+                Self::RuleCallable { rule_class: r2, .. },
+            ) => r1 == r2,
             (Self::Provider { name: n1 }, Self::Provider { name: n2 }) => n1 == n2,
             (
                 Self::ProviderInstance {
@@ -623,12 +752,15 @@ impl Hash for Value {
                     let (mantissa_raw, shift) = if exp == 0 {
                         (bits & 0x000F_FFFF_FFFF_FFFF, -1022 - 52)
                     } else {
-                        ((bits & 0x000F_FFFF_FFFF_FFFF) | (1u64 << 52), exp - 1023 - 52)
+                        (
+                            (bits & 0x000F_FFFF_FFFF_FFFF) | (1u64 << 52),
+                            exp - 1023 - 52,
+                        )
                     };
                     if shift >= 0 {
                         // Exact integer
                         let is_neg = (bits >> 63) != 0;
-                        let mut bi = BigInt::from_u64(mantissa_raw).shl(shift as i64).unwrap();
+                        let mut bi = BigInt::from_u64(mantissa_raw).shl_bits(shift as usize);
                         if is_neg {
                             bi = bi.neg();
                         }
@@ -674,7 +806,10 @@ impl Hash for Value {
                     v.hash(state);
                 }
             }
-            Self::ProviderInstance { provider_name, fields } => {
+            Self::ProviderInstance {
+                provider_name,
+                fields,
+            } => {
                 11u8.hash(state);
                 provider_name.hash(state);
                 for (k, v) in fields {
@@ -725,55 +860,8 @@ impl fmt::Display for Value {
             Self::Float(fl) => write!(f, "{}", format_float(*fl)),
             Self::String(s) => f.write_str(s),
             Self::Label(l) => write!(f, "{}", l.unambiguous_canonical_form()),
-            Self::List(l) => {
-                let guard = l.lock().unwrap();
-                f.write_str("[")?;
-                for (i, item) in guard.elements.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{}", item.repr())?;
-                }
-                f.write_str("]")
-            }
-            Self::Tuple(items) => {
-                f.write_str("(")?;
-                for (i, item) in items.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{}", item.repr())?;
-                }
-                if items.len() == 1 {
-                    f.write_str(",")?;
-                }
-                f.write_str(")")
-            }
-            Self::Dict(d) => {
-                let guard = d.lock().unwrap();
-                f.write_str("{")?;
-                for (i, (k, v)) in guard.entries.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    write!(f, "{}: {}", k.repr(), v.repr())?;
-                }
-                f.write_str("}")
-            }
-            Self::Set(s) => {
-                let guard = s.lock().unwrap();
-                if guard.elements.is_empty() {
-                    f.write_str("set()")
-                } else {
-                    f.write_str("set([")?;
-                    for (i, item) in guard.elements.iter().enumerate() {
-                        if i > 0 {
-                            f.write_str(", ")?;
-                        }
-                        write!(f, "{}", item.repr())?;
-                    }
-                    f.write_str("])")
-                }
+            Self::List(_) | Self::Tuple(_) | Self::Dict(_) | Self::Set(_) => {
+                f.write_str(&self.repr())
             }
             Self::Range(r) => write!(f, "{r}"),
             Self::Depset(d) => write!(f, "{d}"),

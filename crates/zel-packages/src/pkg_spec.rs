@@ -73,6 +73,25 @@ impl PackageSpec {
                 "invalid package name '{spec}': must start with '//', '@', or be 'public' or 'private'"
             ));
         }
+        // `//pkg:__pkg__` and `//pkg:__subpackages__` (in any repo form) are valid package specs.
+        if let Ok(mut label) = Label::parse_with_repo_mapping(spec, mapping) {
+            if spec.starts_with("//") && !repo.is_main() {
+                if let Ok(rebound_pkg) = PackageIdentifier::create(
+                    repo.clone(),
+                    label.package_identifier().package_fragment().clone(),
+                ) {
+                    if let Ok(rebound) = Label::create(rebound_pkg, label.name()) {
+                        label = rebound;
+                    }
+                }
+            }
+            if label.name() == "__pkg__" {
+                return Ok(Self::Single(label.package_identifier().clone()));
+            }
+            if label.name() == "__subpackages__" {
+                return Ok(Self::AllBeneath(label.package_identifier().clone()));
+            }
+        }
         // Split off the repository.
         let (repo_name, path) = if let Some(rest) = spec.strip_prefix('@') {
             let canonical = rest.starts_with('@');
@@ -100,11 +119,11 @@ impl PackageSpec {
         // A `//pkg:all`-style spec is not valid here.
         if pkg.contains(':') {
             return Err(format!(
-                "invalid package name '{pkg}': package names may not contain ':'"
+                "invalid package name '{spec}': package names may not contain ':'"
             ));
         }
         let id = PackageIdentifier::create(repo_name, PathFragment::create(pkg))
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| format!("invalid package name '{spec}': {e}"))?;
         Ok(if beneath {
             Self::AllBeneath(id)
         } else {
@@ -153,21 +172,41 @@ impl PackageGroupContents {
 /// Resolves the transitive contents of the package group `group`, following `includes`.
 ///
 /// `lookup` returns `(direct specs, included group labels)` for a package group label.
+pub type PackageGroupLookup<'a> =
+    &'a mut dyn FnMut(&Label) -> Result<(Vec<PackageSpec>, Vec<Label>), String>;
+
 pub fn resolve_package_group(
     group: &Label,
-    lookup: &mut dyn FnMut(&Label) -> Result<(Vec<PackageSpec>, Vec<Label>), String>,
+    lookup: PackageGroupLookup<'_>,
 ) -> Result<PackageGroupContents, String> {
-    let mut seen = BTreeSet::new();
-    let mut out = PackageGroupContents::default();
-    let mut stack = vec![group.clone()];
-    while let Some(g) = stack.pop() {
-        if !seen.insert(g.clone()) {
-            continue;
+    fn visit(
+        g: &Label,
+        lookup: PackageGroupLookup<'_>,
+        seen: &mut BTreeSet<Label>,
+        visiting: &mut Vec<Label>,
+        out: &mut PackageGroupContents,
+    ) -> Result<(), String> {
+        if let Some(pos) = visiting.iter().position(|x| x == g) {
+            let mut cyc: Vec<String> = visiting[pos..].iter().map(|l| l.canonical_form()).collect();
+            cyc.push(g.canonical_form());
+            return Err(format!("cycle in dependency graph: {}", cyc.join(" -> ")));
         }
-        let (specs, includes) = lookup(&g)?;
+        if !seen.insert(g.clone()) {
+            return Ok(());
+        }
+        visiting.push(g.clone());
+        let (specs, includes) = lookup(g)?;
         out.specs.extend(specs);
-        stack.extend(includes);
+        for inc in includes {
+            visit(&inc, lookup, seen, visiting, out)?;
+        }
+        visiting.pop();
+        Ok(())
     }
+    let mut seen = BTreeSet::new();
+    let mut visiting = Vec::new();
+    let mut out = PackageGroupContents::default();
+    visit(group, lookup, &mut seen, &mut visiting, &mut out)?;
     Ok(out)
 }
 
@@ -181,35 +220,94 @@ pub enum Visibility {
     Groups(Vec<Label>),
 }
 
-/// Classifies a converted `visibility` list the way `BuildType.NODEP_LABEL_LIST` visibility
-/// conversion does, producing Bazel's error messages.
-pub fn parse_visibility(labels: &[Label]) -> Result<Visibility, String> {
-    let mut public = false;
-    let mut private = false;
-    let mut groups = Vec::new();
+/// Validates and normalizes visibility labels per `RuleVisibility.validateAndSimplify`:
+/// - rejects invalid labels in the `//visibility` package (anything other than `public`, `private`,
+///   `__pkg__`, `__subpackages__`) before any simplification
+/// - collapses any list containing `//visibility:public` to `[//visibility:public]`
+/// - turns an empty or all-`//visibility:private` list into `[//visibility:private]`
+/// - drops `//visibility:private` when mixed with other labels, preserving order and duplicates
+pub fn validate_and_simplify_visibility(labels: &[Label]) -> Result<Vec<Label>, String> {
+    let public_label = Label::parse_canonical("//visibility:public").unwrap();
+    let private_label = Label::parse_canonical("//visibility:private").unwrap();
+    let mut has_public = false;
+    let mut num_private = 0usize;
     for l in labels {
-        let f = l.canonical_form();
-        if f == "//visibility:public" {
-            public = true;
-        } else if f == "//visibility:private" {
-            private = true;
-        } else {
-            groups.push(l.clone());
+        if *l == public_label {
+            has_public = true;
+        } else if *l == private_label {
+            num_private += 1;
+        } else if l.repository().is_main()
+            && l.package_name() == "visibility"
+            && l.name() != "__pkg__"
+            && l.name() != "__subpackages__"
+        {
+            return Err(format!(
+                "Invalid visibility label '{}'; did you mean //visibility:public or //visibility:private?",
+                l.canonical_form()
+            ));
         }
     }
-    if (public || private) && (groups.len() + usize::from(public) + usize::from(private)) > 1 {
-        return Err(
-            "Public or private visibility labels (e.g. //visibility:public or //visibility:private) cannot be used in combination with other labels"
-                .to_string(),
-        );
+    if has_public {
+        return Ok(vec![public_label]);
     }
-    Ok(if public {
-        Visibility::Public
-    } else if private || groups.is_empty() {
-        Visibility::Private
+    if num_private == labels.len() {
+        return Ok(vec![private_label]);
+    }
+    if num_private == 0 {
+        return Ok(labels.to_vec());
+    }
+    Ok(labels
+        .iter()
+        .filter(|l| **l != private_label)
+        .cloned()
+        .collect())
+}
+
+/// Concatenates a validated/simplified visibility list with `pkg:__pkg__` per
+/// `RuleVisibility.concatWithPackage`.
+pub fn concat_visibility_with_package(labels: &[Label], pkg: &PackageIdentifier) -> Vec<Label> {
+    let public_label = Label::parse_canonical("//visibility:public").unwrap();
+    let private_label = Label::parse_canonical("//visibility:private").unwrap();
+    let pkg_item = Label::create(pkg.clone(), "__pkg__").unwrap();
+    if labels.len() == 1 && labels[0] == public_label {
+        return vec![public_label];
+    }
+    if labels.is_empty() || (labels.len() == 1 && labels[0] == private_label) {
+        return vec![pkg_item];
+    }
+    if labels.contains(&pkg_item) {
+        return labels.to_vec();
+    }
+    let mut out = labels.to_vec();
+    out.push(pkg_item);
+    out
+}
+
+/// Loadable `package_group` dependency labels (`RuleVisibility.getDependencyLabels`).
+pub fn visibility_dependency_labels(labels: &[Label]) -> Vec<Label> {
+    labels
+        .iter()
+        .filter(|l| {
+            !(l.package_name() == "visibility" && (l.name() == "public" || l.name() == "private"))
+                && l.name() != "__pkg__"
+                && l.name() != "__subpackages__"
+        })
+        .cloned()
+        .collect()
+}
+
+/// Classifies a converted `visibility` list using `RuleVisibility.validateAndSimplify`.
+pub fn parse_visibility(labels: &[Label]) -> Result<Visibility, String> {
+    let simplified = validate_and_simplify_visibility(labels)?;
+    let public_label = Label::parse_canonical("//visibility:public").unwrap();
+    let private_label = Label::parse_canonical("//visibility:private").unwrap();
+    if simplified.len() == 1 && simplified[0] == public_label {
+        Ok(Visibility::Public)
+    } else if simplified.len() == 1 && simplified[0] == private_label {
+        Ok(Visibility::Private)
     } else {
-        Visibility::Groups(groups)
-    })
+        Ok(Visibility::Groups(simplified))
+    }
 }
 
 /// Checks whether `from` may see a target whose visibility is `vis`, owned by package `owner`.
@@ -251,13 +349,21 @@ mod tests {
     }
 
     fn spec(s: &str) -> Result<PackageSpec, String> {
-        PackageSpec::parse(&RepositoryMapping::always_fallback(), &RepositoryName::main(), s)
+        PackageSpec::parse(
+            &RepositoryMapping::always_fallback(),
+            &RepositoryName::main(),
+            s,
+        )
     }
 
     #[test]
     fn spec_parsing_and_matching() {
         let g = PackageGroupContents {
-            specs: vec![spec("//a/...").unwrap(), spec("//b").unwrap(), spec("-//a/secret/...").unwrap()],
+            specs: vec![
+                spec("//a/...").unwrap(),
+                spec("//b").unwrap(),
+                spec("-//a/secret/...").unwrap(),
+            ],
         };
         assert!(g.contains(&pkg("a")));
         assert!(g.contains(&pkg("a/x/y")));
@@ -266,10 +372,18 @@ mod tests {
         assert!(!g.contains(&pkg("a/secret")));
         assert!(!g.contains(&pkg("a/secret/z")));
         assert!(!g.contains(&pkg("c")));
-        let root = PackageGroupContents { specs: vec![spec("//...").unwrap()] };
+        let root = PackageGroupContents {
+            specs: vec![spec("//...").unwrap()],
+        };
         assert!(root.contains(&pkg("")) && root.contains(&pkg("any/thing")));
-        assert!(PackageGroupContents { specs: vec![spec("public").unwrap()] }.contains(&pkg("q")));
-        assert!(!PackageGroupContents { specs: vec![spec("private").unwrap()] }.contains(&pkg("q")));
+        assert!(PackageGroupContents {
+            specs: vec![spec("public").unwrap()]
+        }
+        .contains(&pkg("q")));
+        assert!(!PackageGroupContents {
+            specs: vec![spec("private").unwrap()]
+        }
+        .contains(&pkg("q")));
     }
 
     #[test]
@@ -278,23 +392,46 @@ mod tests {
             spec("foo/bar").unwrap_err(),
             "invalid package name 'foo/bar': must start with '//', '@', or be 'public' or 'private'"
         );
-        assert_eq!(spec("-public").unwrap_err(), "Cannot negate \"public\" package specification");
+        assert_eq!(
+            spec("-public").unwrap_err(),
+            "Cannot negate \"public\" package specification"
+        );
         assert!(spec("//a:b").is_err());
+        assert_eq!(spec("//a:__pkg__").unwrap(), PackageSpec::Single(pkg("a")));
+        assert_eq!(
+            spec("//a:__subpackages__").unwrap(),
+            PackageSpec::AllBeneath(pkg("a"))
+        );
     }
 
     #[test]
     fn visibility_semantics() {
         let l = |s: &str| Label::parse_canonical(s).unwrap();
-        assert_eq!(parse_visibility(&[l("//visibility:public")]).unwrap(), Visibility::Public);
+        assert_eq!(
+            parse_visibility(&[l("//visibility:public")]).unwrap(),
+            Visibility::Public
+        );
         assert_eq!(parse_visibility(&[]).unwrap(), Visibility::Private);
-        assert!(parse_visibility(&[l("//visibility:public"), l("//x:g")])
-            .unwrap_err()
-            .starts_with("Public or private visibility labels"));
+        assert_eq!(
+            parse_visibility(&[l("//visibility:public"), l("//x:g")]).unwrap(),
+            Visibility::Public
+        );
+        assert_eq!(
+            parse_visibility(&[l("//visibility:private"), l("//x:g")]).unwrap(),
+            Visibility::Groups(vec![l("//x:g")])
+        );
+        assert!(
+            parse_visibility(&[l("//visibility:public"), l("//visibility:typo")])
+                .unwrap_err()
+                .contains("Invalid visibility label '//visibility:typo'")
+        );
         let vis = parse_visibility(&[l("//lib:__subpackages__"), l("//x:g")]).unwrap();
         let mut groups = BTreeMap::new();
         groups.insert(
             l("//x:g"),
-            PackageGroupContents { specs: vec![spec("//friends").unwrap()] },
+            PackageGroupContents {
+                specs: vec![spec("//friends").unwrap()],
+            },
         );
         assert!(is_visible(&vis, &pkg("owner"), &pkg("lib/sub"), &groups));
         assert!(is_visible(&vis, &pkg("owner"), &pkg("friends"), &groups));

@@ -2,10 +2,17 @@
 use zel_starlark::{EvalContext, Value};
 
 fn run(src: &str) -> Vec<String> {
-    let mut ctx = EvalContext::default();
-    ctx.captured_prints = Some(Vec::new());
+    let mut ctx = EvalContext {
+        captured_prints: Some(Vec::new()),
+        ..Default::default()
+    };
     ctx.eval_str(src).unwrap_or_else(|e| panic!("{}", e.0));
-    ctx.captured_prints.take().unwrap().into_iter().map(|(_, m)| m).collect()
+    ctx.captured_prints
+        .take()
+        .unwrap()
+        .into_iter()
+        .map(|(_, m)| m)
+        .collect()
 }
 
 #[test]
@@ -15,7 +22,10 @@ fn struct_repr_quotes_strings() {
         run("print(struct(b=[1, 'y'], a={'k': 'v'}, c=struct(d=None)))"),
         vec!["struct(a = {\"k\": \"v\"}, b = [1, \"y\"], c = struct(d = None))"]
     );
-    assert_eq!(run("print(repr(struct(a='h\\u00e9\"q')))"), vec!["struct(a = \"h\u{e9}\\\"q\")"]);
+    assert_eq!(
+        run("print(repr(struct(a='h\u{00e9}\"q')))"),
+        vec!["struct(a = \"h\u{e9}\\\"q\")"]
+    );
 }
 
 #[test]
@@ -44,38 +54,58 @@ fn float_repr_matches_python_style() {
 #[test]
 fn opaque_struct_prints_as_unknown_object() {
     let s = zel_starlark::StructValue::new_opaque(Default::default(), "com.example.Thing");
-    assert_eq!(Value::Struct(std::sync::Arc::new(s)).repr(), "<unknown object com.example.Thing>");
+    assert_eq!(
+        Value::Struct(std::sync::Arc::new(s)).repr(),
+        "<unknown object com.example.Thing>"
+    );
 }
 
 #[test]
 fn static_names_reject_undefined_before_execution() {
-    let mut ctx = EvalContext::default();
-    ctx.file_name = "e.bzl".into();
-    ctx.static_names = true;
-    ctx.captured_prints = Some(Vec::new());
-    let errs = ctx.eval_file_checked("print('ran')\nx = zzz\n", None).unwrap_err();
+    let mut ctx = EvalContext {
+        file_name: "e.bzl".into(),
+        static_names: true,
+        captured_prints: Some(Vec::new()),
+        ..Default::default()
+    };
+    let errs = ctx
+        .eval_file_checked("print('ran')\nx = zzz\n", None)
+        .unwrap_err();
     assert!(ctx.static_failure);
     assert_eq!(errs.len(), 1, "{errs:?}");
-    assert!(errs[0].ends_with("2:5: name 'zzz' is not defined"), "{errs:?}");
-    assert!(ctx.captured_prints.unwrap().is_empty(), "the file must not run when the static check fails");
+    assert!(
+        errs[0].ends_with("2:5: name 'zzz' is not defined"),
+        "{errs:?}"
+    );
+    assert!(
+        ctx.captured_prints.unwrap().is_empty(),
+        "the file must not run when the static check fails"
+    );
 }
 
 #[test]
 fn static_names_accept_declared_universe() {
-    let mut ctx = EvalContext::default();
-    ctx.file_name = "e.bzl".into();
-    ctx.static_names = true;
-    ctx.static_universe = vec!["cc_common".into()];
-    ctx.captured_prints = Some(Vec::new());
+    let mut ctx = EvalContext {
+        file_name: "e.bzl".into(),
+        static_names: true,
+        static_universe: vec!["cc_common".into()],
+        captured_prints: Some(Vec::new()),
+        ..Default::default()
+    };
     let r = ctx.eval_file_checked("def f():\n    return cc_common\nprint('ok')\n", None);
     assert!(r.is_ok(), "{r:?}");
 }
 
 #[test]
 fn static_names_did_you_mean() {
-    let mut ctx = EvalContext::default();
-    ctx.file_name = "e.bzl".into();
-    ctx.static_names = true;
+    let mut ctx = EvalContext {
+        file_name: "e.bzl".into(),
+        static_names: true,
+        ..Default::default()
+    };
     let errs = ctx.eval_file_checked("x = lenn([1])\n", None).unwrap_err();
-    assert!(errs[0].contains("name 'lenn' is not defined (did you mean 'len'?)"), "{errs:?}");
+    assert!(
+        errs[0].contains("name 'lenn' is not defined (did you mean 'len'?)"),
+        "{errs:?}"
+    );
 }

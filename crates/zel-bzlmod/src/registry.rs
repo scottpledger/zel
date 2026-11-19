@@ -37,7 +37,10 @@ pub struct Registry {
 }
 
 pub fn sha256_hex_to_sri(h: &str) -> String {
-    format!("sha256-{}", crate::hash::base64_encode(&crate::hash::from_hex(h).unwrap_or_default()))
+    format!(
+        "sha256-{}",
+        crate::hash::base64_encode(&crate::hash::from_hex(h).unwrap_or_default())
+    )
 }
 
 fn join_url(base: &str, segs: &[&str]) -> String {
@@ -63,7 +66,9 @@ fn construct_url(base: &str, segments: &[&str]) -> String {
 }
 
 pub fn file_url_to_path(url: &str) -> Result<PathBuf, String> {
-    let rest = url.strip_prefix("file://").ok_or_else(|| format!("not a file URL: {url}"))?;
+    let rest = url
+        .strip_prefix("file://")
+        .ok_or_else(|| format!("not a file URL: {url}"))?;
     // file://host/path is not supported; accept file:///path and file://localhost/path.
     let path = rest.strip_prefix("localhost").unwrap_or(rest);
     if !path.starts_with('/') {
@@ -71,7 +76,17 @@ pub fn file_url_to_path(url: &str) -> Result<PathBuf, String> {
             "Local registry URL must have an absolute path -- did you mean to use file:///foo/bar or file:///c:/foo/bar for Windows? ({url})"
         ));
     }
-    Ok(PathBuf::from(percent_decode(path)))
+    let decoded = percent_decode(path);
+    #[cfg(windows)]
+    let decoded = {
+        let b = decoded.as_bytes();
+        if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+            decoded[1..].to_string()
+        } else {
+            decoded
+        }
+    };
+    Ok(PathBuf::from(decoded))
 }
 
 fn percent_decode(s: &str) -> String {
@@ -79,7 +94,12 @@ fn percent_decode(s: &str) -> String {
     let mut out = Vec::new();
     let mut i = 0;
     while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() + 1 && s.is_char_boundary(i + 1) && s.is_char_boundary(i + 3.min(b.len())) && i + 3 <= b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len() + 1
+            && s.is_char_boundary(i + 1)
+            && s.is_char_boundary(i + 3.min(b.len()))
+            && i + 3 <= b.len()
+        {
             if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
                 out.push(v);
                 i += 3;
@@ -92,34 +112,88 @@ fn percent_decode(s: &str) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
-static URL_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, Result<Option<Vec<u8>>, String>>>> =
-    std::sync::Mutex::new(None);
+#[derive(Clone, Default)]
+struct RegistryAuthCtx {
+    helpers: Vec<(String, std::path::PathBuf)>,
+    client_env: std::collections::BTreeMap<String, String>,
+}
+
+thread_local! {
+    static REGISTRY_AUTH: std::cell::RefCell<RegistryAuthCtx> = std::cell::RefCell::new(RegistryAuthCtx::default());
+}
+
+pub(crate) struct RegistryAuthGuard(RegistryAuthCtx);
+
+impl Drop for RegistryAuthGuard {
+    fn drop(&mut self) {
+        REGISTRY_AUTH.with(|c| *c.borrow_mut() = std::mem::take(&mut self.0));
+    }
+}
+
+pub(crate) fn push_auth_context(
+    helpers: Vec<(String, std::path::PathBuf)>,
+    client_env: std::collections::BTreeMap<String, String>,
+) -> RegistryAuthGuard {
+    let prev = REGISTRY_AUTH.with(|c| {
+        let mut r = c.borrow_mut();
+        let prev = r.clone();
+        *r = RegistryAuthCtx {
+            helpers,
+            client_env,
+        };
+        prev
+    });
+    RegistryAuthGuard(prev)
+}
+
+#[allow(clippy::type_complexity)]
+static URL_CACHE: std::sync::Mutex<
+    Option<std::collections::HashMap<String, Result<Option<Vec<u8>>, String>>>,
+> = std::sync::Mutex::new(None);
 
 /// Fetches raw bytes from `url`; `Ok(None)` means "not found".
 pub fn fetch_url(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, String> {
+    let auth_hdrs = if url.starts_with("http://") || url.starts_with("https://") {
+        let ctx = REGISTRY_AUTH.with(|c| c.borrow().clone());
+        crate::netrc::resolve_auth_headers(url, &ctx.helpers, &ctx.client_env).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let cache_key = if auth_hdrs.is_empty() {
+        url.to_string()
+    } else {
+        format!("{url}\0{auth_hdrs:?}")
+    };
     {
         let mut guard = URL_CACHE.lock().unwrap();
         let cache = guard.get_or_insert_with(std::collections::HashMap::new);
-        if let Some(res) = cache.get(url) {
+        if let Some(res) = cache.get(&cache_key) {
             return res.clone();
         }
     }
-    let res = fetch_url_uncached(url, timeout_secs);
-    {
+    let res = fetch_url_uncached(url, timeout_secs, &auth_hdrs);
+    if res.is_ok() {
         let mut guard = URL_CACHE.lock().unwrap();
         let cache = guard.get_or_insert_with(std::collections::HashMap::new);
-        cache.insert(url.to_string(), res.clone());
+        cache.insert(cache_key, res.clone());
     }
     res
 }
 
-fn fetch_url_uncached(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, String> {
-    if url.starts_with("file://") {
-        let rest = &url["file://".len()..];
+fn fetch_url_uncached(
+    url: &str,
+    timeout_secs: u64,
+    auth_hdrs: &[(String, String)],
+) -> Result<Option<Vec<u8>>, String> {
+    if let Some(rest) = url.strip_prefix("file://") {
         {
             let auth = rest.split('/').next().unwrap_or("");
             if !auth.is_empty() && auth != "localhost" {
-                let base_url = if let Some(idx) = url.find("/modules/") { &url[..idx] } else { url };
+                let base_url = if let Some(idx) = url.find("/modules/") {
+                    &url[..idx]
+                } else {
+                    url
+                };
                 return Err(format!("Error accessing registry {base_url}/: Failed to fetch registry file {url}: Unsupported non-local file URL"));
             }
         }
@@ -131,7 +205,7 @@ fn fetch_url_uncached(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, S
         };
     }
     if url.starts_with("http://") || url.starts_with("https://") {
-        return fetch_http_with_retries(url, timeout_secs);
+        return fetch_http_with_retries(url, timeout_secs, auth_hdrs);
     }
     Err(format!("Unsupported registry URL scheme: {url}"))
 }
@@ -142,50 +216,72 @@ static HTTP_ATTEMPTS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU3
 
 /// Sets `--http_connector_attempts` (0 keeps the default of 8).
 pub fn set_http_connector_attempts(n: u32) {
-    HTTP_ATTEMPTS.store(if n > 0 { n } else { 8 }, std::sync::atomic::Ordering::Relaxed);
+    HTTP_ATTEMPTS.store(
+        if n > 0 { n } else { 8 },
+        std::sync::atomic::Ordering::Relaxed,
+    );
 }
 
 /// One HTTP GET through `curl` (no TLS stack without external crates). `Err((retryable, msg))`.
-fn curl_once(url: &str, connect_timeout_ms: u64, max_time: u64) -> Result<Option<Vec<u8>>, (bool, String)> {
-    let out = std::process::Command::new("curl")
-        .args([
-            "-sS",
-            "-L",
-            "--max-redirs",
-            "40",
-            "--connect-timeout",
-            &format!("{:.3}", connect_timeout_ms as f64 / 1000.0),
-            "--max-time",
-            &max_time.to_string(),
-            "-w",
-            "\n%{http_code}",
-            url,
-        ])
-        .output()
-        .map_err(|e| (false, e.to_string()))?;
+fn curl_once(
+    url: &str,
+    connect_timeout_ms: u64,
+    max_time: u64,
+    auth_hdrs: &[(String, String)],
+) -> Result<Option<Vec<u8>>, (bool, String)> {
+    let mut cmd = std::process::Command::new("curl");
+    cmd.args([
+        "-sS",
+        "-L",
+        "--max-redirs",
+        "40",
+        "--connect-timeout",
+        &format!("{:.3}", connect_timeout_ms as f64 / 1000.0),
+        "--max-time",
+        &max_time.to_string(),
+        "-w",
+        "\n%{http_code}",
+    ]);
+    for (k, v) in auth_hdrs {
+        cmd.arg("-H").arg(format!("{k}: {v}"));
+    }
+    cmd.arg(url);
+    let out = cmd.output().map_err(|e| (false, e.to_string()))?;
     if !out.status.success() {
         // Mirror the Java connector: unknown host and certificate problems are permanent, everything else
         // (refused, reset, timeout, ...) is an IOException that is retried.
         return Err(match out.status.code() {
             Some(7) => (true, "Connection refused".to_string()),
             Some(6) => {
-                let host = url.split("://").nth(1).and_then(|r| r.split('/').next()).unwrap_or("");
+                let host = url
+                    .split("://")
+                    .nth(1)
+                    .and_then(|r| r.split('/').next())
+                    .unwrap_or("");
                 (false, format!("Unknown host: {host}"))
             }
             Some(28) => (true, "connect timed out".to_string()),
-            Some(35) | Some(51) | Some(58) | Some(60) | Some(77) => {
-                (false, format!("TLS error: {}", String::from_utf8_lossy(&out.stderr).trim()))
-            }
-            _ => (true, String::from_utf8_lossy(&out.stderr).trim().to_string()),
+            Some(35) | Some(51) | Some(58) | Some(60) | Some(77) => (
+                false,
+                format!("TLS error: {}", String::from_utf8_lossy(&out.stderr).trim()),
+            ),
+            _ => (
+                true,
+                String::from_utf8_lossy(&out.stderr).trim().to_string(),
+            ),
         });
     }
     let body = out.stdout;
     let nl = body.iter().rposition(|b| *b == b'\n').unwrap_or(0);
-    let code = String::from_utf8_lossy(&body[nl + 1..]).trim().parse::<u32>().unwrap_or(0);
+    let code = String::from_utf8_lossy(&body[nl + 1..])
+        .trim()
+        .parse::<u32>()
+        .unwrap_or(0);
     let content = body[..nl].to_vec();
     match code {
         200 | 206 => Ok(Some(content)),
         404 | 410 => Ok(None),
+        401 => Err((false, "GET returned 401 Unauthorized".to_string())),
         // HttpConnector: 403, 408, 429 and 5xx other than 501/505 are retried; other 4xx are permanent.
         403 | 408 | 429 => Err((true, format!("HTTP status {code}"))),
         c if c < 500 || c == 501 || c == 505 => Err((false, format!("HTTP status {c}"))),
@@ -196,15 +292,23 @@ fn curl_once(url: &str, connect_timeout_ms: u64, max_time: u64) -> Result<Option
 /// Port of `HttpConnector.connect`'s retry loop: up to `HTTP_ATTEMPTS` attempts, exponential backoff
 /// (`100ms << retries`, jittered 0.75..1.25) between failures, connect timeout doubling from 1s to 10s on
 /// timeouts.
-fn fetch_http_with_retries(url: &str, max_time: u64) -> Result<Option<Vec<u8>>, String> {
+fn fetch_http_with_retries(
+    url: &str,
+    max_time: u64,
+    auth_hdrs: &[(String, String)],
+) -> Result<Option<Vec<u8>>, String> {
     let attempts = HTTP_ATTEMPTS.load(std::sync::atomic::Ordering::Relaxed);
     let mut connect_ms: u64 = 1000;
     let mut retries: u32 = 0;
     loop {
-        match curl_once(url, connect_ms, max_time.max(20)) {
+        match curl_once(url, connect_ms, max_time.max(20), auth_hdrs) {
             Ok(r) => return Ok(r),
             Err((retryable, msg)) => {
-                let base_url = if let Some(idx) = url.find("/modules/") { &url[..idx] } else { url };
+                let base_url = if let Some(idx) = url.find("/modules/") {
+                    &url[..idx]
+                } else {
+                    url
+                };
                 let fail = |m: &str| {
                     if m.starts_with("HTTP status") {
                         format!("Failed to fetch registry file {url}: {m}")
@@ -250,13 +354,21 @@ pub fn take_registry_warnings() -> Vec<String> {
 fn java_uri_parse(input: &str) -> Result<(Option<String>, bool), String> {
     let b = input.as_bytes();
     let n = b.len();
-    let illegal = |c: char| c.is_ascii_control() || matches!(c, ' ' | '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '|' | '}');
+    let illegal = |c: char| {
+        c.is_ascii_control()
+            || matches!(
+                c,
+                ' ' | '"' | '<' | '>' | '\\' | '^' | '`' | '{' | '|' | '}'
+            )
+    };
     let check = |from: usize, to: usize, what: &str, extra_ok: &str| -> Result<(), String> {
         let mut i = from;
         while i < to {
             let c = input[i..].chars().next().unwrap();
             if c == '%' {
-                if !(b.get(i + 1).is_some_and(|x| x.is_ascii_hexdigit()) && b.get(i + 2).is_some_and(|x| x.is_ascii_hexdigit())) {
+                if !(b.get(i + 1).is_some_and(|x| x.is_ascii_hexdigit())
+                    && b.get(i + 2).is_some_and(|x| x.is_ascii_hexdigit()))
+                {
                     return Err(format!("Malformed escape pair at index {i}"));
                 }
                 i += 3;
@@ -269,7 +381,12 @@ fn java_uri_parse(input: &str) -> Result<(Option<String>, bool), String> {
         }
         Ok(())
     };
-    let scan_to = |from: usize, stops: &str| -> usize { input[from..].find(|c| stops.contains(c)).map(|x| x + from).unwrap_or(n) };
+    let scan_to = |from: usize, stops: &str| -> usize {
+        input[from..]
+            .find(|c| stops.contains(c))
+            .map(|x| x + from)
+            .unwrap_or(n)
+    };
     // Scheme?
     let p = scan_to(0, "/?#:");
     let (scheme, mut p) = if p < n && b[p] == b':' {
@@ -279,7 +396,9 @@ fn java_uri_parse(input: &str) -> Result<(Option<String>, bool), String> {
         if !b[0].is_ascii_alphabetic() {
             return Err("Illegal character in scheme name at index 0".into());
         }
-        if let Some(i) = (1..p).find(|&i| !(b[i].is_ascii_alphanumeric() || matches!(b[i], b'+' | b'-' | b'.'))) {
+        if let Some(i) =
+            (1..p).find(|&i| !(b[i].is_ascii_alphanumeric() || matches!(b[i], b'+' | b'-' | b'.')))
+        {
             return Err(format!("Illegal character in scheme name at index {i}"));
         }
         (Some(input[..p].to_string()), p + 1)
@@ -300,7 +419,9 @@ fn java_uri_parse(input: &str) -> Result<(Option<String>, bool), String> {
         p += 2;
         let q = scan_to(p, "/?#");
         if input[p..q].starts_with('[') && !input[p..q].contains(']') {
-            return Err(format!("Expected closing bracket for IPv6 address at index {q}"));
+            return Err(format!(
+                "Expected closing bracket for IPv6 address at index {q}"
+            ));
         }
         check(p, q, "authority", "")?;
         p = q;
@@ -346,7 +467,11 @@ impl Registry {
                 return Err(format!("Invalid registry URL: {url}: Registry URL path is not valid -- did you mean to use file:///foo/bar or file:///c:/foo/bar for Windows?: {url}"));
             }
             // `file://host/path` (a non-local authority) is rejected when the registry file is opened.
-            if let Some(auth) = url["file://".len()..].split('/').next().filter(|a| !a.is_empty() && *a != "localhost") {
+            if let Some(auth) = url["file://".len()..]
+                .split('/')
+                .next()
+                .filter(|a| !a.is_empty() && *a != "localhost")
+            {
                 let _ = auth;
             } else {
                 local_dir = Some(file_url_to_path(&url)?);
@@ -406,11 +531,24 @@ impl Registry {
     }
 
     pub fn module_file_url(&self, key: &ModuleKey) -> String {
-        join_url(&self.url, &["modules", &key.name, &key.version.to_string(), "MODULE.bazel"])
+        join_url(
+            &self.url,
+            &[
+                "modules",
+                &key.name,
+                &key.version.to_string(),
+                "MODULE.bazel",
+            ],
+        )
     }
 
     /// Fetches a file; verifies/records its hash when `use_checksum`.
-    fn grab(&self, url: &str, use_checksum: bool, hashes: &mut FileHashes) -> Result<Option<Vec<u8>>, String> {
+    fn grab(
+        &self,
+        url: &str,
+        use_checksum: bool,
+        hashes: &mut FileHashes,
+    ) -> Result<Option<Vec<u8>>, String> {
         let is_file = self.is_file_registry() || url.starts_with("file://");
         if is_file || self.mode == KnownHashesMode::Ignore {
             let content = self.fetch(url)?;
@@ -445,7 +583,9 @@ impl Registry {
                     expected = Some(h.clone());
                     // Lockfile-first: a file whose hash the lockfile records is served from the
                     // repository cache without any registry access (Bazel's DownloadManager).
-                    if let (Some(rc), Ok(ck)) = (&self.repo_cache, crate::hash::Checksum::sha256_hex(h)) {
+                    if let (Some(rc), Ok(ck)) =
+                        (&self.repo_cache, crate::hash::Checksum::sha256_hex(h))
+                    {
                         if let Ok(Some(f)) = rc.get(&ck, "") {
                             if let Ok(c) = std::fs::read(&f) {
                                 hashes.insert(url.to_string(), Some(h.clone()));
@@ -483,12 +623,23 @@ impl Registry {
         Ok(content)
     }
 
-    fn grab_text(&self, url: &str, use_checksum: bool, hashes: &mut FileHashes) -> Result<Option<String>, String> {
-        Ok(self.grab(url, use_checksum, hashes)?.map(|b| String::from_utf8_lossy(&b).into_owned()))
+    fn grab_text(
+        &self,
+        url: &str,
+        use_checksum: bool,
+        hashes: &mut FileHashes,
+    ) -> Result<Option<String>, String> {
+        Ok(self
+            .grab(url, use_checksum, hashes)?
+            .map(|b| String::from_utf8_lossy(&b).into_owned()))
     }
 
     /// Returns the MODULE.bazel content of `key`, or `None` if the registry doesn't have it.
-    pub fn get_module_file(&self, key: &ModuleKey, hashes: &mut FileHashes) -> Result<Option<String>, String> {
+    pub fn get_module_file(
+        &self,
+        key: &ModuleKey,
+        hashes: &mut FileHashes,
+    ) -> Result<Option<String>, String> {
         let url = self.module_file_url(key);
         self.grab_text(&url, true, hashes)
     }
@@ -500,9 +651,9 @@ impl Registry {
         let url = join_url(&self.url, &["bazel_registry.json"]);
         let txt = self.grab_text(&url, true, hashes)?;
         let parsed = match txt {
-            Some(t) if !t.trim().is_empty() => {
-                Some(Json::parse(&t).map_err(|e| format!("Unable to parse json at url {url}: {e}"))?)
-            }
+            Some(t) if !t.trim().is_empty() => Some(
+                Json::parse(&t).map_err(|e| format!("Unable to parse json at url {url}: {e}"))?,
+            ),
             _ => None,
         };
         *self.registry_json.lock().unwrap() = Some(parsed.clone());
@@ -517,13 +668,14 @@ impl Registry {
         module_file_hashes: &FileHashes,
         hashes: &mut FileHashes,
     ) -> Result<RepoSpec, String> {
-        self.get_repo_spec_inner(key, module_file_hashes, hashes).map_err(|e| {
-            if e.starts_with("Unable to get module repo spec") {
-                e
-            } else {
-                format!("Unable to get module repo spec for {key} from registry: {e}")
-            }
-        })
+        self.get_repo_spec_inner(key, module_file_hashes, hashes)
+            .map_err(|e| {
+                if e.starts_with("Unable to get module repo spec") {
+                    e
+                } else {
+                    format!("Unable to get module repo spec for {key} from registry: {e}")
+                }
+            })
     }
 
     fn get_repo_spec_inner(
@@ -532,11 +684,23 @@ impl Registry {
         module_file_hashes: &FileHashes,
         hashes: &mut FileHashes,
     ) -> Result<RepoSpec, String> {
-        let json_url = join_url(&self.url, &["modules", &key.name, &key.version.to_string(), "source.json"]);
-        let txt = self
-            .grab_text(&json_url, true, hashes)?
-            .ok_or_else(|| format!("Module {key}'s source.json not found in registry {}", self.url))?;
-        let sj = Json::parse(&txt).map_err(|e| format!("Unable to parse json at url {json_url}: {e}"))?;
+        let json_url = join_url(
+            &self.url,
+            &[
+                "modules",
+                &key.name,
+                &key.version.to_string(),
+                "source.json",
+            ],
+        );
+        let txt = self.grab_text(&json_url, true, hashes)?.ok_or_else(|| {
+            format!(
+                "Module {key}'s source.json not found in registry {}",
+                self.url
+            )
+        })?;
+        let sj = Json::parse(&txt)
+            .map_err(|e| format!("Unable to parse json at url {json_url}: {e}"))?;
         let ty = sj.get("type").and_then(|t| t.as_str()).unwrap_or("archive");
         let s = |k: &str| sj.get(k).and_then(|v| v.as_str()).map(String::from);
         let module_file_url = self.module_file_url(key);
@@ -556,7 +720,16 @@ impl Registry {
                         return Err(format!("Unable to get module repo spec for {key} from registry: Missing integrity for patch {name} of module {key}"));
                     }
                     out.push((
-                        join_url(&self.url, &["modules", &key.name, &key.version.to_string(), "patches", name]),
+                        join_url(
+                            &self.url,
+                            &[
+                                "modules",
+                                &key.name,
+                                &key.version.to_string(),
+                                "patches",
+                                name,
+                            ],
+                        ),
                         AttrVal::Str(i.to_string()),
                     ));
                 }
@@ -602,27 +775,53 @@ impl Registry {
                     for (name, integ) in ov {
                         let i = integ.as_str().unwrap_or("");
                         if i.trim().is_empty() {
-                            return Err(format!("Missing integrity for overlay file {name} of module {key}"));
+                            return Err(format!(
+                                "Missing integrity for overlay file {name} of module {key}"
+                            ));
                         }
                         overlay_urls.push((
                             name.clone(),
                             AttrVal::List(vec![AttrVal::Str(join_url(
                                 &self.url,
-                                &["modules", &key.name, &key.version.to_string(), "overlay", name],
+                                &[
+                                    "modules",
+                                    &key.name,
+                                    &key.version.to_string(),
+                                    "overlay",
+                                    name,
+                                ],
                             ))]),
                         ));
                         overlay_integrity.push((name.clone(), AttrVal::Str(i.to_string())));
                     }
                 }
                 let mut attrs = vec![
-                    ("urls".to_string(), AttrVal::List(urls.into_iter().map(AttrVal::Str).collect())),
+                    (
+                        "urls".to_string(),
+                        AttrVal::List(urls.into_iter().map(AttrVal::Str).collect()),
+                    ),
                     ("integrity".into(), AttrVal::Str(integrity)),
-                    ("strip_prefix".into(), AttrVal::Str(s("strip_prefix").unwrap_or_default())),
-                    ("remote_patches".into(), AttrVal::Dict(patches_of(&sj)?.into_iter().map(|(k, v)| (k, v)).collect())),
+                    (
+                        "strip_prefix".into(),
+                        AttrVal::Str(s("strip_prefix").unwrap_or_default()),
+                    ),
+                    (
+                        "remote_patches".into(),
+                        AttrVal::Dict(patches_of(&sj)?.into_iter().collect()),
+                    ),
                     ("remote_file_urls".into(), AttrVal::Dict(overlay_urls)),
-                    ("remote_file_integrity".into(), AttrVal::Dict(overlay_integrity)),
-                    ("remote_module_file_urls".into(), AttrVal::List(vec![AttrVal::Str(module_file_url)])),
-                    ("remote_module_file_integrity".into(), AttrVal::Str(module_file_sri)),
+                    (
+                        "remote_file_integrity".into(),
+                        AttrVal::Dict(overlay_integrity),
+                    ),
+                    (
+                        "remote_module_file_urls".into(),
+                        AttrVal::List(vec![AttrVal::Str(module_file_url)]),
+                    ),
+                    (
+                        "remote_module_file_integrity".into(),
+                        AttrVal::Str(module_file_sri),
+                    ),
                     (
                         "remote_patch_strip".into(),
                         AttrVal::Int(sj.get("patch_strip").and_then(|v| v.as_i64()).unwrap_or(0)),
@@ -634,9 +833,18 @@ impl Registry {
                 Ok(RepoSpec::new(HTTP_BZL, "http_archive", attrs))
             }
             "local_path" => {
+                let is_abs = |s: &str| {
+                    let b = s.as_bytes();
+                    s.starts_with('/')
+                        || s.starts_with('\\')
+                        || (b.len() >= 3
+                            && b[0].is_ascii_alphabetic()
+                            && b[1] == b':'
+                            && matches!(b[2], b'/' | b'\\'))
+                };
                 let path = s("path").unwrap_or_default();
                 let mut p = path.clone();
-                if !path.starts_with('/') {
+                if !is_abs(&path) {
                     let reg_json = self.bazel_registry_json(hashes)?;
                     let base = reg_json
                         .as_ref()
@@ -645,17 +853,25 @@ impl Registry {
                         .map(String::from)
                         .ok_or_else(|| format!("Provided non local registry for module {key}"))?;
                     p = format!("{base}/{path}");
-                    if !base.starts_with('/') {
+                    if !is_abs(&base) {
                         match &self.local_dir {
                             Some(d) => p = format!("{}/{p}", d.display()),
-                            None => return Err(format!("Provided non local registry for module {key}")),
+                            None => {
+                                return Err(format!("Provided non local registry for module {key}"))
+                            }
                         }
                     }
                 }
-                Ok(RepoSpec::new(LOCAL_BZL, "local_repository", vec![("path".into(), AttrVal::Str(p))]))
+                Ok(RepoSpec::new(
+                    LOCAL_BZL,
+                    "local_repository",
+                    vec![("path".into(), AttrVal::Str(p))],
+                ))
             }
             "git_repository" => {
-                let remote = s("remote").ok_or_else(|| format!("Missing remote in git_repository source for module {key}"))?;
+                let remote = s("remote").ok_or_else(|| {
+                    format!("Missing remote in git_repository source for module {key}")
+                })?;
                 const SCHEMES: &[&str] = &["http://", "https://", "file://", "ssh://", "git://"];
                 if !SCHEMES.iter().any(|p| remote.starts_with(p)) {
                     return Err(format!(
@@ -664,18 +880,28 @@ impl Registry {
                     ));
                 }
                 if let Some(c) = s("commit") {
-                    let ok = (7..=64).contains(&c.len()) && c.chars().all(|x| x.is_ascii_hexdigit());
+                    let ok =
+                        (7..=64).contains(&c.len()) && c.chars().all(|x| x.is_ascii_hexdigit());
                     if !ok {
                         return Err(format!("Invalid commit: \"{c}\" for module {key}. Must be a valid commit hash."));
                     }
                 }
                 if let Some(t) = s("tag") {
                     if t.starts_with('-') {
-                        return Err(format!("Invalid tag: \"{t}\" for module {key}. Cannot start with '-'."));
+                        return Err(format!(
+                            "Invalid tag: \"{t}\" for module {key}. Cannot start with '-'."
+                        ));
                     }
                 }
-                let mut attrs: Vec<(String, AttrVal)> = vec![("remote".into(), AttrVal::Str(remote))];
-                for k in ["commit", "shallow_since", "tag", "strip_prefix", "add_prefix"] {
+                let mut attrs: Vec<(String, AttrVal)> =
+                    vec![("remote".into(), AttrVal::Str(remote))];
+                for k in [
+                    "commit",
+                    "shallow_since",
+                    "tag",
+                    "strip_prefix",
+                    "add_prefix",
+                ] {
                     if let Some(v) = s(k) {
                         attrs.push((k.into(), AttrVal::Str(v)));
                     }
@@ -689,7 +915,10 @@ impl Registry {
                     "remote_module_file_urls".into(),
                     AttrVal::List(vec![AttrVal::Str(module_file_url)]),
                 ));
-                attrs.push(("remote_module_file_integrity".into(), AttrVal::Str(module_file_sri)));
+                attrs.push((
+                    "remote_module_file_integrity".into(),
+                    AttrVal::Str(module_file_sri),
+                ));
                 attrs.push(("remote_patches".into(), AttrVal::Dict(patches_of(&sj)?)));
                 attrs.push((
                     "remote_patch_strip".into(),
@@ -702,9 +931,26 @@ impl Registry {
     }
 
     /// `metadata.json` yanked versions (version -> reason). `None` if metadata is missing.
-    pub fn yanked_versions(&self, module: &str, hashes: &mut FileHashes) -> Result<Option<BTreeMap<Version, String>>, String> {
+    pub fn yanked_versions(
+        &self,
+        module: &str,
+        hashes: &mut FileHashes,
+    ) -> Result<Option<BTreeMap<Version, String>>, String> {
         let url = join_url(&self.url, &["modules", module, "metadata.json"]);
-        let Some(txt) = self.grab_text(&url, false, hashes)? else { return Ok(None) };
+        let txt = match self.grab_text(&url, false, hashes) {
+            Ok(Some(t)) => t,
+            Ok(None) => return Ok(None),
+            Err(e) => {
+                // `YankedVersionsFunction.compute`: transport and other I/O failures fail open with a warning.
+                REGISTRY_WARNINGS.with(|w| {
+                    w.borrow_mut().push(format!(
+                        "WARNING: Could not read metadata file for module {module} from registry {}: {e}",
+                        self.orig_url
+                    ))
+                });
+                return Ok(None);
+            }
+        };
         if txt.trim().is_empty() {
             return Ok(None);
         }
@@ -729,7 +975,18 @@ impl Registry {
         let mut out = BTreeMap::new();
         if let Some(Json::Obj(y)) = j.get("yanked_versions") {
             for (k, v) in y {
-                let ver = Version::parse(k).map_err(|e| format!("Unable to parse yanked version '{k}' in {url}: {e}"))?;
+                let ver = match Version::parse(k) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        REGISTRY_WARNINGS.with(|w| {
+                            w.borrow_mut().push(format!(
+                                "WARNING: Could not read metadata file for module {module} from registry {}: Could not parse module {module}'s metadata file: {e}",
+                                self.orig_url
+                            ))
+                        });
+                        return Ok(None);
+                    }
+                };
                 out.insert(ver, v.as_str().unwrap_or("").to_string());
             }
         }
@@ -755,9 +1012,23 @@ pub(crate) mod testutil {
     }
 
     /// Adds `modules/<name>/<version>/{MODULE.bazel,source.json}` (local_path source) to a registry.
-    pub fn add_module(reg: &Path, name: &str, version: &str, module_bazel: &str, source_json: &str) {
-        write(reg, &format!("modules/{name}/{version}/MODULE.bazel"), module_bazel);
-        write(reg, &format!("modules/{name}/{version}/source.json"), source_json);
+    pub fn add_module(
+        reg: &Path,
+        name: &str,
+        version: &str,
+        module_bazel: &str,
+        source_json: &str,
+    ) {
+        write(
+            reg,
+            &format!("modules/{name}/{version}/MODULE.bazel"),
+            module_bazel,
+        );
+        write(
+            reg,
+            &format!("modules/{name}/{version}/source.json"),
+            source_json,
+        );
     }
 }
 
@@ -769,15 +1040,32 @@ mod tests {
     #[test]
     fn local_registry_module_and_source() {
         let d = tmpdir("reg1");
-        add_module(&d, "foo", "1.0", "module(name='foo', version='1.0')", r#"{"type":"local_path","path":"/x/foo"}"#);
-        write(&d, "modules/foo/metadata.json", r#"{"yanked_versions":{"0.9":"bad"}}"#);
-        let r = Registry::new(&format!("file://{}", d.display())).unwrap();
+        add_module(
+            &d,
+            "foo",
+            "1.0",
+            "module(name='foo', version='1.0')",
+            r#"{"type":"local_path","path":"/x/foo"}"#,
+        );
+        write(
+            &d,
+            "modules/foo/metadata.json",
+            r#"{"yanked_versions":{"0.9":"bad"}}"#,
+        );
+        let r = Registry::new(&crate::file_url_for_path(&d)).unwrap();
         let mut hashes = FileHashes::new();
         let key = ModuleKey::new("foo", Version::parse("1.0").unwrap());
-        assert!(r.get_module_file(&key, &mut hashes).unwrap().unwrap().contains("foo"));
+        assert!(r
+            .get_module_file(&key, &mut hashes)
+            .unwrap()
+            .unwrap()
+            .contains("foo"));
         let missing = ModuleKey::new("bar", Version::parse("1.0").unwrap());
         assert!(r.get_module_file(&missing, &mut hashes).unwrap().is_none());
-        assert!(!hashes.is_empty(), "hashes must be recorded for file:// registries as in Bazel IndexRegistry.grabFile");
+        assert!(
+            !hashes.is_empty(),
+            "hashes must be recorded for file:// registries as in Bazel IndexRegistry.grabFile"
+        );
         let spec = r.get_repo_spec(&key, &hashes.clone(), &mut hashes).unwrap();
         assert_eq!(spec.rule_name, "local_repository");
         let y = r.yanked_versions("foo", &mut hashes).unwrap().unwrap();
@@ -794,8 +1082,12 @@ mod tests {
             "module(name='foo', version='1.0')",
             r#"{"url":"https://example.com/foo.tgz","integrity":"sha256-AAAA","strip_prefix":"foo-1.0","patches":{"p.patch":"sha256-BBBB"},"patch_strip":1}"#,
         );
-        write(&d, "bazel_registry.json", r#"{"mirrors":["https://mirror.example/"]}"#);
-        let r = Registry::new(&format!("file://{}", d.display())).unwrap();
+        write(
+            &d,
+            "bazel_registry.json",
+            r#"{"mirrors":["https://mirror.example/"]}"#,
+        );
+        let r = Registry::new(&crate::file_url_for_path(&d)).unwrap();
         let mut h = FileHashes::new();
         let key = ModuleKey::new("foo", Version::parse("1.0").unwrap());
         r.get_module_file(&key, &mut h).unwrap();
@@ -823,20 +1115,34 @@ mod tests {
         let content = "module(name='foo', version='1.0')";
         let h = crate::hash::sha256_hex(content.as_bytes());
         let cache = crate::download::RepositoryCache::new(d.join("cache"));
-        cache.put(&crate::hash::Checksum::sha256_hex(&h).unwrap(), content.as_bytes(), "").unwrap();
+        cache
+            .put(
+                &crate::hash::Checksum::sha256_hex(&h).unwrap(),
+                content.as_bytes(),
+                "",
+            )
+            .unwrap();
         let url = "http://127.0.0.1:9/reg";
         let key = ModuleKey::new("foo", Version::parse("1.0").unwrap());
         let mut known = FileHashes::new();
-        known.insert(format!("{url}/modules/foo/1.0/MODULE.bazel"), Some(h.clone()));
+        known.insert(
+            format!("{url}/modules/foo/1.0/MODULE.bazel"),
+            Some(h.clone()),
+        );
         let r = Registry::new(url)
             .unwrap()
             .with_known_hashes(known.clone(), KnownHashesMode::Enforce)
             .with_repo_cache(Some(d.join("cache")));
         let mut hashes = FileHashes::new();
-        assert_eq!(r.get_module_file(&key, &mut hashes).unwrap().as_deref(), Some(content));
+        assert_eq!(
+            r.get_module_file(&key, &mut hashes).unwrap().as_deref(),
+            Some(content)
+        );
         assert_eq!(hashes.values().next().unwrap().as_deref(), Some(h.as_str()));
         // Without the cache the (unreachable) registry is contacted and fails.
-        let r2 = Registry::new(url).unwrap().with_known_hashes(known, KnownHashesMode::Enforce);
+        let r2 = Registry::new(url)
+            .unwrap()
+            .with_known_hashes(known, KnownHashesMode::Enforce);
         assert!(r2.get_module_file(&key, &mut FileHashes::new()).is_err());
     }
 
@@ -844,7 +1150,7 @@ mod tests {
     fn file_registry_ignores_hashes_and_permits_updates() {
         let d = tmpdir("reg_file_ignore");
         add_module(&d, "foo", "1.0", "module(name='foo', version='1.0')", "{}");
-        let reg_url = format!("file://{}", d.display());
+        let reg_url = crate::file_url_for_path(&d);
         let r = Registry::new(&reg_url)
             .unwrap()
             .with_known_hashes(FileHashes::new(), KnownHashesMode::Enforce);
@@ -855,10 +1161,11 @@ mod tests {
         assert!(content.is_some());
         // And hashes MUST be recorded for file:// registries per Bazel IndexRegistry.grabFile
         assert!(!hashes.is_empty());
-        assert!(hashes.iter().any(|(u, h)| u.starts_with("file://") && h.is_some()));
+        assert!(hashes
+            .iter()
+            .any(|(u, h)| u.starts_with("file://") && h.is_some()));
     }
 }
-
 
 /// Gson's (lenient) `JsonReader` message for a top-level object whose first member name is unquoted and is not
 /// followed by a `:` (`{not json` -> `Expected ':' at line 1 column 7 path $.not`). Only this shape is modelled.
@@ -868,7 +1175,9 @@ fn gson_lenient_error(txt: &str) -> Option<String> {
     let rest = t.strip_prefix('{')?;
     let name_start = rest.len() - rest.trim_start().len();
     let r = &rest[name_start..];
-    let name_len = r.find(|c: char| matches!(c, ':' | '=' | ',' | ';' | '#' | '[' | ']' | '{' | '}' | '\\' | '/' | ' ' | '\n' | '\r' | '\t' | '"' | '\''))?;
+    let name_len = r.find([
+        ':', '=', ',', ';', '#', '[', ']', '{', '}', '\\', '/', ' ', '\n', '\r', '\t', '"', '\'',
+    ])?;
     if name_len == 0 {
         return None;
     }
@@ -882,8 +1191,15 @@ fn gson_lenient_error(txt: &str) -> Option<String> {
     // Position of the offending character (1-based line, column counted after consuming it).
     let consumed = &txt[..lead + 1 + name_start + name_len + ws];
     let line = consumed.matches('\n').count() + 1;
-    let col = consumed.rsplit('\n').next().map(|l| l.chars().count()).unwrap_or(0) + 2;
-    Some(format!("Expected ':' at line {line} column {col} path $.{name}"))
+    let col = consumed
+        .rsplit('\n')
+        .next()
+        .map(|l| l.chars().count())
+        .unwrap_or(0)
+        + 2;
+    Some(format!(
+        "Expected ':' at line {line} column {col} path $.{name}"
+    ))
 }
 
 #[cfg(test)]
@@ -892,8 +1208,14 @@ mod gson_tests {
 
     #[test]
     fn unquoted_name_without_colon_matches_gson() {
-        assert_eq!(gson_lenient_error("{not json").as_deref(), Some("Expected ':' at line 1 column 7 path $.not"));
-        assert_eq!(gson_lenient_error("{\n  abc 1}").as_deref(), Some("Expected ':' at line 2 column 8 path $.abc"));
+        assert_eq!(
+            gson_lenient_error("{not json").as_deref(),
+            Some("Expected ':' at line 1 column 7 path $.not")
+        );
+        assert_eq!(
+            gson_lenient_error("{\n  abc 1}").as_deref(),
+            Some("Expected ':' at line 2 column 8 path $.abc")
+        );
         assert_eq!(gson_lenient_error("{a: 1}"), None);
         assert_eq!(gson_lenient_error("[1]"), None);
     }

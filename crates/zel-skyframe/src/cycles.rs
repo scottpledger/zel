@@ -29,7 +29,10 @@ pub struct CycleInfo {
 
 impl CycleInfo {
     pub fn new(path_to_cycle: Vec<SkyKey>, cycle: Vec<SkyKey>) -> Self {
-        Self { path_to_cycle, cycle }
+        Self {
+            path_to_cycle,
+            cycle,
+        }
     }
 
     /// Cycle rotated so that it starts at `idx` (every member sees the cycle from itself).
@@ -49,7 +52,11 @@ impl CycleInfo {
 
 /// `AbstractLabelCycleReporter.printCycle`: appends the cycle block to `msg` and returns the key
 /// the cycle is reported at (its first element).
-pub fn print_cycle(cycle: &[SkyKey], msg: &mut String, pretty: &dyn Fn(&SkyKey) -> String) -> SkyKey {
+pub fn print_cycle(
+    cycle: &[SkyKey],
+    msg: &mut String,
+    pretty: &dyn Fn(&SkyKey) -> String,
+) -> SkyKey {
     assert!(!cycle.is_empty());
     let first = &cycle[0];
     if cycle.len() == 1 {
@@ -71,7 +78,10 @@ pub fn print_cycle(cycle: &[SkyKey], msg: &mut String, pretty: &dyn Fn(&SkyKey) 
 }
 
 /// Message text of one cycle (everything after the `in <kind> <label>: ` prefix in Bazel).
-pub fn format_cycle_message(info: &CycleInfo, pretty: &dyn Fn(&SkyKey) -> String) -> (String, SkyKey) {
+pub fn format_cycle_message(
+    info: &CycleInfo,
+    pretty: &dyn Fn(&SkyKey) -> String,
+) -> (String, SkyKey) {
     let mut msg = String::from("cycle in dependency graph:");
     for k in &info.path_to_cycle {
         msg.push_str("\n    ");
@@ -100,7 +110,9 @@ impl Default for CyclesReporter {
 
 impl CyclesReporter {
     pub fn new() -> Self {
-        Self { seen: HashSet::new() }
+        Self {
+            seen: HashSet::new(),
+        }
     }
 
     pub fn report(
@@ -157,14 +169,22 @@ mod tests {
     #[test]
     fn reporter_dedupes_cycles_across_top_level_keys() {
         let mut r = CyclesReporter::new();
-        let d = |key: &SkyKey| (format!("/ws/BUILD:{}", pretty(key).len()), format!("cc_library rule {}", pretty(key)));
+        let d = |key: &SkyKey| {
+            (
+                format!("/ws/BUILD:{}", pretty(key).len()),
+                format!("cc_library rule {}", pretty(key)),
+            )
+        };
         let c1 = CycleInfo::new(vec![k("t1")], vec![k("a"), k("b")]);
         let c2 = CycleInfo::new(vec![k("t2")], vec![k("b"), k("a")]); // same cycle, other entry point
         let m1 = r.report(&k("t1"), &c1, &pretty, &d);
         assert!(m1.starts_with("ERROR: /ws/BUILD:"));
         assert!(m1.contains("in cc_library rule //x:a: cycle in dependency graph:\n    //x:t1\n.-> //x:a\n|   //x:b\n`-- //x:a"));
         let m2 = r.report(&k("t2"), &c2, &pretty, &d);
-        assert!(m2.ends_with("cycle in dependency graph: target depends on an already-reported cycle"), "{m2}");
+        assert!(
+            m2.ends_with("cycle in dependency graph: target depends on an already-reported cycle"),
+            "{m2}"
+        );
     }
 
     #[test]

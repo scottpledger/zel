@@ -3,6 +3,7 @@
 //! must be the only source of inherited variables (never the server process environment), for
 //! `--action_env`, `--host_action_env`, `--incompatible_strict_action_env`, `--test_env`,
 //! `RunEnvironmentInfo`, `env` / `env_inherit`, `bazel run` (`--run_env`) and the action cache.
+#![cfg(unix)]
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -14,13 +15,14 @@ use zel_vfs::{FileSystem, LocalFileSystem, PathFragment};
 /// A variable that only exists in this (the "server") process; it must never reach an action.
 const SERVER_ONLY: &str = "ZEL_ENV_TEST_SERVER_ONLY";
 
-
 /// A hermetic local registry built once per test process from the vendored closure under
 /// `third_party` (`scripts/make_vendored_registry.py`); no network is ever used.
 fn local_registry() -> PathBuf {
     static REG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     REG.get_or_init(|| {
-        let root = env!("CARGO_MANIFEST_DIR").strip_suffix("/crates/zel-server").unwrap_or("/Users/pledger/Development/zel");
+        let root = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/zel-server")
+            .unwrap_or("/Users/pledger/Development/zel");
         let dir = std::env::temp_dir().join(format!("zel-envsem-registry-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let st = std::process::Command::new("python3")
@@ -42,7 +44,9 @@ fn shell_loads(rel: &str, content: &str) -> String {
     let mut out = String::new();
     for name in ["sh_binary", "sh_test", "sh_library"] {
         if content.contains(&format!("{name}(")) && !content.contains(&format!("\"{name}\")")) {
-            out.push_str(&format!("load(\"@rules_shell//shell:{name}.bzl\", \"{name}\")\n"));
+            out.push_str(&format!(
+                "load(\"@rules_shell//shell:{name}.bzl\", \"{name}\")\n"
+            ));
         }
     }
     out.push_str(content);
@@ -63,7 +67,11 @@ fn ws(name: &str) -> Ws {
     std::fs::create_dir_all(&ws).unwrap();
     let root = std::fs::canonicalize(&root).unwrap();
     let ws = root.join("ws");
-    std::fs::write(ws.join("MODULE.bazel"), "module(name = \"w\")\nbazel_dep(name = \"rules_shell\", version = \"0.6.1\")\n").unwrap();
+    std::fs::write(
+        ws.join("MODULE.bazel"),
+        "module(name = \"w\")\nbazel_dep(name = \"rules_shell\", version = \"0.6.1\")\n",
+    )
+    .unwrap();
     std::fs::write(ws.join("BUILD"), "").unwrap();
     let fs: Arc<dyn FileSystem> = Arc::new(LocalFileSystem::default());
     let p = |s: &str| PathFragment::create(root.join(s).to_str().unwrap());
@@ -73,7 +81,10 @@ fn ws(name: &str) -> Ws {
         install_base: p("ib"),
         output_user_root: p("ur"),
     };
-    Ws { ws, rt: BlazeRuntime::new(dirs, fs, 1) }
+    Ws {
+        ws,
+        rt: BlazeRuntime::new(dirs, fs, 1),
+    }
 }
 
 struct Out {
@@ -95,14 +106,28 @@ impl Ws {
     fn run(&self, client_env: &[(&str, &str)], args: &[&str]) -> Out {
         let mut arg: Vec<Vec<u8>> = Vec::new();
         arg.push(args[0].as_bytes().to_vec());
-        if matches!(args[0], "build" | "test" | "run" | "coverage" | "query" | "cquery" | "aquery") {
-            arg.push(format!("--registry=file://{}", local_registry().display()).into_bytes());
+        if matches!(
+            args[0],
+            "build" | "test" | "run" | "coverage" | "query" | "cquery" | "aquery"
+        ) {
+            arg.push(
+                format!(
+                    "--registry={}",
+                    zel_bzlmod::file_url_for_path(&local_registry())
+                )
+                .into_bytes(),
+            );
         }
         for (k, v) in client_env {
             arg.push(format!("--client_env={k}={v}").into_bytes());
         }
         arg.extend(args[1..].iter().map(|a| a.as_bytes().to_vec()));
-        let req = RunRequest { cookie: "c".into(), arg, client_description: "t".into(), ..Default::default() };
+        let req = RunRequest {
+            cookie: "c".into(),
+            arg,
+            client_description: "t".into(),
+            ..Default::default()
+        };
         let r = self.rt.dispatch_command(&req, "r");
         Out {
             code: r.exit_code,
@@ -126,7 +151,8 @@ fn parse(text: &str) -> BTreeMap<String, String> {
         .collect()
 }
 
-const NAMES: &str = "PATH LC_CTYPE TZ HOME LD_LIBRARY_PATH FOO BAR BAZ CLIENT_ONLY ZEL_ENV_TEST_SERVER_ONLY \
+const NAMES: &str =
+    "PATH LC_CTYPE TZ HOME LD_LIBRARY_PATH FOO BAR BAZ CLIENT_ONLY ZEL_ENV_TEST_SERVER_ONLY \
                      RE_FIXED RE_INHERIT E1 EI RUN1 ACT";
 
 /// Shell snippet printing `ENV NAME=value` for every interesting variable.
@@ -164,13 +190,26 @@ const STRICT_PATH: &str = "/bin:/usr/bin:/usr/local/bin";
 fn strict_action_env_is_the_default() {
     let w = ws("strict");
     w.write("p/BUILD", GENRULE_DUMP);
-    let client = [("FOO", "clientfoo"), ("CLIENT_ONLY", "x"), ("LD_LIBRARY_PATH", "/ld"), ("HOME", "/h"), ("PATH", "/opt/z:/bin")];
+    let client = [
+        ("FOO", "clientfoo"),
+        ("CLIENT_ONLY", "x"),
+        ("LD_LIBRARY_PATH", "/ld"),
+        ("HOME", "/h"),
+        ("PATH", "/opt/z:/bin"),
+    ];
     let r = w.run(&client, &["build", "//p:dump"]);
     assert_eq!(r.code, 0, "{}", r.err);
     let e = parse(&w.read("bazel-bin/p/dump.txt"));
     assert_eq!(e["PATH"], STRICT_PATH);
     assert_eq!(e["LC_CTYPE"], "<unset>"); // 9.3.2 sets no LC_CTYPE
-    for unset in ["HOME", "LD_LIBRARY_PATH", "FOO", "BAR", "CLIENT_ONLY", SERVER_ONLY] {
+    for unset in [
+        "HOME",
+        "LD_LIBRARY_PATH",
+        "FOO",
+        "BAR",
+        "CLIENT_ONLY",
+        SERVER_ONLY,
+    ] {
         assert_eq!(e[unset], "<unset>", "{unset} leaked: {e:?}");
     }
 }
@@ -179,8 +218,15 @@ fn strict_action_env_is_the_default() {
 fn non_strict_inherits_path_and_ld_library_path_from_the_client() {
     let w = ws("nonstrict");
     w.write("p/BUILD", GENRULE_DUMP);
-    let client = [("PATH", "/opt/z:/bin:/usr/bin"), ("LD_LIBRARY_PATH", "/ld"), ("FOO", "clientfoo")];
-    let r = w.run(&client, &["build", "//p:dump", "--noincompatible_strict_action_env"]);
+    let client = [
+        ("PATH", "/opt/z:/bin:/usr/bin"),
+        ("LD_LIBRARY_PATH", "/ld"),
+        ("FOO", "clientfoo"),
+    ];
+    let r = w.run(
+        &client,
+        &["build", "//p:dump", "--noincompatible_strict_action_env"],
+    );
     assert_eq!(r.code, 0, "{}", r.err);
     let e = parse(&w.read("bazel-bin/p/dump.txt"));
     assert_eq!(e["PATH"], "/opt/z:/bin:/usr/bin");
@@ -194,7 +240,11 @@ fn non_strict_inherits_path_and_ld_library_path_from_the_client() {
 fn action_env_set_inherit_unset_and_last_wins() {
     let w = ws("actionenv");
     w.write("p/BUILD", GENRULE_DUMP);
-    let client = [("HOME", "/client/home"), ("BAR", "clientbar"), ("FOO", "clientfoo")];
+    let client = [
+        ("HOME", "/client/home"),
+        ("BAR", "clientbar"),
+        ("FOO", "clientfoo"),
+    ];
     let r = w.run(
         &client,
         &[
@@ -211,11 +261,20 @@ fn action_env_set_inherit_unset_and_last_wins() {
     );
     assert_eq!(r.code, 0, "{}", r.err);
     let e = parse(&w.read("bazel-bin/p/dump.txt"));
-    assert_eq!(e["FOO"], "baz", "last occurrence wins, client FOO is ignored for a fixed value");
+    assert_eq!(
+        e["FOO"], "baz",
+        "last occurrence wins, client FOO is ignored for a fixed value"
+    );
     assert_eq!(e["HOME"], "/client/home");
-    assert_eq!(e["BAR"], "<unset>", "=BAR unsets even though the client has BAR");
+    assert_eq!(
+        e["BAR"], "<unset>",
+        "=BAR unsets even though the client has BAR"
+    );
     assert_eq!(e["BAZ"], "a=b");
-    assert_eq!(e["CLIENT_ONLY"], "<unset>", "inherited but absent from the client environment");
+    assert_eq!(
+        e["CLIENT_ONLY"], "<unset>",
+        "inherited but absent from the client environment"
+    );
     assert_eq!(e["PATH"], STRICT_PATH);
 }
 
@@ -223,10 +282,24 @@ fn action_env_set_inherit_unset_and_last_wins() {
 fn action_env_can_override_and_unset_the_default_path() {
     let w = ws("actionpath");
     w.write("p/BUILD", GENRULE_DUMP);
-    let r = w.run(&[], &["build", "//p:dump", "--action_env=PATH=/custom:/bin"]);
+    let r = w.run(
+        &[],
+        &["build", "//p:dump", "--action_env=PATH=/custom:/bin"],
+    );
     assert_eq!(r.code, 0, "{}", r.err);
-    assert_eq!(parse(&w.read("bazel-bin/p/dump.txt"))["PATH"], "/custom:/bin");
-    let r = w.run(&[], &["build", "//p:dump", "--action_env==PATH", "--action_env==LC_CTYPE"]);
+    assert_eq!(
+        parse(&w.read("bazel-bin/p/dump.txt"))["PATH"],
+        "/custom:/bin"
+    );
+    let r = w.run(
+        &[],
+        &[
+            "build",
+            "//p:dump",
+            "--action_env==PATH",
+            "--action_env==LC_CTYPE",
+        ],
+    );
     assert_eq!(r.code, 0, "{}", r.err);
     let e = parse(&w.read("bazel-bin/p/dump.txt"));
     // bash invents its own PATH when none is exported; what matters is that it is not ours.
@@ -264,7 +337,11 @@ fn inherited_values_are_part_of_the_action_cache_key() {
 fn fixed_action_env_values_change_the_action_key() {
     let w = ws("fixedkey");
     w.write("p/BUILD", GENRULE_DUMP);
-    assert_eq!(w.run(&[], &["build", "//p:dump", "--action_env=FOO=1"]).code, 0);
+    assert_eq!(
+        w.run(&[], &["build", "//p:dump", "--action_env=FOO=1"])
+            .code,
+        0
+    );
     let r = w.run(&[], &["build", "//p:dump", "--action_env=FOO=1"]);
     assert!(r.err.contains("1 total action\n"), "{}", r.err);
     let r = w.run(&[], &["build", "//p:dump", "--action_env=FOO=2"]);
@@ -279,7 +356,13 @@ fn host_action_env_applies_to_exec_configuration_actions_only() {
     let client = [("BAR", "clientbar")];
     let r = w.run(
         &client,
-        &["build", "//p:user_dump", "--action_env=FOO=target", "--host_action_env=FOO=host", "--host_action_env=BAR"],
+        &[
+            "build",
+            "//p:user_dump",
+            "--action_env=FOO=target",
+            "--host_action_env=FOO=host",
+            "--host_action_env=BAR",
+        ],
     );
     assert_eq!(r.code, 0, "{}", r.err);
     let e = parse(&w.read("bazel-bin/p/user.txt"));
@@ -337,7 +420,10 @@ default_env = rule(implementation = _default_env)
 "#;
 
 fn script_attr() -> String {
-    let s = dump_script().replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+    let s = dump_script()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n");
     format!("\"{s}\"")
 }
 
@@ -362,13 +448,24 @@ sh_test(name = "sh", srcs = ["sh.sh"], env = {{"E1": "v1", "FOO": "rule"}}, env_
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(w.ws.join("t/sh.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(w.ws.join("t/sh.sh"), std::fs::Permissions::from_mode(0o755))
+            .unwrap();
     }
     w
 }
 
-fn test_env_of(w: &Ws, client: &[(&str, &str)], target: &str, flags: &[&str]) -> BTreeMap<String, String> {
-    let mut args = vec!["test", target, "--test_output=all", "--cache_test_results=no"];
+fn test_env_of(
+    w: &Ws,
+    client: &[(&str, &str)],
+    target: &str,
+    flags: &[&str],
+) -> BTreeMap<String, String> {
+    let mut args = vec![
+        "test",
+        target,
+        "--test_output=all",
+        "--cache_test_results=no",
+    ];
     args.extend_from_slice(flags);
     let r = w.run(client, &args);
     assert_eq!(r.code, 0, "{}", r.err);
@@ -378,13 +475,22 @@ fn test_env_of(w: &Ws, client: &[(&str, &str)], target: &str, flags: &[&str]) ->
 #[test]
 fn test_default_environment() {
     let w = test_ws("testdef");
-    let client = [("FOO", "clientfoo"), ("CLIENT_ONLY", "x"), ("HOME", "/h"), ("PATH", "/opt/z:/bin")];
+    let client = [
+        ("FOO", "clientfoo"),
+        ("CLIENT_ONLY", "x"),
+        ("HOME", "/h"),
+        ("PATH", "/opt/z:/bin"),
+    ];
     let e = test_env_of(&w, &client, "//t:plain", &[]);
     // test-setup.sh prepends '.' to the PATH of the action environment.
     assert_eq!(e["PATH"], format!(".:{STRICT_PATH}"));
     assert_eq!(e["TZ"], "UTC");
     assert_eq!(e["LC_CTYPE"], "<unset>"); // 9.3.2 sets no LC_CTYPE
-    assert_eq!(e.get("HOME_IS_TEST_TMPDIR").map(String::as_str), Some("yes"), "HOME defaults to TEST_TMPDIR");
+    assert_eq!(
+        e.get("HOME_IS_TEST_TMPDIR").map(String::as_str),
+        Some("yes"),
+        "HOME defaults to TEST_TMPDIR"
+    );
     assert_eq!(e["RUNFILES_DIR_SET"], "yes");
     for unset in ["LD_LIBRARY_PATH", "CLIENT_ONLY", SERVER_ONLY, "ACT"] {
         assert_eq!(e[unset], "<unset>", "{unset}: {e:?}");
@@ -411,25 +517,56 @@ fn test_env_set_inherit_override_and_unset() {
         ],
     );
     assert_eq!(e["FOO"], "baz", "--test_env overrides --action_env");
-    assert_eq!(e["BAR"], "clientbar", "--test_env=NAME inherits from the client environment");
-    assert_eq!(e["HOME"], "/explicit", "--test_env overrides the default HOME");
+    assert_eq!(
+        e["BAR"], "clientbar",
+        "--test_env=NAME inherits from the client environment"
+    );
+    assert_eq!(
+        e["HOME"], "/explicit",
+        "--test_env overrides the default HOME"
+    );
     assert_eq!(e["BAZ"], "from_action_env", "--action_env reaches tests");
     assert_eq!(e["CLIENT_ONLY"], "<unset>");
     assert_eq!(e["PATH"], format!(".:{STRICT_PATH}"));
 
-    // `--test_env=HOME` inherits the client HOME; `--test_env==HOME` removes even the default.
+    // `--test_env=HOME` inherits the client HOME; `--test_env==HOME` unsets it from the
+    // test environment (after which Bazel 9.3.2's `test-setup.sh` defaults unset `HOME` to
+    // `TEST_TMPDIR`), while `--test_env==TZ` unsets `TZ` completely.
     let e = test_env_of(&w, &client, "//t:plain", &["--test_env=HOME"]);
     assert_eq!(e["HOME"], "/h");
-    let e = test_env_of(&w, &client, "//t:plain", &["--test_env==HOME", "--test_env==TZ"]);
-    assert_eq!(e["HOME"], "<unset>");
+    let e = test_env_of(
+        &w,
+        &client,
+        "//t:plain",
+        &["--test_env==HOME", "--test_env==TZ"],
+    );
+    assert_eq!(
+        e.get("HOME_IS_TEST_TMPDIR").map(String::as_str),
+        Some("yes")
+    );
     assert_eq!(e["TZ"], "<unset>");
     // Last one wins: HOME set after the unset.
-    let e = test_env_of(&w, &client, "//t:plain", &["--test_env==HOME", "--test_env=HOME=/again"]);
+    let e = test_env_of(
+        &w,
+        &client,
+        "//t:plain",
+        &["--test_env==HOME", "--test_env=HOME=/again"],
+    );
     assert_eq!(e["HOME"], "/again");
     // The action environment's PATH can be replaced / non-strict inherits the client PATH.
-    let e = test_env_of(&w, &[("PATH", "/opt/q:/bin:/usr/bin")], "//t:plain", &["--noincompatible_strict_action_env"]);
+    let e = test_env_of(
+        &w,
+        &[("PATH", "/opt/q:/bin:/usr/bin")],
+        "//t:plain",
+        &["--noincompatible_strict_action_env"],
+    );
     assert_eq!(e["PATH"], ".:/opt/q:/bin:/usr/bin");
-    let e = test_env_of(&w, &client, "//t:plain", &["--action_env=PATH=/custom:/bin:/usr/bin"]);
+    let e = test_env_of(
+        &w,
+        &client,
+        "//t:plain",
+        &["--action_env=PATH=/custom:/bin:/usr/bin"],
+    );
     assert_eq!(e["PATH"], ".:/custom:/bin:/usr/bin");
 }
 
@@ -437,7 +574,10 @@ fn test_env_set_inherit_override_and_unset() {
 fn test_env_inherits_use_the_client_env_and_invalidate_the_test_cache() {
     let w = test_ws("testcache");
     let run = |foo: &str| {
-        let r = w.run(&[("FOO", foo)], &["test", "//t:plain", "--test_output=all", "--test_env=FOO"]);
+        let r = w.run(
+            &[("FOO", foo)],
+            &["test", "//t:plain", "--test_output=all", "--test_env=FOO"],
+        );
         assert_eq!(r.code, 0, "{}", r.err);
         r.out
     };
@@ -453,27 +593,50 @@ fn test_env_inherits_use_the_client_env_and_invalidate_the_test_cache() {
 #[test]
 fn rule_environment_wins_over_test_env() {
     let w = test_ws("ruleenv");
-    let client = [("EI", "client_ei"), ("E1", "client_e1"), ("FOO", "clientfoo")];
+    let client = [
+        ("EI", "client_ei"),
+        ("E1", "client_e1"),
+        ("FOO", "clientfoo"),
+    ];
     // `@rules_shell`'s `sh_test` (`RunEnvironmentInfo`): `env` beats `--test_env`; an `env_inherit` entry (taken
     // from the client environment) beats an `env` entry of the same name (verified on real Bazel 9.3.2).
-    let e = test_env_of(&w, &client, "//t:sh", &["--test_env=FOO=cli", "--test_env=E1=cli"]);
+    let e = test_env_of(
+        &w,
+        &client,
+        "//t:sh",
+        &["--test_env=FOO=cli", "--test_env=E1=cli"],
+    );
     assert_eq!(e["FOO"], "rule");
     assert_eq!(e["E1"], "client_e1");
     assert_eq!(e["EI"], "client_ei");
     // A Starlark rule's `env` attribute is *not* applied unless it returns RunEnvironmentInfo.
     let e = test_env_of(&w, &client, "//t:withenv", &["--test_env=FOO=cli"]);
     assert_eq!(e["FOO"], "cli");
-    assert_eq!(e["E1"], "<unset>", "a Starlark rule's own `env` attribute is not the native one");
+    assert_eq!(
+        e["E1"], "<unset>",
+        "a Starlark rule's own `env` attribute is not the native one"
+    );
 }
 
 #[test]
 fn run_environment_info_in_tests() {
     let w = test_ws("rei-test");
     let client = [("RE_INHERIT", "client_value"), ("FOO", "clientfoo")];
-    let e = test_env_of(&w, &client, "//t:retest", &["--test_env=RE_FIXED=cli", "--test_env=FOO=cli"]);
-    assert_eq!(e["RE_FIXED"], "fixed", "RunEnvironmentInfo.environment overrides --test_env");
+    let e = test_env_of(
+        &w,
+        &client,
+        "//t:retest",
+        &["--test_env=RE_FIXED=cli", "--test_env=FOO=cli"],
+    );
+    assert_eq!(
+        e["RE_FIXED"], "fixed",
+        "RunEnvironmentInfo.environment overrides --test_env"
+    );
     assert_eq!(e["FOO"], "from_rule");
-    assert_eq!(e["RE_INHERIT"], "client_value", "inherited_environment comes from the client environment");
+    assert_eq!(
+        e["RE_INHERIT"], "client_value",
+        "inherited_environment comes from the client environment"
+    );
     let e = test_env_of(&w, &[], "//t:retest", &[]);
     assert_eq!(e["RE_INHERIT"], "<unset>");
 }
@@ -482,9 +645,18 @@ fn exec_env(x: &ExecRequest) -> (BTreeMap<String, String>, Vec<String>) {
     let env = x
         .environment_variable
         .iter()
-        .map(|v| (String::from_utf8_lossy(&v.name).into_owned(), String::from_utf8_lossy(&v.value).into_owned()))
+        .map(|v| {
+            (
+                String::from_utf8_lossy(&v.name).into_owned(),
+                String::from_utf8_lossy(&v.value).into_owned(),
+            )
+        })
         .collect();
-    let mut clear: Vec<String> = x.environment_variable_to_clear.iter().map(|n| String::from_utf8_lossy(n).into_owned()).collect();
+    let mut clear: Vec<String> = x
+        .environment_variable_to_clear
+        .iter()
+        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .collect();
     clear.sort();
     (env, clear)
 }
@@ -492,7 +664,12 @@ fn exec_env(x: &ExecRequest) -> (BTreeMap<String, String>, Vec<String>) {
 #[test]
 fn bazel_run_environment() {
     let w = test_ws("run");
-    let client = [("RE_INHERIT", "client_value"), ("FOO", "clientfoo"), ("CLIENT_ONLY", "x"), ("RUN1", "clientrun1")];
+    let client = [
+        ("RE_INHERIT", "client_value"),
+        ("FOO", "clientfoo"),
+        ("CLIENT_ONLY", "x"),
+        ("RUN1", "clientrun1"),
+    ];
     let r = w.run(
         &client,
         &[
@@ -509,20 +686,40 @@ fn bazel_run_environment() {
     );
     assert_eq!(r.code, 0, "{}", r.err);
     let (env, clear) = exec_env(r.exec.as_ref().expect("exec request"));
-    assert_eq!(env["RE_FIXED"], "fixed", "RunEnvironmentInfo overrides --run_env");
+    assert_eq!(
+        env["RE_FIXED"], "fixed",
+        "RunEnvironmentInfo overrides --run_env"
+    );
     assert_eq!(env["FOO"], "from_rule");
     assert_eq!(env["RE_INHERIT"], "client_value");
-    assert_eq!(env["RUN1"], "clientrun1", "--run_env=NAME inherits; --action_env does not apply to bazel run");
+    assert_eq!(
+        env["RUN1"], "clientrun1",
+        "--run_env=NAME inherits; --action_env does not apply to bazel run"
+    );
     assert!(!env.contains_key("ACT"), "{env:?}");
     assert!(!env.contains_key("MISSING_IN_CLIENT"));
     assert!(!env.contains_key("CLIENT_ONLY"));
-    assert!(!env.contains_key("PATH"), "the client's own PATH is kept by the client, not rewritten");
+    assert!(
+        !env.contains_key("PATH"),
+        "the client's own PATH is kept by the client, not rewritten"
+    );
     assert!(!env.contains_key(SERVER_ONLY));
     assert_eq!(env["BUILD_WORKSPACE_DIRECTORY"], w.ws.to_str().unwrap());
-    assert!(env.contains_key("BUILD_WORKING_DIRECTORY") && env.contains_key("BUILD_EXECROOT") && env.contains_key("BUILD_ID"));
+    assert!(
+        env.contains_key("BUILD_WORKING_DIRECTORY")
+            && env.contains_key("BUILD_EXECROOT")
+            && env.contains_key("BUILD_ID")
+    );
     assert_eq!(
         clear,
-        ["CLIENT_ONLY", "JAVA_RUNFILES", "RUNFILES_DIR", "RUNFILES_MANIFEST_FILE", "RUNFILES_MANIFEST_ONLY", "TEST_SRCDIR"]
+        [
+            "CLIENT_ONLY",
+            "JAVA_RUNFILES",
+            "RUNFILES_DIR",
+            "RUNFILES_MANIFEST_FILE",
+            "RUNFILES_MANIFEST_ONLY",
+            "TEST_SRCDIR"
+        ]
     );
     // Without `RunEnvironmentInfo`-declared inherited variable in the client env nothing is added.
     let r = w.run(&[], &["run", "//t:rebin"]);
@@ -535,7 +732,16 @@ fn bazel_run_environment() {
 fn ctx_configuration_default_shell_env_and_use_default_shell_env() {
     let w = test_ws("defshell");
     let client = [("FOO", "clientfoo"), ("BAZ", "clientbaz")];
-    let r = w.run(&client, &["build", "//t:defenv", "--action_env=FOO", "--action_env=BAZ=cfg", "--action_env=FIXED=1"]);
+    let r = w.run(
+        &client,
+        &[
+            "build",
+            "//t:defenv",
+            "--action_env=FOO",
+            "--action_env=BAZ=cfg",
+            "--action_env=FIXED=1",
+        ],
+    );
     assert_eq!(r.code, 0, "{}", r.err);
     // `ctx.configuration.default_shell_env` is the fixed part: inherited FOO is not in it.
     let fixed = parse(&w.read("bazel-bin/t/defenv.txt"));
@@ -550,7 +756,7 @@ fn ctx_configuration_default_shell_env_and_use_default_shell_env() {
     assert_eq!(with["BAZ"], "explicit");
     assert_eq!(with["PATH"], STRICT_PATH);
     assert_eq!(with["LC_CTYPE"], "<unset>"); // 9.3.2 sets no LC_CTYPE
-    // Without it: only the action's own env.
+                                             // Without it: only the action's own env.
     let bare = parse(&w.read("bazel-bin/t/defenv_bare.txt"));
     assert_eq!(bare["BAZ"], "explicit");
     assert_eq!(bare["FOO"], "<unset>");

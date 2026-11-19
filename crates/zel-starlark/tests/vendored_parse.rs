@@ -49,15 +49,22 @@ fn parse_all_vendored() {
         if let Some(e) = bazel.errors.first() {
             fails.push(format!("bazel_syntax: {e}"));
         } else if let Some(e) = bazel.resolver_errors.first() {
-            if !(name.ends_with("protobuf/33.4/conformance/BUILD") && e.error.message.contains("more than once")) {
+            if !(name.ends_with("protobuf/33.4/conformance/BUILD")
+                && e.error.message.contains("more than once"))
+            {
                 fails.push(format!("bazel_syntax resolver: {}", e.error));
             }
         }
         let r = (|| -> Result<(), String> {
-            let toks = Lexer::new(&name, &src).lex_all().map_err(|e| e.to_string())?;
+            let toks = Lexer::new(&name, &src)
+                .lex_all()
+                .map_err(|e| e.to_string())?;
             let stmts = Parser::new(toks).parse_module().map_err(|e| e.0)?;
             let mut r = Resolver::new();
-            r.allow_late_loads = !name.ends_with(".bzl");
+            let is_bzl = name.ends_with(".bzl");
+            r.allow_late_loads = !is_bzl;
+            r.allow_toplevel_rebinding = !is_bzl;
+            r.load_binds_globally = !is_bzl;
             r.resolve_module(&stmts).map_err(|e| e.0)?;
             Ok(())
         })();

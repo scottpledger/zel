@@ -119,12 +119,10 @@ impl BigInt {
             2 => {
                 let mag = (self.limbs[0] as u64) | ((self.limbs[1] as u64) << 32);
                 if self.is_negative {
-                    if mag == (1u64 << 63) {
-                        Some(i64::MIN)
-                    } else if mag < (1u64 << 63) {
-                        Some(-(mag as i64))
-                    } else {
-                        None
+                    match mag.cmp(&(1u64 << 63)) {
+                        std::cmp::Ordering::Equal => Some(i64::MIN),
+                        std::cmp::Ordering::Less => Some(-(mag as i64)),
+                        std::cmp::Ordering::Greater => None,
                     }
                 } else if mag <= (i64::MAX as u64) {
                     Some(mag as i64)
@@ -204,8 +202,8 @@ impl BigInt {
     fn sub_mag(a: &[u32], b: &[u32]) -> Vec<u32> {
         let mut res = Vec::with_capacity(a.len());
         let mut borrow: i64 = 0;
-        for i in 0..a.len() {
-            let ai = a[i] as i64;
+        for (i, &limb) in a.iter().enumerate() {
+            let ai = limb as i64;
             let bi = b.get(i).copied().unwrap_or(0) as i64;
             let diff = ai - bi - borrow;
             if diff < 0 {
@@ -544,18 +542,14 @@ impl BigInt {
         }
     }
 
-    /// Left shift: `x << shift`.
-    pub fn shl(&self, shift: i64) -> Result<Self, String> {
-        if shift < 0 {
-            return Err(format!("negative shift count: {shift}"));
-        }
-        if shift >= 512 {
-            return Err(format!("shift count too large: {shift}"));
-        }
+    pub fn bit_len(&self) -> usize {
+        self.bit_length()
+    }
+
+    pub(crate) fn shl_bits(&self, shift: usize) -> Self {
         if self.is_zero() || shift == 0 {
-            return Ok(self.clone());
+            return self.clone();
         }
-        let shift = shift as usize;
         let limb_shift = shift / 32;
         let bit_shift = shift % 32;
 
@@ -582,7 +576,18 @@ impl BigInt {
             limbs: res,
         };
         r.normalize();
-        Ok(r)
+        r
+    }
+
+    /// Left shift: `x << shift`.
+    pub fn shl(&self, shift: i64) -> Result<Self, String> {
+        if shift < 0 {
+            return Err(format!("negative shift count: {shift}"));
+        }
+        if shift >= 512 {
+            return Err(format!("shift count too large: {shift}"));
+        }
+        Ok(self.shl_bits(shift as usize))
     }
 
     /// Right shift: `x >> shift`.
@@ -647,9 +652,18 @@ impl BigInt {
             (false, s)
         };
         let s = match radix {
-            16 => s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s),
-            8 => s.strip_prefix("0o").or_else(|| s.strip_prefix("0O")).unwrap_or(s),
-            2 => s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")).unwrap_or(s),
+            16 => s
+                .strip_prefix("0x")
+                .or_else(|| s.strip_prefix("0X"))
+                .unwrap_or(s),
+            8 => s
+                .strip_prefix("0o")
+                .or_else(|| s.strip_prefix("0O"))
+                .unwrap_or(s),
+            2 => s
+                .strip_prefix("0b")
+                .or_else(|| s.strip_prefix("0B"))
+                .unwrap_or(s),
             _ => s,
         };
         if s.is_empty() {
@@ -767,6 +781,107 @@ impl BigInt {
     fn format_binary(&self) -> String {
         self.to_str_radix(2)
     }
+}
+
+/// Exact three-way comparison of `BigInt` `x` and `f64` `y`, matching Bazel's
+/// `StarlarkInt.compareIntAndDouble` (NaN is greater than every integer; ±Inf compare as expected).
+pub fn compare_int_and_float(x: &BigInt, y: f64) -> Ordering {
+    if y.is_nan() {
+        return Ordering::Less;
+    }
+    if y == f64::INFINITY {
+        return Ordering::Less;
+    }
+    if y == f64::NEG_INFINITY {
+        return Ordering::Greater;
+    }
+    if x.is_zero() && y == 0.0 {
+        return Ordering::Equal;
+    }
+    let x_sign = x.signum();
+    let y_sign = if y > 0.0 {
+        1
+    } else if y < 0.0 {
+        -1
+    } else {
+        0
+    };
+    if x_sign != y_sign {
+        return x_sign.cmp(&y_sign);
+    }
+
+    let bits = y.to_bits();
+    let exp = ((bits >> 52) & 0x7FF) as i32;
+    let (mantissa_raw, shift) = if exp == 0 {
+        (bits & 0x000F_FFFF_FFFF_FFFF, -1022 - 52)
+    } else {
+        (
+            (bits & 0x000F_FFFF_FFFF_FFFF) | (1u64 << 52),
+            exp - 1023 - 52,
+        )
+    };
+
+    let x_abs = x.abs();
+    let mag_cmp = if shift < 0 {
+        let rshift = (-shift) as usize;
+        if rshift >= 53 || x_abs.bit_length() > 53 {
+            Ordering::Greater
+        } else {
+            x_abs
+                .shl_bits(rshift)
+                .cmp_mag(&BigInt::from_u64(mantissa_raw))
+        }
+    } else {
+        let y_bits = (64 - mantissa_raw.leading_zeros() as usize) + (shift as usize);
+        if x_abs.bit_length() != y_bits {
+            x_abs.bit_length().cmp(&y_bits)
+        } else {
+            x_abs.cmp_mag(&BigInt::from_u64(mantissa_raw).shl_bits(shift as usize))
+        }
+    };
+
+    if x.is_negative() {
+        mag_cmp.reverse()
+    } else {
+        mag_cmp
+    }
+}
+
+/// Converts a finite `f64` to an exact `BigInt` truncating toward zero (like Bazel's
+/// `StarlarkFloat.finiteDoubleToIntExact`).
+pub fn finite_double_to_int_exact(x: f64) -> Result<BigInt, String> {
+    if !x.is_finite() {
+        return Err("cannot convert float NaN or Inf to int".to_string());
+    }
+    if x == 0.0 {
+        return Ok(BigInt::zero());
+    }
+    let bits = x.to_bits();
+    let is_neg = (bits >> 63) != 0;
+    let exp = ((bits >> 52) & 0x7FF) as i32;
+    let (mantissa_raw, shift) = if exp == 0 {
+        (bits & 0x000F_FFFF_FFFF_FFFF, -1022 - 52)
+    } else {
+        (
+            (bits & 0x000F_FFFF_FFFF_FFFF) | (1u64 << 52),
+            exp - 1023 - 52,
+        )
+    };
+    let mag = if shift < 0 {
+        let rshift = (-shift) as usize;
+        if rshift >= 64 {
+            BigInt::zero()
+        } else {
+            BigInt::from_u64(mantissa_raw >> rshift)
+        }
+    } else {
+        BigInt::from_u64(mantissa_raw).shl_bits(shift as usize)
+    };
+    Ok(if is_neg && !mag.is_zero() {
+        mag.neg()
+    } else {
+        mag
+    })
 }
 
 impl Default for BigInt {
@@ -943,7 +1058,10 @@ mod tests {
         let one = BigInt::one();
         let big = one.shl(128).unwrap();
         let big_minus_one = one.shl(127).unwrap();
-        assert_eq!(big.floored_div(&big_minus_one).unwrap(), BigInt::from_i64(2));
+        assert_eq!(
+            big.floored_div(&big_minus_one).unwrap(),
+            BigInt::from_i64(2)
+        );
         assert_eq!(format!("{big}"), "340282366920938463463374607431768211456");
         assert_eq!(format!("{:x}", big), "100000000000000000000000000000000");
     }
@@ -975,7 +1093,10 @@ mod tests {
         assert_eq!(maxint.shr(9999).unwrap(), BigInt::from_i64(0));
         assert_eq!(minint.shr(31).unwrap(), BigInt::from_i64(-1));
         assert_eq!(minint.shr(30).unwrap(), BigInt::from_i64(-2));
-        assert_eq!(BigInt::from_i64(-10).shr(1000).unwrap(), BigInt::from_i64(-1));
+        assert_eq!(
+            BigInt::from_i64(-10).shr(1000).unwrap(),
+            BigInt::from_i64(-1)
+        );
     }
 
     #[test]

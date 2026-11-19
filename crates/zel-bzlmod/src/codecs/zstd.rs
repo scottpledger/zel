@@ -12,7 +12,11 @@ const BLOCK_MAX: usize = 128 * 1024;
 
 #[inline(always)]
 fn mask(n: u32) -> u64 {
-    if n >= 64 { u64::MAX } else { (1u64 << n) - 1 }
+    if n >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << n) - 1
+    }
 }
 
 /// Backward bitstream (read from the last byte towards the first, MSB first).
@@ -29,7 +33,10 @@ impl<'a> Rev<'a> {
             return Err("Zstd bitstream end mark missing".into());
         }
         let h = 7 - last.leading_zeros() as i64;
-        Ok(Self { d, pos: (d.len() as i64 - 1) * 8 + h })
+        Ok(Self {
+            d,
+            pos: (d.len() as i64 - 1) * 8 + h,
+        })
     }
 
     #[inline(always)]
@@ -84,7 +91,12 @@ struct Fse {
 
 impl Fse {
     fn rle(symbol: u8) -> Self {
-        Fse { al: 0, sym: vec![symbol], nb: vec![0], base: vec![0] }
+        Fse {
+            al: 0,
+            sym: vec![symbol],
+            nb: vec![0],
+            base: vec![0],
+        }
     }
 
     fn build(norm: &[i16], al: u32) -> Result<Self, String> {
@@ -210,36 +222,41 @@ fn fse_read_table(data: &[u8], max_sv: usize, max_al: u32) -> Result<(Fse, usize
 
 fn predefined_ll() -> Fse {
     const N: [i16; 36] = [
-        4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1, 1, 1, -1, -1, -1, -1,
+        4, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 1, 1, 1, 2, 2, 2, 2, 2, 2, 2, 2, 2, 3, 2, 1, 1, 1,
+        1, 1, -1, -1, -1, -1,
     ];
     Fse::build(&N, 6).unwrap()
 }
 fn predefined_ml() -> Fse {
     const N: [i16; 53] = [
-        1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
-        1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1,
+        1, 4, 3, 2, 2, 2, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+        1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1, -1, -1,
     ];
     Fse::build(&N, 6).unwrap()
 }
 fn predefined_of() -> Fse {
-    const N: [i16; 29] = [1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1];
+    const N: [i16; 29] = [
+        1, 1, 1, 1, 1, 1, 2, 2, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, -1, -1, -1, -1, -1,
+    ];
     Fse::build(&N, 5).unwrap()
 }
 
 const LL_BASE: [u32; 36] = [
-    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64, 128, 256, 512, 1024, 2048,
-    4096, 8192, 16384, 32768, 65536,
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 20, 22, 24, 28, 32, 40, 48, 64,
+    128, 256, 512, 1024, 2048, 4096, 8192, 16384, 32768, 65536,
 ];
 const LL_BITS: [u8; 36] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 6, 7, 8, 9, 10, 11,
+    12, 13, 14, 15, 16,
 ];
 const ML_BASE: [u32; 53] = [
-    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35,
-    37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027, 2051, 4099, 8195, 16387, 32771, 65539,
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27,
+    28, 29, 30, 31, 32, 33, 34, 35, 37, 39, 41, 43, 47, 51, 59, 67, 83, 99, 131, 259, 515, 1027,
+    2051, 4099, 8195, 16387, 32771, 65539,
 ];
 const ML_BITS: [u8; 53] = [
-    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 3, 3, 4, 4,
-    5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    1, 1, 1, 1, 2, 2, 3, 3, 4, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
 ];
 
 // ---------------------------------------------------------------------------
@@ -379,11 +396,7 @@ struct FrameState {
     reps: [usize; 3],
 }
 
-fn decode_literals(
-    blk: &[u8],
-    st: &mut FrameState,
-    lits: &mut Vec<u8>,
-) -> Result<usize, String> {
+fn decode_literals(blk: &[u8], st: &mut FrameState, lits: &mut Vec<u8>) -> Result<usize, String> {
     lits.clear();
     if blk.is_empty() {
         return Err("Zstd literals section truncated".into());
@@ -405,7 +418,10 @@ fn decode_literals(
                     if blk.len() < 3 {
                         return Err("Zstd literals header truncated".into());
                     }
-                    (((b0 >> 4) as usize) | ((blk[1] as usize) << 4) | ((blk[2] as usize) << 12), 3)
+                    (
+                        ((b0 >> 4) as usize) | ((blk[1] as usize) << 4) | ((blk[2] as usize) << 12),
+                        3,
+                    )
                 }
             };
             if size > BLOCK_MAX {
@@ -436,8 +452,8 @@ fn decode_literals(
                 return Err("Zstd literals header truncated".into());
             }
             let mut v = 0u64;
-            for i in 0..hdr {
-                v |= (blk[i] as u64) << (8 * i);
+            for (i, &b) in blk.iter().enumerate().take(hdr) {
+                v |= (b as u64) << (8 * i);
             }
             v >>= 4;
             let regen = (v & mask(bits)) as usize;
@@ -455,7 +471,10 @@ fn decode_literals(
                 st.huf = Some(h);
                 off = used;
             }
-            let huf = st.huf.as_ref().ok_or("Zstd treeless literals without previous Huffman table")?;
+            let huf = st
+                .huf
+                .as_ref()
+                .ok_or("Zstd treeless literals without previous Huffman table")?;
             let data = &body[off..];
             if streams == 1 {
                 huf.decode_stream(data, regen, lits)?;
@@ -508,7 +527,9 @@ fn read_seq_table(
             *pos += used;
             Ok(t)
         }
-        _ => prev.clone().ok_or_else(|| "Zstd repeat sequence table without previous table".to_string()),
+        _ => prev
+            .clone()
+            .ok_or_else(|| "Zstd repeat sequence table without previous table".to_string()),
     }
 }
 
@@ -562,8 +583,24 @@ fn decode_block(
         return Err("Zstd reserved sequence mode bits set".into());
     }
     let ll = read_seq_table(modes >> 6, blk, &mut pos, &st.ll, predefined_ll, 35, 9)?;
-    let of = read_seq_table((modes >> 4) & 3, blk, &mut pos, &st.of, predefined_of, 31, 8)?;
-    let ml = read_seq_table((modes >> 2) & 3, blk, &mut pos, &st.ml, predefined_ml, 52, 9)?;
+    let of = read_seq_table(
+        (modes >> 4) & 3,
+        blk,
+        &mut pos,
+        &st.of,
+        predefined_of,
+        31,
+        8,
+    )?;
+    let ml = read_seq_table(
+        (modes >> 2) & 3,
+        blk,
+        &mut pos,
+        &st.ml,
+        predefined_ml,
+        52,
+        9,
+    )?;
     // For FSE tables the symbol range was validated while building; make sure sym tables
     // cannot index outside the base tables.
     if ll.sym.iter().any(|&s| s as usize >= LL_BASE.len())
@@ -636,7 +673,11 @@ fn decode_block(
         lit_pos += llen;
 
         if offset == 0 || offset > avail_total(out) || offset > window {
-            return Err(format!("Invalid zstd match offset: {} (out len is {})", offset, avail_total(out)));
+            return Err(format!(
+                "Invalid zstd match offset: {} (out len is {})",
+                offset,
+                avail_total(out)
+            ));
         }
         let offset = offset as usize;
         let cur = out.len();
@@ -682,7 +723,11 @@ fn zstd_into(input: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
 
     while pos < input.len() {
         if input.len() - pos < 4 {
-            return Err(if frames > 0 { "Not a zstd archive (bad magic number)".into() } else { "Zstd frame header truncated".into() });
+            return Err(if frames > 0 {
+                "Not a zstd archive (bad magic number)".into()
+            } else {
+                "Zstd frame header truncated".into()
+            });
         }
         let magic = u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap());
         if magic & 0xFFFF_FFF0 == 0x184D_2A50 {
@@ -698,7 +743,11 @@ fn zstd_into(input: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
             continue;
         }
         if magic != MAGIC {
-            return Err(if frames == 0 { "Not a zstd archive (bad magic number)".into() } else { "Zstd: unknown frame magic".to_string() });
+            return Err(if frames == 0 {
+                "Not a zstd archive (bad magic number)".into()
+            } else {
+                "Zstd: unknown frame magic".to_string()
+            });
         }
         pos += 4;
         let fd = *input.get(pos).ok_or("Zstd frame header truncated")?;
@@ -734,10 +783,18 @@ fn zstd_into(input: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
         }
         pos += dict_len;
         if dict_id != 0 {
-            return Err(format!("Zstd frame requires dictionary {dict_id}, which is not supported"));
+            return Err(format!(
+                "Zstd frame requires dictionary {dict_id}, which is not supported"
+            ));
         }
         let fcs_len = match fcs_flag {
-            0 => if single { 1 } else { 0 },
+            0 => {
+                if single {
+                    1
+                } else {
+                    0
+                }
+            }
             1 => 2,
             2 => 4,
             _ => 8,
@@ -765,13 +822,21 @@ fn zstd_into(input: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
         if let Some(n) = fcs {
             out.reserve(n.min(1 << 28) as usize);
         }
-        let mut st = FrameState { huf: None, ll: None, of: None, ml: None, reps: [1, 4, 8] };
+        let mut st = FrameState {
+            huf: None,
+            ll: None,
+            of: None,
+            ml: None,
+            reps: [1, 4, 8],
+        };
 
         loop {
             if input.len() - pos < 3 {
                 return Err("Truncated block data".into());
             }
-            let h = input[pos] as u32 | ((input[pos + 1] as u32) << 8) | ((input[pos + 2] as u32) << 16);
+            let h = input[pos] as u32
+                | ((input[pos + 1] as u32) << 8)
+                | ((input[pos + 2] as u32) << 16);
             pos += 3;
             let last = h & 1 != 0;
             let btype = (h >> 1) & 3;
@@ -797,7 +862,14 @@ fn zstd_into(input: &[u8], out: &mut Vec<u8>) -> Result<(), String> {
                     if bsize > BLOCK_MAX || input.len() - pos < bsize {
                         return Err("Truncated block data".into());
                     }
-                    decode_block(&input[pos..pos + bsize], &mut st, &mut lits, out, frame_start, window)?;
+                    decode_block(
+                        &input[pos..pos + bsize],
+                        &mut st,
+                        &mut lits,
+                        out,
+                        frame_start,
+                        window,
+                    )?;
                     pos += bsize;
                 }
                 _ => return Err("Zstd reserved block type".into()),
@@ -837,7 +909,11 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
     let p4 = 0x85EBCA77C2B2AE63u64;
     let p5 = 0x27D4EB2F165667C5u64;
 
-    let round = |acc: u64, val: u64| acc.wrapping_add(val.wrapping_mul(p2)).rotate_left(31).wrapping_mul(p1);
+    let round = |acc: u64, val: u64| {
+        acc.wrapping_add(val.wrapping_mul(p2))
+            .rotate_left(31)
+            .wrapping_mul(p1)
+    };
     let merge_round = |acc: u64, val: u64| {
         let v = round(0, val);
         (acc ^ v).wrapping_mul(p1).wrapping_add(p4)
@@ -862,7 +938,8 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
             v4 = round(v4, u3);
         }
 
-        let mut h = v1.rotate_left(1)
+        let mut h = v1
+            .rotate_left(1)
             .wrapping_add(v2.rotate_left(7))
             .wrapping_add(v3.rotate_left(12))
             .wrapping_add(v4.rotate_left(18));
@@ -886,12 +963,17 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
     }
     if i + 4 <= len {
         let u = u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as u64;
-        h64 = (h64 ^ (u.wrapping_mul(p1))).rotate_left(23).wrapping_mul(p2).wrapping_add(p3);
+        h64 = (h64 ^ (u.wrapping_mul(p1)))
+            .rotate_left(23)
+            .wrapping_mul(p2)
+            .wrapping_add(p3);
         i += 4;
     }
     while i < len {
         let u = data[i] as u64;
-        h64 = (h64 ^ (u.wrapping_mul(p5))).rotate_left(11).wrapping_mul(p1);
+        h64 = (h64 ^ (u.wrapping_mul(p5)))
+            .rotate_left(11)
+            .wrapping_mul(p1);
         i += 1;
     }
 

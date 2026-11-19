@@ -31,7 +31,12 @@ fn int_flag(parsed: &ParsedCommandOptions, name: &str, default: i32) -> i32 {
 }
 
 /// `QueryOptionHelper.readQuery`: joins the residue with spaces, or reads `--query_file`.
-pub(crate) fn read_query(parsed: &ParsedCommandOptions, cwd: &std::path::Path, cmd_kind: &str, allow_empty: bool) -> Result<String, String> {
+pub(crate) fn read_query(
+    parsed: &ParsedCommandOptions,
+    cwd: &std::path::Path,
+    cmd_kind: &str,
+    allow_empty: bool,
+) -> Result<String, String> {
     let query_file = parsed.get_str("query_file").unwrap_or("");
     if !parsed.targets.is_empty() {
         if !query_file.is_empty() {
@@ -69,11 +74,22 @@ impl BlazeRuntime {
             strict_test_suite: flag(parsed, "strict_test_suite", false),
             universe_scope: opt_list(parsed, "universe_scope"),
             infer_universe_scope: flag(parsed, "infer_universe_scope", false),
-            package_group_includes_double_slash: flag(parsed, "incompatible_package_group_includes_double_slash", true),
+            package_group_includes_double_slash: flag(
+                parsed,
+                "incompatible_package_group_includes_double_slash",
+                true,
+            ),
             nodep_deps: flag(parsed, "nodep_deps", true),
-            aspect_deps: parsed.get_str("aspect_deps").unwrap_or("conservative").to_string(),
+            aspect_deps: parsed
+                .get_str("aspect_deps")
+                .unwrap_or("conservative")
+                .to_string(),
             sky: false,
-            graphless_query: match parsed.parsed_options.get("experimental_graphless_query").map(|d| &d.value) {
+            graphless_query: match parsed
+                .parsed_options
+                .get("experimental_graphless_query")
+                .map(|d| &d.value)
+            {
                 Some(zel_options::OptionValue::TriState(zel_options::TriState::Yes)) => Some(true),
                 Some(zel_options::OptionValue::TriState(zel_options::TriState::No)) => Some(false),
                 _ => None,
@@ -81,7 +97,12 @@ impl BlazeRuntime {
         }
     }
 
-    pub(crate) fn query_format_opts(&self, parsed: &ParsedCommandOptions, resolver: &PatternResolver, default_output: &str) -> FormatOpts {
+    pub(crate) fn query_format_opts(
+        &self,
+        parsed: &ParsedCommandOptions,
+        resolver: &PatternResolver,
+        default_output: &str,
+    ) -> FormatOpts {
         let output = match parsed.parsed_options.get("output") {
             Some(d) => d.value.as_str().unwrap_or(default_output).to_string(),
             None => default_output.to_string(),
@@ -94,15 +115,28 @@ impl BlazeRuntime {
                 None => OrderOutput::Auto,
             },
         };
-        let mut printer = LabelPrinter { consistent: flag(parsed, "consistent_labels", false), ..Default::default() };
+        let mut printer = LabelPrinter {
+            consistent: flag(parsed, "consistent_labels", false),
+            ..Default::default()
+        };
         for (apparent, canonical) in resolver.main_mapping.entries() {
-            printer.apparent.entry(canonical.name().to_string()).or_insert_with(|| apparent.clone());
+            printer
+                .apparent
+                .entry(canonical.name().to_string())
+                .or_insert_with(|| apparent.clone());
         }
         // Every repository mapping contains `bazel_tools`.
-        printer.apparent.entry("bazel_tools".to_string()).or_insert_with(|| "bazel_tools".to_string());
+        printer
+            .apparent
+            .entry("bazel_tools".to_string())
+            .or_insert_with(|| "bazel_tools".to_string());
         let attrs = {
             let l = opt_list(parsed, "proto:output_rule_attrs");
-            if l.is_empty() && !parsed.parsed_options.contains_key("proto:output_rule_attrs") {
+            if l.is_empty()
+                && !parsed
+                    .parsed_options
+                    .contains_key("proto:output_rule_attrs")
+            {
                 vec!["all".to_string()]
             } else {
                 l
@@ -112,7 +146,11 @@ impl BlazeRuntime {
             output,
             printer,
             order,
-            line_terminator: if flag(parsed, "line_terminator_null", false) { "\0".into() } else { "\n".into() },
+            line_terminator: if flag(parsed, "line_terminator_null", false) {
+                "\0".into()
+            } else {
+                "\n".into()
+            },
             relative_locations: flag(parsed, "relative_locations", false),
             display_full_kind: flag(parsed, "output:display_full_kind", false),
             implicit_deps: flag(parsed, "implicit_deps", true),
@@ -121,8 +159,16 @@ impl BlazeRuntime {
             } else {
                 flag(parsed, "tool_deps", true)
             },
-            package_group_includes_double_slash: flag(parsed, "incompatible_package_group_includes_double_slash", true),
-            package_group_build_output: flag(parsed, "incompatible_package_group_build_output", false),
+            package_group_includes_double_slash: flag(
+                parsed,
+                "incompatible_package_group_includes_double_slash",
+                true,
+            ),
+            package_group_build_output: flag(
+                parsed,
+                "incompatible_package_group_build_output",
+                false,
+            ),
             proto_locations: flag(parsed, "proto:locations", true),
             proto_default_values: flag(parsed, "proto:default_values", true),
             proto_flatten_selects: flag(parsed, "proto:flatten_selects", true),
@@ -130,9 +176,17 @@ impl BlazeRuntime {
             proto_rule_inputs_and_outputs: flag(parsed, "proto:rule_inputs_and_outputs", true),
             proto_instantiation_stack: flag(parsed, "proto:instantiation_stack", false),
             proto_definition_stack: flag(parsed, "proto:definition_stack", false),
-            proto_include_attribute_source_aspects: flag(parsed, "proto:include_attribute_source_aspects", false),
+            proto_include_attribute_source_aspects: flag(
+                parsed,
+                "proto:include_attribute_source_aspects",
+                false,
+            ),
             proto_rule_classes: flag(parsed, "proto:rule_classes", false),
-            proto_include_synthetic_attribute_hash: flag(parsed, "proto:include_synthetic_attribute_hash", false),
+            proto_include_synthetic_attribute_hash: flag(
+                parsed,
+                "proto:include_synthetic_attribute_hash",
+                false,
+            ),
             proto_include_starlark_rule_env: flag(parsed, "proto:include_starlark_rule_env", false),
             nodep_deps: flag(parsed, "nodep_deps", true),
             include_aspects: flag(parsed, "include_aspects", true),
@@ -161,7 +215,12 @@ impl BlazeRuntime {
             }
         };
         let cwd = self.command_cwd(&parsed);
-        let expr_str = match read_query(&parsed, &cwd, cmd_kind, cmd_kind == "aquery" && parsed.get_bool("skyframe_state").unwrap_or(false)) {
+        let expr_str = match read_query(
+            &parsed,
+            &cwd,
+            cmd_kind,
+            cmd_kind == "aquery" && parsed.get_bool("skyframe_state").unwrap_or(false),
+        ) {
             Ok(q) => q,
             Err(_) => {
                 // `QueryEnvironmentBasedCommand` returns `BlazeCommandResult.failureDetail(..)`
@@ -181,10 +240,14 @@ impl BlazeRuntime {
                     // `QueryRuntimeHelper.FileQueryRuntimeHelper.create`: the file is opened (not
                     // created in missing directories) before the query is evaluated.
                     let file_path = cwd.join(out_path);
-                    if let Err(code) = write_query_output_file(&file_path, &outcome.stdout, stderr) {
+                    if let Err(code) = write_query_output_file(&file_path, &outcome.stdout, stderr)
+                    {
                         return code;
                     }
-                } else if parsed.get_bool("experimental_ui_debug_all_events").unwrap_or(false) {
+                } else if parsed
+                    .get_bool("experimental_ui_debug_all_events")
+                    .unwrap_or(false)
+                {
                     writeln_bytes(stdout, "INFO <no location>: Transports announced:");
                     let text = String::from_utf8_lossy(&outcome.stdout);
                     stdout.extend_from_slice(format!("STDOUT <no location>: {text}\n").as_bytes());
@@ -213,13 +276,22 @@ pub(crate) fn write_query_output_file(
     match std::fs::File::create(path) {
         Ok(mut f) => {
             if f.write_all(data).is_err() {
-                writeln_bytes(stderr, &format!("ERROR: Could not close query output file {}", path.display()));
+                writeln_bytes(
+                    stderr,
+                    &format!(
+                        "ERROR: Could not close query output file {}",
+                        path.display()
+                    ),
+                );
                 return Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR);
             }
             Ok(())
         }
         Err(_) => {
-            writeln_bytes(stderr, &format!("ERROR: Could not open query output file {}", path.display()));
+            writeln_bytes(
+                stderr,
+                &format!("ERROR: Could not open query output file {}", path.display()),
+            );
             Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR)
         }
     }
@@ -253,7 +325,9 @@ pub(crate) fn emit_deprecation_warnings(command: &str, args: &[String], stderr: 
         if a == "--" {
             break;
         }
-        let Some(body) = a.strip_prefix("--") else { continue };
+        let Some(body) = a.strip_prefix("--") else {
+            continue;
+        };
         let name = body.split('=').next().unwrap_or("");
         let mut candidates = vec![name.to_string()];
         if let Some(n) = name.strip_prefix("no") {
@@ -261,12 +335,21 @@ pub(crate) fn emit_deprecation_warnings(command: &str, args: &[String], stderr: 
         }
         'cand: for cand in &candidates {
             if cand == "test_result_expiration" {
-                writeln_bytes(stderr, "WARNING: Option 'test_result_expiration' is deprecated");
+                writeln_bytes(
+                    stderr,
+                    "WARNING: Option 'test_result_expiration' is deprecated",
+                );
                 break 'cand;
             }
             if let Some((_, w)) = DEPRECATION_WARNINGS.iter().find(|(k, _)| k == cand) {
-                if ALL_COMMAND_OPTIONS.iter().any(|d| d.name == cand.as_str() && d.commands.contains(&command)) {
-                    writeln_bytes(stderr, &format!("WARNING: Option '{cand}' is deprecated: {w}"));
+                if ALL_COMMAND_OPTIONS
+                    .iter()
+                    .any(|d| d.name == cand.as_str() && d.commands.contains(&command))
+                {
+                    writeln_bytes(
+                        stderr,
+                        &format!("WARNING: Option '{cand}' is deprecated: {w}"),
+                    );
                     break 'cand;
                 }
             }
@@ -276,12 +359,21 @@ pub(crate) fn emit_deprecation_warnings(command: &str, args: &[String], stderr: 
                 }
                 if d.name == cand {
                     if let Some(w) = d.deprecation_warning {
-                        writeln_bytes(stderr, &format!("WARNING: Option '{}' is deprecated: {w}", d.name));
+                        writeln_bytes(
+                            stderr,
+                            &format!("WARNING: Option '{}' is deprecated: {w}", d.name),
+                        );
                     }
                     break 'cand;
                 }
                 if d.old_name == Some(cand.as_str()) {
-                    writeln_bytes(stderr, &format!("WARNING: Option '{cand}' is deprecated: Use --{} instead", d.name));
+                    writeln_bytes(
+                        stderr,
+                        &format!(
+                            "WARNING: Option '{cand}' is deprecated: Use --{} instead",
+                            d.name
+                        ),
+                    );
                     break 'cand;
                 }
             }
@@ -310,13 +402,22 @@ mod tests {
         let ws = PathFragment::create("/workspace");
         // A private output base per runtime: tests run in parallel (and other cargo runs share /tmp).
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let uniq = format!("{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        let uniq = format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        );
         let ob = PathFragment::create(&format!("/tmp/ob-query-cmd-{uniq}"));
         fs.create_directory_and_parents(&ws).unwrap();
         fs.create_directory_and_parents(&ob).unwrap();
         for (p, c) in files {
-            let path = if p.starts_with('/') { PathFragment::create(p) } else { ws.get_relative_str(p) };
-            fs.create_directory_and_parents(&path.parent_directory().unwrap()).unwrap();
+            let path = if p.starts_with('/') {
+                PathFragment::create(p)
+            } else {
+                ws.get_relative_str(p)
+            };
+            fs.create_directory_and_parents(&path.parent_directory().unwrap())
+                .unwrap();
             fs.write_file(&path, c.as_bytes()).unwrap();
         }
         let dirs = BlazeDirectories {
@@ -351,7 +452,11 @@ mod tests {
             ..Default::default()
         };
         let r = rt.dispatch_command(&req, "r");
-        Out { code: r.exit_code, stdout: r.standard_output, stderr: String::from_utf8_lossy(&r.standard_error).to_string() }
+        Out {
+            code: r.exit_code,
+            stdout: r.standard_output,
+            stderr: String::from_utf8_lossy(&r.standard_error).to_string(),
+        }
     }
 
     fn tree() -> BlazeRuntime {
@@ -383,7 +488,12 @@ mod tests {
         let rt = tree();
         let o = run(&rt, &["query", "deps("]);
         assert_eq!(o.code, 2);
-        assert!(o.stderr.contains("ERROR: Error while parsing 'deps(': premature end of input"), "{}", o.stderr);
+        assert!(
+            o.stderr
+                .contains("ERROR: Error while parsing 'deps(': premature end of input"),
+            "{}",
+            o.stderr
+        );
         let o = run(&rt, &["query"]);
         // `QueryOptionHelper.readQuery` failures are not reported (usage text only).
         assert_eq!(o.code, 2);
@@ -398,7 +508,16 @@ mod tests {
         // The in-memory workspace has no `@bazel_tools` repository (genrule's implicit dep).
         let o = run(&rt, &["query", "--noimplicit_deps", "deps(//app:fg)"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert_eq!(o.lines(), vec!["//app:app", "//app:fg", "//app:in.txt", "//lib:data.txt", "//lib:l"]);
+        assert_eq!(
+            o.lines(),
+            vec![
+                "//app:app",
+                "//app:fg",
+                "//app:in.txt",
+                "//lib:data.txt",
+                "//lib:l"
+            ]
+        );
         let o = run(&rt, &["query", "//app:all - //app:all"]);
         assert_eq!(o.code, 0);
         assert!(o.stdout.is_empty());
@@ -414,9 +533,22 @@ mod tests {
         assert_eq!(o.out(), want);
         let o = run(&rt, &["query", "--output=xml", "//lib:l"]);
         assert!(o.out().starts_with("<?xml version=\"1.1\" encoding=\"UTF-8\" standalone=\"no\"?>\n<query version=\"2\">\n    <rule class=\"genrule\" location=\"/workspace/lib/BUILD:1:8\" name=\"//lib:l\">") || o.out().starts_with("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?><query version=\"2\">\n    <rule class=\"genrule\" location=\"/workspace/lib/BUILD:1:8\" name=\"//lib:l\">"), "{}", o.out());
-        assert!(o.out().contains("<list name=\"srcs\">\n            <label value=\"//lib:data.txt\"/>"), "{}", o.out());
-        assert!(o.out().contains("<rule-input name=\"//lib:data.txt\"/>"), "{}", o.out());
-        assert!(o.out().contains("<rule-output name=\"//lib:l.out\"/>"), "{}", o.out());
+        assert!(
+            o.out()
+                .contains("<list name=\"srcs\">\n            <label value=\"//lib:data.txt\"/>"),
+            "{}",
+            o.out()
+        );
+        assert!(
+            o.out().contains("<rule-input name=\"//lib:data.txt\"/>"),
+            "{}",
+            o.out()
+        );
+        assert!(
+            o.out().contains("<rule-output name=\"//lib:l.out\"/>"),
+            "{}",
+            o.out()
+        );
         let o = run(&rt, &["query", "--output=proto", "//lib:l"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
         // QueryResult { target { type: RULE rule { name: ... } } }
@@ -436,8 +568,16 @@ mod tests {
         assert!(l[0].starts_with("//app:app ("), "{l:?}");
         assert!(l[0].ends_with(')') && !l[0].contains("fastbuild"), "{l:?}");
         let o = run(&rt, &["cquery", "--output=label_kind", "//app:all"]);
-        assert!(o.lines()[0].starts_with("genrule rule //app:app ("), "{:?}", o.lines());
-        assert!(o.lines()[1].starts_with("filegroup rule //app:fg ("), "{:?}", o.lines());
+        assert!(
+            o.lines()[0].starts_with("genrule rule //app:app ("),
+            "{:?}",
+            o.lines()
+        );
+        assert!(
+            o.lines()[1].starts_with("filegroup rule //app:fg ("),
+            "{:?}",
+            o.lines()
+        );
         let o = run(&rt, &["cquery", "deps(//app:app)"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
         let ls = o.lines();
@@ -458,7 +598,12 @@ mod tests {
         assert!(out.contains("  Command Line: (exec "), "{out}");
         assert!(out.contains("\n# Configuration: "), "{out}");
         let o = run(&rt, &["aquery", "--output=summary", "//lib:l"]);
-        assert!(o.out().starts_with("1 total action.\n\nMnemonics:\n  Genrule: 1\n"), "{}", o.out());
+        assert!(
+            o.out()
+                .starts_with("1 total action.\n\nMnemonics:\n  Genrule: 1\n"),
+            "{}",
+            o.out()
+        );
         let o = run(&rt, &["aquery", "--output=commands", "//lib:l"]);
         assert!(o.out().contains("cat lib/data.txt > "), "{}", o.out());
         let o = run(&rt, &["aquery", "--output=jsonproto", "//lib:l"]);
@@ -470,10 +615,26 @@ mod tests {
     #[test]
     fn cquery_starlark_config_transitions_and_graph() {
         let rt = tree();
-        let o = run(&rt, &["cquery", "--output=starlark", "--starlark:expr=target.label.name + ':' + str(len(providers(target)) > 0)", "//app:app"]);
+        let o = run(
+            &rt,
+            &[
+                "cquery",
+                "--output=starlark",
+                "--starlark:expr=target.label.name + ':' + str(len(providers(target)) > 0)",
+                "//app:app",
+            ],
+        );
         assert_eq!(o.code, 0, "{}", o.stderr);
         assert_eq!(o.lines(), vec!["app:True"]);
-        let o = run(&rt, &["cquery", "--output=starlark", "--starlark:expr=1", "//app:app"]);
+        let o = run(
+            &rt,
+            &[
+                "cquery",
+                "--output=starlark",
+                "--starlark:expr=1",
+                "//app:app",
+            ],
+        );
         assert_eq!(o.code, 0, "{}", o.stderr);
         assert_eq!(o.lines(), vec!["1"]);
         let o = run(&rt, &["cquery", "--output=starlark", "//app:app"]);
@@ -485,24 +646,66 @@ mod tests {
         let o = run(&rt, &["cquery", "--output=transitions", "//app:app"]);
         assert_eq!(o.code, 0, "{}", o.stderr); // reported after `Found`, exit code stays 0
         assert!(o.stderr.contains("Instead of using --output=transitions, set the --transitions flag explicitly to 'lite' or 'full'"), "{}", o.stderr);
-        let o = run(&rt, &["cquery", "--output=transitions", "--transitions=lite", "//app:app"]);
+        let o = run(
+            &rt,
+            &[
+                "cquery",
+                "--output=transitions",
+                "--transitions=lite",
+                "//app:app",
+            ],
+        );
         let l = o.lines();
         assert!(l[0].starts_with("NoTransition -> //app:app ("), "{l:?}");
-        assert!(l.iter().any(|x| x.starts_with("  srcs#//lib:l#NoTransition -> ")), "{l:?}");
-        let o = run(&rt, &["cquery", "--output=graph", "--nograph:factored", "deps(//app:app)"]);
-        assert!(o.out().starts_with("digraph mygraph {\n  node [shape=box];\n  \"//app:app ("), "{}", o.out());
+        assert!(
+            l.iter()
+                .any(|x| x.starts_with("  srcs#//lib:l#NoTransition -> ")),
+            "{l:?}"
+        );
+        let o = run(
+            &rt,
+            &[
+                "cquery",
+                "--output=graph",
+                "--nograph:factored",
+                "deps(//app:app)",
+            ],
+        );
+        assert!(
+            o.out()
+                .starts_with("digraph mygraph {\n  node [shape=box];\n  \"//app:app ("),
+            "{}",
+            o.out()
+        );
         assert!(o.out().contains("\"//app:in.txt (null)\""), "{}", o.out());
         let o = run(&rt, &["cquery", "--output=streamed_proto", "//app:app"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
         assert!(!o.stdout.is_empty());
         let o = run(&rt, &["cquery", "--output=textproto", "//app:app"]);
-        assert!(o.out().starts_with("results {\n  target {\n    type: RULE\n    rule {\n      name: \"//app:app\""), "{}", o.out());
-        assert!(o.out().contains("configurations {\n  id: 1\n"), "{}", o.out());
+        assert!(
+            o.out().starts_with(
+                "results {\n  target {\n    type: RULE\n    rule {\n      name: \"//app:app\""
+            ),
+            "{}",
+            o.out()
+        );
+        assert!(
+            o.out().contains("configurations {\n  id: 1\n"),
+            "{}",
+            o.out()
+        );
         // Setting --transitions=full implies --output=transitions automatically
         let o = run(&rt, &["cquery", "--transitions=full", "//app:app"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert!(o.out().starts_with("NoTransition -> //app:app ("), "{}", o.out());
-        let o = run(&rt, &["cquery", "--show_config_fragments=direct", "//app:app"]);
+        assert!(
+            o.out().starts_with("NoTransition -> //app:app ("),
+            "{}",
+            o.out()
+        );
+        let o = run(
+            &rt,
+            &["cquery", "--show_config_fragments=direct", "//app:app"],
+        );
         assert_eq!(o.code, 0, "{}", o.stderr);
         assert!(o.out().contains("[BazelRuleClassProvider$StrictActionEnvConfiguration, CoreOptions, PlatformConfiguration, PlatformOptions, ShellConfiguration]"), "{}", o.out());
     }
@@ -512,25 +715,55 @@ mod tests {
         let rt = tree();
         let tmp = std::env::temp_dir();
         let tmp_file = tmp.join("zel_query_test_out.txt");
-        let o = run(&rt, &["query", &format!("--output_file={}", tmp_file.display()), "//lib:l"]);
+        let o = run(
+            &rt,
+            &[
+                "query",
+                &format!("--output_file={}", tmp_file.display()),
+                "//lib:l",
+            ],
+        );
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert!(o.stdout.is_empty(), "stdout must be empty when --output_file is set");
+        assert!(
+            o.stdout.is_empty(),
+            "stdout must be empty when --output_file is set"
+        );
         let contents = std::fs::read_to_string(&tmp_file).unwrap();
         assert_eq!(contents.trim(), "//lib:l");
         let _ = std::fs::remove_file(&tmp_file);
 
         let tmp_cquery = tmp.join("zel_cquery_test_out.txt");
-        let o = run(&rt, &["cquery", &format!("--output_file={}", tmp_cquery.display()), "//lib:l"]);
+        let o = run(
+            &rt,
+            &[
+                "cquery",
+                &format!("--output_file={}", tmp_cquery.display()),
+                "//lib:l",
+            ],
+        );
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert!(o.stdout.is_empty(), "stdout must be empty when --output_file is set");
+        assert!(
+            o.stdout.is_empty(),
+            "stdout must be empty when --output_file is set"
+        );
         let contents = std::fs::read_to_string(&tmp_cquery).unwrap();
         assert!(contents.starts_with("//lib:l ("));
         let _ = std::fs::remove_file(&tmp_cquery);
 
         let tmp_aquery = tmp.join("zel_aquery_test_out.txt");
-        let o = run(&rt, &["aquery", &format!("--output_file={}", tmp_aquery.display()), "//lib:l"]);
+        let o = run(
+            &rt,
+            &[
+                "aquery",
+                &format!("--output_file={}", tmp_aquery.display()),
+                "//lib:l",
+            ],
+        );
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert!(o.stdout.is_empty(), "stdout must be empty when --output_file is set");
+        assert!(
+            o.stdout.is_empty(),
+            "stdout must be empty when --output_file is set"
+        );
         let contents = std::fs::read_to_string(&tmp_aquery).unwrap();
         assert!(contents.contains("action 'Executing genrule //lib:l'"));
         let _ = std::fs::remove_file(&tmp_aquery);
@@ -544,13 +777,26 @@ mod tests {
         assert_eq!(o.out().matches("Mnemonic:").count(), 1, "{}", o.out());
         assert!(o.out().contains("Target: //lib:l"), "{}", o.out());
         let o = run(&rt, &["aquery", "outputs('.*app.out', deps(//app:app))"]);
-        assert!(o.out().contains("Target: //app:app") && !o.out().contains("Target: //lib:l"), "{}", o.out());
+        assert!(
+            o.out().contains("Target: //app:app") && !o.out().contains("Target: //lib:l"),
+            "{}",
+            o.out()
+        );
         let o = run(&rt, &["aquery", "--noinclude_artifacts", "//lib:l"]);
-        assert!(!o.out().contains("Inputs:") && !o.out().contains("Outputs:"), "{}", o.out());
+        assert!(
+            !o.out().contains("Inputs:") && !o.out().contains("Outputs:"),
+            "{}",
+            o.out()
+        );
         let o = run(&rt, &["aquery", "--noinclude_commandline", "//lib:l"]);
         assert!(!o.out().contains("Command Line:"), "{}", o.out());
         let o = run(&rt, &["aquery", "--output=summary", "deps(//app:app)"]);
-        assert!(o.out().starts_with("2 total actions.\n\nMnemonics:\n  Genrule: 2\n"), "{}", o.out());
+        assert!(
+            o.out()
+                .starts_with("2 total actions.\n\nMnemonics:\n  Genrule: 2\n"),
+            "{}",
+            o.out()
+        );
         let o = run(&rt, &["aquery", "--output=nope", "//lib:l"]);
         assert_eq!(o.code, 2);
         assert!(o.stderr.contains("Invalid output format 'nope'. Valid values are: proto, streamed_proto, textproto, jsonproto, text, commands, summary"), "{}", o.stderr);
@@ -563,13 +809,22 @@ mod tests {
         assert_eq!(b.code, 0, "{}", b.stderr);
         let o = run(&rt, &["aquery", "--skyframe_state", "--output=textproto"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert!(o.out().contains("mnemonic: \"Genrule\""), "skyframe_state must dump actions from last build: {}", o.out());
+        assert!(
+            o.out().contains("mnemonic: \"Genrule\""),
+            "skyframe_state must dump actions from last build: {}",
+            o.out()
+        );
         let o = run(&rt, &["aquery", "--skyframe_state", "--output=text"]);
         assert_eq!(o.code, 2);
-        assert!(o.stderr.contains("--skyframe_state must be used with --output=proto|textproto|jsonproto."));
+        assert!(o
+            .stderr
+            .contains("--skyframe_state must be used with --output=proto|textproto|jsonproto."));
         let o = run(&rt, &["aquery", "--output=proto", "//lib:l"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert_eq!(o.stdout[0], 0x0a, "ActionGraphContainer starts with artifacts (field 1)");
+        assert_eq!(
+            o.stdout[0], 0x0a,
+            "ActionGraphContainer starts with artifacts (field 1)"
+        );
     }
     #[test]
     fn round9_found_count_graphless_and_formatter_errors() {
@@ -579,20 +834,43 @@ mod tests {
         assert_eq!(o.code, 0, "{}", o.stderr);
         assert!(o.stderr.contains("INFO: Found 1 target..."), "{}", o.stderr);
         let o = run(&rt, &["cquery", "rdeps(//app:app, //lib:l)"]);
-        assert!(o.stderr.contains("INFO: Found 2 targets..."), "{}", o.stderr); // two distinct patterns
-        // aquery: unknown formatter is reported after `Found`, exit 2.
+        assert!(
+            o.stderr.contains("INFO: Found 2 targets..."),
+            "{}",
+            o.stderr
+        ); // two distinct patterns
+           // aquery: unknown formatter is reported after `Found`, exit 2.
         let o = run(&rt, &["aquery", "--output=starlark", "//app:app"]);
         assert_eq!(o.code, 2, "{}", o.stderr);
         let found = o.stderr.find("INFO: Found 1 target...").expect(&o.stderr);
         let bad = o.stderr.find("ERROR: Invalid output format 'starlark'. Valid values are: proto, streamed_proto, textproto, jsonproto, text, commands, summary").expect(&o.stderr);
         assert!(found < bad, "{}", o.stderr);
         // `--experimental_graphless_query=yes` needs a streaming formatter and order.
-        let o = run(&rt, &["query", "--experimental_graphless_query=true", "--order_output=full", "//lib:l"]);
+        let o = run(
+            &rt,
+            &[
+                "query",
+                "--experimental_graphless_query=true",
+                "--order_output=full",
+                "//lib:l",
+            ],
+        );
         assert_eq!(o.code, 2, "{}", o.stderr);
         assert!(o.stderr.contains("ERROR: --experimental_graphless_query requires --order_output=no or --order_output=auto and an --output option that supports streaming; valid values are: label, label_kind, build, package, location, xml, proto, streamed_jsonproto, streamed_proto"), "{}", o.stderr);
-        let o = run(&rt, &["query", "--experimental_graphless_query=true", "--output=graph", "//lib:l"]);
+        let o = run(
+            &rt,
+            &[
+                "query",
+                "--experimental_graphless_query=true",
+                "--output=graph",
+                "//lib:l",
+            ],
+        );
         assert_eq!(o.code, 2, "{}", o.stderr);
-        let o = run(&rt, &["query", "--experimental_graphless_query=true", "//lib:l"]);
+        let o = run(
+            &rt,
+            &["query", "--experimental_graphless_query=true", "//lib:l"],
+        );
         assert_eq!(o.code, 0, "{}", o.stderr);
     }
 
@@ -604,7 +882,15 @@ mod tests {
         let out = o.out();
         // ConfiguredTarget { target, configuration { checksum }, configuration_id }
         assert!(out.contains("configuration {\n    checksum: \""), "{out}");
-        let o = run(&rt, &["cquery", "--noproto:include_configurations", "--output=textproto", "//app:app"]);
+        let o = run(
+            &rt,
+            &[
+                "cquery",
+                "--noproto:include_configurations",
+                "--output=textproto",
+                "//app:app",
+            ],
+        );
         assert!(!o.out().contains("checksum"), "{}", o.out());
     }
 
@@ -612,7 +898,11 @@ mod tests {
     fn round9_aquery_filters_use_full_match() {
         let rt = tree();
         let o = run(&rt, &["aquery", "mnemonic('Genru', //app:app)"]);
-        assert_eq!(o.out(), "", "partial regex must not match (Pattern.matches)");
+        assert_eq!(
+            o.out(),
+            "",
+            "partial regex must not match (Pattern.matches)"
+        );
         let o = run(&rt, &["aquery", "mnemonic('Genrule', //app:app)"]);
         assert!(o.out().contains("Mnemonic: Genrule"), "{}", o.out());
         let o = run(&rt, &["aquery", "inputs('data.txt', deps(//app:app))"]);
@@ -629,9 +919,16 @@ mod output_file_tests {
     #[test]
     fn unopenable_output_file_is_exit_36_without_creating_directories() {
         let mut err = Vec::new();
-        let r = write_query_output_file(std::path::Path::new("/nonexistent-zel-dir/x"), b"data", &mut err);
+        let r = write_query_output_file(
+            std::path::Path::new("/nonexistent-zel-dir/x"),
+            b"data",
+            &mut err,
+        );
         assert_eq!(r, Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR));
-        assert_eq!(String::from_utf8_lossy(&err), "ERROR: Could not open query output file /nonexistent-zel-dir/x\n");
+        assert_eq!(
+            String::from_utf8_lossy(&err),
+            "ERROR: Could not open query output file /nonexistent-zel-dir/x\n"
+        );
         assert_eq!(ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code(), 36);
         assert!(!std::path::Path::new("/nonexistent-zel-dir").exists());
         let dir = std::env::temp_dir().join(format!("zel-q6a-{}", std::process::id()));

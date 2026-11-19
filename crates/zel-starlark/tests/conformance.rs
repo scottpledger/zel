@@ -54,8 +54,14 @@ r1 = reversed([1, 2, 3])
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("m1"), Some(&Value::Int(BigInt::from_i64(1))));
-    assert_eq!(ctx.globals.get("m2"), Some(&Value::Int(BigInt::from_i64(99))));
+    assert_eq!(
+        ctx.globals.get("m1"),
+        Some(&Value::Int(BigInt::from_i64(1)))
+    );
+    assert_eq!(
+        ctx.globals.get("m2"),
+        Some(&Value::Int(BigInt::from_i64(99)))
+    );
     assert_eq!(ctx.globals.get("s1").unwrap().to_string(), "[8, 5, 2, 1]");
     assert_eq!(ctx.globals.get("r1").unwrap().to_string(), "[3, 2, 1]");
 }
@@ -80,15 +86,36 @@ t_set = type(set([1]))
     .unwrap();
 
     // Java String.hashCode() for "hello": 99162322
-    assert_eq!(ctx.globals.get("h"), Some(&Value::Int(BigInt::from_i64(99162322))));
+    assert_eq!(
+        ctx.globals.get("h"),
+        Some(&Value::Int(BigInt::from_i64(99162322)))
+    );
     assert_eq!(ctx.globals.get("has_x"), Some(&Value::Bool(true)));
     assert_eq!(ctx.globals.get("has_z"), Some(&Value::Bool(false)));
-    assert_eq!(ctx.globals.get("gx"), Some(&Value::Int(BigInt::from_i64(10))));
-    assert_eq!(ctx.globals.get("gz"), Some(&Value::Int(BigInt::from_i64(42))));
-    assert_eq!(ctx.globals.get("t_int"), Some(&Value::String("int".to_string())));
-    assert_eq!(ctx.globals.get("t_float"), Some(&Value::String("float".to_string())));
-    assert_eq!(ctx.globals.get("t_range"), Some(&Value::String("range".to_string())));
-    assert_eq!(ctx.globals.get("t_set"), Some(&Value::String("set".to_string())));
+    assert_eq!(
+        ctx.globals.get("gx"),
+        Some(&Value::Int(BigInt::from_i64(10)))
+    );
+    assert_eq!(
+        ctx.globals.get("gz"),
+        Some(&Value::Int(BigInt::from_i64(42)))
+    );
+    assert_eq!(
+        ctx.globals.get("t_int"),
+        Some(&Value::String("int".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("t_float"),
+        Some(&Value::String("float".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("t_range"),
+        Some(&Value::String("range".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("t_set"),
+        Some(&Value::String("set".to_string()))
+    );
 }
 
 #[test]
@@ -108,8 +135,14 @@ l.remove(2)
     .unwrap();
 
     assert_eq!(ctx.globals.get("l").unwrap().to_string(), "[0, 1, 3, 4, 5]");
-    assert_eq!(ctx.globals.get("idx"), Some(&Value::Int(BigInt::from_i64(3))));
-    assert_eq!(ctx.globals.get("popped"), Some(&Value::Int(BigInt::from_i64(6))));
+    assert_eq!(
+        ctx.globals.get("idx"),
+        Some(&Value::Int(BigInt::from_i64(3)))
+    );
+    assert_eq!(
+        ctx.globals.get("popped"),
+        Some(&Value::Int(BigInt::from_i64(6)))
+    );
 }
 
 #[test]
@@ -133,11 +166,26 @@ d2 = d | {"extra": 99}
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("val_int"), Some(&Value::String("int_one".to_string())));
-    assert_eq!(ctx.globals.get("val_str"), Some(&Value::String("str_one".to_string())));
-    assert_eq!(ctx.globals.get("val_tuple"), Some(&Value::String("tuple_key".to_string())));
-    assert_eq!(ctx.globals.get("val_float"), Some(&Value::String("float_key".to_string())));
-    assert_eq!(ctx.globals.get("d_pop"), Some(&Value::String("int_one".to_string())));
+    assert_eq!(
+        ctx.globals.get("val_int"),
+        Some(&Value::String("int_one".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("val_str"),
+        Some(&Value::String("str_one".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("val_tuple"),
+        Some(&Value::String("tuple_key".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("val_float"),
+        Some(&Value::String("float_key".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("d_pop"),
+        Some(&Value::String("int_one".to_string()))
+    );
     assert!(ctx.globals.get("d2").unwrap().to_string().contains("extra"));
 }
 
@@ -157,10 +205,22 @@ is_sub = set([1, 2]).issubset(s1)
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("union_set").unwrap().to_string(), "set([1, 2, 3, 4, 5])");
-    assert_eq!(ctx.globals.get("inter_set").unwrap().to_string(), "set([3])");
-    assert_eq!(ctx.globals.get("diff_set").unwrap().to_string(), "set([1, 2])");
-    assert_eq!(ctx.globals.get("sym_diff").unwrap().to_string(), "set([1, 2, 4, 5])");
+    assert_eq!(
+        ctx.globals.get("union_set").unwrap().to_string(),
+        "set([1, 2, 3, 4, 5])"
+    );
+    assert_eq!(
+        ctx.globals.get("inter_set").unwrap().to_string(),
+        "set([3])"
+    );
+    assert_eq!(
+        ctx.globals.get("diff_set").unwrap().to_string(),
+        "set([1, 2])"
+    );
+    assert_eq!(
+        ctx.globals.get("sym_diff").unwrap().to_string(),
+        "set([1, 2, 4, 5])"
+    );
     assert_eq!(ctx.globals.get("is_sub"), Some(&Value::Bool(true)));
 }
 
@@ -178,10 +238,22 @@ r_list = list(r)
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("r_len"), Some(&Value::Int(BigInt::from_i64(10))));
-    assert_eq!(ctx.globals.get("r_idx"), Some(&Value::Int(BigInt::from_i64(3))));
-    assert_eq!(ctx.globals.get("r_neg"), Some(&Value::Int(BigInt::from_i64(9))));
-    assert_eq!(ctx.globals.get("r_list").unwrap().to_string(), "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]");
+    assert_eq!(
+        ctx.globals.get("r_len"),
+        Some(&Value::Int(BigInt::from_i64(10)))
+    );
+    assert_eq!(
+        ctx.globals.get("r_idx"),
+        Some(&Value::Int(BigInt::from_i64(3)))
+    );
+    assert_eq!(
+        ctx.globals.get("r_neg"),
+        Some(&Value::Int(BigInt::from_i64(9)))
+    );
+    assert_eq!(
+        ctx.globals.get("r_list").unwrap().to_string(),
+        "[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]"
+    );
 
     // Step 0 must error
     assert!(ctx.eval_str("range(0, 10, 0)").is_err());
@@ -200,7 +272,10 @@ r = repr(s3)
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("r"), Some(&Value::String("struct(a = 1, b = 2, c = 3)".to_string())));
+    assert_eq!(
+        ctx.globals.get("r"),
+        Some(&Value::String("struct(a = 1, b = 2, c = 3)".to_string()))
+    );
 
     // Common field addition must error
     assert!(ctx.eval_str("s = struct(a = 1) + struct(a = 2)").is_err());
@@ -242,7 +317,9 @@ def f():
 
     // Mutating during iteration must fail!
     let err = ctx.eval_str("f()").unwrap_err();
-    assert!(err.to_string().contains("temporarily immutable due to active for-loop iteration"));
+    assert!(err
+        .to_string()
+        .contains("temporarily immutable due to active for-loop iteration"));
 }
 
 #[test]
@@ -262,9 +339,18 @@ l_topo = d_topo.to_list()
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("l_post").unwrap().to_string(), "[\"b\", \"a\"]");
-    assert_eq!(ctx.globals.get("l_pre").unwrap().to_string(), "[\"a\", \"b\"]");
-    assert_eq!(ctx.globals.get("l_topo").unwrap().to_string(), "[\"a\", \"b\"]");
+    assert_eq!(
+        ctx.globals.get("l_post").unwrap().to_string(),
+        "[\"b\", \"a\"]"
+    );
+    assert_eq!(
+        ctx.globals.get("l_pre").unwrap().to_string(),
+        "[\"a\", \"b\"]"
+    );
+    assert_eq!(
+        ctx.globals.get("l_topo").unwrap().to_string(),
+        "[\"a\", \"b\"]"
+    );
 
     // Direct iteration over depset must fail
     assert!(ctx.eval_str("for x in depset([1]): pass").is_err());
@@ -288,10 +374,20 @@ ind = json.indent('{"a":1,"b":2}', prefix = "", indent = "  ")
     // Key order in JSON encode is sorted: "a" before "b"
     assert_eq!(
         ctx.globals.get("enc"),
-        Some(&Value::String("{\"a\":1,\"b\":2,\"nested\":[true,null,1.5]}".to_string()))
+        Some(&Value::String(
+            "{\"a\":1,\"b\":2,\"nested\":[true,null,1.5]}".to_string()
+        ))
     );
-    assert_eq!(ctx.globals.get("dec").unwrap().to_string(), "{\"x\": 10, \"y\": [True, None]}");
-    assert!(ctx.globals.get("ind").unwrap().to_string().contains("\n  \"a\": 1,"));
+    assert_eq!(
+        ctx.globals.get("dec").unwrap().to_string(),
+        "{\"x\": 10, \"y\": [True, None]}"
+    );
+    assert!(ctx
+        .globals
+        .get("ind")
+        .unwrap()
+        .to_string()
+        .contains("\n  \"a\": 1,"));
 }
 
 #[test]
@@ -317,7 +413,10 @@ sub {
 tags: "a"
 tags: "b"
 "#;
-    assert_eq!(ctx.globals.get("txt"), Some(&Value::String(expected.to_string())));
+    assert_eq!(
+        ctx.globals.get("txt"),
+        Some(&Value::String(expected.to_string()))
+    );
 }
 
 #[test]
@@ -337,14 +436,38 @@ lines = "a\nb\r\nc".splitlines()
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("f1"), Some(&Value::String("hello world".to_string())));
-    assert_eq!(ctx.globals.get("f2"), Some(&Value::String("1 and 2".to_string())));
-    assert_eq!(ctx.globals.get("f3"), Some(&Value::String("{escaped}".to_string())));
-    assert_eq!(ctx.globals.get("p1").unwrap().to_string(), "(\"l\", \"a\", \"wl\")");
-    assert_eq!(ctx.globals.get("p2").unwrap().to_string(), "(\"go\", \"o\", \"gle\")");
-    assert_eq!(ctx.globals.get("rp"), Some(&Value::String("bar".to_string())));
-    assert_eq!(ctx.globals.get("rs"), Some(&Value::String("foo".to_string())));
-    assert_eq!(ctx.globals.get("lines").unwrap().to_string(), "[\"a\", \"b\", \"c\"]");
+    assert_eq!(
+        ctx.globals.get("f1"),
+        Some(&Value::String("hello world".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("f2"),
+        Some(&Value::String("1 and 2".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("f3"),
+        Some(&Value::String("{escaped}".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("p1").unwrap().to_string(),
+        "(\"l\", \"a\", \"wl\")"
+    );
+    assert_eq!(
+        ctx.globals.get("p2").unwrap().to_string(),
+        "(\"go\", \"o\", \"gle\")"
+    );
+    assert_eq!(
+        ctx.globals.get("rp"),
+        Some(&Value::String("bar".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("rs"),
+        Some(&Value::String("foo".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("lines").unwrap().to_string(),
+        "[\"a\", \"b\", \"c\"]"
+    );
 }
 
 #[test]
@@ -366,7 +489,10 @@ f_floordiv = 5.5 // 2
 
     assert_eq!(ctx.globals.get("nan_eq"), Some(&Value::Bool(true)));
     assert_eq!(ctx.globals.get("f_int_eq"), Some(&Value::Bool(true)));
-    assert_eq!(ctx.globals.get("f_str"), Some(&Value::String("0.0".to_string())));
+    assert_eq!(
+        ctx.globals.get("f_str"),
+        Some(&Value::String("0.0".to_string()))
+    );
     assert_eq!(ctx.globals.get("f_div"), Some(&Value::Float(0.5)));
     assert_eq!(ctx.globals.get("f_floordiv"), Some(&Value::Float(2.0)));
 }
@@ -387,13 +513,34 @@ i6 = int("-0x10", 0)
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("i0"), Some(&Value::Int(BigInt::from_i64(0))));
-    assert_eq!(ctx.globals.get("i1"), Some(&Value::Int(BigInt::from_i64(42))));
-    assert_eq!(ctx.globals.get("i2"), Some(&Value::Int(BigInt::from_i64(-1234))));
-    assert_eq!(ctx.globals.get("i3"), Some(&Value::Int(BigInt::from_i64(175))));
-    assert_eq!(ctx.globals.get("i4"), Some(&Value::Int(BigInt::from_i64(8191))));
-    assert_eq!(ctx.globals.get("i5"), Some(&Value::Int(BigInt::from_i64(37))));
-    assert_eq!(ctx.globals.get("i6"), Some(&Value::Int(BigInt::from_i64(-16))));
+    assert_eq!(
+        ctx.globals.get("i0"),
+        Some(&Value::Int(BigInt::from_i64(0)))
+    );
+    assert_eq!(
+        ctx.globals.get("i1"),
+        Some(&Value::Int(BigInt::from_i64(42)))
+    );
+    assert_eq!(
+        ctx.globals.get("i2"),
+        Some(&Value::Int(BigInt::from_i64(-1234)))
+    );
+    assert_eq!(
+        ctx.globals.get("i3"),
+        Some(&Value::Int(BigInt::from_i64(175)))
+    );
+    assert_eq!(
+        ctx.globals.get("i4"),
+        Some(&Value::Int(BigInt::from_i64(8191)))
+    );
+    assert_eq!(
+        ctx.globals.get("i5"),
+        Some(&Value::Int(BigInt::from_i64(37)))
+    );
+    assert_eq!(
+        ctx.globals.get("i6"),
+        Some(&Value::Int(BigInt::from_i64(-16)))
+    );
 }
 
 #[test]
@@ -416,16 +563,43 @@ s10 = s[::3]
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("s1"), Some(&Value::String("012345".to_string())));
-    assert_eq!(ctx.globals.get("s2"), Some(&Value::String("23".to_string())));
+    assert_eq!(
+        ctx.globals.get("s1"),
+        Some(&Value::String("012345".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("s2"),
+        Some(&Value::String("23".to_string()))
+    );
     assert_eq!(ctx.globals.get("s3"), Some(&Value::String("5".to_string())));
-    assert_eq!(ctx.globals.get("s4"), Some(&Value::String("0123456".to_string())));
-    assert_eq!(ctx.globals.get("s5"), Some(&Value::String("123456".to_string())));
-    assert_eq!(ctx.globals.get("s6"), Some(&Value::String("01".to_string())));
-    assert_eq!(ctx.globals.get("s7"), Some(&Value::String("6543210".to_string())));
-    assert_eq!(ctx.globals.get("s8"), Some(&Value::String("43210".to_string())));
-    assert_eq!(ctx.globals.get("s9"), Some(&Value::String("654321".to_string())));
-    assert_eq!(ctx.globals.get("s10"), Some(&Value::String("036".to_string())));
+    assert_eq!(
+        ctx.globals.get("s4"),
+        Some(&Value::String("0123456".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("s5"),
+        Some(&Value::String("123456".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("s6"),
+        Some(&Value::String("01".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("s7"),
+        Some(&Value::String("6543210".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("s8"),
+        Some(&Value::String("43210".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("s9"),
+        Some(&Value::String("654321".to_string()))
+    );
+    assert_eq!(
+        ctx.globals.get("s10"),
+        Some(&Value::String("036".to_string()))
+    );
 }
 
 #[test]
@@ -440,7 +614,10 @@ filtered = [x for x in [1, 2, 3, 4, 5, 6] if x > 2 if x % 2 == 0]
     )
     .unwrap();
 
-    assert_eq!(ctx.globals.get("flattened").unwrap().to_string(), "[1, 2, 3, 4]");
+    assert_eq!(
+        ctx.globals.get("flattened").unwrap().to_string(),
+        "[1, 2, 3, 4]"
+    );
     assert_eq!(ctx.globals.get("filtered").unwrap().to_string(), "[4, 6]");
 }
 
@@ -448,10 +625,10 @@ filtered = [x for x in [1, 2, 3, 4, 5, 6] if x > 2 if x % 2 == 0]
 fn test_starlark_semantics_flags() {
     let ctx = EvalContext::default();
     assert_eq!(ctx.semantics.nested_set_depth_limit, 3500);
-    assert_eq!(ctx.semantics.incompatible_always_check_depset_elements, true);
-    assert_eq!(ctx.semantics.incompatible_stop_exporting_build_file_path, true);
-    assert_eq!(ctx.semantics.incompatible_no_implicit_file_export, true);
-    assert_eq!(ctx.semantics.incompatible_fail_on_unknown_attributes, true);
+    assert!(ctx.semantics.incompatible_always_check_depset_elements);
+    assert!(ctx.semantics.incompatible_stop_exporting_build_file_path);
+    assert!(ctx.semantics.incompatible_no_implicit_file_export);
+    assert!(ctx.semantics.incompatible_fail_on_unknown_attributes);
 }
 
 #[test]
@@ -481,8 +658,14 @@ if True: g = 7; h = 8
     assert_eq!(ctx.globals.get("g"), Some(&Value::Int(BigInt::from(7))));
     assert_eq!(ctx.globals.get("h"), Some(&Value::Int(BigInt::from(8))));
 
-    let toks = zel_starlark::syntax::lexer::Lexer::new("test.bzl", "load(\":foo.bzl\", \"foo\"); print(\"bar\"); x = 1\n").lex_all().unwrap();
-    let stmts = zel_starlark::syntax::parser::Parser::new(toks).parse_module().unwrap();
+    let toks = zel_starlark::syntax::lexer::Lexer::new(
+        "test.bzl",
+        "load(\":foo.bzl\", \"foo\"); print(\"bar\"); x = 1\n",
+    )
+    .lex_all()
+    .unwrap();
+    let stmts = zel_starlark::syntax::parser::Parser::new(toks)
+        .parse_module()
+        .unwrap();
     assert_eq!(stmts.len(), 3);
 }
-

@@ -326,11 +326,18 @@ impl<'a> Parser<'a> {
                             3 => {
                                 let vt = self.read_val_type()?;
                                 let m = self.read_byte()? != 0;
-                                ImportDesc::Global(GlobalType { val_type: vt, mutable: m })
+                                ImportDesc::Global(GlobalType {
+                                    val_type: vt,
+                                    mutable: m,
+                                })
                             }
                             other => return Err(format!("Unsupported import kind: {other}")),
                         };
-                        module.imports.push(Import { module: m, name: n, desc });
+                        module.imports.push(Import {
+                            module: m,
+                            name: n,
+                            desc,
+                        });
                     }
                 }
                 3 => {
@@ -365,7 +372,10 @@ impl<'a> Parser<'a> {
                         let m = self.read_byte()? != 0;
                         let init_code = self.read_init_expr()?;
                         module.globals.push(GlobalDef {
-                            global_type: GlobalType { val_type: vt, mutable: m },
+                            global_type: GlobalType {
+                                val_type: vt,
+                                mutable: m,
+                            },
                             init_code,
                         });
                     }
@@ -402,7 +412,11 @@ impl<'a> Parser<'a> {
                         for _ in 0..num_funcs {
                             func_indices.push(self.read_u32_leb128()?);
                         }
-                        module.elements.push(ElementDef { table_idx, offset_code, func_indices });
+                        module.elements.push(ElementDef {
+                            table_idx,
+                            offset_code,
+                            func_indices,
+                        });
                     }
                 }
                 10 => {
@@ -433,7 +447,11 @@ impl<'a> Parser<'a> {
                         let offset_code = self.read_init_expr()?;
                         let data_len = self.read_u32_leb128()? as usize;
                         let bytes = self.read_bytes(data_len)?.to_vec();
-                        module.data.push(DataDef { mem_idx, offset_code, data: bytes });
+                        module.data.push(DataDef {
+                            mem_idx,
+                            offset_code,
+                            data: bytes,
+                        });
                     }
                 }
                 _ => {
@@ -538,7 +556,12 @@ impl Instance {
         }
 
         // Run _initialize if exported
-        if let Some(init_exp) = instance.module.exports.iter().find(|e| e.name == "_initialize" && e.kind == ExportKind::Func) {
+        if let Some(init_exp) = instance
+            .module
+            .exports
+            .iter()
+            .find(|e| e.name == "_initialize" && e.kind == ExportKind::Func)
+        {
             let _ = instance.invoke_func(init_exp.index, vec![]);
         }
 
@@ -553,31 +576,63 @@ impl Instance {
             0x42 => Ok(WasmVal::I64(p.read_i64_leb128()?)),
             0x23 => {
                 let gidx = p.read_u32_leb128()? as usize;
-                self.globals.get(gidx).copied().ok_or_else(|| "Unknown global in init expr".into())
+                self.globals
+                    .get(gidx)
+                    .copied()
+                    .ok_or_else(|| "Unknown global in init expr".into())
             }
             other => Err(format!("Unsupported init expr opcode: 0x{:02X}", other)),
         }
     }
 
     pub fn export_func(&self, name: &str) -> Option<u32> {
-        self.module.exports.iter().find(|e| e.name == name && e.kind == ExportKind::Func).map(|e| e.index)
+        self.module
+            .exports
+            .iter()
+            .find(|e| e.name == name && e.kind == ExportKind::Func)
+            .map(|e| e.index)
     }
 
-    pub fn invoke_export(&mut self, name: &str, args: Vec<WasmVal>) -> Result<Vec<WasmVal>, String> {
-        let func_idx = self.export_func(name).ok_or_else(|| format!("WebAssembly module doesn't export \"{name}\""))?;
+    pub fn invoke_export(
+        &mut self,
+        name: &str,
+        args: Vec<WasmVal>,
+    ) -> Result<Vec<WasmVal>, String> {
+        let func_idx = self
+            .export_func(name)
+            .ok_or_else(|| format!("WebAssembly module doesn't export \"{name}\""))?;
         self.invoke_func(func_idx, args)
     }
 
-    pub fn invoke_func(&mut self, func_idx: u32, args: Vec<WasmVal>) -> Result<Vec<WasmVal>, String> {
+    pub fn invoke_func(
+        &mut self,
+        func_idx: u32,
+        args: Vec<WasmVal>,
+    ) -> Result<Vec<WasmVal>, String> {
         let num_imported = self.imported_funcs.len() as u32;
         if func_idx < num_imported {
             return self.invoke_imported_func(func_idx, args);
         }
 
         let internal_idx = (func_idx - num_imported) as usize;
-        let type_idx = self.module.func_types.get(internal_idx).copied().ok_or("Invalid function index")? as usize;
-        let func_type = self.module.types.get(type_idx).cloned().ok_or("Invalid function type index")?;
-        let body = self.module.bodies.get(internal_idx).cloned().ok_or("Missing function body")?;
+        let type_idx = self
+            .module
+            .func_types
+            .get(internal_idx)
+            .copied()
+            .ok_or("Invalid function index")? as usize;
+        let func_type = self
+            .module
+            .types
+            .get(type_idx)
+            .cloned()
+            .ok_or("Invalid function type index")?;
+        let body = self
+            .module
+            .bodies
+            .get(internal_idx)
+            .cloned()
+            .ok_or("Missing function body")?;
 
         let mut locals = Vec::with_capacity(args.len() + body.locals.len());
         locals.extend(args);
@@ -600,8 +655,16 @@ impl Instance {
         Ok(stack.split_off(stack.len() - num_results))
     }
 
-    fn invoke_imported_func(&mut self, func_idx: u32, args: Vec<WasmVal>) -> Result<Vec<WasmVal>, String> {
-        let (mod_name, func_name, _type_idx) = self.imported_funcs.get(func_idx as usize).cloned().ok_or("Invalid imported func index")?;
+    fn invoke_imported_func(
+        &mut self,
+        func_idx: u32,
+        args: Vec<WasmVal>,
+    ) -> Result<Vec<WasmVal>, String> {
+        let (mod_name, func_name, _type_idx) = self
+            .imported_funcs
+            .get(func_idx as usize)
+            .cloned()
+            .ok_or("Invalid imported func index")?;
 
         // Support WASI Preview1 host functions
         if mod_name == "wasi_snapshot_preview1" || mod_name == "wasi_unstable" {
@@ -614,35 +677,49 @@ impl Instance {
                     // (fd, iovs_ptr, iovs_len, nwritten_ptr) -> errno (0)
                     let iovs_ptr = args.get(1).and_then(|v| v.as_i32().ok()).unwrap_or(0) as usize;
                     let iovs_len = args.get(2).and_then(|v| v.as_i32().ok()).unwrap_or(0) as usize;
-                    let nwritten_ptr = args.get(3).and_then(|v| v.as_i32().ok()).unwrap_or(0) as usize;
+                    let nwritten_ptr =
+                        args.get(3).and_then(|v| v.as_i32().ok()).unwrap_or(0) as usize;
 
                     let mut total_written = 0u32;
                     for i in 0..iovs_len {
                         let iov_addr = iovs_ptr + i * 8;
                         if iov_addr + 8 <= self.memory.len() {
-                            let buf_ptr = u32::from_le_bytes(self.memory[iov_addr..iov_addr + 4].try_into().unwrap()) as usize;
-                            let buf_len = u32::from_le_bytes(self.memory[iov_addr + 4..iov_addr + 8].try_into().unwrap()) as usize;
+                            let buf_ptr = u32::from_le_bytes(
+                                self.memory[iov_addr..iov_addr + 4].try_into().unwrap(),
+                            ) as usize;
+                            let buf_len = u32::from_le_bytes(
+                                self.memory[iov_addr + 4..iov_addr + 8].try_into().unwrap(),
+                            ) as usize;
                             total_written += buf_len as u32;
                             let _ = buf_ptr;
                         }
                     }
                     if nwritten_ptr + 4 <= self.memory.len() {
-                        self.memory[nwritten_ptr..nwritten_ptr + 4].copy_from_slice(&total_written.to_le_bytes());
+                        self.memory[nwritten_ptr..nwritten_ptr + 4]
+                            .copy_from_slice(&total_written.to_le_bytes());
                     }
                     return Ok(vec![WasmVal::I32(0)]); // ERRNO_SUCCESS
                 }
-                "fd_read" | "fd_close" | "fd_seek" | "fd_fdstat_get" | "fd_prestat_get" | "fd_prestat_dir_name" => {
+                "fd_read"
+                | "fd_close"
+                | "fd_seek"
+                | "fd_fdstat_get"
+                | "fd_prestat_get"
+                | "fd_prestat_dir_name" => {
                     return Ok(vec![WasmVal::I32(0)]);
                 }
                 "environ_sizes_get" => {
                     // (count_ptr, buf_size_ptr) -> errno (0)
-                    let count_ptr = args.get(0).and_then(|v| v.as_i32().ok()).unwrap_or(0) as usize;
-                    let buf_size_ptr = args.get(1).and_then(|v| v.as_i32().ok()).unwrap_or(0) as usize;
+                    let count_ptr =
+                        args.first().and_then(|v| v.as_i32().ok()).unwrap_or(0) as usize;
+                    let buf_size_ptr =
+                        args.get(1).and_then(|v| v.as_i32().ok()).unwrap_or(0) as usize;
                     if count_ptr + 4 <= self.memory.len() {
                         self.memory[count_ptr..count_ptr + 4].copy_from_slice(&0u32.to_le_bytes());
                     }
                     if buf_size_ptr + 4 <= self.memory.len() {
-                        self.memory[buf_size_ptr..buf_size_ptr + 4].copy_from_slice(&0u32.to_le_bytes());
+                        self.memory[buf_size_ptr..buf_size_ptr + 4]
+                            .copy_from_slice(&0u32.to_le_bytes());
                     }
                     return Ok(vec![WasmVal::I32(0)]);
                 }
@@ -655,7 +732,9 @@ impl Instance {
             }
         }
 
-        Err(format!("Unsupported imported function: {mod_name}::{func_name}"))
+        Err(format!(
+            "Unsupported imported function: {mod_name}::{func_name}"
+        ))
     }
 
     fn execute_code(
@@ -775,7 +854,11 @@ impl Instance {
                     let default = p.read_u32_leb128()?;
 
                     let idx = stack.pop().ok_or("Stack underflow in br_table")?.as_i32()? as usize;
-                    let label = if idx < targets.len() { targets[idx] } else { default };
+                    let label = if idx < targets.len() {
+                        targets[idx]
+                    } else {
+                        default
+                    };
                     return Ok(ControlFlow::Branch(label));
                 }
                 0x0F => return Ok(ControlFlow::Return), // return
@@ -801,9 +884,19 @@ impl Instance {
                     let _table_idx = p.read_u32_leb128()?;
                     pc += p.pos;
 
-                    let table_elem_idx = stack.pop().ok_or("Stack underflow in call_indirect")?.as_i32()? as usize;
-                    let fidx = self.tables.get(0).and_then(|t| t.get(table_elem_idx)).copied().flatten()
-                        .ok_or_else(|| format!("Uninitialized element {table_elem_idx} in call_indirect"))?;
+                    let table_elem_idx = stack
+                        .pop()
+                        .ok_or("Stack underflow in call_indirect")?
+                        .as_i32()? as usize;
+                    let fidx = self
+                        .tables
+                        .first()
+                        .and_then(|t| t.get(table_elem_idx))
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| {
+                            format!("Uninitialized element {table_elem_idx} in call_indirect")
+                        })?;
 
                     let param_count = self.module.types[type_idx].params.len();
                     if stack.len() < param_count {
@@ -829,7 +922,10 @@ impl Instance {
                     let mut p = Parser::new(&code[pc..]);
                     let idx = p.read_u32_leb128()? as usize;
                     pc += p.pos;
-                    let val = locals.get(idx).copied().ok_or("Invalid local index in local.get")?;
+                    let val = locals
+                        .get(idx)
+                        .copied()
+                        .ok_or("Invalid local index in local.get")?;
                     stack.push(val);
                 }
                 0x21 => {
@@ -848,7 +944,10 @@ impl Instance {
                     let mut p = Parser::new(&code[pc..]);
                     let idx = p.read_u32_leb128()? as usize;
                     pc += p.pos;
-                    let val = stack.last().copied().ok_or("Stack underflow in local.tee")?;
+                    let val = stack
+                        .last()
+                        .copied()
+                        .ok_or("Stack underflow in local.tee")?;
                     if idx >= locals.len() {
                         return Err("Invalid local index in local.tee".into());
                     }
@@ -859,7 +958,11 @@ impl Instance {
                     let mut p = Parser::new(&code[pc..]);
                     let idx = p.read_u32_leb128()? as usize;
                     pc += p.pos;
-                    let val = self.globals.get(idx).copied().ok_or("Invalid global index in global.get")?;
+                    let val = self
+                        .globals
+                        .get(idx)
+                        .copied()
+                        .ok_or("Invalid global index in global.get")?;
                     stack.push(val);
                 }
                 0x24 => {
@@ -876,7 +979,7 @@ impl Instance {
                 // Memory loads
                 0x28 => {
                     // i32.load
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 4)?;
                     let val = i32::from_le_bytes(self.memory[addr..addr + 4].try_into().unwrap());
@@ -884,7 +987,7 @@ impl Instance {
                 }
                 0x29 => {
                     // i64.load
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 8)?;
                     let val = i64::from_le_bytes(self.memory[addr..addr + 8].try_into().unwrap());
@@ -892,7 +995,7 @@ impl Instance {
                 }
                 0x2A => {
                     // f32.load
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 4)?;
                     let val = f32::from_le_bytes(self.memory[addr..addr + 4].try_into().unwrap());
@@ -900,7 +1003,7 @@ impl Instance {
                 }
                 0x2B => {
                     // f64.load
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 8)?;
                     let val = f64::from_le_bytes(self.memory[addr..addr + 8].try_into().unwrap());
@@ -908,84 +1011,90 @@ impl Instance {
                 }
                 0x2C => {
                     // i32.load8_s
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 1)?;
                     stack.push(WasmVal::I32(self.memory[addr] as i8 as i32));
                 }
                 0x2D => {
                     // i32.load8_u
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 1)?;
                     stack.push(WasmVal::I32(self.memory[addr] as i32));
                 }
                 0x2E => {
                     // i32.load16_s
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 2)?;
-                    let val = i16::from_le_bytes(self.memory[addr..addr + 2].try_into().unwrap()) as i32;
+                    let val =
+                        i16::from_le_bytes(self.memory[addr..addr + 2].try_into().unwrap()) as i32;
                     stack.push(WasmVal::I32(val));
                 }
                 0x2F => {
                     // i32.load16_u
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 2)?;
-                    let val = u16::from_le_bytes(self.memory[addr..addr + 2].try_into().unwrap()) as i32;
+                    let val =
+                        u16::from_le_bytes(self.memory[addr..addr + 2].try_into().unwrap()) as i32;
                     stack.push(WasmVal::I32(val));
                 }
                 0x30 => {
                     // i64.load8_s
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 1)?;
                     stack.push(WasmVal::I64(self.memory[addr] as i8 as i64));
                 }
                 0x31 => {
                     // i64.load8_u
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 1)?;
                     stack.push(WasmVal::I64(self.memory[addr] as i64));
                 }
                 0x32 => {
                     // i64.load16_s
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 2)?;
-                    let val = i16::from_le_bytes(self.memory[addr..addr + 2].try_into().unwrap()) as i64;
+                    let val =
+                        i16::from_le_bytes(self.memory[addr..addr + 2].try_into().unwrap()) as i64;
                     stack.push(WasmVal::I64(val));
                 }
                 0x33 => {
                     // i64.load16_u
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 2)?;
-                    let val = u16::from_le_bytes(self.memory[addr..addr + 2].try_into().unwrap()) as i64;
+                    let val =
+                        u16::from_le_bytes(self.memory[addr..addr + 2].try_into().unwrap()) as i64;
                     stack.push(WasmVal::I64(val));
                 }
                 0x34 => {
                     // i64.load32_s
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 4)?;
-                    let val = i32::from_le_bytes(self.memory[addr..addr + 4].try_into().unwrap()) as i64;
+                    let val =
+                        i32::from_le_bytes(self.memory[addr..addr + 4].try_into().unwrap()) as i64;
                     stack.push(WasmVal::I64(val));
                 }
                 0x35 => {
                     // i64.load32_u
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 4)?;
-                    let val = u32::from_le_bytes(self.memory[addr..addr + 4].try_into().unwrap()) as i64;
+                    let val =
+                        u32::from_le_bytes(self.memory[addr..addr + 4].try_into().unwrap()) as i64;
                     stack.push(WasmVal::I64(val));
                 }
                 // Memory stores
                 0x36 => {
                     // i32.store
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let val = stack.pop().ok_or("Stack underflow")?.as_i32()?;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 4)?;
@@ -993,7 +1102,7 @@ impl Instance {
                 }
                 0x37 => {
                     // i64.store
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let val = match stack.pop().ok_or("Stack underflow")? {
                         WasmVal::I64(v) => v,
                         _ => return Err("Expected I64 in i64.store".into()),
@@ -1004,7 +1113,7 @@ impl Instance {
                 }
                 0x38 => {
                     // f32.store
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let val = match stack.pop().ok_or("Stack underflow")? {
                         WasmVal::F32(v) => v,
                         _ => return Err("Expected F32 in f32.store".into()),
@@ -1015,7 +1124,7 @@ impl Instance {
                 }
                 0x39 => {
                     // f64.store
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let val = match stack.pop().ok_or("Stack underflow")? {
                         WasmVal::F64(v) => v,
                         _ => return Err("Expected F64 in f64.store".into()),
@@ -1026,7 +1135,7 @@ impl Instance {
                 }
                 0x3A => {
                     // i32.store8
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let val = stack.pop().ok_or("Stack underflow")?.as_i32()? as u8;
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 1)?;
@@ -1034,15 +1143,16 @@ impl Instance {
                 }
                 0x3B => {
                     // i32.store16
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
-                    let val = (stack.pop().ok_or("Stack underflow")?.as_i32()? as u16).to_le_bytes();
+                    let offset = self.read_mem_offset(code, &mut pc)?;
+                    let val =
+                        (stack.pop().ok_or("Stack underflow")?.as_i32()? as u16).to_le_bytes();
                     let addr = (stack.pop().ok_or("Stack underflow")?.as_i32()? as usize) + offset;
                     self.check_mem(addr, 2)?;
                     self.memory[addr..addr + 2].copy_from_slice(&val);
                 }
                 0x3C => {
                     // i64.store8
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let val = match stack.pop().ok_or("Stack underflow")? {
                         WasmVal::I64(v) => v as u8,
                         _ => return Err("Expected I64 in i64.store8".into()),
@@ -1053,7 +1163,7 @@ impl Instance {
                 }
                 0x3D => {
                     // i64.store16
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let val = match stack.pop().ok_or("Stack underflow")? {
                         WasmVal::I64(v) => (v as u16).to_le_bytes(),
                         _ => return Err("Expected I64 in i64.store16".into()),
@@ -1064,7 +1174,7 @@ impl Instance {
                 }
                 0x3E => {
                     // i64.store32
-                    let offset = self.read_mem_offset(&code, &mut pc)?;
+                    let offset = self.read_mem_offset(code, &mut pc)?;
                     let val = match stack.pop().ok_or("Stack underflow")? {
                         WasmVal::I64(v) => (v as u32).to_le_bytes(),
                         _ => return Err("Expected I64 in i64.store32".into()),
@@ -1145,58 +1255,70 @@ impl Instance {
                     stack.push(WasmVal::I32(if res { 1 } else { 0 }));
                 }
                 // i32 arithmetic
-                0x67..=0x78 => {
-                    match op {
-                        0x67 => {
-                            let a = stack.pop().ok_or("Stack underflow")?.as_i32()?;
-                            stack.push(WasmVal::I32(a.leading_zeros() as i32));
-                        }
-                        0x68 => {
-                            let a = stack.pop().ok_or("Stack underflow")?.as_i32()?;
-                            stack.push(WasmVal::I32(a.trailing_zeros() as i32));
-                        }
-                        0x69 => {
-                            let a = stack.pop().ok_or("Stack underflow")?.as_i32()?;
-                            stack.push(WasmVal::I32(a.count_ones() as i32));
-                        }
-                        _ => {
-                            let b = stack.pop().ok_or("Stack underflow")?.as_i32()?;
-                            let a = stack.pop().ok_or("Stack underflow")?.as_i32()?;
-                            let res = match op {
-                                0x6A => a.wrapping_add(b),
-                                0x6B => a.wrapping_sub(b),
-                                0x6C => a.wrapping_mul(b),
-                                0x6D => {
-                                    if b == 0 { return Err("Division by zero".into()); }
-                                    if a == i32::MIN && b == -1 { return Err("Integer overflow".into()); }
-                                    a.wrapping_div(b)
-                                }
-                                0x6E => {
-                                    if b == 0 { return Err("Division by zero".into()); }
-                                    ((a as u32) / (b as u32)) as i32
-                                }
-                                0x6F => {
-                                    if b == 0 { return Err("Division by zero".into()); }
-                                    if b == -1 { 0 } else { a.wrapping_rem(b) }
-                                }
-                                0x70 => {
-                                    if b == 0 { return Err("Division by zero".into()); }
-                                    ((a as u32) % (b as u32)) as i32
-                                }
-                                0x71 => a & b,
-                                0x72 => a | b,
-                                0x73 => a ^ b,
-                                0x74 => a.wrapping_shl((b as u32) & 31),
-                                0x75 => a.wrapping_shr((b as u32) & 31),
-                                0x76 => ((a as u32).wrapping_shr((b as u32) & 31)) as i32,
-                                0x77 => a.rotate_left((b as u32) & 31),
-                                0x78 => a.rotate_right((b as u32) & 31),
-                                _ => unreachable!(),
-                            };
-                            stack.push(WasmVal::I32(res));
-                        }
+                0x67..=0x78 => match op {
+                    0x67 => {
+                        let a = stack.pop().ok_or("Stack underflow")?.as_i32()?;
+                        stack.push(WasmVal::I32(a.leading_zeros() as i32));
                     }
-                }
+                    0x68 => {
+                        let a = stack.pop().ok_or("Stack underflow")?.as_i32()?;
+                        stack.push(WasmVal::I32(a.trailing_zeros() as i32));
+                    }
+                    0x69 => {
+                        let a = stack.pop().ok_or("Stack underflow")?.as_i32()?;
+                        stack.push(WasmVal::I32(a.count_ones() as i32));
+                    }
+                    _ => {
+                        let b = stack.pop().ok_or("Stack underflow")?.as_i32()?;
+                        let a = stack.pop().ok_or("Stack underflow")?.as_i32()?;
+                        let res = match op {
+                            0x6A => a.wrapping_add(b),
+                            0x6B => a.wrapping_sub(b),
+                            0x6C => a.wrapping_mul(b),
+                            0x6D => {
+                                if b == 0 {
+                                    return Err("Division by zero".into());
+                                }
+                                if a == i32::MIN && b == -1 {
+                                    return Err("Integer overflow".into());
+                                }
+                                a.wrapping_div(b)
+                            }
+                            0x6E => {
+                                if b == 0 {
+                                    return Err("Division by zero".into());
+                                }
+                                ((a as u32) / (b as u32)) as i32
+                            }
+                            0x6F => {
+                                if b == 0 {
+                                    return Err("Division by zero".into());
+                                }
+                                if b == -1 {
+                                    0
+                                } else {
+                                    a.wrapping_rem(b)
+                                }
+                            }
+                            0x70 => {
+                                if b == 0 {
+                                    return Err("Division by zero".into());
+                                }
+                                ((a as u32) % (b as u32)) as i32
+                            }
+                            0x71 => a & b,
+                            0x72 => a | b,
+                            0x73 => a ^ b,
+                            0x74 => a.wrapping_shl((b as u32) & 31),
+                            0x75 => a.wrapping_shr((b as u32) & 31),
+                            0x76 => ((a as u32).wrapping_shr((b as u32) & 31)) as i32,
+                            0x77 => a.rotate_left((b as u32) & 31),
+                            0x78 => a.rotate_right((b as u32) & 31),
+                            _ => unreachable!(),
+                        };
+                        stack.push(WasmVal::I32(res));
+                    }
+                },
                 // i64 arithmetic & ops
                 0x7C..=0x8A => {
                     let b = match stack.pop().ok_or("Stack underflow")? {
@@ -1212,12 +1334,18 @@ impl Instance {
                         0x7D => a.wrapping_sub(b),
                         0x7E => a.wrapping_mul(b),
                         0x7F => {
-                            if b == 0 { return Err("Division by zero".into()); }
-                            if a == i64::MIN && b == -1 { return Err("Integer overflow".into()); }
+                            if b == 0 {
+                                return Err("Division by zero".into());
+                            }
+                            if a == i64::MIN && b == -1 {
+                                return Err("Integer overflow".into());
+                            }
                             a.wrapping_div(b)
                         }
                         0x80 => {
-                            if b == 0 { return Err("Division by zero".into()); }
+                            if b == 0 {
+                                return Err("Division by zero".into());
+                            }
                             ((a as u64) / (b as u64)) as i64
                         }
                         0x81 => a & b,
@@ -1268,7 +1396,10 @@ impl Instance {
 
     fn check_mem(&self, addr: usize, len: usize) -> Result<(), String> {
         if addr + len > self.memory.len() {
-            return Err(format!("Out of bounds memory access at 0x{addr:X} (memory size is 0x{:X})", self.memory.len()));
+            return Err(format!(
+                "Out of bounds memory access at 0x{addr:X} (memory size is 0x{:X})",
+                self.memory.len()
+            ));
         }
         Ok(())
     }
@@ -1279,7 +1410,12 @@ impl Instance {
             Ok(self.imported_funcs[func_idx as usize].2 as usize)
         } else {
             let internal = (func_idx - num_imported) as usize;
-            self.module.func_types.get(internal).copied().map(|t| t as usize).ok_or_else(|| "Invalid function index".into())
+            self.module
+                .func_types
+                .get(internal)
+                .copied()
+                .map(|t| t as usize)
+                .ok_or_else(|| "Invalid function index".into())
         }
     }
 }
@@ -1301,24 +1437,51 @@ pub fn run_wasm_execution(
     let mut parser = Parser::new(module_bytes);
     let module = match parser.parse_module() {
         Ok(m) => m,
-        Err(e) => return (-1, String::new(), format!("Error parsing WebAssembly module: {e}")),
+        Err(e) => {
+            return (
+                -1,
+                String::new(),
+                format!("Error parsing WebAssembly module: {e}"),
+            )
+        }
     };
 
     let mut instance = match Instance::new(module, memory_limit) {
         Ok(inst) => inst,
-        Err(e) => return (-1, String::new(), format!("Error instantiating WebAssembly module: {e}")),
+        Err(e) => {
+            return (
+                -1,
+                String::new(),
+                format!("Error instantiating WebAssembly module: {e}"),
+            )
+        }
     };
 
     // 1. Allocate input buffer
     let input_bytes = input_str.as_bytes();
     let input_len = input_bytes.len() as i32;
     let input_ptr = if input_len > 0 {
-        match instance.invoke_export(alloc_fn_name, vec![WasmVal::I32(input_len), WasmVal::I32(1)]) {
+        match instance.invoke_export(
+            alloc_fn_name,
+            vec![WasmVal::I32(input_len), WasmVal::I32(1)],
+        ) {
             Ok(res) => match res.first() {
                 Some(WasmVal::I32(ptr)) if *ptr != 0 => *ptr as usize,
-                _ => return (-1, String::new(), format!("allocation failed: {alloc_fn_name}({input_len}, 1) returned NULL")),
+                _ => {
+                    return (
+                        -1,
+                        String::new(),
+                        format!("allocation failed: {alloc_fn_name}({input_len}, 1) returned NULL"),
+                    )
+                }
             },
-            Err(e) => return (-1, String::new(), format!("Error executing {alloc_fn_name}: {e}")),
+            Err(e) => {
+                return (
+                    -1,
+                    String::new(),
+                    format!("Error executing {alloc_fn_name}: {e}"),
+                )
+            }
         }
     } else {
         0
@@ -1332,13 +1495,26 @@ pub fn run_wasm_execution(
     }
 
     // 2. Allocate output params pointer (output_ptr_ptr: 4 bytes, output_len_ptr: 4 bytes)
-    let params_ptr = match instance.invoke_export(alloc_fn_name, vec![WasmVal::I32(8), WasmVal::I32(4)]) {
-        Ok(res) => match res.first() {
-            Some(WasmVal::I32(ptr)) if *ptr != 0 => *ptr as usize,
-            _ => return (-1, String::new(), format!("allocation failed: {alloc_fn_name}(8, 4) returned NULL")),
-        },
-        Err(e) => return (-1, String::new(), format!("Error executing {alloc_fn_name}: {e}")),
-    };
+    let params_ptr =
+        match instance.invoke_export(alloc_fn_name, vec![WasmVal::I32(8), WasmVal::I32(4)]) {
+            Ok(res) => match res.first() {
+                Some(WasmVal::I32(ptr)) if *ptr != 0 => *ptr as usize,
+                _ => {
+                    return (
+                        -1,
+                        String::new(),
+                        format!("allocation failed: {alloc_fn_name}(8, 4) returned NULL"),
+                    )
+                }
+            },
+            Err(e) => {
+                return (
+                    -1,
+                    String::new(),
+                    format!("Error executing {alloc_fn_name}: {e}"),
+                )
+            }
+        };
 
     if params_ptr + 8 > instance.memory.len() {
         return (-1, String::new(), "Params pointer out of bounds".into());
@@ -1364,12 +1540,26 @@ pub fn run_wasm_execution(
             Some(WasmVal::I32(rc)) => *rc as i64,
             _ => 0,
         },
-        Err(e) => return (-1, String::new(), format!("Error executing {function_name}: {e}")),
+        Err(e) => {
+            return (
+                -1,
+                String::new(),
+                format!("Error executing {function_name}: {e}"),
+            )
+        }
     };
 
     // 4. Read output buffer
-    let out_ptr = u32::from_le_bytes(instance.memory[params_ptr..params_ptr + 4].try_into().unwrap()) as usize;
-    let out_len = u32::from_le_bytes(instance.memory[params_ptr + 4..params_ptr + 8].try_into().unwrap()) as usize;
+    let out_ptr = u32::from_le_bytes(
+        instance.memory[params_ptr..params_ptr + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let out_len = u32::from_le_bytes(
+        instance.memory[params_ptr + 4..params_ptr + 8]
+            .try_into()
+            .unwrap(),
+    ) as usize;
 
     let output_str = if out_len > 0 && out_ptr + out_len <= instance.memory.len() {
         let bytes = &instance.memory[out_ptr..out_ptr + out_len];
@@ -1413,8 +1603,7 @@ mod tests {
         // type 1: (i32, i32, i32, i32) -> i32
         let type_sec = &[
             2, // 2 types
-            0x60, 2, 0x7F, 0x7F, 1, 0x7F,
-            0x60, 4, 0x7F, 0x7F, 0x7F, 0x7F, 1, 0x7F,
+            0x60, 2, 0x7F, 0x7F, 1, 0x7F, 0x60, 4, 0x7F, 0x7F, 0x7F, 0x7F, 1, 0x7F,
         ];
         add_section(&mut wasm, 1, type_sec);
 
@@ -1437,21 +1626,14 @@ mod tests {
         // Code section:
         let f0 = &[0, 0x41, 0x80, 0x08, 0x0B];
         let f1 = &[
-            0,
-            0x20, 3, 0x41, 2, 0x36, 2, 0,
-            0x20, 2, 0x41, 0x80, 0x10, 0x36, 2, 0,
-            0x41, 0x80, 0x10, 0x41, 0xEF, 0x00, 0x3A, 0, 0,
-            0x41, 0x81, 0x10, 0x41, 0xEB, 0x00, 0x3A, 0, 0,
+            0, 0x20, 3, 0x41, 2, 0x36, 2, 0, 0x20, 2, 0x41, 0x80, 0x10, 0x36, 2, 0, 0x41, 0x80,
+            0x10, 0x41, 0xEF, 0x00, 0x3A, 0, 0, 0x41, 0x81, 0x10, 0x41, 0xEB, 0x00, 0x3A, 0, 0,
             0x41, 0, 0x0B,
         ];
         let f2 = &[
-            0,
-            0x20, 3, 0x41, 3, 0x36, 2, 0,
-            0x20, 2, 0x41, 0x80, 0x10, 0x36, 2, 0,
-            0x41, 0x80, 0x10, 0x41, 0xE5, 0x00, 0x3A, 0, 0,
-            0x41, 0x81, 0x10, 0x41, 0xF2, 0x00, 0x3A, 0, 0,
-            0x41, 0x82, 0x10, 0x41, 0xF2, 0x00, 0x3A, 0, 0,
-            0x41, 1, 0x0B,
+            0, 0x20, 3, 0x41, 3, 0x36, 2, 0, 0x20, 2, 0x41, 0x80, 0x10, 0x36, 2, 0, 0x41, 0x80,
+            0x10, 0x41, 0xE5, 0x00, 0x3A, 0, 0, 0x41, 0x81, 0x10, 0x41, 0xF2, 0x00, 0x3A, 0, 0,
+            0x41, 0x82, 0x10, 0x41, 0xF2, 0x00, 0x3A, 0, 0, 0x41, 1, 0x0B,
         ];
 
         let mut code_sec = Vec::new();
@@ -1464,12 +1646,14 @@ mod tests {
         code_sec.extend_from_slice(f2);
         add_section(&mut wasm, 10, &code_sec);
 
-        let (rc1, out1, err1) = run_wasm_execution(&wasm, "run_ok", "", "allocate", 64 * 1024 * 1024);
+        let (rc1, out1, err1) =
+            run_wasm_execution(&wasm, "run_ok", "", "allocate", 64 * 1024 * 1024);
         assert_eq!(err1, "");
         assert_eq!(rc1, 0);
         assert_eq!(out1, "ok");
 
-        let (rc2, out2, err2) = run_wasm_execution(&wasm, "run_err", "", "allocate", 64 * 1024 * 1024);
+        let (rc2, out2, err2) =
+            run_wasm_execution(&wasm, "run_err", "", "allocate", 64 * 1024 * 1024);
         assert_eq!(err2, "");
         assert_eq!(rc2, 1);
         assert_eq!(out2, "err");
@@ -1480,7 +1664,10 @@ mod tests {
         // 1. Length < 4
         let mut p1 = Parser::new(b"xy");
         let e1 = p1.parse_module().unwrap_err();
-        assert_eq!(e1, "section size mismatch, unexpected end of section or function, length out of bounds");
+        assert_eq!(
+            e1,
+            "section size mismatch, unexpected end of section or function, length out of bounds"
+        );
 
         // 2. Bad magic
         let mut p2 = Parser::new(b"garb\x01\x00\x00\x00");
@@ -1507,7 +1694,7 @@ mod tests {
         }
         add_sec(&mut wasm, 1, type_sec);
         add_sec(&mut wasm, 3, &[1, 0]); // 1 func with type 0
-        // Export "div_zero"
+                                        // Export "div_zero"
         let mut exp = vec![1];
         exp.extend_from_slice(&[8, b'd', b'i', b'v', b'_', b'z', b'e', b'r', b'o', 0, 0]);
         add_sec(&mut wasm, 7, &exp);

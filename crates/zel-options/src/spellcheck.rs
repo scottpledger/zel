@@ -38,7 +38,11 @@ pub fn edit_distance(s1: &str, s2: &str, max_edit_distance: usize) -> i32 {
 
         for j in 1..=len2 {
             let old = row[j];
-            let cost = if s1_chars[i - 1] == s2_chars[j - 1] { 0 } else { 1 };
+            let cost = if s1_chars[i - 1] == s2_chars[j - 1] {
+                0
+            } else {
+                1
+            };
             row[j] = std::cmp::min(previous + cost, 1 + std::cmp::min(row[j - 1], row[j]));
             previous = old;
             best_in_row = std::cmp::min(best_in_row, row[j]);
@@ -89,7 +93,7 @@ mod tests {
 
     #[test]
     fn test_spellcheck() {
-        let candidates = vec!["--compilation_mode", "--subcommands", "--keep_going"];
+        let candidates = ["--compilation_mode", "--subcommands", "--keep_going"];
         assert_eq!(
             did_you_mean("--subcommand", candidates.iter().copied()),
             " (did you mean '--subcommands'?)"

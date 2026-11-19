@@ -40,7 +40,10 @@ impl OptionsParsingError {
     /// An `OptionsParsingException` with an invalid argument (`BlazeOptionHandler` prints
     /// `<arg> :: <message>`).
     pub fn with_failed_arg(arg: &str, message: String) -> Self {
-        Self { message, failed_arg: Some(arg.to_string()) }
+        Self {
+            message,
+            failed_arg: Some(arg.to_string()),
+        }
     }
 
     pub fn unrecognized_option(arg: &str, suggestion: &str) -> Self {

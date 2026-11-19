@@ -113,7 +113,11 @@ pub fn register_subrule(def: SubruleDef) -> Value {
 
 pub fn subrule_of(v: &Value) -> Option<Arc<SubruleDef>> {
     match v {
-        Value::Host(kind, id) if kind == "subrule" => SUBRULES.lock().unwrap().get(id.parse::<usize>().ok()?).cloned(),
+        Value::Host(kind, id) if kind == "subrule" => SUBRULES
+            .lock()
+            .unwrap()
+            .get(id.parse::<usize>().ok()?)
+            .cloned(),
         _ => None,
     }
 }

@@ -80,16 +80,35 @@ impl ResultNode {
     }
 
     pub fn add_child(&mut self, key: &ModuleKey, expanded: IsExpanded, indirect: IsIndirect) {
-        self.add_meta(key, NodeMetadata { expanded, indirect, cycle: IsCycle::False });
+        self.add_meta(
+            key,
+            NodeMetadata {
+                expanded,
+                indirect,
+                cycle: IsCycle::False,
+            },
+        );
     }
 
-    pub fn with_child(mut self, key: &ModuleKey, expanded: IsExpanded, indirect: IsIndirect) -> ResultNode {
+    pub fn with_child(
+        mut self,
+        key: &ModuleKey,
+        expanded: IsExpanded,
+        indirect: IsIndirect,
+    ) -> ResultNode {
         self.add_child(key, expanded, indirect);
         self
     }
 
     pub fn add_cycle(&mut self, key: &ModuleKey) {
-        self.add_meta(key, NodeMetadata { expanded: IsExpanded::False, indirect: IsIndirect::False, cycle: IsCycle::True });
+        self.add_meta(
+            key,
+            NodeMetadata {
+                expanded: IsExpanded::False,
+                indirect: IsIndirect::False,
+                cycle: IsCycle::True,
+            },
+        );
     }
 
     fn add_children_of(&mut self, other: &ResultNode) {
@@ -106,7 +125,10 @@ impl ResultNode {
     }
 
     fn entries(&self) -> Vec<(ModuleKey, NodeMetadata)> {
-        self.children.iter().flat_map(|(k, ms)| ms.iter().map(move |m| (k.clone(), *m))).collect()
+        self.children
+            .iter()
+            .flat_map(|(k, ms)| ms.iter().map(move |m| (k.clone(), *m)))
+            .collect()
     }
 
     fn keys(&self) -> Vec<&ModuleKey> {
@@ -115,8 +137,11 @@ impl ResultNode {
 
     /// `getChildrenSortedByKey`: a sorted set by key only (the first metadata of a key wins).
     pub fn children_sorted_by_key(&self) -> Vec<(ModuleKey, NodeMetadata)> {
-        let mut v: Vec<(ModuleKey, NodeMetadata)> =
-            self.children.iter().filter_map(|(k, ms)| ms.first().map(|m| (k.clone(), *m))).collect();
+        let mut v: Vec<(ModuleKey, NodeMetadata)> = self
+            .children
+            .iter()
+            .filter_map(|(k, ms)| ms.first().map(|m| (k.clone(), *m)))
+            .collect();
         v.sort_by(|a, b| a.0.cmp(&b.0));
         v
     }
@@ -151,7 +176,12 @@ impl ImportsTable {
     /// Repos of `id` imported by `key` (`get(id).inverse().get(key)`), sorted.
     pub fn repos_imported_by(&self, id: &ExtensionId, key: &ModuleKey) -> BTreeSet<String> {
         self.get(id)
-            .map(|m| m.iter().filter(|(_, mods)| mods.contains(key)).map(|(r, _)| r.clone()).collect())
+            .map(|m| {
+                m.iter()
+                    .filter(|(_, mods)| mods.contains(key))
+                    .map(|(r, _)| r.clone())
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -186,25 +216,40 @@ pub struct Explanation {
 impl Explanation {
     /// The exact label printed next to the module with `--verbose`.
     pub fn to_explanation_string(&self, unused: bool) -> String {
-        let changed = if self.changed_version.is_empty() { "_".to_string() } else { self.changed_version.to_string() };
+        let changed = if self.changed_version.is_empty() {
+            "_".to_string()
+        } else {
+            self.changed_version.to_string()
+        };
         let to_or_was = if unused { "to" } else { "was" };
         let reason = match &self.requested_by_modules {
-            Some(mods) => mods.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", "),
+            Some(mods) => mods
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+                .join(", "),
             None => self.resolution_reason.lower_name().to_string(),
         };
         format!("({to_or_was} {changed}, cause {reason})")
     }
 }
 
-impl<'a> FormatCtx<'a> {
+impl FormatCtx<'_> {
     /// `None` if the module version has not changed during resolution or if the module is `<root>`.
-    pub fn extra_resolution_explanation(&self, key: &ModuleKey, parent: &ModuleKey) -> Option<Explanation> {
+    pub fn extra_resolution_explanation(
+        &self,
+        key: &ModuleKey,
+        parent: &ModuleKey,
+    ) -> Option<Explanation> {
         if key.is_root() {
             return None;
         }
         let module = self.insp.dep_graph.get(key)?;
         let parent_module = self.insp.dep_graph.get(parent)?;
-        let repo_name = parent_module.get_all_deps(self.opts.include_unused).get(key)?.clone();
+        let repo_name = parent_module
+            .get_all_deps(self.opts.include_unused)
+            .get(key)?
+            .clone();
         let reason = parent_module.reason(&repo_name)?;
         let replacement: &AugmentedModule = if module.is_used() {
             module
@@ -215,14 +260,22 @@ impl<'a> FormatCtx<'a> {
             let changed_version = if !module.is_used() {
                 replacement.version.clone()
             } else {
-                self.insp.dep_graph.get(parent_module.unused_dep(&repo_name)?)?.version.clone()
+                self.insp
+                    .dep_graph
+                    .get(parent_module.unused_dep(&repo_name)?)?
+                    .version
+                    .clone()
             };
             let changed_by = if reason == ResolutionReason::MinimalVersionSelection {
                 Some(replacement.original_dependants.clone())
             } else {
                 None
             };
-            return Some(Explanation { changed_version, resolution_reason: reason, requested_by_modules: changed_by });
+            return Some(Explanation {
+                changed_version,
+                resolution_reason: reason,
+                requested_by_modules: changed_by,
+            });
         }
         None
     }
@@ -255,8 +308,18 @@ pub struct ModExecutor<'a> {
 }
 
 impl<'a> ModExecutor<'a> {
-    pub fn new(insp: &'a Inspector, extension_filter: Option<MaybeCompleteExtSet>, opts: &'a ModOptions) -> Self {
-        let mut ex = ModExecutor { insp, extension_filter, opts, ext_imports: ImportsTable::default(), out: String::new() };
+    pub fn new(
+        insp: &'a Inspector,
+        extension_filter: Option<MaybeCompleteExtSet>,
+        opts: &'a ModOptions,
+    ) -> Self {
+        let mut ex = ModExecutor {
+            insp,
+            extension_filter,
+            opts,
+            ext_imports: ImportsTable::default(),
+            out: String::new(),
+        };
         let all: BTreeSet<ModuleKey> = insp.dep_graph.keys().cloned().collect();
         ex.ext_imports = ex.compute_repo_imports_table(&all);
         ex
@@ -273,7 +336,12 @@ impl<'a> ModExecutor<'a> {
     }
 
     fn output_graph(&mut self, result: &ResultGraph) {
-        let ctx = FormatCtx { result, insp: self.insp, ext_imports: &self.ext_imports, opts: self.opts };
+        let ctx = FormatCtx {
+            result,
+            insp: self.insp,
+            ext_imports: &self.ext_imports,
+            opts: self.opts,
+        };
         let s = match self.opts.output {
             OutputFormat::Json => json::format(&ctx),
             OutputFormat::Graph => graphviz::format(&ctx),
@@ -323,7 +391,12 @@ impl<'a> ModExecutor<'a> {
         self.insp
             .dep_graph
             .get(&ModuleKey::root())
-            .map(|m| m.get_all_deps(self.opts.include_unused).keys().cloned().collect())
+            .map(|m| {
+                m.get_all_deps(self.opts.include_unused)
+                    .keys()
+                    .cloned()
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -352,7 +425,11 @@ impl<'a> ModExecutor<'a> {
             parent_node.add_child(
                 &current_child,
                 IsExpanded::True,
-                if is_indirect { IsIndirect::True } else { IsIndirect::False },
+                if is_indirect {
+                    IsIndirect::True
+                } else {
+                    IsIndirect::False
+                },
             );
             result_graph.insert(parent.clone(), parent_node);
             current_child = parent;
@@ -364,7 +441,12 @@ impl<'a> ModExecutor<'a> {
         self.insp
             .dep_graph
             .get(key)
-            .map(|m| m.get_all_deps(self.opts.include_unused).into_keys().filter(|k| self.filter_builtin(k)).collect())
+            .map(|m| {
+                m.get_all_deps(self.opts.include_unused)
+                    .into_keys()
+                    .filter(|k| self.filter_builtin(k))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -376,7 +458,8 @@ impl<'a> ModExecutor<'a> {
         find_single_path: bool,
     ) -> ResultGraph {
         let mut bfs_parent: HashMap<ModuleKey, Option<ModuleKey>> = HashMap::new();
-        let mut sorted_from: Vec<&ModuleKey> = from.iter().filter(|k| self.filter_builtin(k)).collect();
+        let mut sorted_from: Vec<&ModuleKey> =
+            from.iter().filter(|k| self.filter_builtin(k)).collect();
         sorted_from.sort();
         for k in sorted_from {
             bfs_parent.insert(k.clone(), Some(ModuleKey::root()));
@@ -395,7 +478,12 @@ impl<'a> ModExecutor<'a> {
             let current = queue.pop_front().unwrap();
             if target_set.contains(&current) && !(find_single_path && found.contains(&current)) {
                 let parent = bfs_parent.get(&current).cloned().flatten();
-                self.add_path_to_result_graph(&mut result_graph, &bfs_parent, parent.as_ref(), &current);
+                self.add_path_to_result_graph(
+                    &mut result_graph,
+                    &bfs_parent,
+                    parent.as_ref(),
+                    &current,
+                );
                 found.insert(current.clone());
                 if find_single_path && target_set.iter().all(|t| found.contains(t)) {
                     break;
@@ -406,7 +494,12 @@ impl<'a> ModExecutor<'a> {
             }
             for dep in self.sorted_deps(&current) {
                 if target_set.contains(&dep) && !(find_single_path && found.contains(&dep)) {
-                    self.add_path_to_result_graph(&mut result_graph, &bfs_parent, Some(&current), &dep);
+                    self.add_path_to_result_graph(
+                        &mut result_graph,
+                        &bfs_parent,
+                        Some(&current),
+                        &dep,
+                    );
                     found.insert(dep.clone());
                 }
                 if !bfs_parent.contains_key(&dep) {
@@ -432,7 +525,15 @@ impl<'a> ModExecutor<'a> {
         let mut root_node = ResultNode::new();
         for p in &pinned {
             let is_direct = root_direct.contains(p);
-            root_node.add_child(p, IsExpanded::True, if is_direct { IsIndirect::False } else { IsIndirect::True });
+            root_node.add_child(
+                p,
+                IsExpanded::True,
+                if is_direct {
+                    IsIndirect::False
+                } else {
+                    IsIndirect::True
+                },
+            );
         }
         full.insert(ModuleKey::root(), root_node);
 
@@ -460,26 +561,39 @@ impl<'a> ModExecutor<'a> {
     }
 
     /// Sorted direct children of the root in the result graph (root's direct deps replace `<root>`).
-    fn pinned_children_of_root(&self, root_direct: &BTreeSet<ModuleKey>, from: &[ModuleKey]) -> Vec<ModuleKey> {
+    fn pinned_children_of_root(
+        &self,
+        root_direct: &BTreeSet<ModuleKey>,
+        from: &[ModuleKey],
+    ) -> Vec<ModuleKey> {
         let mut keys: BTreeSet<ModuleKey> = from.iter().cloned().collect();
         if keys.contains(&ModuleKey::root()) {
             keys.remove(&ModuleKey::root());
             keys.extend(root_direct.iter().cloned());
         }
-        keys.into_iter().filter(|k| self.filter_builtin(k)).collect()
+        keys.into_iter()
+            .filter(|k| self.filter_builtin(k))
+            .collect()
     }
 
     /// Modules using the filtered extension(s), if `--extension_filter` is set.
     fn compute_extension_filter_targets(&self) -> Vec<ModuleKey> {
-        let Some(filter) = &self.extension_filter else { return vec![] };
+        let Some(filter) = &self.extension_filter else {
+            return vec![];
+        };
         self.insp
             .dep_graph
             .keys()
             .filter(|k| self.filter_unused(k))
             .filter(|k| self.filter_builtin(k))
             .filter(|k| {
-                let used: Vec<&ExtensionId> =
-                    self.insp.extension_usages.iter().filter(|(_, m, _)| m == *k).map(|(i, _, _)| i).collect();
+                let used: Vec<&ExtensionId> = self
+                    .insp
+                    .extension_usages
+                    .iter()
+                    .filter(|(_, m, _)| m == *k)
+                    .map(|(i, _, _)| i)
+                    .collect();
                 match filter {
                     MaybeCompleteExtSet::Complete => !used.is_empty(),
                     MaybeCompleteExtSet::Set(s) => used.iter().any(|i| s.contains(i)),
@@ -515,7 +629,13 @@ impl<'a> ModExecutor<'a> {
     }
 
     fn filter_unused(&self, key: &ModuleKey) -> bool {
-        self.opts.include_unused || self.insp.dep_graph.get(key).map(|m| m.is_used()).unwrap_or(false)
+        self.opts.include_unused
+            || self
+                .insp
+                .dep_graph
+                .get(key)
+                .map(|m| m.is_used())
+                .unwrap_or(false)
     }
 
     fn filter_builtin(&self, key: &ModuleKey) -> bool {
@@ -523,7 +643,11 @@ impl<'a> ModExecutor<'a> {
     }
 
     /// `show_extension`.
-    pub fn show_extension(&mut self, extensions: &[ExtensionId], from_usages: &[ModuleKey]) -> Result<(), ModError> {
+    pub fn show_extension(
+        &mut self,
+        extensions: &[ExtensionId],
+        from_usages: &[ModuleKey],
+    ) -> Result<(), ModError> {
         for ext in sorted_unique_ext_ids(extensions.to_vec()) {
             self.display_extension(&ext, from_usages)?;
         }
@@ -538,17 +662,28 @@ impl<'a> ModExecutor<'a> {
             let kb = if b.0 == "name" { "" } else { b.0.as_str() };
             ka.cmp(kb)
         });
-        v.iter().map(|(k, val)| format!("{}={}", k, val.repr())).collect::<Vec<_>>().join(", ")
+        v.iter()
+            .map(|(k, val)| format!("{}={}", k, val.repr()))
+            .collect::<Vec<_>>()
+            .join(", ")
     }
 
-    fn display_extension(&mut self, extension: &ExtensionId, from_usages: &[ModuleKey]) -> Result<(), ModError> {
-        self.out.push_str(&format!("## {}:\n", ext_id_string(extension)));
+    fn display_extension(
+        &mut self,
+        extension: &ExtensionId,
+        from_usages: &[ModuleKey],
+    ) -> Result<(), ModError> {
+        self.out
+            .push_str(&format!("## {}:\n", ext_id_string(extension)));
         self.println("");
         self.println("Fetched repositories:");
         let Some(imports) = self.ext_imports.get(extension).cloned() else {
             return Err(ModError::raw(
                 ModErrorKind::InvalidArguments,
-                format!("No extension {} exists in the dependency graph", ext_id_string(extension)),
+                format!(
+                    "No extension {} exists in the dependency graph",
+                    ext_id_string(extension)
+                ),
             ));
         };
         let used_repos: BTreeSet<String> = imports.keys().cloned().collect();
@@ -559,7 +694,10 @@ impl<'a> ModExecutor<'a> {
             let line = format!(
                 "  - {} (imported by {})\n",
                 repo,
-                mods.iter().map(|m| m.to_string()).collect::<Vec<_>>().join(", ")
+                mods.iter()
+                    .map(|m| m.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
             self.out.push_str(&line);
         }
@@ -579,28 +717,40 @@ impl<'a> ModExecutor<'a> {
             from_usages.to_vec()
         };
         for module in &usage_modules {
-            let Some((_, _, usage)) =
-                self.insp.extension_usages.iter().find(|(i, k, _)| i == extension && k == module)
+            let Some((_, _, usage)) = self
+                .insp
+                .extension_usages
+                .iter()
+                .find(|(i, k, _)| i == extension && k == module)
             else {
                 continue;
             };
             let first = usage.proxies.first();
-            let loc = first.map(|p| short_location(&p.location)).unwrap_or_default();
-            self.out.push_str(&format!("## Usage in {module} from {loc}\n"));
+            let loc = first
+                .map(|p| short_location(&p.location))
+                .unwrap_or_default();
+            self.out
+                .push_str(&format!("## Usage in {module} from {loc}\n"));
 
             if extension.is_innate() {
                 // Fake module extension created by use_repo_rule(); name is "<bzl_file_label> <rule_name>".
                 let last_space = extension.name.rfind(' ').unwrap_or(0);
                 let raw_label = &extension.name[..last_space];
                 let rule_name = &extension.name[last_space + 1..];
-                self.out.push_str(&format!("{rule_name} = use_repo_rule(\"{raw_label}\", \"{rule_name}\")\n"));
+                self.out.push_str(&format!(
+                    "{rule_name} = use_repo_rule(\"{raw_label}\", \"{rule_name}\")\n"
+                ));
                 for tag in &usage.tags {
                     let callee = if tag.tag_name != "repo" {
                         format!("{}.{}", rule_name, tag.tag_name)
                     } else {
                         rule_name.to_string()
                     };
-                    self.out.push_str(&format!("{}({})\n", callee, Self::tag_to_function_args(&tag.attrs)));
+                    self.out.push_str(&format!(
+                        "{}({})\n",
+                        callee,
+                        Self::tag_to_function_args(&tag.attrs)
+                    ));
                 }
                 self.println("");
             } else {
@@ -633,7 +783,10 @@ impl<'a> ModExecutor<'a> {
 /// `file:line` from a `file:line:column` location string.
 fn short_location(loc: &str) -> String {
     let parts: Vec<&str> = loc.rsplitn(3, ':').collect();
-    if parts.len() == 3 && parts[0].chars().all(|c| c.is_ascii_digit()) && parts[1].chars().all(|c| c.is_ascii_digit()) {
+    if parts.len() == 3
+        && parts[0].chars().all(|c| c.is_ascii_digit())
+        && parts[1].chars().all(|c| c.is_ascii_digit())
+    {
         format!("{}:{}", parts[2], parts[1])
     } else {
         loc.to_string()
@@ -650,8 +803,18 @@ struct Pruner<'o> {
 }
 
 impl<'o> Pruner<'o> {
-    fn new(targets: Targets, old_result: HashMap<ModuleKey, ResultNode>, opts: &'o ModOptions) -> Self {
-        Pruner { old_result, result_builder: HashMap::new(), parent_stack: HashSet::new(), targets, opts }
+    fn new(
+        targets: Targets,
+        old_result: HashMap<ModuleKey, ResultNode>,
+        opts: &'o ModOptions,
+    ) -> Self {
+        Pruner {
+            old_result,
+            result_builder: HashMap::new(),
+            parent_stack: HashSet::new(),
+            targets,
+            opts,
+        }
     }
 
     /// Prunes the tree after the specified depth using DFS (because some nodes may still appear
@@ -663,18 +826,36 @@ impl<'o> Pruner<'o> {
         let root = ModuleKey::root();
         self.result_builder.insert(root.clone(), ResultNode::new());
         self.parent_stack.insert(root.clone());
-        let root_children = self.old_result.get(&root).cloned().unwrap_or_default().children_sorted_by_key();
+        let root_children = self
+            .old_result
+            .get(&root)
+            .cloned()
+            .unwrap_or_default()
+            .children_sorted_by_key();
         for (key, meta) in root_children {
-            self.result_builder.get_mut(&root).unwrap().add_child(&key, IsExpanded::True, meta.indirect);
+            self.result_builder.get_mut(&root).unwrap().add_child(
+                &key,
+                IsExpanded::True,
+                meta.indirect,
+            );
             self.visit_visible(&key, 1, &root, IsExpanded::True);
         }
         self.result_builder.drain().collect()
     }
 
-    fn visit_visible(&mut self, module_key: &ModuleKey, depth: i32, parent_key: &ModuleKey, expanded: IsExpanded) {
+    fn visit_visible(
+        &mut self,
+        module_key: &ModuleKey,
+        depth: i32,
+        parent_key: &ModuleKey,
+        expanded: IsExpanded,
+    ) {
         self.parent_stack.insert(module_key.clone());
         let old_node = self.old_result.get(module_key).cloned().unwrap_or_default();
-        self.result_builder.entry(module_key.clone()).or_default().target = old_node.target;
+        self.result_builder
+            .entry(module_key.clone())
+            .or_default()
+            .target = old_node.target;
         if depth > 1 {
             if let Some(p) = self.result_builder.get_mut(parent_key) {
                 p.add_child(module_key, expanded, IsIndirect::False);
@@ -692,7 +873,10 @@ impl<'o> Pruner<'o> {
                     self.visit_detached(&child_key, module_key, module_key.clone(), meta.expanded);
                 }
             } else if self.opts.cycles {
-                self.result_builder.get_mut(module_key).unwrap().add_cycle(&child_key);
+                self.result_builder
+                    .get_mut(module_key)
+                    .unwrap()
+                    .add_cycle(&child_key);
             }
         }
         self.parent_stack.remove(module_key);
@@ -712,7 +896,11 @@ impl<'o> Pruner<'o> {
         let node = ResultNode::new().with_target(old_node.target);
         let mut registered = false;
         if old_node.target || self.is_target_parent(&old_node) {
-            let indirect = if &last_visible_parent == parent_key { IsIndirect::False } else { IsIndirect::True };
+            let indirect = if &last_visible_parent == parent_key {
+                IsIndirect::False
+            } else {
+                IsIndirect::True
+            };
             if let Some(p) = self.result_builder.get_mut(&last_visible_parent) {
                 p.add_child(module_key, expanded, indirect);
             }
@@ -726,7 +914,12 @@ impl<'o> Pruner<'o> {
         }
         for (child_key, meta) in old_node.children_sorted_by_key() {
             if !self.parent_stack.contains(&child_key) {
-                self.visit_detached(&child_key, module_key, last_visible_parent.clone(), meta.expanded);
+                self.visit_detached(
+                    &child_key,
+                    module_key,
+                    last_visible_parent.clone(),
+                    meta.expanded,
+                );
             } else if self.opts.cycles && registered {
                 if let Some(n) = self.result_builder.get_mut(module_key) {
                     n.add_cycle(&child_key);
@@ -737,6 +930,9 @@ impl<'o> Pruner<'o> {
     }
 
     fn is_target_parent(&self, node: &ResultNode) -> bool {
-        node.keys().into_iter().filter(|k| !self.parent_stack.contains(*k)).any(|k| self.targets.contains(k))
+        node.keys()
+            .into_iter()
+            .filter(|k| !self.parent_stack.contains(*k))
+            .any(|k| self.targets.contains(k))
     }
 }

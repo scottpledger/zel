@@ -39,22 +39,40 @@ impl BlazeRuntime {
             return ExitCode::BUILD_FAILURE;
         }
         let resolver = self.pattern_resolver(parsed);
-        let config = match self.build_config_key(parsed, resolver.loader()).map(|mut c| {
-            // `CqueryCommand`: `--show_config_fragments=X` implicitly sets
-            // `--include_config_fragments_provider=X` (COMMAND_LINE priority).
-            if !aquery {
-                if let Some(v) = parsed.get_str("show_config_fragments").filter(|v| *v != "off") {
-                    if let Some((_, opt)) = zel_analysis::build_options::find_option("include_config_fragments_provider") {
-                        let raws = vec![v.to_string()];
-                        let canon = |raw: &str| Ok::<String, String>(raw.to_string());
-                        if let Ok(value) = zel_analysis::build_options::convert_raws(opt, &raws, &canon, zel_analysis::build_options::auto_host_cpu()) {
-                            c.native.insert("include_config_fragments_provider".to_string(), zel_analysis::NativeSetting { raw: v.to_string(), value });
+        let config = match self
+            .build_config_key(parsed, resolver.loader())
+            .map(|mut c| {
+                // `CqueryCommand`: `--show_config_fragments=X` implicitly sets
+                // `--include_config_fragments_provider=X` (COMMAND_LINE priority).
+                if !aquery {
+                    if let Some(v) = parsed
+                        .get_str("show_config_fragments")
+                        .filter(|v| *v != "off")
+                    {
+                        if let Some((_, opt)) = zel_analysis::build_options::find_option(
+                            "include_config_fragments_provider",
+                        ) {
+                            let raws = vec![v.to_string()];
+                            let canon = |raw: &str| Ok::<String, String>(raw.to_string());
+                            if let Ok(value) = zel_analysis::build_options::convert_raws(
+                                opt,
+                                &raws,
+                                &canon,
+                                zel_analysis::build_options::auto_host_cpu(),
+                            ) {
+                                c.native.insert(
+                                    "include_config_fragments_provider".to_string(),
+                                    zel_analysis::NativeSetting {
+                                        raw: v.to_string(),
+                                        value,
+                                    },
+                                );
+                            }
                         }
                     }
                 }
-            }
-            c
-        }) {
+                c
+            }) {
             Ok(c) => c,
             Err(e) => {
                 writeln_bytes(stderr, &format!("ERROR: {e}"));
@@ -62,7 +80,8 @@ impl BlazeRuntime {
                 return ExitCode::COMMAND_LINE_ERROR;
             }
         };
-        if let Err(code) = self.validate_top_level_aspects(parsed, resolver.loader(), expr, stderr) {
+        if let Err(code) = self.validate_top_level_aspects(parsed, resolver.loader(), expr, stderr)
+        {
             return code;
         }
         if let Err(code) = self.check_analysis_cache(parsed, &config, stderr) {
@@ -86,7 +105,10 @@ impl BlazeRuntime {
             aquery,
             output: fopts.output.clone(),
             transitions: parsed.get_str("transitions").unwrap_or("none").to_string(),
-            show_config_fragments: parsed.get_str("show_config_fragments").unwrap_or("off").to_string(),
+            show_config_fragments: parsed
+                .get_str("show_config_fragments")
+                .unwrap_or("off")
+                .to_string(),
             proto_include_configurations: flag("proto:include_configurations", true),
             starlark_expr: parsed.get_str("starlark:expr").unwrap_or("").to_string(),
             starlark_file: parsed.get_str("starlark:file").unwrap_or("").to_string(),
@@ -145,7 +167,14 @@ impl BlazeRuntime {
             if let Ok(e) = zel_query::parse::parse(expr, &zel_query::parse::all_functions()) {
                 e.collect_target_patterns(&mut pats);
             }
-            let top = if qopts.universe_scope.is_empty() { pats } else { qopts.universe_scope.clone() };
+            // QueryCommandUtils.getTopLevelTargets: dedup in encounter order and omit $var references.
+            let mut seen_pats = std::collections::HashSet::new();
+            pats.retain(|p| !(p.starts_with('$') && p.len() > 1) && seen_pats.insert(p.clone()));
+            let top = if qopts.universe_scope.is_empty() {
+                pats
+            } else {
+                qopts.universe_scope.clone()
+            };
             if !top.is_empty() {
                 writeln_bytes(
                     stderr,
@@ -157,7 +186,8 @@ impl BlazeRuntime {
                 );
                 return ExitCode::COMMAND_LINE_ERROR;
             }
-            if popts.output != "proto" && popts.output != "textproto" && popts.output != "jsonproto" {
+            if popts.output != "proto" && popts.output != "textproto" && popts.output != "jsonproto"
+            {
                 writeln_bytes(stderr, &format!("ERROR: --skyframe_state must be used with --output=proto|textproto|jsonproto. Invalid aquery output format: {}", popts.output));
                 return ExitCode::COMMAND_LINE_ERROR;
             }
@@ -189,7 +219,9 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, l);
             }
             let file_path = cwd.join(out_path);
-            if let Err(code) = crate::query_cmd::write_query_output_file(&file_path, &outcome.stdout, stderr) {
+            if let Err(code) =
+                crate::query_cmd::write_query_output_file(&file_path, &outcome.stdout, stderr)
+            {
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                 return code;
             }
@@ -233,18 +265,28 @@ impl BlazeRuntime {
         };
         for spec in &specs {
             let Some((file, name)) = spec.rsplit_once('%') else {
-                return Err(fail(stderr, vec![format!("ERROR: Aspect '{spec}' is unknown")]));
+                return Err(fail(
+                    stderr,
+                    vec![format!("ERROR: Aspect '{spec}' is unknown")],
+                ));
             };
             let problem = match Self::canonical_option_label(loader, file, &rel) {
-                Err(e) if e.contains("no such target") => Some(format!("cannot load '{file}': no such file")),
+                Err(e) if e.contains("no such target") => {
+                    Some(format!("cannot load '{file}': no such file"))
+                }
                 Err(e) => Some(e),
                 Ok(label) => match loader.load_bzl_exports(&label) {
-                    Err(e) if e.contains("no such target") => Some(format!("cannot load '{file}': no such file")),
+                    Err(e) if e.contains("no such target") => {
+                        Some(format!("cannot load '{file}': no such file"))
+                    }
                     Err(e) => Some(e),
                     Ok(exports) => match exports.get(name) {
                         Some(v) if zel_packages::aspect::aspect_of(v).is_some() => None,
                         Some(_) => Some(format!("{name} is not an aspect")),
-                        None => Some(format!("{name} is not exported from {}", label.canonical_form())),
+                        None => Some(format!(
+                            "{name} is not exported from {}",
+                            label.canonical_form()
+                        )),
                     },
                 },
             };

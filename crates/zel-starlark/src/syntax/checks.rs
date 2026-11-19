@@ -72,19 +72,27 @@ struct DotBazelChecker {
 
 const INCLUDE_MSG: &str = "the `include` directive MUST be called with one positional string literal argument and, optionally, `dev_dependency` as a boolean literal";
 
-fn is_valid_include_call(pos_args: &[Expr], kw_args: &[(String, Expr)], var_args: &Option<Box<Expr>>, kw_var_args: &Option<Box<Expr>>) -> bool {
+fn is_valid_include_call(
+    pos_args: &[Expr],
+    kw_args: &[(String, Expr)],
+    var_args: &Option<Box<Expr>>,
+    kw_var_args: &Option<Box<Expr>>,
+) -> bool {
     if var_args.is_some() || kw_var_args.is_some() || pos_args.len() != 1 {
         return false;
     }
-    if !matches!(&pos_args[0], Expr::Literal(crate::types::value::Value::String(_))) {
+    if !matches!(
+        &pos_args[0],
+        Expr::Literal(crate::types::value::Value::String(_))
+    ) {
         return false;
     }
     match kw_args {
         [] => true,
         [(k, v)] => {
             k == "dev_dependency"
-                && matches!(v, Expr::Ident(n, _) if n == "True" || n == "False"
-                    ) || (k == "dev_dependency" && matches!(v, Expr::Literal(crate::types::value::Value::Bool(_))))
+                && (matches!(v, Expr::Ident(n, _) if n == "True" || n == "False")
+                    || matches!(v, Expr::Literal(crate::types::value::Value::Bool(_))))
         }
         _ => false,
     }
@@ -146,19 +154,27 @@ impl DotBazelChecker {
                     self.err(location, m);
                 }
             }
-            Stmt::Expr(Expr::Call { callee, pos_args, kw_args, var_args, kw_var_args, .. })
-                if self.module_file
-                    && !self.include_assigned
-                    && matches!(&**callee, Expr::Ident(n, _) if n == "include") =>
+            Stmt::Expr(Expr::Call {
+                callee,
+                pos_args,
+                kw_args,
+                var_args,
+                kw_var_args,
+                ..
+            }) if self.module_file
+                && !self.include_assigned
+                && matches!(&**callee, Expr::Ident(n, _) if n == "include") =>
             {
                 if !is_valid_include_call(pos_args, kw_args, var_args, kw_var_args) {
                     let loc = callee.location();
                     self.err(&loc, INCLUDE_MSG.to_string());
                 }
             }
-            Stmt::Assign { target: AssignTarget::Ident(n), value, .. }
-                if self.module_file && !self.include_assigned && n == "include" =>
-            {
+            Stmt::Assign {
+                target: AssignTarget::Ident(n),
+                value,
+                ..
+            } if self.module_file && !self.include_assigned && n == "include" => {
                 self.expr(value);
                 self.include_assigned = true;
             }
@@ -289,7 +305,8 @@ impl DotBazelChecker {
             }
             Expr::Ident(n, loc) => {
                 if self.module_file && !self.include_assigned && n == "include" {
-                    let m = "the `include` directive MUST be called directly at the top-level".to_string();
+                    let m = "the `include` directive MUST be called directly at the top-level"
+                        .to_string();
                     self.err(loc, m);
                 }
             }
@@ -309,9 +326,38 @@ impl DotBazelChecker {
 
 /// Names that are always available (Starlark universe).
 pub const UNIVERSE: &[&str] = &[
-    "None", "True", "False", "abs", "all", "any", "bool", "dict", "dir", "enumerate", "fail",
-    "float", "getattr", "hasattr", "hash", "int", "len", "list", "max", "min", "print", "range",
-    "repr", "reversed", "set", "sorted", "str", "tuple", "type", "zip", "chr", "ord",
+    "None",
+    "True",
+    "False",
+    "abs",
+    "all",
+    "any",
+    "bool",
+    "dict",
+    "dir",
+    "enumerate",
+    "fail",
+    "float",
+    "getattr",
+    "hasattr",
+    "hash",
+    "int",
+    "len",
+    "list",
+    "max",
+    "min",
+    "print",
+    "range",
+    "repr",
+    "reversed",
+    "set",
+    "sorted",
+    "str",
+    "tuple",
+    "type",
+    "zip",
+    "chr",
+    "ord",
 ];
 
 /// Reports every reference to a name that is neither bound in an enclosing scope, nor a
@@ -460,10 +506,11 @@ impl NameWalker {
                 if !self.defined(name) {
                     let suggestion = did_you_mean(
                         name,
-                        self.candidates
-                            .iter()
-                            .map(|s| s.as_str())
-                            .chain(self.scopes.iter().flat_map(|scope| scope.iter().map(|s| s.as_str()))),
+                        self.candidates.iter().map(|s| s.as_str()).chain(
+                            self.scopes
+                                .iter()
+                                .flat_map(|scope| scope.iter().map(|s| s.as_str())),
+                        ),
                     );
                     self.errors.push(SyntaxError {
                         location: loc.clone(),
@@ -657,23 +704,52 @@ mod tests {
 
     #[test]
     fn build_file_restrictions() {
-        let errs = check_dot_bazel_file_syntax(&parse("def f():\n  pass\n"), "BUILD files", true, false);
+        let errs =
+            check_dot_bazel_file_syntax(&parse("def f():\n  pass\n"), "BUILD files", true, false);
         assert_eq!(errs.len(), 1);
         assert_eq!(
             errs[0].message,
             "functions may not be defined in BUILD files. You may move the function to a .bzl file and load it."
         );
-        let errs = check_dot_bazel_file_syntax(&parse("for x in [1]:\n  pass\n"), "BUILD files", true, false);
-        assert!(errs[0].message.starts_with("`for` statements are not allowed in BUILD files."));
-        let errs = check_dot_bazel_file_syntax(&parse("if True:\n  pass\n"), "BUILD files", true, false);
-        assert!(errs[0].message.starts_with("`if` statements are not allowed in BUILD files."));
-        let errs = check_dot_bazel_file_syntax(&parse("x = lambda: 1\n"), "BUILD files", true, false);
-        assert!(errs[0].message.starts_with("functions may not be defined in BUILD files"));
-        let errs = check_dot_bazel_file_syntax(&parse("f(*a)\nf(**k)\n"), "BUILD files", true, false);
+        let errs = check_dot_bazel_file_syntax(
+            &parse("for x in [1]:\n  pass\n"),
+            "BUILD files",
+            true,
+            false,
+        );
+        assert!(errs[0]
+            .message
+            .starts_with("`for` statements are not allowed in BUILD files."));
+        let errs =
+            check_dot_bazel_file_syntax(&parse("if True:\n  pass\n"), "BUILD files", true, false);
+        assert!(errs[0]
+            .message
+            .starts_with("`if` statements are not allowed in BUILD files."));
+        let errs =
+            check_dot_bazel_file_syntax(&parse("x = lambda: 1\n"), "BUILD files", true, false);
+        assert!(errs[0]
+            .message
+            .starts_with("functions may not be defined in BUILD files"));
+        let errs =
+            check_dot_bazel_file_syntax(&parse("f(*a)\nf(**k)\n"), "BUILD files", true, false);
         assert_eq!(errs.len(), 3);
-        assert!(check_dot_bazel_file_syntax(&parse("x = [1 for y in [2] if y]\nz = 1 if x else 2\n"), "BUILD files", true, false).is_empty());
-        let errs = check_dot_bazel_file_syntax(&parse("load('//:a.bzl', 'a')\n"), "MODULE.bazel files", false, false);
-        assert_eq!(errs[0].message, "`load` statements may not be used in MODULE.bazel files");
+        assert!(check_dot_bazel_file_syntax(
+            &parse("x = [1 for y in [2] if y]\nz = 1 if x else 2\n"),
+            "BUILD files",
+            true,
+            false
+        )
+        .is_empty());
+        let errs = check_dot_bazel_file_syntax(
+            &parse("load('//:a.bzl', 'a')\n"),
+            "MODULE.bazel files",
+            false,
+            false,
+        );
+        assert_eq!(
+            errs[0].message,
+            "`load` statements may not be used in MODULE.bazel files"
+        );
     }
 
     #[test]
@@ -689,7 +765,11 @@ mod tests {
                 "name 'undefined_name' is not defined".to_string()
             ]
         );
-        let errs = check_undefined_names(&parse("filegroop(name='a')\n"), &["filegroup".to_string()]);
-        assert_eq!(errs[0].message, "name 'filegroop' is not defined (did you mean 'filegroup'?)");
+        let errs =
+            check_undefined_names(&parse("filegroop(name='a')\n"), &["filegroup".to_string()]);
+        assert_eq!(
+            errs[0].message,
+            "name 'filegroop' is not defined (did you mean 'filegroup'?)"
+        );
     }
 }

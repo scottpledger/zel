@@ -71,10 +71,18 @@ pub enum DownloadMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Endpoint {
-    Tcp { host: String, port: u16, tls: bool },
+    Tcp {
+        host: String,
+        port: u16,
+        tls: bool,
+    },
     Unix(String),
     /// Plain HTTP/1.1 cache (`--remote_cache=http://host:port/prefix`).
-    Http { host: String, port: u16, prefix: String },
+    Http {
+        host: String,
+        port: u16,
+        prefix: String,
+    },
 }
 
 impl Endpoint {
@@ -98,7 +106,10 @@ impl Endpoint {
                 return Ok((h.to_string(), port));
             }
             match hp.rsplit_once(':') {
-                Some((h, p)) => Ok((h.to_string(), p.parse().map_err(|_| format!("bad port in {s}"))?)),
+                Some((h, p)) => Ok((
+                    h.to_string(),
+                    p.parse().map_err(|_| format!("bad port in {s}"))?,
+                )),
                 None => Ok((hp.to_string(), default)),
             }
         };
@@ -115,7 +126,11 @@ impl Endpoint {
             "grpcs" => {
                 let hostport = rest.split('/').next().unwrap_or("");
                 let (host, port) = split_host_port(hostport, 443)?;
-                Ok(Endpoint::Tcp { host, port, tls: true })
+                Ok(Endpoint::Tcp {
+                    host,
+                    port,
+                    tls: true,
+                })
             }
             "http" => {
                 let (hostport, prefix) = match rest.split_once('/') {
@@ -123,10 +138,20 @@ impl Endpoint {
                     None => (rest, String::new()),
                 };
                 let (host, port) = split_host_port(hostport, 80)?;
-                Ok(Endpoint::Http { host, port, prefix: if prefix == "/" { String::new() } else { prefix } })
+                Ok(Endpoint::Http {
+                    host,
+                    port,
+                    prefix: if prefix == "/" { String::new() } else { prefix },
+                })
             }
-            "https" => Ok(Endpoint::Tcp { host: rest.split('/').next().unwrap_or("").to_string(), port: 443, tls: true }),
-            other => Err(format!("Unsupported scheme '{other}' in remote endpoint '{s}'")),
+            "https" => Ok(Endpoint::Tcp {
+                host: rest.split('/').next().unwrap_or("").to_string(),
+                port: 443,
+                tls: true,
+            }),
+            other => Err(format!(
+                "Unsupported scheme '{other}' in remote endpoint '{s}'"
+            )),
         }
     }
 
@@ -145,7 +170,8 @@ use a gRPC endpoint (grpc://host:port or unix:/path)"
     }
 }
 
-pub const TLS_UNSUPPORTED: &str = "TLS (grpcs://, https://, --tls_enabled) is not supported by this build: it contains no TLS \
+pub const TLS_UNSUPPORTED: &str =
+    "TLS (grpcs://, https://, --tls_enabled) is not supported by this build: it contains no TLS \
 implementation and may not use external crates. Use grpc:// (plaintext HTTP/2) or unix: endpoints, \
 or a local TLS-terminating proxy.";
 
@@ -225,7 +251,10 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
     } else {
         (s, 1000.0)
     };
-    let v: f64 = num.trim().parse().map_err(|_| format!("Invalid duration: '{s}'"))?;
+    let v: f64 = num
+        .trim()
+        .parse()
+        .map_err(|_| format!("Invalid duration: '{s}'"))?;
     if v < 0.0 {
         return Err(format!("Invalid duration: '{s}'"));
     }
@@ -236,7 +265,9 @@ fn parse_bool(flag: &str, v: &str) -> Result<bool, String> {
     match v.to_ascii_lowercase().as_str() {
         "true" | "1" | "yes" | "" => Ok(true),
         "false" | "0" | "no" => Ok(false),
-        _ => Err(format!("While parsing option --{flag}: '{v}' is not a boolean")),
+        _ => Err(format!(
+            "While parsing option --{flag}: '{v}' is not a boolean"
+        )),
     }
 }
 
@@ -245,7 +276,9 @@ fn parse_header(flag: &str, v: &str) -> Result<Header, String> {
         .split_once('=')
         .ok_or_else(|| format!("Invalid value for --{flag}: '{v}' (expected Name=Value)"))?;
     if n.is_empty() {
-        return Err(format!("Invalid value for --{flag}: '{v}' (empty header name)"));
+        return Err(format!(
+            "Invalid value for --{flag}: '{v}' (empty header name)"
+        ));
     }
     Ok((n.to_string(), val.to_string()))
 }
@@ -269,7 +302,8 @@ impl RemoteOptions {
         o.upload_local_results = b("remote_upload_local_results", true)?;
         o.accept_cached = b("remote_accept_cached", true)?;
         o.local_fallback = b("remote_local_fallback", false)?;
-        o.cache_compression = b("remote_cache_compression", false)? || b("experimental_remote_cache_compression", false)?;
+        o.cache_compression = b("remote_cache_compression", false)?
+            || b("experimental_remote_cache_compression", false)?;
         o.tls_enabled = b("tls_enabled", false)?;
         o.verify_downloads = b("remote_verify_downloads", true)?;
         // Download mode: legacy shorthands first, then the explicit flag (last one wins).
@@ -278,8 +312,14 @@ impl RemoteOptions {
             ("remote_download_all", DownloadMode::All),
             ("remote_download_toplevel", DownloadMode::TopLevel),
             ("remote_download_minimal", DownloadMode::Minimal),
-            ("experimental_remote_download_toplevel", DownloadMode::TopLevel),
-            ("experimental_remote_download_minimal", DownloadMode::Minimal),
+            (
+                "experimental_remote_download_toplevel",
+                DownloadMode::TopLevel,
+            ),
+            (
+                "experimental_remote_download_minimal",
+                DownloadMode::Minimal,
+            ),
         ] {
             if let Some(v) = src.last(flag) {
                 if parse_bool(flag, &v)? {
@@ -287,7 +327,10 @@ impl RemoteOptions {
                 }
             }
         }
-        if let Some(v) = src.last("remote_download_outputs").or_else(|| src.last("experimental_remote_download_outputs")) {
+        if let Some(v) = src
+            .last("remote_download_outputs")
+            .or_else(|| src.last("experimental_remote_download_outputs"))
+        {
             mode = match v.as_str() {
                 "all" => DownloadMode::All,
                 "minimal" => DownloadMode::Minimal,
@@ -304,7 +347,8 @@ impl RemoteOptions {
             o.headers.push(parse_header("remote_header", &v)?);
         }
         for v in src.all("remote_cache_header") {
-            o.cache_headers.push(parse_header("remote_cache_header", &v)?);
+            o.cache_headers
+                .push(parse_header("remote_cache_header", &v)?);
         }
         for v in src.all("remote_exec_header") {
             o.exec_headers.push(parse_header("remote_exec_header", &v)?);
@@ -312,17 +356,25 @@ impl RemoteOptions {
         if let Some(v) = src.last("remote_timeout") {
             o.timeout = parse_duration(&v)?;
         }
-        if let Some(v) = src.last("remote_retries").or_else(|| src.last("experimental_remote_retry_max_attempts")) {
-            o.retries = v.parse().map_err(|_| format!("While parsing option --remote_retries: '{v}' is not an int"))?;
+        if let Some(v) = src
+            .last("remote_retries")
+            .or_else(|| src.last("experimental_remote_retry_max_attempts"))
+        {
+            o.retries = v.parse().map_err(|_| {
+                format!("While parsing option --remote_retries: '{v}' is not an int")
+            })?;
         }
         if let Some(v) = src.last("remote_retry_max_delay") {
             o.retry_max_delay = parse_duration(&v)?;
         }
         if let Some(v) = src.last("remote_max_connections") {
-            o.max_connections = v.parse().map_err(|_| format!("While parsing option --remote_max_connections: '{v}' is not an int"))?;
+            o.max_connections = v.parse().map_err(|_| {
+                format!("While parsing option --remote_max_connections: '{v}' is not an int")
+            })?;
         }
         o.google_credentials = nonempty(src.last("google_credentials"));
-        o.remote_proxy = nonempty(src.last("remote_proxy")).or_else(|| nonempty(src.last("remote_cache_proxy")));
+        o.remote_proxy =
+            nonempty(src.last("remote_proxy")).or_else(|| nonempty(src.last("remote_cache_proxy")));
         o.credential_helper = nonempty(src.last("credential_helper"));
         if let Some(v) = src.last("digest_function") {
             o.digest_fn = DigestFn::parse(&v)?;
@@ -331,7 +383,8 @@ impl RemoteOptions {
             let (k, val) = v
                 .split_once('=')
                 .ok_or_else(|| format!("Invalid value for --remote_default_exec_properties: '{v}' (expected name=value)"))?;
-            o.default_exec_properties.insert(k.to_string(), val.to_string());
+            o.default_exec_properties
+                .insert(k.to_string(), val.to_string());
         }
         o.download_regex = src.all("remote_download_regex");
         o.validate()?;
@@ -340,10 +393,16 @@ impl RemoteOptions {
 
     /// Cross-flag validation mirroring `RemoteModule.beforeCommand` / `RemoteOptions`.
     pub fn validate(&self) -> Result<(), String> {
-        if self.remote_executor.is_some() && self.remote_cache.is_none() && self.remote_instance_name.is_empty() {
+        if self.remote_executor.is_some()
+            && self.remote_cache.is_none()
+            && self.remote_instance_name.is_empty()
+        {
             // allowed: the executor doubles as the cache
         }
-        for ep in [&self.remote_cache, &self.remote_executor].into_iter().flatten() {
+        for ep in [&self.remote_cache, &self.remote_executor]
+            .into_iter()
+            .flatten()
+        {
             if let Endpoint::Tcp { tls: true, .. } = Endpoint::parse(ep, self.tls_enabled)? {
                 return Err(format!("Invalid remote endpoint '{ep}': {TLS_UNSUPPORTED}"));
             }
@@ -374,7 +433,11 @@ Provide a token explicitly with --remote_header=Authorization=Bearer <token> or 
     }
 
     pub fn retry_policy(&self) -> RetryPolicy {
-        RetryPolicy { max_retries: self.retries, max_delay: self.retry_max_delay, ..Default::default() }
+        RetryPolicy {
+            max_retries: self.retries,
+            max_delay: self.retry_max_delay,
+            ..Default::default()
+        }
     }
 
     pub fn reapi_config(&self, tool_invocation_id: &str) -> ReapiConfig {
@@ -399,14 +462,23 @@ Provide a token explicitly with --remote_header=Authorization=Bearer <token> or 
         if let Some(h) = &self.credential_helper {
             headers.extend(crate::credentials::run_credential_helper(h, endpoint)?);
         }
-        Ok(Arc::new(Channel::new(connector, self.max_connections, headers)))
+        Ok(Arc::new(Channel::new(
+            connector,
+            self.max_connections,
+            headers,
+        )))
     }
 
     /// Builds the REAPI client for `--remote_cache` / `--remote_executor` (the executor also
     /// serves as the cache if no separate cache is given).
     pub fn build_client(&self, tool_invocation_id: &str) -> Result<Option<ReapiClient>, String> {
-        let cache_ep = self.remote_cache.clone().or_else(|| self.remote_executor.clone());
-        let Some(cache_ep) = cache_ep else { return Ok(None) };
+        let cache_ep = self
+            .remote_cache
+            .clone()
+            .or_else(|| self.remote_executor.clone());
+        let Some(cache_ep) = cache_ep else {
+            return Ok(None);
+        };
         let cache = self.channel_for(&cache_ep, &self.cache_headers)?;
         let exec = match &self.remote_executor {
             Some(e) if Some(e) == self.remote_cache.as_ref() || self.remote_cache.is_none() => {
@@ -415,7 +487,11 @@ Provide a token explicitly with --remote_header=Authorization=Bearer <token> or 
             Some(e) => Some(self.channel_for(e, &self.exec_headers)?),
             None => None,
         };
-        Ok(Some(ReapiClient::new(cache, exec, self.reapi_config(tool_invocation_id))))
+        Ok(Some(ReapiClient::new(
+            cache,
+            exec,
+            self.reapi_config(tool_invocation_id),
+        )))
     }
 }
 
@@ -425,13 +501,58 @@ mod tests {
 
     #[test]
     fn endpoint_parsing() {
-        assert_eq!(Endpoint::parse("grpc://host:8980", false).unwrap(), Endpoint::Tcp { host: "host".into(), port: 8980, tls: false });
-        assert_eq!(Endpoint::parse("host:1", false).unwrap(), Endpoint::Tcp { host: "host".into(), port: 1, tls: false });
-        assert_eq!(Endpoint::parse("host", true).unwrap(), Endpoint::Tcp { host: "host".into(), port: 443, tls: true });
-        assert_eq!(Endpoint::parse("grpcs://h", false).unwrap(), Endpoint::Tcp { host: "h".into(), port: 443, tls: true });
-        assert_eq!(Endpoint::parse("unix:/tmp/s.sock", false).unwrap(), Endpoint::Unix("/tmp/s.sock".into()));
-        assert_eq!(Endpoint::parse("http://c:9090/cache/", false).unwrap(), Endpoint::Http { host: "c".into(), port: 9090, prefix: "/cache".into() });
-        assert_eq!(Endpoint::parse("grpc://[::1]:50051", false).unwrap(), Endpoint::Tcp { host: "::1".into(), port: 50051, tls: false });
+        assert_eq!(
+            Endpoint::parse("grpc://host:8980", false).unwrap(),
+            Endpoint::Tcp {
+                host: "host".into(),
+                port: 8980,
+                tls: false
+            }
+        );
+        assert_eq!(
+            Endpoint::parse("host:1", false).unwrap(),
+            Endpoint::Tcp {
+                host: "host".into(),
+                port: 1,
+                tls: false
+            }
+        );
+        assert_eq!(
+            Endpoint::parse("host", true).unwrap(),
+            Endpoint::Tcp {
+                host: "host".into(),
+                port: 443,
+                tls: true
+            }
+        );
+        assert_eq!(
+            Endpoint::parse("grpcs://h", false).unwrap(),
+            Endpoint::Tcp {
+                host: "h".into(),
+                port: 443,
+                tls: true
+            }
+        );
+        assert_eq!(
+            Endpoint::parse("unix:/tmp/s.sock", false).unwrap(),
+            Endpoint::Unix("/tmp/s.sock".into())
+        );
+        assert_eq!(
+            Endpoint::parse("http://c:9090/cache/", false).unwrap(),
+            Endpoint::Http {
+                host: "c".into(),
+                port: 9090,
+                prefix: "/cache".into()
+            }
+        );
+        assert_eq!(
+            Endpoint::parse("grpc://[::1]:50051", false).unwrap(),
+            Endpoint::Tcp {
+                host: "::1".into(),
+                port: 50051,
+                tls: false
+            }
+        );
         assert!(Endpoint::parse("ftp://x", false).is_err());
         assert!(Endpoint::parse("grpc://", false).is_err());
     }
@@ -468,7 +589,13 @@ mod tests {
         assert_eq!(o.remote_instance_name, "main");
         assert!(!o.upload_local_results && !o.accept_cached && o.local_fallback);
         assert_eq!(o.download_mode, DownloadMode::Minimal);
-        assert_eq!(o.headers, vec![("A".to_string(), "1".to_string()), ("B".to_string(), "x=y".to_string())]);
+        assert_eq!(
+            o.headers,
+            vec![
+                ("A".to_string(), "1".to_string()),
+                ("B".to_string(), "x=y".to_string())
+            ]
+        );
         assert_eq!(o.timeout, Duration::from_secs(120));
         assert_eq!((o.retries, o.max_connections), (3, 7));
         assert_eq!(o.digest_fn, DigestFn::Md5);
@@ -480,25 +607,49 @@ mod tests {
     fn defaults_and_errors() {
         let o = RemoteOptions::from_source(&options_from_args(&[])).unwrap();
         assert!(o.upload_local_results && o.accept_cached && !o.local_fallback);
-        assert_eq!((o.retries, o.max_connections, o.timeout), (5, 100, Duration::from_secs(60)));
+        assert_eq!(
+            (o.retries, o.max_connections, o.timeout),
+            (5, 100, Duration::from_secs(60))
+        );
         assert_eq!(o.download_mode, DownloadMode::TopLevel);
         assert!(!o.has_remote_cache());
-        let e = RemoteOptions::from_source(&options_from_args(&["--remote_cache=grpcs://x"])).unwrap_err();
+        let e = RemoteOptions::from_source(&options_from_args(&["--remote_cache=grpcs://x"]))
+            .unwrap_err();
         assert!(e.contains("TLS"));
-        let e = RemoteOptions::from_source(&options_from_args(&["--google_credentials=/k.json", "--remote_cache=grpc://x:1"])).unwrap_err();
-        assert!(RemoteOptions::from_source(&options_from_args(&["--google_credentials=/k.json"])).is_ok());
+        let e = RemoteOptions::from_source(&options_from_args(&[
+            "--google_credentials=/k.json",
+            "--remote_cache=grpc://x:1",
+        ]))
+        .unwrap_err();
+        assert!(
+            RemoteOptions::from_source(&options_from_args(&["--google_credentials=/k.json"]))
+                .is_ok()
+        );
         assert!(e.contains("google_credentials"));
-        assert!(RemoteOptions::from_source(&options_from_args(&["--remote_download_outputs=bogus"])).is_err());
-        assert!(RemoteOptions::from_source(&options_from_args(&["--remote_header=novalue"])).is_err());
-        assert!(RemoteOptions::from_source(&options_from_args(&["--digest_function=blake3"])).is_err());
-        assert!(RemoteOptions::from_source(&options_from_args(&["--remote_proxy=http://p:1"])).is_err());
-        let o = RemoteOptions::from_source(&options_from_args(&["--remote_download_minimal"])).unwrap();
+        assert!(RemoteOptions::from_source(&options_from_args(&[
+            "--remote_download_outputs=bogus"
+        ]))
+        .is_err());
+        assert!(
+            RemoteOptions::from_source(&options_from_args(&["--remote_header=novalue"])).is_err()
+        );
+        assert!(
+            RemoteOptions::from_source(&options_from_args(&["--digest_function=blake3"])).is_err()
+        );
+        assert!(
+            RemoteOptions::from_source(&options_from_args(&["--remote_proxy=http://p:1"])).is_err()
+        );
+        let o =
+            RemoteOptions::from_source(&options_from_args(&["--remote_download_minimal"])).unwrap();
         assert_eq!(o.download_mode, DownloadMode::Minimal);
     }
 
     #[test]
     fn executor_doubles_as_cache() {
-        let o = RemoteOptions::from_source(&options_from_args(&["--remote_executor=grpc://127.0.0.1:1"])).unwrap();
+        let o = RemoteOptions::from_source(&options_from_args(&[
+            "--remote_executor=grpc://127.0.0.1:1",
+        ]))
+        .unwrap();
         assert!(o.has_remote_cache());
         let c = o.build_client("inv").unwrap().unwrap();
         assert!(c.executor.is_some());
@@ -543,12 +694,24 @@ mod socket_tests {
         }
         let s = FakeReapiServer::new();
         s.serve_tcp(l);
-        let o = RemoteOptions::from_source(&options_from_args(&[&format!("--remote_cache=grpc://127.0.0.1:{port}"), "--remote_header=x-api-key=k1", "--remote_max_connections=2"])).unwrap();
+        let o = RemoteOptions::from_source(&options_from_args(&[
+            &format!("--remote_cache=grpc://127.0.0.1:{port}"),
+            "--remote_header=x-api-key=k1",
+            "--remote_max_connections=2",
+        ]))
+        .unwrap();
         let c = o.build_client("inv").unwrap().unwrap();
         exercise(&c, &s);
-        assert!(s.last_headers("FindMissingBlobs").unwrap().contains(&("x-api-key".to_string(), "k1".to_string())));
+        assert!(s
+            .last_headers("FindMissingBlobs")
+            .unwrap()
+            .contains(&("x-api-key".to_string(), "k1".to_string())));
         // Connection refused surfaces as UNAVAILABLE after retries.
-        let o = RemoteOptions::from_source(&options_from_args(&["--remote_cache=grpc://127.0.0.1:1", "--remote_retries=1"])).unwrap();
+        let o = RemoteOptions::from_source(&options_from_args(&[
+            "--remote_cache=grpc://127.0.0.1:1",
+            "--remote_retries=1",
+        ]))
+        .unwrap();
         let c2 = o.build_client("inv").unwrap().unwrap();
         let e = c2.capabilities().unwrap_err().to_string();
         assert!(e.contains("UNAVAILABLE"), "{e}");
@@ -579,7 +742,9 @@ mod socket_tests {
         let s2 = s.clone();
         std::thread::spawn(move || {
             for st in l.incoming().flatten() {
-                let (Ok(r), Ok(w)) = (st.try_clone(), st.try_clone()) else { continue };
+                let (Ok(r), Ok(w)) = (st.try_clone(), st.try_clone()) else {
+                    continue;
+                };
                 s2.serve_transport(crate::transport::Transport {
                     reader: Box::new(r),
                     writer: Box::new(w),
@@ -589,7 +754,11 @@ mod socket_tests {
                 });
             }
         });
-        let o = RemoteOptions::from_source(&options_from_args(&[&format!("--remote_cache=unix:{}", path.display())])).unwrap();
+        let o = RemoteOptions::from_source(&options_from_args(&[&format!(
+            "--remote_cache=unix:{}",
+            path.display()
+        )]))
+        .unwrap();
         let c = o.build_client("inv").unwrap().unwrap();
         exercise(&c, &s);
         let _ = std::fs::remove_file(&path);

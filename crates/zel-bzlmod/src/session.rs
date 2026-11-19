@@ -44,10 +44,15 @@ pub struct BzlmodConfig {
     pub nofetch: bool,
     pub bazel_version: String,
     pub experimental_repository_ctx_execute_wasm: bool,
+    pub credential_helpers: Vec<(String, PathBuf)>,
 }
 
 fn raw(parsed: &ParsedCommandOptions, name: &str) -> Vec<String> {
-    parsed.parsed_options.get(name).map(|d| d.raw_values.clone()).unwrap_or_default()
+    parsed
+        .parsed_options
+        .get(name)
+        .map(|d| d.raw_values.clone())
+        .unwrap_or_default()
 }
 
 /// `RepositoryOverrideConverter`'s name check: an apparent name must be a valid user-provided repo name.
@@ -58,8 +63,15 @@ fn validate_repo_flag_name(name: &str) -> Result<(), ()> {
     if name.contains('+') {
         return Ok(());
     }
-    let valid_start = name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric());
-    if valid_start && name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')) {
+    let valid_start = name
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric());
+    if valid_start
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
         Ok(())
     } else {
         Err(())
@@ -72,7 +84,9 @@ fn validate_module_flag_name(name: &str, flag: &str, value: &str) -> Result<(), 
     let ok = !b.is_empty()
         && b[0].is_ascii_lowercase()
         && (b[b.len() - 1].is_ascii_lowercase() || b[b.len() - 1].is_ascii_digit())
-        && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'-' | b'_'));
+        && b.iter().all(|c| {
+            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'-' | b'_')
+        });
     if ok {
         Ok(())
     } else {
@@ -83,7 +97,8 @@ fn validate_module_flag_name(name: &str, flag: &str, value: &str) -> Result<(), 
 }
 
 fn split_pair(v: &str) -> Option<(String, String)> {
-    v.split_once('=').map(|(a, b)| (a.to_string(), b.to_string()))
+    v.split_once('=')
+        .map(|(a, b)| (a.to_string(), b.to_string()))
 }
 
 impl BzlmodConfig {
@@ -107,7 +122,14 @@ impl BzlmodConfig {
                 }
             }
         };
-        let mode_str = |n: &str, d: &str| parsed.get_str(n).map(String::from).unwrap_or_else(|| raw(parsed, n).last().cloned().unwrap_or_else(|| d.to_string()));
+        let mode_str = |n: &str, d: &str| {
+            parsed.get_str(n).map(String::from).unwrap_or_else(|| {
+                raw(parsed, n)
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| d.to_string())
+            })
+        };
         let check = |n: &str, d: &str| -> Result<CheckMode, String> {
             let s = mode_str(n, d);
             CheckMode::parse(&s).ok_or_else(|| format!("Invalid value '{s}' for --{n}"))
@@ -131,7 +153,9 @@ impl BzlmodConfig {
         // `--experimental_strict_repo_env`) with `--repo_env` applied in order: `NAME=value`
         // (`%bazel_workspace%` expanded), `NAME` (inherit from the client env), `=NAME` (unset).
         // `--action_env` does not feed the repository environment.
-        let strict_repo_env = parsed.get_bool("experimental_strict_repo_env").unwrap_or(false);
+        let strict_repo_env = parsed
+            .get_bool("experimental_strict_repo_env")
+            .unwrap_or(false);
         let repo_env_vars = zel_util::action_env::parse_env_vars(raw(parsed, "repo_env"));
         let (env, _nonstrict) = zel_util::action_env::repository_environments(
             &client_env,
@@ -164,10 +188,26 @@ impl BzlmodConfig {
                 })
                 .collect()
         };
-        let allow_yanked: Vec<String> = raw(parsed, "allow_yanked_versions").iter().flat_map(|s| s.split(',').map(|x| x.trim().to_string()).collect::<Vec<_>>()).filter(|s| !s.is_empty()).collect();
-        let env_allowed = client_env.get("BZLMOD_ALLOW_YANKED_VERSIONS").cloned().unwrap_or_default();
+        let allow_yanked: Vec<String> = raw(parsed, "allow_yanked_versions")
+            .iter()
+            .flat_map(|s| {
+                s.split(',')
+                    .map(|x| x.trim().to_string())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|s| !s.is_empty())
+            .collect();
+        let env_allowed = client_env
+            .get("BZLMOD_ALLOW_YANKED_VERSIONS")
+            .cloned()
+            .unwrap_or_default();
         let mut allow_yanked = allow_yanked;
-        allow_yanked.extend(env_allowed.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()));
+        allow_yanked.extend(
+            env_allowed
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
         for y in &allow_yanked {
             if y != "all" && !y.contains('@') {
                 return Err(format!(
@@ -175,6 +215,20 @@ impl BzlmodConfig {
                 ));
             }
         }
+        let credential_helpers: Vec<(String, PathBuf)> = raw(parsed, "credential_helper")
+            .into_iter()
+            .filter_map(|v| {
+                let (scope, path) = match v.split_once('=') {
+                    Some((s, p)) => (s.to_string(), p),
+                    None => (String::new(), v.as_str()),
+                };
+                if path.is_empty() {
+                    None
+                } else {
+                    Some((scope, abs(path)))
+                }
+            })
+            .collect();
         Ok(BzlmodConfig {
             workspace: workspace.to_path_buf(),
             output_base: output_base.to_path_buf(),
@@ -191,29 +245,57 @@ impl BzlmodConfig {
                 Some(s) => Some(abs(s)),
                 None => Some(default_repository_cache(output_base)),
             },
-            repo_contents_cache: raw(parsed, "repo_contents_cache").last().filter(|s| !s.is_empty()).map(|s| abs(s)),
-            disable_download: parsed.get_bool("repository_disable_download").unwrap_or(false),
+            repo_contents_cache: raw(parsed, "repo_contents_cache")
+                .last()
+                .filter(|s| !s.is_empty())
+                .map(|s| abs(s)),
+            disable_download: parsed
+                .get_bool("repository_disable_download")
+                .unwrap_or(false),
             // An empty `--vendor_dir=` is the (empty) path fragment relative to the workspace, i.e. the workspace root.
-            vendor_dir: raw(parsed, "vendor_dir").last().map(|s| if s.is_empty() { workspace.to_path_buf() } else { abs(s) }),
+            vendor_dir: raw(parsed, "vendor_dir").last().map(|s| {
+                if s.is_empty() {
+                    workspace.to_path_buf()
+                } else {
+                    abs(s)
+                }
+            }),
             ignore_dev_dependency: parsed.get_bool("ignore_dev_dependency").unwrap_or(false),
-            isolated_extension_usages: parsed.get_bool("experimental_isolated_extension_usages").unwrap_or(false),
+            isolated_extension_usages: parsed
+                .get_bool("experimental_isolated_extension_usages")
+                .unwrap_or(false),
             allow_yanked,
             override_modules: pairs("override_module")?
                 .into_iter()
                 .zip(raw(parsed, "override_module"))
-                .filter_map(|(pair, raw)| raw.split_once('=').filter(|(_, path)| !path.is_empty()).map(|_| pair))
+                .filter_map(|(pair, raw)| {
+                    raw.split_once('=')
+                        .filter(|(_, path)| !path.is_empty())
+                        .map(|_| pair)
+                })
                 .collect(),
             inject_modules: pairs("inject_module")?,
             inject_repositories: pairs("inject_repository")?,
             module_mirrors: raw(parsed, "module_mirrors"),
             main_mapping_errors: false,
-            semantics_fingerprint: crate::semantics_fp::stable_fingerprint(&crate::semantics_fp::bool_overrides(parsed)),
-            downloader_rewriter: crate::download::UrlRewriter::from_config_paths(workspace, &raw(parsed, "downloader_config"))?,
-            download_retries: parsed.get_int("experimental_repository_downloader_retries").map(|v| v.max(0) as u32).unwrap_or(5),
+            semantics_fingerprint: crate::semantics_fp::stable_fingerprint(
+                &crate::semantics_fp::bool_overrides(parsed),
+            ),
+            downloader_rewriter: crate::download::UrlRewriter::from_config_paths(
+                workspace,
+                &raw(parsed, "downloader_config"),
+            )?,
+            download_retries: parsed
+                .get_int("experimental_repository_downloader_retries")
+                .map(|v| v.max(0) as u32)
+                .unwrap_or(5),
             force: parsed.get_bool("force").unwrap_or(false),
             nofetch: parsed.get_bool("fetch") == Some(false),
             bazel_version: crate::resolve::default_bazel_version(),
-            experimental_repository_ctx_execute_wasm: parsed.get_bool("experimental_repository_ctx_execute_wasm").unwrap_or(false),
+            experimental_repository_ctx_execute_wasm: parsed
+                .get_bool("experimental_repository_ctx_execute_wasm")
+                .unwrap_or(false),
+            credential_helpers,
         })
     }
 
@@ -235,6 +317,7 @@ impl BzlmodConfig {
             nofetch: self.nofetch,
             verbose: false,
             experimental_repository_ctx_execute_wasm: self.experimental_repository_ctx_execute_wasm,
+            credential_helpers: self.credential_helpers.clone(),
         }
     }
 
@@ -249,37 +332,75 @@ impl BzlmodConfig {
 
 /// `BazelRepositoryModule.beforeCommand`: a malformed or missing `--downloader_config` aborts the
 /// command (exit code 2) before anything else runs.
-pub fn check_downloader_config(command: &str, args: &[String], workspace: &Path) -> Result<(), String> {
+pub fn check_downloader_config(
+    command: &str,
+    args: &[String],
+    workspace: &Path,
+) -> Result<(), String> {
     check_repo_contents_cache_location(command, args, workspace)?;
     check_override_flags(command, args, workspace)?;
     if !args.iter().any(|a| a.contains("downloader_config")) {
         return Ok(());
     }
-    let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else { return Ok(()) };
-    crate::download::UrlRewriter::from_config_paths(workspace, &raw(&parsed, "downloader_config")).map(|_| ())
+    let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else {
+        return Ok(());
+    };
+    crate::download::UrlRewriter::from_config_paths(workspace, &raw(&parsed, "downloader_config"))
+        .map(|_| ())
 }
 
 /// Option-parsing failures of `--override_repository`, `--override_module` and the `--inject_*` flags
 /// (`While parsing option --x=y: ...`), reported before any command runs.
 fn check_override_flags(command: &str, args: &[String], workspace: &Path) -> Result<(), String> {
-    if !args.iter().any(|a| a.starts_with("--override_repository") || a.starts_with("--override_module") || a.starts_with("--inject_")) {
+    if !args.iter().any(|a| {
+        a.starts_with("--override_repository")
+            || a.starts_with("--override_module")
+            || a.starts_with("--inject_")
+    }) {
         return Ok(());
     }
-    let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else { return Ok(()) };
-    match BzlmodConfig::from_parsed(&parsed, workspace, Path::new("/nonexistent-output-base"), BTreeMap::new()) {
-        Err(e) if e.starts_with("While parsing option --override_") || e.starts_with("While parsing option --inject_") => Err(e),
+    let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else {
+        return Ok(());
+    };
+    match BzlmodConfig::from_parsed(
+        &parsed,
+        workspace,
+        Path::new("/nonexistent-output-base"),
+        BTreeMap::new(),
+    ) {
+        Err(e)
+            if e.starts_with("While parsing option --override_")
+                || e.starts_with("While parsing option --inject_") =>
+        {
+            Err(e)
+        }
         _ => Ok(()),
     }
 }
 
 /// `BazelRepositoryModule.beforeCommand`: the repo contents cache (by default `<repository_cache>/contents`) must not be
 /// inside the main repository.
-fn check_repo_contents_cache_location(command: &str, args: &[String], workspace: &Path) -> Result<(), String> {
-    if !args.iter().any(|a| a.starts_with("--repository_cache=") || a.starts_with("--repo_contents_cache=")) {
+fn check_repo_contents_cache_location(
+    command: &str,
+    args: &[String],
+    workspace: &Path,
+) -> Result<(), String> {
+    if !args
+        .iter()
+        .any(|a| a.starts_with("--repository_cache=") || a.starts_with("--repo_contents_cache="))
+    {
         return Ok(());
     }
-    let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else { return Ok(()) };
-    let abs = |s: &str| if Path::new(s).is_absolute() { PathBuf::from(s) } else { workspace.join(s) };
+    let Ok(parsed) = ParsedCommandOptions::parse_for_command(command, args) else {
+        return Ok(());
+    };
+    let abs = |s: &str| {
+        if Path::new(s).is_absolute() {
+            PathBuf::from(s)
+        } else {
+            workspace.join(s)
+        }
+    };
     let contents = match raw(&parsed, "repo_contents_cache").last() {
         Some(s) if !s.is_empty() => abs(s),
         Some(_) => return Ok(()),
@@ -320,7 +441,11 @@ pub fn install_base() -> Option<PathBuf> {
 /// The default repository cache: `<output_user_root>/cache/repos/v1`, falling back to the parent
 /// of the output base (the default `output_user_root` layout) before the server registered one.
 pub fn default_repository_cache(output_base: &Path) -> PathBuf {
-    let root = OUTPUT_USER_ROOT.lock().unwrap().clone().unwrap_or_else(|| output_base.join(".."));
+    let root = OUTPUT_USER_ROOT
+        .lock()
+        .unwrap()
+        .clone()
+        .unwrap_or_else(|| output_base.join(".."));
     root.join("cache").join("repos").join("v1")
 }
 
@@ -340,13 +465,18 @@ pub struct Session {
 
 impl Session {
     pub fn open(cfg: BzlmodConfig) -> Result<Session, SessionError> {
-        let fail = |message: String, warnings: Vec<String>, code: i32| SessionError { message, warnings, exit_code: code };
+        let fail = |message: String, warnings: Vec<String>, code: i32| SessionError {
+            message,
+            warnings,
+            exit_code: code,
+        };
         let mode = cfg.lockfile_mode;
         let (ws_lock, hidden_lock) = if mode == LockfileMode::Off {
             (Lockfile::default(), Lockfile::default())
         } else {
             let ws = Lockfile::read(&cfg.lockfile_path(), mode).map_err(|e| fail(e, vec![], 48))?;
-            let hid = Lockfile::read(&cfg.hidden_lockfile_path(), LockfileMode::Update).unwrap_or_default();
+            let hid = Lockfile::read(&cfg.hidden_lockfile_path(), LockfileMode::Update)
+                .unwrap_or_default();
             (ws, hid)
         };
         let mut ro = ResolveOptions::new(&cfg.workspace);
@@ -363,6 +493,8 @@ impl Session {
         ro.inject_repositories = cfg.inject_repositories.clone();
         ro.module_mirrors = cfg.module_mirrors.clone();
         ro.repository_cache = cfg.repository_cache.clone();
+        ro.credential_helpers = cfg.credential_helpers.clone();
+        ro.client_env = cfg.client_env.clone();
         match mode {
             LockfileMode::Off => {}
             LockfileMode::Update => {
@@ -390,7 +522,20 @@ impl Session {
             let fp = rt.predeclared_input_hash(&canonical, spec);
             let marker = rt.external_dir().join(format!("@{canonical}.marker"));
             let _ = std::fs::create_dir_all(rt.external_dir());
-            if dir.exists() && std::fs::read_to_string(&marker).map(|m| crate::fetch::marker_is_current(&m, &fp, &boot_opts.client_env, &boot_opts.workspace_root, &rt.external_dir())).unwrap_or(false) && !boot_opts.force {
+            if dir.exists()
+                && std::fs::read_to_string(&marker)
+                    .map(|m| {
+                        crate::fetch::marker_is_current(
+                            &m,
+                            &fp,
+                            &boot_opts.client_env,
+                            &boot_opts.workspace_root,
+                            &rt.external_dir(),
+                        )
+                    })
+                    .unwrap_or(false)
+                && !boot_opts.force
+            {
                 return Ok(dir);
             }
             if let Some(rcc_dir) = &boot_opts.repo_contents_cache {
@@ -399,7 +544,13 @@ impl Session {
                     let candidates = cache.get_candidate_repos(&fp);
                     for cand in candidates {
                         if let Ok(m) = std::fs::read_to_string(&cand.recorded_inputs_file) {
-                            if crate::fetch::marker_is_current(&m, &fp, &boot_opts.client_env, &boot_opts.workspace_root, &rt.external_dir()) {
+                            if crate::fetch::marker_is_current(
+                                &m,
+                                &fp,
+                                &boot_opts.client_env,
+                                &boot_opts.workspace_root,
+                                &rt.external_dir(),
+                            ) {
                                 let _ = remove_any(&dir);
                                 #[cfg(unix)]
                                 {
@@ -461,15 +612,13 @@ impl Session {
                 37
             } else if spec_or_access {
                 32
-            } else if e.message.contains("MODULE.bazel expected but not found at") {
-                48
-            } else if cfg.main_mapping_errors
-                && !cfg.override_modules.is_empty()
-                && !e.message.contains("The repository's path is ")
-                && !e.message.contains("No MODULE.bazel, REPO.bazel, or WORKSPACE file found in")
+            } else if e.message.contains("MODULE.bazel expected but not found at")
+                || (cfg.main_mapping_errors
+                    && !cfg.override_modules.is_empty()
+                    && !e.message.contains("The repository's path is ")
+                    && !e.message.contains("No MODULE.bazel, REPO.bazel, or WORKSPACE file found in"))
+                || (cfg.main_mapping_errors && mapping_category)
             {
-                48
-            } else if cfg.main_mapping_errors && mapping_category {
                 48
             } else {
                 37
@@ -529,7 +678,12 @@ impl Session {
         let resolution = Arc::new(resolution);
         let rt = Rt::new(cfg.external_options(), resolution.clone());
         rt.set_lockfile(mode, ws_lock, hidden_lock);
-        Ok(Session { cfg, resolution, rt, warnings })
+        Ok(Session {
+            cfg,
+            resolution,
+            rt,
+            warnings,
+        })
     }
 
     /// Writes the lockfiles (`MODULE.bazel.lock` and the hidden lockfile) if enabled.
@@ -548,8 +702,12 @@ impl Session {
             && ws.module_extensions.is_empty()
             && ws.facts.is_empty()
             && ws.facts_versions.is_empty();
-        if mode != LockfileMode::Error && !would_be_empty && std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str()) {
-            std::fs::write(&path, text).map_err(|e| format!("Error while updating MODULE.bazel.lock file: {e}"))?;
+        if mode != LockfileMode::Error
+            && !would_be_empty
+            && std::fs::read_to_string(&path).ok().as_deref() != Some(text.as_str())
+        {
+            std::fs::write(&path, text)
+                .map_err(|e| format!("Error while updating MODULE.bazel.lock file: {e}"))?;
         }
         if mode != LockfileMode::Error {
             let _ = std::fs::create_dir_all(&self.cfg.output_base);
@@ -570,11 +728,23 @@ impl Session {
             return Ok(c.to_string());
         }
         if !arg.starts_with('@') {
-            return Err("The repo value has to be either apparent '@repo' or canonical '@@repo' repo name".into());
+            return Err(
+                "The repo value has to be either apparent '@repo' or canonical '@@repo' repo name"
+                    .into(),
+            );
         }
         let a = arg.strip_prefix('@').unwrap_or(arg);
-        let valid_start = a.chars().next().map(|c| c.is_ascii_alphanumeric()).unwrap_or(false);
-        if !a.is_empty() && (!valid_start || !a.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))) {
+        let valid_start = a
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_alphanumeric())
+            .unwrap_or(false);
+        if !a.is_empty()
+            && (!valid_start
+                || !a
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+        {
             return Err(format!("invalid user-provided repo name '{a}': valid names may contain only A-Z, a-z, 0-9, '-', '_', '.', and must start with a letter or a number"));
         }
         if a.is_empty() {
@@ -599,15 +769,31 @@ pub struct CmdOutput {
 
 impl CmdOutput {
     fn ok(stderr: String) -> Self {
-        Self { exit_code: 0, stdout: String::new(), stderr }
+        Self {
+            exit_code: 0,
+            stdout: String::new(),
+            stderr,
+        }
     }
     fn fail(code: i32, stderr: String) -> Self {
-        Self { exit_code: code, stdout: String::new(), stderr }
+        Self {
+            exit_code: code,
+            stdout: String::new(),
+            stderr,
+        }
     }
 }
 
 fn warn_lines(ws: &[String]) -> String {
-    ws.iter().map(|w| if w.starts_with("ERROR:") || w.starts_with("WARNING:") { format!("{w}\n") } else { format!("WARNING: {w}\n") }).collect()
+    ws.iter()
+        .map(|w| {
+            if w.starts_with("ERROR:") || w.starts_with("WARNING:") {
+                format!("{w}\n")
+            } else {
+                format!("WARNING: {w}\n")
+            }
+        })
+        .collect()
 }
 
 fn session_error(e: SessionError) -> CmdOutput {
@@ -631,15 +817,24 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
     let mut cfg = cfg;
     cfg.main_mapping_errors = true;
     if parsed.get_bool("fetch") == Some(false) {
-        return CmdOutput::fail(EXIT_COMMAND_LINE, "ERROR: You cannot run fetch with --nofetch\n".into());
+        return CmdOutput::fail(
+            EXIT_COMMAND_LINE,
+            "ERROR: You cannot run fetch with --nofetch\n".into(),
+        );
     }
     let all = parsed.get_bool("all").unwrap_or(false);
     let configure = parsed.get_bool("configure").unwrap_or(false);
     let repos = raw(parsed, "repo");
     let targets = parsed.targets.clone();
-    let count = [all, configure, !repos.is_empty(), !targets.is_empty()].iter().filter(|b| **b).count();
+    let count = [all, configure, !repos.is_empty(), !targets.is_empty()]
+        .iter()
+        .filter(|b| **b)
+        .count();
     if count > 1 {
-        return CmdOutput::fail(EXIT_COMMAND_LINE, "ERROR: Only one fetch option can be provided for fetch command\n".into());
+        return CmdOutput::fail(
+            EXIT_COMMAND_LINE,
+            "ERROR: Only one fetch option can be provided for fetch command\n".into(),
+        );
     }
     let session = match Session::open(cfg) {
         Ok(s) => s,
@@ -650,7 +845,10 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
     let result: Result<String, (i32, String)> = (|| {
         if !targets.is_empty() {
             return fetch_targets(&session, &targets)
-                .map(|_| "All external dependencies for the requested targets fetched successfully.".to_string())
+                .map(|_| {
+                    "All external dependencies for the requested targets fetched successfully."
+                        .to_string()
+                })
                 .map_err(|e| (EXIT_COMMAND_LINE, e));
         }
         if !repos.is_empty() {
@@ -663,7 +861,9 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
                         }
                     }
                     Err(e) => {
-                        if e.starts_with("invalid user-provided repo name") || e.starts_with("The repo value has to be") {
+                        if e.starts_with("invalid user-provided repo name")
+                            || e.starts_with("The repo value has to be")
+                        {
                             return Err((EXIT_FETCH_FAILED, format!("Invalid repo name: {e}")));
                         }
                         errors.push(e);
@@ -671,10 +871,28 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
                 }
             }
             if !errors.is_empty() {
-                if errors.len() == 1 && (errors[0].starts_with("ERROR:") || errors[0].contains("An error occurred during the fetch of repository") || errors[0].starts_with("fetching ") || errors[0].contains("error evaluating module extension") || errors[0].contains("Traceback (most recent call last)") || errors[0].contains("expected module extension") || errors[0].contains("does not have a tag class named") || errors[0].contains("root_module_direct_deps contained") || errors[0].starts_with("The repository's path is ") || errors[0].contains("Error loading '") || errors[0].contains("error loading '")) {
+                if errors.len() == 1
+                    && (errors[0].starts_with("ERROR:")
+                        || errors[0].contains("An error occurred during the fetch of repository")
+                        || errors[0].starts_with("fetching ")
+                        || errors[0].contains("error evaluating module extension")
+                        || errors[0].contains("Traceback (most recent call last)")
+                        || errors[0].contains("expected module extension")
+                        || errors[0].contains("does not have a tag class named")
+                        || errors[0].contains("root_module_direct_deps contained")
+                        || errors[0].starts_with("The repository's path is ")
+                        || errors[0].contains("Error loading '")
+                        || errors[0].contains("error loading '"))
+                {
                     return Err((EXIT_FETCH_FAILED, errors.remove(0)));
                 }
-                return Err((EXIT_FETCH_FAILED, format!("Fetching some repos failed with errors: {}", errors.join("; "))));
+                return Err((
+                    EXIT_FETCH_FAILED,
+                    format!(
+                        "Fetching some repos failed with errors: {}",
+                        errors.join("; ")
+                    ),
+                ));
             }
             return Ok("All requested repos fetched successfully.".into());
         }
@@ -683,7 +901,9 @@ pub fn run_fetch(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput 
         // Evaluating every extension also verifies that the repos imported with `use_repo` are generated.
         for id in session.resolution.extension_ids() {
             if let Err(e) = rt.eval_extension(&id) {
-                let code = if e.contains("does not exist in the lockfile") || e.contains("MODULE.bazel.lock is no longer up-to-date") {
+                let code = if e.contains("does not exist in the lockfile")
+                    || e.contains("MODULE.bazel.lock is no longer up-to-date")
+                {
                     EXIT_INTERRUPTED
                 } else {
                     EXIT_FETCH_FAILED
@@ -752,7 +972,8 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
 
     // 2. Package loader and pattern resolver for target dependency closure analysis
     let loader = rt.package_loader();
-    let resolver = zel_packages::resolve::PatternResolver::new(loader.clone(), zel_vfs::PathFragment::empty());
+    let resolver =
+        zel_packages::resolve::PatternResolver::new(loader.clone(), zel_vfs::PathFragment::empty());
     let outcome = resolver.resolve_patterns(targets);
     for event in &outcome.events {
         rt.info(format!("WARNING: {}", event.message));
@@ -762,11 +983,17 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
         // `FetchCommand` reports `QUERY_EVALUATION_ERROR` (exit 2).
         let mut m = String::from("WARNING: Target pattern parsing failed.\n");
         for err in &outcome.errors {
-            m.push_str(&format!("ERROR: Skipping '{}': {}\nERROR: {}\n", err.pattern, err.message, err.message));
+            m.push_str(&format!(
+                "ERROR: Skipping '{}': {}\nERROR: {}\n",
+                err.pattern, err.message, err.message
+            ));
         }
         m.push_str("INFO: Elapsed time: 0.050s\nINFO: 0 processes.\nERROR: Build did NOT complete successfully");
         if let Some(err) = outcome.errors.first() {
-            m.push_str(&format!("\nERROR: Fetching some target dependencies failed with errors: {}", err.message));
+            m.push_str(&format!(
+                "\nERROR: Fetching some target dependencies failed with errors: {}",
+                err.message
+            ));
         }
         return Err(m);
     }
@@ -779,7 +1006,10 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
                 if !repo_ident.is_empty() {
                     let owner = r.label.repository().name();
                     let mapping = rt.repo_mapping_of(owner);
-                    let canonical = mapping.get(repo_ident).unwrap_or(&repo_ident.to_string()).clone();
+                    let canonical = mapping
+                        .get(repo_ident)
+                        .unwrap_or(&repo_ident.to_string())
+                        .clone();
                     if fetched_repos.insert(canonical.clone()) {
                         queue.push(canonical);
                     }
@@ -789,7 +1019,7 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
     }
 
     while let Some(r) = queue.pop() {
-        if let Ok(_) = rt.fetch_repo(&r) {
+        if rt.fetch_repo(&r).is_ok() {
             let pattern = format!("@@{r}//...");
             let sub_outcome = resolver.resolve_patterns(&[pattern]);
             let (sub_targets, _) = resolver.load_transitive_closure(&sub_outcome.targets);
@@ -800,7 +1030,10 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
                         if !repo_ident.is_empty() {
                             let owner = rule.label.repository().name();
                             let mapping = rt.repo_mapping_of(owner);
-                            let canonical = mapping.get(repo_ident).unwrap_or(&repo_ident.to_string()).clone();
+                            let canonical = mapping
+                                .get(repo_ident)
+                                .unwrap_or(&repo_ident.to_string())
+                                .clone();
                             if fetched_repos.insert(canonical.clone()) {
                                 queue.push(canonical);
                             }
@@ -817,19 +1050,31 @@ fn fetch_targets(session: &Session, targets: &[String]) -> Result<(), String> {
 /// `bazel vendor`: copies fetched repositories into `--vendor_dir`.
 pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput {
     let Some(vendor_dir) = cfg.vendor_dir.clone() else {
-        return CmdOutput::fail(EXIT_COMMAND_LINE, "ERROR: You cannot run the vendor command without specifying --vendor_dir\n".into());
+        return CmdOutput::fail(
+            EXIT_COMMAND_LINE,
+            "ERROR: You cannot run the vendor command without specifying --vendor_dir\n".into(),
+        );
     };
     if parsed.get_bool("fetch") == Some(false) {
-        return CmdOutput::fail(EXIT_COMMAND_LINE, "ERROR: You cannot run the vendor command with --nofetch\n".into());
+        return CmdOutput::fail(
+            EXIT_COMMAND_LINE,
+            "ERROR: You cannot run the vendor command with --nofetch\n".into(),
+        );
     }
     let repos = raw(parsed, "repo");
     let lockfile_deps = parsed.get_bool("lockfile_deps").unwrap_or(false);
     let targets = parsed.targets.clone();
     if !repos.is_empty() && !targets.is_empty() {
-        return CmdOutput::fail(EXIT_INTERRUPTED, "ERROR: Target patterns and --repo cannot both be specified\n".into());
+        return CmdOutput::fail(
+            EXIT_INTERRUPTED,
+            "ERROR: Target patterns and --repo cannot both be specified\n".into(),
+        );
     }
     if !repos.is_empty() && lockfile_deps {
-        return CmdOutput::fail(EXIT_COMMAND_LINE, "ERROR: --lockfile_deps and --repo cannot both be specified\n".into());
+        return CmdOutput::fail(
+            EXIT_COMMAND_LINE,
+            "ERROR: --lockfile_deps and --repo cannot both be specified\n".into(),
+        );
     }
     // Fetch from the real source (not an existing vendor dir) when vendoring.
     let mut cfg = cfg;
@@ -841,7 +1086,9 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
     };
     let mut err = warn_lines(&session.warnings);
     let rt = session.rt.clone();
-    let ok_msg = std::cell::RefCell::new("INFO: All external dependencies vendored successfully.".to_string());
+    let ok_msg = std::cell::RefCell::new(
+        "INFO: All external dependencies vendored successfully.".to_string(),
+    );
     let result: Result<Vec<String>, String> = (|| {
         let _ = std::fs::create_dir_all(&vendor_dir);
         let external_symlink = vendor_dir.join(crate::vendor::EXTERNAL_ROOT_SYMLINK_NAME);
@@ -852,7 +1099,9 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
             err.push_str("INFO: Vendoring repositories...\n");
             for r in &repos {
                 let c = session.resolve_repo_arg(r).map_err(|e| {
-                    if e.starts_with("invalid user-provided repo name") || e.starts_with("The repo value has to be") {
+                    if e.starts_with("invalid user-provided repo name")
+                        || e.starts_with("The repo value has to be")
+                    {
                         format!("Invalid repo name: {e}")
                     } else {
                         format!("Vendoring some repos failed with errors: [{e}]")
@@ -861,8 +1110,15 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
                 names.push(c);
             }
         } else if !targets.is_empty() || lockfile_deps {
-            let subject = if targets.is_empty() { "lockfile updates" } else if lockfile_deps { "the requested targets and lockfile updates" } else { "the requested targets" };
-            *ok_msg.borrow_mut() = format!("INFO: All external dependencies for {subject} vendored successfully.");
+            let subject = if targets.is_empty() {
+                "lockfile updates"
+            } else if lockfile_deps {
+                "the requested targets and lockfile updates"
+            } else {
+                "the requested targets"
+            };
+            *ok_msg.borrow_mut() =
+                format!("INFO: All external dependencies for {subject} vendored successfully.");
             err.push_str(&format!("INFO: Vendoring dependencies for {subject}...\n"));
             fetch_targets(&session, &targets)?;
             names = rt.state_fetched();
@@ -901,17 +1157,22 @@ pub fn run_vendor(cfg: BzlmodConfig, parsed: &ParsedCommandOptions) -> CmdOutput
             if rt.is_local_repo(n) || n == "bazel_tools" {
                 continue;
             }
-            let dir = rt.fetch_repo(n).map_err(|e| format!("Fetching some repos failed with errors: {e}"))?;
+            let dir = rt
+                .fetch_repo(n)
+                .map_err(|e| format!("Fetching some repos failed with errors: {e}"))?;
             vendored.push(n.clone());
             let target = vendor_dir.join(n);
-            std::fs::create_dir_all(&vendor_dir).map_err(|e| format!("Error while vendoring repos: {e}"))?;
+            std::fs::create_dir_all(&vendor_dir)
+                .map_err(|e| format!("Error while vendoring repos: {e}"))?;
             // `dir` may itself be a symlink to `target` (re-run after a previous vendor), so copy
             // to a temporary sibling first and only then replace the old vendored copy.
             let tmp_target = vendor_dir.join(format!(".{n}.vendor-tmp"));
             let _ = remove_any(&tmp_target);
-            copy_tree(&dir, &tmp_target).map_err(|e| format!("Error while vendoring repos: {e}"))?;
+            copy_tree(&dir, &tmp_target)
+                .map_err(|e| format!("Error while vendoring repos: {e}"))?;
             let _ = remove_any(&target);
-            std::fs::rename(&tmp_target, &target).map_err(|e| format!("Error while vendoring repos: {e}"))?;
+            std::fs::rename(&tmp_target, &target)
+                .map_err(|e| format!("Error while vendoring repos: {e}"))?;
             crate::vendor::replant_symlinks(&target, &session.cfg.workspace, &rt.external_dir())
                 .map_err(|e| format!("Error replanting symlinks: {e}"))?;
             let marker = rt.external_dir().join(format!("@{n}.marker"));
@@ -975,7 +1236,11 @@ impl Rt {
         }
         match self.repo_spec_for(canonical) {
             Ok(Some(s)) => {
-                if matches!(s.rule_name.as_str(), "local_repository" | "new_local_repository") && s.bzl_file.contains("bazel_tools") {
+                if matches!(
+                    s.rule_name.as_str(),
+                    "local_repository" | "new_local_repository"
+                ) && s.bzl_file.contains("bazel_tools")
+                {
                     return true;
                 }
                 let (repo, pkg, name) = {
@@ -987,12 +1252,14 @@ impl Rt {
                 let key = format!("@@{repo}//{pkg}:{name}");
                 match self.eval_bzl_fresh(&key, &repo, &pkg, &name) {
                     Ok(c) => match c.globals.get(&s.rule_name) {
-                        Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => {
-                            id.parse::<usize>().ok().map(|i| {
+                        Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => id
+                            .parse::<usize>()
+                            .ok()
+                            .map(|i| {
                                 let d = &self.state.lock().unwrap().rule_defs[i];
                                 d.local || d.configure
-                            }).unwrap_or(false)
-                        }
+                            })
+                            .unwrap_or(false),
                         _ => false,
                     },
                     Err(_) => false,
@@ -1017,9 +1284,11 @@ impl Rt {
                 let key = format!("@@{repo}//{pkg}:{name}");
                 match self.eval_bzl_fresh(&key, &repo, &pkg, &name) {
                     Ok(c) => match c.globals.get(&s.rule_name) {
-                        Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => {
-                            id.parse::<usize>().ok().map(|i| self.state.lock().unwrap().rule_defs[i].configure).unwrap_or(false)
-                        }
+                        Some(zel_starlark::Value::Host(k, id)) if k == "repository_rule" => id
+                            .parse::<usize>()
+                            .ok()
+                            .map(|i| self.state.lock().unwrap().rule_defs[i].configure)
+                            .unwrap_or(false),
                         _ => false,
                     },
                     Err(_) => false,
@@ -1037,15 +1306,27 @@ mod repo_env_tests {
     fn env_of(client: &[(&str, &str)], args: &[&str]) -> BTreeMap<String, String> {
         let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
         let parsed = ParsedCommandOptions::parse_for_command("build", &args).unwrap();
-        let client = client.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
-        BzlmodConfig::from_parsed(&parsed, Path::new("/ws"), Path::new("/ob"), client).unwrap().client_env
+        let client = client
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        BzlmodConfig::from_parsed(&parsed, Path::new("/ws"), Path::new("/ob"), client)
+            .unwrap()
+            .client_env
     }
 
     #[test]
     fn repo_env_set_inherit_unset_and_workspace_placeholder() {
         let e = env_of(
             &[("PATH", "/p"), ("HOME", "/h"), ("SECRET", "s")],
-            &["--repo_env=A=%bazel_workspace%/x", "--repo_env=SECRET", "--repo_env=MISSING", "--repo_env==HOME", "--repo_env=B=1", "--repo_env=B=2"],
+            &[
+                "--repo_env=A=%bazel_workspace%/x",
+                "--repo_env=SECRET",
+                "--repo_env=MISSING",
+                "--repo_env==HOME",
+                "--repo_env=B=1",
+                "--repo_env=B=2",
+            ],
         );
         assert_eq!(e.get("A").map(String::as_str), Some("/ws/x"));
         assert_eq!(e.get("B").map(String::as_str), Some("2"));
@@ -1059,7 +1340,11 @@ mod repo_env_tests {
     fn strict_repo_env_keeps_only_path_and_explicit_repo_env() {
         let e = env_of(
             &[("PATH", "/p"), ("HOME", "/h"), ("SECRET", "s")],
-            &["--experimental_strict_repo_env", "--repo_env=SECRET", "--repo_env=X=1"],
+            &[
+                "--experimental_strict_repo_env",
+                "--repo_env=SECRET",
+                "--repo_env=X=1",
+            ],
         );
         let keys: Vec<&str> = e.keys().map(String::as_str).collect();
         assert_eq!(keys, vec!["PATH", "SECRET", "X"]);
@@ -1067,7 +1352,14 @@ mod repo_env_tests {
 
     #[test]
     fn action_env_does_not_feed_the_repo_env() {
-        let e = env_of(&[("HOME", "/h"), ("PATH", "/p")], &["--experimental_strict_repo_env", "--action_env=HOME", "--action_env=NEW=1"]);
+        let e = env_of(
+            &[("HOME", "/h"), ("PATH", "/p")],
+            &[
+                "--experimental_strict_repo_env",
+                "--action_env=HOME",
+                "--action_env=NEW=1",
+            ],
+        );
         assert!(!e.contains_key("HOME") && !e.contains_key("NEW"), "{e:?}");
     }
 }

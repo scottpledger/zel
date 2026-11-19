@@ -12,16 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::eval::builtins::universal::value_to_sequence;
 use crate::eval::format::str_format;
-use crate::types::list::StarlarkError;
+use crate::types::list::{StarlarkError, StarlarkList};
+use crate::types::mutability::Mutability;
 use crate::types::value::Value;
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
 pub fn eval_string_method(
     s: &str,
     method: &str,
     pos_args: &[Value],
     kw_args: &BTreeMap<String, Value>,
+) -> Result<Value, StarlarkError> {
+    eval_string_method_in(s, method, pos_args, kw_args, &Mutability::create())
+}
+
+pub fn eval_string_method_in(
+    s: &str,
+    method: &str,
+    pos_args: &[Value],
+    kw_args: &BTreeMap<String, Value>,
+    mutability: &Arc<Mutability>,
 ) -> Result<Value, StarlarkError> {
     match method {
         "capitalize" => {
@@ -43,7 +56,9 @@ pub fn eval_string_method(
                 .ok_or_else(|| StarlarkError("count() requires sub string".to_string()))?;
             let slice = get_slice(s, pos_args.get(1), pos_args.get(2))?;
             if sub.is_empty() {
-                Ok(Value::Int(crate::bigint::BigInt::from_u64((slice.chars().count() + 1) as u64)))
+                Ok(Value::Int(crate::bigint::BigInt::from_u64(
+                    (slice.chars().count() + 1) as u64,
+                )))
             } else {
                 let cnt = slice.matches(sub).count();
                 Ok(Value::Int(crate::bigint::BigInt::from_u64(cnt as u64)))
@@ -52,7 +67,10 @@ pub fn eval_string_method(
         "elems" => {
             let elems: Vec<Value> = s.chars().map(|c| Value::String(c.to_string())).collect();
             // Bazel returns a list, whose slice `[:]` is a mutable copy.
-            Ok(Value::List(std::sync::Arc::new(std::sync::Mutex::new(crate::types::list::StarlarkList::new(elems)))))
+            Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                elems,
+                Arc::clone(mutability),
+            )))))
         }
         "endswith" => {
             let (start, end) = (pos_args.get(1), pos_args.get(2));
@@ -69,7 +87,9 @@ pub fn eval_string_method(
                     }
                     Ok(Value::Bool(false))
                 }
-                _ => Err(StarlarkError("endswith() suffix must be str or tuple of str".to_string())),
+                _ => Err(StarlarkError(
+                    "endswith() suffix must be str or tuple of str".to_string(),
+                )),
             }
         }
         "find" => {
@@ -82,7 +102,9 @@ pub fn eval_string_method(
             if let Some(pos) = slice.find(sub) {
                 // Character index
                 let char_offset = slice[..pos].chars().count();
-                Ok(Value::Int(crate::bigint::BigInt::from_i64((start_idx + char_offset) as i64)))
+                Ok(Value::Int(crate::bigint::BigInt::from_i64(
+                    (start_idx + char_offset) as i64,
+                )))
             } else {
                 Ok(Value::Int(crate::bigint::BigInt::from_i64(-1)))
             }
@@ -97,7 +119,9 @@ pub fn eval_string_method(
             let slice = get_slice(s, pos_args.get(1), pos_args.get(2))?;
             if let Some(pos) = slice.find(sub) {
                 let char_offset = slice[..pos].chars().count();
-                Ok(Value::Int(crate::bigint::BigInt::from_i64((start_idx + char_offset) as i64)))
+                Ok(Value::Int(crate::bigint::BigInt::from_i64(
+                    (start_idx + char_offset) as i64,
+                )))
             } else {
                 Err(StarlarkError(format!("substring not found: {sub:?}")))
             }
@@ -149,19 +173,24 @@ pub fn eval_string_method(
             Ok(Value::Bool(has_cased && all_upper))
         }
         "join" => {
-            let items = match pos_args.first() {
-                Some(Value::List(l)) => l.lock().unwrap().elements.clone(),
-                Some(Value::Tuple(t)) => t.clone(),
-                Some(Value::Set(set)) => set.lock().unwrap().elements.clone(),
-                _ => return Err(StarlarkError("join() requires sequence argument".to_string())),
+            let Some(arg) = pos_args.first() else {
+                return Err(StarlarkError(
+                    "join() missing 1 required positional argument: elements".to_string(),
+                ));
             };
+            if matches!(arg, Value::String(_)) {
+                return Err(StarlarkError(
+                    "got value of type 'string', want 'iterable'".to_string(),
+                ));
+            }
+            let items = value_to_sequence(arg)?;
             let mut parts = Vec::with_capacity(items.len());
-            for item in items {
+            for (i, item) in items.into_iter().enumerate() {
                 match item {
                     Value::String(st) => parts.push(st),
                     other => {
                         return Err(StarlarkError(format!(
-                            "expected string for sequence element, got '{}' of type {}",
+                            "expected string for sequence element {i}, got '{}' of type {}",
                             other,
                             other.type_name()
                         )));
@@ -181,7 +210,9 @@ pub fn eval_string_method(
         }
         "partition" => {
             if pos_args.is_empty() {
-                return Err(StarlarkError("missing 1 required positional argument".to_string()));
+                return Err(StarlarkError(
+                    "missing 1 required positional argument".to_string(),
+                ));
             }
             let sep = match pos_args.first() {
                 Some(Value::String(sep)) => sep.as_str(),
@@ -191,7 +222,11 @@ pub fn eval_string_method(
                         other.type_name()
                     )))
                 }
-                None => return Err(StarlarkError("missing 1 required positional argument".to_string())),
+                None => {
+                    return Err(StarlarkError(
+                        "missing 1 required positional argument".to_string(),
+                    ))
+                }
             };
             if sep.is_empty() {
                 return Err(StarlarkError("empty separator".to_string()));
@@ -212,11 +247,15 @@ pub fn eval_string_method(
         }
         "removeprefix" => {
             let prefix = pos_args.first().and_then(|v| v.as_str()).unwrap_or("");
-            Ok(Value::String(s.strip_prefix(prefix).unwrap_or(s).to_string()))
+            Ok(Value::String(
+                s.strip_prefix(prefix).unwrap_or(s).to_string(),
+            ))
         }
         "removesuffix" => {
             let suffix = pos_args.first().and_then(|v| v.as_str()).unwrap_or("");
-            Ok(Value::String(s.strip_suffix(suffix).unwrap_or(s).to_string()))
+            Ok(Value::String(
+                s.strip_suffix(suffix).unwrap_or(s).to_string(),
+            ))
         }
         "replace" => {
             let old = pos_args.first().and_then(|v| v.as_str()).unwrap_or("");
@@ -245,7 +284,9 @@ pub fn eval_string_method(
             let slice = get_slice(s, pos_args.get(1), pos_args.get(2))?;
             if let Some(pos) = slice.rfind(sub) {
                 let char_offset = slice[..pos].chars().count();
-                Ok(Value::Int(crate::bigint::BigInt::from_i64((start_idx + char_offset) as i64)))
+                Ok(Value::Int(crate::bigint::BigInt::from_i64(
+                    (start_idx + char_offset) as i64,
+                )))
             } else {
                 Ok(Value::Int(crate::bigint::BigInt::from_i64(-1)))
             }
@@ -259,14 +300,18 @@ pub fn eval_string_method(
             let slice = get_slice(s, pos_args.get(1), pos_args.get(2))?;
             if let Some(pos) = slice.rfind(sub) {
                 let char_offset = slice[..pos].chars().count();
-                Ok(Value::Int(crate::bigint::BigInt::from_i64((start_idx + char_offset) as i64)))
+                Ok(Value::Int(crate::bigint::BigInt::from_i64(
+                    (start_idx + char_offset) as i64,
+                )))
             } else {
                 Err(StarlarkError(format!("substring not found: {sub:?}")))
             }
         }
         "rpartition" => {
             if pos_args.is_empty() {
-                return Err(StarlarkError("missing 1 required positional argument".to_string()));
+                return Err(StarlarkError(
+                    "missing 1 required positional argument".to_string(),
+                ));
             }
             let sep = match pos_args.first() {
                 Some(Value::String(sep)) => sep.as_str(),
@@ -276,7 +321,11 @@ pub fn eval_string_method(
                         other.type_name()
                     )))
                 }
-                None => return Err(StarlarkError("missing 1 required positional argument".to_string())),
+                None => {
+                    return Err(StarlarkError(
+                        "missing 1 required positional argument".to_string(),
+                    ))
+                }
             };
             if sep.is_empty() {
                 return Err(StarlarkError("empty separator".to_string()));
@@ -296,51 +345,79 @@ pub fn eval_string_method(
             ]))
         }
         "rsplit" => {
-            let sep_val = pos_args.first().or_else(|| kw_args.get("sep"));
-            let maxsplit_val = pos_args.get(1).or_else(|| kw_args.get("maxsplit"));
-            let maxsplit = maxsplit_val.and_then(|v| v.as_i64()).unwrap_or(-1);
-
-            if maxsplit == 0 {
-                return Ok(Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-                    crate::types::list::StarlarkList::new(vec![Value::String(s.to_string())]),
-                ))));
-            }
-
-            let parts: Vec<String> = match sep_val {
-                Some(Value::String(sep)) => {
-                    if sep.is_empty() {
-                        return Err(StarlarkError("Empty separator".to_string()));
-                    }
-                    if maxsplit < 0 {
-                        s.rsplit(sep).map(|p| p.to_string()).collect::<Vec<_>>().into_iter().rev().collect()
-                    } else {
-                        s.rsplitn((maxsplit + 1) as usize, sep)
-                            .map(|p| p.to_string())
-                            .collect::<Vec<_>>()
-                            .into_iter()
-                            .rev()
-                            .collect()
-                    }
+            for k in kw_args.keys() {
+                if k != "sep" && k != "maxsplit" {
+                    return Err(StarlarkError(format!(
+                        "rsplit() got unexpected keyword argument: {k}"
+                    )));
                 }
-                _ => {
-                    // Whitespace splitting
-                    let words: Vec<&str> = s.split_whitespace().collect();
-                    if maxsplit < 0 || maxsplit >= words.len() as i64 {
-                        words.into_iter().map(|w| w.to_string()).collect()
-                    } else {
-                        let split_idx = words.len() - maxsplit as usize;
-                        let first = words[..split_idx].join(" ");
-                        let mut res = vec![first];
-                        for &w in &words[split_idx..] {
-                            res.push(w.to_string());
-                        }
-                        res
-                    }
+            }
+            if !pos_args.is_empty() && kw_args.contains_key("sep") {
+                return Err(StarlarkError(
+                    "rsplit() got multiple values for parameter 'sep'".to_string(),
+                ));
+            }
+            if pos_args.len() > 1 && kw_args.contains_key("maxsplit") {
+                return Err(StarlarkError(
+                    "rsplit() got multiple values for parameter 'maxsplit'".to_string(),
+                ));
+            }
+            let sep_val = pos_args
+                .first()
+                .or_else(|| kw_args.get("sep"))
+                .ok_or_else(|| {
+                    StarlarkError(
+                        "rsplit() missing 1 required positional argument: sep".to_string(),
+                    )
+                })?;
+            let sep = match sep_val {
+                Value::String(sep) => sep.as_str(),
+                other => {
+                    return Err(StarlarkError(format!(
+                    "in call to rsplit(), parameter 'sep' got value of type '{}', want 'string'",
+                    other.type_name()
+                )))
                 }
             };
-            Ok(Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-                crate::types::list::StarlarkList::new(parts.into_iter().map(Value::String).collect()),
-            ))))
+            if sep.is_empty() {
+                return Err(StarlarkError("Empty separator".to_string()));
+            }
+            let maxsplit_val = pos_args.get(1).or_else(|| kw_args.get("maxsplit"));
+            let maxsplit = match maxsplit_val {
+                None => -1i64,
+                Some(Value::Int(i)) => i
+                    .to_i64()
+                    .ok_or_else(|| StarlarkError("maxsplit out of range".to_string()))?,
+                Some(other) => {
+                    return Err(StarlarkError(format!(
+                    "in call to rsplit(), parameter 'maxsplit' got value of type '{}', want 'int'",
+                    other.type_name()
+                )))
+                }
+            };
+
+            let mut parts: Vec<String> = Vec::new();
+            let mut end = s.len();
+            let mut rem = maxsplit;
+            loop {
+                if rem == 0 {
+                    parts.push(s[..end].to_string());
+                    break;
+                }
+                if let Some(start) = s[..end].rfind(sep) {
+                    parts.push(s[start + sep.len()..end].to_string());
+                    end = start;
+                    rem -= 1;
+                } else {
+                    parts.push(s[..end].to_string());
+                    break;
+                }
+            }
+            parts.reverse();
+            Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                parts.into_iter().map(Value::String).collect(),
+                Arc::clone(mutability),
+            )))))
         }
         "rstrip" => {
             let chars_to_strip = pos_args.first().and_then(|v| v.as_str());
@@ -351,37 +428,76 @@ pub fn eval_string_method(
             Ok(Value::String(res))
         }
         "split" => {
-            let sep_val = pos_args.first().or_else(|| kw_args.get("sep"));
-            let maxsplit_val = pos_args.get(1).or_else(|| kw_args.get("maxsplit"));
-            let maxsplit = maxsplit_val.and_then(|v| v.as_i64()).unwrap_or(-1);
-
-            if maxsplit == 0 {
-                return Ok(Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-                    crate::types::list::StarlarkList::new(vec![Value::String(s.to_string())]),
-                ))));
-            }
-
-            let parts: Vec<String> = match sep_val {
-                Some(Value::String(sep)) => {
-                    if sep.is_empty() {
-                        return Err(StarlarkError("Empty separator".to_string()));
-                    }
-                    if maxsplit < 0 {
-                        s.split(sep).map(|p| p.to_string()).collect()
-                    } else {
-                        s.splitn((maxsplit + 1) as usize, sep)
-                            .map(|p| p.to_string())
-                            .collect()
-                    }
+            for k in kw_args.keys() {
+                if k != "sep" && k != "maxsplit" {
+                    return Err(StarlarkError(format!(
+                        "split() got unexpected keyword argument: {k}"
+                    )));
                 }
-                _ => {
-                    // No separator: whitespace splitting
-                    s.split_whitespace().map(|p| p.to_string()).collect()
+            }
+            if !pos_args.is_empty() && kw_args.contains_key("sep") {
+                return Err(StarlarkError(
+                    "split() got multiple values for parameter 'sep'".to_string(),
+                ));
+            }
+            if pos_args.len() > 1 && kw_args.contains_key("maxsplit") {
+                return Err(StarlarkError(
+                    "split() got multiple values for parameter 'maxsplit'".to_string(),
+                ));
+            }
+            let sep_val = pos_args
+                .first()
+                .or_else(|| kw_args.get("sep"))
+                .ok_or_else(|| {
+                    StarlarkError("split() missing 1 required positional argument: sep".to_string())
+                })?;
+            let sep = match sep_val {
+                Value::String(sep) => sep.as_str(),
+                other => {
+                    return Err(StarlarkError(format!(
+                        "in call to split(), parameter 'sep' got value of type '{}', want 'string'",
+                        other.type_name()
+                    )))
                 }
             };
-            Ok(Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-                crate::types::list::StarlarkList::new(parts.into_iter().map(Value::String).collect()),
-            ))))
+            if sep.is_empty() {
+                return Err(StarlarkError("Empty separator".to_string()));
+            }
+            let maxsplit_val = pos_args.get(1).or_else(|| kw_args.get("maxsplit"));
+            let maxsplit = match maxsplit_val {
+                None => -1i64,
+                Some(Value::Int(i)) => i
+                    .to_i64()
+                    .ok_or_else(|| StarlarkError("maxsplit out of range".to_string()))?,
+                Some(other) => {
+                    return Err(StarlarkError(format!(
+                    "in call to split(), parameter 'maxsplit' got value of type '{}', want 'int'",
+                    other.type_name()
+                )))
+                }
+            };
+
+            let mut parts: Vec<String> = Vec::new();
+            let mut start = 0usize;
+            let mut rem = maxsplit;
+            loop {
+                if rem == 0 {
+                    parts.push(s[start..].to_string());
+                    break;
+                }
+                if let Some(rel) = s[start..].find(sep) {
+                    parts.push(s[start..start + rel].to_string());
+                    start = start + rel + sep.len();
+                    rem -= 1;
+                } else {
+                    parts.push(s[start..].to_string());
+                    break;
+                }
+            }
+            Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                parts.into_iter().map(Value::String).collect(),
+                Arc::clone(mutability),
+            )))))
         }
         "splitlines" => {
             let keepends = pos_args.first().map(|v| v.is_truthy()).unwrap_or(false);
@@ -411,9 +527,10 @@ pub fn eval_string_method(
             if start < bytes.len() {
                 lines.push(s[start..].to_string());
             }
-            Ok(Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-                crate::types::list::StarlarkList::new(lines.into_iter().map(Value::String).collect()),
-            ))))
+            Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new_in(
+                lines.into_iter().map(Value::String).collect(),
+                Arc::clone(mutability),
+            )))))
         }
         "startswith" => {
             let (start, end) = (pos_args.get(1), pos_args.get(2));
@@ -430,7 +547,9 @@ pub fn eval_string_method(
                     }
                     Ok(Value::Bool(false))
                 }
-                _ => Err(StarlarkError("startswith() prefix must be str or tuple of str".to_string())),
+                _ => Err(StarlarkError(
+                    "startswith() prefix must be str or tuple of str".to_string(),
+                )),
             }
         }
         "strip" => {

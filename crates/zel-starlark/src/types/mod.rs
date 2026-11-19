@@ -15,6 +15,7 @@
 pub mod depset;
 pub mod dict;
 pub mod list;
+pub mod mutability;
 pub mod range;
 pub mod select;
 pub mod set;
@@ -24,6 +25,7 @@ pub mod value;
 pub use depset::{Depset, DepsetOrder};
 pub use dict::StarlarkDict;
 pub use list::{StarlarkError, StarlarkList};
+pub use mutability::Mutability;
 pub use range::RangeList;
 pub use select::{SelectorElement, SelectorList};
 pub use set::StarlarkSet;

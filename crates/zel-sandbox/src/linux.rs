@@ -20,20 +20,17 @@
 //! Linux host, it can be invoked. On other platforms `get_unsupported_reason` reports why the
 //! `linux-sandbox` strategy is unavailable and it is never registered.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum NetworkNamespace {
+    #[default]
     NoNetns,
     Netns,
     NetnsWithLoopback,
-}
-
-impl Default for NetworkNamespace {
-    fn default() -> Self {
-        NetworkNamespace::NoNetns
-    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -63,7 +60,10 @@ pub struct LinuxSandboxCommandLineBuilder {
 
 impl LinuxSandboxCommandLineBuilder {
     pub fn new(path: &str) -> Self {
-        Self { linux_sandbox_path: path.to_string(), ..Default::default() }
+        Self {
+            linux_sandbox_path: path.to_string(),
+            ..Default::default()
+        }
     }
 
     /// `addExecutionInfo`: `supports-graceful-termination` makes SIGINT send SIGTERM.
@@ -152,18 +152,96 @@ impl LinuxSandboxCommandLineBuilder {
     }
 }
 
+static PROBE_CACHE: OnceLock<Mutex<HashMap<PathBuf, Result<(), String>>>> = OnceLock::new();
+
+/// Live-probes `linux-sandbox` (`LinuxSandboxedSpawnRunner.isSupported`), caching the result per
+/// binary path. Executes `<linux_sandbox> -T <kill_grace_secs> -- /bin/true` with an empty
+/// environment, cwd = `exec_root` (or `/tmp`), and stdout/stderr discarded.
+pub fn probe_linux_sandbox(
+    linux_sandbox_binary: &str,
+    exec_root: Option<&Path>,
+    kill_grace_secs: u64,
+) -> Result<(), String> {
+    if !cfg!(target_os = "linux") {
+        return Err("linux-sandbox is only supported on Linux".to_string());
+    }
+    let path = PathBuf::from(linux_sandbox_binary);
+    if !path.exists() {
+        return Err(format!(
+            "linux-sandbox binary {linux_sandbox_binary} does not exist"
+        ));
+    }
+    let cache = PROBE_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let guard = cache.lock().unwrap();
+        if let Some(cached) = guard.get(&path) {
+            return cached.clone();
+        }
+    }
+    let res = run_probe(linux_sandbox_binary, exec_root, kill_grace_secs);
+    let mut guard = cache.lock().unwrap();
+    guard.entry(path).or_insert_with(|| res.clone());
+    res
+}
+
+fn run_probe(
+    linux_sandbox_binary: &str,
+    exec_root: Option<&Path>,
+    kill_grace_secs: u64,
+) -> Result<(), String> {
+    let mut b = LinuxSandboxCommandLineBuilder::new(linux_sandbox_binary);
+    b.timeout = Some(Duration::from_secs(kill_grace_secs));
+    let argv = b.build_for_command(&["/bin/true".to_string()])?;
+    let cwd = exec_root
+        .filter(|p| p.is_dir())
+        .unwrap_or_else(|| Path::new("/tmp"));
+    let status = {
+        let mut attempt = 0u32;
+        loop {
+            let res = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .current_dir(cwd)
+                .env_clear()
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            // In multi-threaded test/daemon processes on Linux, another thread's fork()
+            // before execve() can transiently hold a writable fd open, causing ETXTBSY (26).
+            if let Err(ref e) = res {
+                if e.raw_os_error() == Some(26) && attempt < 10 {
+                    attempt += 1;
+                    std::thread::sleep(Duration::from_millis(5 * attempt as u64));
+                    continue;
+                }
+            }
+            break res;
+        }
+    };
+    match status {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("linux-sandbox probe failed with status {s}")),
+        Err(e) => Err(format!("linux-sandbox probe failed: {e}")),
+    }
+}
+
 /// Why `linux-sandbox` is unavailable here (`LinuxSandboxedSpawnRunner.getUnsupportedReason`);
 /// `None` means supported.
 pub fn get_unsupported_reason(linux_sandbox_binary: Option<&str>) -> Option<String> {
+    get_unsupported_reason_with(linux_sandbox_binary, None, 15)
+}
+
+/// Live-probed availability check with configurable exec_root and `local_sigkill_grace_seconds`.
+pub fn get_unsupported_reason_with(
+    linux_sandbox_binary: Option<&str>,
+    exec_root: Option<&Path>,
+    kill_grace_secs: u64,
+) -> Option<String> {
     if !cfg!(target_os = "linux") {
         return Some("linux-sandbox is only supported on Linux".to_string());
     }
     match linux_sandbox_binary {
         None => Some("linux-sandbox binary is not installed".to_string()),
-        Some(p) if !std::path::Path::new(p).exists() => {
-            Some(format!("linux-sandbox binary {p} does not exist"))
-        }
-        Some(_) => None,
+        Some(p) => probe_linux_sandbox(p, exec_root, kill_grace_secs).err(),
     }
 }
 
@@ -190,14 +268,53 @@ mod tests {
         b.use_fake_username = true;
         b.enable_pseudoterminal = true;
         b.sandbox_debug_path = Some("/dbg".into());
-        b.add_execution_info(&[("supports-graceful-termination".to_string(), "1".to_string())].into());
+        b.add_execution_info(
+            &[("supports-graceful-termination".to_string(), "1".to_string())].into(),
+        );
         b.persistent_process = true;
         b.cgroups_dirs = vec!["/sys/fs/cgroup/x".into()];
         let got = b.build_for_command(&["cc".into(), "-c".into()]).unwrap();
         let want: Vec<&str> = vec![
-            "/ls", "-W", "/sbx/execroot/ws", "-T", "60", "-t", "15", "-l", "/o", "-L", "/e", "-w", "/w1", "-w", "/w2",
-            "-e", "/tmp", "-M", "/src", "-m", "/dst", "-M", "/same", "-S", "/stats", "-h", "/sbx", "-H", "-N", "-U",
-            "-P", "-D", "/dbg", "-i", "-p", "-C", "/sys/fs/cgroup/x", "--", "cc", "-c",
+            "/ls",
+            "-W",
+            "/sbx/execroot/ws",
+            "-T",
+            "60",
+            "-t",
+            "15",
+            "-l",
+            "/o",
+            "-L",
+            "/e",
+            "-w",
+            "/w1",
+            "-w",
+            "/w2",
+            "-e",
+            "/tmp",
+            "-M",
+            "/src",
+            "-m",
+            "/dst",
+            "-M",
+            "/same",
+            "-S",
+            "/stats",
+            "-h",
+            "/sbx",
+            "-H",
+            "-N",
+            "-U",
+            "-P",
+            "-D",
+            "/dbg",
+            "-i",
+            "-p",
+            "-C",
+            "/sys/fs/cgroup/x",
+            "--",
+            "cc",
+            "-c",
         ];
         assert_eq!(got, want);
     }
@@ -207,13 +324,59 @@ mod tests {
         let mut b = LinuxSandboxCommandLineBuilder::new("/ls");
         b.use_fake_root = true;
         b.use_fake_username = true;
-        assert_eq!(b.build_for_command(&[]).unwrap_err(), "useFakeUsername and useFakeRoot are exclusive");
+        assert_eq!(
+            b.build_for_command(&[]).unwrap_err(),
+            "useFakeUsername and useFakeRoot are exclusive"
+        );
     }
 
     #[test]
     fn unsupported_off_linux() {
         if !cfg!(target_os = "linux") {
-            assert!(get_unsupported_reason(Some("/x")).unwrap().contains("only supported on Linux"));
+            assert!(get_unsupported_reason(Some("/x"))
+                .unwrap()
+                .contains("only supported on Linux"));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn probe_runs_binary_with_timeout_empty_env_and_caches() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = std::env::temp_dir().join(format!("zel-ls-probe-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let ok_bin = d.join("ok-sandbox");
+        let log = d.join("probe.log");
+        std::fs::write(
+            &ok_bin,
+            format!(
+                "#!/bin/sh\necho \"$*\" > {}\nenv | wc -l >> {}\nexit 0\n",
+                log.display(),
+                log.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&ok_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(
+            get_unsupported_reason_with(Some(ok_bin.to_str().unwrap()), Some(&d), 12),
+            None
+        );
+        let text = std::fs::read_to_string(&log).unwrap();
+        assert!(text.contains("-T 12 -- /bin/true"), "{text}");
+
+        // Failing binary is reported unsupported and cached per path.
+        let bad_bin = d.join("bad-sandbox");
+        std::fs::write(&bad_bin, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&bad_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            get_unsupported_reason_with(Some(bad_bin.to_str().unwrap()), Some(&d), 15).is_some()
+        );
+        // Overwriting the binary after probe still returns the cached failure.
+        std::fs::write(&bad_bin, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bad_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(
+            get_unsupported_reason_with(Some(bad_bin.to_str().unwrap()), Some(&d), 15).is_some()
+        );
     }
 }

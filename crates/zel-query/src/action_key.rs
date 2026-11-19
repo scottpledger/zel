@@ -82,7 +82,10 @@ impl JFp {
         self
     }
 
-    pub fn add_string_map<'a, I: ExactSizeIterator<Item = (&'a String, &'a String)>>(&mut self, m: I) -> &mut Self {
+    pub fn add_string_map<'a, I: ExactSizeIterator<Item = (&'a String, &'a String)>>(
+        &mut self,
+        m: I,
+    ) -> &mut Self {
         self.add_int(m.len() as i32);
         for (k, v) in m {
             self.add_string(k).add_string(v);
@@ -115,49 +118,98 @@ const EMPTY_SET_DIGEST: i32 = 104_395_303;
 const REPO_MAPPING_GUID: &str = "458e351c-4d30-433d-b927-da6cddd4737f";
 
 /// `NestedSetFingerprintCache.addNestedSetToFingerprint` with the element mapper `f`.
-fn add_nested_set<E: Clone + PartialEq>(fp: &mut JFp, set: &zel_analysis::nested_set::NSet<E>, f: &dyn Fn(&E, &mut JFp)) {
-    use zel_analysis::nested_set::NNode;
-    fn node<E>(fp: &mut JFp, n: &NNode<E>, f: &dyn Fn(&E, &mut JFp)) {
-        match n {
-            NNode::Leaf(e) => f(e, fp),
-            NNode::Arr(children) => {
-                let mut sub = JFp::new();
-                for c in children.iter() {
-                    node(&mut sub, c, f);
+#[derive(Default)]
+pub struct NestedSetFingerprintCache {
+    digests: std::collections::HashMap<usize, [u8; 32]>,
+}
+
+impl NestedSetFingerprintCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn add_nested_set<E: Clone + PartialEq>(
+        &mut self,
+        fp: &mut JFp,
+        set: &zel_analysis::nested_set::NSet<E>,
+        f: &mut dyn FnMut(&E, &mut JFp),
+    ) {
+        use zel_analysis::nested_set::NNode;
+        fn node<E>(
+            cache: &mut std::collections::HashMap<usize, [u8; 32]>,
+            fp: &mut JFp,
+            n: &NNode<E>,
+            f: &mut dyn FnMut(&E, &mut JFp),
+        ) {
+            match n {
+                NNode::Leaf(e) => f(e, fp),
+                NNode::Arr(children) => {
+                    let key = std::sync::Arc::as_ptr(children) as usize;
+                    let d = if let Some(&cached) = cache.get(&key) {
+                        cached
+                    } else {
+                        let mut sub = JFp::new();
+                        for c in children.iter() {
+                            node(cache, &mut sub, c, f);
+                        }
+                        let d = sub.digest();
+                        cache.insert(key, d);
+                        d
+                    };
+                    fp.add_raw(&d);
                 }
-                let d = sub.digest();
-                fp.add_raw(&d);
             }
         }
-    }
-    match &set.children {
-        None => {
-            fp.add_int(EMPTY_SET_DIGEST);
-        }
-        Some(c) => {
-            fp.add_int(set.order);
-            node(fp, c, f);
+        match &set.children {
+            None => {
+                fp.add_int(EMPTY_SET_DIGEST);
+            }
+            Some(c) => {
+                fp.add_int(set.order);
+                node(&mut self.digests, fp, c, f);
+            }
         }
     }
 }
 
+fn add_nested_set<E: Clone + PartialEq>(
+    fp: &mut JFp,
+    set: &zel_analysis::nested_set::NSet<E>,
+    f: &dyn Fn(&E, &mut JFp),
+) {
+    let mut cache = NestedSetFingerprintCache::new();
+    let mut f_mut = |e: &E, fp: &mut JFp| f(e, fp);
+    cache.add_nested_set(fp, set, &mut f_mut);
+}
+
 /// `TestRunnerAction.computeKey`.
-fn add_test_runner_key(fp: &mut JFp, t: &zel_analysis::TestRunnerKey, exec_info: &std::collections::BTreeMap<String, String>) {
+fn add_test_runner_key(
+    fp: &mut JFp,
+    t: &zel_analysis::TestRunnerKey,
+    exec_info: &std::collections::BTreeMap<String, String>,
+) {
     fp.add_string("cc41f9d0-47a6-11e7-8726-eb6ce83a8cc8");
     for a in &t.args {
         fp.add_bool(true).add_string(a);
     }
     fp.add_bool(false);
-    fp.add_string(&t.test_filter).add_bool(t.fail_fast).add_string(&t.run_under);
+    fp.add_string(&t.test_filter)
+        .add_bool(t.fail_fast)
+        .add_string(&t.run_under);
     fp.add_string_map(t.coverage_env.iter());
     for e in [&t.extra_env, &t.action_env, &t.test_env] {
         fp.add_string_map(e.0.iter());
         fp.add_strings(&e.1);
     }
-    fp.add_string(&t.size).add_string(&t.timeout_category).add_string(&t.timeout);
+    fp.add_string(&t.size)
+        .add_string(&t.timeout_category)
+        .add_string(&t.timeout);
     fp.add_strings(&t.tags);
     fp.add_bool(t.remotable);
-    fp.add_int(t.shard_num).add_int(t.total_shards).add_int(t.run_number).add_int(t.total_runs);
+    fp.add_int(t.shard_num)
+        .add_int(t.total_shards)
+        .add_int(t.run_number)
+        .add_int(t.total_runs);
     fp.add_bool(t.coverage).add_bool(t.zip_undeclared);
     fp.add_string_map(exec_info.iter());
     fp.add_nullable_string(None);
@@ -165,7 +217,17 @@ fn add_test_runner_key(fp: &mut JFp, t: &zel_analysis::TestRunnerKey, exec_info:
 
 /// `RepoMappingManifestAction.computeKey`.
 fn add_repo_mapping_key(fp: &mut JFp, info: &zel_analysis::ActionKeyInfo) {
-    let zel_analysis::ActionKeyInfo::RepoMapping { packages, runfiles_owner_repos, has_runfiles_symlinks, root_symlink_segments, workspace_name, compact } = info else { return };
+    let zel_analysis::ActionKeyInfo::RepoMapping {
+        packages,
+        runfiles_owner_repos,
+        has_runfiles_symlinks,
+        root_symlink_segments,
+        workspace_name,
+        compact,
+    } = info
+    else {
+        return;
+    };
     fp.add_uuid(REPO_MAPPING_GUID);
     add_nested_set(fp, packages, &|p, fp| {
         // `repoMappingFingerprintCache`: size, then (apparent name, canonical name) pairs.
@@ -204,8 +266,14 @@ fn add_platform(fp: &mut JFp, label: &str, cpu: &str, os: &str) {
     fp.add_bool(false); // no parent constraint collection
     fp.add_int(2);
     for (setting, value) in [
-        ("@@platforms//cpu:cpu".to_string(), format!("@@platforms//cpu:{cpu}")),
-        ("@@platforms//os:os".to_string(), format!("@@platforms//os:{os}")),
+        (
+            "@@platforms//cpu:cpu".to_string(),
+            format!("@@platforms//cpu:{cpu}"),
+        ),
+        (
+            "@@platforms//os:os".to_string(),
+            format!("@@platforms//os:{os}"),
+        ),
     ] {
         fp.add_string(&setting).add_string(&value);
     }
@@ -234,15 +302,28 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
     let runfiles_tree = a.mnemonic == "RunfilesTree";
     match &a.kind {
         _ if runfiles_tree => {}
-        ActionKind::FileWrite { .. } if matches!(a.key_info.as_deref(), Some(zel_analysis::ActionKeyInfo::RepoMapping { .. })) => {
+        ActionKind::FileWrite { .. }
+            if matches!(
+                a.key_info.as_deref(),
+                Some(zel_analysis::ActionKeyInfo::RepoMapping { .. })
+            ) =>
+        {
             add_repo_mapping_key(&mut fp, a.key_info.as_ref().unwrap());
         }
-        ActionKind::Spawn { .. } if matches!(a.key_info.as_deref(), Some(zel_analysis::ActionKeyInfo::TestRunner(_))) => {
+        ActionKind::Spawn { .. }
+            if matches!(
+                a.key_info.as_deref(),
+                Some(zel_analysis::ActionKeyInfo::TestRunner(_))
+            ) =>
+        {
             if let Some(zel_analysis::ActionKeyInfo::TestRunner(t)) = a.key_info.as_deref() {
                 add_test_runner_key(&mut fp, t, &a.execution_requirements);
             }
         }
-        ActionKind::FileWrite { content, is_executable } => {
+        ActionKind::FileWrite {
+            content,
+            is_executable,
+        } => {
             let bytes = content.render();
             fp.add_string(FILE_WRITE_GUID)
                 .add_bool(*is_executable)
@@ -250,7 +331,12 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
         }
         ActionKind::Spawn { .. } => {
             fp.add_string(SPAWN_GUID);
-            if let ActionKind::Spawn { executable, arguments, .. } = &a.kind {
+            if let ActionKind::Spawn {
+                executable,
+                arguments,
+                ..
+            } = &a.kind
+            {
                 // `CommandLines`: the executable line, then every `Args` line followed by its
                 // `ParamFileInfo` (plain string arguments only; `Args` objects with
                 // `format_each`/`map_each` have their own fingerprint in Bazel).
@@ -284,7 +370,11 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
             }
             fp.add_string_map(a.execution_requirements.iter());
         }
-        ActionKind::Symlink { target_file, target_path, .. } => match (target_file, target_path) {
+        ActionKind::Symlink {
+            target_file,
+            target_path,
+            ..
+        } => match (target_file, target_path) {
             // `SymlinkAction.computeKey`: the GUID, plus the input path only when it differs from the
             // input artifact (`use_exec_root_for_source`, not modelled: always null here).
             (Some(_), _) | (None, None) => {
@@ -292,10 +382,17 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
             }
             // `UnresolvedSymlinkAction.computeKey` (the explicit `target_type` is not recorded).
             (None, Some(p)) => {
-                fp.add_string(UNRESOLVED_SYMLINK_GUID).add_string(p).add_string("UNSPECIFIED");
+                fp.add_string(UNRESOLVED_SYMLINK_GUID)
+                    .add_string(p)
+                    .add_string("UNSPECIFIED");
             }
         },
-        ActionKind::TemplateExpand { template, substitutions, is_executable, computed_substitutions } => {
+        ActionKind::TemplateExpand {
+            template,
+            substitutions,
+            is_executable,
+            computed_substitutions,
+        } => {
             fp.add_string(TEMPLATE_GUID);
             fp.add_string(if *is_executable { "true" } else { "false" });
             fp.add_string(&format!("ARTIFACT: {}", template.exec_path.path_string()));
@@ -310,7 +407,10 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
     }
     // `SymlinkAction`, `SolibSymlinkAction` and `RunfilesTreeAction` are platform agnostic: they
     // override `getExecutionPlatform` with `PlatformInfo.EMPTY_PLATFORM_INFO`.
-    let agnostic = matches!(a.mnemonic.as_str(), "Symlink" | "ExecutableSymlink" | "SolibSymlink" | "RunfilesTree");
+    let agnostic = matches!(
+        a.mnemonic.as_str(),
+        "Symlink" | "ExecutableSymlink" | "SolibSymlink" | "RunfilesTree"
+    );
     match exec_platform {
         _ if agnostic => {
             fp.add_bool(true);
@@ -354,15 +454,27 @@ mod tests {
         let a = Action::new(
             owner(),
             "FileWrite",
-            ActionKind::FileWrite { content: FileContent::Literal("#!/bin/sh\ntrue\n".into()), is_executable: true },
+            ActionKind::FileWrite {
+                content: FileContent::Literal("#!/bin/sh\ntrue\n".into()),
+                is_executable: true,
+            },
         );
-        assert_eq!(key_on_mac(&a), "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a");
+        assert_eq!(
+            key_on_mac(&a),
+            "c60c798cc3bc62836511bbeff4652c740baf83705716113dbf218e878fd7a46a"
+        );
         let b = Action::new(
             owner(),
             "FileWrite",
-            ActionKind::FileWrite { content: FileContent::Literal("hello\n".into()), is_executable: false },
+            ActionKind::FileWrite {
+                content: FileContent::Literal("hello\n".into()),
+                is_executable: false,
+            },
         );
-        assert_eq!(key_on_mac(&b), "c2deb0bea159fada2a4c523f4e462702506abd451f590e52880764e05e701f92");
+        assert_eq!(
+            key_on_mac(&b),
+            "c2deb0bea159fada2a4c523f4e462702506abd451f590e52880764e05e701f92"
+        );
     }
 
     fn spawn(mnemonic: &str, args: Vec<&str>, env: &[(&str, &str)]) -> Action {
@@ -371,26 +483,45 @@ mod tests {
             mnemonic,
             ActionKind::Spawn {
                 executable: "/bin/bash".into(),
-                arguments: vec![CommandLineArgs { args: args.into_iter().map(String::from).collect(), param_file: None }],
+                arguments: vec![CommandLineArgs {
+                    args: args.into_iter().map(String::from).collect(),
+                    param_file: None,
+                }],
                 shell_command: None,
             },
         );
-        a.env = env.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect::<BTreeMap<_, _>>();
+        a.env = env
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<BTreeMap<_, _>>();
         a
     }
 
     #[test]
     fn spawn_action_keys_match_bazel_9_3_2() {
         // `ctx.actions.run_shell(command = "echo hi > <out>", mnemonic = "Foo")`.
-        let a = spawn("Foo", vec!["-c", "echo hi > bazel-out/darwin_arm64-fastbuild/bin/sh.txt"], &[]);
-        assert_eq!(key_on_mac(&a), "7cae808420194240877b674491e7ee0b5c299911923f48b307818bbc720e9b49");
+        let a = spawn(
+            "Foo",
+            vec![
+                "-c",
+                "echo hi > bazel-out/darwin_arm64-fastbuild/bin/sh.txt",
+            ],
+            &[],
+        );
+        assert_eq!(
+            key_on_mac(&a),
+            "7cae808420194240877b674491e7ee0b5c299911923f48b307818bbc720e9b49"
+        );
         // `genrule(cmd = "echo hi > $@")`: 9.3.2's strict action environment.
         let g = spawn(
             "Genrule",
             vec!["-c", "source external/bazel_tools/tools/genrule/genrule-setup.sh; echo hi > bazel-out/darwin_arm64-fastbuild/bin/o.txt"],
             &[("PATH", "/bin:/usr/bin:/usr/local/bin")],
         );
-        assert_eq!(key_on_mac(&g), "63704e266eda4547e7e31cbba63adc3d112c38d0cfa7973022081fcc0392d709");
+        assert_eq!(
+            key_on_mac(&g),
+            "63704e266eda4547e7e31cbba63adc3d112c38d0cfa7973022081fcc0392d709"
+        );
     }
 
     #[test]
@@ -399,9 +530,34 @@ mod tests {
         let mut fp = JFp::new();
         fp.add_uuid("106c1389-88d7-4cc1-8f05-f8a61fd8f7b1");
         assert_eq!(fp.b.len(), 19);
-        assert_eq!(fp.hex_digest(), "23e1b636b669bb504ba6a2464c1089c10a515aaba302ce27fd1cb7c7d1f3b724");
+        assert_eq!(
+            fp.hex_digest(),
+            "23e1b636b669bb504ba6a2464c1089c10a515aaba302ce27fd1cb7c7d1f3b724"
+        );
         let mut fp = JFp::new();
         fp.add_int(-1);
         assert_eq!(fp.b.len(), 10); // negative int32: sign-extended ten-byte varint
+    }
+
+    #[test]
+    fn nested_set_cache_memoizes_array_digest_by_identity() {
+        use zel_analysis::nested_set::{NSet, COMPILE_ORDER};
+        let shared = NSet::build(COMPILE_ORDER, vec!["a", "b"], vec![]);
+        let parent = NSet::build(COMPILE_ORDER, vec!["c"], vec![shared.clone()]);
+        let mut cache = NestedSetFingerprintCache::new();
+        let mut calls = 0usize;
+        let mut fp1 = JFp::new();
+        cache.add_nested_set(&mut fp1, &shared, &mut |s, fp| {
+            calls += 1;
+            fp.add_string(&format!("{s}:{calls}"));
+        });
+        assert_eq!(calls, 2);
+        let mut fp2 = JFp::new();
+        cache.add_nested_set(&mut fp2, &parent, &mut |s, fp| {
+            calls += 1;
+            fp.add_string(&format!("{s}:{calls}"));
+        });
+        // The shared child array digest is reused (only `"c"` invokes the mapper).
+        assert_eq!(calls, 3);
     }
 }

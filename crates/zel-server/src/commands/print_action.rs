@@ -19,7 +19,6 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use zel_analysis::ActionAnalysisMetadata;
 use zel_options::ParsedCommandOptions;
-use zel_packages::Target as PkgTarget;
 use zel_util::ExitCode;
 
 impl BlazeRuntime {
@@ -50,7 +49,14 @@ impl BlazeRuntime {
                 return ExitCode::BUILD_FAILURE;
             }
         };
-        let (resolved_targets, _) = match self.resolve_for_build(&resolver, &patterns, parsed.keep_going, false, true, stderr) {
+        let (resolved_targets, _) = match self.resolve_for_build(
+            &resolver,
+            &patterns,
+            parsed.keep_going,
+            false,
+            true,
+            stderr,
+        ) {
             Ok(r) => r,
             Err(code) => {
                 writeln_bytes(stderr, "ERROR: Build failed when printing actions");
@@ -71,13 +77,14 @@ impl BlazeRuntime {
                 return ExitCode::BUILD_FAILURE;
             }
         };
-        let analysis = match self.analyze_roots(&parsed, &build_loader, &resolved_targets, &config, stderr) {
-            Ok(a) => a,
-            Err(code) => {
-                writeln_bytes(stderr, "ERROR: Build failed when printing actions");
-                return code;
-            }
-        };
+        let analysis =
+            match self.analyze_roots(&parsed, &build_loader, &resolved_targets, &config, stderr) {
+                Ok(a) => a,
+                Err(code) => {
+                    writeln_bytes(stderr, "ERROR: Build failed when printing actions");
+                    return code;
+                }
+            };
         if !analysis.failed.is_empty() {
             writeln_bytes(stderr, "ERROR: Build failed when printing actions");
             return ExitCode::BUILD_FAILURE;
@@ -90,7 +97,10 @@ impl BlazeRuntime {
                 is_genrule = true;
                 writeln_bytes(
                     stderr,
-                    &format!("INFO: Analyzed target {} (2 packages loaded, 2 targets configured).", ct.label),
+                    &format!(
+                        "INFO: Analyzed target {} (2 packages loaded, 2 targets configured).",
+                        ct.label
+                    ),
                 );
                 writeln_bytes(stderr, "INFO: Found 1 target...");
                 writeln_bytes(stderr, &format!("Target {} up-to-date:", ct.label));
@@ -101,7 +111,10 @@ impl BlazeRuntime {
                 let cfg_hash = ct.configuration.checksum();
                 writeln_bytes(
                     stderr,
-                    &format!("ERROR: ConfiguredTarget({}, {}) is not a supported target kind", ct.label, cfg_hash),
+                    &format!(
+                        "ERROR: ConfiguredTarget({}, {}) is not a supported target kind",
+                        ct.label, cfg_hash
+                    ),
                 );
             }
         }
@@ -109,9 +122,10 @@ impl BlazeRuntime {
             return ExitCode::BUILD_FAILURE;
         }
 
-        let mnemonics: HashSet<String> = crate::loading::opt_list(&parsed, "print_action_mnemonics")
-            .into_iter()
-            .collect();
+        let mnemonics: HashSet<String> =
+            crate::loading::opt_list(&parsed, "print_action_mnemonics")
+                .into_iter()
+                .collect();
         let mut printed_actions = 0;
         let mut action_id = 0;
         for ct in &analysis.configured {
@@ -141,7 +155,10 @@ impl BlazeRuntime {
         }
         if printed_actions == 0 {
             for ct in &analysis.configured {
-                writeln_bytes(stderr, &format!("ERROR: {} is not a supported target kind", ct.label));
+                writeln_bytes(
+                    stderr,
+                    &format!("ERROR: {} is not a supported target kind", ct.label),
+                );
             }
             return ExitCode::BUILD_FAILURE;
         }
@@ -151,7 +168,12 @@ impl BlazeRuntime {
     /// `MobileInstallCommand`: a build of the first target with the options
     /// `editOptions` adds (`--aspects=<mobile_install_aspect>%MIASPECT` and the internal output
     /// groups); the other residue are arguments of the deployer.
-    pub(crate) fn cmd_mobile_install(&self, args: &[String], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> ExitCode {
+    pub(crate) fn cmd_mobile_install(
+        &self,
+        args: &[String],
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
         let parsed = match ParsedCommandOptions::parse_for_command("mobile-install", args) {
             Ok(p) => p,
             Err(e) => {
@@ -180,18 +202,31 @@ impl BlazeRuntime {
             "--output_groups=mobile_install_INTERNAL_".to_string(),
             "--output_groups=mobile_install_launcher_INTERNAL_".to_string(),
         ];
-        let at = build_args.iter().position(|a| a == "--").unwrap_or(build_args.len());
+        let at = build_args
+            .iter()
+            .position(|a| a == "--")
+            .unwrap_or(build_args.len());
         for (i, e) in edit.into_iter().enumerate() {
             build_args.insert(at + i, e);
         }
         let code = self.cmd_build_or_test("mobile-install", &build_args, stdout, stderr);
         if code != ExitCode::SUCCESS {
-            writeln_bytes(stderr, "ERROR: Build failed. Not running mobile-install on target.");
+            writeln_bytes(
+                stderr,
+                "ERROR: Build failed. Not running mobile-install on target.",
+            );
             return code;
         }
         let patterns = self.command_patterns(&parsed).unwrap_or_default();
         let resolver = self.pattern_resolver(&parsed);
-        if let Ok((targets, _)) = self.resolve_for_build(&resolver, &patterns[..patterns.len().min(1)], parsed.keep_going, false, true, &mut Vec::new()) {
+        if let Ok((targets, _)) = self.resolve_for_build(
+            &resolver,
+            &patterns[..patterns.len().min(1)],
+            parsed.keep_going,
+            false,
+            true,
+            &mut Vec::new(),
+        ) {
             if let Some(t) = targets.first() {
                 let supported = parsed
                     .parsed_options
@@ -204,7 +239,10 @@ impl BlazeRuntime {
                 if !list.is_empty() && !list.contains(&class) {
                     writeln_bytes(
                         stderr,
-                        &format!("ERROR: mobile-install can only be run on [{}] targets. Got: {class}", list.join(", ")),
+                        &format!(
+                            "ERROR: mobile-install can only be run on [{}] targets. Got: {class}",
+                            list.join(", ")
+                        ),
                     );
                     // `MobileInstall.Code.TARGET_TYPE_INVALID`.
                     return ExitCode::from_numeric(6);

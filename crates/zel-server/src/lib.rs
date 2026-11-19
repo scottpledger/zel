@@ -18,14 +18,14 @@
 mod analysis_phase;
 pub mod commands;
 pub mod daemon;
-pub mod live;
-pub mod sys;
 mod exec_phase;
 mod failure;
+pub mod live;
 mod loading;
 mod observability;
 mod post_analysis_query;
 mod query_cmd;
+pub mod sys;
 
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, BufWriter};
@@ -34,10 +34,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use zel_analysis::BuildConfigurationKey;
 use zel_cmdline::PackageIdentifier;
-use zel_events::{BepEvent, Reporter};
+use zel_events::BepEvent;
 use zel_exec::{plant_symlink_forest, CompactPersistentActionCache};
-use zel_options::{canonicalize_flags, ParsedCommandOptions};
-use zel_packages::Package;
+use zel_options::ParsedCommandOptions;
 use zel_proto::command_server::{
     CancelRequest, CancelResponse, ExecRequest, PathToReplace, PathToReplaceType, PingRequest,
     PingResponse, RunRequest, RunResponse, ServerInfo, TerminalSizeRequest, TerminalSizeResponse,
@@ -136,7 +135,8 @@ impl BlazeDirectories {
     }
 
     pub fn execroot(&self) -> PathFragment {
-        self.execroot_base().get_relative_str(&self.execroot_workspace_name())
+        self.execroot_base()
+            .get_relative_str(&self.execroot_workspace_name())
     }
 
     pub fn output_path(&self) -> PathFragment {
@@ -182,7 +182,11 @@ static COMMAND_START: std::sync::Mutex<Option<std::time::Instant>> = std::sync::
 
 /// Seconds since the running build-like command started (for `INFO: Elapsed time` lines).
 pub(crate) fn command_elapsed_secs() -> f64 {
-    COMMAND_START.lock().unwrap_or_else(|e| e.into_inner()).map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0)
+    COMMAND_START
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .map(|t| t.elapsed().as_secs_f64())
+        .unwrap_or(0.0)
 }
 
 pub struct BlazeRuntime {
@@ -197,6 +201,8 @@ pub struct BlazeRuntime {
     pub action_cache: Mutex<CompactPersistentActionCache>,
     pub server_pid: u32,
     pub shutdown_requested: AtomicBool,
+    pub expunge_requested: AtomicBool,
+    pub skip_action_cache_save: AtomicBool,
     /// External repository resolver of the running command (per runtime, not process-global).
     pub repo_resolver: zel_bzlmod::resolver::CommandResolver,
     /// Serialises build-family commands of this server (Bazel's `BlazeCommandDispatcher` runs one
@@ -223,15 +229,20 @@ impl BlazeRuntime {
             zel_query::run_genquery(loader, expr, scope, strict, opts)
         }));
         let default_config = BuildConfigurationKey::target(Self::host_cpu(), "fastbuild");
-        zel_bzlmod::session::set_install_base(std::path::Path::new(&dirs.install_base.path_string()));
-        zel_bzlmod::session::set_output_user_root(std::path::Path::new(&dirs.output_user_root.path_string()));
-        let repo_resolver = zel_bzlmod::resolver::CommandResolver::new();
-        let configured_target: Arc<dyn SkyFunction> = Arc::new(analysis_phase::skyframe_configured_target_function(
-            default_config,
-            Arc::clone(&fs),
-            dirs.workspace_dir.clone(),
-            repo_resolver.clone(),
+        zel_bzlmod::session::set_install_base(std::path::Path::new(
+            &dirs.install_base.path_string(),
         ));
+        zel_bzlmod::session::set_output_user_root(std::path::Path::new(
+            &dirs.output_user_root.path_string(),
+        ));
+        let repo_resolver = zel_bzlmod::resolver::CommandResolver::new();
+        let configured_target: Arc<dyn SkyFunction> =
+            Arc::new(analysis_phase::skyframe_configured_target_function(
+                default_config,
+                Arc::clone(&fs),
+                dirs.workspace_dir.clone(),
+                repo_resolver.clone(),
+            ));
         let skyframe = SkyframeExecutor::with_functions_and_resolver(
             Arc::clone(&fs),
             dirs.workspace_dir.clone(),
@@ -254,6 +265,8 @@ impl BlazeRuntime {
             action_cache: Mutex::new(action_cache),
             server_pid,
             shutdown_requested: AtomicBool::new(false),
+            expunge_requested: AtomicBool::new(false),
+            skip_action_cache_save: AtomicBool::new(false),
             repo_resolver,
             command_lock: Mutex::new(()),
             client_env: Mutex::new(Arc::new(BTreeMap::new())),
@@ -282,40 +295,24 @@ impl BlazeRuntime {
     /// Executes a single Bazel command and returns a `RunResponse`.
     pub fn dispatch_command(&self, req: &RunRequest, response_cookie: &str) -> RunResponse {
         self.command_seq.fetch_add(1, Ordering::SeqCst);
-        let raw_args: Vec<String> = req
+        let args: Vec<String> = req
             .arg
             .iter()
             .map(|b| String::from_utf8_lossy(b).into_owned())
             .collect();
-        // `--client_env=NAME=VALUE` (hidden `ClientOptions.client_env`, sent by the client for
-        // every command): the per-command client environment. Later occurrences win. Requests
-        // that carry none (in-process callers without a client) fall back to the process
-        // environment, which for such callers *is* the client's.
-        let mut client_env: BTreeMap<String, String> = BTreeMap::new();
-        let mut saw_client_env = false;
-        let mut args: Vec<String> = Vec::with_capacity(raw_args.len());
-        let mut after_terminator = false;
-        for a in raw_args {
-            if a == "--" {
-                after_terminator = true;
-            }
-            match (after_terminator, zel_util::action_env::parse_client_env_arg(&a)) {
-                (false, Some((k, v))) => {
-                    saw_client_env = true;
-                    client_env.insert(k, v);
-                }
-                _ => args.push(a),
-            }
-        }
-        if !saw_client_env {
-            client_env = std::env::vars().collect();
-        }
-        let client_env = Arc::new(client_env);
 
         let command = args.first().map(|s| s.as_str()).unwrap_or("help");
         // `ALL_HELP_OPTIONS`: be gentle to users who want to find out about the invocation.
-        let command = if matches!(command, "--help" | "-help" | "-h") { "help" } else { command };
+        let command = if matches!(command, "--help" | "-help" | "-h") {
+            "help"
+        } else {
+            command
+        };
         let cmd_args = if args.len() > 1 { &args[1..] } else { &[] };
+        // `ClientOptions.clientEnv` / `CommandEnvironment`: only the parsed `--client_env`
+        // assignments (both `--client_env=K=V` and `--client_env K=V` forms, last value wins).
+        // When omitted, the client environment map is empty (never copies server process env).
+        let client_env = Arc::new(ParsedCommandOptions::extract_client_env(cmd_args));
 
         // `--digest_function` is a startup option: every digest computed by the execution phase
         // (action cache, worker inputs, test cache keys) uses it.
@@ -385,44 +382,77 @@ impl BlazeRuntime {
             .filter(|spec| spec.must_run_in_workspace && !self.in_workspace());
         let downloader_config_error: Option<String> = if matches!(
             command,
-            "aquery" | "build" | "config" | "coverage" | "cquery" | "fetch" | "info" | "mod" | "print_action" | "query" | "run" | "test" | "vendor"
+            "aquery"
+                | "build"
+                | "config"
+                | "coverage"
+                | "cquery"
+                | "fetch"
+                | "info"
+                | "mod"
+                | "print_action"
+                | "query"
+                | "run"
+                | "test"
+                | "vendor"
         ) {
-            zel_bzlmod::session::check_downloader_config(command, cmd_args, std::path::Path::new(self.dirs.workspace_dir.path_string())).err()
+            zel_bzlmod::session::check_downloader_config(
+                command,
+                cmd_args,
+                std::path::Path::new(self.dirs.workspace_dir.path_string()),
+            )
+            .err()
         } else {
             None
         };
-        let mut exit_code = match command {
+        let exit_code = match command {
             _ if downloader_config_error.is_some() => {
                 crate::query_cmd::emit_deprecation_warnings(command, cmd_args, &mut stderr);
-                writeln_bytes(&mut stderr, &format!("ERROR: {}", downloader_config_error.clone().unwrap_or_default()));
+                writeln_bytes(
+                    &mut stderr,
+                    &format!(
+                        "ERROR: {}",
+                        downloader_config_error.clone().unwrap_or_default()
+                    ),
+                );
                 ExitCode::COMMAND_LINE_ERROR
             }
             _ if module_resolution_failure.is_some() => {
                 let mut code = module_resolution_failure.unwrap_or(1);
                 let messages = self.repo_resolver.take_messages();
-                // Evaluation failures of the root `MODULE.bazel` end the build with `BAD_MODULE` (48).
-                if messages.iter().any(|m| m.contains("error executing MODULE.bazel file for") || m.contains("syntax error in MODULE.bazel file for")) {
-                    code = 48;
-                }
-                for line in messages {
-                    if let Some(rest) = line.strip_prefix("ERROR: ") {
-                        let rest = rest.strip_prefix("ERROR: ").unwrap_or(rest);
-                        // Bazel: "Error computing the main repository mapping: <cause>"; with several error
-                        // lines (traceback, then the `... MODULE.bazel file for` trailer) only the last carries it.
-                        let msg = if rest.contains("Error computing the main repository mapping") {
-                            rest.to_string()
-                        } else if let Some(i) = rest.rfind("\nERROR: ") {
-                            let (head, tail) = rest.split_at(i + "\nERROR: ".len());
-                            format!("{head}Error computing the main repository mapping: {tail}")
-                        } else {
-                            format!("Error computing the main repository mapping: {rest}")
-                        };
-                        writeln_bytes(&mut stderr, &format!("ERROR: {msg}"));
-                    } else {
-                        writeln_bytes(&mut stderr, &line);
+                if code == 8 && matches!(command, "test" | "coverage") {
+                    writeln_bytes(&mut stderr, "ERROR: test command interrupted");
+                    ExitCode::INTERRUPTED
+                } else {
+                    // Evaluation failures of the root `MODULE.bazel` end the build with `BAD_MODULE` (48).
+                    if messages.iter().any(|m| {
+                        m.contains("error executing MODULE.bazel file for")
+                            || m.contains("syntax error in MODULE.bazel file for")
+                    }) {
+                        code = 48;
                     }
+                    for line in messages {
+                        if let Some(rest) = line.strip_prefix("ERROR: ") {
+                            let rest = rest.strip_prefix("ERROR: ").unwrap_or(rest);
+                            // Bazel: "Error computing the main repository mapping: <cause>"; with several error
+                            // lines (traceback, then the `... MODULE.bazel file for` trailer) only the last carries it.
+                            let msg = if rest
+                                .contains("Error computing the main repository mapping")
+                            {
+                                rest.to_string()
+                            } else if let Some(i) = rest.rfind("\nERROR: ") {
+                                let (head, tail) = rest.split_at(i + "\nERROR: ".len());
+                                format!("{head}Error computing the main repository mapping: {tail}")
+                            } else {
+                                format!("Error computing the main repository mapping: {rest}")
+                            };
+                            writeln_bytes(&mut stderr, &format!("ERROR: {msg}"));
+                        } else {
+                            writeln_bytes(&mut stderr, &line);
+                        }
+                    }
+                    ExitCode::from_numeric(code)
                 }
-                ExitCode::from_numeric(code)
             }
             _ if not_in_workspace.is_some() => {
                 let msg = commands::not_in_workspace_message(command);
@@ -436,9 +466,7 @@ impl BlazeRuntime {
             "version" => self.cmd_version(cmd_args, &mut stdout, &mut stderr),
             "help" => self.cmd_help(cmd_args, &mut stdout, &mut stderr),
             "info" => self.cmd_info(cmd_args, &mut stdout, &mut stderr, &mut command_extensions),
-            "canonicalize-flags" => {
-                self.cmd_canonicalize_flags(cmd_args, &mut stdout, &mut stderr)
-            }
+            "canonicalize-flags" => self.cmd_canonicalize_flags(cmd_args, &mut stdout, &mut stderr),
             "shutdown" => self.cmd_shutdown(cmd_args, &mut stderr, &mut termination_expected),
             "license" => self.cmd_license(cmd_args, &mut stdout, &mut stderr),
             "dump" => self.cmd_dump(cmd_args, &mut stdout, &mut stderr),
@@ -455,7 +483,9 @@ impl BlazeRuntime {
                     &mut termination_expected,
                 )
             }
-            "mod" | "fetch" | "vendor" => self.cmd_bzlmod(command, cmd_args, &mut stdout, &mut stderr),
+            "mod" | "fetch" | "vendor" => {
+                self.cmd_bzlmod(command, cmd_args, &mut stdout, &mut stderr)
+            }
             "query" | "cquery" | "aquery" => {
                 self.cmd_query(command, cmd_args, &mut stdout, &mut stderr)
             }
@@ -467,7 +497,10 @@ impl BlazeRuntime {
                 let msg = format!("Command '{unknown}' not found.");
                 writeln_bytes(
                     &mut stderr,
-                    &format!("Command '{unknown}' not found. Try '{} help'.", commands::product_name()),
+                    &format!(
+                        "Command '{unknown}' not found. Try '{} help'.",
+                        commands::product_name()
+                    ),
                 );
                 failure_detail = Some(FailureDetail::new(
                     msg,
@@ -479,7 +512,9 @@ impl BlazeRuntime {
 
         if uses_external_repos {
             let messages = self.repo_resolver.finish();
-            if !matches!(command, "query" | "cquery" | "aquery") && exit_code != ExitCode::COMMAND_LINE_ERROR {
+            if !matches!(command, "query" | "cquery" | "aquery")
+                && exit_code != ExitCode::COMMAND_LINE_ERROR
+            {
                 for line in messages {
                     if !line.starts_with("ERROR:") || exit_code != ExitCode::SUCCESS {
                         writeln_bytes(&mut stderr, &line);
@@ -492,26 +527,37 @@ impl BlazeRuntime {
         // analog of `java.log`.
         // `clean` does not write a command log (otherwise it could not delete the output base),
         // and `--nowrite_command_log` disables it.
-        let write_command_log = !startup
-            .iter()
-            .any(|o| o == "--nowrite_command_log" || o == "--write_command_log=false")
-            && command != "clean";
+        let write_command_log = !startup.iter().any(|o| {
+            o == "--nowrite_command_log"
+                || matches!(
+                    o.strip_prefix("--write_command_log="),
+                    Some("false" | "0" | "no" | "f" | "n")
+                )
+        }) && command != "clean";
         if write_command_log {
             let ob = std::path::Path::new(self.dirs.output_base.path_string());
             let _ = zel_exec::layout::ensure_output_base_layout(
                 ob,
                 Some(std::path::Path::new(self.dirs.install_base.path_string())),
             );
-            let _ = zel_exec::layout::write_command_log(ob, &stdout, &stderr);
+            let (mut log_out, mut log_err) = crate::live::take_history();
+            log_out.extend_from_slice(&stdout);
+            log_err.extend_from_slice(&stderr);
+            let _ = zel_exec::layout::write_command_log(ob, &log_out, &log_err);
             let _ = zel_exec::layout::append_server_log(
                 ob,
                 self.server_pid,
                 zel_exec::layout::server_start_secs(),
-                &format!("I Command: {} exit_code={}", command, exit_code.numeric_exit_code()),
+                &format!(
+                    "I Command: {} exit_code={}",
+                    command,
+                    exit_code.numeric_exit_code()
+                ),
             );
         }
 
-        let failure_detail = failure_detail.or_else(|| failure::default_for(exit_code, command, &stderr));
+        let failure_detail =
+            failure_detail.or_else(|| failure::default_for(exit_code, command, &stderr));
         RunResponse {
             cookie: response_cookie.to_string(),
             standard_output: stdout,
@@ -537,7 +583,13 @@ impl BlazeRuntime {
         let ws = std::path::PathBuf::from(self.dirs.workspace_dir.path_string());
         let ob = std::path::PathBuf::from(self.dirs.output_base.path_string());
         crate::query_cmd::emit_deprecation_warnings(command, args, stderr);
-        let out = zel_bzlmod::commands::run_bzlmod_command_with_env(command, args, &ws, &ob, (*self.client_env()).clone());
+        let out = zel_bzlmod::commands::run_bzlmod_command_with_env(
+            command,
+            args,
+            &ws,
+            &ob,
+            (*self.client_env()).clone(),
+        );
         out_write_str(stdout, &out.stdout);
         out_write_str(stderr, &out.stderr);
         match out.exit_code {
@@ -562,7 +614,10 @@ impl BlazeRuntime {
         stderr: &mut Vec<u8>,
     ) -> ExitCode {
         let parsed = ParsedCommandOptions::parse_for_command(command, args).ok();
-        let debug_all_events = parsed.as_ref().and_then(|p| p.get_bool("experimental_ui_debug_all_events")).unwrap_or(false);
+        let debug_all_events = parsed
+            .as_ref()
+            .and_then(|p| p.get_bool("experimental_ui_debug_all_events"))
+            .unwrap_or(false);
         let obs = observability::BuildObserver::new(
             parsed.as_ref(),
             command,
@@ -581,14 +636,23 @@ impl BlazeRuntime {
             debug_out.push_str("PROGRESS <no location>: Loading package: @@platforms//host\n");
             debug_out.push_str("PROGRESS <no location>: Loading package: @@platforms//os\n");
             debug_out.push_str("PROGRESS <no location>: Loading package: @@platforms//cpu\n");
-            debug_out.push_str("START <no location>: [0 / 1] BazelWorkspaceStatusAction stable-status.txt\n");
-            debug_out.push_str("FINISH <no location>: [1 / 1] BazelWorkspaceStatusAction stable-status.txt\n");
-            debug_out.push_str("PROGRESS <no location>: Loading package: @@bazel_tools//tools/genrule\n");
+            debug_out.push_str(
+                "START <no location>: [0 / 1] BazelWorkspaceStatusAction stable-status.txt\n",
+            );
+            debug_out.push_str(
+                "FINISH <no location>: [1 / 1] BazelWorkspaceStatusAction stable-status.txt\n",
+            );
+            debug_out.push_str(
+                "PROGRESS <no location>: Loading package: @@bazel_tools//tools/genrule\n",
+            );
             stdout.clear();
             let _ = obs.take_stdout();
             let err_str = String::from_utf8_lossy(stderr).into_owned();
             for line in err_str.lines() {
-                if line.contains("no actions running") || line.trim() == "STDERR <no location>:" || line.trim().is_empty() {
+                if line.contains("no actions running")
+                    || line.trim() == "STDERR <no location>:"
+                    || line.trim().is_empty()
+                {
                     continue;
                 }
                 let formatted = if let Some(rest) = line.strip_prefix("INFO: ") {
@@ -644,14 +708,7 @@ impl BlazeRuntime {
     ) -> ExitCode {
         let cmd_started = std::time::Instant::now();
         *COMMAND_START.lock().unwrap_or_else(|e| e.into_inner()) = Some(cmd_started);
-        // `CoverageCommand.editOptions`: the coverage command always collects coverage (a
-        // computed default that later command-line flags may still override).
-        let parse_args: Vec<String> = if command == "coverage" {
-            std::iter::once("--collect_code_coverage".to_string()).chain(args.iter().cloned()).collect()
-        } else {
-            args.to_vec()
-        };
-        let parsed = match ParsedCommandOptions::parse_for_command(command, &parse_args) {
+        let parsed = match ParsedCommandOptions::parse_for_command(command, args) {
             Ok(p) => p,
             Err(e) => {
                 writeln_bytes(stderr, &e.format_bazel_error());
@@ -666,7 +723,13 @@ impl BlazeRuntime {
             if matches!(command, "build" | "test" | "run" | "coverage")
                 && e.contains("no strategy with that identifier was registered")
             {
-                writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", cmd_started.elapsed().as_secs_f64()));
+                writeln_bytes(
+                    stderr,
+                    &format!(
+                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                        cmd_started.elapsed().as_secs_f64()
+                    ),
+                );
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             }
@@ -685,12 +748,22 @@ impl BlazeRuntime {
                 if !visible.is_empty() {
                     for o in exec_phase::opt_all(&parsed, "override_repository") {
                         let name = o.split_once('=').map(|(n, _)| n).unwrap_or(&o);
-                        if name.is_empty() || name.contains('+') || name.contains('~') || name.starts_with('@') {
+                        if name.is_empty()
+                            || name.contains('+')
+                            || name.contains('~')
+                            || name.starts_with('@')
+                        {
                             continue;
                         }
                         if !visible.iter().any(|v| v == name) {
                             writeln_bytes(stderr, &format!("ERROR: no repository visible as '@{name}' from the main repository, but overridden with --override_repository. Use --inject_repository to add new repositories."));
-                            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s", cmd_started.elapsed().as_secs_f64()));
+                            writeln_bytes(
+                                stderr,
+                                &format!(
+                                    "INFO: Elapsed time: {:.3}s",
+                                    cmd_started.elapsed().as_secs_f64()
+                                ),
+                            );
                             writeln_bytes(stderr, "INFO: 0 processes.");
                             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                             return ExitCode::from_numeric(48);
@@ -699,20 +772,32 @@ impl BlazeRuntime {
                 }
             }
             crate::query_cmd::emit_deprecation_warnings(command, args, stderr);
-            if let Some(sb) = exec_phase::opt_last(&parsed, "sandbox_base").filter(|s| !s.is_empty()) {
+            if let Some(sb) =
+                exec_phase::opt_last(&parsed, "sandbox_base").filter(|s| !s.is_empty())
+            {
                 if !std::path::Path::new(&sb).exists() {
                     writeln_bytes(stderr, &format!("ERROR: Failed to initialize sandbox: [unix_jni.cc:382] {sb} (No such file or directory)"));
-                    writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s", cmd_started.elapsed().as_secs_f64()));
+                    writeln_bytes(
+                        stderr,
+                        &format!(
+                            "INFO: Elapsed time: {:.3}s",
+                            cmd_started.elapsed().as_secs_f64()
+                        ),
+                    );
                     writeln_bytes(stderr, "INFO: 0 processes.");
                     writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                     return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
                 }
             }
             // `RemoteModule.beforeCommand` reports the invocation id once a cache/executor is set.
-            if ["remote_cache", "remote_executor", "disk_cache"].iter().any(|f| exec_phase::opt_last(&parsed, f).map_or(false, |v| !v.is_empty())) {
+            if ["remote_cache", "remote_executor", "disk_cache"]
+                .iter()
+                .any(|f| exec_phase::opt_last(&parsed, f).is_some_and(|v| !v.is_empty()))
+            {
                 writeln_bytes(stderr, &format!("INFO: Invocation ID: {}", pseudo_uuid()));
             }
-            if let Some(dc) = exec_phase::opt_last(&parsed, "disk_cache").filter(|s| !s.is_empty()) {
+            if let Some(dc) = exec_phase::opt_last(&parsed, "disk_cache").filter(|s| !s.is_empty())
+            {
                 let abs = if std::path::Path::new(&dc).is_absolute() {
                     std::path::PathBuf::from(&dc)
                 } else {
@@ -734,7 +819,10 @@ impl BlazeRuntime {
                         }
                         failing = up;
                     }
-                    writeln_bytes(stderr, &format!("ERROR: [unix_jni.cc:471] {} ({why})", failing.display()));
+                    writeln_bytes(
+                        stderr,
+                        &format!("ERROR: [unix_jni.cc:471] {} ({why})", failing.display()),
+                    );
                     writeln_bytes(stderr, "ERROR: Error initializing RemoteModule");
                     return ExitCode::COMMAND_LINE_ERROR;
                 }
@@ -748,11 +836,22 @@ impl BlazeRuntime {
         }
         // `BuildEventServiceModule`: an unwritable `--build_event_*_file` aborts the command.
         for (flag, path) in [
-            ("build_event_text_file", parsed.get_str("build_event_text_file")),
-            ("build_event_binary_file", parsed.get_str("build_event_binary_file")),
-            ("build_event_json_file", parsed.get_str("build_event_json_file")),
+            (
+                "build_event_text_file",
+                parsed.get_str("build_event_text_file"),
+            ),
+            (
+                "build_event_binary_file",
+                parsed.get_str("build_event_binary_file"),
+            ),
+            (
+                "build_event_json_file",
+                parsed.get_str("build_event_json_file"),
+            ),
         ] {
-            let Some(path) = path.filter(|p| !p.is_empty()) else { continue };
+            let Some(path) = path.filter(|p| !p.is_empty()) else {
+                continue;
+            };
             let abs = if std::path::Path::new(path).is_absolute() {
                 std::path::PathBuf::from(path)
             } else {
@@ -778,7 +877,10 @@ impl BlazeRuntime {
                 }
                 let detail = format!("[unix_jni.cc:471] {} ({why})", failing.display());
                 writeln_bytes(stderr, &format!("ERROR: {detail}"));
-                writeln_bytes(stderr, &format!("ERROR: Unable to write to '{path}'. Omitting --{flag}. {detail}"));
+                writeln_bytes(
+                    stderr,
+                    &format!("ERROR: Unable to write to '{path}'. Omitting --{flag}. {detail}"),
+                );
                 return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
             }
         }
@@ -787,7 +889,7 @@ impl BlazeRuntime {
             let get_all = |n: &str| exec_phase::opt_all(p, n);
             let bep_opts = zel_events::bep::BepOptions::from_flags(&get, &get_all);
             if bep_opts.any_enabled() {
-                for e in obs.reporter.configure_bep(&bep_opts) {
+                if let Some(e) = obs.reporter.configure_bep(&bep_opts).into_iter().next() {
                     writeln_bytes(stderr, &format!("ERROR: {e}"));
                     return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
                 }
@@ -809,6 +911,16 @@ impl BlazeRuntime {
             self,
             parsed.get_bool("discard_analysis_cache").unwrap_or(false),
         );
+        if !parsed.raw_starlark_args.is_empty() && self.in_workspace() {
+            let sl_loader = self.make_loader(&parsed);
+            let sl_rel = self.command_relative_dir(&parsed);
+            if let Err(e) =
+                self.parse_and_validate_starlark_options(&parsed, &sl_loader, &sl_rel, false)
+            {
+                writeln_bytes(stderr, &format!("ERROR: {e}"));
+                return ExitCode::COMMAND_LINE_ERROR;
+            }
+        }
         let patterns = match self.command_patterns(&parsed) {
             Ok(p) => p,
             Err(e) => {
@@ -820,21 +932,35 @@ impl BlazeRuntime {
             if command == "build" {
                 writeln_bytes(
                     stderr,
-                    &format!(
-                        "WARNING: Usage: bazel build <options> <targets>.\nInvoke `bazel help build` for full description of usage and options.\nYour request is correct, but requested an empty set of targets. Nothing will be built."
-                    ),
+                    "WARNING: Usage: bazel build <options> <targets>.\nInvoke `bazel help build` for full description of usage and options.\nYour request is correct, but requested an empty set of targets. Nothing will be built.",
                 );
             }
             let is_test = matches!(command, "test" | "coverage");
-            writeln_bytes(stderr, if is_test { "INFO: Found 0 test targets..." } else { "INFO: Found 0 targets..." });
+            writeln_bytes(
+                stderr,
+                if is_test {
+                    "INFO: Found 0 test targets..."
+                } else {
+                    "INFO: Found 0 targets..."
+                },
+            );
             if matches!(command, "build" | "test" | "coverage") {
-                writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", cmd_started.elapsed().as_secs_f64()));
+                writeln_bytes(
+                    stderr,
+                    &format!(
+                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                        cmd_started.elapsed().as_secs_f64()
+                    ),
+                );
                 writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
                 writeln_bytes(stderr, "INFO: Build completed successfully, 1 total action");
             }
             if is_test {
                 // `TestCommand`: testing was requested but the pattern set holds no test target.
-                writeln_bytes(stderr, "ERROR: No test targets were found, yet testing was requested");
+                writeln_bytes(
+                    stderr,
+                    "ERROR: No test targets were found, yet testing was requested",
+                );
                 return ExitCode::NO_TESTS_FOUND;
             }
             return ExitCode::SUCCESS;
@@ -857,26 +983,52 @@ impl BlazeRuntime {
         crate::analysis_phase::TEST_COMMAND.with(|c| c.set(matches!(command, "test" | "coverage")));
         let show_timestamps = exec_phase::opt_bool(&parsed, "show_timestamps", false);
         if show_timestamps {
-            writeln_bytes(stderr, &format!("{}INFO: Current date is {}", timestamp_prefix(), current_date_str()));
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "{}INFO: Current date is {}",
+                    timestamp_prefix(),
+                    current_date_str()
+                ),
+            );
         }
 
         let load_start = std::time::Instant::now();
         let resolver = self.pattern_resolver(&parsed);
         let build_manual_tests = exec_phase::opt_bool(&parsed, "build_manual_tests", false);
-            let filter_manual = !build_manual_tests;
-        let (mut resolved_targets, pattern_errors) =
-            match self.resolve_for_build(&resolver, &patterns, parsed.keep_going, filter_manual, !(command == "test" || command == "coverage"), stderr) {
-                Ok(r) => r,
-                Err(code) => {
-                    if (command == "test" || command == "coverage") && code == ExitCode::PARSING_FAILURE {
-                        writeln_bytes(stderr, "ERROR: Couldn't start the build. Unable to run tests");
-                        return ExitCode::BUILD_FAILURE;
-                    }
-                    return code;
+        let filter_manual = !build_manual_tests;
+        let (mut resolved_targets, pattern_errors) = match self.resolve_for_build(
+            &resolver,
+            &patterns,
+            parsed.keep_going,
+            filter_manual,
+            !(command == "test" || command == "coverage"),
+            stderr,
+        ) {
+            Ok(r) => r,
+            Err(code) => {
+                if command == "test" || command == "coverage" {
+                    writeln_bytes(
+                        stderr,
+                        "ERROR: Couldn't start the build. Unable to run tests",
+                    );
+                    return if code == ExitCode::PARSING_FAILURE {
+                        ExitCode::BUILD_FAILURE
+                    } else {
+                        code
+                    };
                 }
-            };
-        if parsed.keep_going && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."]) {
-            if let Ok(pkg) = resolver.package(&zel_cmdline::PackageIdentifier::create_in_main_repo("").unwrap()) {
+                return code;
+            }
+        };
+        if parsed.keep_going
+            && (parsed.targets == vec!["//:all"]
+                || parsed.targets == vec!["//..."]
+                || parsed.targets == vec!["..."])
+        {
+            if let Ok(pkg) =
+                resolver.package(&zel_cmdline::PackageIdentifier::create_in_main_repo("").unwrap())
+            {
                 if let Some(t) = pkg.targets.get("t_manual") {
                     if !resolved_targets.iter().any(|x| x.label() == t.label()) {
                         resolved_targets.push(t.clone());
@@ -887,20 +1039,90 @@ impl BlazeRuntime {
         // `TargetPatternPhaseFunction.maybeReportDeprecation`.
         for t in &resolved_targets {
             if let zel_packages::Target::Rule(r) = t {
-                if let Some(zel_packages::attr::AttrValue::Str(d)) = r.extra.attr_values.get("deprecation") {
-                    let loc = r.extra.location.clone().map(|l| format!("{l}: ")).unwrap_or_default();
-                    writeln_bytes(stderr, &format!("WARNING: {loc}target '{}' is deprecated: {d}", r.label.canonical_form()));
+                if let Some(zel_packages::attr::AttrValue::Str(d)) =
+                    r.extra.attr_values.get("deprecation")
+                {
+                    let loc = r
+                        .extra
+                        .location
+                        .clone()
+                        .map(|l| format!("{l}: "))
+                        .unwrap_or_default();
+                    writeln_bytes(
+                        stderr,
+                        &format!(
+                            "WARNING: {loc}target '{}' is deprecated: {d}",
+                            r.label.canonical_form()
+                        ),
+                    );
                 }
             }
         }
+        let mut excluded_suite_tests: std::collections::HashSet<zel_cmdline::Label> =
+            std::collections::HashSet::new();
         if command == "test" || command == "coverage" {
+            let expand_suites = exec_phase::opt_bool(&parsed, "expand_test_suites", true);
+            if expand_suites {
+                let mut seen_suite = false;
+                for p in &patterns {
+                    if let Some(neg) = p.strip_prefix('-') {
+                        if seen_suite {
+                            let res = resolver.resolve_patterns(&[neg.to_string()]);
+                            for t in res.targets {
+                                excluded_suite_tests.insert(t.label().clone());
+                            }
+                        }
+                    } else {
+                        let res = resolver.resolve_patterns(&[p.clone()]);
+                        if res.targets.iter().any(|t| matches!(t, zel_packages::Target::Rule(r) if r.rule_class == "test_suite")) {
+                            seen_suite = true;
+                        }
+                    }
+                }
+            }
             let build_loader_check = Arc::clone(resolver.loader());
-            let had_test = resolved_targets.iter().any(|rt| matches!(rt, zel_packages::Target::Rule(rule) if rule.is_test_rule()));
-            let kept_test = resolved_targets.iter().any(|rt| {
-                matches!(rt, zel_packages::Target::Rule(rule) if rule.is_test_rule() && exec_phase::passes_filters_for_label(&rule.label, &build_loader_check, &parsed))
-            });
-            if had_test && !kept_test {
-                writeln_bytes(stderr, "WARNING: All specified test targets were excluded by filters");
+            let mut any_test = false;
+            let mut kept_test = false;
+            for rt in &resolved_targets {
+                if let zel_packages::Target::Rule(rule) = rt {
+                    if rule.rule_class == "test_suite" {
+                        let tr = zel_rules::TargetResolver::new(
+                            Arc::clone(&build_loader_check),
+                            zel_rules::AnalysisConfig::new(),
+                        );
+                        if let Ok(expanded) = tr.expand_test_suites(&rule.label, &[]) {
+                            for l in expanded {
+                                any_test = true;
+                                if !excluded_suite_tests.contains(&l)
+                                    && exec_phase::passes_filters_for_label(
+                                        &l,
+                                        &build_loader_check,
+                                        &parsed,
+                                    )
+                                {
+                                    kept_test = true;
+                                }
+                            }
+                        }
+                    } else if rule.is_test_rule() {
+                        any_test = true;
+                        if !excluded_suite_tests.contains(&rule.label)
+                            && exec_phase::passes_filters_for_label(
+                                &rule.label,
+                                &build_loader_check,
+                                &parsed,
+                            )
+                        {
+                            kept_test = true;
+                        }
+                    }
+                }
+            }
+            if any_test && !kept_test {
+                writeln_bytes(
+                    stderr,
+                    "WARNING: All specified test targets were excluded by filters",
+                );
             }
         }
         let mut implicit_labels: std::collections::HashSet<String> = Default::default();
@@ -918,19 +1140,37 @@ impl BlazeRuntime {
                             }
                         }
                         None => {
-                            let msg = res.errors.first().map(|e| e.message.clone()).unwrap_or_else(|| format!("no such target '{first}'"));
+                            let msg = res
+                                .errors
+                                .first()
+                                .map(|e| e.message.clone())
+                                .unwrap_or_else(|| format!("no such target '{first}'"));
                             let test = resolved_targets.iter().find_map(|t| match t {
                                 zel_packages::Target::Rule(r) if r.is_test_rule() => Some(r),
                                 _ => None,
                             });
                             if let Some(r) = test {
-                                let loc = r.extra.location.clone().map(|l| format!("{l}: ")).unwrap_or_default();
+                                let loc = r
+                                    .extra
+                                    .location
+                                    .clone()
+                                    .map(|l| format!("{l}: "))
+                                    .unwrap_or_default();
                                 writeln_bytes(stderr, &format!("ERROR: {loc}every rule of type {} implicitly depends upon the target '{first}', but this target could not be found because of: {msg}", r.rule_class));
                                 writeln_bytes(stderr, &format!("ERROR: Analysis of target '{}' failed; build aborted: Analysis failed", r.label.canonical_form()));
-                                writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", cmd_started.elapsed().as_secs_f64()));
+                                writeln_bytes(
+                                    stderr,
+                                    &format!(
+                                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                                        cmd_started.elapsed().as_secs_f64()
+                                    ),
+                                );
                                 writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
                                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                                writeln_bytes(stderr, "ERROR: No test targets were found, yet testing was requested");
+                                writeln_bytes(
+                                    stderr,
+                                    "ERROR: Couldn't start the build. Unable to run tests",
+                                );
                                 return ExitCode::BUILD_FAILURE;
                             }
                         }
@@ -952,22 +1192,49 @@ impl BlazeRuntime {
                             });
                             if let Some(r) = test {
                                 if !parsed.parsed_options.contains_key("instrumentation_filter") {
-                                    if let Some(f) = default_instrumentation_filter(&resolved_targets) {
+                                    if let Some(f) =
+                                        default_instrumentation_filter(&resolved_targets)
+                                    {
                                         writeln_bytes(stderr, &format!("INFO: Using default value for --instrumentation_filter: \"{f}\"."));
                                         writeln_bytes(stderr, "INFO: Override the above default with --instrumentation_filter");
                                     }
                                 }
-                                let loc = r.extra.location.clone().map(|l| format!("{l}: ")).unwrap_or_default();
-                                let cause = res.errors.first().map(|e| e.message.clone()).unwrap_or_else(|| format!("no such target '{lbl}'"));
+                                let loc = r
+                                    .extra
+                                    .location
+                                    .clone()
+                                    .map(|l| format!("{l}: "))
+                                    .unwrap_or_default();
+                                let cause = res
+                                    .errors
+                                    .first()
+                                    .map(|e| e.message.clone())
+                                    .unwrap_or_else(|| format!("no such target '{lbl}'"));
                                 writeln_bytes(stderr, &format!("ERROR: {loc}every rule of type {} implicitly depends upon the target '{lbl}', but this target could not be found because of: {cause}", r.rule_class));
                                 writeln_bytes(stderr, &format!("ERROR: Analysis of target '{}' failed; build aborted: Analysis failed", r.label.canonical_form()));
-                                writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", cmd_started.elapsed().as_secs_f64()));
+                                writeln_bytes(
+                                    stderr,
+                                    &format!(
+                                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                                        cmd_started.elapsed().as_secs_f64()
+                                    ),
+                                );
                                 writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
                                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                                writeln_bytes(stderr, "ERROR: No test targets were found, yet testing was requested");
+                                writeln_bytes(
+                                    stderr,
+                                    "ERROR: Couldn't start the build. Unable to run tests",
+                                );
                                 return ExitCode::BUILD_FAILURE;
                             }
-                            writeln_bytes(stderr, &format!("ERROR: Skipping '{lbl}': no such target '{lbl}'"));
+                            writeln_bytes(
+                                stderr,
+                                &format!("ERROR: Skipping '{lbl}': no such target '{lbl}'"),
+                            );
+                            writeln_bytes(
+                                stderr,
+                                "ERROR: Couldn't start the build. Unable to run tests",
+                            );
                             return ExitCode::BUILD_FAILURE;
                         }
                         for t in res.targets {
@@ -987,21 +1254,34 @@ impl BlazeRuntime {
             if v == "local" || !allowed.contains(&v.as_str()) {
                 writeln_bytes(stderr, &format!("ERROR: No context of type TestActionContext registered for requested value '{v}', available identifiers are: [exclusive, standalone]"));
                 writeln_bytes(stderr, "unused [interface com.google.devtools.build.lib.analysis.test.TestActionContext]");
-                writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", cmd_started.elapsed().as_secs_f64()));
+                writeln_bytes(
+                    stderr,
+                    &format!(
+                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                        cmd_started.elapsed().as_secs_f64()
+                    ),
+                );
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                writeln_bytes(stderr, "ERROR: Couldn't start the build. Unable to run tests");
+                writeln_bytes(
+                    stderr,
+                    "ERROR: Couldn't start the build. Unable to run tests",
+                );
                 return ExitCode::COMMAND_LINE_ERROR;
             }
         }
         if let Some(v) = exec_phase::opt_last(&parsed, "run_under") {
             if v.trim().is_empty() {
-                writeln_bytes(stderr, "ERROR: While parsing option --run_under=: Empty command");
+                writeln_bytes(
+                    stderr,
+                    "ERROR: While parsing option --run_under=: Empty command",
+                );
                 return ExitCode::COMMAND_LINE_ERROR;
             }
         }
         let target_query = exec_phase::opt_last(&parsed, "target_query").or_else(|| {
-            exec_phase::opt_last(&parsed, "target_query_file").and_then(|f| std::fs::read_to_string(f).ok())
+            exec_phase::opt_last(&parsed, "target_query_file")
+                .and_then(|f| std::fs::read_to_string(f).ok())
         });
         if let Some(query_str) = target_query {
             let filter_pat = query_str.trim();
@@ -1020,7 +1300,13 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, &m);
             }
             let el = load_start.elapsed();
-            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", el.as_secs_f64()));
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                    el.as_secs_f64()
+                ),
+            );
             writeln_bytes(stderr, "INFO: 0 processes.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             return ExitCode::BUILD_FAILURE;
@@ -1038,7 +1324,13 @@ impl BlazeRuntime {
                 writeln_bytes(stderr, &m);
             }
             let el = load_start.elapsed();
-            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", el.as_secs_f64()));
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                    el.as_secs_f64()
+                ),
+            );
             writeln_bytes(stderr, "INFO: 0 processes.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             return ExitCode::BUILD_FAILURE;
@@ -1046,11 +1338,15 @@ impl BlazeRuntime {
         let topo_targets = order;
         let _ = load_start;
         // Skymeld (the default): analysis and execution are one interleaved phase.
-        obs.mark_phase(if exec_phase::opt_bool(&parsed, "build", true) && matches!(command, "build" | "test" | "run" | "coverage") {
-            zel_events::profiler::ProfilePhase::ANALYZE_AND_EXECUTE
-        } else {
-            zel_events::profiler::ProfilePhase::ANALYZE
-        });
+        obs.mark_phase(
+            if exec_phase::opt_bool(&parsed, "build", true)
+                && matches!(command, "build" | "test" | "run" | "coverage")
+            {
+                zel_events::profiler::ProfilePhase::ANALYZE_AND_EXECUTE
+            } else {
+                zel_events::profiler::ProfilePhase::ANALYZE
+            },
+        );
 
         // Analysis: dependency-aware configured-target analysis of the requested targets.
         let build_loader = Arc::clone(resolver.loader());
@@ -1059,7 +1355,13 @@ impl BlazeRuntime {
             Err(e) => {
                 writeln_bytes(stderr, &format!("ERROR: {e}"));
                 let el = load_start.elapsed();
-                writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", el.as_secs_f64()));
+                writeln_bytes(
+                    stderr,
+                    &format!(
+                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                        el.as_secs_f64()
+                    ),
+                );
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
                 return ExitCode::COMMAND_LINE_ERROR;
@@ -1073,11 +1375,41 @@ impl BlazeRuntime {
         if !parsed.get_bool("check_visibility").unwrap_or(true) {
             writeln_bytes(stderr, "WARNING: This build has globally disabled target visibility checking (--nocheck_visibility).");
         }
-        if (command == "coverage" || (command == "test" && exec_phase::opt_bool(&parsed, "collect_code_coverage", false))) && !parsed.parsed_options.contains_key("instrumentation_filter") {
+        if (command == "coverage"
+            || (command == "test" && exec_phase::opt_bool(&parsed, "collect_code_coverage", false)))
+            && !parsed.parsed_options.contains_key("instrumentation_filter")
+        {
             if let Some(f) = default_instrumentation_filter(&resolved_targets) {
-                writeln_bytes(stderr, &format!("INFO: Using default value for --instrumentation_filter: \"{f}\"."));
-                writeln_bytes(stderr, "INFO: Override the above default with --instrumentation_filter");
+                writeln_bytes(
+                    stderr,
+                    &format!("INFO: Using default value for --instrumentation_filter: \"{f}\"."),
+                );
+                writeln_bytes(
+                    stderr,
+                    "INFO: Override the above default with --instrumentation_filter",
+                );
             }
+        }
+        if (command == "test" || command == "coverage")
+            && !exec_phase::opt_bool(&parsed, "analyze", true)
+        {
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                    cmd_started.elapsed().as_secs_f64()
+                ),
+            );
+            writeln_bytes(stderr, "INFO: 0 processes.");
+            writeln_bytes(
+                stderr,
+                "INFO: Build completed successfully, 0 total actions",
+            );
+            writeln_bytes(
+                stderr,
+                "ERROR: Couldn't start the build. Unable to run tests",
+            );
+            return ExitCode::BUILD_FAILURE;
         }
         let pre_analysis_len = stderr.len();
         let analysis =
@@ -1088,25 +1420,47 @@ impl BlazeRuntime {
                     // first: without --keep_going its error replaces the analysis failure.
                     if code == ExitCode::BUILD_FAILURE
                         && !parsed.keep_going
-                        && !parsed.get_str("workspace_status_command").unwrap_or("").is_empty()
-                        && String::from_utf8_lossy(&stderr[pre_analysis_len..]).contains("failed; build aborted")
+                        && !parsed
+                            .get_str("workspace_status_command")
+                            .unwrap_or("")
+                            .is_empty()
+                        && String::from_utf8_lossy(&stderr[pre_analysis_len..])
+                            .contains("failed; build aborted")
                     {
-                        if let Err(e) = self.write_workspace_status_files(&parsed, &self.dirs.output_path()) {
+                        if let Err(e) =
+                            self.write_workspace_status_files(&parsed, &self.dirs.output_path())
+                        {
                             stderr.truncate(pre_analysis_len);
                             writeln_bytes(stderr, &e);
-                            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", cmd_started.elapsed().as_secs_f64()));
+                            writeln_bytes(
+                                stderr,
+                                &format!(
+                                    "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                                    cmd_started.elapsed().as_secs_f64()
+                                ),
+                            );
                             writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
                             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                            if command == "test" || command == "coverage" {
+                                writeln_bytes(
+                                    stderr,
+                                    "ERROR: Couldn't start the build. Unable to run tests",
+                                );
+                            }
                             return ExitCode::BUILD_FAILURE;
                         }
                     }
-                    // `TestCommand`: an aborted analysis leaves no test targets to run.
+                    // `TestCommand`: when `successfulTargets == null` (analysis aborted), Bazel
+                    // prints "Couldn't start the build. Unable to run tests" and keeps the build exit code.
                     if (command == "test" || command == "coverage")
-                        && code == ExitCode::BUILD_FAILURE
-                        && String::from_utf8_lossy(stderr).contains("failed; build aborted")
-                        && String::from_utf8_lossy(stderr).trim_end().ends_with("ERROR: Build did NOT complete successfully")
+                        && String::from_utf8_lossy(stderr)
+                            .trim_end()
+                            .ends_with("ERROR: Build did NOT complete successfully")
                     {
-                        writeln_bytes(stderr, "ERROR: No test targets were found, yet testing was requested");
+                        writeln_bytes(
+                            stderr,
+                            "ERROR: Couldn't start the build. Unable to run tests",
+                        );
                     }
                     return code;
                 }
@@ -1120,7 +1474,9 @@ impl BlazeRuntime {
                     let bad = analysis.configured.iter().find(|ct| {
                         let cf = ct.label.canonical_form();
                         let ts = ct.label.to_string();
-                        (cf == first || ts == first || cf.trim_start_matches('@') == first.trim_start_matches('@'))
+                        (cf == first
+                            || ts == first
+                            || cf.trim_start_matches('@') == first.trim_start_matches('@'))
                             && ct.default_info.executable.is_none()
                     });
                     let test = resolved_targets.iter().find_map(|t| match t {
@@ -1128,52 +1484,120 @@ impl BlazeRuntime {
                         _ => None,
                     });
                     if let (Some(_), Some(r)) = (bad, test) {
-                        let loc = r.extra.location.clone().map(|l| format!("{l}: ")).unwrap_or_default();
-                        writeln_bytes(stderr, &format!("ERROR: {loc}run_under target {first} is not executable"));
-                        writeln_bytes(stderr, &format!("ERROR: Analysis of target '{}' failed; build aborted", r.label.canonical_form()));
-                        writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", cmd_started.elapsed().as_secs_f64()));
+                        let loc = r
+                            .extra
+                            .location
+                            .clone()
+                            .map(|l| format!("{l}: "))
+                            .unwrap_or_default();
+                        writeln_bytes(
+                            stderr,
+                            &format!("ERROR: {loc}run_under target {first} is not executable"),
+                        );
+                        writeln_bytes(
+                            stderr,
+                            &format!(
+                                "ERROR: Analysis of target '{}' failed; build aborted",
+                                r.label.canonical_form()
+                            ),
+                        );
+                        writeln_bytes(
+                            stderr,
+                            &format!(
+                                "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                                cmd_started.elapsed().as_secs_f64()
+                            ),
+                        );
                         writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
                         writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                        writeln_bytes(stderr, "ERROR: No test targets were found, yet testing was requested");
+                        writeln_bytes(
+                            stderr,
+                            "ERROR: Couldn't start the build. Unable to run tests",
+                        );
                         return ExitCode::BUILD_FAILURE;
                     }
                 }
             }
         }
-        let valid_roots: Vec<Arc<zel_analysis::ConfiguredTarget>> = analysis.roots.iter().flatten().filter(|c| !implicit_labels.contains(&c.label.canonical_form())).cloned().collect();
+        let all_valid_roots: Vec<Arc<zel_analysis::ConfiguredTarget>> = analysis
+            .roots
+            .iter()
+            .flatten()
+            .filter(|c| !implicit_labels.contains(&c.label.canonical_form()))
+            .cloned()
+            .collect();
+        let skipped_tests: Vec<String> = all_valid_roots
+            .iter()
+            .filter(|ct| {
+                ct.is_test
+                    && analysis
+                        .skipped_targets
+                        .contains(&ct.label.canonical_form())
+            })
+            .map(|ct| ct.label.canonical_form())
+            .collect();
+        let test_targets_count = all_valid_roots.iter().filter(|ct| ct.is_test).count();
+        let valid_roots: Vec<Arc<zel_analysis::ConfiguredTarget>> = all_valid_roots
+            .into_iter()
+            .filter(|ct| {
+                !analysis
+                    .skipped_targets
+                    .contains(&ct.label.canonical_form())
+            })
+            .collect();
         let count = valid_roots.len();
-        let root_labels: std::collections::HashSet<String> =
-            valid_roots.iter().map(|t| t.label.canonical_form()).collect();
-
-        let test_targets_count = valid_roots.iter().filter(|ct| ct.is_test).count();
+        let root_labels: std::collections::HashSet<String> = valid_roots
+            .iter()
+            .map(|t| t.label.canonical_form())
+            .collect();
         let check_up_to_date = exec_phase::opt_bool(&parsed, "check_up_to_date", false);
         let check_tests_up_to_date = exec_phase::opt_bool(&parsed, "check_tests_up_to_date", false);
         if check_up_to_date || check_tests_up_to_date {
-            let stable = std::path::PathBuf::from(self.dirs.output_path().path_string()).join("stable-status.txt");
+            let stable = std::path::PathBuf::from(self.dirs.output_path().path_string())
+                .join("stable-status.txt");
             if !stable.exists() {
                 writeln_bytes(stderr, "ERROR: action 'BazelWorkspaceStatusAction stable-status.txt' is not up-to-date");
                 let el = load_start.elapsed();
-                writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", el.as_secs_f64()));
+                writeln_bytes(
+                    stderr,
+                    &format!(
+                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                        el.as_secs_f64()
+                    ),
+                );
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                if command == "test" {
-                    writeln_bytes(stderr, "ERROR: No test targets were found, yet testing was requested");
+                if command == "test" || command == "coverage" {
+                    writeln_bytes(
+                        stderr,
+                        "ERROR: Couldn't start the build. Unable to run tests",
+                    );
                 }
                 return ExitCode::BUILD_FAILURE;
             }
         }
-        let mut analyzed_info_line = String::new();
+        let analyzed_info_line;
         {
             // `UiStateTracker.analysisComplete`: "Analyzed N targets (X packages loaded, Y targets configured)."
-            let packages: std::collections::HashSet<String> =
-                topo_targets.iter().map(|t| t.label().package_name().to_string()).collect();
+            let packages: std::collections::HashSet<String> = topo_targets
+                .iter()
+                .map(|t| t.label().package_name().to_string())
+                .collect();
             // With --keep_going and failed roots the loading-phase label count is reported
             // (failed roots included) and the line lands before the per-root WARNINGs; after a
             // dependency cycle bazel never completes the analysis phase, so there is no line.
             let kg_fail = parsed.keep_going && !analysis.failed.is_empty();
-            let total = if kg_fail { count + analysis.failed.len() } else { count };
+            let total = if kg_fail {
+                count + analysis.failed.len()
+            } else {
+                count
+            };
             let what = if total == 1 {
-                let lbl = valid_roots.first().map(|r| r.label.canonical_form()).or_else(|| analysis.failed.first().cloned()).unwrap_or_default();
+                let lbl = valid_roots
+                    .first()
+                    .map(|r| r.label.canonical_form())
+                    .or_else(|| analysis.failed.first().cloned())
+                    .unwrap_or_default();
                 format!("target {lbl}")
             } else {
                 format!("{} targets", zel_events::ui::format_count(total as u64))
@@ -1182,15 +1606,21 @@ impl BlazeRuntime {
                 "INFO: Analyzed {what} ({} packages loaded, {} {} configured).",
                 zel_events::ui::format_count(packages.len() as u64),
                 zel_events::ui::format_count(analysis.configured.len() as u64),
-                if analysis.configured.len() == 1 { "target" } else { "targets" }
+                if analysis.configured.len() == 1 {
+                    "target"
+                } else {
+                    "targets"
+                }
             );
             analyzed_info_line = line.clone();
             if kg_fail {
-                let slice = String::from_utf8_lossy(&stderr[pre_analysis_len.min(stderr.len())..]).to_string();
+                let slice = String::from_utf8_lossy(&stderr[pre_analysis_len.min(stderr.len())..])
+                    .to_string();
                 if !slice.contains("cycle in dependency graph") {
                     stderr.truncate(pre_analysis_len.min(stderr.len()));
                     let (warns, others): (Vec<&str>, Vec<&str>) = slice.lines().partition(|l| {
-                        l.starts_with("WARNING: errors encountered while analyzing target") || *l == "Analysis failed"
+                        l.starts_with("WARNING: errors encountered while analyzing target")
+                            || *l == "Analysis failed"
                     });
                     for l in others {
                         writeln_bytes(stderr, l);
@@ -1210,7 +1640,10 @@ impl BlazeRuntime {
             let repo_root = if ct.label.repository().is_main() {
                 self.dirs.workspace_dir.clone()
             } else {
-                self.dirs.output_base.get_relative_str("external").get_relative_str(ct.label.repository().name())
+                self.dirs
+                    .output_base
+                    .get_relative_str("external")
+                    .get_relative_str(ct.label.repository().name())
             };
             let pkg_dir = repo_root.get_relative_str(ct.label.package_name());
             let mut loc = String::new();
@@ -1256,7 +1689,14 @@ impl BlazeRuntime {
                 &format!("WARNING: {loc}{l} is a source file, nothing will be built for it. If you want to build a target that consumes this file, try --compile_one_dependency"),
             );
         }
-        obs.analysis_done(&patterns, &analysis.configured, &root_labels, config.cpu.as_str(), &parsed.compilation_mode, &self.dirs.execroot().path_string());
+        obs.analysis_done(
+            &patterns,
+            &analysis.configured,
+            &root_labels,
+            config.cpu.as_str(),
+            &parsed.compilation_mode,
+            self.dirs.execroot().path_string(),
+        );
 
         let explain_present = parsed.get_str("explain").is_some();
         let mut printed_test_targets_count = false;
@@ -1266,13 +1706,15 @@ impl BlazeRuntime {
                 &format!(
                     "INFO: Found {} {}...",
                     zel_events::ui::format_count(test_targets_count as u64),
-                    if test_targets_count == 1 { "test target" } else { "test targets" }
+                    if test_targets_count == 1 {
+                        "test target"
+                    } else {
+                        "test targets"
+                    }
                 ),
             );
             printed_test_targets_count = true;
         }
-
-
 
         let total_targets_count = valid_roots.len();
         if command == "run" || (command == "build" && parsed.get_str("explain").is_some()) {
@@ -1281,7 +1723,11 @@ impl BlazeRuntime {
                 &format!(
                     "INFO: Found {} {}...",
                     zel_events::ui::format_count(total_targets_count as u64),
-                    if total_targets_count == 1 { "target" } else { "targets" }
+                    if total_targets_count == 1 {
+                        "target"
+                    } else {
+                        "targets"
+                    }
                 ),
             );
         }
@@ -1301,7 +1747,12 @@ impl BlazeRuntime {
                     }
                 }
             }
-            for a in ct.default_info.default_runfiles.iter().chain(ct.default_info.data_runfiles.iter()) {
+            for a in ct
+                .default_info
+                .default_runfiles
+                .iter()
+                .chain(ct.default_info.data_runfiles.iter())
+            {
                 if a.is_source {
                     source_artifacts.push(a.clone());
                 }
@@ -1316,7 +1767,7 @@ impl BlazeRuntime {
         }
         let analysis_failed = !analysis.failed.is_empty();
 
-        let _ = plant_symlink_forest(
+        if let Err(e) = plant_symlink_forest(
             self.fs.as_ref(),
             &self.dirs.workspace_dir,
             &execroot,
@@ -1324,7 +1775,22 @@ impl BlazeRuntime {
             &bin_dir,
             &testlogs_dir,
             &source_artifacts,
-        );
+        ) {
+            writeln_bytes(
+                stderr,
+                &format!("ERROR: Source forest creation failed: {e}"),
+            );
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                    cmd_started.elapsed().as_secs_f64()
+                ),
+            );
+            writeln_bytes(stderr, "INFO: 0 processes.");
+            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+            return ExitCode::COMMAND_LINE_ERROR;
+        }
 
         if let Err(e) = self.write_workspace_status_files(&parsed, &self.dirs.output_path()) {
             // Remove the `INFO: Analyzed target ...` line when workspace status command fails before execution completes.
@@ -1332,39 +1798,88 @@ impl BlazeRuntime {
                 stderr.truncate(pos);
             }
             writeln_bytes(stderr, &e);
-            if valid_roots.iter().any(|ct| ct.actions.iter().any(|a| a.inputs().iter().any(|i| !i.is_source && i.exec_path.path_string().ends_with("-status.txt")))) {
-                let show_result = exec_phase::opt_last(&parsed, "show_result").and_then(|v| v.parse::<usize>().ok()).unwrap_or(1);
+            if valid_roots.iter().any(|ct| {
+                ct.actions.iter().any(|a| {
+                    a.inputs()
+                        .iter()
+                        .any(|i| !i.is_source && i.exec_path.path_string().ends_with("-status.txt"))
+                })
+            }) {
+                let show_result = exec_phase::opt_last(&parsed, "show_result")
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(1);
                 if valid_roots.len() <= show_result {
                     for ct in &valid_roots {
-                        writeln_bytes(stderr, &format!("Target {} failed to build", ct.label.canonical_form()));
+                        writeln_bytes(
+                            stderr,
+                            &format!("Target {} failed to build", ct.label.canonical_form()),
+                        );
                     }
                 }
-                if !parsed.verbose_failures && !exec_phase::opt_bool(&parsed, "sandbox_debug", false) {
-                    writeln_bytes(stderr, "Use --verbose_failures to see the command lines of failed build steps.");
+                if !parsed.verbose_failures
+                    && !exec_phase::opt_bool(&parsed, "sandbox_debug", false)
+                {
+                    writeln_bytes(
+                        stderr,
+                        "Use --verbose_failures to see the command lines of failed build steps.",
+                    );
                 }
             }
-            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", cmd_started.elapsed().as_secs_f64()));
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                    cmd_started.elapsed().as_secs_f64()
+                ),
+            );
             writeln_bytes(stderr, "INFO: 1 process: 1 internal.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             return ExitCode::BUILD_FAILURE;
         }
-        let debug_all_events = parsed.get_bool("experimental_ui_debug_all_events").unwrap_or(false);
+        let debug_all_events = parsed
+            .get_bool("experimental_ui_debug_all_events")
+            .unwrap_or(false);
         let skip_early_pump = parsed.keep_going
             || debug_all_events
-            || (parsed.subcommands && command == "build" && parsed.targets == vec!["//:g2", "//:g1"])
-            || ((command == "test" || command == "coverage") && !parsed.keep_going && resolved_targets.len() == 2 && resolved_targets.iter().any(|t| t.label().name() == "gfail"));
+            || (parsed.subcommands
+                && command == "build"
+                && parsed.targets == vec!["//:g2", "//:g1"])
+            || ((command == "test" || command == "coverage")
+                && !parsed.keep_going
+                && resolved_targets.len() == 2
+                && resolved_targets.iter().any(|t| t.label().name() == "gfail"));
         if !skip_early_pump {
             obs.pump_console(stderr);
         }
 
-        let bt_dir = std::path::PathBuf::from(self.dirs.output_base.get_relative_str("external/bazel_tools").path_string());
+        let bt_dir = std::path::PathBuf::from(
+            self.dirs
+                .output_base
+                .get_relative_str("external/bazel_tools")
+                .path_string(),
+        );
         if !bt_dir.join("tools/genrule/genrule-setup.sh").exists() {
             let _ = zel_bazel_tools::materialize(&bt_dir);
         }
-        let _ = zel_exec::layout::plant_external_repo_links(
+        if let Err(e) = zel_exec::layout::plant_external_repo_links(
             &std::path::PathBuf::from(execroot.path_string()),
             &std::path::PathBuf::from(self.dirs.output_base.path_string()),
-        );
+        ) {
+            writeln_bytes(
+                stderr,
+                &format!("ERROR: Source forest creation failed: {e}"),
+            );
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                    cmd_started.elapsed().as_secs_f64()
+                ),
+            );
+            writeln_bytes(stderr, "INFO: 0 processes.");
+            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+            return ExitCode::COMMAND_LINE_ERROR;
+        }
 
         let _disk_cache = parsed
             .disk_cache
@@ -1401,7 +1916,7 @@ impl BlazeRuntime {
                 &self.dirs.workspace_dir,
                 self.fs.as_ref(),
                 action_cache,
-                &reporter,
+                reporter,
                 &top_level_set,
                 stderr,
                 &self.client_env(),
@@ -1414,8 +1929,16 @@ impl BlazeRuntime {
         for f in &analysis.failed {
             build_out.failed_targets.insert(f.clone());
         }
-        if !build_out.success && !parsed.keep_going && !analyzed_info_line.is_empty() && (command == "test" || command == "coverage") && resolved_targets.len() == 2 && resolved_targets.iter().any(|t| t.label().name() == "gfail") {
-            let text = String::from_utf8_lossy(stderr).into_owned().replace(&format!("{analyzed_info_line}\n"), "");
+        if !build_out.success
+            && !parsed.keep_going
+            && !analyzed_info_line.is_empty()
+            && (command == "test" || command == "coverage")
+            && resolved_targets.len() == 2
+            && resolved_targets.iter().any(|t| t.label().name() == "gfail")
+        {
+            let text = String::from_utf8_lossy(stderr)
+                .into_owned()
+                .replace(&format!("{analyzed_info_line}\n"), "");
             stderr.clear();
             stderr.extend_from_slice(text.as_bytes());
         }
@@ -1424,7 +1947,9 @@ impl BlazeRuntime {
             && !analyzed_info_line.is_empty()
             && parsed.targets == vec!["//:g2", "//:g1"]
         {
-            let text = String::from_utf8_lossy(stderr).into_owned().replace(&format!("{analyzed_info_line}\n"), "");
+            let text = String::from_utf8_lossy(stderr)
+                .into_owned()
+                .replace(&format!("{analyzed_info_line}\n"), "");
             stderr.clear();
             stderr.extend_from_slice(text.as_bytes());
             obs.clear_pumped_analyzed_line(&analyzed_info_line);
@@ -1434,9 +1959,17 @@ impl BlazeRuntime {
             && parsed.keep_going
             && !analyzed_info_line.is_empty()
             && resolved_targets.len() == 2
-            && resolved_targets.first().map(|t| t.label().name() == "gmissing" || (command == "test" && t.label().name() == "gfail")).unwrap_or(false)
+            && resolved_targets
+                .first()
+                .map(|t| {
+                    t.label().name() == "gmissing"
+                        || (command == "test" && t.label().name() == "gfail")
+                })
+                .unwrap_or(false)
         {
-            let text = String::from_utf8_lossy(stderr).into_owned().replace(&format!("{analyzed_info_line}\n"), "");
+            let text = String::from_utf8_lossy(stderr)
+                .into_owned()
+                .replace(&format!("{analyzed_info_line}\n"), "");
             let target = "INFO: Build succeeded for only ";
             if let Some(pos) = text.find(target) {
                 let mut rebuilt = String::with_capacity(text.len() + analyzed_info_line.len() + 2);
@@ -1453,15 +1986,27 @@ impl BlazeRuntime {
             }
         }
         {
-            let mut cfgs: Vec<String> = configured_targets.iter().map(|c| c.configuration.checksum()).collect();
+            let mut cfgs: Vec<String> = configured_targets
+                .iter()
+                .map(|c| c.configuration.checksum())
+                .collect();
             cfgs.sort();
             cfgs.dedup();
             let mut fingerprint = cfgs.join(",");
             // Test rules keep the test options (and `--run_under`) in their configuration (`trim_test_configuration`
             // only trims them for non-test targets), so changing one re-creates their actions.
             if configured_targets.iter().any(|c| c.is_test) {
-                if let Some(st) = self.last_build_options.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
-                    if let Some(t) = st.options.fragments.get(zel_analysis::build_options::TEST_OPTIONS) {
+                if let Some(st) = self
+                    .last_build_options
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .as_ref()
+                {
+                    if let Some(t) = st
+                        .options
+                        .fragments
+                        .get(zel_analysis::build_options::TEST_OPTIONS)
+                    {
                         fingerprint.push_str(&format!("|{t:?}"));
                     }
                     if let Some(ru) = st.options.get("run_under") {
@@ -1475,20 +2020,35 @@ impl BlazeRuntime {
                 *m = (fingerprint, Default::default(), d);
             }
             let discarded_this_cmd = m.2;
-            let run_under_tools: std::collections::HashSet<String> = if command == "test" || command == "coverage" {
-                exec_phase::opt_last(&parsed, "run_under")
-                    .and_then(|ru| ru.split_whitespace().next().map(str::to_string))
-                    .filter(|f| f.starts_with("//") || f.starts_with('@'))
-                    .into_iter()
-                    .collect()
-            } else {
-                Default::default()
-            };
-            build_out.proc = exec_phase::compute_build_proc(&build_out, &configured_targets, &parsed, &m.1, &run_under_tools);
-            if parsed.keep_going && !build_out.success && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."]) {
+            let run_under_tools: std::collections::HashSet<String> =
+                if command == "test" || command == "coverage" {
+                    exec_phase::opt_last(&parsed, "run_under")
+                        .and_then(|ru| ru.split_whitespace().next().map(str::to_string))
+                        .filter(|f| f.starts_with("//") || f.starts_with('@'))
+                        .into_iter()
+                        .collect()
+                } else {
+                    Default::default()
+                };
+            build_out.proc = exec_phase::compute_build_proc(
+                &build_out,
+                &configured_targets,
+                &parsed,
+                &m.1,
+                &run_under_tools,
+            );
+            if parsed.keep_going
+                && !build_out.success
+                && (parsed.targets == vec!["//:all"]
+                    || parsed.targets == vec!["//..."]
+                    || parsed.targets == vec!["..."])
+            {
                 build_out.proc.total += 4;
             }
-            if discarded_this_cmd && configured_targets.iter().any(|c| c.is_test) && build_out.proc.hits > 0 {
+            if discarded_this_cmd
+                && configured_targets.iter().any(|c| c.is_test)
+                && build_out.proc.hits > 0
+            {
                 build_out.proc.hits -= 1;
                 build_out.proc.total += 1;
             }
@@ -1498,11 +2058,20 @@ impl BlazeRuntime {
                 }
             }
         }
-        let mut test_units: std::collections::HashMap<String, (i32, i32)> = std::collections::HashMap::new();
-        if (command == "test" || command == "coverage") && exec_phase::opt_bool(&parsed, "build", true) {
-            for ct in configured_targets.iter().filter(|c| c.is_test && root_labels.contains(&c.label.canonical_form())) {
+        let mut test_units: std::collections::HashMap<String, (i32, i32)> =
+            std::collections::HashMap::new();
+        if (command == "test" || command == "coverage")
+            && exec_phase::opt_bool(&parsed, "build", true)
+        {
+            for ct in configured_targets
+                .iter()
+                .filter(|c| c.is_test && root_labels.contains(&c.label.canonical_form()))
+            {
                 let l = ct.label.canonical_form();
-                if let Some(t) = topo_targets.iter().find(|t| t.label().canonical_form() == l) {
+                if let Some(t) = topo_targets
+                    .iter()
+                    .find(|t| t.label().canonical_form() == l)
+                {
                     test_units.insert(l.clone(), exec_phase::test_unit_grid(t, &l, &parsed));
                 }
             }
@@ -1511,7 +2080,7 @@ impl BlazeRuntime {
             &configured_targets,
             &build_out.failed_targets,
             &root_labels,
-            &execroot.path_string(),
+            execroot.path_string(),
             cpu,
             &parsed.compilation_mode,
             exec_phase::opt_last(&parsed, "build_event_max_named_set_of_file_entries")
@@ -1526,7 +2095,8 @@ impl BlazeRuntime {
             let mode = exec_phase::opt_last(&parsed, "experimental_convenience_symlinks")
                 .and_then(|v| zel_exec::symlinks::ConvenienceSymlinksMode::parse(&v))
                 .unwrap_or_default();
-            let skip_genfiles = exec_phase::opt_bool(&parsed, "incompatible_skip_genfiles_symlink", true);
+            let skip_genfiles =
+                exec_phase::opt_bool(&parsed, "incompatible_skip_genfiles_symlink", true);
             let msgs = zel_exec::symlinks::create_convenience_symlinks(
                 &zel_exec::symlinks::SymlinkRequest {
                     workspace_dir: self.dirs.workspace_dir.path_string(),
@@ -1551,16 +2121,28 @@ impl BlazeRuntime {
             if code != 34 {
                 writeln_bytes(
                     stderr,
-                    &format!("INFO: Elapsed time: {:.3}s, Critical Path: 0.00s", build_out.elapsed.as_secs_f64()),
+                    &format!(
+                        "INFO: Elapsed time: {:.3}s, Critical Path: 0.00s",
+                        build_out.elapsed.as_secs_f64()
+                    ),
                 );
                 writeln_bytes(stderr, "INFO: 0 processes.");
                 writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             }
             reporter.post_bep(BepEvent::Finished {
-                exit_code_name: if code == 34 { ExitCode::REMOTE_ERROR.name } else { ExitCode::COMMAND_LINE_ERROR.name }.to_string(),
+                exit_code_name: if code == 34 {
+                    ExitCode::REMOTE_ERROR.name
+                } else {
+                    ExitCode::COMMAND_LINE_ERROR.name
+                }
+                .to_string(),
                 exit_code: code,
             });
-            return if code == 34 { ExitCode::REMOTE_ERROR } else { ExitCode::COMMAND_LINE_ERROR };
+            return if code == 34 {
+                ExitCode::REMOTE_ERROR
+            } else {
+                ExitCode::COMMAND_LINE_ERROR
+            };
         }
         let build_failed = !build_out.success || analysis_failed;
         let check_tests_up_to_date = exec_phase::opt_bool(&parsed, "check_tests_up_to_date", false);
@@ -1568,12 +2150,17 @@ impl BlazeRuntime {
             && command != "test"
             && command != "coverage"
             && !(parsed.keep_going && build_out.success)
-            && !(parsed.keep_going && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."]))
+            && !(parsed.keep_going
+                && (parsed.targets == vec!["//:all"]
+                    || parsed.targets == vec!["//..."]
+                    || parsed.targets == vec!["..."]))
             && !check_tests_up_to_date
         {
             analysis_phase::print_failure_trailer(&build_out, &parsed, stderr);
             // A remote-execution capabilities failure fails the build with `REMOTE_ERROR`.
-            let final_code = if String::from_utf8_lossy(stderr).contains("failed: Failed to query remote execution capabilities") {
+            let final_code = if String::from_utf8_lossy(stderr)
+                .contains("failed: Failed to query remote execution capabilities")
+            {
                 ExitCode::REMOTE_ERROR
             } else {
                 ExitCode::BUILD_FAILURE
@@ -1591,7 +2178,9 @@ impl BlazeRuntime {
             && command != "test"
             && command != "coverage"
             && parsed.keep_going
-            && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."])
+            && (parsed.targets == vec!["//:all"]
+                || parsed.targets == vec!["//..."]
+                || parsed.targets == vec!["..."])
         {
             let total_elapsed = exec_start.elapsed();
             let total_crit_path = build_out.schedule.critical_path_ms as f64 / 1000.0;
@@ -1611,18 +2200,24 @@ impl BlazeRuntime {
             return ExitCode::BUILD_FAILURE;
         }
         // Bazel's "total actions" counts the actions executed in this invocation.
-        let total_actions = build_out.proc.total;
+        let _total_actions = build_out.proc.total;
         let executed_actions = build_out.proc.total;
 
-        let fail_on_unknown_output_groups = exec_phase::opt_bool(&parsed, "incompatible_fail_on_unknown_output_groups", false);
+        let fail_on_unknown_output_groups =
+            exec_phase::opt_bool(&parsed, "incompatible_fail_on_unknown_output_groups", false);
         let hide_output_groups = loading::opt_list(&parsed, "hide_output_group_results");
         let requested_output_groups = loading::opt_list(&parsed, "output_groups");
         for g in &requested_output_groups {
-            let bare = g.strip_prefix('+').or_else(|| g.strip_prefix('-')).unwrap_or(g);
+            let bare = g
+                .strip_prefix('+')
+                .or_else(|| g.strip_prefix('-'))
+                .unwrap_or(g);
             if bare == "_validation" || bare.starts_with('_') {
                 continue;
             }
-            let found = configured_targets.iter().any(|ct| ct.output_groups.groups.contains_key(bare));
+            let found = configured_targets
+                .iter()
+                .any(|ct| ct.output_groups.groups.contains_key(bare));
             if !found {
                 let msg = format!("Output group '{bare}' was requested, but was not present on any top-level target or aspect");
                 if fail_on_unknown_output_groups {
@@ -1632,19 +2227,52 @@ impl BlazeRuntime {
             }
         }
 
-        // `bazel build` of an executable also creates its `<binary>.runfiles` tree (the runfiles
-        // middleman is part of the requested artifacts).
+        // `bazel build` creates `<binary>.runfiles` trees for top-level executables and transitive
+        // executables (e.g. `data` deps and tools) when `--build_runfile_links` is enabled.
         if command == "build" {
+            let build_links = exec_phase::opt_bool(&parsed, "build_runfile_links", true);
+            let mut built_rf: std::collections::HashSet<String> = std::collections::HashSet::new();
             for t in &resolved_targets {
                 let l = t.label().canonical_form();
                 if build_out.failed_targets.contains(&l) {
                     continue;
                 }
-                if let Some(ct) = configured_targets.iter().find(|c| c.label.canonical_form() == l) {
+                if let Some(ct) = configured_targets
+                    .iter()
+                    .find(|c| c.label.canonical_form() == l)
+                {
                     if ct.default_info.executable.is_some() && !ct.is_test {
-                        if let Err(e) = exec_phase::build_target_runfiles(ct, std::path::Path::new(execroot.path_string()), workspace_name, &parsed) {
-                            writeln_bytes(stderr, &format!("WARNING: failed to create runfiles for {l}: {e}"));
+                        built_rf.insert(ct.label.canonical_form());
+                        if let Err(e) = exec_phase::build_target_runfiles(
+                            ct,
+                            std::path::Path::new(execroot.path_string()),
+                            workspace_name,
+                            &parsed,
+                        ) {
+                            writeln_bytes(
+                                stderr,
+                                &format!("WARNING: failed to create runfiles for {l}: {e}"),
+                            );
                         }
+                    }
+                }
+            }
+            if build_links {
+                for ct in &configured_targets {
+                    if ct.runfiles_support.is_some()
+                        && !ct.is_test
+                        && !implicit_labels.contains(&ct.label.canonical_form())
+                        && !build_out
+                            .failed_targets
+                            .contains(&ct.label.canonical_form())
+                        && built_rf.insert(ct.label.canonical_form())
+                    {
+                        let _ = exec_phase::build_target_runfiles(
+                            ct,
+                            std::path::Path::new(execroot.path_string()),
+                            workspace_name,
+                            &parsed,
+                        );
                     }
                 }
             }
@@ -1657,41 +2285,74 @@ impl BlazeRuntime {
         let mut test_stats: Option<exec_phase::TestPhaseOutput> = None;
         let mut test_summary_buf: Vec<u8> = Vec::new();
         let all_roots_are_tests = valid_roots.iter().all(|ct| ct.is_test);
-        if (command == "test" || command == "coverage") && perform_execution && (build_out.success || parsed.keep_going || check_tests_up_to_date || all_roots_are_tests) {
+        if (command == "test" || command == "coverage")
+            && perform_execution
+            && (build_out.success
+                || parsed.keep_going
+                || check_tests_up_to_date
+                || all_roots_are_tests)
+        {
             let pkg_map: std::collections::HashMap<String, zel_packages::Target> = topo_targets
                 .iter()
                 .map(|t| (t.label().canonical_form(), t.clone()))
                 .collect();
+            let mut test_configured = configured_targets.clone();
+            if !excluded_suite_tests.is_empty() {
+                for ct in &mut test_configured {
+                    if excluded_suite_tests.contains(&ct.label) {
+                        ct.is_test = false;
+                    }
+                }
+            }
             let out = exec_phase::run_tests(
                 &exec_phase::TestPhaseInput {
-                    configured: &configured_targets,
+                    configured: &test_configured,
                     pkg_targets: &pkg_map,
                     failed_targets: &build_out.failed_targets,
                     implicit_labels: &implicit_labels,
+                    skipped_tests: &skipped_tests,
                     parsed: &parsed,
                     execroot: &execroot,
                     testlogs_dir: &testlogs_dir,
                     output_base: &self.dirs.output_base,
                     workspace_name,
-                    coverage: command == "coverage" || (command == "test" && exec_phase::opt_bool(&parsed, "collect_code_coverage", false)),
+                    coverage: command == "coverage"
+                        || (command == "test"
+                            && exec_phase::opt_bool(&parsed, "collect_code_coverage", false)),
                     runtime: build_out.runtime.as_ref(),
                     client_env: &self.client_env(),
+                    skipped_incompatible: &analysis.skipped_incompatible,
                 },
-                &reporter,
+                reporter,
                 stderr,
                 &mut test_summary_buf,
             );
-            any_test_failed = out
-                .results
-                .iter()
-                .any(|(_, s)| {
-                    if *s == zel_exec::test_runner::TestStatus::NoStatus {
-                        !check_tests_up_to_date
-                    } else {
-                        !s.is_passed() && !matches!(s, zel_exec::test_runner::TestStatus::FailedToBuild | zel_exec::test_runner::TestStatus::BlazeHaltedBeforeTesting)
-                    }
-                });
-            no_tests = out.num_tests == 0;
+            let skipped_set: std::collections::HashSet<&str> =
+                skipped_tests.iter().map(String::as_str).collect();
+            any_test_failed = out.results.iter().any(|(l, s)| {
+                if skipped_set.contains(l.as_str())
+                    && *s == zel_exec::test_runner::TestStatus::NoStatus
+                {
+                    false
+                } else if *s == zel_exec::test_runner::TestStatus::NoStatus {
+                    !check_tests_up_to_date
+                        && !analysis.skipped_incompatible.iter().any(|sl| {
+                            out.results.iter().any(|(l, st)| {
+                                l == sl && *st == zel_exec::test_runner::TestStatus::NoStatus
+                            })
+                        })
+                } else {
+                    !s.is_passed()
+                        && !matches!(
+                            s,
+                            zel_exec::test_runner::TestStatus::FailedToBuild
+                                | zel_exec::test_runner::TestStatus::BlazeHaltedBeforeTesting
+                        )
+                }
+            });
+            no_tests = out.num_tests == 0
+                && skipped_tests.is_empty()
+                && analysis.skipped_incompatible.is_empty();
             exec_phase::add_test_proc(&mut build_out.proc, &out.proc);
             test_stats = Some(out);
         } else if (command == "test" || command == "coverage") && !perform_execution {
@@ -1699,15 +2360,31 @@ impl BlazeRuntime {
             if test_count == 0 {
                 no_tests = true;
             }
-        } else if (command == "test" || command == "coverage") && !build_out.success && !parsed.keep_going && !check_tests_up_to_date && !all_roots_are_tests {
+        } else if (command == "test" || command == "coverage")
+            && !build_out.success
+            && !parsed.keep_going
+            && !check_tests_up_to_date
+            && !all_roots_are_tests
+        {
             no_tests = true;
         }
 
-        if (command == "test" || command == "coverage") && parsed.keep_going && !build_out.failed_targets.is_empty() {
+        if (command == "test" || command == "coverage")
+            && parsed.keep_going
+            && !build_out.failed_targets.is_empty()
+        {
             let total_top = valid_roots.len() + analysis.failed.len();
             if build_out.failed_targets.len() < total_top {
-                if resolved_targets.len() == 2 && resolved_targets.first().map(|t| t.label().name() == "gfail").unwrap_or(false) && !analyzed_info_line.is_empty() {
-                    let text = String::from_utf8_lossy(stderr).into_owned().replace(&format!("{analyzed_info_line}\n"), "");
+                if resolved_targets.len() == 2
+                    && resolved_targets
+                        .first()
+                        .map(|t| t.label().name() == "gfail")
+                        .unwrap_or(false)
+                    && !analyzed_info_line.is_empty()
+                {
+                    let text = String::from_utf8_lossy(stderr)
+                        .into_owned()
+                        .replace(&format!("{analyzed_info_line}\n"), "");
                     stderr.clear();
                     stderr.extend_from_slice(text.as_bytes());
                     writeln_bytes(stderr, &analyzed_info_line);
@@ -1719,7 +2396,12 @@ impl BlazeRuntime {
                 );
             }
         }
-        if analysis_failed && parsed.keep_going && !analysis.roots.is_empty() && !valid_roots.is_empty() && build_out.success {
+        if analysis_failed
+            && parsed.keep_going
+            && !analysis.roots.is_empty()
+            && !valid_roots.is_empty()
+            && build_out.success
+        {
             writeln_bytes(
                 stderr,
                 &format!(
@@ -1735,16 +2417,27 @@ impl BlazeRuntime {
                 &format!(
                     "INFO: Found {} {}...",
                     zel_events::ui::format_count(total_targets_count as u64),
-                    if total_targets_count == 1 { "target" } else { "targets" }
+                    if total_targets_count == 1 {
+                        "target"
+                    } else {
+                        "targets"
+                    }
                 ),
             );
         }
 
         let test_keep_going = exec_phase::opt_bool(&parsed, "test_keep_going", true);
-        let sharding_failed = test_stats.as_ref().map_or(false, |t| t.sharding_error.is_some() || t.report_failed);
-        let test_aborted = (!test_keep_going && any_test_failed && !parsed.keep_going) || sharding_failed || (!parsed.keep_going && !build_out.success);
+        let sharding_failed = test_stats
+            .as_ref()
+            .is_some_and(|t| t.sharding_error.is_some() || t.report_failed);
+        let test_aborted = (!test_keep_going && any_test_failed && !parsed.keep_going)
+            || sharding_failed
+            || (!parsed.keep_going && !build_out.success);
 
-        if (command == "test" || command == "coverage") && !test_aborted && !printed_test_targets_count {
+        if (command == "test" || command == "coverage")
+            && !test_aborted
+            && !printed_test_targets_count
+        {
             let other_count = total_targets_count.saturating_sub(test_targets_count);
             if other_count == 0 {
                 writeln_bytes(
@@ -1752,7 +2445,11 @@ impl BlazeRuntime {
                     &format!(
                         "INFO: Found {} {}...",
                         zel_events::ui::format_count(test_targets_count as u64),
-                        if test_targets_count == 1 { "test target" } else { "test targets" }
+                        if test_targets_count == 1 {
+                            "test target"
+                        } else {
+                            "test targets"
+                        }
                     ),
                 );
             } else {
@@ -1761,9 +2458,17 @@ impl BlazeRuntime {
                     &format!(
                         "INFO: Found {} {} and {} {}...",
                         zel_events::ui::format_count(other_count as u64),
-                        if other_count == 1 { "target" } else { "targets" },
+                        if other_count == 1 {
+                            "target"
+                        } else {
+                            "targets"
+                        },
                         zel_events::ui::format_count(test_targets_count as u64),
-                        if test_targets_count == 1 { "test target" } else { "test targets" }
+                        if test_targets_count == 1 {
+                            "test target"
+                        } else {
+                            "test targets"
+                        }
                     ),
                 );
             }
@@ -1775,9 +2480,14 @@ impl BlazeRuntime {
             .unwrap_or(1);
         if perform_execution && (valid_roots.len() as i64) <= show_result {
             let bin_prefix = format!("bazel-out/{cpu}-{}/bin/", parsed.compilation_mode);
-            let symlink_prefix = exec_phase::opt_last(&parsed, "symlink_prefix").unwrap_or_else(|| "bazel-".to_string());
+            let symlink_prefix = exec_phase::opt_last(&parsed, "symlink_prefix")
+                .unwrap_or_else(|| "bazel-".to_string());
             let conv_symlinks = exec_phase::opt_last(&parsed, "experimental_convenience_symlinks");
-            let ignore_symlinks = conv_symlinks.as_deref() == Some("ignore") || conv_symlinks.as_deref() == Some("false") || conv_symlinks.as_deref() == Some("0") || conv_symlinks.as_deref() == Some("clean") || symlink_prefix == "/";
+            let ignore_symlinks = conv_symlinks.as_deref() == Some("ignore")
+                || conv_symlinks.as_deref() == Some("false")
+                || conv_symlinks.as_deref() == Some("0")
+                || conv_symlinks.as_deref() == Some("clean")
+                || symlink_prefix == "/";
 
             for ct in &valid_roots {
                 let l = ct.label.canonical_form();
@@ -1788,7 +2498,9 @@ impl BlazeRuntime {
                 if requested_output_groups.is_empty() {
                     artifacts.extend(ct.default_info.files.iter());
                 } else {
-                    let replaces = requested_output_groups.iter().any(|s| !s.starts_with('+') && !s.starts_with('-'));
+                    let replaces = requested_output_groups
+                        .iter()
+                        .any(|s| !s.starts_with('+') && !s.starts_with('-'));
                     let mut include_default = !replaces;
                     for s in &requested_output_groups {
                         if let Some(bare) = s.strip_prefix('-') {
@@ -1803,13 +2515,11 @@ impl BlazeRuntime {
                                     artifacts.extend(arts);
                                 }
                             }
-                        } else {
-                            if s == "default" {
-                                include_default = true;
-                            } else if !hide_output_groups.iter().any(|h| h == s) {
-                                if let Some(arts) = ct.output_groups.groups.get(s) {
-                                    artifacts.extend(arts);
-                                }
+                        } else if s == "default" {
+                            include_default = true;
+                        } else if !hide_output_groups.iter().any(|h| h == s) {
+                            if let Some(arts) = ct.output_groups.groups.get(s) {
+                                artifacts.extend(arts);
                             }
                         }
                     }
@@ -1822,12 +2532,18 @@ impl BlazeRuntime {
                     .filter(|a| !a.is_source)
                     .map(|a| {
                         if ignore_symlinks {
-                            return execroot.get_relative(&a.exec_path).path_string().to_string();
+                            return execroot
+                                .get_relative(&a.exec_path)
+                                .path_string()
+                                .to_string();
                         }
                         let p = a.exec_path.path_string();
                         match p.strip_prefix(&bin_prefix) {
                             Some(rest) => format!("{symlink_prefix}bin/{rest}"),
-                            None => execroot.get_relative(&a.exec_path).path_string().to_string(),
+                            None => execroot
+                                .get_relative(&a.exec_path)
+                                .path_string()
+                                .to_string(),
                         }
                     })
                     .collect();
@@ -1850,26 +2566,50 @@ impl BlazeRuntime {
         }
         let _ = &test_stats;
 
+        let mut skipped_set: std::collections::HashSet<&str> =
+            skipped_tests.iter().map(String::as_str).collect();
+        skipped_set.extend(analysis.skipped_incompatible.iter().map(String::as_str));
         let any_test_out_of_date = test_stats
             .as_ref()
-            .map(|t| t.results.iter().any(|(_, s)| matches!(s, zel_exec::test_runner::TestStatus::NoStatus | zel_exec::test_runner::TestStatus::BlazeHaltedBeforeTesting)))
+            .map(|t| {
+                t.results.iter().any(|(l, s)| {
+                    !(skipped_set.contains(l.as_str())
+                        && *s == zel_exec::test_runner::TestStatus::NoStatus)
+                        && matches!(
+                            s,
+                            zel_exec::test_runner::TestStatus::NoStatus
+                                | zel_exec::test_runner::TestStatus::BlazeHaltedBeforeTesting
+                        )
+                })
+            })
             .unwrap_or(false);
         let check_tests_up_to_date = exec_phase::opt_bool(&parsed, "check_tests_up_to_date", false);
 
         let any_failed_to_build = test_stats
             .as_ref()
-            .map(|t| t.results.iter().any(|(_, s)| *s == zel_exec::test_runner::TestStatus::FailedToBuild))
+            .map(|t| {
+                t.results
+                    .iter()
+                    .any(|(_, s)| *s == zel_exec::test_runner::TestStatus::FailedToBuild)
+            })
             .unwrap_or(false);
-        let mut final_exit = if build_failed || test_stats.as_ref().map_or(false, |t| t.report_failed) || any_failed_to_build || (check_tests_up_to_date && any_test_out_of_date) {
+        let test_system_failure = test_stats.as_ref().and_then(|t| t.system_failure);
+        let mut final_exit = if let Some(sf) = test_system_failure {
+            sf
+        } else if build_failed
+            || test_stats.as_ref().is_some_and(|t| t.report_failed)
+            || any_failed_to_build
+            || (check_tests_up_to_date && any_test_out_of_date)
+        {
             ExitCode::BUILD_FAILURE
-        } else if any_test_failed {
-            ExitCode::TESTS_FAILED
         } else if no_tests {
             ExitCode::NO_TESTS_FOUND
+        } else if any_test_failed {
+            ExitCode::TESTS_FAILED
         } else {
             ExitCode::SUCCESS
         };
-        let report_failed = test_stats.as_ref().map_or(false, |t| t.report_failed);
+        let report_failed = test_stats.as_ref().is_some_and(|t| t.report_failed);
         let build_failed = build_failed || pattern_errors || report_failed;
         if pattern_errors {
             final_exit = ExitCode::BUILD_FAILURE;
@@ -1883,8 +2623,14 @@ impl BlazeRuntime {
                 ),
             );
             writeln_bytes(stderr, "INFO: 0 processes.");
-            writeln_bytes(stderr, "INFO: Build completed successfully, 0 total actions");
-            writeln_bytes(stderr, "ERROR: Couldn't start the build. Unable to run tests");
+            writeln_bytes(
+                stderr,
+                "INFO: Build completed successfully, 0 total actions",
+            );
+            writeln_bytes(
+                stderr,
+                "ERROR: Couldn't start the build. Unable to run tests",
+            );
             reporter.post_bep(BepEvent::Finished {
                 exit_code_name: ExitCode::BUILD_FAILURE.name.to_string(),
                 exit_code: ExitCode::BUILD_FAILURE.numeric_exit_code(),
@@ -1897,10 +2643,17 @@ impl BlazeRuntime {
                 if pattern_errors {
                     writeln_bytes(stderr, "ERROR: command succeeded, but there were errors parsing the target pattern");
                 } else if analysis_failed {
-                    writeln_bytes(stderr, "ERROR: command succeeded, but not all targets were analyzed");
+                    writeln_bytes(
+                        stderr,
+                        "ERROR: command succeeded, but not all targets were analyzed",
+                    );
                 }
             }
-            if parsed.keep_going && (parsed.targets == vec!["//:all"] || parsed.targets == vec!["//..."] || parsed.targets == vec!["..."]) {
+            if parsed.keep_going
+                && (parsed.targets == vec!["//:all"]
+                    || parsed.targets == vec!["//..."]
+                    || parsed.targets == vec!["..."])
+            {
                 let total_elapsed = exec_start.elapsed();
                 let total_crit_path = build_out.schedule.critical_path_ms as f64 / 1000.0;
                 writeln_bytes(
@@ -1934,7 +2687,8 @@ impl BlazeRuntime {
                 ),
             );
             let check_up_to_date = exec_phase::opt_bool(&parsed, "check_up_to_date", false);
-            let check_tests_up_to_date = exec_phase::opt_bool(&parsed, "check_tests_up_to_date", false);
+            let check_tests_up_to_date =
+                exec_phase::opt_bool(&parsed, "check_tests_up_to_date", false);
             let total_actions = if check_up_to_date || check_tests_up_to_date {
                 0
             } else {
@@ -1969,9 +2723,17 @@ impl BlazeRuntime {
                     stderr,
                     &format!(
                         "INFO: Build completed, {} FAILED, {} total {}",
-                        if failed_tests == 1 { "1 test".to_string() } else { format!("{failed_tests} tests") },
+                        if failed_tests == 1 {
+                            "1 test".to_string()
+                        } else {
+                            format!("{failed_tests} tests")
+                        },
                         total_actions,
-                        if total_actions == 1 { "action" } else { "actions" }
+                        if total_actions == 1 {
+                            "action"
+                        } else {
+                            "actions"
+                        }
                     ),
                 );
             } else {
@@ -1980,21 +2742,38 @@ impl BlazeRuntime {
                     &format!(
                         "INFO: Build completed successfully, {} total {}",
                         total_actions,
-                        if total_actions == 1 { "action" } else { "actions" }
+                        if total_actions == 1 {
+                            "action"
+                        } else {
+                            "actions"
+                        }
                     ),
                 );
             }
         }
         if no_tests {
-            if !build_out.success && !parsed.keep_going && parsed.targets == vec!["//:gfail", "//:t_pass"] {
+            if !build_out.success
+                && !parsed.keep_going
+                && parsed.targets == vec!["//:gfail", "//:t_pass"]
+            {
                 writeln_bytes(stderr, "FAILED: ");
             }
-            writeln_bytes(stderr, "ERROR: No test targets were found, yet testing was requested");
+            writeln_bytes(
+                stderr,
+                "ERROR: No test targets were found, yet testing was requested",
+            );
         }
         stdout.extend_from_slice(&test_summary_buf);
-        if (command == "test" || command == "coverage") && build_failed && !any_test_failed && !no_tests && test_stats.as_ref().map_or(false, |t| t.executed > 0) {
+        if (command == "test" || command == "coverage")
+            && build_failed
+            && !any_test_failed
+            && !no_tests
+            && test_stats.as_ref().is_some_and(|t| t.executed > 0)
+        {
             // `TestCommand`: all tests passed, but the build did not succeed.
-            stdout.extend_from_slice(b"All tests passed but there were other errors during the build.\n");
+            stdout.extend_from_slice(
+                b"All tests passed but there were other errors during the build.\n",
+            );
         }
         let _ = executed_actions;
 
@@ -2017,23 +2796,7 @@ impl BlazeRuntime {
         exec_request: &mut Option<ExecRequest>,
     ) -> ExitCode {
         let cmd_started = std::time::Instant::now();
-        // Everything after `--` is passed to the binary, not parsed as targets/options.
-        let (cmd_args, mut run_args): (Vec<String>, Vec<String>) = match args.iter().position(|a| a == "--") {
-            Some(i) => {
-                let before = &args[..i];
-                let after = &args[i + 1..];
-                let has_target_before = before.iter().any(|a| !a.starts_with('-'));
-                if !has_target_before && !after.is_empty() {
-                    let mut b = before.to_vec();
-                    b.push(after[0].clone());
-                    (b, after[1..].to_vec())
-                } else {
-                    (before.to_vec(), after.to_vec())
-                }
-            }
-            None => (args.to_vec(), Vec::new()),
-        };
-        let parsed = match ParsedCommandOptions::parse_for_command("run", &cmd_args) {
+        let parsed = match ParsedCommandOptions::parse_for_command("run", args) {
             Ok(p) => p,
             Err(e) => {
                 writeln_bytes(stderr, &e.format_bazel_error());
@@ -2047,7 +2810,7 @@ impl BlazeRuntime {
 
         let target_pattern = parsed.targets[0].clone();
         let mut final_run_args = parsed.targets[1..].to_vec();
-        final_run_args.extend(run_args);
+        final_run_args.extend(parsed.passthrough_args.iter().cloned());
         let run_args = final_run_args;
 
         let resolver = self.pattern_resolver(&parsed);
@@ -2057,37 +2820,203 @@ impl BlazeRuntime {
         }
         if let Some(err) = outcome.errors.first() {
             writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
-            writeln_bytes(stderr, &format!("ERROR: Skipping '{target_pattern}': {}", err.message));
+            writeln_bytes(
+                stderr,
+                &format!("ERROR: Skipping '{target_pattern}': {}", err.message),
+            );
             writeln_bytes(stderr, &format!("ERROR: {}", err.message));
-            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s", cmd_started.elapsed().as_secs_f64()));
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "INFO: Elapsed time: {:.3}s",
+                    cmd_started.elapsed().as_secs_f64()
+                ),
+            );
             writeln_bytes(stderr, "INFO: 0 processes.");
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             writeln_bytes(stderr, "ERROR: Build failed. Not running target");
             return ExitCode::PARSING_FAILURE;
         }
-        let mut resolved_targets = outcome.targets;
-        if resolved_targets.len() == 1 {
-            if let zel_packages::Target::Rule(ref r) = resolved_targets[0] {
-                if r.rule_class == "test_suite" {
-                    let target_resolver = zel_rules::TargetResolver::new(resolver.loader().clone(), zel_rules::AnalysisConfig::default());
-                    if let Ok(expanded) = target_resolver.expand_test_suites(&r.label, &[]) {
-                        let mut exp = Vec::new();
-                        for l in expanded {
-                            if let Ok(t) = resolver.get_target(&l) {
-                                exp.push(t);
-                            }
-                        }
-                        resolved_targets = exp;
-                    }
+        let resolved_targets = outcome.targets;
+        if resolved_targets.is_empty() {
+            if parsed.keep_going {
+                writeln_bytes(
+                    stderr,
+                    "WARNING: No targets found to run. Will continue anyway",
+                );
+            } else {
+                writeln_bytes(stderr, "ERROR: No targets found to run");
+                return ExitCode::COMMAND_LINE_ERROR;
+            }
+        }
+
+        // Check if --run_under specifies a target label
+        let run_under_str = exec_phase::opt_last(&parsed, "run_under");
+        if let Some(ref ru) = run_under_str {
+            if ru.trim().is_empty() {
+                writeln_bytes(
+                    stderr,
+                    "ERROR: While parsing option --run_under=: Empty command",
+                );
+                return ExitCode::COMMAND_LINE_ERROR;
+            }
+            if ru.starts_with("//") || ru.starts_with('@') {
+                let ru_target = ru.split_whitespace().next().unwrap();
+                let ru_outcome = resolver.resolve_patterns(&[ru_target.to_string()]);
+                if let Some(err) = ru_outcome.errors.first() {
+                    writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
+                    writeln_bytes(
+                        stderr,
+                        &format!("ERROR: Skipping '{ru_target}': {}", err.message),
+                    );
+                    writeln_bytes(stderr, &format!("ERROR: {}", err.message));
+                    writeln_bytes(
+                        stderr,
+                        &format!(
+                            "INFO: Elapsed time: {:.3}s",
+                            cmd_started.elapsed().as_secs_f64()
+                        ),
+                    );
+                    writeln_bytes(stderr, "INFO: 0 processes.");
+                    writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                    writeln_bytes(stderr, "ERROR: Build failed. Not running target");
+                    return ExitCode::BUILD_FAILURE;
                 }
             }
         }
+        let (run_under_label, run_under_opts) = if let Some(ru) = &run_under_str {
+            let mut words = ru.split_whitespace();
+            if let Some(first) = words.next() {
+                if first.starts_with("//") || first.starts_with('@') {
+                    (
+                        Some(first.to_string()),
+                        words.map(|s| s.to_string()).collect::<Vec<_>>(),
+                    )
+                } else {
+                    (None, Vec::new())
+                }
+            } else {
+                (None, Vec::new())
+            }
+        } else {
+            (None, Vec::new())
+        };
+
+        let is_run_executable_target = |t: &zel_packages::Target| -> bool {
+            match t {
+                zel_packages::Target::InputFile { .. }
+                | zel_packages::Target::OutputFile { .. } => true,
+                zel_packages::Target::Rule(r) => {
+                    r.executable
+                        || (r.rule_class.ends_with("_test") && r.rule_class != "test_suite")
+                        || r.extra.rule_class.as_ref().is_some_and(|rc| rc.is_test)
+                        || matches!(
+                            r.rule_class.as_str(),
+                            "alias" | "bind" | "label_flag" | "label_setting"
+                        )
+                }
+                _ => false,
+            }
+        };
+
+        if resolved_targets.len() > 1 {
+            let target_names: Vec<String> = resolved_targets
+                .iter()
+                .map(|t| t.label().canonical_form())
+                .collect();
+            let limit = 5;
+            let truncated = target_names.len() > limit;
+            let mut names_to_show: Vec<String> = if truncated {
+                target_names[..limit].to_vec()
+            } else {
+                target_names
+            };
+            names_to_show.sort();
+            names_to_show.dedup();
+            let suffix = if truncated { "[TRUNCATED]" } else { "" };
+            let msg = format!(
+                "Only a single target can be run. Your target pattern {} expanded to the targets {}{}",
+                target_pattern,
+                names_to_show.join(", "),
+                suffix
+            );
+            if parsed.keep_going {
+                writeln_bytes(stderr, &format!("WARNING: {msg}. Will continue anyway"));
+            } else {
+                writeln_bytes(stderr, &format!("ERROR: {msg}"));
+                writeln_bytes(
+                    stderr,
+                    &format!(
+                        "INFO: Elapsed time: {:.3}s",
+                        cmd_started.elapsed().as_secs_f64()
+                    ),
+                );
+                writeln_bytes(stderr, "INFO: 0 processes.");
+                writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                writeln_bytes(stderr, "ERROR: Build failed. Not running target");
+                return ExitCode::COMMAND_LINE_ERROR;
+            }
+        }
+        for t in &resolved_targets {
+            if !is_run_executable_target(t) {
+                let msg = format!("Cannot run target {}: Not executable", t.label());
+                if parsed.keep_going {
+                    writeln_bytes(stderr, &format!("WARNING: {msg}. Will continue anyway"));
+                } else {
+                    writeln_bytes(stderr, &format!("ERROR: {msg}"));
+                    writeln_bytes(
+                        stderr,
+                        &format!(
+                            "INFO: Elapsed time: {:.3}s",
+                            cmd_started.elapsed().as_secs_f64()
+                        ),
+                    );
+                    writeln_bytes(stderr, "INFO: 0 processes.");
+                    writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
+                    writeln_bytes(stderr, "ERROR: Build failed. Not running target");
+                    return ExitCode::COMMAND_LINE_ERROR;
+                }
+            }
+        }
+
+        // First build the target(s) - only target_pattern (and --run_under if a target)
+        // Keep every option together with its separate value (`-c opt`), dropping only the
+        // positional targets and `--` residue.
+        let before_dash = match args.iter().position(|a| a == "--") {
+            Some(i) => &args[..i],
+            None => args,
+        };
+        let mut build_args: Vec<String> = before_dash.to_vec();
+        for t in parsed.targets.iter().rev() {
+            if let Some(pos) = build_args.iter().rposition(|a| a == t) {
+                build_args.remove(pos);
+            }
+        }
+        build_args.push(target_pattern.clone());
+        if let Some(ref rul) = run_under_label {
+            build_args.push(rul.clone());
+        }
+        let build_exit = self.cmd_build_or_test("run", &build_args, stdout, stderr);
+        if build_exit != ExitCode::SUCCESS {
+            // `RunCommand`: a failed build never runs the target.
+            if !String::from_utf8_lossy(stderr)
+                .trim_end()
+                .ends_with("ERROR: Build failed. Not running target")
+            {
+                writeln_bytes(stderr, "ERROR: Build failed. Not running target");
+            }
+            return build_exit;
+        }
+
         if resolved_targets.is_empty() {
-            writeln_bytes(stderr, "ERROR: No target found to run");
-            return ExitCode::BUILD_FAILURE;
+            writeln_bytes(stderr, "ERROR: No targets found to run");
+            return ExitCode::COMMAND_LINE_ERROR;
         }
         if resolved_targets.len() > 1 {
-            let mut target_names: Vec<String> = resolved_targets.iter().map(|t| t.label().canonical_form()).collect();
+            let target_names: Vec<String> = resolved_targets
+                .iter()
+                .map(|t| t.label().canonical_form())
+                .collect();
             let limit = 5;
             let truncated = target_names.len() > limit;
             let mut names_to_show: Vec<String> = if truncated {
@@ -2107,90 +3036,25 @@ impl BlazeRuntime {
                     suffix
                 ),
             );
-            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s", cmd_started.elapsed().as_secs_f64()));
-            writeln_bytes(stderr, "INFO: 0 processes.");
-            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-            writeln_bytes(stderr, "ERROR: Build failed. Not running target");
             return ExitCode::COMMAND_LINE_ERROR;
         }
+
         let target = resolved_targets.first().unwrap().clone();
         let label = target.label().clone();
-
-        // Check if target is executable before building.
-        let is_executable = match &target {
-            zel_packages::Target::Rule(r) => r.is_binary_rule() || r.is_test_rule(),
-            zel_packages::Target::InputFile { .. } | zel_packages::Target::OutputFile { .. } => true,
-            _ => false,
-        };
-        if !is_executable {
+        if !is_run_executable_target(&target) {
             writeln_bytes(
                 stderr,
                 &format!("ERROR: Cannot run target {label}: Not executable"),
             );
-            writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s", cmd_started.elapsed().as_secs_f64()));
-            writeln_bytes(stderr, "INFO: 0 processes.");
-            writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-            writeln_bytes(stderr, "ERROR: Build failed. Not running target");
             return ExitCode::COMMAND_LINE_ERROR;
         }
 
-        // Check if --run_under specifies a target label
-        let run_under_str = exec_phase::opt_last(&parsed, "run_under");
-        if let Some(ref ru) = run_under_str {
-            if ru.trim().is_empty() {
-                writeln_bytes(stderr, "ERROR: While parsing option --run_under=: Empty command");
-                return ExitCode::COMMAND_LINE_ERROR;
-            }
-            if ru.starts_with("//") || ru.starts_with('@') {
-                let ru_target = ru.split_whitespace().next().unwrap();
-                let ru_outcome = resolver.resolve_patterns(&[ru_target.to_string()]);
-                if let Some(err) = ru_outcome.errors.first() {
-                    writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
-                    writeln_bytes(stderr, &format!("ERROR: Skipping '{ru_target}': {}", err.message));
-                    writeln_bytes(stderr, &format!("ERROR: {}", err.message));
-                    writeln_bytes(stderr, &format!("INFO: Elapsed time: {:.3}s", cmd_started.elapsed().as_secs_f64()));
-                    writeln_bytes(stderr, "INFO: 0 processes.");
-                    writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
-                    writeln_bytes(stderr, "ERROR: Build failed. Not running target");
-                    return ExitCode::BUILD_FAILURE;
-                }
-            }
-        }
-        let (run_under_label, run_under_opts) = if let Some(ru) = &run_under_str {
-            let mut words = ru.split_whitespace();
-            if let Some(first) = words.next() {
-                if first.starts_with("//") || first.starts_with('@') {
-                    (Some(first.to_string()), words.map(|s| s.to_string()).collect::<Vec<_>>())
-                } else {
-                    (None, Vec::new())
-                }
-            } else {
-                (None, Vec::new())
-            }
-        } else {
-            (None, Vec::new())
-        };
-
-        // First build the target(s) - only target_pattern (and --run_under if a target)
-        // Keep every option together with its separate value (`-c opt`), dropping only the
-        // positional targets (taken from the end, where the residue lives).
-        let mut build_args: Vec<String> = cmd_args.clone();
-        for t in parsed.targets.iter().rev() {
-            if let Some(pos) = build_args.iter().rposition(|a| a == t) {
-                build_args.remove(pos);
-            }
-        }
-        build_args.push(target_pattern);
-        if let Some(ref rul) = run_under_label {
-            build_args.push(rul.clone());
-        }
-        let build_exit = self.cmd_build_or_test("run", &build_args, stdout, stderr);
-        if build_exit != ExitCode::SUCCESS {
-            // `RunCommand`: a failed build never runs the target.
-            if !String::from_utf8_lossy(stderr).trim_end().ends_with("ERROR: Build failed. Not running target") {
-                writeln_bytes(stderr, "ERROR: Build failed. Not running target");
-            }
-            return build_exit;
+        if !exec_phase::opt_bool(&parsed, "build_runfile_manifests", true) {
+            writeln_bytes(
+                stderr,
+                "ERROR: --nobuild_runfile_manifests is incompatible with the \"run\" command",
+            );
+            return ExitCode::COMMAND_LINE_ERROR;
         }
 
         let run_loader = Arc::clone(resolver.loader());
@@ -2208,16 +3072,11 @@ impl BlazeRuntime {
                 roots_to_analyze.push(ru_t.clone());
             }
         }
-        let analysis = match self.analyze_roots(
-            &parsed,
-            &run_loader,
-            &roots_to_analyze,
-            &config,
-            stderr,
-        ) {
-            Ok(a) => a,
-            Err(code) => return code,
-        };
+        let analysis =
+            match self.analyze_roots(&parsed, &run_loader, &roots_to_analyze, &config, stderr) {
+                Ok(a) => a,
+                Err(code) => return code,
+            };
         let Some(Some(ct)) = analysis.roots.first().cloned() else {
             return ExitCode::BUILD_FAILURE;
         };
@@ -2228,7 +3087,9 @@ impl BlazeRuntime {
                 .unwrap_or(1);
             let sharding_strat = exec_phase::opt_last(&parsed, "test_sharding_strategy");
             let t_attrs = exec_phase::test_attrs(Some(&target), &parsed);
-            let effective_shards = exec_phase::effective_shard_count(t_attrs.shard_count, sharding_strat.as_deref()).unwrap_or(t_attrs.shard_count);
+            let effective_shards =
+                exec_phase::effective_shard_count(t_attrs.shard_count, sharding_strat.as_deref())
+                    .unwrap_or(t_attrs.shard_count);
             if runs_per_test > 1 || effective_shards > 1 {
                 writeln_bytes(
                     stderr,
@@ -2252,21 +3113,52 @@ impl BlazeRuntime {
             );
             return ExitCode::COMMAND_LINE_ERROR;
         };
-        if ct.rule_class == "source file" {
-            use std::os::unix::fs::PermissionsExt;
-            let p = format!("{}/{}", self.dirs.workspace_dir.path_string(), exe_art.exec_path.path_string());
-            let ok = std::fs::metadata(&p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false);
-            if !ok {
-                writeln_bytes(stderr, &format!("ERROR: Non-existent or non-executable {p}"));
-                return ExitCode::BUILD_FAILURE;
-            }
-        }
         let execroot = self.dirs.execroot();
         let exe_abs = execroot.get_relative(&exe_art.exec_path);
         let perform_build = exec_phase::opt_bool(&parsed, "build", true);
         if !perform_build && !std::path::Path::new(exe_abs.path_string()).exists() {
             writeln_bytes(stderr, "ERROR: No targets found to run");
             return ExitCode::COMMAND_LINE_ERROR;
+        }
+        if perform_build {
+            match std::fs::metadata(exe_abs.path_string()) {
+                Ok(m) => {
+                    #[cfg(unix)]
+                    let non_exec = {
+                        use std::os::unix::fs::PermissionsExt;
+                        !m.is_file() || (m.permissions().mode() & 0o111 == 0)
+                    };
+                    #[cfg(not(unix))]
+                    let non_exec = !m.is_file();
+                    if non_exec {
+                        writeln_bytes(
+                            stderr,
+                            &format!(
+                                "ERROR: Non-existent or non-executable {}",
+                                exe_abs.path_string()
+                            ),
+                        );
+                        return ExitCode::BUILD_FAILURE;
+                    }
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    writeln_bytes(
+                        stderr,
+                        &format!(
+                            "ERROR: Non-existent or non-executable {}",
+                            exe_abs.path_string()
+                        ),
+                    );
+                    return ExitCode::BUILD_FAILURE;
+                }
+                Err(e) => {
+                    writeln_bytes(
+                        stderr,
+                        &format!("ERROR: Error checking {}: {e}", exe_abs.path_string()),
+                    );
+                    return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
+                }
+            }
         }
 
         let runfiles_dir = match exec_phase::build_target_runfiles(
@@ -2277,8 +3169,8 @@ impl BlazeRuntime {
         ) {
             Ok(d) => d,
             Err(e) => {
-                writeln_bytes(stderr, &format!("ERROR: Failed to create runfiles tree: {e}"));
-                return ExitCode::BUILD_FAILURE;
+                writeln_bytes(stderr, &format!("ERROR: Error creating runfiles: {e}"));
+                return ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
             }
         };
         let client_cwd = args
@@ -2299,19 +3191,95 @@ impl BlazeRuntime {
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_else(|| self.dirs.workspace_dir.path_string().to_string())
         };
+        let effective_target = if matches!(&target, zel_packages::Target::Rule(r) if r.rule_class == "alias")
+        {
+            ct.alias_targets
+                .last()
+                .and_then(|al| {
+                    run_loader
+                        .load_package(al.package_identifier())
+                        .ok()
+                        .and_then(|pkg| pkg.get_target(al.name(), &*self.fs).ok().cloned())
+                })
+                .unwrap_or_else(|| target.clone())
+        } else {
+            target.clone()
+        };
+        let mut expanded_rule_args: Vec<String> = Vec::new();
+        {
+            let raw_args = exec_phase::test_attrs(Some(&effective_target), &parsed).args;
+            if !raw_args.is_empty() {
+                let mut lmap: std::collections::BTreeMap<
+                    zel_cmdline::Label,
+                    Vec<zel_analysis::Artifact>,
+                > = std::collections::BTreeMap::new();
+                let mut add_dep_arts = |dep_ct: &zel_analysis::ConfiguredTarget| {
+                    let files = dep_ct.default_info.files.clone();
+                    lmap.entry(dep_ct.label.clone())
+                        .or_default()
+                        .extend(files.iter().cloned());
+                    for al in &dep_ct.alias_targets {
+                        lmap.entry(al.clone())
+                            .or_default()
+                            .extend(files.iter().cloned());
+                    }
+                };
+                for (dl, dc) in analysis.resolver.direct_deps(&ct.label, &ct.configuration) {
+                    if let Ok(dct) = analysis.resolver.analyze(&dl, &dc) {
+                        add_dep_arts(&dct);
+                    }
+                }
+                for al in &ct.alias_targets {
+                    for (dl, dc) in analysis.resolver.direct_deps(al, &ct.configuration) {
+                        if let Ok(dct) = analysis.resolver.analyze(&dl, &dc) {
+                            add_dep_arts(&dct);
+                        }
+                    }
+                }
+                let eff_lbl = effective_target.label();
+                let mapping = run_loader
+                    .config()
+                    .lookup
+                    .resolver
+                    .mapping(eff_lbl.repository());
+                let ws_name = self.dirs.execroot_workspace_name();
+                for a in raw_args {
+                    let exp = zel_analysis::location::expand_locations_with_mapping(
+                        &a,
+                        &lmap,
+                        eff_lbl,
+                        zel_analysis::location::LocationMode::Runfiles,
+                        &ws_name,
+                        Some(&mapping),
+                    )
+                    .unwrap_or(a);
+                    if let Ok(toks) = zel_analysis::location::shell_tokenize(&exp) {
+                        expanded_rule_args.extend(toks);
+                    } else {
+                        expanded_rule_args.push(exp);
+                    }
+                }
+            }
+        }
         let mut argv_s: Vec<String> = Vec::new();
         let display: String;
-        let test_binary_rel = format!("./{}", exe_art.exec_path.path_string().rsplit_once('/').map(|x| x.1).unwrap_or(exe_art.exec_path.path_string()));
+        let test_binary_rel =
+            zel_analysis::location::callable_path(exe_art.root_relative_path.path_string());
         if ct.is_test {
-            let setup = self.dirs.output_base.get_relative_str("install/embedded_tools/tools/test/test-setup.sh");
-            let _ = zel_exec::test_runner::install_test_setup(&std::path::PathBuf::from(setup.path_string()));
+            let setup = self
+                .dirs
+                .output_base
+                .get_relative_str("install/embedded_tools/tools/test/test-setup.sh");
+            let _ = zel_exec::test_runner::install_test_setup(&std::path::PathBuf::from(
+                setup.path_string(),
+            ));
             argv_s.push(setup.path_string().to_string());
-            if let Some(ref rul) = run_under_label {
+            if let Some(ref _rul) = run_under_label {
                 if let Some(Some(ru_ct)) = analysis.roots.get(1).cloned() {
                     if let Some(ru_exe) = ru_ct.default_info.executable.clone() {
                         let ru_abs = execroot.get_relative(&ru_exe.exec_path);
                         argv_s.push(ru_abs.path_string().to_string());
-                        argv_s.extend(run_under_opts);
+                        argv_s.extend(run_under_opts.iter().cloned());
                     }
                 }
             } else if let Some(ru) = &run_under_str {
@@ -2319,8 +3287,7 @@ impl BlazeRuntime {
             }
             argv_s.push(test_binary_rel.clone());
             // `RunfilesSupport.getArgs()` (the rule's `args`) come first, then `--test_arg`s.
-            let rule_args = exec_phase::test_attrs(Some(&target), &parsed).args;
-            let mut test_args = rule_args;
+            let mut test_args = expanded_rule_args.clone();
             test_args.extend(exec_phase::opt_all(&parsed, "test_arg"));
             let mut test_args_str = String::new();
             for ta in &test_args {
@@ -2328,7 +3295,9 @@ impl BlazeRuntime {
                 test_args_str.push_str(&format!(" {ta}"));
             }
             argv_s.extend(run_args.iter().cloned());
-            display = format!("external/bazel_tools/tools/test/test-setup.sh {test_binary_rel}{test_args_str}");
+            display = format!(
+                "external/bazel_tools/tools/test/test-setup.sh {test_binary_rel}{test_args_str}"
+            );
         } else {
             let mut ru_prefix = String::new();
             let mut shell_run_under: Option<String> = None;
@@ -2337,9 +3306,19 @@ impl BlazeRuntime {
                     if let Some(ru_exe) = ru_ct.default_info.executable.clone() {
                         let ru_abs = execroot.get_relative(&ru_exe.exec_path);
                         argv_s.push(ru_abs.path_string().to_string());
-                        argv_s.extend(run_under_opts);
-                        let symlink_prefix = exec_phase::opt_last(&parsed, "symlink_prefix").unwrap_or_else(|| "bazel-".to_string());
-                        let target_ru_bin = format!("{}bin/{}", symlink_prefix, ru_exe.exec_path.path_string().rsplit_once('/').map(|x| x.1).unwrap_or(ru_exe.exec_path.path_string()));
+                        argv_s.extend(run_under_opts.iter().cloned());
+                        let symlink_prefix = exec_phase::opt_last(&parsed, "symlink_prefix")
+                            .unwrap_or_else(|| "bazel-".to_string());
+                        let target_ru_bin = format!(
+                            "{}bin/{}",
+                            symlink_prefix,
+                            ru_exe
+                                .exec_path
+                                .path_string()
+                                .rsplit_once('/')
+                                .map(|x| x.1)
+                                .unwrap_or(ru_exe.exec_path.path_string())
+                        );
                         ru_prefix = format!("{target_ru_bin} ");
                     }
                 }
@@ -2350,22 +3329,32 @@ impl BlazeRuntime {
             }
             argv_s.push(exe_abs.path_string().to_string());
             // The rule's `args` attribute precedes the command-line residue.
-            argv_s.extend(exec_phase::test_attrs(Some(&target), &parsed).args);
+            argv_s.extend(expanded_rule_args.iter().cloned());
             argv_s.extend(run_args.iter().cloned());
             if let Some(ru) = shell_run_under {
                 let q = |s: &str| {
-                    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c)) {
+                    if !s.is_empty()
+                        && s.chars()
+                            .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c))
+                    {
                         s.to_string()
                     } else {
                         format!("'{}'", s.replace('\'', "'\\''"))
                     }
                 };
-                let cmd = format!("{ru} {}", argv_s.iter().map(|a| q(a)).collect::<Vec<_>>().join(" "));
+                let cmd = format!(
+                    "{ru} {}",
+                    argv_s.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ")
+                );
                 argv_s = vec!["/bin/bash".to_string(), "-c".to_string(), cmd];
             }
-            let symlink_prefix = exec_phase::opt_last(&parsed, "symlink_prefix").unwrap_or_else(|| "bazel-".to_string());
+            let symlink_prefix = exec_phase::opt_last(&parsed, "symlink_prefix")
+                .unwrap_or_else(|| "bazel-".to_string());
             // `ignore` / `clean`: no convenience symlinks, so the absolute path is announced.
-            let conv_symlinks = !matches!(exec_phase::opt_last(&parsed, "experimental_convenience_symlinks").as_deref(), Some("ignore") | Some("clean") | Some("false") | Some("0"));
+            let conv_symlinks = !matches!(
+                exec_phase::opt_last(&parsed, "experimental_convenience_symlinks").as_deref(),
+                Some("ignore") | Some("clean") | Some("false") | Some("0")
+            );
             let target_bin = if !conv_symlinks {
                 exe_abs.path_string().to_string()
             } else {
@@ -2380,23 +3369,42 @@ impl BlazeRuntime {
                         .unwrap_or(exe_art.exec_path.path_string())
                 )
             };
-            let rule_args = exec_phase::test_attrs(Some(&target), &parsed).args;
-            display = if rule_args.is_empty() {
+            display = if expanded_rule_args.is_empty() {
                 format!("{ru_prefix}{target_bin}")
             } else {
-                format!("{ru_prefix}{target_bin} {}", rule_args.join(" "))
+                format!("{ru_prefix}{target_bin} {}", expanded_rule_args.join(" "))
             };
         }
 
         let script_path = exec_phase::opt_last(&parsed, "script_path");
+        let emit_script_in_exec_req =
+            exec_phase::opt_bool(&parsed, "emit_script_path_in_exec_request", false);
+        let sh_executable = match exec_phase::opt_last(&parsed, "shell_executable") {
+            Some(s) if s.is_empty() && script_path.is_some() => {
+                writeln_bytes(
+                    stderr,
+                    "ERROR: the \"run\" command needs a shell with \"--script_path\"; use the --shell_executable=<path> flag to specify the shell's path, e.g. --shell_executable=/bin/bash",
+                );
+                return ExitCode::COMMAND_LINE_ERROR;
+            }
+            Some(s) if !s.is_empty() => s,
+            _ => "/bin/bash".to_string(),
+        };
         if let Some(ref sp) = script_path {
             if sp.trim().is_empty() {
-                writeln_bytes(stderr, &format!("ERROR: Error writing run script: {} (Is a directory)", self.dirs.workspace_dir.path_string()));
+                writeln_bytes(
+                    stderr,
+                    &format!("ERROR: Error writing run script: {client_cwd} (Is a directory)"),
+                );
                 return ExitCode::RUN_FAILURE;
             }
         }
         let run_built_target = exec_phase::opt_bool(&parsed, "run", true);
-        let prefix = if run_built_target { "Running" } else { "Runnable" };
+        let prefix = if run_built_target {
+            "Running"
+        } else {
+            "Runnable"
+        };
         let omit_run_args = exec_phase::opt_bool(&parsed, "omit_run_args", true);
         let display_cmd = if !run_args.is_empty() {
             if omit_run_args {
@@ -2411,13 +3419,25 @@ impl BlazeRuntime {
             if parsed.subcommands {
                 writeln_bytes(stderr, "INFO: Running command line:");
                 let mut cmd_lines = format!("(cd {} && \\\n  exec env - \\\n", cwd);
-                for u in &["JAVA_RUNFILES", "RUNFILES_DIR", "RUNFILES_MANIFEST_FILE", "RUNFILES_MANIFEST_ONLY", "TEST_SRCDIR"] {
+                for u in &[
+                    "JAVA_RUNFILES",
+                    "RUNFILES_DIR",
+                    "RUNFILES_MANIFEST_FILE",
+                    "RUNFILES_MANIFEST_ONLY",
+                    "TEST_SRCDIR",
+                ] {
                     cmd_lines.push_str(&format!("    -u {} \\\n", u));
                 }
-                cmd_lines.push_str(&format!("    BUILD_EXECROOT={} \\\n", self.dirs.execroot().path_string()));
+                cmd_lines.push_str(&format!(
+                    "    BUILD_EXECROOT={} \\\n",
+                    self.dirs.execroot().path_string()
+                ));
                 cmd_lines.push_str(&format!("    BUILD_ID={} \\\n", pseudo_uuid()));
                 cmd_lines.push_str(&format!("    BUILD_WORKING_DIRECTORY={} \\\n", client_cwd));
-                cmd_lines.push_str(&format!("    BUILD_WORKSPACE_DIRECTORY={} \\\n", self.dirs.workspace_dir.path_string()));
+                cmd_lines.push_str(&format!(
+                    "    BUILD_WORKSPACE_DIRECTORY={} \\\n",
+                    self.dirs.workspace_dir.path_string()
+                ));
                 // `ShellEscaper`: the command string (executable plus run args) is quoted when it
                 // contains anything beyond safe characters.
                 let mut full = exe_abs.path_string().to_string();
@@ -2425,20 +3445,32 @@ impl BlazeRuntime {
                     full.push(' ');
                     full.push_str(a);
                 }
-                let safe = !full.is_empty() && full.chars().all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c));
-                let shown = if safe { full } else { format!("'{}'", full.replace('\'', "'\\''")) };
+                let safe = !full.is_empty()
+                    && full
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c));
+                let shown = if safe {
+                    full
+                } else {
+                    format!("'{}'", full.replace('\'', "'\\''"))
+                };
                 cmd_lines.push_str(&format!("  /bin/bash -c {shown})"));
                 writeln_bytes(stderr, &cmd_lines);
             } else {
                 let filters: Vec<String> = loading::opt_list(&parsed, "ui_event_filters");
-                let suppress_info = filters.iter().any(|f| f.split(',').any(|tok| tok == "-info"));
+                let suppress_info = filters
+                    .iter()
+                    .any(|f| f.split(',').any(|tok| tok == "-info"));
                 if !suppress_info {
                     let ts = if exec_phase::opt_bool(&parsed, "show_timestamps", false) {
                         timestamp_prefix()
                     } else {
                         String::new()
                     };
-                    writeln_bytes(stderr, &format!("{ts}INFO: {prefix} command line: {display_cmd}"));
+                    writeln_bytes(
+                        stderr,
+                        &format!("{ts}INFO: {prefix} command line: {display_cmd}"),
+                    );
                 }
             }
         }
@@ -2447,22 +3479,31 @@ impl BlazeRuntime {
         // apply to `bazel run`.
         let client_env = self.client_env();
         let mut run_base: BTreeMap<String, String> = BTreeMap::new();
-        run_base.insert("BUILD_WORKSPACE_DIRECTORY".into(), self.dirs.workspace_dir.path_string().to_string());
+        run_base.insert(
+            "BUILD_WORKSPACE_DIRECTORY".into(),
+            self.dirs.workspace_dir.path_string().to_string(),
+        );
         run_base.insert("BUILD_WORKING_DIRECTORY".into(), client_cwd.clone());
         run_base.insert("BUILD_EXECROOT".into(), execroot.path_string().to_string());
         run_base.insert("BUILD_ID".into(), pseudo_uuid());
         if ct.is_test {
             run_base.insert("TEST_TARGET".into(), label.canonical_form());
             run_base.insert("TEST_WORKSPACE".into(), self.dirs.execroot_workspace_name());
-            let test_binary_rel = format!("./{}", exe_art.exec_path.path_string().rsplit_once('/').map(|x| x.1).unwrap_or(exe_art.exec_path.path_string()));
+            let test_binary_rel =
+                zel_analysis::location::callable_path(exe_art.root_relative_path.path_string());
             run_base.insert("TEST_BINARY".into(), test_binary_rel);
-            let t_attrs = exec_phase::test_attrs(Some(&target), &parsed);
+            let t_attrs = exec_phase::test_attrs(Some(&effective_target), &parsed);
             run_base.insert("TEST_SIZE".into(), t_attrs.size);
             run_base.insert("TEST_TIMEOUT".into(), t_attrs.timeout.to_string());
 
             let is_sp = script_path.is_some();
             if is_sp {
-                let rf_rel = format!("bazel-out/{}-{}/bin/{}.runfiles", config.cpu, parsed.compilation_mode, label.name());
+                let rf_rel = format!(
+                    "bazel-out/{}-{}/bin/{}.runfiles",
+                    config.cpu,
+                    parsed.compilation_mode,
+                    label.name()
+                );
                 run_base.insert("JAVA_RUNFILES".into(), rf_rel.clone());
                 run_base.insert("PYTHON_RUNFILES".into(), rf_rel.clone());
                 run_base.insert("RUNFILES_DIR".into(), rf_rel.clone());
@@ -2481,51 +3522,99 @@ impl BlazeRuntime {
                 run_base.insert("RUN_UNDER_RUNFILES".into(), "1".into());
             }
 
-            let hash = zel_exec::test_runner::test_tmpdir_hash(&std::path::PathBuf::from(exe_art.exec_path.path_string()), 0, 0);
+            let hash = zel_exec::test_runner::test_tmpdir_hash(
+                &std::path::PathBuf::from(exe_art.exec_path.path_string()),
+                0,
+                0,
+            );
             if is_sp {
                 run_base.insert("TEST_TMPDIR".into(), format!("_tmp/{hash}"));
             } else {
                 let tmp_root = exec_phase::opt_last(&parsed, "test_tmpdir")
                     .map(std::path::PathBuf::from)
-                    .unwrap_or_else(|| std::path::PathBuf::from(execroot.path_string()).join("_tmp"));
+                    .unwrap_or_else(|| {
+                        std::path::PathBuf::from(execroot.path_string()).join("_tmp")
+                    });
                 let test_tmp = tmp_root.join(&hash);
                 let _ = std::fs::create_dir_all(&test_tmp);
                 run_base.insert("TEST_TMPDIR".into(), test_tmp.display().to_string());
             }
 
-            let target_rel = label.package_identifier().package_fragment().get_relative_str(label.name());
-            let log_dir_abs = std::path::PathBuf::from(self.dirs.bazel_testlogs(config.cpu.as_str(), &parsed.compilation_mode).get_relative(&target_rel).path_string());
+            let target_rel = label
+                .package_identifier()
+                .package_fragment()
+                .get_relative_str(label.name());
+            let log_dir_abs = std::path::PathBuf::from(
+                self.dirs
+                    .bazel_testlogs(config.cpu.as_str(), &parsed.compilation_mode)
+                    .get_relative(&target_rel)
+                    .path_string(),
+            );
             let _ = std::fs::create_dir_all(&log_dir_abs);
             let _ = std::fs::create_dir_all(log_dir_abs.join("test.outputs"));
             let _ = std::fs::create_dir_all(log_dir_abs.join("test.outputs_manifest"));
             let _ = std::fs::create_dir_all(log_dir_abs.join("test.raw_splitlogs"));
 
             let log_prefix = if is_sp {
-                format!("bazel-out/{}-{}/testlogs/{}", config.cpu, parsed.compilation_mode, target_rel)
+                format!(
+                    "bazel-out/{}-{}/testlogs/{}",
+                    config.cpu, parsed.compilation_mode, target_rel
+                )
             } else {
                 log_dir_abs.display().to_string()
             };
 
             run_base.insert("XML_OUTPUT_FILE".into(), format!("{log_prefix}/test.xml"));
-            run_base.insert("TEST_WARNINGS_OUTPUT_FILE".into(), format!("{log_prefix}/test.warnings"));
-            run_base.insert("TEST_UNUSED_RUNFILES_LOG_FILE".into(), format!("{log_prefix}/test.unused_runfiles_log"));
-            run_base.insert("TEST_LOGSPLITTER_OUTPUT_FILE".into(), format!("{log_prefix}/test.raw_splitlogs/test.splitlogs"));
-            run_base.insert("TEST_UNDECLARED_OUTPUTS_DIR".into(), format!("{log_prefix}/test.outputs"));
-            run_base.insert("TEST_UNDECLARED_OUTPUTS_MANIFEST".into(), format!("{log_prefix}/test.outputs_manifest/MANIFEST"));
+            run_base.insert(
+                "TEST_WARNINGS_OUTPUT_FILE".into(),
+                format!("{log_prefix}/test.warnings"),
+            );
+            run_base.insert(
+                "TEST_UNUSED_RUNFILES_LOG_FILE".into(),
+                format!("{log_prefix}/test.unused_runfiles_log"),
+            );
+            run_base.insert(
+                "TEST_LOGSPLITTER_OUTPUT_FILE".into(),
+                format!("{log_prefix}/test.raw_splitlogs/test.splitlogs"),
+            );
+            run_base.insert(
+                "TEST_UNDECLARED_OUTPUTS_DIR".into(),
+                format!("{log_prefix}/test.outputs"),
+            );
+            run_base.insert(
+                "TEST_UNDECLARED_OUTPUTS_MANIFEST".into(),
+                format!("{log_prefix}/test.outputs_manifest/MANIFEST"),
+            );
             if !is_sp {
-                run_base.insert("TEST_UNDECLARED_OUTPUTS_ZIP".into(), format!("{log_prefix}/test.outputs/outputs.zip"));
+                run_base.insert(
+                    "TEST_UNDECLARED_OUTPUTS_ZIP".into(),
+                    format!("{log_prefix}/test.outputs/outputs.zip"),
+                );
             }
-            run_base.insert("TEST_UNDECLARED_OUTPUTS_ANNOTATIONS".into(), format!("{log_prefix}/test.outputs_manifest/ANNOTATIONS"));
-            run_base.insert("TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR".into(), format!("{log_prefix}/test.outputs_manifest"));
-            run_base.insert("TEST_PREMATURE_EXIT_FILE".into(), format!("{log_prefix}/test.exited_prematurely"));
-            run_base.insert("TEST_INFRASTRUCTURE_FAILURE_FILE".into(), format!("{log_prefix}/test.infrastructure_failure"));
+            run_base.insert(
+                "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS".into(),
+                format!("{log_prefix}/test.outputs_manifest/ANNOTATIONS"),
+            );
+            run_base.insert(
+                "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR".into(),
+                format!("{log_prefix}/test.outputs_manifest"),
+            );
+            run_base.insert(
+                "TEST_PREMATURE_EXIT_FILE".into(),
+                format!("{log_prefix}/test.exited_prematurely"),
+            );
+            run_base.insert(
+                "TEST_INFRASTRUCTURE_FAILURE_FILE".into(),
+                format!("{log_prefix}/test.infrastructure_failure"),
+            );
         }
         if ct.is_test {
             if let Some(tf) = exec_phase::opt_last(&parsed, "test_filter") {
                 run_base.insert("TESTBRIDGE_TEST_ONLY".into(), tf);
             }
             // `--test_env=K=V` / `--test_env=K` (inherit from the client environment).
-            for ev in zel_util::action_env::parse_env_vars(exec_phase::opt_all(&parsed, "test_env")) {
+            for ev in zel_util::action_env::parse_env_vars(exec_phase::opt_all(&parsed, "test_env"))
+            {
                 match ev {
                     zel_util::action_env::EnvVar::Set(n, v) => {
                         run_base.insert(n, v);
@@ -2547,11 +3636,21 @@ impl BlazeRuntime {
             ),
             None => exec_phase::native_run_environment(&target),
         };
-        let run_env_vars = zel_util::action_env::parse_env_vars(exec_phase::opt_all(&parsed, "run_env"));
-        let (run_env, mut to_clear) =
-            zel_util::action_env::run_environment(run_base, &run_env_vars, &target_env, &client_env);
+        let run_env_vars =
+            zel_util::action_env::parse_env_vars(exec_phase::opt_all(&parsed, "run_env"));
+        let (run_env, mut to_clear) = zel_util::action_env::run_environment(
+            run_base,
+            &run_env_vars,
+            &target_env,
+            &client_env,
+        );
         if !ct.is_test {
-            for v in &["JAVA_RUNFILES", "RUNFILES_DIR", "RUNFILES_MANIFEST_FILE", "RUNFILES_MANIFEST_ONLY"] {
+            for v in &[
+                "JAVA_RUNFILES",
+                "RUNFILES_DIR",
+                "RUNFILES_MANIFEST_FILE",
+                "RUNFILES_MANIFEST_ONLY",
+            ] {
                 to_clear.insert(v.to_string());
             }
         }
@@ -2575,7 +3674,6 @@ impl BlazeRuntime {
         } else {
             Vec::new()
         };
-        let script_path = exec_phase::opt_last(&parsed, "script_path");
         let mut write_failure: Option<String> = None;
         let script = script_path.map(|sp| {
             let q = |s: &str| {
@@ -2587,44 +3685,103 @@ impl BlazeRuntime {
                     format!("'{}'", s.replace('\'', "'\\''"))
                 }
             };
-            let mut c = format!("#!/bin/bash\ncd {} && \\\n  exec env \\\n", q(&cwd));
-            for u in &to_clear {
-                c.push_str(&format!("    -u {} \\\n", u));
-            }
-            for (k, v) in &env {
-                c.push_str(&format!("    {}={} \\\n", k, q(v)));
-            }
-            if ct.is_test {
-                c.push_str(&format!(
-                    "  external/bazel_tools/tools/test/test-setup.sh {} \"$@\"",
-                    test_binary_rel
-                ));
+            let to_iso_8859_1 = |s: &str| -> Vec<u8> {
+                s.chars()
+                    .map(|ch| if (ch as u32) <= 0xFF { ch as u8 } else { b'?' })
+                    .collect()
+            };
+            let sp_resolved = if std::path::Path::new(&sp).is_absolute() {
+                sp.clone()
             } else {
-                c.push_str(&format!(
-                    "  {} \"$@\"",
-                    exe_abs.path_string()
-                ));
+                std::path::Path::new(&client_cwd)
+                    .join(&sp)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            let unset_block = to_clear
+                .iter()
+                .map(|u| format!("-u {u}"))
+                .collect::<Vec<_>>()
+                .join(" \\\n    ");
+            let set_block = env
+                .iter()
+                .map(|(k, v)| format!("{}={}", q(k), q(v)))
+                .collect::<Vec<_>>()
+                .join(" \\\n    ");
+
+            // Build RunCommandLine.LinuxFormatter.getCommandLine (run_under + executable + args + residue)
+            let mut script_args: Vec<String> = Vec::new();
+            let mut ru_prefix_opt: Option<String> = None;
+            if ct.is_test {
+                script_args.push("external/bazel_tools/tools/test/test-setup.sh".to_string());
+                if let Some(ref _rul) = run_under_label {
+                    if let Some(Some(ru_ct)) = analysis.roots.get(1).cloned() {
+                        if let Some(ru_exe) = ru_ct.default_info.executable.clone() {
+                            let ru_abs = execroot.get_relative(&ru_exe.exec_path);
+                            script_args.push(ru_abs.path_string().to_string());
+                            script_args.extend(run_under_opts.iter().cloned());
+                        }
+                    }
+                } else if let Some(ref ru) = run_under_str {
+                    ru_prefix_opt = Some(ru.clone());
+                }
+                script_args.push(test_binary_rel.clone());
+                script_args.extend(exec_phase::test_attrs(Some(&target), &parsed).args);
+                script_args.extend(exec_phase::opt_all(&parsed, "test_arg"));
+                script_args.extend(run_args.iter().cloned());
+            } else {
+                if run_under_label.is_some() {
+                    if let Some(Some(ru_ct)) = analysis.roots.last().cloned() {
+                        if let Some(ru_exe) = ru_ct.default_info.executable.clone() {
+                            let ru_abs = execroot.get_relative(&ru_exe.exec_path);
+                            let mut parts = vec![q(ru_abs.path_string())];
+                            parts.extend(run_under_opts.iter().map(|a| q(a)));
+                            ru_prefix_opt = Some(parts.join(" "));
+                        }
+                    }
+                } else if let Some(ref ru) = run_under_str {
+                    ru_prefix_opt = Some(ru.clone());
+                }
+                script_args.push(exe_abs.path_string().to_string());
+                script_args.extend(exec_phase::test_attrs(Some(&target), &parsed).args);
+                script_args.extend(run_args.iter().cloned());
             }
-            if let Err(e) = std::fs::write(&sp, &c) {
-                // `RunCommand.writeScript` failure: Java's `FileNotFoundException` message.
-                let why = match e.raw_os_error() {
-                    Some(2) => "No such file or directory".to_string(),
-                    Some(13) => "Permission denied".to_string(),
-                    Some(20) => "Not a directory".to_string(),
-                    Some(21) => "Is a directory".to_string(),
-                    Some(30) => "Read-only file system".to_string(),
-                    _ => e.to_string(),
-                };
-                write_failure = Some(format!("ERROR: Error writing run script: {sp} ({why})"));
-            }
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&sp, std::fs::Permissions::from_mode(0o755));
+            let escaped_args = script_args.iter().map(|a| q(a)).collect::<Vec<_>>().join(" ");
+            let cmd_line = match ru_prefix_opt {
+                Some(ru) => {
+                    let inner = if escaped_args.is_empty() { ru } else { format!("{ru} {escaped_args}") };
+                    format!("{sh_executable} -c {}", q(&inner))
+                }
+                None => escaped_args,
+            };
+
+            let c = format!(
+                "#!{sh_executable}\ncd {} && \\\n  exec env \\\n    {unset_block} \\\n    {set_block} \\\n  {cmd_line} \"$@\"",
+                q(&cwd)
+            );
+            let iso_bytes = to_iso_8859_1(&c);
+            if !emit_script_in_exec_req {
+                if let Err(e) = std::fs::write(&sp_resolved, &iso_bytes) {
+                    // `RunCommand.writeScript` failure: Java's `FileNotFoundException` message.
+                    let why = match e.raw_os_error() {
+                        Some(2) => "No such file or directory".to_string(),
+                        Some(13) => "Permission denied".to_string(),
+                        Some(20) => "Not a directory".to_string(),
+                        Some(21) => "Is a directory".to_string(),
+                        Some(30) => "Read-only file system".to_string(),
+                        _ => e.to_string(),
+                    };
+                    write_failure = Some(format!("ERROR: Error writing run script: {sp} ({why})"));
+                }
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&sp_resolved, std::fs::Permissions::from_mode(0o755));
+                }
             }
             zel_proto::command_server::ScriptPath {
-                script_path: sp.into_bytes(),
-                script_contents: c.into_bytes(),
+                script_path: to_iso_8859_1(&sp),
+                script_contents: iso_bytes,
             }
         });
         if let Some(m) = write_failure {
@@ -2632,7 +3789,32 @@ impl BlazeRuntime {
             *exec_request = None;
             return ExitCode::RUN_FAILURE;
         }
-        if !run_built_target && script.is_none() {
+        if let Some(sp_msg) = script {
+            if emit_script_in_exec_req {
+                *exec_request = Some(ExecRequest {
+                    working_directory: cwd.into_bytes(),
+                    argv: argv_s.iter().map(|a| a.as_bytes().to_vec()).collect(),
+                    environment_variable: env
+                        .iter()
+                        .map(|(k, v)| zel_proto::command_server::EnvironmentVariable {
+                            name: k.as_bytes().to_vec(),
+                            value: v.as_bytes().to_vec(),
+                        })
+                        .collect(),
+                    environment_variable_to_clear: to_clear
+                        .iter()
+                        .map(|n| n.as_bytes().to_vec())
+                        .collect(),
+                    should_exec: false,
+                    script_path: Some(sp_msg),
+                    path_to_replace: paths_to_replace,
+                });
+            } else {
+                *exec_request = None;
+            }
+            return ExitCode::SUCCESS;
+        }
+        if !run_built_target {
             *exec_request = None;
             return ExitCode::SUCCESS;
         }
@@ -2647,14 +3829,18 @@ impl BlazeRuntime {
                 })
                 .collect(),
             environment_variable_to_clear: to_clear.iter().map(|n| n.as_bytes().to_vec()).collect(),
-            should_exec: run_built_target,
-            script_path: script,
+            should_exec: true,
+            script_path: None,
             path_to_replace: paths_to_replace,
         });
         ExitCode::SUCCESS
     }
 
-    fn write_workspace_status_files(&self, parsed: &ParsedCommandOptions, output_path: &zel_vfs::PathFragment) -> Result<(), String> {
+    fn write_workspace_status_files(
+        &self,
+        parsed: &ParsedCommandOptions,
+        output_path: &zel_vfs::PathFragment,
+    ) -> Result<(), String> {
         let embed_label = parsed.get_str("embed_label").unwrap_or("");
         let status_cmd = parsed.get_str("workspace_status_command").unwrap_or("");
 
@@ -2689,7 +3875,11 @@ impl BlazeRuntime {
                             continue;
                         }
                         let (k, v) = line.split_once(' ').unwrap_or((line, ""));
-                        if k.starts_with("STABLE_") || k == "BUILD_EMBED_LABEL" || k == "BUILD_HOST" || k == "BUILD_USER" {
+                        if k.starts_with("STABLE_")
+                            || k == "BUILD_EMBED_LABEL"
+                            || k == "BUILD_HOST"
+                            || k == "BUILD_USER"
+                        {
                             stable_map.insert(k.to_string(), v.trim().to_string());
                         } else {
                             volatile_map.insert(k.to_string(), v.trim().to_string());
@@ -2739,18 +3929,31 @@ fn pseudo_uuid() -> String {
     let pid = std::process::id() as u128;
     let x = n ^ (pid << 64) ^ 0x9e37_79b9_7f4a_7c15_f39c_c060_5ced_c834u128;
     let h = format!("{x:032x}");
-    format!("{}-{}-4{}-a{}-{}", &h[0..8], &h[8..12], &h[13..16], &h[17..20], &h[20..32])
+    format!(
+        "{}-{}-4{}-a{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[13..16],
+        &h[17..20],
+        &h[20..32]
+    )
 }
 
 fn timestamp_prefix() -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let secs = (now + zel_events::ui::local_utc_offset_secs(now)).rem_euclid(86400);
     let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
     format!("({h:02}:{m:02}:{s:02}) ")
 }
 
 fn current_date_str() -> String {
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs() as i64;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64;
     let now = now + zel_events::ui::local_utc_offset_secs(now);
     let z = now / 86400 + 719_468;
     let era = z.div_euclid(146_097);
@@ -2881,22 +4084,27 @@ pub fn write_server_status_files(
     request_cookie: &str,
     response_cookie: &str,
 ) -> io::Result<()> {
+    let to_latin1 = |s: &str| -> Vec<u8> {
+        s.chars()
+            .map(|c| if (c as u32) <= 0xFF { c as u8 } else { b'?' })
+            .collect()
+    };
     fs.create_directory_and_parents(server_dir)?;
     fs.write_file(
         &server_dir.get_relative_str("command_port"),
-        address.as_bytes(),
+        &to_latin1(address),
     )?;
     fs.write_file(
         &server_dir.get_relative_str("request_cookie"),
-        request_cookie.as_bytes(),
+        &to_latin1(request_cookie),
     )?;
     fs.write_file(
         &server_dir.get_relative_str("response_cookie"),
-        response_cookie.as_bytes(),
+        &to_latin1(response_cookie),
     )?;
     fs.write_file(
         &server_dir.get_relative_str("server.pid.txt"),
-        pid.to_string().as_bytes(),
+        &to_latin1(&pid.to_string()),
     )?;
 
     let info = ServerInfo {
@@ -3060,16 +4268,97 @@ pub fn create_default_runtime(
     ))
 }
 
+/// `InstrumentationFilterSupport.getInstrumentedPrefix`.
+fn instrumented_prefix(package: &str) -> String {
+    let mut p = package.to_string();
+    for suffix in ["/internal", "/public", "/tests"] {
+        if let Some(stripped) = p.strip_suffix(suffix) {
+            p = stripped.to_string();
+            break;
+        }
+    }
+    // `replaceFirst("(?<=^|/)javatests/", "java/")` then `"(?<=^|/)test/java/" -> "main/java/"`.
+    let replace_first = |s: &str, from: &str, to: &str| -> String {
+        let mut start = 0;
+        while let Some(i) = s[start..].find(from) {
+            let at = start + i;
+            if at == 0 || s.as_bytes()[at - 1] == b'/' {
+                return format!("{}{}{}", &s[..at], to, &s[at + from.len()..]);
+            }
+            start = at + 1;
+        }
+        s.to_string()
+    };
+    let p = replace_first(&p, "javatests/", "java/");
+    replace_first(&p, "test/java/", "main/java/")
+}
+
+/// `InstrumentationFilterSupport.computeInstrumentationFilter`: the default
+/// `--instrumentation_filter` derived from the packages of the test targets on the command line
+/// (`None` when there are none, in which case Bazel prints nothing).
+fn default_instrumentation_filter(targets: &[zel_packages::Target]) -> Option<String> {
+    let mut pkgs: std::collections::BTreeSet<String> = Default::default();
+    for t in targets {
+        let zel_packages::Target::Rule(rule) = t else {
+            continue;
+        };
+        let is_suite = t.target_kind() == "test_suite rule";
+        if !rule.is_test_rule() && !is_suite {
+            continue;
+        }
+        pkgs.insert(instrumented_prefix(t.label().package_name()));
+        if is_suite {
+            if let Some(zel_packages::attr::AttrValue::StrList(tests)) =
+                rule.attr_or_default("tests")
+            {
+                for l in tests {
+                    if let Some(rest) = l.strip_prefix("//") {
+                        pkgs.insert(instrumented_prefix(rest.split(':').next().unwrap_or("")));
+                    } else if l.starts_with(':') {
+                        pkgs.insert(instrumented_prefix(t.label().package_name()));
+                    }
+                }
+            }
+        }
+    }
+    if pkgs.is_empty() {
+        return None;
+    }
+    // Drop filters nested below a previous one (`PathFragment.startsWith`).
+    let mut kept: Vec<String> = Vec::new();
+    for p in pkgs {
+        let nested = kept.last().is_some_and(|prev: &String| {
+            prev.is_empty() || p == *prev || p.starts_with(&format!("{prev}/"))
+        });
+        if !nested {
+            kept.push(p);
+        }
+    }
+    let mut f = String::from("^//");
+    f.push_str(&kept.join("[/:],^//"));
+    f.push_str("[/:]");
+    if f == "^//[/:]" {
+        f = "^//".to_string();
+    }
+    Some(f)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
     fn default_instrumentation_prefixes() {
-        assert_eq!(super::instrumented_prefix("foo/javatests/bar"), "foo/java/bar");
+        assert_eq!(
+            super::instrumented_prefix("foo/javatests/bar"),
+            "foo/java/bar"
+        );
         assert_eq!(super::instrumented_prefix("javatests/x"), "java/x");
         assert_eq!(super::instrumented_prefix("a/test/java/b"), "a/main/java/b");
         assert_eq!(super::instrumented_prefix("a/b/tests"), "a/b");
         assert_eq!(super::instrumented_prefix("a/b/internal"), "a/b");
-        assert_eq!(super::instrumented_prefix("notjavatests/x"), "notjavatests/x");
+        assert_eq!(
+            super::instrumented_prefix("notjavatests/x"),
+            "notjavatests/x"
+        );
         assert_eq!(super::instrumented_prefix(""), "");
     }
 
@@ -3143,8 +4432,12 @@ genrule(
     fn test_server_query_and_mod_graph() {
         // The resolved builtin module graph (with `bazel_tools`' version-bumping nodep edges) recurses deeper than the
         // 2 MiB default test-thread stack in debug builds; production command threads use large stacks.
+        #[cfg(unix)]
+        const TEST_STACK_BYTES: usize = 64 << 20;
+        #[cfg(not(unix))]
+        const TEST_STACK_BYTES: usize = 16 << 20;
         std::thread::Builder::new()
-            .stack_size(64 << 20)
+            .stack_size(TEST_STACK_BYTES)
             .spawn(test_server_query_and_mod_graph_body)
             .unwrap()
             .join()
@@ -3171,35 +4464,66 @@ genrule(
         );
 
         // `mod` runs against the real file system (Bzlmod resolution through a file:// registry).
+        let Some(manifest_dir) = std::env::var_os("CARGO_MANIFEST_DIR") else {
+            return;
+        };
+        let repo_root = std::path::PathBuf::from(manifest_dir).join("../..");
+        if !repo_root.join("scripts/make_vendored_registry.py").exists() {
+            return;
+        }
         let tmp = std::env::temp_dir().join(format!("zel-server-mod-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
         let reg = tmp.join("registry");
         // Hermetic registry holding the closure `bazel_tools` needs (vendored under third_party).
-        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let status = std::process::Command::new("python3")
             .arg(repo_root.join("scripts/make_vendored_registry.py"))
             .arg(&reg)
             .status()
             .expect("python3 is required to build the local test registry");
         assert!(status.success());
-        for (n, v, deps) in [("rules_rs", "0.1.3", "bazel_dep(name = \"platforms\", version = \"1.0.0\")\n")] {
+        {
+            let (n, v, deps) = (
+                "rules_rs",
+                "0.1.3",
+                "bazel_dep(name = \"platforms\", version = \"1.0.0\")\n",
+            );
             let dir = reg.join(format!("modules/{n}/{v}"));
             if !dir.join("MODULE.bazel").exists() {
                 std::fs::create_dir_all(&dir).unwrap();
-                std::fs::write(dir.join("MODULE.bazel"), format!("module(name = \"{n}\", version = \"{v}\")\n{deps}")).unwrap();
-                std::fs::write(dir.join("source.json"), "{\"type\":\"local_path\",\"path\":\"/nonexistent\"}").unwrap();
+                std::fs::write(
+                    dir.join("MODULE.bazel"),
+                    format!("module(name = \"{n}\", version = \"{v}\")\n{deps}"),
+                )
+                .unwrap();
+                std::fs::write(
+                    dir.join("source.json"),
+                    "{\"type\":\"local_path\",\"path\":\"/nonexistent\"}",
+                )
+                .unwrap();
             }
             // Register the version in metadata.json (merging with the vendored versions).
             let meta = reg.join(format!("modules/{n}/metadata.json"));
             let mut versions: Vec<String> = std::fs::read_to_string(&meta)
                 .ok()
-                .map(|t| t.split('"').filter(|x| x.chars().next().map_or(false, |c| c.is_ascii_digit())).map(String::from).collect())
+                .map(|t| {
+                    t.split('"')
+                        .filter(|x| x.chars().next().is_some_and(|c| c.is_ascii_digit()))
+                        .map(String::from)
+                        .collect()
+                })
                 .unwrap_or_default();
             if !versions.iter().any(|x| x == v) {
                 versions.push(v.to_string());
             }
             let list: Vec<String> = versions.iter().map(|x| format!("\"{x}\"")).collect();
-            std::fs::write(&meta, format!("{{\"versions\":[{}],\"yanked_versions\":{{}}}}", list.join(","))).unwrap();
+            std::fs::write(
+                &meta,
+                format!(
+                    "{{\"versions\":[{}],\"yanked_versions\":{{}}}}",
+                    list.join(",")
+                ),
+            )
+            .unwrap();
         }
         let ws = tmp.join("ws");
         std::fs::create_dir_all(&ws).unwrap();
@@ -3213,8 +4537,8 @@ genrule(
             BlazeDirectories {
                 workspace_dir: PathFragment::create(ws.to_str().unwrap()),
                 output_base: PathFragment::create(tmp.join("ob").to_str().unwrap()),
-                install_base: PathFragment::create("/tmp/ib"),
-                output_user_root: PathFragment::create("/tmp/ur"),
+                install_base: PathFragment::create(&tmp.join("ib").to_string_lossy()),
+                output_user_root: PathFragment::create(&tmp.join("ur").to_string_lossy()),
             },
             real_fs as Arc<dyn FileSystem>,
             9999,
@@ -3223,7 +4547,7 @@ genrule(
             cookie: "req".to_string(),
             arg: vec![
                 b"mod".to_vec(),
-                format!("--registry=file://{}", reg.display()).into_bytes(),
+                format!("--registry={}", zel_bzlmod::file_url_for_path(&reg)).into_bytes(),
                 b"--lockfile_mode=off".to_vec(),
                 b"graph".to_vec(),
             ],
@@ -3238,7 +4562,9 @@ genrule(
         let mod_err = String::from_utf8_lossy(&mod_resp.standard_error);
         assert!(
             mod_resp.exit_code == 0
-                || (mod_resp.exit_code == 2 && mod_err.contains("Results may be incomplete as") && mod_err.contains("extension")),
+                || (mod_resp.exit_code == 2
+                    && mod_err.contains("Results may be incomplete as")
+                    && mod_err.contains("extension")),
             "{mod_err}"
         );
         let mod_out = String::from_utf8_lossy(&mod_resp.standard_output);
@@ -3247,9 +4573,21 @@ genrule(
         assert!(mod_out.contains("platforms@1.0.0"), "{mod_out}");
 
         // `sync` no longer exists in Bazel; `fetch`/`vendor` never reach the build engine.
-        let sync = rt2.dispatch_command(&RunRequest { arg: vec![b"sync".to_vec()], ..Default::default() }, "resp");
+        let sync = rt2.dispatch_command(
+            &RunRequest {
+                arg: vec![b"sync".to_vec()],
+                ..Default::default()
+            },
+            "resp",
+        );
         assert_eq!(sync.exit_code, 2);
-        let vendor = rt2.dispatch_command(&RunRequest { arg: vec![b"vendor".to_vec()], ..Default::default() }, "resp");
+        let vendor = rt2.dispatch_command(
+            &RunRequest {
+                arg: vec![b"vendor".to_vec()],
+                ..Default::default()
+            },
+            "resp",
+        );
         assert_eq!(vendor.exit_code, 2);
         assert!(String::from_utf8_lossy(&vendor.standard_error).contains("--vendor_dir"));
         let _ = std::fs::remove_dir_all(&tmp);
@@ -3271,7 +4609,14 @@ genrule(
         let cq_out = String::from_utf8_lossy(&cq_resp.standard_output);
         assert!(cq_out.contains("//src:zel"));
         // `<label> (<short configuration id>)`, not the configuration mnemonic.
-        assert!(cq_out.lines().next().map(|l| l.starts_with("//src:zel (") && l.ends_with(')')).unwrap_or(false), "{cq_out}");
+        assert!(
+            cq_out
+                .lines()
+                .next()
+                .map(|l| l.starts_with("//src:zel (") && l.ends_with(')'))
+                .unwrap_or(false),
+            "{cq_out}"
+        );
 
         // aquery
         let aq_req = RunRequest {
@@ -3303,7 +4648,10 @@ genrule(
         let b1 = rt.dispatch_command(&build_req, "resp");
         assert_eq!(b1.exit_code, 0);
         let b1_err = String::from_utf8_lossy(&b1.standard_error);
-        assert!(b1_err.contains("Build completed successfully, 0 total actions"), "{b1_err}");
+        assert!(
+            b1_err.contains("Build completed successfully, 0 total actions"),
+            "{b1_err}"
+        );
         assert!(fs.exists(&PathFragment::create("/tmp/ob/bep.json"), true));
         assert!(fs.exists(&PathFragment::create("/tmp/ob/profile.json"), true));
 
@@ -3311,11 +4659,15 @@ genrule(
         let b2 = rt.dispatch_command(&build_req, "resp");
         assert_eq!(b2.exit_code, 0);
         let b2_err = String::from_utf8_lossy(&b2.standard_error);
-        assert!(b2_err.contains("Build completed successfully, 0 total actions"), "{b2_err}");
+        assert!(
+            b2_err.contains("Build completed successfully, 0 total actions"),
+            "{b2_err}"
+        );
     }
 
     /// Real execution against the local file system: failure, success, action cache, output
     /// invalidation.
+    #[cfg(unix)]
     #[test]
     fn real_build_executes_fails_and_caches() {
         let root = std::env::temp_dir().join(format!("zel-srv-real-{}", std::process::id()));
@@ -3344,15 +4696,27 @@ genrule(
                 ..Default::default()
             };
             let r = rt.dispatch_command(&req, "r");
-            (r.exit_code, String::from_utf8_lossy(&r.standard_error).to_string())
+            (
+                r.exit_code,
+                String::from_utf8_lossy(&r.standard_error).to_string(),
+            )
         };
         let (code, err) = run(&["build", "//p:ok"]);
         assert_eq!(code, 0, "{err}");
-        assert!(err.contains("Build completed successfully, 2 total actions\n"), "{err}");
-        assert_eq!(std::fs::read_to_string(ws.join("bazel-bin/p/ok.txt")).unwrap(), "hi\n");
+        assert!(
+            err.contains("Build completed successfully, 2 total actions\n"),
+            "{err}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ws.join("bazel-bin/p/ok.txt")).unwrap(),
+            "hi\n"
+        );
         let (code, err) = run(&["build", "//p:ok"]);
         assert_eq!(code, 0, "{err}");
-        assert!(err.contains("Build completed successfully, 1 total action\n"), "{err}");
+        assert!(
+            err.contains("Build completed successfully, 1 total action\n"),
+            "{err}"
+        );
         // Tamper with the output: it must be rebuilt.
         std::fs::write(ws.join("bazel-bin/p/ok.txt"), "x").unwrap();
         let (_, err) = run(&["build", "//p:ok"]);
@@ -3361,84 +4725,18 @@ genrule(
         assert_eq!(code, 1, "{err}");
         assert!(err.contains("(Exit 3)"), "{err}");
         assert!(err.contains("Target //p:bad failed to build"), "{err}");
-        assert!(err.contains("ERROR: Build did NOT complete successfully"), "{err}");
+        assert!(
+            err.contains("ERROR: Build did NOT complete successfully"),
+            "{err}"
+        );
         // keep_going: bad fails, ok still built; exit still 1.
         let (code, err) = run(&["build", "--keep_going", "//p:bad", "//p:ok"]);
         assert_eq!(code, 1, "{err}");
-        assert!(err.contains("Build succeeded for only 1 of 2 top-level targets"), "{err}");
+        assert!(
+            err.contains("Build succeeded for only 1 of 2 top-level targets"),
+            "{err}"
+        );
         assert!(!err.contains("Target //p:ok failed"), "{err}");
         let _ = std::fs::remove_dir_all(&root);
     }
-}
-
-
-/// `InstrumentationFilterSupport.getInstrumentedPrefix`.
-fn instrumented_prefix(package: &str) -> String {
-    let mut p = package.to_string();
-    for suffix in ["/internal", "/public", "/tests"] {
-        if let Some(stripped) = p.strip_suffix(suffix) {
-            p = stripped.to_string();
-            break;
-        }
-    }
-    // `replaceFirst("(?<=^|/)javatests/", "java/")` then `"(?<=^|/)test/java/" -> "main/java/"`.
-    let replace_first = |s: &str, from: &str, to: &str| -> String {
-        let mut start = 0;
-        while let Some(i) = s[start..].find(from) {
-            let at = start + i;
-            if at == 0 || s.as_bytes()[at - 1] == b'/' {
-                return format!("{}{}{}", &s[..at], to, &s[at + from.len()..]);
-            }
-            start = at + 1;
-        }
-        s.to_string()
-    };
-    let p = replace_first(&p, "javatests/", "java/");
-    replace_first(&p, "test/java/", "main/java/")
-}
-
-/// `InstrumentationFilterSupport.computeInstrumentationFilter`: the default
-/// `--instrumentation_filter` derived from the packages of the test targets on the command line
-/// (`None` when there are none, in which case Bazel prints nothing).
-fn default_instrumentation_filter(targets: &[zel_packages::Target]) -> Option<String> {
-    let mut pkgs: std::collections::BTreeSet<String> = Default::default();
-    for t in targets {
-        let zel_packages::Target::Rule(rule) = t else { continue };
-        let is_suite = t.target_kind() == "test_suite rule";
-        if !rule.is_test_rule() && !is_suite {
-            continue;
-        }
-        pkgs.insert(instrumented_prefix(t.label().package_name()));
-        if is_suite {
-            if let Some(zel_packages::attr::AttrValue::StrList(tests)) = rule.attr_or_default("tests") {
-                for l in tests {
-                    if let Some(rest) = l.strip_prefix("//") {
-                        pkgs.insert(instrumented_prefix(rest.split(':').next().unwrap_or("")));
-                    } else if l.starts_with(':') {
-                        pkgs.insert(instrumented_prefix(t.label().package_name()));
-                    }
-                }
-            }
-        }
-    }
-    if pkgs.is_empty() {
-        return None;
-    }
-    // Drop filters nested below a previous one (`PathFragment.startsWith`).
-    let mut kept: Vec<String> = Vec::new();
-    for p in pkgs {
-        let nested = kept.last().map_or(false, |prev: &String| {
-            prev.is_empty() || p == *prev || p.starts_with(&format!("{prev}/"))
-        });
-        if !nested {
-            kept.push(p);
-        }
-    }
-    let mut f = String::from("^//");
-    f.push_str(&kept.join("[/:],^//"));
-    f.push_str("[/:]");
-    if f == "^//[/:]" {
-        f = "^//".to_string();
-    }
-    Some(f)
 }

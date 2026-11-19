@@ -65,7 +65,13 @@ fn parse_spec(spec: &str) -> Vec<Param> {
                 "sn" => Ty::StrOrNone,
                 _ => Ty::Any,
             };
-            Param { name: Box::leak(name.to_string().into_boxed_str()), ty, required, pos_only, kw_only }
+            Param {
+                name: Box::leak(name.to_string().into_boxed_str()),
+                ty,
+                required,
+                pos_only,
+                kw_only,
+            }
         })
         .collect()
 }
@@ -118,11 +124,7 @@ fn type_ok(ty: Ty, v: &Value) -> bool {
         Ty::Dict => matches!(v, Value::Dict(_)),
         Ty::P3 => matches!(v, Value::String(_) | Value::Label(_)) || is_path(v),
         Ty::P2 => matches!(v, Value::String(_)) || is_path(v),
-        Ty::Url => match v {
-            Value::String(_) => true,
-            Value::List(_) | Value::Tuple(_) => true,
-            _ => false,
-        },
+        Ty::Url => matches!(v, Value::String(_) | Value::List(_) | Value::Tuple(_)),
         Ty::StrSeq => match v {
             Value::List(_) | Value::Tuple(_) => all_strings(v),
             _ => false,
@@ -161,19 +163,38 @@ fn plural(n: usize) -> &'static str {
 
 /// Binds positional and keyword arguments to the parameters of `kind.member`. Returns arguments keyed by
 /// parameter name, or `None` when the method has no spec. Defaults are not materialised.
-pub(crate) fn bind(kind: &str, member: &str, pos: &[Value], kw: &BTreeMap<String, Value>) -> Result<Option<BTreeMap<String, Value>>, StarlarkError> {
-    let Some(spec) = spec_of(kind, member) else { return Ok(None) };
+pub(crate) fn bind(
+    kind: &str,
+    member: &str,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+) -> Result<Option<BTreeMap<String, Value>>, StarlarkError> {
+    let Some(spec) = spec_of(kind, member) else {
+        return Ok(None);
+    };
     bind_with(member, spec, pos, kw).map(Some)
 }
 
-fn bind_with(fname: &str, spec: &str, pos: &[Value], kw: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>, StarlarkError> {
+fn bind_with(
+    fname: &str,
+    spec: &str,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, Value>, StarlarkError> {
     let params = parse_spec(spec);
     // With keyword arguments Bazel binds each argument while still evaluating the call's arguments, so such errors
     // are reported at the (possibly stale) location after the argument evaluation.
     let tag = if kw.is_empty() { "" } else { STALE };
     let e = |m: String| StarlarkError(format!("{tag}{m}"));
     let late = |m: String| StarlarkError(m);
-    let type_err = |p: &Param, v: &Value| e(format!("in call to {fname}(), parameter '{}' got value of type '{}', want '{}'", p.name, v.type_name(), want(p.ty)));
+    let type_err = |p: &Param, v: &Value| {
+        e(format!(
+            "in call to {fname}(), parameter '{}' got value of type '{}', want '{}'",
+            p.name,
+            v.type_name(),
+            want(p.ty)
+        ))
+    };
     let mut out: BTreeMap<String, Value> = BTreeMap::new();
     // Positional arguments bind (and are type checked) in declaration order.
     let positional: Vec<&Param> = params.iter().filter(|p| !p.kw_only).collect();
@@ -189,7 +210,11 @@ fn bind_with(fname: &str, spec: &str, pos: &[Value], kw: &BTreeMap<String, Value
         return Err(if consumed == 0 {
             late(format!("{fname}() got unexpected positional argument"))
         } else {
-            late(format!("{fname}() accepts no more than {consumed} positional argument{} but got {}", plural(consumed), pos.len()))
+            late(format!(
+                "{fname}() accepts no more than {consumed} positional argument{} but got {}",
+                plural(consumed),
+                pos.len()
+            ))
         });
     }
     for (k, v) in kw {
@@ -202,25 +227,49 @@ fn bind_with(fname: &str, spec: &str, pos: &[Value], kw: &BTreeMap<String, Value
                 }
                 return Err(e(msg));
             }
-            Some(p) if p.pos_only => return Err(e(format!("{fname}() got named argument for positional-only parameter '{k}'"))),
+            Some(p) if p.pos_only => {
+                return Err(e(format!(
+                    "{fname}() got named argument for positional-only parameter '{k}'"
+                )))
+            }
             Some(p) => {
                 if !type_ok(p.ty, v) {
                     return Err(type_err(p, v));
                 }
                 if out.contains_key(p.name) {
-                    return Err(e(format!("{fname}() got multiple values for argument '{k}'")));
+                    return Err(e(format!(
+                        "{fname}() got multiple values for argument '{k}'"
+                    )));
                 }
                 out.insert(p.name.to_string(), v.clone());
             }
         }
     }
-    let missing_pos: Vec<&str> = params.iter().filter(|p| p.required && !p.kw_only && !out.contains_key(p.name)).map(|p| p.name).collect();
+    let missing_pos: Vec<&str> = params
+        .iter()
+        .filter(|p| p.required && !p.kw_only && !out.contains_key(p.name))
+        .map(|p| p.name)
+        .collect();
     if !missing_pos.is_empty() {
-        return Err(late(format!("{fname}() missing {} required positional argument{}: {}", missing_pos.len(), plural(missing_pos.len()), missing_pos.join(", "))));
+        return Err(late(format!(
+            "{fname}() missing {} required positional argument{}: {}",
+            missing_pos.len(),
+            plural(missing_pos.len()),
+            missing_pos.join(", ")
+        )));
     }
-    let missing_kw: Vec<&str> = params.iter().filter(|p| p.required && p.kw_only && !out.contains_key(p.name)).map(|p| p.name).collect();
+    let missing_kw: Vec<&str> = params
+        .iter()
+        .filter(|p| p.required && p.kw_only && !out.contains_key(p.name))
+        .map(|p| p.name)
+        .collect();
     if !missing_kw.is_empty() {
-        return Err(late(format!("{fname}() missing {} required named argument{}: {}", missing_kw.len(), plural(missing_kw.len()), missing_kw.join(", "))));
+        return Err(late(format!(
+            "{fname}() missing {} required named argument{}: {}",
+            missing_kw.len(),
+            plural(missing_kw.len()),
+            missing_kw.join(", ")
+        )));
     }
     Ok(out)
 }
@@ -257,7 +306,10 @@ fn edit_distance(s1: &str, s2: &str, max: i64) -> i64 {
         let mut previous = i as i64 - 1;
         for j in 1..=b.len() {
             let old = row[j];
-            row[j] = std::cmp::min(previous + if a[i - 1] == b[j - 1] { 0 } else { 1 }, 1 + std::cmp::min(row[j - 1], row[j]));
+            row[j] = std::cmp::min(
+                previous + if a[i - 1] == b[j - 1] { 0 } else { 1 },
+                1 + std::cmp::min(row[j - 1], row[j]),
+            );
             previous = old;
             best_in_row = best_in_row.min(row[j]);
         }
@@ -274,7 +326,12 @@ fn edit_distance(s1: &str, s2: &str, max: i64) -> i64 {
 }
 
 /// Binds arguments against an ad-hoc spec (used for methods of non-context objects such as `path`).
-pub(crate) fn bind_raw(fname: &str, spec: &str, pos: &[Value], kw: &BTreeMap<String, Value>) -> Result<BTreeMap<String, Value>, StarlarkError> {
+pub(crate) fn bind_raw(
+    fname: &str,
+    spec: &str,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, Value>, StarlarkError> {
     bind_with(fname, spec, pos, kw)
 }
 

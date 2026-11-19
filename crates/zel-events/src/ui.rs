@@ -178,8 +178,9 @@ impl UiOptions {
         };
         o.show_progress = b(get("show_progress"), true);
         if let Some(v) = get("show_progress_rate_limit") {
-            o.show_progress_rate_limit =
-                v.parse().map_err(|_| format!("bad --show_progress_rate_limit: {v}"))?;
+            o.show_progress_rate_limit = v
+                .parse()
+                .map_err(|_| format!("bad --show_progress_rate_limit: {v}"))?;
         }
         if let Some(v) = get("color") {
             o.color = TriState::parse(&v).ok_or_else(|| format!("bad --color value: {v}"))?;
@@ -204,9 +205,15 @@ impl UiOptions {
                 .parse()
                 .map_err(|_| format!("bad --experimental_ui_max_stdouterr_bytes: {v}"))?;
             if n < -1 {
-                return Err(format!("--experimental_ui_max_stdouterr_bytes out of range: {n}"));
+                return Err(format!(
+                    "--experimental_ui_max_stdouterr_bytes out of range: {n}"
+                ));
             }
-            o.max_stdouterr_bytes = if n >= 0 { n as usize } else { ((i32::MAX - 8) >> 1) as usize };
+            o.max_stdouterr_bytes = if n >= 0 {
+                n as usize
+            } else {
+                ((i32::MAX - 8) >> 1) as usize
+            };
         }
         if let Some(v) = get("terminal_hyperlinks") {
             o.terminal_hyperlinks = TriState::parse(&v).unwrap_or(TriState::No);
@@ -305,9 +312,11 @@ impl OutErr for StdOutErr {
 }
 
 /// Forwards each write to caller-provided closures (e.g. gRPC response streaming).
+pub type OutputChunkCallback = Box<dyn Fn(&[u8]) + Send + Sync>;
+
 pub struct CallbackOutErr {
-    pub out_cb: Box<dyn Fn(&[u8]) + Send + Sync>,
-    pub err_cb: Box<dyn Fn(&[u8]) + Send + Sync>,
+    pub out_cb: OutputChunkCallback,
+    pub err_cb: OutputChunkCallback,
 }
 
 impl OutErr for CallbackOutErr {
@@ -329,6 +338,7 @@ pub trait UiClock: Send + Sync {
     }
 }
 
+#[cfg(unix)]
 #[repr(C)]
 struct CTm {
     tm_sec: i32,
@@ -344,16 +354,87 @@ struct CTm {
     tm_zone: *const u8,
 }
 
+#[cfg(unix)]
 extern "C" {
     fn localtime_r(t: *const i64, out: *mut CTm) -> *mut CTm;
 }
 
 /// Local-time offset from UTC in seconds at the given epoch second (0 if unavailable).
 pub fn local_utc_offset_secs(epoch_secs: i64) -> i64 {
-    let mut tm = CTm { tm_sec: 0, tm_min: 0, tm_hour: 0, tm_mday: 0, tm_mon: 0, tm_year: 0, tm_wday: 0, tm_yday: 0, tm_isdst: 0, tm_gmtoff: 0, tm_zone: std::ptr::null() };
-    // SAFETY: `tm` is a valid, properly laid out `struct tm`; `localtime_r` is thread-safe.
-    let r = unsafe { localtime_r(&epoch_secs, &mut tm) };
-    if r.is_null() { 0 } else { tm.tm_gmtoff }
+    #[cfg(unix)]
+    {
+        let mut tm = CTm {
+            tm_sec: 0,
+            tm_min: 0,
+            tm_hour: 0,
+            tm_mday: 0,
+            tm_mon: 0,
+            tm_year: 0,
+            tm_wday: 0,
+            tm_yday: 0,
+            tm_isdst: 0,
+            tm_gmtoff: 0,
+            tm_zone: std::ptr::null(),
+        };
+        // SAFETY: `tm` is a valid, properly laid out `struct tm`; `localtime_r` is thread-safe.
+        let r = unsafe { localtime_r(&epoch_secs, &mut tm) };
+        if r.is_null() {
+            0
+        } else {
+            tm.tm_gmtoff
+        }
+    }
+    #[cfg(windows)]
+    {
+        let _ = epoch_secs;
+        #[repr(C)]
+        #[derive(Default)]
+        struct SystemTime {
+            w_year: u16,
+            w_month: u16,
+            w_day_of_week: u16,
+            w_day: u16,
+            w_hour: u16,
+            w_minute: u16,
+            w_second: u16,
+            w_milliseconds: u16,
+        }
+        #[repr(C)]
+        struct TimeZoneInformation {
+            bias: i32,
+            standard_name: [u16; 32],
+            standard_date: SystemTime,
+            standard_bias: i32,
+            daylight_name: [u16; 32],
+            daylight_date: SystemTime,
+            daylight_bias: i32,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn GetTimeZoneInformation(lp_time_zone_information: *mut TimeZoneInformation) -> u32;
+        }
+        let mut tzi = TimeZoneInformation {
+            bias: 0,
+            standard_name: [0; 32],
+            standard_date: SystemTime::default(),
+            standard_bias: 0,
+            daylight_name: [0; 32],
+            daylight_date: SystemTime::default(),
+            daylight_bias: 0,
+        };
+        let mode = unsafe { GetTimeZoneInformation(&mut tzi) };
+        let extra = match mode {
+            1 => tzi.standard_bias,
+            2 => tzi.daylight_bias,
+            _ => 0,
+        };
+        -((tzi.bias + extra) as i64) * 60
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = epoch_secs;
+        0
+    }
 }
 
 pub struct SystemUiClock {
@@ -362,13 +443,18 @@ pub struct SystemUiClock {
 
 impl Default for SystemUiClock {
     fn default() -> Self {
-        Self { start: Instant::now() }
+        Self {
+            start: Instant::now(),
+        }
     }
 }
 
 impl UiClock for SystemUiClock {
     fn millis(&self) -> i64 {
-        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0)
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
     }
     fn nanos(&self) -> u64 {
         self.start.elapsed().as_nanos() as u64
@@ -475,7 +561,11 @@ struct Term {
 
 impl Term {
     fn new(color: bool, cursor: bool) -> Self {
-        Self { buf: Vec::new(), color, cursor }
+        Self {
+            buf: Vec::new(),
+            color,
+            cursor,
+        }
     }
     fn raw(&mut self, s: &str) {
         self.buf.extend_from_slice(s.as_bytes());
@@ -676,7 +766,11 @@ impl UiStateTracker {
 
     pub fn loading_started(&mut self, with_package_progress: bool) {
         self.package_progress = with_package_progress;
-        self.status = if with_package_progress { None } else { Some("Loading".into()) };
+        self.status = if with_package_progress {
+            None
+        } else {
+            Some("Loading".into())
+        };
     }
 
     pub fn configuration_started(&mut self) {
@@ -721,13 +815,21 @@ impl UiStateTracker {
         let mut s = format!(
             "{} {} configured",
             format_count(self.targets_configured),
-            if self.targets_configured == 1 { "target" } else { "targets" }
+            if self.targets_configured == 1 {
+                "target"
+            } else {
+                "targets"
+            }
         );
         if self.aspects_configured > 0 {
             s.push_str(&format!(
                 ", {} {}",
                 format_count(self.aspects_configured),
-                if self.aspects_configured == 1 { "aspect application" } else { "aspect applications" }
+                if self.aspects_configured == 1 {
+                    "aspect application"
+                } else {
+                    "aspect applications"
+                }
             ));
         }
         s
@@ -814,10 +916,15 @@ impl UiStateTracker {
         let nanos = self.now_hint();
         let seq = self.next_seq;
         self.next_seq += 1;
-        self.enqueued_actions = self.enqueued_actions.max(self.actions_completed + self.active.len() as u64 + 1);
+        self.enqueued_actions = self
+            .enqueued_actions
+            .max(self.actions_completed + self.active.len() as u64 + 1);
         if mnemonic == "TestRunner" {
             if let Some(o) = owner {
-                self.test_actions.entry(o.to_string()).or_default().insert(id.to_string());
+                self.test_actions
+                    .entry(o.to_string())
+                    .or_default()
+                    .insert(id.to_string());
             }
         }
         self.active.insert(
@@ -901,7 +1008,11 @@ impl UiStateTracker {
     pub fn action_progress(&mut self, id: &str, progress_id: &str, message: &str, finished: bool) {
         if let Some(a) = self.action_mut(id) {
             if finished {
-                if a.progress.as_ref().map(|p| p.0 == progress_id).unwrap_or(false) {
+                if a.progress
+                    .as_ref()
+                    .map(|p| p.0 == progress_id)
+                    .unwrap_or(false)
+                {
                     a.progress = None;
                 }
             } else {
@@ -931,7 +1042,13 @@ impl UiStateTracker {
         }
     }
     pub fn download_started(&mut self, url: &str, nanos: u64) {
-        self.downloads.insert(url.to_string(), DownloadData { start_nanos: nanos, bytes: 0 });
+        self.downloads.insert(
+            url.to_string(),
+            DownloadData {
+                start_nanos: nanos,
+                bytes: 0,
+            },
+        );
     }
     pub fn download_progress(&mut self, url: &str, bytes: u64) {
         if let Some(d) = self.downloads.get_mut(url) {
@@ -978,7 +1095,13 @@ impl UiStateTracker {
         chars[chars.len().saturating_sub(n)..].iter().collect()
     }
 
-    fn describe_test_group(&self, owner: &str, now: u64, desired: usize, all: &HashSet<String>) -> String {
+    fn describe_test_group(
+        &self,
+        owner: &str,
+        now: u64,
+        desired: usize,
+        all: &HashSet<String>,
+    ) -> String {
         let prefix = "Testing ";
         let label_sep = " [";
         let postfix = format!(" ({} actions)]", all.len());
@@ -1000,7 +1123,9 @@ impl UiStateTracker {
         let mut ids: Vec<&String> = all.iter().collect();
         ids.sort();
         for id in ids {
-            let Some(a) = self.active.get(id) else { continue };
+            let Some(a) = self.active.get(id) else {
+                continue;
+            };
             let secs = now.saturating_sub(a.start_nanos) / 1_000_000_000;
             let text = if a.phase < ActionPhase::Running {
                 format!("{sep}[{secs}s]")
@@ -1020,8 +1145,14 @@ impl UiStateTracker {
     }
 
     fn describe_action_progress(a: &ActionState, desired: usize) -> String {
-        let Some((id, msg)) = &a.progress else { return String::new() };
-        let m = if msg.is_empty() { id.clone() } else { msg.clone() };
+        let Some((id, msg)) = &a.progress else {
+            return String::new();
+        };
+        let m = if msg.is_empty() {
+            id.clone()
+        } else {
+            msg.clone()
+        };
         let m = format!("; {m}");
         if desired == 0 || m.chars().count() <= desired {
             return m;
@@ -1034,12 +1165,18 @@ impl UiStateTracker {
 
     /// `describeAction`: `[Prepa] Compiling foo.cc; 5s (sandbox)` shortened to `desired` columns
     /// (0 = unlimited).
-    fn describe_action(&self, a: &ActionState, now: u64, desired: usize, mut skip: Option<&mut HashSet<String>>) -> String {
+    fn describe_action(
+        &self,
+        a: &ActionState,
+        now: u64,
+        desired: usize,
+        mut skip: Option<&mut HashSet<String>>,
+    ) -> String {
         if a.mnemonic == "TestRunner" {
             if let Some(owner) = &a.owner_label {
                 if let Some(all) = self.test_actions.get(owner) {
                     if all.len() > 1 {
-                        if let Some(s) = skip.as_deref_mut() {
+                        if let Some(s) = &mut skip {
                             s.extend(all.iter().cloned());
                         }
                         return self.describe_test_group(owner, now, desired, all);
@@ -1050,7 +1187,11 @@ impl UiStateTracker {
         let mut prefix = String::new();
         let mut postfix = String::new();
         let secs = now.saturating_sub(a.start_nanos) / 1_000_000_000;
-        let strategy = if a.strategies.is_empty() { None } else { Some(a.strategies.join(", ")) };
+        let strategy = if a.strategies.is_empty() {
+            None
+        } else {
+            Some(a.strategies.join(", "))
+        };
         if a.phase != ActionPhase::Caching && a.phase != ActionPhase::Running {
             let mut status = a.phase.describe().unwrap_or(NO_STATUS).to_string();
             if status.len() > STATUS_LENGTH {
@@ -1067,10 +1208,12 @@ impl UiStateTracker {
         let message = a.message.clone();
         let progress = Self::describe_action_progress(a, 0);
         let len = |s: &str| s.chars().count();
-        if desired == 0 || len(&prefix) + len(&message) + len(&progress) + len(&postfix) <= desired {
+        if desired == 0 || len(&prefix) + len(&message) + len(&progress) + len(&postfix) <= desired
+        {
             return format!("{prefix}{message}{progress}{postfix}");
         }
-        let remaining = desired as i64 - len(&prefix) as i64 - len(&message) as i64 - len(&postfix) as i64;
+        let remaining =
+            desired as i64 - len(&prefix) as i64 - len(&message) as i64 - len(&postfix) as i64;
         if remaining >= 7 {
             let p = Self::describe_action_progress(a, remaining as usize);
             return format!("{prefix}{message}{p}{postfix}");
@@ -1098,12 +1241,16 @@ impl UiStateTracker {
                     if target >= 3 * ELLIPSIS.len() as i64 {
                         let short = Self::suffix(pkg, target as usize - ELLIPSIS.len());
                         if let Some(slash) = short.find('/') {
-                            return format!("{prefix}{start}{ELLIPSIS}{}{end}{postfix}", &short[slash..]);
+                            return format!(
+                                "{prefix}{start}{ELLIPSIS}{}{end}{postfix}",
+                                &short[slash..]
+                            );
                         }
                     }
                 }
             }
-            let short_label = Self::shortened_label(label, desired.saturating_sub(len(&postfix) + len(&prefix)));
+            let short_label =
+                Self::shortened_label(label, desired.saturating_sub(len(&postfix) + len(&prefix)));
             if len(&prefix) + len(&short_label) + len(&postfix) <= desired {
                 return format!("{prefix}{short_label}{postfix}");
             }
@@ -1112,7 +1259,10 @@ impl UiStateTracker {
         if 3 * ELLIPSIS.len() + len(&postfix) + len(&prefix) <= desired {
             message = format!(
                 "{ELLIPSIS}{}",
-                Self::suffix(&message, desired - ELLIPSIS.len() - len(&postfix) - len(&prefix))
+                Self::suffix(
+                    &message,
+                    desired - ELLIPSIS.len() - len(&postfix) - len(&prefix)
+                )
             );
         }
         format!("{prefix}{message}{postfix}")
@@ -1124,7 +1274,11 @@ impl UiStateTracker {
         }
         // Keep the target name, elide the middle of the package path.
         let (pkg, name) = label.rsplit_once(':').unwrap_or((label, ""));
-        let tail = if name.is_empty() { String::new() } else { format!(":{name}") };
+        let tail = if name.is_empty() {
+            String::new()
+        } else {
+            format!(":{name}")
+        };
         let budget = max.saturating_sub(tail.chars().count() + ELLIPSIS.len());
         let kept = Self::suffix(pkg, budget);
         format!("{ELLIPSIS}{kept}{tail}")
@@ -1134,8 +1288,15 @@ impl UiStateTracker {
         let mut oldest_running: Option<&ActionState> = None;
         let mut oldest_scheduled: Option<&ActionState> = None;
         for a in self.active.values() {
-            let slot = if a.phase == ActionPhase::Running { &mut oldest_running } else { &mut oldest_scheduled };
-            if slot.map(|s| (a.start_nanos, a.seq) < (s.start_nanos, s.seq)).unwrap_or(true) {
+            let slot = if a.phase == ActionPhase::Running {
+                &mut oldest_running
+            } else {
+                &mut oldest_scheduled
+            };
+            if slot
+                .map(|s| (a.start_nanos, a.seq) < (s.start_nanos, s.seq))
+                .unwrap_or(true)
+            {
                 *slot = Some(a);
             }
         }
@@ -1144,7 +1305,11 @@ impl UiStateTracker {
 
     fn count_actions(&self) -> String {
         let total = self.active.len();
-        let running = self.active.values().filter(|a| a.phase == ActionPhase::Running).count();
+        let running = self
+            .active
+            .values()
+            .filter(|a| a.phase == ActionPhase::Running)
+            .count();
         if total == 1 {
             " 1 action running".to_string()
         } else if total == running {
@@ -1185,7 +1350,8 @@ impl UiStateTracker {
         let hidden = total.saturating_sub(shown);
         let _ = skipped_count;
         if hidden > 0 && shown >= sample {
-            doc.newline().append(&format!("  ... and {} more", format_count(hidden as u64)));
+            doc.newline()
+                .append(&format!("  ... and {} more", format_count(hidden as u64)));
         }
     }
 
@@ -1199,9 +1365,15 @@ impl UiStateTracker {
             ));
         }
         if self.completed_tests > 0 {
-            doc.normal().append(&format!(" {} / {} tests", self.completed_tests, self.total_tests));
+            doc.normal().append(&format!(
+                " {} / {} tests",
+                self.completed_tests, self.total_tests
+            ));
             if self.failed_tests > 0 {
-                doc.append(", ").fail().append(&format!("{} failed", self.failed_tests)).normal();
+                doc.append(", ")
+                    .fail()
+                    .append(&format!("{} failed", self.failed_tests))
+                    .normal();
             }
             doc.append(";");
         }
@@ -1217,17 +1389,24 @@ impl UiStateTracker {
             }
             (1, Some(a)) => {
                 let w = width_left(doc).saturating_sub(1);
-                let msg = self.describe_action(a, now, if self.target_width == 0 { 0 } else { w }, None);
+                let msg =
+                    self.describe_action(a, now, if self.target_width == 0 { 0 } else { w }, None);
                 doc.normal().append(&format!(" {msg}"));
             }
             (_, Some(a)) => {
                 if short {
                     let w = width_left(doc);
-                    let mut msg = self.describe_action(a, now, if self.target_width == 0 { 0 } else { w }, None);
+                    let mut msg = self.describe_action(
+                        a,
+                        now,
+                        if self.target_width == 0 { 0 } else { w },
+                        None,
+                    );
                     msg.push_str(&format!(" ... ({})", self.count_actions().trim_start()));
                     doc.normal().append(&format!(" {msg}"));
                 } else {
-                    doc.normal().append(&format!(" {}", self.count_actions().trim_start()));
+                    doc.normal()
+                        .append(&format!(" {}", self.count_actions().trim_start()));
                     self.sample_oldest_actions(doc, now);
                 }
             }
@@ -1244,7 +1423,8 @@ impl UiStateTracker {
         let sample = self.progress_sample_size.max(1);
         for (i, (url, d)) in v.iter().enumerate() {
             if i >= sample {
-                doc.newline().append(&format!("    ... and {} more", count - i));
+                doc.newline()
+                    .append(&format!("    ... and {} more", count - i));
                 break;
             }
             let secs = now.saturating_sub(d.start_nanos) / 1_000_000_000;
@@ -1264,7 +1444,9 @@ impl UiStateTracker {
     }
 
     fn report_bep(&self, doc: &mut ProgressDoc, now: u64) {
-        let Some(at) = self.build_complete_at_nanos else { return };
+        let Some(at) = self.build_complete_at_nanos else {
+            return;
+        };
         if !self.build_complete || self.bep_transports.is_empty() {
             return;
         }
@@ -1281,17 +1463,27 @@ impl UiStateTracker {
             let wait_message = "Waiting for: ";
             let secs = format!(" {wait}s");
             let max_name = max_width.saturating_sub(wait_message.len() + secs.len());
-            doc.newline().append(&format!("{wait_message}{}{secs}", Self::shortened(name, max_name)));
+            doc.newline().append(&format!(
+                "{wait_message}{}{secs}",
+                Self::shortened(name, max_name)
+            ));
         } else {
-            doc.newline().append(&format!("Waiting for build events upload: {wait}s"));
+            doc.newline()
+                .append(&format!("Waiting for build events upload: {wait}s"));
             for t in &self.bep_transports {
-                doc.newline().append(&Self::shortened(&format!("  {t}"), max_width));
+                doc.newline()
+                    .append(&Self::shortened(&format!("  {t}"), max_width));
             }
         }
     }
 
     /// Renders the progress bar document (`writeProgressBar`).
-    pub fn write_progress_bar(&self, short: bool, timestamp: Option<&str>, now: u64) -> ProgressDoc {
+    pub fn write_progress_bar(
+        &self,
+        short: bool,
+        timestamp: Option<&str>,
+        now: u64,
+    ) -> ProgressDoc {
         let mut doc = ProgressDoc::default();
         if let Some(t) = timestamp {
             doc.append(t);
@@ -1302,7 +1494,9 @@ impl UiStateTracker {
             } else {
                 doc.fail();
             }
-            doc.append(&format!("{status}:")).normal().append(&format!(" {}", self.additional_message));
+            doc.append(&format!("{status}:"))
+                .normal()
+                .append(&format!(" {}", self.additional_message));
             if self.package_progress || self.analysis_progress {
                 doc.append(" (");
                 let mut first = true;
@@ -1332,7 +1526,10 @@ impl UiStateTracker {
         }
         if self.package_progress {
             let (p, act) = self.package_progress_state();
-            doc.ok().append("Loading:").normal().append(&format!(" {p}"));
+            doc.ok()
+                .append("Loading:")
+                .normal()
+                .append(&format!(" {p}"));
             if !act.is_empty() {
                 doc.newline().append(&format!("    {act}"));
             }
@@ -1394,7 +1591,11 @@ pub struct UiEventHandler {
 fn civil_hms(ms: i64) -> (u32, u32, u32) {
     // Callers pass epoch millis already shifted by the local UTC offset.
     let secs = ms.div_euclid(1000).rem_euclid(86400);
-    ((secs / 3600) as u32, (secs % 3600 / 60) as u32, (secs % 60) as u32)
+    (
+        (secs / 3600) as u32,
+        (secs % 3600 / 60) as u32,
+        (secs % 60) as u32,
+    )
 }
 
 fn civil_date(ms: i64) -> String {
@@ -1420,12 +1621,24 @@ impl UiEventHandler {
 
     pub fn with_clock(out: Arc<dyn OutErr>, opts: UiOptions, clock: Arc<dyn UiClock>) -> Self {
         let cursor = opts.use_cursor_control();
-        let terminal_width = if opts.terminal_columns > 0 { opts.terminal_columns } else { 80 };
-        let target = if cursor { terminal_width.saturating_sub(2) } else { 0 };
+        let terminal_width = if opts.terminal_columns > 0 {
+            opts.terminal_columns
+        } else {
+            80
+        };
+        let target = if cursor {
+            terminal_width.saturating_sub(2)
+        } else {
+            0
+        };
         let mut tracker = UiStateTracker::new(target);
         tracker.set_progress_sample_size(opts.ui_actions_shown);
         let rate = (opts.show_progress_rate_limit * 1000.0).round() as i64;
-        let progress_rate_limit_ms = if cursor { rate } else { rate.max(NO_CURSES_MINIMAL_PROGRESS_RATE_LIMIT) };
+        let progress_rate_limit_ms = if cursor {
+            rate
+        } else {
+            rate.max(NO_CURSES_MINIMAL_PROGRESS_RATE_LIMIT)
+        };
         let last_refresh = clock.millis() - progress_rate_limit_ms - 1;
         let state = HandlerState {
             tracker,
@@ -1535,12 +1748,22 @@ impl UiEventHandler {
         st.last_refresh = self.s.clock.millis();
         let now = self.s.clock.nanos();
         st.tracker.set_now(now);
-        let ts = if self.s.opts.show_timestamps { Some(self.timestamp()) } else { None };
+        let ts = if self.s.opts.show_timestamps {
+            Some(self.timestamp())
+        } else {
+            None
+        };
         let mut lines = 0;
         if st.tracker.has_activities() {
-            let mut doc = st.tracker.write_progress_bar(!self.s.cursor, ts.as_deref(), now);
+            let mut doc = st
+                .tracker
+                .write_progress_bar(!self.s.cursor, ts.as_deref(), now);
             doc.newline();
-            let wrap = if self.s.cursor { Some(Self::wrapping_width(st)) } else { None };
+            let wrap = if self.s.cursor {
+                Some(Self::wrapping_width(st))
+            } else {
+                None
+            };
             let (bytes, n) = self.render_doc(&doc, wrap);
             t.buf.extend_from_slice(&bytes);
             lines = n;
@@ -1567,17 +1790,31 @@ impl UiEventHandler {
         did
     }
 
-    fn write_to_stream(&self, st: &mut HandlerState, t: &mut Term, kind: EventKind, msg: &[u8]) -> bool {
+    fn write_to_stream(
+        &self,
+        st: &mut HandlerState,
+        t: &mut Term,
+        kind: EventKind,
+        msg: &[u8],
+    ) -> bool {
         let eol = msg.iter().rposition(|&b| b == b'\n');
         let Some(eol) = eol else {
-            let buf = if kind == EventKind::Stdout { &mut st.stdout_buf } else { &mut st.stderr_buf };
+            let buf = if kind == EventKind::Stdout {
+                &mut st.stdout_buf
+            } else {
+                &mut st.stderr_buf
+            };
             buf.extend_from_slice(msg);
             return false;
         };
         self.clear_bar(st, t);
         // Flush what the terminal buffer collected so far, including the progress bar clearing.
         self.s.out.err(&std::mem::take(&mut t.buf));
-        let buf = if kind == EventKind::Stdout { &mut st.stdout_buf } else { &mut st.stderr_buf };
+        let buf = if kind == EventKind::Stdout {
+            &mut st.stdout_buf
+        } else {
+            &mut st.stderr_buf
+        };
         let mut line = std::mem::take(buf);
         line.extend_from_slice(&msg[..=eol]);
         if kind == EventKind::Stdout {
@@ -1681,7 +1918,11 @@ impl UiEventHandler {
                     self.refresh_locked(st);
                 }
             }
-            EventKind::Start | EventKind::Finish | EventKind::Pass | EventKind::Timeout | EventKind::Depchecker => {}
+            EventKind::Start
+            | EventKind::Finish
+            | EventKind::Pass
+            | EventKind::Timeout
+            | EventKind::Depchecker => {}
         }
     }
 
@@ -1734,7 +1975,9 @@ impl UiEventHandler {
         }
         let now = self.s.clock.millis();
         if st.last_refresh + self.s.progress_rate_limit_ms < now {
-            if st.show_progress && (std::mem::replace(&mut st.needs_refresh, false) || self.time_based_refresh(st)) {
+            if st.show_progress
+                && (std::mem::replace(&mut st.needs_refresh, false) || self.time_based_refresh(st))
+            {
                 let mut t = self.term();
                 self.clear_bar(st, &mut t);
                 self.add_bar(st, &mut t);
@@ -1894,7 +2137,10 @@ impl UiEventHandler {
     }
 
     pub fn action_progress(&self, id: &str, progress_id: &str, message: &str, finished: bool) {
-        self.with_state(|st| st.tracker.action_progress(id, progress_id, message, finished));
+        self.with_state(|st| {
+            st.tracker
+                .action_progress(id, progress_id, message, finished)
+        });
         self.refresh_soon();
     }
 
@@ -1930,7 +2176,11 @@ impl UiEventHandler {
     }
 
     pub fn bep_transports_announced(&self, names: Vec<String>) {
-        let msg = if names.is_empty() { None } else { Some(format!("Streaming build results to: {}", "")) };
+        let msg = if names.is_empty() {
+            None
+        } else {
+            Some(format!("Streaming build results to: {}", ""))
+        };
         let _ = msg;
         self.with_state(|st| st.tracker.bep_transports_announced(names));
     }
@@ -2049,7 +2299,11 @@ impl EventHandler for UiEventHandler {
             && !self.s.opts.show_timestamps
             && matches!(
                 event.kind,
-                EventKind::Start | EventKind::Finish | EventKind::Pass | EventKind::Timeout | EventKind::Depchecker
+                EventKind::Start
+                    | EventKind::Finish
+                    | EventKind::Pass
+                    | EventKind::Timeout
+                    | EventKind::Depchecker
             )
         {
             return;
@@ -2086,11 +2340,17 @@ pub fn events_from_console_text(text: &str) -> Vec<Event> {
     let mut out = Vec::new();
     for line in text.split_inclusive('\n') {
         let body = line.strip_suffix('\n').unwrap_or(line);
-        let hit = KINDS.iter().find_map(|k| body.strip_prefix(k.prefix().as_str()).map(|rest| (*k, rest)));
+        let hit = KINDS.iter().find_map(|k| {
+            body.strip_prefix(k.prefix().as_str())
+                .map(|rest| (*k, rest))
+        });
         match hit {
-            Some((k, rest)) if line.ends_with('\n') => {
-                out.push(Event { kind: k, location: None, message: rest.to_string(), tag: None })
-            }
+            Some((k, rest)) if line.ends_with('\n') => out.push(Event {
+                kind: k,
+                location: None,
+                message: rest.to_string(),
+                tag: None,
+            }),
             _ => out.push(Event::stderr(line)),
         }
     }
@@ -2119,17 +2379,28 @@ mod tests {
 
     #[test]
     fn no_color_plain_lines() {
-        let (h, out, _) = handler(UiOptions { color: TriState::No, curses: TriState::No, ..Default::default() });
+        let (h, out, _) = handler(UiOptions {
+            color: TriState::No,
+            curses: TriState::No,
+            ..Default::default()
+        });
         h.handle(&Event::info("hello"));
         h.handle(&Event::warning(None, "careful"));
         h.handle(&Event::error(None, "bad"));
         h.handle(&Event::debug("dbg"));
-        assert_eq!(out.err_string(), "INFO: hello\nWARNING: careful\nERROR: bad\nDEBUG: dbg\n");
+        assert_eq!(
+            out.err_string(),
+            "INFO: hello\nWARNING: careful\nERROR: bad\nDEBUG: dbg\n"
+        );
     }
 
     #[test]
     fn color_sequences_match_bazel() {
-        let (h, out, _) = handler(UiOptions { color: TriState::Yes, curses: TriState::No, ..Default::default() });
+        let (h, out, _) = handler(UiOptions {
+            color: TriState::Yes,
+            curses: TriState::No,
+            ..Default::default()
+        });
         h.handle(&Event::error(None, "x"));
         h.handle(&Event::info("y"));
         assert_eq!(
@@ -2140,17 +2411,29 @@ mod tests {
 
     #[test]
     fn auto_color_follows_isatty() {
-        let (h, out, _) = handler(UiOptions { isatty: true, curses: TriState::No, ..Default::default() });
+        let (h, out, _) = handler(UiOptions {
+            isatty: true,
+            curses: TriState::No,
+            ..Default::default()
+        });
         h.handle(&Event::warning(None, "w"));
         assert!(out.err_string().starts_with("\x1b[35mWARNING: "));
-        let (h, out, _) = handler(UiOptions { isatty: false, ..Default::default() });
+        let (h, out, _) = handler(UiOptions {
+            isatty: false,
+            ..Default::default()
+        });
         h.handle(&Event::warning(None, "w"));
         assert_eq!(out.err_string(), "WARNING: w\n");
     }
 
     #[test]
     fn event_filters_and_timestamps() {
-        let mut o = UiOptions { color: TriState::No, curses: TriState::No, show_timestamps: true, ..Default::default() };
+        let mut o = UiOptions {
+            color: TriState::No,
+            curses: TriState::No,
+            show_timestamps: true,
+            ..Default::default()
+        };
         o.filtered_event_kinds = parse_event_filters(&["-info".to_string()]).unwrap();
         let (h, out, _) = handler(o);
         h.handle(&Event::info("hidden"));
@@ -2160,16 +2443,29 @@ mod tests {
         let f = parse_event_filters(&["error".to_string()]).unwrap();
         assert!(!f.contains(&EventKind::Error) && f.contains(&EventKind::Info));
         let f = parse_event_filters(&["-info,-warning".to_string()]).unwrap();
-        assert!(f.contains(&EventKind::Info) && f.contains(&EventKind::Warning) && !f.contains(&EventKind::Error));
+        assert!(
+            f.contains(&EventKind::Info)
+                && f.contains(&EventKind::Warning)
+                && !f.contains(&EventKind::Error)
+        );
     }
 
     #[test]
     fn date_line_with_timestamps_while_building() {
-        let (h, out, _) = handler(UiOptions { color: TriState::No, curses: TriState::No, show_timestamps: true, show_progress: false, ..Default::default() });
+        let (h, out, _) = handler(UiOptions {
+            color: TriState::No,
+            curses: TriState::No,
+            show_timestamps: true,
+            show_progress: false,
+            ..Default::default()
+        });
         h.build_started();
         h.handle(&Event::info("a"));
         let s = out.err_string();
-        assert!(s.starts_with("(03:04:05) INFO: Current date is 2024-01-02\n(03:04:05) INFO: a\n"), "{s}");
+        assert!(
+            s.starts_with("(03:04:05) INFO: Current date is 2024-01-02\n(03:04:05) INFO: a\n"),
+            "{s}"
+        );
     }
 
     #[test]
@@ -2179,7 +2475,10 @@ mod tests {
         h.loading_started(true);
         h.package_loading_started("//foo");
         let t = h.progress_text(false);
-        assert_eq!(t, "Loading: 0 packages loaded\n    currently loading: //foo");
+        assert_eq!(
+            t,
+            "Loading: 0 packages loaded\n    currently loading: //foo"
+        );
         h.package_loaded("//foo");
         h.loading_complete(&["//foo:bar".into()]);
         h.configuration_started();
@@ -2188,7 +2487,10 @@ mod tests {
         h.handle(&Event::info("tick"));
         h.analysis_complete();
         let e = out.err_string();
-        assert!(e.contains("Analyzed target //foo:bar (1 packages loaded, 1 target configured)."), "{e}");
+        assert!(
+            e.contains("Analyzed target //foo:bar (1 packages loaded, 1 target configured)."),
+            "{e}"
+        );
         // A line event while a bar is displayed clears it with CR, up, erase-line.
         assert!(e.contains("\r\x1b[1A\x1b[K"), "{e:?}");
     }
@@ -2220,23 +2522,43 @@ mod tests {
 
     #[test]
     fn completion_line_counts_actions() {
-        let (h, out, _) = handler(UiOptions { color: TriState::No, curses: TriState::No, ..Default::default() });
+        let (h, out, _) = handler(UiOptions {
+            color: TriState::No,
+            curses: TriState::No,
+            ..Default::default()
+        });
         h.build_started();
         h.analysis_complete();
         h.execution_phase_started();
         h.action_started("a", "x", None, "M");
         h.action_completed("a");
         h.build_complete(true);
-        assert!(out.err_string().contains("INFO: Build completed successfully, 1 total action\n"), "{}", out.err_string());
-        let (h, out, _) = handler(UiOptions { color: TriState::No, curses: TriState::No, ..Default::default() });
+        assert!(
+            out.err_string()
+                .contains("INFO: Build completed successfully, 1 total action\n"),
+            "{}",
+            out.err_string()
+        );
+        let (h, out, _) = handler(UiOptions {
+            color: TriState::No,
+            curses: TriState::No,
+            ..Default::default()
+        });
         h.build_started();
         h.build_complete(false);
-        assert!(out.err_string().contains("ERROR: Build did NOT complete successfully\n"));
+        assert!(out
+            .err_string()
+            .contains("ERROR: Build did NOT complete successfully\n"));
     }
 
     #[test]
     fn stdout_stderr_line_buffering_and_partial_flush() {
-        let (h, out, _) = handler(UiOptions { color: TriState::No, curses: TriState::No, show_progress: false, ..Default::default() });
+        let (h, out, _) = handler(UiOptions {
+            color: TriState::No,
+            curses: TriState::No,
+            show_progress: false,
+            ..Default::default()
+        });
         h.build_started();
         h.handle(&Event::stderr("par"));
         h.handle(&Event::stderr("tial\nrest"));
@@ -2248,7 +2570,11 @@ mod tests {
 
     #[test]
     fn rate_limit_without_curses_is_one_second() {
-        let (h, out, clock) = handler(UiOptions { color: TriState::No, curses: TriState::No, ..Default::default() });
+        let (h, out, clock) = handler(UiOptions {
+            color: TriState::No,
+            curses: TriState::No,
+            ..Default::default()
+        });
         h.build_started();
         h.analysis_complete();
         h.execution_phase_started();
@@ -2276,14 +2602,22 @@ mod tests {
         .into_iter()
         .collect();
         let o = UiOptions::from_flags(&|n| map.get(n).map(|s| s.to_string()), &|n| {
-            if n == "ui_event_filters" { vec!["-debug".to_string()] } else { vec![] }
+            if n == "ui_event_filters" {
+                vec!["-debug".to_string()]
+            } else {
+                vec![]
+            }
         })
         .unwrap();
         assert!(o.use_color() && !o.use_cursor_control() && !o.show_progress);
         assert_eq!(o.terminal_columns, 120);
         assert_eq!(o.max_stdouterr_bytes, ((i32::MAX - 8) >> 1) as usize);
         assert!(o.filtered_event_kinds.contains(&EventKind::Debug));
-        assert!(UiOptions::from_flags(&|n| (n == "color").then(|| "maybe".to_string()), &|_| vec![]).is_err());
+        assert!(UiOptions::from_flags(
+            &|n| (n == "color").then(|| "maybe".to_string()),
+            &|_| vec![]
+        )
+        .is_err());
         assert_eq!(format_count(9_999), "9999");
         assert_eq!(format_count(12_345), "12,345");
         assert_eq!(group(1_234), "1,234");
@@ -2297,13 +2631,24 @@ mod tests {
         assert_eq!(evs[0].kind, EventKind::Info);
         assert_eq!(evs[1].kind, EventKind::Stderr);
         assert_eq!(evs[3].message, "boom");
-        let (h, out, _) = handler(UiOptions { color: TriState::No, curses: TriState::No, ..Default::default() });
+        let (h, out, _) = handler(UiOptions {
+            color: TriState::No,
+            curses: TriState::No,
+            ..Default::default()
+        });
         for e in &evs {
             h.handle(e);
         }
         h.after_command();
-        assert_eq!(out.err_string(), "INFO: a\nTarget //x up-to-date:\n  bazel-bin/x\nERROR: boom\nlast partial");
-        let (h, out, _) = handler(UiOptions { color: TriState::Yes, curses: TriState::No, ..Default::default() });
+        assert_eq!(
+            out.err_string(),
+            "INFO: a\nTarget //x up-to-date:\n  bazel-bin/x\nERROR: boom\nlast partial"
+        );
+        let (h, out, _) = handler(UiOptions {
+            color: TriState::Yes,
+            curses: TriState::No,
+            ..Default::default()
+        });
         for e in &evs {
             h.handle(e);
         }
@@ -2312,7 +2657,12 @@ mod tests {
 
     #[test]
     fn wrapping_inserts_continuation() {
-        let (h, _, _) = handler(UiOptions { curses: TriState::Yes, color: TriState::No, terminal_columns: 10, ..Default::default() });
+        let (h, _, _) = handler(UiOptions {
+            curses: TriState::Yes,
+            color: TriState::No,
+            terminal_columns: 10,
+            ..Default::default()
+        });
         let mut doc = ProgressDoc::default();
         doc.append("0123456789ab");
         let (bytes, lines) = h.render_doc(&doc, Some(9));

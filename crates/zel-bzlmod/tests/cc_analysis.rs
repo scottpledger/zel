@@ -9,11 +9,15 @@ use zel_bzlmod::session::{BzlmodConfig, Session};
 #[test]
 fn analyze_cc_binary() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    if !root.join("third_party/bcr/rules_cc").exists() || std::env::var("ZEL_CC_ANALYSIS").is_err() {
+    if !root.join("third_party/bcr/rules_cc").exists() || std::env::var("ZEL_CC_ANALYSIS").is_err()
+    {
         return;
     }
     let reg = PathBuf::from("/tmp/zel-registry");
-    let _ = std::process::Command::new("python3").arg(root.join("scripts/make_vendored_registry.py")).arg(&reg).status();
+    let _ = std::process::Command::new("python3")
+        .arg(root.join("scripts/make_vendored_registry.py"))
+        .arg(&reg)
+        .status();
     let ws = PathBuf::from("/tmp/zel-cc-ws");
     let _ = std::fs::remove_dir_all(&ws);
     std::fs::create_dir_all(ws.join("hello")).unwrap();
@@ -47,6 +51,7 @@ fn analyze_cc_binary() {
         repo_contents_cache: None,
         experimental_repository_ctx_execute_wasm: false,
         isolated_extension_usages: false,
+        credential_helpers: vec![],
         main_mapping_errors: false,
         nofetch: false,
     };
@@ -55,12 +60,15 @@ fn analyze_cc_binary() {
     eprintln!("session open: {:?}", t.elapsed());
     let resolver = Arc::new(zel_bzlmod::resolver::BzlmodRepoResolver::new(s.rt.clone()));
     let lcfg = zel_packages::LoaderConfig::new(
-        Arc::new(zel_vfs::LocalFileSystem::new(zel_vfs::DigestHashFunction::Sha256)),
+        Arc::new(zel_vfs::LocalFileSystem::new(
+            zel_vfs::DigestHashFunction::Sha256,
+        )),
         resolver,
     );
     let loader = zel_packages::PackageLoader::new(lcfg);
     let t = Instant::now();
-    let pkg = loader.load_package(&zel_cmdline::PackageIdentifier::create_in_main_repo("hello").unwrap());
+    let pkg =
+        loader.load_package(&zel_cmdline::PackageIdentifier::create_in_main_repo("hello").unwrap());
     eprintln!("load package: {:?} ok={}", t.elapsed(), pkg.is_ok());
     if let Ok(p) = &pkg {
         for e in &p.events {
@@ -73,11 +81,18 @@ fn analyze_cc_binary() {
             let id = zel_cmdline::PackageIdentifier::create(
                 zel_cmdline::RepositoryName::create_unvalidated(repo.trim_start_matches('@')),
                 zel_vfs::PathFragment::create(p),
-            ).unwrap();
+            )
+            .unwrap();
             match loader.load_package(&id) {
                 Ok(p) => {
-                    eprintln!("PKG {one}: {} targets, contains_errors={}", p.targets.len(), p.contains_errors);
-                    for e in &p.events { eprintln!("  event: {}", e.render()); }
+                    eprintln!(
+                        "PKG {one}: {} targets, contains_errors={}",
+                        p.targets.len(),
+                        p.contains_errors
+                    );
+                    for e in &p.events {
+                        eprintln!("  event: {}", e.render());
+                    }
                 }
                 Err(e) => eprintln!("PKG {one}: load error {e}"),
             }
@@ -86,7 +101,10 @@ fn analyze_cc_binary() {
     let t = Instant::now();
     let analyzer = zel_rules::TargetResolver::new(loader, zel_rules::AnalysisConfig::new());
     let label = zel_cmdline::Label::parse_canonical("@@//hello:hello").unwrap();
-    let r = analyzer.analyze(&label, &zel_analysis::BuildConfigurationKey::target("darwin_arm64", "fastbuild"));
+    let r = analyzer.analyze(
+        &label,
+        &zel_analysis::BuildConfigurationKey::target("darwin_arm64", "fastbuild"),
+    );
     eprintln!("analyze: {:?}", t.elapsed());
     match r {
         Ok(ct) => eprintln!("ANALYZED actions={}", ct.actions.len()),

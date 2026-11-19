@@ -104,11 +104,7 @@ pub(crate) fn edit_distance(a: &str, b: &str, max: usize) -> Option<usize> {
 
 impl Package {
     /// `Package.getTarget`: the target `name`, or Bazel's `no such target` message.
-    pub fn get_target(
-        &self,
-        name: &str,
-        fs: &dyn zel_vfs::FileSystem,
-    ) -> Result<&Target, String> {
+    pub fn get_target(&self, name: &str, fs: &dyn zel_vfs::FileSystem) -> Result<&Target, String> {
         if let Some(t) = self.targets.get(name) {
             return Ok(t);
         }
@@ -175,10 +171,10 @@ impl Package {
                             .strip_prefix(&own_prefix)
                             .or_else(|| s.strip_prefix(':'))
                             .unwrap_or(s);
-                        if matching_source_files.iter().any(|f| f == short) {
-                            if !consuming.contains(rn) {
-                                consuming.push(rn.clone());
-                            }
+                        if matching_source_files.iter().any(|f| f == short)
+                            && !consuming.contains(rn)
+                        {
+                            consuming.push(rn.clone());
                         }
                     }
                 }
@@ -238,6 +234,87 @@ pub struct ResolveOutcome {
     pub errors: Vec<PatternError>,
     /// Events (errors/warnings/prints) of every package that was loaded.
     pub events: Vec<PackageEvent>,
+}
+
+/// Filtering policy matching `com.google.devtools.build.lib.pkgcache.FilteringPolicy` /
+/// `FilteringPolicies`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilteringPolicy {
+    NoFilter,
+    FilterManual,
+    FilterTests,
+    RulesOnly,
+    RuleTypeExplicit(String),
+    And(Box<FilteringPolicy>, Box<FilteringPolicy>),
+}
+
+impl FilteringPolicy {
+    pub fn should_retain(&self, target: &Target, explicit: bool, pkg: &Package) -> bool {
+        match self {
+            Self::NoFilter => true,
+            Self::FilterManual => explicit || !target.has_tag("manual"),
+            Self::FilterTests => {
+                let is_test = matches!(target, Target::Rule(r) if r.is_test_rule());
+                is_test && (explicit || !target.has_tag("manual"))
+            }
+            Self::RulesOnly => matches!(target, Target::Rule(_)),
+            Self::RuleTypeExplicit(rule_name) => {
+                if explicit {
+                    return true;
+                }
+                match target {
+                    Target::Rule(r) => r.rule_class == *rule_name,
+                    Target::OutputFile {
+                        generating_rule, ..
+                    } => match pkg.targets.get(generating_rule.name()) {
+                        Some(Target::Rule(r)) => r.rule_class == *rule_name,
+                        _ => false,
+                    },
+                    _ => false,
+                }
+            }
+            Self::And(a, b) => {
+                a.should_retain(target, explicit, pkg) && b.should_retain(target, explicit, pkg)
+            }
+        }
+    }
+}
+
+/// `TargetPatternResolverUtil.getParsingErrorMessage`.
+pub fn get_parsing_error_message(message: &str, original_pattern: Option<&str>) -> String {
+    match original_pattern {
+        None => message.to_string(),
+        Some(p) => format!("while parsing '{p}': {message}"),
+    }
+}
+
+/// `TargetPatternResolverUtil.getPathFragment`.
+pub fn get_path_fragment(path_prefix: &str) -> Result<PathFragment, String> {
+    let directory = PathFragment::create(path_prefix);
+    if directory.contains_uplevel_references() {
+        return Err(format!(
+            "up-level references are not permitted: '{}'",
+            directory.path_string()
+        ));
+    }
+    if !path_prefix.is_empty()
+        && zel_cmdline::validator::validate_package_name(path_prefix).is_err()
+    {
+        return Err(format!("'{path_prefix}' is not a valid package name"));
+    }
+    Ok(directory)
+}
+
+/// `TargetPatternResolverUtil.resolvePackageTargets`.
+pub fn resolve_package_targets(pkg: &Package, policy: &FilteringPolicy) -> Vec<Target> {
+    if matches!(policy, FilteringPolicy::NoFilter) {
+        return pkg.targets.values().cloned().collect();
+    }
+    pkg.targets
+        .values()
+        .filter(|t| policy.should_retain(t, false, pkg))
+        .cloned()
+        .collect()
 }
 
 /// Resolves target patterns against a [`PackageLoader`], caching loaded packages for the lifetime
@@ -309,12 +386,9 @@ impl PatternResolver {
 
     pub fn rules_or_all(pkg: &Package, include_files: bool) -> Vec<Target> {
         pkg.targets
-            .iter()
-            .filter(|(n, t)| {
-                !pkg.macro_namespace_violating_targets.contains_key(*n)
-                    && (include_files || matches!(t, Target::Rule(_)))
-            })
-            .map(|(_, t)| t.clone())
+            .values()
+            .filter(|t| include_files || matches!(t, Target::Rule(_)))
+            .cloned()
             .collect()
     }
 
@@ -363,41 +437,57 @@ impl PatternResolver {
             TargetPattern::TargetsBelowDirectory {
                 directory,
                 include_files,
-            } => {
-                let mut out = Vec::new();
-                let mut pkgs = Vec::new();
-                self.find_packages_below(directory, &mut pkgs)?;
-                let mut failed: Option<String> = None;
-                let mut pkg_err_events = Vec::new();
-                for id in pkgs {
-                    match self.package(&id) {
-                        Ok(pkg) => {
-                            self.take_events(&pkg, events);
-                            if pkg.contains_errors {
-                                pkg_err_events.push(PackageEvent::error(
-                                    None,
-                                    format!("package contains errors: {}", id.package_fragment()),
-                                ));
-                                failed.get_or_insert_with(|| {
-                                    format!("error loading package '{}': Package '{}' contains errors", id.package_fragment(), id.package_fragment())
-                                });
-                                continue;
-                            }
-                            out.extend(Self::rules_or_all(&pkg, *include_files));
-                        }
-                        Err(e) => {
-                            failed.get_or_insert(e.message);
-                        }
+            } => self
+                .expand_below_directory(directory, *include_files, &[], false, events)
+                .map(|(ts, _)| ts),
+        }
+    }
+
+    fn expand_below_directory(
+        &self,
+        directory: &PackageIdentifier,
+        include_files: bool,
+        excluded_subdirs: &[PathFragment],
+        keep_going: bool,
+        events: &mut Vec<PackageEvent>,
+    ) -> Result<(Vec<Target>, Vec<String>), String> {
+        let mut out = Vec::new();
+        let mut pkgs = Vec::new();
+        self.find_packages_below_excluding(directory, excluded_subdirs, &mut pkgs, events)?;
+        let mut pkg_failures: Vec<String> = Vec::new();
+        let mut pkg_err_events = Vec::new();
+        for id in pkgs {
+            match self.package(&id) {
+                Ok(pkg) => {
+                    self.take_events(&pkg, events);
+                    if pkg.contains_errors {
+                        pkg_err_events.push(PackageEvent::error(
+                            None,
+                            format!("package contains errors: {}", id.package_fragment()),
+                        ));
+                        pkg_failures.push(format!(
+                            "error loading package '{}': Package '{}' contains errors",
+                            id.package_fragment(),
+                            id.package_fragment()
+                        ));
+                        continue;
                     }
+                    out.extend(Self::rules_or_all(&pkg, include_files));
                 }
-                pkg_err_events.reverse();
-                events.extend(pkg_err_events);
-                match failed {
-                    Some(m) => Err(m),
-                    None => Ok(out),
+                Err(e) => {
+                    pkg_failures.push(e.message);
                 }
             }
         }
+        pkg_err_events.reverse();
+        events.extend(pkg_err_events);
+        if !keep_going {
+            if let Some(first) = pkg_failures.into_iter().next() {
+                return Err(first);
+            }
+            return Ok((out, Vec::new()));
+        }
+        Ok((out, pkg_failures))
     }
 
     /// `InterpretPathAsTarget`: finds the package containing `path` and builds the label.
@@ -435,12 +525,26 @@ impl PatternResolver {
         dir: &PackageIdentifier,
         out: &mut Vec<PackageIdentifier>,
     ) -> Result<(), String> {
+        let mut ignored_events = Vec::new();
+        self.find_packages_below_excluding(dir, &[], out, &mut ignored_events)
+    }
+
+    pub fn find_packages_below_excluding(
+        &self,
+        dir: &PackageIdentifier,
+        excluded_subdirs: &[PathFragment],
+        out: &mut Vec<PackageIdentifier>,
+        events: &mut Vec<PackageEvent>,
+    ) -> Result<(), String> {
         let lookup = &self.loader.config().lookup;
         let Some(root) = lookup.resolver.repo_root(dir.repository()) else {
             let repo_display = if dir.repository().is_main() {
                 dir.repository().canonical_form()
             } else {
-                format!("@@[unknown repo '{}' requested from @@]", dir.repository().name())
+                format!(
+                    "@@[unknown repo '{}' requested from @@]",
+                    dir.repository().name()
+                )
             };
             return Err(format!(
                 "no such package '{repo_display}//{}': The repository '{repo_display}' could not be resolved: No repository visible as '@{}' from main repository",
@@ -449,7 +553,12 @@ impl PatternResolver {
             ));
         };
         let start = root.get_relative(dir.package_fragment());
-        if !lookup.fs.stat(&start, true).map(|s| s.is_directory).unwrap_or(false) {
+        if !lookup
+            .fs
+            .stat(&start, true)
+            .map(|s| s.is_directory)
+            .unwrap_or(false)
+        {
             return Err(format!(
                 "no targets found beneath '{}'",
                 dir.package_fragment()
@@ -457,7 +566,15 @@ impl PatternResolver {
         }
         let is_root = dir.package_fragment().is_empty();
         let mut ancestors = Vec::new();
-        self.walk_dirs(dir, &root, is_root && dir.repository().is_main(), &mut ancestors, out);
+        self.walk_dirs(
+            dir,
+            &root,
+            is_root && dir.repository().is_main(),
+            excluded_subdirs,
+            &mut ancestors,
+            out,
+            events,
+        );
         if out.is_empty() {
             return Err(format!(
                 "no targets found beneath '{}'",
@@ -467,20 +584,55 @@ impl PatternResolver {
         Ok(())
     }
 
+    fn resolve_real_dir(
+        fs: &dyn zel_vfs::FileSystem,
+        start: &PathFragment,
+    ) -> Option<PathFragment> {
+        let mut cur = start.clone();
+        for _ in 0..32 {
+            let st = fs.stat(&cur, false).ok()?;
+            if !st.is_symlink {
+                return Some(cur);
+            }
+            let target = fs.read_symbolic_link(&cur).ok()?;
+            cur = if target.is_absolute() {
+                target
+            } else if let Some(parent) = cur.parent_directory() {
+                parent.get_relative(&target)
+            } else {
+                target
+            };
+        }
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn walk_dirs(
         &self,
         id: &PackageIdentifier,
         root: &PathFragment,
         skip_convenience: bool,
-        ancestors: &mut Vec<u64>,
+        excluded_subdirs: &[PathFragment],
+        ancestors: &mut Vec<PathFragment>,
         out: &mut Vec<PackageIdentifier>,
+        events: &mut Vec<PackageEvent>,
     ) {
+        if excluded_subdirs
+            .iter()
+            .any(|ex| id.package_fragment().starts_with(ex))
+        {
+            return;
+        }
         let lookup = &self.loader.config().lookup;
         let abs = root.get_relative(id.package_fragment());
-        let node = lookup.fs.stat(&abs, true).map(|s| s.node_id).unwrap_or(0);
+        let Some(real_dir) = Self::resolve_real_dir(lookup.fs.as_ref(), &abs) else {
+            return;
+        };
         match lookup.lookup(id) {
             PackageLookup::Found { .. } => out.push(id.clone()),
-            PackageLookup::Deleted(reason) if reason.contains(".bazelignore") || reason.contains("REPO.bazel") => {
+            PackageLookup::Deleted(reason)
+                if reason.contains(".bazelignore") || reason.contains("REPO.bazel") =>
+            {
                 // Ignored directories are not traversed at all.
                 return;
             }
@@ -489,32 +641,76 @@ impl PatternResolver {
         let Ok(entries) = lookup.fs.readdir(&abs) else {
             return;
         };
-        ancestors.push(node);
+        ancestors.push(real_dir);
         let mut names: Vec<_> = entries.into_iter().collect();
         names.sort_by(|a, b| a.name.cmp(&b.name));
         for e in names {
-            if skip_convenience && e.name.starts_with("bazel-") && e.dirent_type == DirentType::Symlink
+            if skip_convenience
+                && e.name.starts_with("bazel-")
+                && e.dirent_type == DirentType::Symlink
             {
                 continue;
             }
             let child_abs = abs.get_relative_str(&e.name);
-            let Ok(cst) = lookup.fs.stat(&child_abs, true) else {
-                continue;
+            let child_rel = id.package_fragment().get_relative_str(&e.name);
+            let cst = match lookup.fs.stat(&child_abs, true) {
+                Ok(s) => s,
+                Err(_) => {
+                    if e.dirent_type == DirentType::Symlink
+                        && Self::resolve_real_dir(lookup.fs.as_ref(), &child_abs).is_none()
+                        && lookup.fs.read_symbolic_link(&child_abs).is_ok()
+                    {
+                        events.push(PackageEvent::error(
+                            None,
+                            format!(
+                                "Failed to get information about path, for {}, skipping: Symlink cycle",
+                                child_rel.path_string()
+                            ),
+                        ));
+                    }
+                    continue;
+                }
             };
             if !cst.is_directory {
                 continue;
             }
-            // Symlink cycles: do not re-enter a directory that is one of our ancestors.
-            if e.dirent_type == DirentType::Symlink && ancestors.contains(&cst.node_id) {
-                continue;
+            if e.dirent_type == DirentType::Symlink {
+                match Self::resolve_real_dir(lookup.fs.as_ref(), &child_abs) {
+                    Some(real_child) if ancestors.contains(&real_child) => {
+                        events.push(PackageEvent::error(
+                            None,
+                            format!(
+                                "Failed to get information about path, for {}, skipping: Symlink cycle",
+                                child_rel.path_string()
+                            ),
+                        ));
+                        continue;
+                    }
+                    None => {
+                        events.push(PackageEvent::error(
+                            None,
+                            format!(
+                                "Failed to get information about path, for {}, skipping: Symlink cycle",
+                                child_rel.path_string()
+                            ),
+                        ));
+                        continue;
+                    }
+                    _ => {}
+                }
             }
-            let Ok(child) = PackageIdentifier::create(
-                id.repository().clone(),
-                id.package_fragment().get_relative_str(&e.name),
-            ) else {
+            let Ok(child) = PackageIdentifier::create(id.repository().clone(), child_rel) else {
                 continue; // directory name is not a valid package component
             };
-            self.walk_dirs(&child, root, false, ancestors, out);
+            self.walk_dirs(
+                &child,
+                root,
+                false,
+                excluded_subdirs,
+                ancestors,
+                out,
+                events,
+            );
         }
         ancestors.pop();
     }
@@ -522,37 +718,144 @@ impl PatternResolver {
     /// Resolves patterns in order: positives add, negatives subtract from what was accumulated so
     /// far (`TargetPatternPhaseFunction`).
     pub fn resolve_patterns(&self, patterns: &[String]) -> ResolveOutcome {
-        self.resolve_patterns_filtered(patterns, false)
+        self.resolve_patterns_with_policy(patterns, &FilteringPolicy::NoFilter)
     }
 
     /// Resolves patterns in order, optionally filtering out targets tagged `manual` from wildcard expansions
     /// (`TargetPattern::TargetsInPackage` and `TargetPattern::TargetsBelowDirectory`).
-    pub fn resolve_patterns_filtered(&self, patterns: &[String], filter_manual: bool) -> ResolveOutcome {
+    pub fn resolve_patterns_filtered(
+        &self,
+        patterns: &[String],
+        filter_manual: bool,
+    ) -> ResolveOutcome {
+        self.resolve_patterns_with_options(patterns, filter_manual, false)
+    }
+
+    pub fn resolve_patterns_with_options(
+        &self,
+        patterns: &[String],
+        filter_manual: bool,
+        keep_going: bool,
+    ) -> ResolveOutcome {
+        let policy = if filter_manual {
+            FilteringPolicy::FilterManual
+        } else {
+            FilteringPolicy::NoFilter
+        };
+        self.resolve_patterns_with_policy_and_options(patterns, &policy, keep_going)
+    }
+
+    /// Resolves patterns in order with an explicit [`FilteringPolicy`]. Negative patterns always
+    /// use `FilteringPolicy::NoFilter`, matching `TargetPatternPhaseFunction`.
+    pub fn resolve_patterns_with_policy(
+        &self,
+        patterns: &[String],
+        policy: &FilteringPolicy,
+    ) -> ResolveOutcome {
+        self.resolve_patterns_with_policy_and_options(patterns, policy, false)
+    }
+
+    pub fn resolve_patterns_with_policy_and_options(
+        &self,
+        patterns: &[String],
+        policy: &FilteringPolicy,
+        keep_going: bool,
+    ) -> ResolveOutcome {
         let mut outcome = ResolveOutcome::default();
-        let mut acc: Vec<Target> = Vec::new();
+        let mut parsed_list: Vec<Option<(String, SignedTargetPattern)>> =
+            Vec::with_capacity(patterns.len());
         for raw in patterns {
-            let signed = match SignedTargetPattern::parse_with(
+            match SignedTargetPattern::parse_with(
                 raw,
                 &self.relative_dir,
                 &RepositoryName::main(),
                 &self.main_mapping,
             ) {
-                Ok(s) => s,
+                Ok(s) => parsed_list.push(Some((raw.clone(), s))),
                 Err(e) => {
                     outcome.errors.push(PatternError {
                         pattern: raw.clone(),
                         message: e.0,
                         package_errors: None,
                     });
-                    continue;
+                    parsed_list.push(None);
                 }
+            }
+        }
+        // Smart negation: fold negative `TargetsBelowDirectory` patterns into preceding positive
+        // `TargetsBelowDirectory` patterns unless a later positive pattern overlaps them.
+        let mut excluded_for: Vec<Vec<PathFragment>> = vec![Vec::new(); parsed_list.len()];
+        let mut folded_negative: Vec<bool> = vec![false; parsed_list.len()];
+        for k in 0..parsed_list.len() {
+            let Some((
+                _,
+                SignedTargetPattern {
+                    sign: PatternSign::Negative,
+                    pattern:
+                        TargetPattern::TargetsBelowDirectory {
+                            directory: neg_dir, ..
+                        },
+                },
+            )) = &parsed_list[k]
+            else {
+                continue;
             };
-            let mut signed = signed;
+            let has_later_positive = (k + 1..parsed_list.len()).any(|m| {
+                matches!(
+                    &parsed_list[m],
+                    Some((
+                        _,
+                        SignedTargetPattern {
+                            sign: PatternSign::Positive,
+                            ..
+                        }
+                    ))
+                )
+            });
+            if has_later_positive {
+                continue;
+            }
+            let mut covered_earlier = false;
+            for j in 0..k {
+                if let Some((
+                    _,
+                    SignedTargetPattern {
+                        sign: PatternSign::Positive,
+                        pattern:
+                            TargetPattern::TargetsBelowDirectory {
+                                directory: pos_dir, ..
+                            },
+                    },
+                )) = &parsed_list[j]
+                {
+                    if pos_dir.repository() == neg_dir.repository()
+                        && neg_dir
+                            .package_fragment()
+                            .starts_with(pos_dir.package_fragment())
+                    {
+                        excluded_for[j].push(neg_dir.package_fragment().clone());
+                        covered_earlier = true;
+                    }
+                }
+            }
+            if covered_earlier {
+                folded_negative[k] = true;
+            }
+        }
+
+        let mut acc: Vec<Target> = Vec::new();
+        for (idx, item) in parsed_list.into_iter().enumerate() {
+            let Some((raw, mut signed)) = item else {
+                continue;
+            };
+            if folded_negative[idx] {
+                continue;
+            }
             let mut ambiguity_warnings = Vec::new();
             let mut replacement: Option<Label> = None;
             // `TargetsInPackage.getWildcardConflict`: `//pkg:all` naming an existing target uses that target.
             if let TargetPattern::TargetsInPackage { package, .. } = &signed.pattern {
-                let unsigned = raw.strip_prefix('-').unwrap_or(raw);
+                let unsigned = raw.strip_prefix('-').unwrap_or(&raw);
                 if unsigned.starts_with("//") || unsigned.starts_with('@') {
                     if let Some((_, suffix)) = unsigned.rsplit_once(':') {
                         if let Ok(pkg) = self.package(package) {
@@ -575,27 +878,58 @@ impl PatternResolver {
                 signed.pattern = TargetPattern::SingleTarget(l);
             }
             outcome.events.extend(ambiguity_warnings);
-            let is_wildcard = matches!(
+            let explicit = !matches!(
                 signed.pattern,
-                TargetPattern::TargetsInPackage { .. } | TargetPattern::TargetsBelowDirectory { .. }
+                TargetPattern::TargetsInPackage { .. }
+                    | TargetPattern::TargetsBelowDirectory { .. }
             );
             let mut events = Vec::new();
-            let res = self.expand(&signed.pattern, &mut events);
+            let res = match &signed.pattern {
+                TargetPattern::TargetsBelowDirectory {
+                    directory,
+                    include_files,
+                } => {
+                    match self.expand_below_directory(
+                        directory,
+                        *include_files,
+                        &excluded_for[idx],
+                        keep_going,
+                        &mut events,
+                    ) {
+                        Ok((ts, pkg_errs)) => {
+                            for msg in pkg_errs {
+                                outcome.errors.push(PatternError {
+                                    pattern: raw.clone(),
+                                    message: msg,
+                                    package_errors: None,
+                                });
+                            }
+                            Ok(ts)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+                _ => self.expand(&signed.pattern, &mut events),
+            };
             outcome.events.extend(events);
             match (signed.sign, res) {
                 (_, Err(message)) => {
                     let package_errors = self.package_errors_for(&signed.pattern, &message);
                     outcome.errors.push(PatternError {
-                        pattern: raw.clone(),
+                        pattern: raw,
                         message,
                         package_errors,
                     })
                 }
-                (PatternSign::Positive, Ok(mut ts)) => {
-                    if filter_manual && is_wildcard {
-                        ts.retain(|t| !t.has_tag("manual"));
-                    }
+                (PatternSign::Positive, Ok(ts)) => {
                     for t in ts {
+                        if !explicit && !matches!(policy, FilteringPolicy::NoFilter) {
+                            if let Ok(pkg) = self.package(t.label().package_identifier()) {
+                                if !policy.should_retain(&t, explicit, &pkg) {
+                                    continue;
+                                }
+                            }
+                        }
                         if !acc.iter().any(|x| x.label() == t.label()) {
                             acc.push(t);
                         }
@@ -615,7 +949,10 @@ impl PatternResolver {
     /// returns the details Bazel's `package contains errors: ...` event needs.
     fn package_errors_for(&self, pattern: &TargetPattern, message: &str) -> Option<PackageErrors> {
         let (id, include_files) = match pattern {
-            TargetPattern::TargetsInPackage { package, include_files } => ((*package).clone(), *include_files),
+            TargetPattern::TargetsInPackage {
+                package,
+                include_files,
+            } => ((*package).clone(), *include_files),
             _ => return None,
         };
         let frag = id.package_fragment();
@@ -629,7 +966,11 @@ impl PatternResolver {
             .find(|e| e.kind == EventKind::Error)
             .map(|e| e.message.clone())
             .unwrap_or_default();
-        Some(PackageErrors { package: id, include_files, first_error })
+        Some(PackageErrors {
+            package: id,
+            include_files,
+            first_error,
+        })
     }
 
     /// Renders error events (`ERROR: ...` lines) for display.
@@ -698,7 +1039,9 @@ impl PatternResolver {
                 }
                 order.push(t.clone());
             }
-            Target::OutputFile { generating_rule, .. } => {
+            Target::OutputFile {
+                generating_rule, ..
+            } => {
                 if let Ok(rt) = self.get_target(generating_rule) {
                     self.visit(&rt, visited, order, errors);
                 }

@@ -131,10 +131,175 @@ impl Netrc {
         Self::from_file(&path).ok()
     }
 
+    /// Locate `.netrc` checking `client_env` first, then process `std::env`.
+    pub fn load_from_env(client_env: &BTreeMap<String, String>) -> Option<Self> {
+        let get = |k: &str| -> Option<String> {
+            client_env
+                .get(k)
+                .filter(|v| !v.is_empty())
+                .cloned()
+                .or_else(|| std::env::var(k).ok().filter(|v| !v.is_empty()))
+        };
+        if let Some(p) = get("NETRC").map(PathBuf::from).filter(|p| p.exists()) {
+            return Self::from_file(&p).ok();
+        }
+        if let Some(p) = get("HOME")
+            .map(|h| PathBuf::from(h).join(".netrc"))
+            .filter(|p| p.exists())
+        {
+            return Self::from_file(&p).ok();
+        }
+        if let Some(p) = get("USERPROFILE")
+            .map(|h| PathBuf::from(h).join(".netrc"))
+            .filter(|p| p.exists())
+        {
+            return Self::from_file(&p).ok();
+        }
+        None
+    }
+
     /// Look up credential for a host.
     pub fn get_credential(&self, host: &str) -> Option<&NetrcMachine> {
         self.machines.get(host).or(self.default_machine.as_ref())
     }
+}
+
+fn url_host(url: &str) -> &str {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let hostport = authority
+        .rsplit_once('@')
+        .map(|(_, h)| h)
+        .unwrap_or(authority);
+    if hostport.starts_with('[') {
+        hostport
+            .split(']')
+            .next()
+            .map(|s| s.trim_start_matches('['))
+            .unwrap_or(hostport)
+    } else {
+        hostport.split(':').next().unwrap_or(hostport)
+    }
+}
+
+fn helper_matches_host(scope: &str, host: &str) -> bool {
+    if scope.is_empty() {
+        return true;
+    }
+    if let Some(sub) = scope.strip_prefix("*.") {
+        host.eq_ignore_ascii_case(sub)
+            || host
+                .to_ascii_lowercase()
+                .ends_with(&format!(".{}", sub.to_ascii_lowercase()))
+    } else {
+        host.eq_ignore_ascii_case(scope)
+    }
+}
+
+fn run_credential_helper(helper: &Path, url: &str) -> Result<Vec<(String, String)>, String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(helper)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| {
+            format!(
+                "Failed to invoke credential helper {}: {e}",
+                helper.display()
+            )
+        })?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let escaped = url.replace('\\', "\\\\").replace('"', "\\\"");
+        let _ = write!(stdin, "{{\"uri\":\"{escaped}\"}}");
+    }
+    let out = child.wait_with_output().map_err(|e| {
+        format!(
+            "Failed to wait for credential helper {}: {e}",
+            helper.display()
+        )
+    })?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        return Err(format!(
+            "Credential helper {} exited with {}: {}",
+            helper.display(),
+            out.status,
+            stderr.trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Ok(Vec::new());
+    }
+    let json = crate::json::Json::parse(trimmed).map_err(|e| {
+        format!(
+            "Invalid JSON from credential helper {}: {e}",
+            helper.display()
+        )
+    })?;
+    let crate::json::Json::Obj(top) = json else {
+        return Ok(Vec::new());
+    };
+    let mut result = Vec::new();
+    if let Some((_, crate::json::Json::Obj(hdrs))) = top.into_iter().find(|(k, _)| k == "headers") {
+        for (name, vals) in hdrs {
+            if let crate::json::Json::Arr(items) = vals {
+                for item in items {
+                    if let crate::json::Json::Str(s) = item {
+                        result.push((name.clone(), s));
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// Resolves auth headers for `url` using `--credential_helper` (highest priority) or `.netrc`.
+pub fn resolve_auth_headers(
+    url: &str,
+    helpers: &[(String, PathBuf)],
+    client_env: &BTreeMap<String, String>,
+) -> Result<Vec<(String, String)>, String> {
+    let host = url_host(url);
+    if !helpers.is_empty() {
+        // Specific scope wins over wildcard; later flag overrides earlier flag.
+        let mut best: Option<&PathBuf> = None;
+        for (scope, path) in helpers {
+            if !scope.is_empty() && helper_matches_host(scope, host) {
+                best = Some(path);
+            }
+        }
+        if best.is_none() {
+            for (scope, path) in helpers {
+                if scope.is_empty() {
+                    best = Some(path);
+                }
+            }
+        }
+        if let Some(helper) = best {
+            let hdrs = run_credential_helper(helper, url)?;
+            if !hdrs.is_empty() {
+                return Ok(hdrs);
+            }
+        }
+    }
+    if let Some(netrc) = Netrc::load_from_env(client_env) {
+        if let Some(m) = netrc.get_credential(host) {
+            if let Some(pwd) = &m.password {
+                if let Some(login) = &m.login {
+                    let b64 = crate::hash::base64_encode(format!("{login}:{pwd}").as_bytes());
+                    return Ok(vec![("Authorization".to_string(), format!("Basic {b64}"))]);
+                } else {
+                    return Ok(vec![("Authorization".to_string(), format!("Bearer {pwd}"))]);
+                }
+            }
+        }
+    }
+    Ok(Vec::new())
 }
 
 fn parse_machine_tokens(

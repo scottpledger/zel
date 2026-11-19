@@ -47,8 +47,9 @@ impl DiskCache {
     /// SHA-256 layout, with action-result integrity checking (as Bazel enables by default
     /// when `--remote_download_outputs` is not `all`... here always on).
     pub fn new(root: PathFragment) -> Self {
-        Self::open(Path::new(root.path_string()), DigestFn::Sha256, true)
-            .unwrap_or_else(|_| Self::unopened(Path::new(root.path_string()), DigestFn::Sha256, true))
+        Self::open(Path::new(root.path_string()), DigestFn::Sha256, true).unwrap_or_else(|_| {
+            Self::unopened(Path::new(root.path_string()), DigestFn::Sha256, true)
+        })
     }
 
     fn unopened(root: &Path, f: DigestFn, check: bool) -> Self {
@@ -94,12 +95,27 @@ impl DiskCache {
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        self.tmp_root.join(format!("{}-{t}-{n}", std::process::id()))
+        self.tmp_root
+            .join(format!("{}-{t}-{n}", std::process::id()))
     }
 
     /// Updates the entry's mtime; returns whether it exists.
     pub fn refresh(&self, path: &Path) -> io::Result<bool> {
-        match std::fs::File::open(path) {
+        #[cfg(windows)]
+        {
+            match std::fs::symlink_metadata(path) {
+                Ok(_) => {
+                    if let Ok(f) = open_for_mtime(path) {
+                        let _ = f.set_modified(SystemTime::now());
+                    }
+                    Ok(true)
+                }
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+                Err(e) => Err(e),
+            }
+        }
+        #[cfg(not(windows))]
+        match open_for_mtime(path) {
             Ok(f) => {
                 // Best effort: a shared cache may be owned by another user.
                 let _ = f.set_modified(SystemTime::now());
@@ -114,10 +130,16 @@ impl DiskCache {
         if d.size_bytes == 0 {
             return true;
         }
-        self.refresh(&self.path(Store::Cas, &d.hash)).unwrap_or(false)
+        self.refresh(&self.path(Store::Cas, &d.hash))
+            .unwrap_or(false)
     }
 
-    fn save(&self, store: Store, hash: &str, write: impl FnOnce(&Path) -> io::Result<()>) -> io::Result<()> {
+    fn save(
+        &self,
+        store: Store,
+        hash: &str,
+        write: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> io::Result<()> {
         let path = self.path(store, hash);
         if store == Store::Cas && self.refresh(&path)? {
             return Ok(());
@@ -190,7 +212,9 @@ impl DiskCache {
 
     /// Copies a blob to `dest` (creating parents), optionally marking it executable.
     pub fn copy_blob_to(&self, d: &Digest, dest: &Path, executable: bool) -> io::Result<bool> {
-        let Some(data) = self.get_blob(d)? else { return Ok(false) };
+        let Some(data) = self.get_blob(d)? else {
+            return Ok(false);
+        };
         if let Some(p) = dest.parent() {
             std::fs::create_dir_all(p)?;
         }
@@ -236,10 +260,18 @@ impl DiskCache {
             }
         }
         for od in &r.output_directories {
-            let Some(td) = &od.tree_digest else { return false };
-            let Ok(Some(bytes)) = self.get_blob(td) else { return false };
-            let Ok(tree) = Tree::decode(&bytes) else { return false };
-            let Ok(entries) = flatten_tree(&tree, self.digest_fn) else { return false };
+            let Some(td) = &od.tree_digest else {
+                return false;
+            };
+            let Ok(Some(bytes)) = self.get_blob(td) else {
+                return false;
+            };
+            let Ok(tree) = Tree::decode(&bytes) else {
+                return false;
+            };
+            let Ok(entries) = flatten_tree(&tree, self.digest_fn) else {
+                return false;
+            };
             for e in entries {
                 if let crate::merkle::TreeEntry::File { digest, .. } = e {
                     if !self.contains_blob(&digest) {
@@ -250,6 +282,20 @@ impl DiskCache {
         }
         true
     }
+}
+
+#[cfg(windows)]
+fn open_for_mtime(path: &Path) -> io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_WRITE_ATTRIBUTES: u32 = 0x0100;
+    std::fs::OpenOptions::new()
+        .access_mode(FILE_WRITE_ATTRIBUTES)
+        .open(path)
+}
+
+#[cfg(not(windows))]
+fn open_for_mtime(path: &Path) -> io::Result<std::fs::File> {
+    std::fs::File::open(path)
 }
 
 #[cfg(unix)]
@@ -290,12 +336,19 @@ mod tests {
         assert_eq!(std::fs::read(&expect).unwrap(), b"hello world");
         assert!(root.join("tmp").is_dir());
         assert_eq!(dc.get_blob(&d).unwrap().unwrap(), b"hello world");
-        assert!(dc.get_blob(&DigestFn::Sha256.digest(b"nope")).unwrap().is_none());
+        assert!(dc
+            .get_blob(&DigestFn::Sha256.digest(b"nope"))
+            .unwrap()
+            .is_none());
 
         let ad = DigestFn::Sha256.digest(b"action");
         let ar = ActionResult {
             exit_code: 0,
-            output_files: vec![OutputFile { path: "o".into(), digest: Some(d.clone()), ..Default::default() }],
+            output_files: vec![OutputFile {
+                path: "o".into(),
+                digest: Some(d.clone()),
+                ..Default::default()
+            }],
             ..Default::default()
         };
         dc.put_action_result(&ad, &ar).unwrap();
@@ -313,7 +366,12 @@ mod tests {
         let dc = DiskCache::open(&root, DigestFn::Md5, true).unwrap();
         let d = DigestFn::Md5.digest(b"x");
         dc.put_blob(&d, b"x").unwrap();
-        assert!(root.join("md5").join("cas").join(&d.hash[..2]).join(&d.hash).is_file());
+        assert!(root
+            .join("md5")
+            .join("cas")
+            .join(&d.hash[..2])
+            .join(&d.hash)
+            .is_file());
         let empty = DigestFn::Md5.digest(b"");
         assert!(dc.contains_blob(&empty));
         assert_eq!(dc.get_blob(&empty).unwrap().unwrap(), Vec::<u8>::new());
@@ -330,17 +388,23 @@ mod tests {
         dc.put_file(&d, &src).unwrap();
         let p = dc.path(Store::Cas, &d.hash);
         let old = SystemTime::now() - std::time::Duration::from_secs(3600);
-        std::fs::File::open(&p).unwrap().set_modified(old).unwrap();
+        open_for_mtime(&p).unwrap().set_modified(old).unwrap();
         assert!(dc.contains_blob(&d));
         let m = std::fs::metadata(&p).unwrap().modified().unwrap();
-        assert!(m > old + std::time::Duration::from_secs(60), "mtime must be refreshed on access");
+        assert!(
+            m > old + std::time::Duration::from_secs(60),
+            "mtime must be refreshed on access"
+        );
         let out = root.join("out/x.bin");
         assert!(dc.copy_blob_to(&d, &out, true).unwrap());
         assert_eq!(std::fs::read(&out).unwrap(), b"content");
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&out).unwrap().permissions().mode() & 0o111, 0o111);
+            assert_eq!(
+                std::fs::metadata(&out).unwrap().permissions().mode() & 0o111,
+                0o111
+            );
         }
         let _ = std::fs::remove_dir_all(&root);
     }

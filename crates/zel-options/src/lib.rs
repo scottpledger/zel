@@ -31,8 +31,8 @@ pub mod invocation_policy;
 pub mod parser;
 pub mod priority;
 pub mod rc;
-mod semantics_keys;
 pub mod semantics_info;
+mod semantics_keys;
 pub mod spellcheck;
 pub mod startup;
 pub mod tags;
@@ -42,21 +42,23 @@ pub use canonicalize::{canonicalize_flags, CanonicalizeCommandOptions};
 pub use config_expander::{expand_command_args, get_platform_name};
 pub use converters::{
     convert_assignment, convert_boolean, convert_bytesize, convert_comma_list,
-    convert_compilation_mode, convert_double, convert_duration, convert_flag_alias, convert_int,
-    convert_enum, convert_long, convert_option, convert_tristate, convert_value,
+    convert_compilation_mode, convert_double, convert_duration, convert_enum, convert_flag_alias,
+    convert_int, convert_long, convert_option, convert_tristate, convert_value,
 };
 pub use definition::{OptionDefinition, OptionValueDescription};
 pub use error::OptionsParsingError;
 pub use flag_tables::{
     get_command_abbrev_map, get_command_allowed_classes, get_command_options_map,
-    get_startup_options_map, ALL_COMMAND_OPTIONS, ALL_STARTUP_OPTIONS, COMMAND_INHERITANCE, COMMAND_OPTION_CLASSES,
-    COMMON_OPTION_CLASSES, FRAGMENT_OPTION_CLASSES,
+    get_startup_options_map, ALL_COMMAND_OPTIONS, ALL_STARTUP_OPTIONS, COMMAND_INHERITANCE,
+    COMMAND_OPTION_CLASSES, COMMON_OPTION_CLASSES, FRAGMENT_OPTION_CLASSES,
 };
 pub use invocation_policy::{
     base64_decode, AllowValues, ConfigOrder, ConfigPolicy, DisallowValues, FlagPolicy,
     InvocationPolicy, PolicyOperation, ReplacementValue, SetValue, SetValueBehavior, UseDefault,
 };
-pub use parser::{split_unsupported_common_args, ParsedCommandOptions};
+pub use parser::{
+    command_analyzes, split_unsupported_common_args, ParsedCommandOptions, StarlarkOccurrence,
+};
 pub use priority::{OptionPriority, PriorityCategory};
 pub use rc::{discover_and_load_rc_files, get_command_ancestry, tokenize_rc_line, BazelrcConfig};
 pub use semantics_info::starlark_semantics_string;

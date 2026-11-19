@@ -35,6 +35,7 @@ pub const SIGALRM: i32 = 14;
 pub const SIGTERM: i32 = 15;
 pub const SIGKILL: i32 = 9;
 
+#[cfg(unix)]
 #[cfg(target_os = "macos")]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -42,6 +43,7 @@ struct Timeval {
     tv_sec: i64,
     tv_usec: i32,
 }
+#[cfg(unix)]
 #[cfg(not(target_os = "macos"))]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
@@ -50,6 +52,7 @@ struct Timeval {
     tv_usec: i64,
 }
 
+#[cfg(unix)]
 #[repr(C)]
 #[derive(Clone, Copy, Default)]
 struct Rusage {
@@ -71,6 +74,7 @@ struct Rusage {
     ru_nivcsw: i64,
 }
 
+#[cfg(unix)]
 extern "C" {
     fn kill(pid: i32, sig: i32) -> i32;
     fn setsid() -> i32;
@@ -78,14 +82,18 @@ extern "C" {
     fn wait4(pid: i32, status: *mut i32, options: i32, rusage: *mut Rusage) -> i32;
 }
 
+#[cfg(unix)]
 const WNOHANG: i32 = 1;
 
 /// Sends `sig` to the process group `pgid` (`kill(-pgid, sig)`).
 pub fn signal_process_group(pgid: u32, sig: i32) {
+    #[cfg(unix)]
     // SAFETY: plain kill(2).
     unsafe {
         kill(-(pgid as i32), sig);
     }
+    #[cfg(not(unix))]
+    let _ = (pgid, sig);
 }
 
 static GLOBAL_CANCEL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -140,6 +148,8 @@ pub struct ProcessWrapperOptions {
     /// When set to true while the command runs, its process group is killed (dynamic execution
     /// cancels the losing branch, the equivalent of Bazel interrupting the spawn thread).
     pub cancel: Option<CancelFlag>,
+    /// Close child stdin (`/dev/null`) instead of inheriting the parent's stdin (`LocalSpawnRunner`).
+    pub close_stdin: bool,
 }
 
 impl Default for ProcessWrapperOptions {
@@ -154,6 +164,7 @@ impl Default for ProcessWrapperOptions {
             debug: false,
             args: Vec::new(),
             cancel: None,
+            close_stdin: false,
         }
     }
 }
@@ -245,7 +256,12 @@ pub fn parse_args(program: &str, args: &[String]) -> Result<ProcessWrapperOption
                 "stderr" => 'e',
                 "stats" => 's',
                 "debug" => 'd',
-                _ => return Err(usage_text(program, &format!("Unrecognized argument: -? ({})", i + 1))),
+                _ => {
+                    return Err(usage_text(
+                        program,
+                        &format!("Unrecognized argument: -? ({})", i + 1),
+                    ))
+                }
             };
             (mapped, val)
         } else {
@@ -257,7 +273,10 @@ pub fn parse_args(program: &str, args: &[String]) -> Result<ProcessWrapperOption
         let takes_arg = matches!(c, 't' | 'k' | 'o' | 'e' | 's');
         let known = takes_arg || matches!(c, 'g' | 'd');
         if !known {
-            return Err(usage_text(program, &format!("Unrecognized argument: -{c} ({})", i + 1)));
+            return Err(usage_text(
+                program,
+                &format!("Unrecognized argument: -{c} ({})", i + 1),
+            ));
         }
         let mut value = None;
         if takes_arg {
@@ -267,7 +286,12 @@ pub fn parse_args(program: &str, args: &[String]) -> Result<ProcessWrapperOption
                     i += 1;
                     match args.get(i) {
                         Some(v) => Some(v.clone()),
-                        None => return Err(usage_text(program, &format!("Flag -{c} requires an argument"))),
+                        None => {
+                            return Err(usage_text(
+                                program,
+                                &format!("Flag -{c} requires an argument"),
+                            ))
+                        }
                     }
                 }
             };
@@ -280,7 +304,10 @@ pub fn parse_args(program: &str, args: &[String]) -> Result<ProcessWrapperOption
                     'g' => opt.graceful_sigterm = true,
                     'd' => opt.debug = true,
                     other => {
-                        return Err(usage_text(program, &format!("Unrecognized argument: -{other} ({})", i + 1)))
+                        return Err(usage_text(
+                            program,
+                            &format!("Unrecognized argument: -{other} ({})", i + 1),
+                        ))
                     }
                 }
             }
@@ -292,29 +319,40 @@ pub fn parse_args(program: &str, args: &[String]) -> Result<ProcessWrapperOption
             'd' => opt.debug = true,
             't' => {
                 let v = value.unwrap();
-                opt.timeout_secs = scan_double(&v)
-                    .ok_or_else(|| usage_text(program, &format!("Invalid timeout (-t) value: {v}")))?;
+                opt.timeout_secs = scan_double(&v).ok_or_else(|| {
+                    usage_text(program, &format!("Invalid timeout (-t) value: {v}"))
+                })?;
             }
             'k' => {
                 let v = value.unwrap();
-                opt.kill_delay_secs = scan_double(&v)
-                    .ok_or_else(|| usage_text(program, &format!("Invalid kill delay (-k) value: {v}")))?;
+                opt.kill_delay_secs = scan_double(&v).ok_or_else(|| {
+                    usage_text(program, &format!("Invalid kill delay (-k) value: {v}"))
+                })?;
             }
             'o' => {
                 if opt.stdout_path.is_some() {
-                    return Err(usage_text(program, "Cannot redirect stdout (-o) to more than one destination."));
+                    return Err(usage_text(
+                        program,
+                        "Cannot redirect stdout (-o) to more than one destination.",
+                    ));
                 }
                 opt.stdout_path = value;
             }
             'e' => {
                 if opt.stderr_path.is_some() {
-                    return Err(usage_text(program, "Cannot redirect stderr (-e) to more than one destination."));
+                    return Err(usage_text(
+                        program,
+                        "Cannot redirect stderr (-e) to more than one destination.",
+                    ));
                 }
                 opt.stderr_path = value;
             }
             's' => {
                 if opt.stats_path.is_some() {
-                    return Err(usage_text(program, "Cannot write stats (-s) to more than one destination."));
+                    return Err(usage_text(
+                        program,
+                        "Cannot write stats (-s) to more than one destination.",
+                    ));
                 }
                 opt.stats_path = value;
             }
@@ -394,6 +432,8 @@ pub struct ResourceUsage {
 }
 
 impl ResourceUsage {
+    #[cfg(unix)]
+    #[allow(clippy::unnecessary_cast)]
     fn from_rusage(r: &Rusage) -> Self {
         Self {
             utime_sec: r.ru_utime.tv_sec,
@@ -418,10 +458,16 @@ impl ResourceUsage {
     }
 
     pub fn user_time(&self) -> Duration {
-        Duration::new(self.utime_sec.max(0) as u64, (self.utime_usec.max(0) as u32) * 1000)
+        Duration::new(
+            self.utime_sec.max(0) as u64,
+            (self.utime_usec.max(0) as u32) * 1000,
+        )
     }
     pub fn system_time(&self) -> Duration {
-        Duration::new(self.stime_sec.max(0) as u64, (self.stime_usec.max(0) as u32) * 1000)
+        Duration::new(
+            self.stime_sec.max(0) as u64,
+            (self.stime_usec.max(0) as u32) * 1000,
+        )
     }
 
     /// Serialized `ExecutionStatistics { resource_usage = 1 }` (proto3: zero fields omitted).
@@ -559,7 +605,11 @@ pub fn run(
     if let Some(e) = env {
         cmd.env_clear().envs(e);
     }
-    cmd.stdin(Stdio::inherit());
+    if opt.close_stdin {
+        cmd.stdin(Stdio::null());
+    } else {
+        cmd.stdin(Stdio::inherit());
+    }
     let capture_out = opt.stdout_path.is_none();
     let capture_err = opt.stderr_path.is_none();
     match &opt.stdout_path {
@@ -578,6 +628,7 @@ pub fn run(
             cmd.stderr(Stdio::piped());
         }
     }
+    #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;
         // SAFETY: setsid/umask are async-signal-safe.
@@ -620,68 +671,115 @@ pub fn run(
     let mut killed = false;
     let mut timed_out = false;
     let mut cancelled = false;
-    let mut status: i32 = 0;
-    let mut ru = Rusage::default();
-    loop {
-        // SAFETY: valid pointers to locals.
-        let r = unsafe { wait4(pid, &mut status, WNOHANG, &mut ru) };
-        if r == pid {
-            break;
-        }
-        if r < 0 {
-            let e = std::io::Error::last_os_error();
-            if e.kind() == std::io::ErrorKind::Interrupted {
-                continue;
+    #[cfg(unix)]
+    let (termination, usage) = {
+        let mut status: i32 = 0;
+        let mut ru = Rusage::default();
+        loop {
+            // SAFETY: valid pointers to locals.
+            let r = unsafe { wait4(pid, &mut status, WNOHANG, &mut ru) };
+            if r == pid {
+                break;
             }
-            return Err(e);
-        }
-        if let Some(t) = timeout {
-            if !timed_out && started.elapsed() >= t {
-                timed_out = true;
-                // SIGALRM => OnGracefulSignal => KillEverything(pid, graceful=true, delay).
-                signal_process_group(pid as u32, SIGTERM);
-                term_sent = Some(Instant::now());
+            if r < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(e);
             }
-        }
-        if !killed && global_cancel_requested() {
-            cancelled = true;
-            signal_process_group(pid as u32, SIGKILL);
-            killed = true;
-        }
-        if let Some(c) = &opt.cancel {
-            if !killed && c.is_cancelled() {
+            if let Some(t) = timeout {
+                if !timed_out && started.elapsed() >= t {
+                    timed_out = true;
+                    // SIGALRM => OnGracefulSignal => KillEverything(pid, graceful=true, delay).
+                    signal_process_group(pid as u32, SIGTERM);
+                    term_sent = Some(Instant::now());
+                }
+            }
+            if !killed && global_cancel_requested() {
                 cancelled = true;
                 signal_process_group(pid as u32, SIGKILL);
                 killed = true;
             }
+            if let Some(c) = &opt.cancel {
+                if !killed && c.is_cancelled() {
+                    cancelled = true;
+                    signal_process_group(pid as u32, SIGKILL);
+                    killed = true;
+                }
+            }
+            if let Some(at) = term_sent {
+                if !killed && at.elapsed() >= kill_delay {
+                    signal_process_group(pid as u32, SIGKILL);
+                    killed = true;
+                }
+            }
+            std::thread::sleep(Duration::from_micros(500));
         }
-        if let Some(at) = term_sent {
-            if !killed && at.elapsed() >= kill_delay {
-                signal_process_group(pid as u32, SIGKILL);
+        // The child is done for, but may have grandchildren that we still have to kill.
+        signal_process_group(pid as u32, SIGKILL);
+        let usage = ResourceUsage::from_rusage(&ru);
+        // Decode the wait status (WIFEXITED / WTERMSIG).
+        let termination = if timed_out {
+            Termination::Signaled(SIGALRM)
+        } else if status & 0x7f == 0 {
+            Termination::Exited((status >> 8) & 0xff)
+        } else {
+            Termination::Signaled(status & 0x7f)
+        };
+        (termination, usage)
+    };
+    #[cfg(not(unix))]
+    let (termination, usage) = {
+        let _ = (pid, &mut term_sent, kill_delay);
+        let exit_status = loop {
+            if let Some(st) = child.try_wait()? {
+                break st;
+            }
+            if let Some(t) = timeout {
+                if !timed_out && started.elapsed() >= t {
+                    timed_out = true;
+                    let _ = child.kill();
+                    killed = true;
+                }
+            }
+            if !killed && global_cancel_requested() {
+                cancelled = true;
+                let _ = child.kill();
                 killed = true;
             }
-        }
-        std::thread::sleep(Duration::from_micros(500));
-    }
-    // The child is done for, but may have grandchildren that we still have to kill.
-    signal_process_group(pid as u32, SIGKILL);
+            if let Some(c) = &opt.cancel {
+                if !killed && c.is_cancelled() {
+                    cancelled = true;
+                    let _ = child.kill();
+                    killed = true;
+                }
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let termination = if timed_out {
+            Termination::Signaled(SIGALRM)
+        } else {
+            Termination::Exited(exit_status.code().unwrap_or(1))
+        };
+        (termination, ResourceUsage::default())
+    };
     let mut outs = readers.into_iter().map(|h| h.join().unwrap_or_default());
-    let stdout = if capture_out { outs.next().unwrap_or_default() } else { Vec::new() };
-    let stderr = if capture_err { outs.next().unwrap_or_default() } else { Vec::new() };
+    let stdout = if capture_out {
+        outs.next().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let stderr = if capture_err {
+        outs.next().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     drop(child);
 
-    let usage = ResourceUsage::from_rusage(&ru);
     if let Some(p) = &opt.stats_path {
         std::fs::write(p, usage.encode_execution_statistics())?;
     }
-    // Decode the wait status (WIFEXITED / WTERMSIG).
-    let termination = if timed_out {
-        Termination::Signaled(SIGALRM)
-    } else if status & 0x7f == 0 {
-        Termination::Exited((status >> 8) & 0xff)
-    } else {
-        Termination::Signaled(status & 0x7f)
-    };
     Ok(WrapperOutcome {
         termination,
         timed_out,
@@ -705,7 +803,23 @@ mod tests {
     fn parses_all_options_and_command() {
         let o = parse_args(
             "pw",
-            &s(&["-g", "-t", "2.5", "--kill_delay=3", "-o", "out", "--stderr", "err", "-s", "st", "-d", "--", "echo", "-n", "x"]),
+            &s(&[
+                "-g",
+                "-t",
+                "2.5",
+                "--kill_delay=3",
+                "-o",
+                "out",
+                "--stderr",
+                "err",
+                "-s",
+                "st",
+                "-d",
+                "--",
+                "echo",
+                "-n",
+                "x",
+            ]),
         )
         .unwrap();
         assert!(o.graceful_sigterm && o.debug);
@@ -752,11 +866,18 @@ mod tests {
 
     #[test]
     fn stats_proto_round_trip() {
-        let u = ResourceUsage { utime_sec: 1, utime_usec: 500, maxrss: 4096, nvcsw: 7, ..Default::default() };
+        let u = ResourceUsage {
+            utime_sec: 1,
+            utime_usec: 500,
+            maxrss: 4096,
+            nvcsw: 7,
+            ..Default::default()
+        };
         let b = u.encode_execution_statistics();
         assert_eq!(ResourceUsage::decode_execution_statistics(&b).unwrap(), u);
     }
 
+    #[cfg(unix)]
     #[test]
     fn redirects_stats_and_exit_code() {
         let d = std::env::temp_dir().join(format!("zel-pw-{}", std::process::id()));
@@ -773,10 +894,12 @@ mod tests {
         assert_eq!(r.termination, Termination::Exited(7));
         assert_eq!(std::fs::read_to_string(d.join("o")).unwrap(), "out\n");
         assert_eq!(std::fs::read_to_string(d.join("e")).unwrap(), "err\n");
-        let st = ResourceUsage::decode_execution_statistics(&std::fs::read(d.join("s")).unwrap()).unwrap();
+        let st = ResourceUsage::decode_execution_statistics(&std::fs::read(d.join("s")).unwrap())
+            .unwrap();
         assert!(st.maxrss > 0);
     }
 
+    #[cfg(unix)]
     #[test]
     fn timeout_sends_term_then_kill_after_delay_and_reports_sigalrm() {
         // Child ignores SIGTERM, so only SIGKILL after the kill delay ends it.
@@ -792,15 +915,20 @@ mod tests {
         assert_eq!(r.termination, Termination::Signaled(SIGALRM));
         assert_eq!(r.termination.exit_code(), 142);
         let el = t.elapsed().as_secs_f64();
-        assert!(el >= 0.55 && el < 5.0, "elapsed {el}");
+        assert!((0.55..5.0).contains(&el), "elapsed {el}");
     }
 
+    #[cfg(unix)]
     #[test]
     fn graceful_term_lets_child_exit_within_delay() {
         let o = ProcessWrapperOptions {
             timeout_secs: 0.2,
             kill_delay_secs: 5.0,
-            args: s(&["/bin/sh", "-c", "trap 'echo bye; exit 0' TERM; while :; do sleep 0.05; done"]),
+            args: s(&[
+                "/bin/sh",
+                "-c",
+                "trap 'echo bye; exit 0' TERM; while :; do sleep 0.05; done",
+            ]),
             ..Default::default()
         };
         let t = Instant::now();
@@ -810,21 +938,32 @@ mod tests {
         assert!(String::from_utf8_lossy(&r.stdout).contains("bye"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn orphans_are_killed_and_signal_death_is_reported() {
-        let o = ProcessWrapperOptions { args: s(&["/bin/sh", "-c", "kill -9 $$"]), ..Default::default() };
+        let o = ProcessWrapperOptions {
+            args: s(&["/bin/sh", "-c", "kill -9 $$"]),
+            ..Default::default()
+        };
         let r = run(&o, None, None).unwrap();
         assert_eq!(r.termination, Termination::Signaled(9));
-        let o = ProcessWrapperOptions { args: s(&["/bin/sh", "-c", "(sleep 30 &) ; exit 0"]), ..Default::default() };
+        let o = ProcessWrapperOptions {
+            args: s(&["/bin/sh", "-c", "(sleep 30 &) ; exit 0"]),
+            ..Default::default()
+        };
         let t = Instant::now();
         let r = run(&o, None, None).unwrap();
         assert_eq!(r.termination, Termination::Exited(0));
         assert!(t.elapsed().as_secs() < 5);
     }
 
+    #[cfg(unix)]
     #[test]
     fn child_umask_is_022_and_runs_in_new_session() {
-        let o = ProcessWrapperOptions { args: s(&["/bin/sh", "-c", "umask"]), ..Default::default() };
+        let o = ProcessWrapperOptions {
+            args: s(&["/bin/sh", "-c", "umask"]),
+            ..Default::default()
+        };
         let r = run(&o, None, None).unwrap();
         assert_eq!(String::from_utf8_lossy(&r.stdout).trim(), "0022");
     }
@@ -839,6 +978,16 @@ mod tests {
             stats_path: Some("/s".into()),
             ..Default::default()
         };
-        assert_eq!(b.build(), s(&["/pw", "--timeout=5", "--kill_delay=15", "--stats=/s", "a", "b"]));
+        assert_eq!(
+            b.build(),
+            s(&[
+                "/pw",
+                "--timeout=5",
+                "--kill_delay=15",
+                "--stats=/s",
+                "a",
+                "b"
+            ])
+        );
     }
 }

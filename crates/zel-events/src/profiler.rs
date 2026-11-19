@@ -132,7 +132,10 @@ impl ProfilerTask {
 
     /// Parses an enum value name case-insensitively (`--experimental_profile_additional_tasks`).
     pub fn from_name(s: &str) -> Option<Self> {
-        Self::ALL.iter().copied().find(|t| t.enum_name().eq_ignore_ascii_case(s))
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|t| t.enum_name().eq_ignore_ascii_case(s))
     }
 
     pub fn from_description(d: &str) -> Option<Self> {
@@ -148,19 +151,46 @@ pub struct ProfilePhase {
 }
 
 impl ProfilePhase {
-    pub const LAUNCH: Self = Self { nick: "launch", description: "Launch Blaze" };
-    pub const INIT: Self = Self { nick: "init", description: "Initialize command" };
-    pub const TARGET_PATTERN_EVAL: Self = Self { nick: "target pattern evaluation", description: "Evaluate target patterns" };
-    pub const ANALYZE: Self = Self { nick: "interleaved loading-and-analysis", description: "Load and analyze dependencies" };
+    pub const LAUNCH: Self = Self {
+        nick: "launch",
+        description: "Launch Blaze",
+    };
+    pub const INIT: Self = Self {
+        nick: "init",
+        description: "Initialize command",
+    };
+    pub const TARGET_PATTERN_EVAL: Self = Self {
+        nick: "target pattern evaluation",
+        description: "Evaluate target patterns",
+    };
+    pub const ANALYZE: Self = Self {
+        nick: "interleaved loading-and-analysis",
+        description: "Load and analyze dependencies",
+    };
     pub const ANALYZE_AND_EXECUTE: Self = Self {
         nick: "interleaved loading, analysis and execution",
         description: "Load, analyze dependencies and build artifacts",
     };
-    pub const LICENSE: Self = Self { nick: "license checking", description: "Analyze licenses" };
-    pub const PREPARE: Self = Self { nick: "preparation", description: "Prepare for build" };
-    pub const EXECUTE: Self = Self { nick: "execution", description: "Build artifacts" };
-    pub const FINISH: Self = Self { nick: "finish", description: "Complete build" };
-    pub const UNKNOWN: Self = Self { nick: "unknown", description: "unknown" };
+    pub const LICENSE: Self = Self {
+        nick: "license checking",
+        description: "Analyze licenses",
+    };
+    pub const PREPARE: Self = Self {
+        nick: "preparation",
+        description: "Prepare for build",
+    };
+    pub const EXECUTE: Self = Self {
+        nick: "execution",
+        description: "Build artifacts",
+    };
+    pub const FINISH: Self = Self {
+        nick: "finish",
+        description: "Complete build",
+    };
+    pub const UNKNOWN: Self = Self {
+        nick: "unknown",
+        description: "unknown",
+    };
     pub const ALL: [Self; 10] = [
         Self::LAUNCH,
         Self::INIT,
@@ -175,7 +205,11 @@ impl ProfilePhase {
     ];
 
     pub fn from_description(d: &str) -> Self {
-        Self::ALL.iter().copied().find(|p| p.description == d).unwrap_or(Self::UNKNOWN)
+        Self::ALL
+            .iter()
+            .copied()
+            .find(|p| p.description == d)
+            .unwrap_or(Self::UNKNOWN)
     }
 }
 
@@ -188,8 +222,14 @@ pub struct SlimProfile {
 }
 
 impl SlimProfile {
-    pub const DISABLED: Self = Self { enabled: false, size_limit: -1 };
-    pub const ALWAYS: Self = Self { enabled: true, size_limit: -1 };
+    pub const DISABLED: Self = Self {
+        enabled: false,
+        size_limit: -1,
+    };
+    pub const ALWAYS: Self = Self {
+        enabled: true,
+        size_limit: -1,
+    };
 
     pub fn has_size_limit(&self) -> bool {
         self.enabled && self.size_limit > 0
@@ -213,7 +253,10 @@ impl SlimProfile {
             (l.as_str(), 1)
         };
         num.parse::<i64>()
-            .map(|n| Self { enabled: true, size_limit: n * mul })
+            .map(|n| Self {
+                enabled: true,
+                size_limit: n * mul,
+            })
             .map_err(|_| format!("Invalid --slim_profile value: {s}"))
     }
 }
@@ -245,7 +288,9 @@ impl ProfilerOptions {
         let mut s: HashSet<ProfilerTask> = ProfilerTask::ALL
             .iter()
             .copied()
-            .filter(|t| !t.is_vfs() && *t != ProfilerTask::CRITICAL_PATH && *t != ProfilerTask::SKYFUNCTION)
+            .filter(|t| {
+                !t.is_vfs() && *t != ProfilerTask::CRITICAL_PATH && *t != ProfilerTask::SKYFUNCTION
+            })
             .collect();
         s.extend(additional.iter().copied());
         if record_full {
@@ -318,10 +363,15 @@ pub fn resolve_profile_path(
     output_base: &str,
     command_is_build_like: bool,
 ) -> Option<(String, bool)> {
-    let enabled = match generate_json_trace_profile.map(|s| s.to_ascii_lowercase()).as_deref() {
+    let enabled = match generate_json_trace_profile
+        .map(|s| s.to_ascii_lowercase())
+        .as_deref()
+    {
         Some("true") | Some("yes") | Some("1") => true,
         Some("false") | Some("no") | Some("0") => false,
-        _ => profile_flag.map(|p| !p.is_empty()).unwrap_or(command_is_build_like),
+        _ => profile_flag
+            .map(|p| !p.is_empty())
+            .unwrap_or(command_is_build_like),
     };
     if !enabled {
         return None;
@@ -342,9 +392,22 @@ struct ActionData {
 
 #[derive(Debug, Clone)]
 enum Rec {
-    Thread { tid: u64, name: String, sort: i64 },
-    Task { tid: u64, start_ns: i64, dur_ns: i64, task: ProfilerTask, desc: String, action: Option<ActionData> },
-    Counter { json: String },
+    Thread {
+        tid: u64,
+        name: String,
+        sort: i64,
+    },
+    Task {
+        tid: u64,
+        start_ns: i64,
+        dur_ns: i64,
+        task: ProfilerTask,
+        desc: String,
+        action: Option<ActionData>,
+    },
+    Counter {
+        json: String,
+    },
 }
 
 #[derive(Default)]
@@ -369,8 +432,14 @@ fn thread_sort_index(name: &str) -> i64 {
     if name == "Notification Thread" || name == "Garbage Collector" {
         return 2;
     }
-    let digits: String = name.chars().skip_while(|c| !c.is_ascii_digit()).take_while(|c| c.is_ascii_digit()).collect();
-    let Ok(n) = digits.parse::<i64>() else { return 1_000_000 };
+    let digits: String = name
+        .chars()
+        .skip_while(|c| !c.is_ascii_digit())
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let Ok(n) = digits.parse::<i64>() else {
+        return 1_000_000;
+    };
     if name.starts_with("skyframe-evaluator") {
         let shift = if name.starts_with("skyframe-evaluator-cpu-heavy") {
             20_000
@@ -412,7 +481,10 @@ impl Profiler {
             opts,
             start: Instant::now(),
             start_epoch_ms: crate::now_millis(),
-            inner: Mutex::new(Inner { next_tid: 1, ..Default::default() }),
+            inner: Mutex::new(Inner {
+                next_tid: 1,
+                ..Default::default()
+            }),
         }
     }
 
@@ -437,9 +509,16 @@ impl Profiler {
         let tid = inner.next_tid;
         inner.next_tid += 1;
         inner.threads.insert(id, tid);
-        let name = std::thread::current().name().map(str::to_string).unwrap_or_else(|| format!("Thread-{tid}"));
+        let name = std::thread::current()
+            .name()
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("Thread-{tid}"));
         let sort = thread_sort_index(&name);
-        inner.recs.push(Rec::Thread { tid, name: readable_thread_name(&name), sort });
+        inner.recs.push(Rec::Thread {
+            tid,
+            name: readable_thread_name(&name),
+            sort,
+        });
         tid
     }
 
@@ -456,10 +535,21 @@ impl Profiler {
                 t
             }
         };
-        inner.recs.push(Rec::Thread { tid, name: readable_thread_name(name), sort: thread_sort_index(name) });
+        inner.recs.push(Rec::Thread {
+            tid,
+            name: readable_thread_name(name),
+            sort: thread_sort_index(name),
+        });
     }
 
-    fn push_task(&self, task: ProfilerTask, start_ns: i64, dur_ns: i64, desc: &str, action: Option<ActionData>) {
+    fn push_task(
+        &self,
+        task: ProfilerTask,
+        start_ns: i64,
+        dur_ns: i64,
+        desc: &str,
+        action: Option<ActionData>,
+    ) {
         if !self.is_profiling(task) {
             return;
         }
@@ -469,7 +559,14 @@ impl Profiler {
         }
         let mut inner = self.inner.lock().unwrap();
         let tid = self.tid(&mut inner);
-        inner.recs.push(Rec::Task { tid, start_ns, dur_ns, task, desc: desc.to_string(), action });
+        inner.recs.push(Rec::Task {
+            tid,
+            start_ns,
+            dur_ns,
+            task,
+            desc: desc.to_string(),
+            action,
+        });
     }
 
     /// `logSimpleTaskDuration`.
@@ -484,12 +581,23 @@ impl Profiler {
 
     /// Starts a scoped task that is recorded when the guard drops (`Profiler.profile`).
     pub fn profile(&self, task: ProfilerTask, desc: impl Into<String>) -> ProfileScope<'_> {
-        ProfileScope { p: self, task, desc: desc.into(), start: self.now_ns() }
+        ProfileScope {
+            p: self,
+            task,
+            desc: desc.into(),
+            start: self.now_ns(),
+        }
     }
 
     /// Starts a phase marker (`markPhase`): an instantaneous `PHASE` event.
     pub fn mark_phase(&self, phase: ProfilePhase) {
-        self.push_task(ProfilerTask::PHASE, self.now_ns(), 0, phase.description, None);
+        self.push_task(
+            ProfilerTask::PHASE,
+            self.now_ns(),
+            0,
+            phase.description,
+            None,
+        );
     }
 
     /// Records a completed action (`ACTION` task with optional `out`/`args`).
@@ -506,16 +614,24 @@ impl Profiler {
     ) {
         let a = ActionData {
             mnemonic: mnemonic.filter(|_| true).map(str::to_string),
-            primary_output: primary_output.filter(|_| self.opts.include_primary_output).map(str::to_string),
-            target_label: target_label.filter(|_| self.opts.include_target_label).map(str::to_string),
-            configuration: configuration.filter(|_| self.opts.include_configuration).map(str::to_string),
+            primary_output: primary_output
+                .filter(|_| self.opts.include_primary_output)
+                .map(str::to_string),
+            target_label: target_label
+                .filter(|_| self.opts.include_target_label)
+                .map(str::to_string),
+            configuration: configuration
+                .filter(|_| self.opts.include_configuration)
+                .map(str::to_string),
         };
         self.push_task(ProfilerTask::ACTION, start_ns, dur_ns, description, Some(a));
     }
 
     /// Records one critical path component (rendered on the fake "Critical Path" thread).
     pub fn log_critical_path_component(&self, start_ns: i64, dur_ns: i64, desc: &str) {
-        if !self.is_profiling(ProfilerTask::CRITICAL_PATH_COMPONENT) && !self.is_profiling(ProfilerTask::CRITICAL_PATH) {
+        if !self.is_profiling(ProfilerTask::CRITICAL_PATH_COMPONENT)
+            && !self.is_profiling(ProfilerTask::CRITICAL_PATH)
+        {
             // Critical path is always written when the profiler is on.
         }
         let mut inner = self.inner.lock().unwrap();
@@ -532,15 +648,27 @@ impl Profiler {
 
     /// Adds a counter lane (`CounterSeriesTraceData`): `series` are `(series name, values)` with one
     /// value per bucket of `bucket_ns` starting at `start_ns`.
-    pub fn add_counter_series(&self, lane: &str, color: Option<&str>, start_ns: i64, bucket_ns: i64, series: &[(String, Vec<f64>)]) {
-        let Some(len) = series.first().map(|s| s.1.len()) else { return };
+    pub fn add_counter_series(
+        &self,
+        lane: &str,
+        color: Option<&str>,
+        start_ns: i64,
+        bucket_ns: i64,
+        series: &[(String, Vec<f64>)],
+    ) {
+        let Some(len) = series.first().map(|s| s.1.len()) else {
+            return;
+        };
         let mut inner = self.inner.lock().unwrap();
         let tid = self.tid(&mut inner);
         let mut recorded = false;
         for i in 0..len {
             let ts = (start_ns + bucket_ns * i as i64) / 1000;
             let mut s = String::from("{");
-            s.push_str(&format!("\"name\":{},\"pid\":1,\"tid\":{tid}", json::escape(lane)));
+            s.push_str(&format!(
+                "\"name\":{},\"pid\":1,\"tid\":{tid}",
+                json::escape(lane)
+            ));
             if let Some(c) = color {
                 s.push_str(&format!(",\"cname\":{}", json::escape(c)));
             }
@@ -571,17 +699,32 @@ impl Profiler {
         let n = (end / bucket_ns + 1) as usize;
         let mut v = vec![0.0; n];
         for (s, e) in actions {
-            let (a, b) = ((s / bucket_ns).max(0) as usize, (e / bucket_ns).max(0) as usize);
+            let (a, b) = (
+                (s / bucket_ns).max(0) as usize,
+                (e / bucket_ns).max(0) as usize,
+            );
             for x in v.iter_mut().take(b.min(n - 1) + 1).skip(a) {
                 *x += 1.0;
             }
         }
-        self.add_counter_series("action count", None, 0, bucket_ns, &[("action".to_string(), v)]);
+        self.add_counter_series(
+            "action count",
+            None,
+            0,
+            bucket_ns,
+            &[("action".to_string(), v)],
+        );
     }
 
     /// Legacy API: records a pre-timed coarse event (`category` is looked up as a task
     /// description, defaulting to `UNKNOWN`/`PHASE` for known phase descriptions).
-    pub fn record(&self, name: impl Into<String>, category: impl Into<String>, start_us: u64, duration_us: u64) {
+    pub fn record(
+        &self,
+        name: impl Into<String>,
+        category: impl Into<String>,
+        start_us: u64,
+        duration_us: u64,
+    ) {
         let name = name.into();
         let category = category.into();
         let task = ProfilerTask::from_description(&category).unwrap_or(ProfilerTask::PHASE);
@@ -598,11 +741,25 @@ impl Profiler {
     }
 
     fn write_task(&self, rec: &Rec) -> String {
-        let Rec::Task { tid, start_ns, dur_ns, task, desc, action } = rec else { return String::new() };
+        let Rec::Task {
+            tid,
+            start_ns,
+            dur_ns,
+            task,
+            desc,
+            action,
+        } = rec
+        else {
+            return String::new();
+        };
         let ph = if *dur_ns == 0 { "i" } else { "X" };
         let mut s = String::from("{");
         s.push_str(&format!("\"cat\":{},", json::escape(task.description())));
-        s.push_str(&format!("\"name\":{},\"ph\":\"{ph}\",\"ts\":{}", json::escape(desc), start_ns / 1000));
+        s.push_str(&format!(
+            "\"name\":{},\"ph\":\"{ph}\",\"ts\":{}",
+            json::escape(desc),
+            start_ns / 1000
+        ));
         if *dur_ns != 0 {
             s.push_str(&format!(",\"dur\":{}", dur_ns / 1000));
         }
@@ -613,7 +770,10 @@ impl Profiler {
             }
         }
         let critical = *task == ProfilerTask::CRITICAL_PATH_COMPONENT;
-        let has_args = action.as_ref().map(|a| a.target_label.is_some() || a.mnemonic.is_some() || a.configuration.is_some()).unwrap_or(false);
+        let has_args = action
+            .as_ref()
+            .map(|a| a.target_label.is_some() || a.mnemonic.is_some() || a.configuration.is_some())
+            .unwrap_or(false);
         if critical || has_args {
             s.push_str(",\"args\":{");
             let mut first = true;
@@ -640,7 +800,14 @@ impl Profiler {
             }
             s.push('}');
         }
-        s.push_str(&format!(",\"tid\":{}}}", if critical { CRITICAL_PATH_THREAD_ID } else { *tid }));
+        s.push_str(&format!(
+            ",\"tid\":{}}}",
+            if critical {
+                CRITICAL_PATH_THREAD_ID
+            } else {
+                *tid
+            }
+        ));
         s
     }
 
@@ -688,7 +855,14 @@ impl Profiler {
                     event_count += 1;
                     emit(&mut out, json);
                 }
-                Rec::Task { tid, start_ns, dur_ns, task, desc, action } => {
+                Rec::Task {
+                    tid,
+                    start_ns,
+                    dur_ns,
+                    task,
+                    desc,
+                    action,
+                } => {
                     event_count += 1;
                     let should_slim = if !slim.enabled {
                         false
@@ -697,10 +871,14 @@ impl Profiler {
                     } else {
                         event_count > SLIM_EVENT_THRESHOLD
                     };
-                    let candidate = *dur_ns > 0 && *dur_ns < SLIM_MAX_DURATION_NS && *task != ProfilerTask::CRITICAL_PATH_COMPONENT;
+                    let candidate = *dur_ns > 0
+                        && *dur_ns < SLIM_MAX_DURATION_NS
+                        && *task != ProfilerTask::CRITICAL_PATH_COMPONENT;
                     if should_slim && candidate {
                         let m = merged.entry(*tid).or_default();
-                        if let Some(flushed) = m.maybe_merge(*tid, *start_ns, *dur_ns, desc, *task, action) {
+                        if let Some(flushed) =
+                            m.maybe_merge(*tid, *start_ns, *dur_ns, desc, *task, action)
+                        {
                             let s = self.write_task(&flushed);
                             emit(&mut out, &s);
                         }
@@ -763,7 +941,8 @@ pub struct ProfileScope<'a> {
 impl Drop for ProfileScope<'_> {
     fn drop(&mut self) {
         let dur = self.p.now_ns() - self.start;
-        self.p.push_task(self.task, self.start, dur, &self.desc, None);
+        self.p
+            .push_task(self.task, self.start, dur, &self.desc, None);
     }
 }
 
@@ -781,7 +960,15 @@ struct Merged {
 
 impl Merged {
     /// `MergedEvent.maybeMerge`: returns the previously merged event if `data` is not mergeable.
-    fn maybe_merge(&mut self, tid: u64, start: i64, dur: i64, desc: &str, task: ProfilerTask, action: &Option<ActionData>) -> Option<Rec> {
+    fn maybe_merge(
+        &mut self,
+        tid: u64,
+        start: i64,
+        dur: i64,
+        desc: &str,
+        task: ProfilerTask,
+        action: &Option<ActionData>,
+    ) -> Option<Rec> {
         let end = start + dur;
         if self.count > 0 && start >= self.start_ns && end <= self.end_ns {
             return None;
@@ -804,7 +991,15 @@ impl Merged {
         ret
     }
 
-    fn begin(&mut self, tid: u64, start: i64, end: i64, desc: &str, task: ProfilerTask, action: &Option<ActionData>) {
+    fn begin(
+        &mut self,
+        tid: u64,
+        start: i64,
+        end: i64,
+        desc: &str,
+        task: ProfilerTask,
+        action: &Option<ActionData>,
+    ) {
         self.tid = tid;
         self.task = Some(task);
         self.first_desc = desc.to_string();
@@ -917,14 +1112,27 @@ impl JsonProfile {
             .and_then(Json::as_array)
             .ok_or("Corrupted profile file: couldn't find 'traceEvents'.")?;
         let other = j.get("otherData");
-        let s = |k: &str| other.and_then(|o| o.get(k)).and_then(Json::as_str).map(str::to_string);
+        let s = |k: &str| {
+            other
+                .and_then(|o| o.get(k))
+                .and_then(Json::as_str)
+                .map(str::to_string)
+        };
         let mut events = Vec::new();
         for e in events_j {
             let args = e.get("args");
-            let astr = |k: &str| args.and_then(|a| a.get(k)).and_then(Json::as_str).map(str::to_string);
+            let astr = |k: &str| {
+                args.and_then(|a| a.get(k))
+                    .and_then(Json::as_str)
+                    .map(str::to_string)
+            };
             events.push(TraceEvent {
                 category: e.get("cat").and_then(Json::as_str).map(str::to_string),
-                name: e.get("name").and_then(Json::as_str).unwrap_or("").to_string(),
+                name: e
+                    .get("name")
+                    .and_then(Json::as_str)
+                    .unwrap_or("")
+                    .to_string(),
                 ph: e.get("ph").and_then(Json::as_str).map(str::to_string),
                 ts_us: e.get("ts").and_then(Json::as_i64),
                 dur_us: e.get("dur").and_then(Json::as_i64),
@@ -955,9 +1163,18 @@ impl JsonProfile {
             }
         }
         if let Some(l) = last_phase {
-            phases.push((ProfilePhase::from_description(&l.name), (max_end - l.ts_us.unwrap_or(0)) * 1000));
+            phases.push((
+                ProfilePhase::from_description(&l.name),
+                (max_end - l.ts_us.unwrap_or(0)) * 1000,
+            ));
         }
-        Ok(Self { build_id: s("build_id"), date: s("date"), output_base: s("output_base"), events, phases })
+        Ok(Self {
+            build_id: s("build_id"),
+            date: s("date"),
+            output_base: s("output_base"),
+            events,
+            phases,
+        })
     }
 }
 
@@ -997,8 +1214,18 @@ fn weekday_month(secs: i64) -> (&'static str, &'static str, i64, i64, i64, i64, 
     let mp = (5 * doy + 2) / 153;
     let d = doy - (153 * mp + 2) / 5 + 1;
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let mon = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"][(m - 1) as usize];
-    (wd, mon, d, rem / 3600, rem % 3600 / 60, rem % 60, if m <= 2 { y + 1 } else { y })
+    let mon = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][(m - 1) as usize];
+    (
+        wd,
+        mon,
+        d,
+        rem / 3600,
+        rem % 3600 / 60,
+        rem % 60,
+        if m <= 2 { y + 1 } else { y },
+    )
 }
 
 /// `java.util.Date.toString()` in UTC (`EEE MMM dd HH:mm:ss zzz yyyy`) for an ISO instant.
@@ -1007,10 +1234,18 @@ fn java_date_string(iso: &str) -> String {
     let parse = || -> Option<i64> {
         let (date, time) = iso.trim_end_matches('Z').split_once('T')?;
         let mut d = date.split('-');
-        let (y, mo, da): (i64, i64, i64) = (d.next()?.parse().ok()?, d.next()?.parse().ok()?, d.next()?.parse().ok()?);
+        let (y, mo, da): (i64, i64, i64) = (
+            d.next()?.parse().ok()?,
+            d.next()?.parse().ok()?,
+            d.next()?.parse().ok()?,
+        );
         let t = time.split('.').next()?;
         let mut tp = t.split(':');
-        let (h, mi, s): (i64, i64, i64) = (tp.next()?.parse().ok()?, tp.next()?.parse().ok()?, tp.next()?.parse().ok()?);
+        let (h, mi, s): (i64, i64, i64) = (
+            tp.next()?.parse().ok()?,
+            tp.next()?.parse().ok()?,
+            tp.next()?.parse().ok()?,
+        );
         let y2 = if mo <= 2 { y - 1 } else { y };
         let era = y2.div_euclid(400);
         let yoe = y2.rem_euclid(400);
@@ -1035,7 +1270,10 @@ pub fn render_analysis(p: &JsonProfile) -> String {
     let none = "null".to_string();
     o.push_str(&format!(
         "INFO: Profile created on {}, build ID: {}, output base: {}\n",
-        p.date.as_deref().map(java_date_string).unwrap_or_else(|| none.clone()),
+        p.date
+            .as_deref()
+            .map(java_date_string)
+            .unwrap_or_else(|| none.clone()),
         p.build_id.clone().unwrap_or_else(|| none.clone()),
         p.output_base.clone().unwrap_or(none),
     ));
@@ -1052,17 +1290,30 @@ pub fn render_analysis(p: &JsonProfile) -> String {
     }
     o.push_str(&"-".repeat(48));
     o.push('\n');
-    o.push_str(&format!("{:<28} {:>10} {:>8}\n", "Total run time", pretty_time(total as f64), "100.00%"));
+    o.push_str(&format!(
+        "{:<28} {:>10} {:>8}\n",
+        "Total run time",
+        pretty_time(total as f64),
+        "100.00%"
+    ));
     // Critical path.
     let crit: Vec<&TraceEvent> = p
         .events
         .iter()
-        .filter(|e| e.category.as_deref() == Some(ProfilerTask::CRITICAL_PATH_COMPONENT.description()))
+        .filter(|e| {
+            e.category.as_deref() == Some(ProfilerTask::CRITICAL_PATH_COMPONENT.description())
+        })
         .collect();
     if !crit.is_empty() {
         let total_ns: i64 = crit.iter().map(|e| e.dur_us.unwrap_or(0) * 1000).sum();
-        o.push_str(&format!("\nCritical path ({}):\n", pretty_time(total_ns as f64)));
-        o.push_str(&format!("{:>11} {:>8}   {}\n", "Time", "Percentage", "Description"));
+        o.push_str(&format!(
+            "\nCritical path ({}):\n",
+            pretty_time(total_ns as f64)
+        ));
+        o.push_str(&format!(
+            "{:>11} {:>8}   {}\n",
+            "Time", "Percentage", "Description"
+        ));
         for e in crit {
             let ns = e.dur_us.unwrap_or(0) * 1000;
             o.push_str(&format!(
@@ -1078,7 +1329,11 @@ pub fn render_analysis(p: &JsonProfile) -> String {
 
 /// `--dump=text|raw` rendering: events sorted by start time (`text`) or in file order (`raw`).
 pub fn render_dump(p: &JsonProfile, mode: &str) -> String {
-    let mut evs: Vec<&TraceEvent> = p.events.iter().filter(|e| e.ph.as_deref() != Some("M")).collect();
+    let mut evs: Vec<&TraceEvent> = p
+        .events
+        .iter()
+        .filter(|e| e.ph.as_deref() != Some("M"))
+        .collect();
     if mode != "raw" && mode != "unsorted" {
         evs.sort_by_key(|e| (e.ts_us.unwrap_or(0), e.tid));
     }
@@ -1090,7 +1345,9 @@ pub fn render_dump(p: &JsonProfile, mode: &str) -> String {
             e.tid,
             e.ph.as_deref().unwrap_or("?"),
             e.category.as_deref().unwrap_or(""),
-            e.dur_us.map(|d| format!("{d}us")).unwrap_or_else(|| "-".into()),
+            e.dur_us
+                .map(|d| format!("{d}us"))
+                .unwrap_or_else(|| "-".into()),
             e.name
         ));
     }
@@ -1105,7 +1362,10 @@ pub struct AnalyzeOutput {
 }
 
 /// Implements `bazel analyze-profile [--dump=text|raw|unsorted] <profile> [<profile>...]`.
-pub fn analyze_profile_command(args: &[String], read: &dyn Fn(&str) -> io::Result<Vec<u8>>) -> AnalyzeOutput {
+pub fn analyze_profile_command(
+    args: &[String],
+    read: &dyn Fn(&str) -> io::Result<Vec<u8>>,
+) -> AnalyzeOutput {
     let mut dump: Option<String> = None;
     let mut files = Vec::new();
     let mut it = args.iter();
@@ -1114,9 +1374,14 @@ pub fn analyze_profile_command(args: &[String], read: &dyn Fn(&str) -> io::Resul
             dump = Some(v.to_string());
         } else if a == "--dump" || a == "-d" {
             dump = it.next().cloned();
-        } else if let Some(v) = a.strip_prefix("-d").filter(|v| !v.is_empty() && !a.starts_with("--")) {
+        } else if let Some(v) = a
+            .strip_prefix("-d")
+            .filter(|v| !v.is_empty() && !a.starts_with("--"))
+        {
             dump = Some(v.to_string());
-        } else if a.starts_with("--") && !a.starts_with("--") || a.starts_with('-') && a.len() > 1 && a != "--" {
+        } else if a.starts_with("--") && !a.starts_with("--")
+            || a.starts_with('-') && a.len() > 1 && a != "--"
+        {
             return AnalyzeOutput {
                 stdout: String::new(),
                 stderr: format!("ERROR: Unrecognized option: {a}\n"),
@@ -1130,7 +1395,9 @@ pub fn analyze_profile_command(args: &[String], read: &dyn Fn(&str) -> io::Resul
         if !["text", "raw", "unsorted"].contains(&d.as_str()) {
             return AnalyzeOutput {
                 stdout: String::new(),
-                stderr: format!("ERROR: Invalid --dump value '{d}': expected one of text, raw, unsorted\n"),
+                stderr: format!(
+                    "ERROR: Invalid --dump value '{d}': expected one of text, raw, unsorted\n"
+                ),
                 exit_code: 2,
             };
         }
@@ -1146,7 +1413,9 @@ pub fn analyze_profile_command(args: &[String], read: &dyn Fn(&str) -> io::Resul
     let mut stderr = String::new();
     let mut code = 0;
     for f in &files {
-        let parsed = read(f).map_err(|e| format!("Failed to read profile file {f}: {e}")).and_then(|b| JsonProfile::parse(&b));
+        let parsed = read(f)
+            .map_err(|e| format!("Failed to read profile file {f}: {e}"))
+            .and_then(|b| JsonProfile::parse(&b));
         match parsed {
             Ok(p) => {
                 if let Some(d) = &dump {
@@ -1161,7 +1430,11 @@ pub fn analyze_profile_command(args: &[String], read: &dyn Fn(&str) -> io::Resul
             }
         }
     }
-    AnalyzeOutput { stdout, stderr, exit_code: code }
+    AnalyzeOutput {
+        stdout,
+        stderr,
+        exit_code: code,
+    }
 }
 
 #[cfg(test)]
@@ -1186,7 +1459,9 @@ mod tests {
         assert!(ProfilerTask::VFS_OPEN.is_vfs() && !ProfilerTask::ACTION.is_vfs());
         let d = ProfilerOptions::default_tasks(&[], false);
         assert!(d.contains(&ProfilerTask::ACTION) && !d.contains(&ProfilerTask::VFS_STAT));
-        assert!(!d.contains(&ProfilerTask::SKYFUNCTION) && !d.contains(&ProfilerTask::CRITICAL_PATH));
+        assert!(
+            !d.contains(&ProfilerTask::SKYFUNCTION) && !d.contains(&ProfilerTask::CRITICAL_PATH)
+        );
         let d = ProfilerOptions::default_tasks(&[ProfilerTask::SKYFUNCTION], false);
         assert!(d.contains(&ProfilerTask::SKYFUNCTION));
     }
@@ -1195,8 +1470,21 @@ mod tests {
     fn writes_bazel_trace_layout() {
         let p = Profiler::with_options(opts(SlimProfile::DISABLED));
         p.name_current_thread("grpc-command-0");
-        p.log_simple_task(0, 1_500_000, ProfilerTask::PHASE, ProfilePhase::LAUNCH.description);
-        p.log_action(2_000_000, 3_000_000, Some("CppCompile"), "Compiling a.cc", Some("bazel-out/a.o"), Some("//a:a"), Some("abc"));
+        p.log_simple_task(
+            0,
+            1_500_000,
+            ProfilerTask::PHASE,
+            ProfilePhase::LAUNCH.description,
+        );
+        p.log_action(
+            2_000_000,
+            3_000_000,
+            Some("CppCompile"),
+            "Compiling a.cc",
+            Some("bazel-out/a.o"),
+            Some("//a:a"),
+            Some("abc"),
+        );
         p.log_critical_path_component(2_000_000, 3_000_000, "action 'Compiling a.cc'");
         // Below min duration: dropped.
         p.log_simple_task(0, 1_000, ProfilerTask::ACTION_CHECK, "tiny");
@@ -1221,14 +1509,25 @@ mod tests {
         o.include_target_label = true;
         o.include_configuration = true;
         let p = Profiler::with_options(o);
-        p.log_action(0, 5_000_000, Some("Javac"), "Compiling X", Some("bazel-out/x.jar"), Some("//x:x"), Some("cfg"));
+        p.log_action(
+            0,
+            5_000_000,
+            Some("Javac"),
+            "Compiling X",
+            Some("bazel-out/x.jar"),
+            Some("//x:x"),
+            Some("cfg"),
+        );
         let j = p.to_json();
         assert!(j.contains("\"pid\":1,\"out\":\"bazel-out/x.jar\",\"args\":{\"target\":\"//x:x\",\"mnemonic\":\"Javac\",\"configuration\":\"cfg\"},\"tid\":"), "{j}");
     }
 
     #[test]
     fn slim_profile_merges_close_events() {
-        let mut o = opts(SlimProfile { enabled: true, size_limit: 1 });
+        let mut o = opts(SlimProfile {
+            enabled: true,
+            size_limit: 1,
+        });
         o.profiled_tasks = ProfilerOptions::default_tasks(&[], true);
         let p = Profiler::with_options(o);
         for i in 0..5 {
@@ -1253,12 +1552,24 @@ mod tests {
     #[test]
     fn counter_series_skips_leading_zeroes() {
         let p = Profiler::with_options(opts(SlimProfile::DISABLED));
-        p.add_counter_series("action count", None, 0, 1_000_000_000, &[("action".to_string(), vec![0.0, 2.0, 0.0])]);
+        p.add_counter_series(
+            "action count",
+            None,
+            0,
+            1_000_000_000,
+            &[("action".to_string(), vec![0.0, 2.0, 0.0])],
+        );
         let j = p.to_json();
         assert!(j.contains("\"ph\":\"C\",\"ts\":0,\"args\":{}}"), "{j}");
-        assert!(j.contains("\"ph\":\"C\",\"ts\":1000000,\"args\":{\"action\":2.0}}"), "{j}");
+        assert!(
+            j.contains("\"ph\":\"C\",\"ts\":1000000,\"args\":{\"action\":2.0}}"),
+            "{j}"
+        );
         // After the first non-zero value, zeros are recorded.
-        assert!(j.contains("\"ts\":2000000,\"args\":{\"action\":0.0}}"), "{j}");
+        assert!(
+            j.contains("\"ts\":2000000,\"args\":{\"action\":0.0}}"),
+            "{j}"
+        );
     }
 
     #[test]
@@ -1266,11 +1577,30 @@ mod tests {
         let mut o = opts(SlimProfile::DISABLED);
         o.compress = true;
         let p = Profiler::with_options(o);
-        p.log_simple_task(0, 1_000_000_000, ProfilerTask::PHASE, ProfilePhase::LAUNCH.description);
-        p.log_simple_task(1_000_000_000, 0, ProfilerTask::PHASE, ProfilePhase::INIT.description);
-        p.log_simple_task(1_500_000_000, 0, ProfilerTask::PHASE, ProfilePhase::EXECUTE.description);
+        p.log_simple_task(
+            0,
+            1_000_000_000,
+            ProfilerTask::PHASE,
+            ProfilePhase::LAUNCH.description,
+        );
+        p.log_simple_task(
+            1_000_000_000,
+            0,
+            ProfilerTask::PHASE,
+            ProfilePhase::INIT.description,
+        );
+        p.log_simple_task(
+            1_500_000_000,
+            0,
+            ProfilerTask::PHASE,
+            ProfilePhase::EXECUTE.description,
+        );
         p.log_simple_task(1_500_000_000, 500_000_000, ProfilerTask::ACTION, "x");
-        p.log_critical_path_component(1_500_000_000, 8_850_000, "_Ccompiler_Udeps for @local_config_cc//:compiler_deps");
+        p.log_critical_path_component(
+            1_500_000_000,
+            8_850_000,
+            "_Ccompiler_Udeps for @local_config_cc//:compiler_deps",
+        );
         p.log_critical_path_component(1_510_000_000, 3_839_000_000, "action 'Compiling foo.cc'");
         let bytes = p.to_bytes();
         assert_eq!(&bytes[..2], &[0x1f, 0x8b]);
@@ -1280,22 +1610,48 @@ mod tests {
         assert_eq!(out.exit_code, 0, "{}", out.stderr);
         let s = out.stdout;
         assert!(s.starts_with("INFO: Profile created on "), "{s}");
-        assert!(s.contains(", build ID: bid-1, output base: /ob\n\n=== PHASE SUMMARY INFORMATION ===\n\n"), "{s}");
+        assert!(
+            s.contains(
+                ", build ID: bid-1, output base: /ob\n\n=== PHASE SUMMARY INFORMATION ===\n\n"
+            ),
+            "{s}"
+        );
         assert!(s.contains("Total launch phase time"), "{s}");
         assert!(s.contains("Total init phase time"), "{s}");
         assert!(s.contains("Total execution phase time"), "{s}");
-        assert!(s.contains(&format!("{}\nTotal run time", "-".repeat(48))), "{s}");
-        assert!(s.contains("Critical path (3.848 s):\n       Time Percentage   Description\n"), "{s}");
-        assert!(s.contains("    8.85 ms    0.23%   _Ccompiler_Udeps for @local_config_cc// compiler_deps\n"), "{s}");
-        assert!(s.contains("    3.839 s   99.77%   action 'Compiling foo.cc'\n"), "{s}");
+        assert!(
+            s.contains(&format!("{}\nTotal run time", "-".repeat(48))),
+            "{s}"
+        );
+        assert!(
+            s.contains("Critical path (3.848 s):\n       Time Percentage   Description\n"),
+            "{s}"
+        );
+        assert!(
+            s.contains(
+                "    8.85 ms    0.23%   _Ccompiler_Udeps for @local_config_cc// compiler_deps\n"
+            ),
+            "{s}"
+        );
+        assert!(
+            s.contains("    3.839 s   99.77%   action 'Compiling foo.cc'\n"),
+            "{s}"
+        );
     }
 
     #[test]
     fn analyze_errors_and_dump() {
-        let none: &dyn Fn(&str) -> io::Result<Vec<u8>> = &|_| Err(io::Error::new(io::ErrorKind::NotFound, "nope"));
+        let none: &dyn Fn(&str) -> io::Result<Vec<u8>> =
+            &|_| Err(io::Error::new(io::ErrorKind::NotFound, "nope"));
         assert_eq!(analyze_profile_command(&[], none).exit_code, 2);
-        assert_eq!(analyze_profile_command(&["--bogus".into()], none).exit_code, 2);
-        assert_eq!(analyze_profile_command(&["--dump=weird".into(), "f".into()], none).exit_code, 2);
+        assert_eq!(
+            analyze_profile_command(&["--bogus".into()], none).exit_code,
+            2
+        );
+        assert_eq!(
+            analyze_profile_command(&["--dump=weird".into(), "f".into()], none).exit_code,
+            2
+        );
         let r = analyze_profile_command(&["f".into()], none);
         assert_eq!(r.exit_code, 1);
         assert!(r.stderr.contains("Failed to analyze profile file(s)"));
@@ -1306,27 +1662,72 @@ mod tests {
         p.log_simple_task(5_000_000, 1_000_000, ProfilerTask::ACTION, "b");
         p.log_simple_task(1_000_000, 1_000_000, ProfilerTask::ACTION, "a");
         let bytes = p.to_bytes();
-        let sorted = analyze_profile_command(&["--dump=text".into(), "f".into()], &|_| Ok(bytes.clone()));
-        let raw = analyze_profile_command(&["--dump=raw".into(), "f".into()], &|_| Ok(bytes.clone()));
+        let sorted =
+            analyze_profile_command(&["--dump=text".into(), "f".into()], &|_| Ok(bytes.clone()));
+        let raw =
+            analyze_profile_command(&["--dump=raw".into(), "f".into()], &|_| Ok(bytes.clone()));
         assert!(sorted.stdout.find(" a\n").unwrap() < sorted.stdout.find(" b\n").unwrap());
         assert!(raw.stdout.find(" b\n").unwrap() < raw.stdout.find(" a\n").unwrap());
     }
 
     #[test]
     fn path_resolution_and_flags() {
-        assert_eq!(resolve_profile_path(Some("/x/p.gz"), None, "/ob", true), Some(("/x/p.gz".into(), true)));
-        assert_eq!(resolve_profile_path(Some("/x/p.json"), None, "/ob", true), Some(("/x/p.json".into(), false)));
-        assert_eq!(resolve_profile_path(None, None, "/ob", true), Some(("/ob/command.profile.gz".into(), true)));
+        assert_eq!(
+            resolve_profile_path(Some("/x/p.gz"), None, "/ob", true),
+            Some(("/x/p.gz".into(), true))
+        );
+        assert_eq!(
+            resolve_profile_path(Some("/x/p.json"), None, "/ob", true),
+            Some(("/x/p.json".into(), false))
+        );
+        assert_eq!(
+            resolve_profile_path(None, None, "/ob", true),
+            Some(("/ob/command.profile.gz".into(), true))
+        );
         assert_eq!(resolve_profile_path(None, Some("false"), "/ob", true), None);
         assert_eq!(resolve_profile_path(None, None, "/ob", false), None);
-        assert_eq!(resolve_profile_path(None, Some("true"), "/ob", false), Some(("/ob/command.profile.gz".into(), true)));
-        assert_eq!(SlimProfile::parse("5m").unwrap(), SlimProfile { enabled: true, size_limit: 5 * 1024 * 1024 });
+        assert_eq!(
+            resolve_profile_path(None, Some("true"), "/ob", false),
+            Some(("/ob/command.profile.gz".into(), true))
+        );
+        assert_eq!(
+            SlimProfile::parse("5m").unwrap(),
+            SlimProfile {
+                enabled: true,
+                size_limit: 5 * 1024 * 1024
+            }
+        );
         assert!(SlimProfile::parse("zzz").is_err());
-        let m: std::collections::HashMap<&str, &str> = [("slim_profile", "false"), ("profile", "/p.json")].into_iter().collect();
-        let o = ProfilerOptions::from_flags(&|n| m.get(n).map(|s| s.to_string()), &|n| if n == "experimental_profile_additional_tasks" { vec!["vfs_stat,skyfunction".into()] } else { vec![] }, "b", "/ob").unwrap();
+        let m: std::collections::HashMap<&str, &str> =
+            [("slim_profile", "false"), ("profile", "/p.json")]
+                .into_iter()
+                .collect();
+        let o = ProfilerOptions::from_flags(
+            &|n| m.get(n).map(|s| s.to_string()),
+            &|n| {
+                if n == "experimental_profile_additional_tasks" {
+                    vec!["vfs_stat,skyfunction".into()]
+                } else {
+                    vec![]
+                }
+            },
+            "b",
+            "/ob",
+        )
+        .unwrap();
         assert!(!o.slim.enabled && !o.compress);
         assert!(o.profiled_tasks.contains(&ProfilerTask::VFS_STAT));
-        assert!(ProfilerOptions::from_flags(&|_| None, &|n| if n == "experimental_profile_additional_tasks" { vec!["nope".into()] } else { vec![] }, "b", "/ob").is_err());
+        assert!(ProfilerOptions::from_flags(
+            &|_| None,
+            &|n| if n == "experimental_profile_additional_tasks" {
+                vec!["nope".into()]
+            } else {
+                vec![]
+            },
+            "b",
+            "/ob"
+        )
+        .is_err());
     }
 
     #[test]
@@ -1336,6 +1737,9 @@ mod tests {
         assert_eq!(thread_sort_index("skyframe-evaluator-12"), 10_012);
         assert_eq!(thread_sort_index("dynamic-execution-4"), 100_004);
         assert_eq!(thread_sort_index("worker"), 1_000_000);
-        assert_eq!(java_date_string("2020-06-16T06:59:40.123Z"), "Tue Jun 16 06:59:40 UTC 2020");
+        assert_eq!(
+            java_date_string("2020-06-16T06:59:40.123Z"),
+            "Tue Jun 16 06:59:40 UTC 2020"
+        );
     }
 }

@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
@@ -22,7 +23,11 @@ fn crc_table() -> &'static [u32; 256] {
         for (i, e) in t.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB88320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *e = c;
         }
@@ -53,7 +58,12 @@ struct BitReader<'a> {
 
 impl<'a> BitReader<'a> {
     fn new(data: &'a [u8]) -> Self {
-        BitReader { data, pos: 0, buf: 0, cnt: 0 }
+        BitReader {
+            data,
+            pos: 0,
+            buf: 0,
+            cnt: 0,
+        }
     }
     #[inline]
     fn refill(&mut self) {
@@ -94,13 +104,13 @@ impl Huff {
         count[0] = 0;
         let mut left = 1i32;
         let mut max_len = 0;
-        for len in 1..16 {
+        for (len, &c) in count.iter().enumerate().skip(1) {
             left <<= 1;
-            left -= count[len];
+            left -= c;
             if left < 0 {
                 return Err("Invalid deflate stream: oversubscribed Huffman code".to_string());
             }
-            if count[len] > 0 {
+            if c > 0 {
                 max_len = len;
             }
         }
@@ -202,7 +212,11 @@ pub fn inflate64_limit(data: &[u8], limit: usize) -> Result<(Vec<u8>, usize), St
     inflate_internal(data, limit, true)
 }
 
-fn inflate_internal(data: &[u8], limit: usize, is_deflate64: bool) -> Result<(Vec<u8>, usize), String> {
+fn inflate_internal(
+    data: &[u8],
+    limit: usize,
+    is_deflate64: bool,
+) -> Result<(Vec<u8>, usize), String> {
     let mut br = BitReader::new(data);
     let mut out: Vec<u8> = Vec::new();
     loop {
@@ -248,60 +262,68 @@ fn inflate_internal(data: &[u8], limit: usize, is_deflate64: bool) -> Result<(Ve
                             _ => 8,
                         };
                     }
-                    let dist_lengths = if is_deflate64 { vec![5u8; 32] } else { vec![5u8; 30] };
+                    let dist_lengths = if is_deflate64 {
+                        vec![5u8; 32]
+                    } else {
+                        vec![5u8; 30]
+                    };
                     (Huff::build(&l)?, Huff::build(&dist_lengths)?)
                 } else {
                     read_dynamic(&mut br, is_deflate64)?
                 };
                 loop {
                     let sym = lit.decode(&mut br)?;
-                    if sym < 256 {
-                        if out.len() >= limit {
-                            crate::codecs::stash_partial(out);
-                            return Err("Deflate output exceeds size limit".to_string());
-                        }
-                        out.push(sym as u8);
-                    } else if sym == 256 {
-                        break;
-                    } else {
-                        let s = sym - 257;
-                        if s >= 29 {
-                            return Err("Invalid deflate stream: bad length code".to_string());
-                        }
-                        let len = if is_deflate64 {
-                            LEN64_BASE[s] + br.bits(LEN64_EXTRA[s] as u32)? as usize
-                        } else {
-                            LEN_BASE[s] as usize + br.bits(LEN_EXTRA[s] as u32)? as usize
-                        };
-                        let ds = dist.decode(&mut br)?;
-                        let max_d_codes = if is_deflate64 { 32 } else { 30 };
-                        if ds >= max_d_codes {
-                            return Err("Invalid deflate stream: bad distance code".to_string());
-                        }
-                        let d = if is_deflate64 {
-                            DIST64_BASE[ds] + br.bits(DIST64_EXTRA[ds] as u32)? as usize
-                        } else {
-                            DIST_BASE[ds] as usize + br.bits(DIST_EXTRA[ds] as u32)? as usize
-                        };
-                        if d > out.len() {
-                            return Err("Invalid deflate stream: distance too far back".to_string());
-                        }
-                        if out.len() + len > limit {
-                            let start = out.len() - d;
-                            while out.len() < limit {
-                                let b = out[start + (out.len() - (start + d))];
-                                out.push(b);
+                    match sym.cmp(&256) {
+                        std::cmp::Ordering::Less => {
+                            if out.len() >= limit {
+                                crate::codecs::stash_partial(out);
+                                return Err("Deflate output exceeds size limit".to_string());
                             }
-                            crate::codecs::stash_partial(out);
-                            return Err("Deflate output exceeds size limit".to_string());
+                            out.push(sym as u8);
                         }
-                        let start = out.len() - d;
-                        if d >= len {
-                            out.extend_from_within(start..start + len);
-                        } else {
-                            for i in 0..len {
-                                let b = out[start + i];
-                                out.push(b);
+                        std::cmp::Ordering::Equal => break,
+                        std::cmp::Ordering::Greater => {
+                            let s = sym - 257;
+                            if s >= 29 {
+                                return Err("Invalid deflate stream: bad length code".to_string());
+                            }
+                            let len = if is_deflate64 {
+                                LEN64_BASE[s] + br.bits(LEN64_EXTRA[s] as u32)? as usize
+                            } else {
+                                LEN_BASE[s] as usize + br.bits(LEN_EXTRA[s] as u32)? as usize
+                            };
+                            let ds = dist.decode(&mut br)?;
+                            let max_d_codes = if is_deflate64 { 32 } else { 30 };
+                            if ds >= max_d_codes {
+                                return Err("Invalid deflate stream: bad distance code".to_string());
+                            }
+                            let d = if is_deflate64 {
+                                DIST64_BASE[ds] + br.bits(DIST64_EXTRA[ds] as u32)? as usize
+                            } else {
+                                DIST_BASE[ds] as usize + br.bits(DIST_EXTRA[ds] as u32)? as usize
+                            };
+                            if d > out.len() {
+                                return Err(
+                                    "Invalid deflate stream: distance too far back".to_string()
+                                );
+                            }
+                            if out.len() + len > limit {
+                                let start = out.len() - d;
+                                while out.len() < limit {
+                                    let b = out[start + (out.len() - (start + d))];
+                                    out.push(b);
+                                }
+                                crate::codecs::stash_partial(out);
+                                return Err("Deflate output exceeds size limit".to_string());
+                            }
+                            let start = out.len() - d;
+                            if d >= len {
+                                out.extend_from_within(start..start + len);
+                            } else {
+                                for i in 0..len {
+                                    let b = out[start + i];
+                                    out.push(b);
+                                }
                             }
                         }
                     }
@@ -326,7 +348,9 @@ fn read_dynamic(br: &mut BitReader, is_deflate64: bool) -> Result<(Huff, Huff), 
     if hlit > max_hlit || hdist > max_hdist {
         return Err("Invalid deflate stream: too many length or distance codes".to_string());
     }
-    const ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+    const ORDER: [usize; 19] = [
+        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+    ];
     let mut cl = [0u8; 19];
     for &o in ORDER.iter().take(hclen) {
         cl[o] = br.bits(3)? as u8;
@@ -343,7 +367,9 @@ fn read_dynamic(br: &mut BitReader, is_deflate64: bool) -> Result<(Huff, Huff), 
             let (val, rep) = match sym {
                 16 => {
                     if i == 0 {
-                        return Err("Invalid deflate stream: repeat with no previous length".to_string());
+                        return Err(
+                            "Invalid deflate stream: repeat with no previous length".to_string()
+                        );
                     }
                     (lengths[i - 1], 3 + br.bits(2)? as usize)
                 }
@@ -362,7 +388,10 @@ fn read_dynamic(br: &mut BitReader, is_deflate64: bool) -> Result<(Huff, Huff), 
     if lengths[256] == 0 {
         return Err("Invalid deflate stream: missing end-of-block code".to_string());
     }
-    Ok((Huff::build(&lengths[..hlit])?, Huff::build(&lengths[hlit..])?))
+    Ok((
+        Huff::build(&lengths[..hlit])?,
+        Huff::build(&lengths[hlit..])?,
+    ))
 }
 
 // ===========================================================================
@@ -405,7 +434,10 @@ fn gunzip_into(data: &[u8], out: &mut Vec<u8>) -> Result<Option<String>, String>
             return Err("Unexpected end of gzip header".to_string());
         }
         if data[pos + 2] != 8 {
-            return Err(format!("Unsupported gzip compression method {}", data[pos + 2]));
+            return Err(format!(
+                "Unsupported gzip compression method {}",
+                data[pos + 2]
+            ));
         }
         if data.len() - pos < 4 {
             return Err("Unexpected end of gzip header".to_string());
@@ -529,7 +561,10 @@ pub enum ArchiveKind {
 
 /// Extensions in Bazel's lookup order.
 const FORMATS: &[(&[&str], ArchiveKind)] = &[
-    (&["zip", "jar", "war", "aar", "nupkg", "whl"], ArchiveKind::Zip),
+    (
+        &["zip", "jar", "war", "aar", "nupkg", "whl"],
+        ArchiveKind::Zip,
+    ),
     (&["tar"], ArchiveKind::Tar),
     (&["tar.gz", "tgz"], ArchiveKind::TarGz),
     (&["gz"], ArchiveKind::Gz),
@@ -559,7 +594,10 @@ fn readable_formats(prefix: &str, conjunction: &str) -> String {
 
 /// Detect the archive kind from the file's base name suffix (Bazel's `getDecompressor(Path)`).
 pub fn detect_kind(archive: &Path) -> Result<ArchiveKind, String> {
-    let base = archive.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+    let base = archive
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_default();
     for (exts, kind) in FORMATS {
         if exts.iter().any(|e| base.ends_with(&format!(".{}", e))) {
             return Ok(*kind);
@@ -628,24 +666,47 @@ pub(crate) fn deprefix(name: &str, prefix: &[String], strip_components: usize) -
     let segs = normalize(name);
     if strip_components != 0 {
         if segs.len() <= strip_components {
-            return Deprefixed { segs: Vec::new(), found: false, skip: true };
+            return Deprefixed {
+                segs: Vec::new(),
+                found: false,
+                skip: true,
+            };
         }
-        return Deprefixed { segs: segs[strip_components..].to_vec(), found: false, skip: false };
+        return Deprefixed {
+            segs: segs[strip_components..].to_vec(),
+            found: false,
+            skip: false,
+        };
     }
     if prefix.is_empty() {
-        return Deprefixed { segs, found: false, skip: false };
+        return Deprefixed {
+            segs,
+            found: false,
+            skip: false,
+        };
     }
     if segs.len() >= prefix.len() && segs[..prefix.len()] == *prefix {
         let rest = segs[prefix.len()..].to_vec();
         let skip = rest.is_empty();
-        Deprefixed { segs: rest, found: true, skip }
+        Deprefixed {
+            segs: rest,
+            found: true,
+            skip,
+        }
     } else {
-        Deprefixed { segs, found: false, skip: true }
+        Deprefixed {
+            segs,
+            found: false,
+            skip: true,
+        }
     }
 }
 
 fn prefix_not_found(prefix: &str, available: &BTreeSet<String>) -> String {
-    let mut msg = format!("Prefix \"{}\" was given, but not found in the archive. ", prefix);
+    let mut msg = format!(
+        "Prefix \"{}\" was given, but not found in the archive. ",
+        prefix
+    );
     if available.is_empty() {
         msg.push_str(
             "We could not find any directory in this archive (maybe there is no need for `strip_prefix`?)",
@@ -678,8 +739,10 @@ enum Data {
     /// Uncompressed bytes at buf[start..start+len].
     Raw(usize, usize),
     /// Deflated bytes at buf[start..start+len]; expected uncompressed size and crc.
+    #[allow(dead_code)]
     Deflated(usize, usize, usize, u32),
     /// Deflate64 bytes at buf[start..start+len]; expected uncompressed size and crc.
+    #[allow(dead_code)]
     Deflated64(usize, usize, usize, u32),
 }
 
@@ -687,6 +750,7 @@ enum Data {
 struct Entry {
     name: String,
     kind: Kind,
+    #[allow(dead_code)]
     mode: u32,
     data: Data,
 }
@@ -700,10 +764,18 @@ fn entry_data(buf: &[u8], d: &Data, archive: &Path, name: &str) -> Result<Vec<u8
             let (out, _) = inflate_limit(&buf[*s..*s + *l], *size)
                 .map_err(|e| format!("{}: {} (entry {})", archive.display(), e, name))?;
             if out.len() != *size {
-                return Err(format!("{}: size mismatch for entry {}", archive.display(), name));
+                return Err(format!(
+                    "{}: size mismatch for entry {}",
+                    archive.display(),
+                    name
+                ));
             }
             if crc32(&out) != *crc {
-                return Err(format!("{}: invalid CRC for entry {}", archive.display(), name));
+                return Err(format!(
+                    "{}: invalid CRC for entry {}",
+                    archive.display(),
+                    name
+                ));
             }
             Ok(out)
         }
@@ -711,10 +783,18 @@ fn entry_data(buf: &[u8], d: &Data, archive: &Path, name: &str) -> Result<Vec<u8
             let (out, _) = inflate64_limit(&buf[*s..*s + *l], *size)
                 .map_err(|e| format!("{}: {} (entry {})", archive.display(), e, name))?;
             if out.len() != *size {
-                return Err(format!("{}: size mismatch for entry {}", archive.display(), name));
+                return Err(format!(
+                    "{}: size mismatch for entry {}",
+                    archive.display(),
+                    name
+                ));
             }
             if crc32(&out) != *crc {
-                return Err(format!("{}: invalid CRC for entry {}", archive.display(), name));
+                return Err(format!(
+                    "{}: invalid CRC for entry {}",
+                    archive.display(),
+                    name
+                ));
             }
             Ok(out)
         }
@@ -737,6 +817,7 @@ pub(crate) fn io_err(what: &str, p: &Path, e: std::io::Error) -> String {
 pub(crate) struct SevenZEntry {
     pub name: String,
     pub is_dir: bool,
+    #[allow(dead_code)]
     pub mode: Option<u32>,
     pub start: usize,
     pub len: usize,
@@ -755,7 +836,11 @@ pub(crate) fn extract_entries_7z(
             name: e.name,
             kind: if e.is_dir { Kind::Dir } else { Kind::File },
             mode: 0o644, // Bazel (commons-compress) ignores 7z unix modes: every file is 0644
-            data: if e.is_dir { Data::None } else { Data::Raw(e.start, e.len) },
+            data: if e.is_dir {
+                Data::None
+            } else {
+                Data::Raw(e.start, e.len)
+            },
         })
         .collect();
     extract_entries(buf, entries, archive, root, opts, "7z")
@@ -778,7 +863,11 @@ fn extract_entries(
     let mut hardlinks: Vec<(PathBuf, PathBuf, String)> = Vec::new();
 
     for entry in &entries {
-        let name = opts.rename_files.get(&entry.name).cloned().unwrap_or_else(|| entry.name.clone());
+        let name = opts
+            .rename_files
+            .get(&entry.name)
+            .cloned()
+            .unwrap_or_else(|| entry.name.clone());
         let dp = deprefix(&name, &prefix_segs, opts.strip_components);
         found_prefix = found_prefix || dp.found;
         if !prefix_segs.is_empty() && !found_prefix {
@@ -799,7 +888,8 @@ fn extract_entries(
         }
         let out_path = join_rel(root, &rel);
         if let Some(parent) = out_path.parent() {
-            fs::create_dir_all(parent).map_err(|e| io_err("Failed to create directory", parent, e))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| io_err("Failed to create directory", parent, e))?;
         }
         match &entry.kind {
             Kind::Dir => {
@@ -817,9 +907,12 @@ fn extract_entries(
                     }
                 }
                 fs::write(&out_path, &data).map_err(|e| io_err("Failed to write", &out_path, e))?;
-                let mode = (entry.mode & 0o777) | 0o400;
-                fs::set_permissions(&out_path, fs::Permissions::from_mode(mode))
-                    .map_err(|e| io_err("Failed to chmod", &out_path, e))?;
+                #[cfg(unix)]
+                {
+                    let mode = (entry.mode & 0o777) | 0o400;
+                    fs::set_permissions(&out_path, fs::Permissions::from_mode(mode))
+                        .map_err(|e| io_err("Failed to chmod", &out_path, e))?;
+                }
             }
             Kind::Symlink(target) => {
                 let is_abs = target.starts_with('/');
@@ -887,7 +980,7 @@ fn extract_entries(
     }
 
     for (link, target, raw) in hardlinks {
-        if let Ok(_) = fs::symlink_metadata(&link) {
+        if fs::symlink_metadata(&link).is_ok() {
             let _ = fs::remove_file(&link);
         }
         if !target.exists() {
@@ -898,7 +991,8 @@ fn extract_entries(
             ));
         }
         if fs::hard_link(&target, &link).is_err() {
-            fs::copy(&target, &link).map_err(|e| io_err("Failed to copy hard link target to", &link, e))?;
+            fs::copy(&target, &link)
+                .map_err(|e| io_err("Failed to copy hard link target to", &link, e))?;
         }
     }
     for (link, target) in symlinks {
@@ -914,8 +1008,11 @@ fn extract_entries(
                 let _ = fs::remove_file(&link);
             }
         }
+        #[cfg(unix)]
         std::os::unix::fs::symlink(&target, &link)
             .map_err(|e| io_err("Failed to create symlink", &link, e))?;
+        #[cfg(not(unix))]
+        let _ = (&target, &link);
     }
     let _ = archive;
     Ok(())
@@ -939,11 +1036,7 @@ fn parse_octal(b: &[u8]) -> Result<u64, String> {
         }
         return Ok(v);
     }
-    let s: Vec<u8> = b
-        .iter()
-        .copied()
-        .take_while(|&c| c != 0)
-        .collect();
+    let s: Vec<u8> = b.iter().copied().take_while(|&c| c != 0).collect();
     let s = String::from_utf8_lossy(&s).trim().to_string();
     if s.is_empty() {
         return Ok(0);
@@ -1002,19 +1095,14 @@ fn parse_tar_ex(buf: &[u8]) -> Result<(Vec<Entry>, Option<usize>), String> {
         let stored = parse_octal(&hdr[148..156])?;
         let mut sum: u64 = 0;
         for (i, &b) in hdr.iter().enumerate() {
-            sum += if (148..156).contains(&i) { b' ' as u64 } else { b as u64 };
+            sum += if (148..156).contains(&i) {
+                b' ' as u64
+            } else {
+                b as u64
+            };
         }
         // commons-compress' TarArchiveInputStream does not verify the header checksum (only number fields).
-        if false && sum != stored {
-            let signed: i64 = hdr
-                .iter()
-                .enumerate()
-                .map(|(i, &b)| if (148..156).contains(&i) { 32 } else { b as i8 as i64 })
-                .sum();
-            if signed != stored as i64 {
-                return Err("Bad tar header checksum: not a valid tar archive".to_string());
-            }
-        }
+        let _ = (sum, stored);
         let mut name = cstr(&hdr[0..100]);
         let mode = parse_octal(&hdr[100..108])? as u32;
         let mut size = parse_octal(&hdr[124..136])? as usize;
@@ -1095,10 +1183,17 @@ fn parse_tar_ex(buf: &[u8]) -> Result<(Vec<Entry>, Option<usize>), String> {
         } else {
             Data::None
         };
-        entries.push(Entry { name, kind, mode, data });
+        entries.push(Entry {
+            name,
+            kind,
+            mode,
+            data,
+        });
     }
     if pending_x {
-        return Err("premature end of tar archive. Didn't find any entry after PAX header.".to_string());
+        return Err(
+            "premature end of tar archive. Didn't find any entry after PAX header.".to_string(),
+        );
     }
     Ok((entries, eof_at))
 }
@@ -1110,12 +1205,23 @@ fn tar_stream_or_error(res: Result<Vec<u8>, String>) -> Result<Vec<u8>, String> 
     match res {
         Ok(v) => Ok(v),
         Err(e) => {
-            let Some(mut p) = crate::codecs::take_partial() else { return Err(e) };
+            let Some(mut p) = crate::codecs::take_partial() else {
+                return Err(e);
+            };
             // Errors raised while finishing a stream (checksum / trailing garbage) are thrown by the very
             // `read` call that would have returned the last 512-byte tar record, so that record is lost.
-            let eager_end = ["Gzip CRC32", "Gzip ISIZE", "Garbage after", "bzip2 block CRC", "bzip2 stream CRC", "XZ block CRC", "XZ block SHA", "Zstd content checksum mismatch"]
-                .iter()
-                .any(|m| e.starts_with(m));
+            let eager_end = [
+                "Gzip CRC32",
+                "Gzip ISIZE",
+                "Garbage after",
+                "bzip2 block CRC",
+                "bzip2 stream CRC",
+                "XZ block CRC",
+                "XZ block SHA",
+                "Zstd content checksum mismatch",
+            ]
+            .iter()
+            .any(|m| e.starts_with(m));
             if eager_end {
                 let keep = p.len().saturating_sub(1) / 512 * 512;
                 p.truncate(keep);
@@ -1124,17 +1230,31 @@ fn tar_stream_or_error(res: Result<Vec<u8>, String>) -> Result<Vec<u8>, String> 
                 Ok((_, Some(eof))) => {
                     let end = eof + 1024;
                     let consumed = end.div_ceil(10240) * 10240;
-                    if consumed <= p.len() { Ok(p) } else { Err(e) }
+                    if consumed <= p.len() {
+                        Ok(p)
+                    } else {
+                        Err(e)
+                    }
                 }
                 Ok((_, None)) => Err(e),
-                Err(te) if te == "Unexpected end of tar archive" || te.starts_with("premature end of tar archive") => Err(e),
+                Err(te)
+                    if te == "Unexpected end of tar archive"
+                        || te.starts_with("premature end of tar archive") =>
+                {
+                    Err(e)
+                }
                 Err(_) => Ok(p),
             }
         }
     }
 }
 
-fn extract_tar(buf: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) -> Result<(), String> {
+fn extract_tar(
+    buf: &[u8],
+    archive: &Path,
+    root: &Path,
+    opts: &ExtractOptions,
+) -> Result<(), String> {
     let entries = parse_tar(buf)?;
     extract_entries(buf, entries, archive, root, opts, "tar")
 }
@@ -1144,7 +1264,9 @@ fn extract_tar(buf: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) -
 // ===========================================================================
 
 fn u16le(b: &[u8], o: usize) -> Result<u16, String> {
-    b.get(o..o + 2).map(|s| u16::from_le_bytes([s[0], s[1]])).ok_or_else(|| "Truncated zip file".to_string())
+    b.get(o..o + 2)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
+        .ok_or_else(|| "Truncated zip file".to_string())
 }
 fn u32le(b: &[u8], o: usize) -> Result<u32, String> {
     b.get(o..o + 4)
@@ -1183,14 +1305,22 @@ fn find_zip_eocd(buf: &[u8]) -> Option<usize> {
 }
 
 fn parse_zip(buf: &[u8], archive: &Path) -> Result<Vec<Entry>, String> {
-    let base = archive.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-    let malformed = || format!("Zip file '{base}' is malformed. It does not contain an end of central directory record.");
+    let base = archive
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    let malformed = || {
+        format!("Zip file '{base}' is malformed. It does not contain an end of central directory record.")
+    };
     let eocd = find_zip_eocd(buf).ok_or_else(malformed)?;
     let mut total = u16le(buf, eocd + 10)? as u64;
     let cd_size = u32le(buf, eocd + 12)? as u64;
     let mut cd_off = u32le(buf, eocd + 16)? as u64;
     let mut zip64 = false;
-    if (total == 0xFFFF || cd_off == 0xFFFF_FFFF) && eocd >= 20 && buf[eocd - 20..eocd - 16] == [0x50, 0x4b, 0x06, 0x07] {
+    if (total == 0xFFFF || cd_off == 0xFFFF_FFFF)
+        && eocd >= 20
+        && buf[eocd - 20..eocd - 16] == [0x50, 0x4b, 0x06, 0x07]
+    {
         let z64 = u64le(buf, eocd - 20 + 8)? as usize;
         if buf.get(z64..z64 + 4) == Some(&[0x50, 0x4b, 0x06, 0x06]) {
             total = u64le(buf, z64 + 32)?;
@@ -1207,7 +1337,8 @@ fn parse_zip(buf: &[u8], archive: &Path) -> Result<Vec<Entry>, String> {
         (cd_off as usize, false)
     };
     let start_pos = pos;
-    let eof_err = || "Unexpected end of file while reading Central Directory File Header.".to_string();
+    let eof_err =
+        || "Unexpected end of file while reading Central Directory File Header.".to_string();
     let mut entries = Vec::new();
     let mut n = 0u64;
     loop {
@@ -1221,7 +1352,9 @@ fn parse_zip(buf: &[u8], archive: &Path) -> Result<Vec<Entry>, String> {
         n += 1;
         let fixed = buf.get(pos..pos + 46).ok_or_else(eof_err)?;
         if fixed[0..4] != [0x50, 0x4b, 0x01, 0x02] {
-            return Err("Malformed Central Directory File Header; does not start with 02014b50".to_string());
+            return Err(
+                "Malformed Central Directory File Header; does not start with 02014b50".to_string(),
+            );
         }
         let made_by = u16le(buf, pos + 4)?;
         let flags = u16le(buf, pos + 8)?;
@@ -1234,8 +1367,11 @@ fn parse_zip(buf: &[u8], archive: &Path) -> Result<Vec<Entry>, String> {
         let eattr = u32le(buf, pos + 38)?;
         let mut lho = u32le(buf, pos + 42)? as u64;
         let name_bytes = buf.get(pos + 46..pos + 46 + nlen).ok_or_else(eof_err)?;
-        let extra = buf.get(pos + 46 + nlen..pos + 46 + nlen + elen).ok_or_else(eof_err)?;
-        buf.get(pos + 46 + nlen + elen..pos + 46 + nlen + elen + clen).ok_or_else(eof_err)?;
+        let extra = buf
+            .get(pos + 46 + nlen..pos + 46 + nlen + elen)
+            .ok_or_else(eof_err)?;
+        buf.get(pos + 46 + nlen + elen..pos + 46 + nlen + elen + clen)
+            .ok_or_else(eof_err)?;
         let name = String::from_utf8_lossy(name_bytes).to_string();
         pos += 46 + nlen + elen + clen;
         if csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF || lho == 0xFFFF_FFFF {
@@ -1273,14 +1409,18 @@ fn parse_zip(buf: &[u8], archive: &Path) -> Result<Vec<Entry>, String> {
         if is_dir_name {
             kind = Kind::Dir;
             perm = 0o755;
-        } else if unix && perm != 0 {
-            match perm & 0o170000 {
-                0o040000 => kind = Kind::Dir,
-                0o120000 => kind = Kind::Symlink(String::new()),
-                _ => {}
+        } else if perm != 0 {
+            if unix {
+                match perm & 0o170000 {
+                    0o040000 => kind = Kind::Dir,
+                    0o120000 => kind = Kind::Symlink(String::new()),
+                    _ => {}
+                }
+            } else if (perm & 0o170000) == 0o040000 {
+                kind = Kind::Dir;
             }
         } else {
-            perm = 0o644;
+            perm = 0o755;
             if eattr & 0x10 != 0 {
                 kind = Kind::Dir;
             }
@@ -1293,14 +1433,25 @@ fn parse_zip(buf: &[u8], archive: &Path) -> Result<Vec<Entry>, String> {
             }
             kind = Kind::Symlink(String::from_utf8_lossy(&target).to_string());
         }
-        entries.push(Entry { name, kind, mode: perm, data });
+        entries.push(Entry {
+            name,
+            kind,
+            mode: perm,
+            data,
+        });
     }
     Ok(entries)
 }
 
 /// Reads one zip entry the way Java's `ZipEntryInputStream` does: no CRC or size verification, the inflater is
 /// not bounded by the compressed size, and only `size` bytes are ever requested.
-fn zip_entry_bytes(buf: &[u8], lho: usize, size: usize, method: u16, base: &str) -> Result<Vec<u8>, String> {
+fn zip_entry_bytes(
+    buf: &[u8],
+    lho: usize,
+    size: usize,
+    method: u16,
+    base: &str,
+) -> Result<Vec<u8>, String> {
     let sig_ok = buf.get(lho..lho + 4) == Some(&[0x50, 0x4b, 0x03, 0x04]);
     if !sig_ok || buf.len() < lho + 30 {
         return Err(format!(
@@ -1315,7 +1466,11 @@ fn zip_entry_bytes(buf: &[u8], lho: usize, size: usize, method: u16, base: &str)
     }
     match method {
         8 | 9 => {
-            let r = if method == 8 { inflate_limit(&buf[start..], size) } else { inflate64_limit(&buf[start..], size) };
+            let r = if method == 8 {
+                inflate_limit(&buf[start..], size)
+            } else {
+                inflate64_limit(&buf[start..], size)
+            };
             match r {
                 Ok((out, _)) => Ok(out),
                 Err(e) if e == "Deflate output exceeds size limit" => {
@@ -1333,21 +1488,38 @@ fn zip_entry_bytes(buf: &[u8], lho: usize, size: usize, method: u16, base: &str)
 fn java_zlib_message(e: &str) -> String {
     match e {
         "Unexpected end of deflate stream" => "Unexpected end of ZLIB input stream".to_string(),
-        "Invalid deflate stream: distance too far back" => "invalid distance too far back".to_string(),
-        "Invalid deflate stream: stored block length mismatch" => "invalid stored block lengths".to_string(),
+        "Invalid deflate stream: distance too far back" => {
+            "invalid distance too far back".to_string()
+        }
+        "Invalid deflate stream: stored block length mismatch" => {
+            "invalid stored block lengths".to_string()
+        }
         "Invalid deflate stream: bad block type" => "invalid block type".to_string(),
         "Invalid deflate stream: bad distance code" => "invalid distance code".to_string(),
         "Invalid deflate stream: bad length code" => "invalid literal/length code".to_string(),
-        "Invalid deflate stream: too many length or distance codes" => "too many length or distance symbols".to_string(),
-        "Invalid deflate stream: repeat with no previous length" => "invalid bit length repeat".to_string(),
+        "Invalid deflate stream: too many length or distance codes" => {
+            "too many length or distance symbols".to_string()
+        }
+        "Invalid deflate stream: repeat with no previous length" => {
+            "invalid bit length repeat".to_string()
+        }
         "Invalid deflate stream: too many code lengths" => "invalid bit length repeat".to_string(),
-        "Invalid deflate stream: missing end-of-block code" => "invalid code -- missing end-of-block".to_string(),
-        "Invalid deflate stream: oversubscribed Huffman code" => "invalid code lengths set".to_string(),
+        "Invalid deflate stream: missing end-of-block code" => {
+            "invalid code -- missing end-of-block".to_string()
+        }
+        "Invalid deflate stream: oversubscribed Huffman code" => {
+            "invalid code lengths set".to_string()
+        }
         other => other.to_string(),
     }
 }
 
-fn extract_zip(buf: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) -> Result<(), String> {
+fn extract_zip(
+    buf: &[u8],
+    archive: &Path,
+    root: &Path,
+    opts: &ExtractOptions,
+) -> Result<(), String> {
     let entries = parse_zip(buf, archive)?;
     extract_entries(buf, entries, archive, root, opts, "zip")
 }
@@ -1356,13 +1528,24 @@ fn extract_zip(buf: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) -
 // Ar
 // ===========================================================================
 
-fn extract_ar(buf: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) -> Result<(), String> {
+fn extract_ar(
+    buf: &[u8],
+    _archive: &Path,
+    root: &Path,
+    opts: &ExtractOptions,
+) -> Result<(), String> {
     // commons-compress ArArchiveInputStream
     if buf.len() < 8 {
-        return Err(format!("Failed to read header. Occurred at byte: {}", buf.len()));
+        return Err(format!(
+            "Failed to read header. Occurred at byte: {}",
+            buf.len()
+        ));
     }
     if &buf[..8] != b"!<arch>\n" {
-        let ascii: String = buf[..8].iter().map(|&b| if b < 0x80 { b as char } else { '?' }).collect();
+        let ascii: String = buf[..8]
+            .iter()
+            .map(|&b| if b < 0x80 { b as char } else { '?' })
+            .collect();
         return Err(format!("Invalid header {ascii}"));
     }
     let mut pos = 8;
@@ -1382,21 +1565,31 @@ fn extract_ar(buf: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) ->
             return Err("Truncated ar archive".to_string());
         }
         if buf.len() - pos < 60 {
-            return Err(format!("Failed to read entry trailer. Occurred at byte: {}", buf.len()));
+            return Err(format!(
+                "Failed to read entry trailer. Occurred at byte: {}",
+                buf.len()
+            ));
         }
         if &buf[pos + 58..pos + 60] != b"`\n" {
-            return Err(format!("Invalid entry trailer. not read the content? Occurred at byte: {}", pos + 60));
+            return Err(format!(
+                "Invalid entry trailer. not read the content? Occurred at byte: {}",
+                pos + 60
+            ));
         }
         let h = &buf[pos..pos + 60];
         let field = |a: usize, b: usize| String::from_utf8_lossy(&h[a..b]).trim().to_string();
         let mut name = field(0, 16);
         let ar_num = |a: usize, b: usize, radix: u32, ty: &str| -> Result<i64, String> {
-            let t: String = h[a..b].iter().map(|&c| if c < 0x80 { c as char } else { '?' }).collect();
+            let t: String = h[a..b]
+                .iter()
+                .map(|&c| if c < 0x80 { c as char } else { '?' })
+                .collect();
             let t = t.trim_matches(|c: char| c <= ' ');
             if t.is_empty() {
                 return Ok(0);
             }
-            i64::from_str_radix(t, radix).map_err(|_| format!("Unable to parse {ty} from string value: {t}"))
+            i64::from_str_radix(t, radix)
+                .map_err(|_| format!("Unable to parse {ty} from string value: {t}"))
         };
         ar_num(16, 28, 10, "long")?;
         ar_num(28, 34, 10, "int")?;
@@ -1418,7 +1611,10 @@ fn extract_ar(buf: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) ->
             continue;
         }
         if let Some(n) = name.strip_prefix("#1/") {
-            let n: usize = n.trim().parse().map_err(|_| format!("For input string: \"{}\"", n.trim()))?;
+            let n: usize = n
+                .trim()
+                .parse()
+                .map_err(|_| format!("For input string: \"{}\"", n.trim()))?;
             if dstart + n > buf.len() {
                 return Err("null".to_string());
             }
@@ -1436,7 +1632,9 @@ fn extract_ar(buf: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) ->
             if let Ok(off) = off.parse::<usize>() {
                 let rest = gnu_names.get(off..).ok_or("Invalid GNU ar name offset")?;
                 let end = rest.iter().position(|&c| c == b'\n').unwrap_or(rest.len());
-                name = String::from_utf8_lossy(&rest[..end]).trim_end_matches('/').to_string();
+                name = String::from_utf8_lossy(&rest[..end])
+                    .trim_end_matches('/')
+                    .to_string();
             }
         } else if let Some(n) = name.strip_suffix('/') {
             name = n.to_string();
@@ -1444,15 +1642,22 @@ fn extract_ar(buf: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) ->
         let name = opts.rename_files.get(&name).cloned().unwrap_or(name);
         let segs = normalize(&name);
         if segs.is_empty() || segs[0] == ".." {
-            return Err(format!("Failed to extract {}, path is escaping the destination directory", name));
+            return Err(format!(
+                "Failed to extract {}, path is escaping the destination directory",
+                name
+            ));
         }
         let out = join_rel(root, &segs);
         if let Some(p) = out.parent() {
             fs::create_dir_all(p).map_err(|e| io_err("Failed to create directory", p, e))?;
         }
-        fs::write(&out, &buf[dstart..dstart + size]).map_err(|e| io_err("Failed to write", &out, e))?;
+        fs::write(&out, &buf[dstart..dstart + size])
+            .map_err(|e| io_err("Failed to write", &out, e))?;
+        #[cfg(unix)]
         fs::set_permissions(&out, fs::Permissions::from_mode((mode & 0o777) | 0o400))
             .map_err(|e| io_err("Failed to chmod", &out, e))?;
+        #[cfg(not(unix))]
+        let _ = mode;
     }
     Ok(())
 }
@@ -1472,7 +1677,10 @@ pub fn extract(archive: &Path, dest: &Path, opts: &ExtractOptions) -> Result<(),
     };
     let add = normalize(&opts.add_prefix);
     if add.first().map(|s| s == "..").unwrap_or(false) {
-        return Err(format!("add_prefix '{}' escapes the destination directory", opts.add_prefix));
+        return Err(format!(
+            "add_prefix '{}' escapes the destination directory",
+            opts.add_prefix
+        ));
     }
     let root = join_rel(dest, &add);
     let raw = fs::read(archive).map_err(|e| io_err("Error reading archive", archive, e))?;
@@ -1480,39 +1688,47 @@ pub fn extract(archive: &Path, dest: &Path, opts: &ExtractOptions) -> Result<(),
         ArchiveKind::Zip => extract_zip(&raw, archive, &root, opts),
         ArchiveKind::Tar => extract_tar(&raw, archive, &root, opts),
         ArchiveKind::TarGz => {
-            let tar = tar_stream_or_error(gunzip(&raw)).map_err(|e| format!("{}: {}", archive.display(), e))?;
+            let tar = tar_stream_or_error(gunzip(&raw))
+                .map_err(|e| format!("{}: {}", archive.display(), e))?;
             drop(raw);
             extract_tar(&tar, archive, &root, opts)
         }
         ArchiveKind::Gz => {
-            let (data, fname) = gunzip_with_header(&raw).map_err(|e| format!("{}: {}", archive.display(), e))?;
+            let (data, fname) =
+                gunzip_with_header(&raw).map_err(|e| format!("{}: {}", archive.display(), e))?;
             extract_single_file(data, fname, ".gz", archive, &root, opts)
         }
         ArchiveKind::TarXz => {
-            let tar = tar_stream_or_error(crate::codecs::xz_decompress(&raw)).map_err(|e| format!("{}: {}", archive.display(), e))?;
+            let tar = tar_stream_or_error(crate::codecs::xz_decompress(&raw))
+                .map_err(|e| format!("{}: {}", archive.display(), e))?;
             drop(raw);
             extract_tar(&tar, archive, &root, opts)
         }
         ArchiveKind::Xz => {
-            let data = crate::codecs::xz_decompress(&raw).map_err(|e| format!("{}: {}", archive.display(), e))?;
+            let data = crate::codecs::xz_decompress(&raw)
+                .map_err(|e| format!("{}: {}", archive.display(), e))?;
             extract_single_file(data, None, ".xz", archive, &root, opts)
         }
         ArchiveKind::TarZst => {
-            let tar = tar_stream_or_error(crate::codecs::zstd_decompress(&raw)).map_err(|e| format!("{}: {}", archive.display(), e))?;
+            let tar = tar_stream_or_error(crate::codecs::zstd_decompress(&raw))
+                .map_err(|e| format!("{}: {}", archive.display(), e))?;
             drop(raw);
             extract_tar(&tar, archive, &root, opts)
         }
         ArchiveKind::Zst => {
-            let data = crate::codecs::zstd_decompress(&raw).map_err(|e| format!("{}: {}", archive.display(), e))?;
+            let data = crate::codecs::zstd_decompress(&raw)
+                .map_err(|e| format!("{}: {}", archive.display(), e))?;
             extract_single_file(data, None, ".zst", archive, &root, opts)
         }
         ArchiveKind::TarBz2 => {
-            let tar = tar_stream_or_error(crate::codecs::bunzip2(&raw)).map_err(|e| format!("{}: {}", archive.display(), e))?;
+            let tar = tar_stream_or_error(crate::codecs::bunzip2(&raw))
+                .map_err(|e| format!("{}: {}", archive.display(), e))?;
             drop(raw);
             extract_tar(&tar, archive, &root, opts)
         }
         ArchiveKind::Bz2 => {
-            let data = crate::codecs::bunzip2(&raw).map_err(|e| format!("{}: {}", archive.display(), e))?;
+            let data = crate::codecs::bunzip2(&raw)
+                .map_err(|e| format!("{}: {}", archive.display(), e))?;
             extract_single_file(data, None, ".bz2", archive, &root, opts)
         }
         ArchiveKind::SevenZ => crate::codecs::extract_7z(&raw, archive, &root, opts),
@@ -1538,13 +1754,17 @@ fn extract_single_file(
     let name = opts.rename_files.get(&name).cloned().unwrap_or(name);
     let segs = normalize(&name);
     if segs.is_empty() || segs[0] == ".." {
-        return Err(format!("Failed to extract {}, path is escaping the destination directory", name));
+        return Err(format!(
+            "Failed to extract {}, path is escaping the destination directory",
+            name
+        ));
     }
     let out = join_rel(root, &segs);
     if let Some(p) = out.parent() {
         fs::create_dir_all(p).map_err(|e| io_err("Failed to create directory", p, e))?;
     }
     fs::write(&out, data).map_err(|e| io_err("Failed to write", &out, e))?;
+    #[cfg(unix)]
     fs::set_permissions(&out, fs::Permissions::from_mode(0o644))
         .map_err(|e| io_err("Failed to chmod", &out, e))?;
     Ok(())
@@ -1556,7 +1776,8 @@ mod tests {
     use std::process::Command;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("zel-archive-test-{}-{}", std::process::id(), name));
+        let p =
+            std::env::temp_dir().join(format!("zel-archive-test-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
@@ -1596,7 +1817,11 @@ mod tests {
     // --- stored-block gzip/zip builders ---
     fn deflate_stored(data: &[u8]) -> Vec<u8> {
         let mut o = Vec::new();
-        let chunks: Vec<&[u8]> = if data.is_empty() { vec![&[][..]] } else { data.chunks(65535).collect() };
+        let chunks: Vec<&[u8]> = if data.is_empty() {
+            vec![&[][..]]
+        } else {
+            data.chunks(65535).collect()
+        };
         for (i, c) in chunks.iter().enumerate() {
             o.push(if i + 1 == chunks.len() { 1 } else { 0 });
             o.extend_from_slice(&(c.len() as u16).to_le_bytes());
@@ -1623,7 +1848,11 @@ mod tests {
         let mut cd = Vec::new();
         for e in entries {
             let off = out.len() as u32;
-            let (method, body) = if e.deflate { (8u16, deflate_stored(e.data)) } else { (0u16, e.data.to_vec()) };
+            let (method, body) = if e.deflate {
+                (8u16, deflate_stored(e.data))
+            } else {
+                (0u16, e.data.to_vec())
+            };
             let crc = crc32(e.data);
             out.extend_from_slice(&[0x50, 0x4b, 3, 4, 20, 0, 0, 0]);
             out.extend_from_slice(&method.to_le_bytes());
@@ -1756,10 +1985,19 @@ mod tests {
         fs::write(d.join("x.tar"), &t).unwrap();
         extract(&d.join("x.tar"), &d.join("out"), &ExtractOptions::default()).unwrap();
         assert_eq!(fs::read(d.join("out/pkg/a.txt")).unwrap(), b"hello");
-        let m = fs::metadata(d.join("out/pkg/bin/run.sh")).unwrap().permissions().mode();
-        assert_eq!(m & 0o111, 0o111);
-        assert_eq!(fs::read_link(d.join("out/pkg/link")).unwrap(), PathBuf::from("a.txt"));
-        assert_eq!(fs::read(d.join("out/pkg/link")).unwrap(), b"hello");
+        #[cfg(unix)]
+        {
+            let m = fs::metadata(d.join("out/pkg/bin/run.sh"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(m & 0o111, 0o111);
+            assert_eq!(
+                fs::read_link(d.join("out/pkg/link")).unwrap(),
+                PathBuf::from("a.txt")
+            );
+            assert_eq!(fs::read(d.join("out/pkg/link")).unwrap(), b"hello");
+        }
         assert_eq!(fs::read(d.join("out/pkg/hard")).unwrap(), b"hello");
     }
 
@@ -1773,16 +2011,21 @@ mod tests {
         tar_add(&mut t, "top-1.0/lnk", b'2', b"", 0o777, "/top-1.0/src/x.c");
         tar_end(&mut t);
         fs::write(d.join("x.tar.gz"), gzip_stored(&t)).unwrap();
-        let mut o = ExtractOptions::default();
-        o.strip_prefix = "top-1.0".into();
-        o.add_prefix = "sub".into();
+        let o = ExtractOptions {
+            strip_prefix: "top-1.0".into(),
+            add_prefix: "sub".into(),
+            ..Default::default()
+        };
         extract(&d.join("x.tar.gz"), &d.join("out"), &o).unwrap();
         assert_eq!(fs::read(d.join("out/sub/src/x.c")).unwrap(), b"int x;");
         assert!(!d.join("out/sub/other").exists());
         assert!(!d.join("out/sub/y").exists());
         // absolute symlink is re-rooted with prefix stripped
-        let l = fs::read_link(d.join("out/sub/lnk")).unwrap();
-        assert_eq!(l, d.join("out/sub/src/x.c"));
+        #[cfg(unix)]
+        {
+            let l = fs::read_link(d.join("out/sub/lnk")).unwrap();
+            assert_eq!(l, d.join("out/sub/src/x.c"));
+        }
 
         let mut o = ExtractOptions::default();
         o.rename_files.insert("other/y".into(), "renamed/z".into());
@@ -1799,13 +2042,17 @@ mod tests {
         tar_add(&mut t, "a/top.txt", b'0', b"t", 0o644, "");
         tar_end(&mut t);
         fs::write(d.join("x.tar"), &t).unwrap();
-        let mut o = ExtractOptions::default();
-        o.strip_components = 1;
+        let mut o = ExtractOptions {
+            strip_components: 1,
+            ..Default::default()
+        };
         extract(&d.join("x.tar"), &d.join("out"), &o).unwrap();
         assert_eq!(fs::read(d.join("out/b/c.txt")).unwrap(), b"c");
         assert_eq!(fs::read(d.join("out/top.txt")).unwrap(), b"t");
         o.strip_prefix = "a".into();
-        assert!(extract(&d.join("x.tar"), &d.join("out3"), &o).unwrap_err().contains("Only one"));
+        assert!(extract(&d.join("x.tar"), &d.join("out3"), &o)
+            .unwrap_err()
+            .contains("Only one"));
     }
 
     #[test]
@@ -1817,8 +2064,10 @@ mod tests {
         tar_add(&mut t, "rootfile", b'0', b"1", 0o644, "");
         tar_end(&mut t);
         fs::write(d.join("x.tar"), &t).unwrap();
-        let mut o = ExtractOptions::default();
-        o.strip_prefix = "nope".into();
+        let o = ExtractOptions {
+            strip_prefix: "nope".into(),
+            ..Default::default()
+        };
         let e = extract(&d.join("x.tar"), &d.join("out"), &o).unwrap_err();
         assert_eq!(
             e,
@@ -1848,7 +2097,13 @@ mod tests {
         tar_end(&mut t);
         fs::write(d.join("y.tar"), &t).unwrap();
         // Tar symlinks to outside extraction root extract like real Bazel and do not error.
-        extract(&d.join("y.tar"), &d.join("out2"), &ExtractOptions::default()).unwrap();
+        extract(
+            &d.join("y.tar"),
+            &d.join("out2"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
+        #[cfg(unix)]
         assert!(fs::read_link(d.join("out2/a/l")).is_ok());
 
         // `a/../../b` normalises to ../b
@@ -1856,14 +2111,24 @@ mod tests {
         tar_add(&mut t, "a/../../b", b'0', b"x", 0o644, "");
         tar_end(&mut t);
         fs::write(d.join("z.tar"), &t).unwrap();
-        assert!(extract(&d.join("z.tar"), &d.join("out3"), &ExtractOptions::default()).is_err());
+        assert!(extract(
+            &d.join("z.tar"),
+            &d.join("out3"),
+            &ExtractOptions::default()
+        )
+        .is_err());
 
         // absolute entry names are made relative
         let mut t = Vec::new();
         tar_add(&mut t, "/abs/f", b'0', b"x", 0o644, "");
         tar_end(&mut t);
         fs::write(d.join("w.tar"), &t).unwrap();
-        extract(&d.join("w.tar"), &d.join("out4"), &ExtractOptions::default()).unwrap();
+        extract(
+            &d.join("w.tar"),
+            &d.join("out4"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
         assert!(d.join("out4/abs/f").exists());
     }
 
@@ -1879,7 +2144,7 @@ mod tests {
         tar_add(&mut t, "truncated", b'0', b"gnu", 0o644, "");
         // pax path
         let rec = format!("path=pax/{}\n", "p".repeat(120));
-        let full = format!("{} {}", rec.len() + 3 + 1 + 0, rec);
+        let full = format!("{} {}", (rec.len() + 3 + 1), rec);
         // length includes digits of itself: compute properly
         let mut n = rec.len() + 2;
         loop {
@@ -1897,7 +2162,10 @@ mod tests {
         fs::write(d.join("x.tar"), &t).unwrap();
         extract(&d.join("x.tar"), &d.join("out"), &ExtractOptions::default()).unwrap();
         assert_eq!(fs::read(d.join("out").join(&long)).unwrap(), b"gnu");
-        assert_eq!(fs::read(d.join(format!("out/pax/{}", "p".repeat(120)))).unwrap(), b"pax");
+        assert_eq!(
+            fs::read(d.join(format!("out/pax/{}", "p".repeat(120)))).unwrap(),
+            b"pax"
+        );
     }
 
     #[test]
@@ -1905,46 +2173,101 @@ mod tests {
         let d = tmpdir("tar-bad");
         fs::write(d.join("x.tar"), vec![b'x'; 1024]).unwrap();
         let e = extract(&d.join("x.tar"), &d.join("out"), &ExtractOptions::default()).unwrap_err();
-        assert!(e.contains("checksum") || e.contains("Invalid number"), "{}", e);
+        assert!(
+            e.contains("checksum") || e.contains("Invalid number"),
+            "{}",
+            e
+        );
         // truncated data
         let mut t = Vec::new();
         t.extend(tar_header("f", b'0', 5000, 0o644, ""));
         t.extend(vec![0u8; 100]);
         fs::write(d.join("y.tar"), &t).unwrap();
-        assert!(extract(&d.join("y.tar"), &d.join("out"), &ExtractOptions::default())
-            .unwrap_err()
-            .contains("Unexpected end"));
+        assert!(
+            extract(&d.join("y.tar"), &d.join("out"), &ExtractOptions::default())
+                .unwrap_err()
+                .contains("Unexpected end")
+        );
         // missing file
-        assert!(extract(&d.join("nope.tar"), &d.join("out"), &ExtractOptions::default()).is_err());
+        assert!(extract(
+            &d.join("nope.tar"),
+            &d.join("out"),
+            &ExtractOptions::default()
+        )
+        .is_err());
     }
 
     #[test]
     fn zip_extract_basic() {
         let d = tmpdir("zip-basic");
         let z = build_zip(&[
-            ZE { name: "root/", data: b"", attr: 0o040755 << 16, deflate: false },
-            ZE { name: "root/a.txt", data: b"aaa", attr: 0o100644 << 16, deflate: true },
-            ZE { name: "root/run", data: b"#!/bin/sh", attr: 0o100755 << 16, deflate: false },
-            ZE { name: "root/ln", data: b"a.txt", attr: 0o120777 << 16, deflate: false },
-            ZE { name: "other/z", data: b"z", attr: 0o100644 << 16, deflate: false },
+            ZE {
+                name: "root/",
+                data: b"",
+                attr: 0o040755 << 16,
+                deflate: false,
+            },
+            ZE {
+                name: "root/a.txt",
+                data: b"aaa",
+                attr: 0o100644 << 16,
+                deflate: true,
+            },
+            ZE {
+                name: "root/run",
+                data: b"#!/bin/sh",
+                attr: 0o100755 << 16,
+                deflate: false,
+            },
+            ZE {
+                name: "root/ln",
+                data: b"a.txt",
+                attr: 0o120777 << 16,
+                deflate: false,
+            },
+            ZE {
+                name: "other/z",
+                data: b"z",
+                attr: 0o100644 << 16,
+                deflate: false,
+            },
         ]);
         fs::write(d.join("x.zip"), &z).unwrap();
-        let mut o = ExtractOptions::default();
-        o.strip_prefix = "root".into();
+        let o = ExtractOptions {
+            strip_prefix: "root".into(),
+            ..Default::default()
+        };
         extract(&d.join("x.zip"), &d.join("out"), &o).unwrap();
         assert_eq!(fs::read(d.join("out/a.txt")).unwrap(), b"aaa");
-        assert!(fs::metadata(d.join("out/run")).unwrap().permissions().mode() & 0o100 != 0);
-        assert_eq!(fs::read_link(d.join("out/ln")).unwrap(), PathBuf::from("a.txt"));
+        #[cfg(unix)]
+        {
+            assert!(
+                fs::metadata(d.join("out/run"))
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o100
+                    != 0
+            );
+            assert_eq!(
+                fs::read_link(d.join("out/ln")).unwrap(),
+                PathBuf::from("a.txt")
+            );
+        }
         assert!(!d.join("out/other").exists());
         // jar with forced type from odd name
         fs::write(d.join("blob.dat"), &z).unwrap();
-        let mut o = ExtractOptions::default();
-        o.archive_type = Some("jar".into());
+        let o = ExtractOptions {
+            archive_type: Some("jar".into()),
+            ..Default::default()
+        };
         extract(&d.join("blob.dat"), &d.join("out2"), &o).unwrap();
         assert!(d.join("out2/other/z").exists());
         // prefix error lists all
-        let mut o = ExtractOptions::default();
-        o.strip_prefix = "x".into();
+        let o = ExtractOptions {
+            strip_prefix: "x".into(),
+            ..Default::default()
+        };
         let e = extract(&d.join("x.zip"), &d.join("out3"), &o).unwrap_err();
         assert!(e.contains("\"other\", \"root\"."), "{}", e);
     }
@@ -1954,23 +2277,80 @@ mod tests {
         let d = tmpdir("zip-err");
         fs::write(d.join("x.zip"), b"hello world, not a zip file at all").unwrap();
         assert!(extract(&d.join("x.zip"), &d.join("o"), &ExtractOptions::default()).is_err());
-        let mut z = build_zip(&[ZE { name: "f", data: b"data", attr: 0, deflate: false }]);
+        let mut z = build_zip(&[ZE {
+            name: "f",
+            data: b"data",
+            attr: 0,
+            deflate: false,
+        }]);
         z[30 + 1 + 1] ^= 0xff; // corrupt data (offset 30 + name len 1 = data start 31)
         fs::write(d.join("y.zip"), &z).unwrap();
         // Java's ZipReader neither verifies CRCs nor sizes of stored entries, so a corrupt payload extracts.
         assert!(extract(&d.join("y.zip"), &d.join("o"), &ExtractOptions::default()).is_ok());
-        let z = build_zip(&[ZE { name: "../f", data: b"data", attr: 0, deflate: false }]);
+        let z = build_zip(&[ZE {
+            name: "../f",
+            data: b"data",
+            attr: 0,
+            deflate: false,
+        }]);
         fs::write(d.join("z.zip"), &z).unwrap();
-        assert!(extract(&d.join("z.zip"), &d.join("o"), &ExtractOptions::default())
-            .unwrap_err()
-            .contains("escaping"));
-        // default perms when no unix attrs: readable
-        let z = build_zip(&[ZE { name: "plain", data: b"p", attr: 0, deflate: false }]);
+        assert!(
+            extract(&d.join("z.zip"), &d.join("o"), &ExtractOptions::default())
+                .unwrap_err()
+                .contains("escaping")
+        );
+        // default perms when no unix attrs: 0o755 (ZipDecompressor.getPermissions)
+        let z = build_zip(&[ZE {
+            name: "plain",
+            data: b"p",
+            attr: 0,
+            deflate: false,
+        }]);
         fs::write(d.join("w.zip"), &z).unwrap();
         extract(&d.join("w.zip"), &d.join("o2"), &ExtractOptions::default()).unwrap();
-        assert_eq!(fs::metadata(d.join("o2/plain")).unwrap().permissions().mode() & 0o777, 0o644);
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(d.join("o2/plain"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
+
+        // Even with Unix made_by (3 << 8), zero high-16 mode defaults to 0o755.
+        let mut z2 = build_zip(&[ZE {
+            name: "u0",
+            data: b"u",
+            attr: 0,
+            deflate: false,
+        }]);
+        // Patch made_by at central dir entry offset (find 0x02014b50 signature).
+        let cd_pos = z2
+            .windows(4)
+            .position(|w| w == [0x50, 0x4b, 0x01, 0x02])
+            .unwrap();
+        z2[cd_pos + 4] = 0;
+        z2[cd_pos + 5] = 3;
+        fs::write(d.join("u0.zip"), &z2).unwrap();
+        extract(
+            &d.join("u0.zip"),
+            &d.join("o_u0"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(d.join("o_u0/u0"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
     }
 
+    #[cfg(unix)]
     #[test]
     fn zip_system_zip_with_real_deflate() {
         if !have("zip") || !have("unzip") {
@@ -1989,14 +2369,27 @@ mod tests {
             .status()
             .unwrap();
         assert!(st.success());
-        let mut o = ExtractOptions::default();
-        o.strip_prefix = "pkg".into();
+        let o = ExtractOptions {
+            strip_prefix: "pkg".into(),
+            ..Default::default()
+        };
         extract(&d.join("a.zip"), &d.join("out"), &o).unwrap();
         assert_eq!(fs::read_to_string(d.join("out/big.txt")).unwrap(), text);
-        assert!(fs::metadata(d.join("out/tool.sh")).unwrap().permissions().mode() & 0o111 != 0);
-        assert_eq!(fs::read_link(d.join("out/sym")).unwrap(), PathBuf::from("big.txt"));
+        assert!(
+            fs::metadata(d.join("out/tool.sh"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111
+                != 0
+        );
+        assert_eq!(
+            fs::read_link(d.join("out/sym")).unwrap(),
+            PathBuf::from("big.txt")
+        );
     }
 
+    #[cfg(unix)]
     #[test]
     fn tar_system_tar_gz_with_real_deflate() {
         if !have("gzip") {
@@ -2016,12 +2409,24 @@ mod tests {
         if !matches!(st, Ok(s) if s.success()) {
             return;
         }
-        let mut o = ExtractOptions::default();
-        o.strip_prefix = "proj".into();
+        let o = ExtractOptions {
+            strip_prefix: "proj".into(),
+            ..Default::default()
+        };
         extract(&d.join("a.tar.gz"), &d.join("out"), &o).unwrap();
         assert_eq!(fs::read_to_string(d.join("out/sub/big")).unwrap(), text);
-        assert!(fs::metadata(d.join("out/exe")).unwrap().permissions().mode() & 0o111 != 0);
-        assert_eq!(fs::read_link(d.join("out/l")).unwrap(), PathBuf::from("sub/big"));
+        assert!(
+            fs::metadata(d.join("out/exe"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o111
+                != 0
+        );
+        assert_eq!(
+            fs::read_link(d.join("out/l")).unwrap(),
+            PathBuf::from("sub/big")
+        );
         // also with tgz name and a pax-format tar
         let st = Command::new("tar")
             .current_dir(d.join("src"))
@@ -2038,7 +2443,11 @@ mod tests {
         let d = tmpdir("ar");
         let mut a = b"!<arch>\n".to_vec();
         let hdr = |name: &str, size: usize| {
-            format!("{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n", name, 0, 0, 0, "100644", size).into_bytes()
+            format!(
+                "{:<16}{:<12}{:<6}{:<6}{:<8}{:<10}`\n",
+                name, 0, 0, 0, "100644", size
+            )
+            .into_bytes()
         };
         a.extend(hdr("debian-binary/", 4));
         a.extend_from_slice(b"2.0\n");
@@ -2056,7 +2465,12 @@ mod tests {
     fn bare_gz() {
         let d = tmpdir("gz");
         fs::write(d.join("file.txt.gz"), gzip_stored(b"payload")).unwrap();
-        extract(&d.join("file.txt.gz"), &d.join("out"), &ExtractOptions::default()).unwrap();
+        extract(
+            &d.join("file.txt.gz"),
+            &d.join("out"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
         assert_eq!(fs::read(d.join("out/file.txt")).unwrap(), b"payload");
 
         // Gzip with FNAME in header
@@ -2066,8 +2480,16 @@ mod tests {
         gz_fname.extend_from_slice(&crc32(b"hello").to_le_bytes());
         gz_fname.extend_from_slice(&(5u32).to_le_bytes());
         fs::write(d.join("single.gz"), &gz_fname).unwrap();
-        extract(&d.join("single.gz"), &d.join("out_fname"), &ExtractOptions::default()).unwrap();
-        assert_eq!(fs::read(d.join("out_fname/custom_name.txt")).unwrap(), b"hello");
+        extract(
+            &d.join("single.gz"),
+            &d.join("out_fname"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read(d.join("out_fname/custom_name.txt")).unwrap(),
+            b"hello"
+        );
     }
 
     #[test]
@@ -2084,7 +2506,12 @@ mod tests {
         tar_add(&mut t, "chardev_file", b'3', b"", 0o644, "");
         tar_end(&mut t);
         fs::write(d.join("special.tar"), &t).unwrap();
-        extract(&d.join("special.tar"), &d.join("out"), &ExtractOptions::default()).unwrap();
+        extract(
+            &d.join("special.tar"),
+            &d.join("out"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
         assert!(d.join("out/fifo_file").is_file());
         assert!(d.join("out/chardev_file").is_file());
         assert_eq!(fs::read(d.join("out/fifo_file")).unwrap().len(), 0);
@@ -2093,13 +2520,22 @@ mod tests {
 
     #[test]
     fn type_detection_and_errors() {
-        assert_eq!(detect_kind(Path::new("/a/b.tar.gz")).unwrap(), ArchiveKind::TarGz);
+        assert_eq!(
+            detect_kind(Path::new("/a/b.tar.gz")).unwrap(),
+            ArchiveKind::TarGz
+        );
         assert_eq!(detect_kind(Path::new("b.tgz")).unwrap(), ArchiveKind::TarGz);
         assert_eq!(detect_kind(Path::new("b.whl")).unwrap(), ArchiveKind::Zip);
         assert_eq!(detect_kind(Path::new("b.gz")).unwrap(), ArchiveKind::Gz);
         assert_eq!(detect_kind(Path::new("b.deb")).unwrap(), ArchiveKind::Ar);
-        assert_eq!(detect_kind(Path::new("b.tar.xz")).unwrap(), ArchiveKind::TarXz);
-        assert_eq!(detect_kind(Path::new("b.tzst")).unwrap(), ArchiveKind::TarZst);
+        assert_eq!(
+            detect_kind(Path::new("b.tar.xz")).unwrap(),
+            ArchiveKind::TarXz
+        );
+        assert_eq!(
+            detect_kind(Path::new("b.tzst")).unwrap(),
+            ArchiveKind::TarZst
+        );
         let e = detect_kind(Path::new("/x/foo.rar")).unwrap_err();
         assert!(e.starts_with("Expected a file with a .zip, .jar,"), "{}", e);
         assert!(e.ends_with(" or .7z suffix (got /x/foo.rar)"), "{}", e);
@@ -2116,12 +2552,18 @@ mod tests {
             let e = extract(&d.join(n), &d.join("o"), &ExtractOptions::default()).unwrap_err();
             assert!(e.starts_with("Expected a file with"), "{}: {}", n, e);
         }
-        let mut o = ExtractOptions::default();
-        o.archive_type = Some("tar.br".into());
+        let mut o = ExtractOptions {
+            archive_type: Some("tar.br".into()),
+            ..Default::default()
+        };
         fs::write(d.join("blob"), b"x").unwrap();
-        assert!(extract(&d.join("blob"), &d.join("o"), &o).unwrap_err().starts_with("No decompressor"));
+        assert!(extract(&d.join("blob"), &d.join("o"), &o)
+            .unwrap_err()
+            .starts_with("No decompressor"));
         o.archive_type = Some("bogus".into());
-        assert!(extract(&d.join("blob"), &d.join("o"), &o).unwrap_err().starts_with("No decompressor"));
+        assert!(extract(&d.join("blob"), &d.join("o"), &o)
+            .unwrap_err()
+            .starts_with("No decompressor"));
     }
 
     #[test]
@@ -2143,7 +2585,12 @@ mod tests {
         assert_eq!(decompressed, payload);
 
         fs::write(d.join("data.txt.bz2"), &bz2_data).unwrap();
-        extract(&d.join("data.txt.bz2"), &d.join("out_single"), &ExtractOptions::default()).unwrap();
+        extract(
+            &d.join("data.txt.bz2"),
+            &d.join("out_single"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
         assert_eq!(fs::read(d.join("out_single/data.txt")).unwrap(), payload);
     }
 
@@ -2153,7 +2600,8 @@ mod tests {
             return;
         }
         let d = tmpdir("xz-test");
-        let payload = b"hello xz compressed payload with some repetitive strings 123456789 123456789\n";
+        let payload =
+            b"hello xz compressed payload with some repetitive strings 123456789 123456789\n";
         let out = Command::new("sh")
             .arg("-c")
             .arg("printf 'hello xz compressed payload with some repetitive strings 123456789 123456789\\n' | xz -c")
@@ -2166,7 +2614,12 @@ mod tests {
         assert_eq!(decompressed, payload);
 
         fs::write(d.join("data.txt.xz"), &xz_data).unwrap();
-        extract(&d.join("data.txt.xz"), &d.join("out_single"), &ExtractOptions::default()).unwrap();
+        extract(
+            &d.join("data.txt.xz"),
+            &d.join("out_single"),
+            &ExtractOptions::default(),
+        )
+        .unwrap();
         assert_eq!(fs::read(d.join("out_single/data.txt")).unwrap(), payload);
     }
 
@@ -2189,7 +2642,12 @@ mod tests {
             assert_eq!(decompressed, payload);
 
             fs::write(d.join("data.txt.zst"), &zst_data).unwrap();
-            extract(&d.join("data.txt.zst"), &d.join("out_single"), &ExtractOptions::default()).unwrap();
+            extract(
+                &d.join("data.txt.zst"),
+                &d.join("out_single"),
+                &ExtractOptions::default(),
+            )
+            .unwrap();
             assert_eq!(fs::read(d.join("out_single/data.txt")).unwrap(), payload);
         }
     }
@@ -2212,7 +2670,10 @@ mod tests {
             .unwrap();
         if st.status.success() {
             extract(&archive_file, &d.join("out_7z"), &ExtractOptions::default()).unwrap();
-            assert_eq!(fs::read(d.join("out_7z/test.txt")).unwrap(), b"content inside 7z");
+            assert_eq!(
+                fs::read(d.join("out_7z/test.txt")).unwrap(),
+                b"content inside 7z"
+            );
         }
     }
 
@@ -2244,47 +2705,96 @@ mod tests {
 /// Name of a Bazel-style scratch directory (`temp<random digits>`) inside a repository directory.
 pub fn java_temp_dir_name() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
-    let n = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) as u64;
-    format!("temp{}", 1_000_000_000_000_000_000u64 + (n.wrapping_mul(6364136223846793005) % 8_000_000_000_000_000_000u64))
+    let n = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0) as u64;
+    format!(
+        "temp{}",
+        1_000_000_000_000_000_000u64
+            + (n.wrapping_mul(6364136223846793005) % 8_000_000_000_000_000_000u64)
+    )
 }
 
 /// Frames an extraction error the way Bazel reports a failed `ctx.download_and_extract` call made by
 /// `http.bzl:203:45` (`_http_archive_impl`): located traceback, `Error in download_and_extract: ...`
 /// and the `java.io.IOException: Error extracting <archive> to <dir>: <msg>` text.
-pub fn bazel_http_archive_extract_failure(output_base: &Path, canonical: &str, archive: &Path, err: &str) -> String {
+pub fn bazel_http_archive_extract_failure(
+    output_base: &Path,
+    canonical: &str,
+    archive: &Path,
+    err: &str,
+) -> String {
     let prefix = format!("{}: ", archive.display());
     let msg = err.strip_prefix(&prefix).unwrap_or(err);
-    let body = if msg.starts_with("Expected a file with a ") || msg.starts_with("No decompressor found for type ") {
+    let body = if msg.starts_with("Expected a file with a ")
+        || msg.starts_with("No decompressor found for type ")
+    {
         msg.to_string()
     } else {
-        let dir = archive.parent().map(|p| p.display().to_string()).unwrap_or_default();
-        format!("java.io.IOException: Error extracting {} to {}: {}", archive.display(), dir, java_message(msg))
+        let dir = archive
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default();
+        format!(
+            "java.io.IOException: Error extracting {} to {}: {}",
+            archive.display(),
+            dir,
+            java_message(msg)
+        )
     };
     frame_native_failure(output_base, canonical, "http_archive", &body)
 }
 
 /// Frames an error raised through `frames` of Bazel's repo `.bzl` files (`(file, line, column, function, source
 /// line)`, outermost first); `call` is the builtin named in the final `Error in <call>: <msg>` line.
-pub fn frame_repo_bzl_failure(output_base: &Path, canonical: &str, frames: &[(&str, u32, u32, &str, &str)], call: &str, msg: &str) -> String {
+pub fn frame_repo_bzl_failure(
+    output_base: &Path,
+    canonical: &str,
+    frames: &[(&str, u32, u32, &str, &str)],
+    call: &str,
+    msg: &str,
+) -> String {
     let base = output_base.join("external/bazel_tools/tools/build_defs/repo");
     let last = frames.last().expect("at least one frame");
     let mut tb = String::new();
     for (file, line, col, func, snippet) in frames {
-        tb.push_str(&format!("\tFile \"{}\", line {line}, column {col}, in {func}\n\t\t{snippet}\n", base.join(file).display()));
+        tb.push_str(&format!(
+            "\tFile \"{}\", line {line}, column {col}, in {func}\n\t\t{snippet}\n",
+            base.join(file).display()
+        ));
     }
-    let located = format!("{}:{}:{}: Traceback (most recent call last):\n{tb}Error in {call}: {msg}\n", base.join(last.0).display(), last.1, last.2);
+    let located = format!(
+        "{}:{}:{}: Traceback (most recent call last):\n{tb}Error in {call}: {msg}\n",
+        base.join(last.0).display(),
+        last.1,
+        last.2
+    );
     crate::fetch::frame_traceback_error(&located, canonical).unwrap_or_else(|| msg.to_string())
 }
 
 /// Frames a `fail(msg)` raised from `http.bzl` (frames are `(line, column, function, source line)`, outermost first).
-pub fn frame_http_fail(output_base: &Path, canonical: &str, frames: &[(u32, u32, &str, &str)], msg: &str) -> String {
-    let http = output_base.join("external/bazel_tools/tools/build_defs/repo/http.bzl").display().to_string();
+pub fn frame_http_fail(
+    output_base: &Path,
+    canonical: &str,
+    frames: &[(u32, u32, &str, &str)],
+    msg: &str,
+) -> String {
+    let http = output_base
+        .join("external/bazel_tools/tools/build_defs/repo/http.bzl")
+        .display()
+        .to_string();
     let last = frames.last().expect("at least one frame");
     let mut tb = String::new();
     for (line, col, func, snippet) in frames {
-        tb.push_str(&format!("\tFile \"{http}\", line {line}, column {col}, in {func}\n\t\t{snippet}\n"));
+        tb.push_str(&format!(
+            "\tFile \"{http}\", line {line}, column {col}, in {func}\n\t\t{snippet}\n"
+        ));
     }
-    let located = format!("{http}:{}:{}: Traceback (most recent call last):\n{tb}Error in fail: {msg}\n", last.0, last.1);
+    let located = format!(
+        "{http}:{}:{}: Traceback (most recent call last):\n{tb}Error in fail: {msg}\n",
+        last.0, last.1
+    );
     crate::fetch::frame_traceback_error(&located, canonical).unwrap_or_else(|| msg.to_string())
 }
 
@@ -2292,11 +2802,32 @@ pub fn frame_http_fail(output_base: &Path, canonical: &str, frames: &[(u32, u32,
 /// `http.bzl` implementation of `rule` (`http_archive`, `http_file` or `http_jar`) fails inside `ctx.download*`.
 pub fn frame_native_failure(output_base: &Path, canonical: &str, rule: &str, body: &str) -> String {
     let (line, col, func, snippet, call) = match rule {
-        "http_file" => (255, 33, "_http_file_impl", "download_info = ctx.download(", "download"),
-        "http_jar" => (292, 33, "_http_jar_impl", "download_info = ctx.download(", "download"),
-        _ => (203, 45, "_http_archive_impl", "download_info = ctx.download_and_extract(", "download_and_extract"),
+        "http_file" => (
+            255,
+            33,
+            "_http_file_impl",
+            "download_info = ctx.download(",
+            "download",
+        ),
+        "http_jar" => (
+            292,
+            33,
+            "_http_jar_impl",
+            "download_info = ctx.download(",
+            "download",
+        ),
+        _ => (
+            203,
+            45,
+            "_http_archive_impl",
+            "download_info = ctx.download_and_extract(",
+            "download_and_extract",
+        ),
     };
-    let http = output_base.join("external/bazel_tools/tools/build_defs/repo/http.bzl").display().to_string();
+    let http = output_base
+        .join("external/bazel_tools/tools/build_defs/repo/http.bzl")
+        .display()
+        .to_string();
     let located = format!(
         "{http}:{line}:{col}: Traceback (most recent call last):\n\tFile \"{http}\", line {line}, column {col}, in {func}\n\t\t{snippet}\nError in {call}: {body}\n"
     );
@@ -2309,30 +2840,72 @@ pub fn java_message(msg: &str) -> String {
     let exact: &[(&str, &str)] = &[
         // gzip (commons-compress GzipCompressorInputStream)
         ("Not in gzip format", "Input is not in the .gz format"),
-        ("Invalid gzip header: reserved flags set", "Reserved flags are set in the .gz header"),
-        ("Gzip CRC32 mismatch", "Gzip-compressed data is corrupt (CRC32 error)"),
-        ("Gzip ISIZE mismatch", "Gzip-compressed data is corrupt(uncompressed size mismatch)"),
+        (
+            "Invalid gzip header: reserved flags set",
+            "Reserved flags are set in the .gz header",
+        ),
+        (
+            "Gzip CRC32 mismatch",
+            "Gzip-compressed data is corrupt (CRC32 error)",
+        ),
+        (
+            "Gzip ISIZE mismatch",
+            "Gzip-compressed data is corrupt(uncompressed size mismatch)",
+        ),
         ("Unexpected end of gzip header", NULL),
         ("Unexpected end of deflate stream", NULL),
         ("Unexpected end of gzip trailer", NULL),
         // bzip2
-        ("Not a bzip2 archive (missing BZh header)", "Stream is not in the BZip2 format"),
+        (
+            "Not a bzip2 archive (missing BZh header)",
+            "Stream is not in the BZip2 format",
+        ),
         ("Unexpected end of bzip2 stream", "Unexpected end of stream"),
-        ("Ran out of selectors during run", "Unexpected end of stream"),
-        ("Huffman length out of range (1..20)", "Corrupted input, zvec value negative"),
+        (
+            "Ran out of selectors during run",
+            "Unexpected end of stream",
+        ),
+        (
+            "Huffman length out of range (1..20)",
+            "Corrupted input, zvec value negative",
+        ),
         ("bzip2 stream CRC mismatch", "BZip2 CRC error"),
         // tar (commons-compress TarArchiveInputStream)
-        ("Bad tar header checksum: not a valid tar archive", "Corrupted TAR archive."),
+        (
+            "Bad tar header checksum: not a valid tar archive",
+            "Corrupted TAR archive.",
+        ),
         ("Unexpected end of tar archive", "Truncated TAR archive"),
         // xz (xz-java via XZCompressorInputStream)
-        ("Not an XZ archive (missing header magic)", "Input is not in the XZ format"),
-        ("XZ stream header CRC32 mismatch", "XZ Stream Header is corrupt"),
-        ("XZ block header CRC32 mismatch", "XZ Block Header is corrupt"),
-        ("XZ block CRC32 check failed", "Integrity check (CRC32) does not match"),
-        ("XZ block CRC64 check failed", "Integrity check (CRC64) does not match"),
-        ("XZ block SHA-256 check failed", "Integrity check (SHA-256) does not match"),
+        (
+            "Not an XZ archive (missing header magic)",
+            "Input is not in the XZ format",
+        ),
+        (
+            "XZ stream header CRC32 mismatch",
+            "XZ Stream Header is corrupt",
+        ),
+        (
+            "XZ block header CRC32 mismatch",
+            "XZ Block Header is corrupt",
+        ),
+        (
+            "XZ block CRC32 check failed",
+            "Integrity check (CRC32) does not match",
+        ),
+        (
+            "XZ block CRC64 check failed",
+            "Integrity check (CRC64) does not match",
+        ),
+        (
+            "XZ block SHA-256 check failed",
+            "Integrity check (SHA-256) does not match",
+        ),
         ("XZ stream header truncated", NULL),
-        ("XZ Stream Footer CRC32 mismatch", "XZ Stream Footer is corrupt"),
+        (
+            "XZ Stream Footer CRC32 mismatch",
+            "XZ Stream Footer is corrupt",
+        ),
         ("XZ bad Stream Footer magic", "XZ Stream Footer is corrupt"),
         ("XZ Stream Footer truncated", NULL),
         ("XZ index truncated", NULL),
@@ -2348,17 +2921,32 @@ pub fn java_message(msg: &str) -> String {
         ("XZ block truncated", NULL),
         ("XZ input is empty", NULL),
         ("LZMA2 data truncated", NULL),
-        ("LZMA2 data corrupt (chunk not fully consumed)", "Compressed data is corrupt"),
+        (
+            "LZMA2 data corrupt (chunk not fully consumed)",
+            "Compressed data is corrupt",
+        ),
         // zstd (zstd-jni)
-        ("Not a zstd archive (bad magic number)", "Unknown frame descriptor"),
+        (
+            "Not a zstd archive (bad magic number)",
+            "Unknown frame descriptor",
+        ),
         ("Zstd: unknown frame magic", "Unknown frame descriptor"),
         ("Zstd frame header truncated", "Truncated source"),
         ("Truncated block data", "Truncated source"),
-        ("Zstd frame header has reserved bit set", "Unsupported frame parameter"),
-        ("Zstd content checksum mismatch", "Restored data doesn't match checksum"),
+        (
+            "Zstd frame header has reserved bit set",
+            "Unsupported frame parameter",
+        ),
+        (
+            "Zstd content checksum mismatch",
+            "Restored data doesn't match checksum",
+        ),
         // 7z (commons-compress SevenZFile)
         ("not a 7z archive (bad magic)", "Bad 7z signature"),
-        ("7z start header CRC mismatch", "Checksum verification failed"),
+        (
+            "7z start header CRC mismatch",
+            "Checksum verification failed",
+        ),
         ("7z header CRC mismatch", "NextHeader CRC-32 mismatch"),
     ];
     for (k, v) in exact {
@@ -2387,7 +2975,10 @@ pub fn java_message(msg: &str) -> String {
     if msg.starts_with("LZMA ") || msg.starts_with("LZMA2 ") {
         return "Compressed data is corrupt".to_string();
     }
-    if msg.starts_with("Invalid zstd match offset") || msg.starts_with("Zstd Huffman") || msg.starts_with("Zstd sequence") {
+    if msg.starts_with("Invalid zstd match offset")
+        || msg.starts_with("Zstd Huffman")
+        || msg.starts_with("Zstd sequence")
+    {
         return "Data corruption detected".to_string();
     }
     msg.to_string()
@@ -2398,18 +2989,24 @@ mod corrupt_tests {
     use super::*;
 
     fn tmpdir(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("zel-corrupt-test-{}-{}", std::process::id(), name));
+        let p =
+            std::env::temp_dir().join(format!("zel-corrupt-test-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
     }
 
-
     #[test]
     fn java_error_texts_and_zip_eocd_rule() {
-        assert_eq!(java_message("Gzip CRC32 mismatch"), "Gzip-compressed data is corrupt (CRC32 error)");
+        assert_eq!(
+            java_message("Gzip CRC32 mismatch"),
+            "Gzip-compressed data is corrupt (CRC32 error)"
+        );
         assert_eq!(java_message("Unexpected end of deflate stream"), "null");
-        assert_eq!(java_message("Unsupported gzip compression method 12"), "Unsupported compression method 12 in the .gz header");
+        assert_eq!(
+            java_message("Unsupported gzip compression method 12"),
+            "Unsupported compression method 12 in the .gz header"
+        );
         let d = tmpdir("zip-tail");
         let mut z = minimal_zip();
         fs::write(d.join("a.zip"), &z).unwrap();
@@ -2417,7 +3014,10 @@ mod corrupt_tests {
         z.push(0);
         fs::write(d.join("b.zip"), &z).unwrap();
         let e = extract(&d.join("b.zip"), &d.join("o2"), &ExtractOptions::default()).unwrap_err();
-        assert!(e.contains("is malformed. It does not contain an end of central directory record."), "{e}");
+        assert!(
+            e.contains("is malformed. It does not contain an end of central directory record."),
+            "{e}"
+        );
         // 7z: too short for the start header -> Java's EOFException (message null)
         fs::write(d.join("c.7z"), b"7z\xbc\xaf\x27\x1c\0\x04\0\0\0\0").unwrap();
         let e = extract(&d.join("c.7z"), &d.join("o3"), &ExtractOptions::default()).unwrap_err();

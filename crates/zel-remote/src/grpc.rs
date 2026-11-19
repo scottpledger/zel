@@ -34,7 +34,10 @@ pub struct GrpcStatus {
 
 impl GrpcStatus {
     pub fn new(code: i32, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
+        Self {
+            code,
+            message: message.into(),
+        }
     }
 
     pub fn code_name(&self) -> &'static str {
@@ -127,6 +130,7 @@ impl MessageParser {
     }
 
     /// Pops the next complete message; `Err` for compressed messages (unsupported).
+    #[allow(clippy::should_implement_trait)]
     pub fn next(&mut self) -> Result<Option<Vec<u8>>, GrpcStatus> {
         if self.buf.len() < 5 {
             return Ok(None);
@@ -165,18 +169,20 @@ fn http_status_to_grpc(status: u32) -> i32 {
 
 fn h2_reset_to_grpc(c: u32) -> i32 {
     match c {
-        0 => code::INTERNAL, // NO_ERROR before trailers is a protocol error
-        7 => code::UNAVAILABLE,   // REFUSED_STREAM
-        8 => code::CANCELLED,     // CANCEL
+        0 => code::INTERNAL,            // NO_ERROR before trailers is a protocol error
+        7 => code::UNAVAILABLE,         // REFUSED_STREAM
+        8 => code::CANCELLED,           // CANCEL
         11 => code::RESOURCE_EXHAUSTED, // ENHANCE_YOUR_CALM
-        12 => code::PERMISSION_DENIED, // INADEQUATE_SECURITY
+        12 => code::PERMISSION_DENIED,  // INADEQUATE_SECURITY
         _ => code::INTERNAL,
     }
 }
 
 fn io_to_status(e: &std::io::Error) -> GrpcStatus {
     match e.kind() {
-        std::io::ErrorKind::TimedOut => GrpcStatus::new(code::DEADLINE_EXCEEDED, "deadline exceeded"),
+        std::io::ErrorKind::TimedOut => {
+            GrpcStatus::new(code::DEADLINE_EXCEEDED, "deadline exceeded")
+        }
         _ => GrpcStatus::new(code::UNAVAILABLE, format!("transport error: {e}")),
     }
 }
@@ -250,6 +256,17 @@ impl Channel {
         opts: &CallOptions,
         on_message: &mut dyn FnMut(Vec<u8>) -> Result<(), GrpcStatus>,
     ) -> Result<(), GrpcStatus> {
+        self.call_with_started(method, requests, opts, &mut || {}, on_message)
+    }
+
+    pub fn call_with_started(
+        &self,
+        method: &str,
+        requests: &mut dyn Iterator<Item = Vec<u8>>,
+        opts: &CallOptions,
+        on_started: &mut dyn FnMut(),
+        on_message: &mut dyn FnMut(Vec<u8>) -> Result<(), GrpcStatus>,
+    ) -> Result<(), GrpcStatus> {
         let deadline = opts.timeout.map(|t| Instant::now() + t);
         let conn = self.pick_conn()?;
         let mut headers: Vec<Header> = vec![
@@ -266,8 +283,14 @@ impl Channel {
             headers.push(("grpc-timeout".into(), format!("{}m", t.as_millis().max(1))));
         }
         headers.extend(self.default_metadata.iter().cloned());
-        headers.extend(opts.metadata.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())));
-        let stream = conn.open_stream(&headers, false).map_err(|e| io_to_status(&e))?;
+        headers.extend(
+            opts.metadata
+                .iter()
+                .map(|(k, v)| (k.to_ascii_lowercase(), v.clone())),
+        );
+        let stream = conn
+            .open_stream(&headers, false)
+            .map_err(|e| io_to_status(&e))?;
 
         let mut sent_end = false;
         let mut pending = requests.next();
@@ -276,29 +299,39 @@ impl Channel {
             pending = requests.next();
             let last = pending.is_none();
             let remaining = deadline.map(|d| d.saturating_duration_since(Instant::now()));
-            if stream.send_data(&frame_message(&msg), last, remaining).is_err() {
+            if stream
+                .send_data(&frame_message(&msg), last, remaining)
+                .is_err()
+            {
                 send_failed = true;
                 break;
             }
             sent_end = last;
         }
-        if !send_failed && !sent_end {
-            if stream.send_data(&[], true, None).is_err() {
-                send_failed = true;
-            }
+        if !send_failed && !sent_end && stream.send_data(&[], true, None).is_err() {
+            send_failed = true;
         }
         let _ = send_failed; // the response (or its absence) carries the real error
+        on_started();
 
         read_response(&stream, deadline, on_message)
     }
 
     /// Unary call.
-    pub fn unary(&self, method: &str, request: &[u8], opts: &CallOptions) -> Result<Vec<u8>, GrpcStatus> {
+    pub fn unary(
+        &self,
+        method: &str,
+        request: &[u8],
+        opts: &CallOptions,
+    ) -> Result<Vec<u8>, GrpcStatus> {
         let mut out: Option<Vec<u8>> = None;
         let mut reqs = std::iter::once(request.to_vec());
         self.call(method, &mut reqs, opts, &mut |m| {
             if out.is_some() {
-                return Err(GrpcStatus::new(code::INTERNAL, "multiple responses to unary call"));
+                return Err(GrpcStatus::new(
+                    code::INTERNAL,
+                    "multiple responses to unary call",
+                ));
             }
             out = Some(m);
             Ok(())
@@ -326,7 +359,9 @@ fn header<'a>(h: &'a [Header], name: &str) -> Option<&'a str> {
 fn status_from_trailers(h: &[Header]) -> Option<GrpcStatus> {
     let c = header(h, "grpc-status")?;
     let code = c.trim().parse::<i32>().unwrap_or(code::UNKNOWN);
-    let msg = header(h, "grpc-message").map(percent_decode).unwrap_or_default();
+    let msg = header(h, "grpc-message")
+        .map(percent_decode)
+        .unwrap_or_default();
     Some(GrpcStatus::new(code, msg))
 }
 
@@ -390,7 +425,10 @@ fn read_response(
             Event::End => {
                 stream.abandon_if_remote_done();
                 if !got_headers {
-                    return Err(GrpcStatus::new(code::UNAVAILABLE, "stream closed without headers"));
+                    return Err(GrpcStatus::new(
+                        code::UNAVAILABLE,
+                        "stream closed without headers",
+                    ));
                 }
                 if !parser.is_empty() {
                     return Err(GrpcStatus::new(code::INTERNAL, "truncated gRPC message"));
@@ -398,11 +436,17 @@ fn read_response(
                 return match final_status {
                     Some(s) if s.code == code::OK => Ok(()),
                     Some(s) => Err(s),
-                    None => Err(GrpcStatus::new(code::INTERNAL, "missing grpc-status trailer")),
+                    None => Err(GrpcStatus::new(
+                        code::INTERNAL,
+                        "missing grpc-status trailer",
+                    )),
                 };
             }
             Event::Reset(c) => {
-                return Err(GrpcStatus::new(h2_reset_to_grpc(c), format!("stream reset (HTTP/2 error {c})")));
+                return Err(GrpcStatus::new(
+                    h2_reset_to_grpc(c),
+                    format!("stream reset (HTTP/2 error {c})"),
+                ));
             }
         }
     }
@@ -505,7 +549,11 @@ mod tests {
 
     #[test]
     fn retry_policy_retries_only_retriable() {
-        let p = RetryPolicy { max_retries: 3, initial_delay: Duration::from_millis(1), ..Default::default() };
+        let p = RetryPolicy {
+            max_retries: 3,
+            initial_delay: Duration::from_millis(1),
+            ..Default::default()
+        };
         let mut n = 0;
         let r: Result<(), _> = p.run(|| {
             n += 1;
@@ -523,7 +571,11 @@ mod tests {
         let mut n = 0;
         let r = p.run(|| {
             n += 1;
-            if n < 3 { Err(GrpcStatus::new(code::ABORTED, "x")) } else { Ok(n) }
+            if n < 3 {
+                Err(GrpcStatus::new(code::ABORTED, "x"))
+            } else {
+                Ok(n)
+            }
         });
         assert_eq!(r.unwrap(), 3);
     }

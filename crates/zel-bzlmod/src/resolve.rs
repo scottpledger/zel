@@ -20,7 +20,10 @@ pub struct OrderedMap<K, V> {
 
 impl<K: std::hash::Hash + Eq + Clone, V> Default for OrderedMap<K, V> {
     fn default() -> Self {
-        Self { keys: vec![], map: HashMap::new() }
+        Self {
+            keys: vec![],
+            map: HashMap::new(),
+        }
     }
 }
 
@@ -75,7 +78,7 @@ impl CheckMode {
     }
 }
 
-/// Test hook: when set, the embedded `bazel_tools` module keeps no module-extension usages.
+// Test hook: when set, the embedded `bazel_tools` module keeps no module-extension usages.
 #[cfg(test)]
 thread_local! {
     /// Unit tests normally tolerate registries lacking `bazel_tools`' dependencies; set to test the strict (production) behaviour.
@@ -108,11 +111,18 @@ pub struct ResolveOptions {
     /// Repository cache root used to serve lockfile-recorded registry files offline.
     pub repository_cache: Option<PathBuf>,
     /// Fetches the repository described by an archive/git override so its MODULE.bazel can be read.
+    #[allow(clippy::type_complexity)]
     pub repo_fetcher: Option<Arc<dyn Fn(&str, &RepoSpec) -> Result<PathBuf, String> + Send + Sync>>,
+    pub credential_helpers: Vec<(String, PathBuf)>,
+    pub client_env: BTreeMap<String, String>,
 }
 
 pub fn default_bazel_version() -> String {
-    for var in ["BAZEL_DEV_VERSION_OVERRIDE", "ZEL_EMBED_LABEL", "BAZEL_EMBED_LABEL"] {
+    for var in [
+        "BAZEL_DEV_VERSION_OVERRIDE",
+        "ZEL_EMBED_LABEL",
+        "BAZEL_EMBED_LABEL",
+    ] {
         if let Ok(val) = std::env::var(var) {
             if !val.is_empty() {
                 return val;
@@ -142,6 +152,8 @@ impl ResolveOptions {
             module_mirrors: vec![],
             repository_cache: None,
             repo_fetcher: None,
+            credential_helpers: vec![],
+            client_env: BTreeMap::new(),
         }
     }
 }
@@ -205,7 +217,10 @@ impl std::fmt::Display for ResolveError {
 }
 
 fn re<T>(m: impl Into<String>) -> Result<T, ResolveError> {
-    Err(ResolveError { message: m.into(), warnings: vec![] })
+    Err(ResolveError {
+        message: m.into(),
+        warnings: vec![],
+    })
 }
 
 pub fn builtin_modules() -> Vec<String> {
@@ -231,12 +246,14 @@ pub fn root_module_file(workspace: &Path) -> PathBuf {
     workspace.join("MODULE.bazel")
 }
 
-impl<'a> Ctx<'a> {
+impl Ctx<'_> {
     fn registry_for(&mut self, url: &str) -> Result<&Registry, String> {
         if let Some(i) = self.local_registries.get(url) {
             return Ok(&self.registries[*i]);
         }
-        let mut r = Registry::new(url)?.with_mirrors(self.opts.module_mirrors.clone()).with_repo_cache(self.opts.repository_cache.clone());
+        let mut r = Registry::new(url)?
+            .with_mirrors(self.opts.module_mirrors.clone())
+            .with_repo_cache(self.opts.repository_cache.clone());
         if let Some(k) = &self.opts.known_hashes {
             r = r.with_known_hashes(k.clone(), self.opts.known_hashes_mode);
         }
@@ -269,8 +286,7 @@ impl<'a> Ctx<'a> {
                     );
                     let f = "{OUTPUT_BASE}/external/bazel_tools/tools/build_defs/repo/local.bzl";
                     return Err(format!(
-                        "ERROR: {f}:55:13: An error occurred during the fetch of repository '{}':\n   Traceback (most recent call last):\n\tFile \"{f}\", line 62, column 25, in _local_repository_impl\n\t\tpath = _get_dir_path(rctx)\n\tFile \"{f}\", line 55, column 13, in _get_dir_path\n\t\tfail(\nError in fail: {msg}\nERROR: Error computing the main repository mapping: error during computation of main repo mapping: {msg}",
-                        format!("{name}+")
+                        "ERROR: {f}:55:13: An error occurred during the fetch of repository '{name}+':\n   Traceback (most recent call last):\n\tFile \"{f}\", line 62, column 25, in _local_repository_impl\n\t\tpath = _get_dir_path(rctx)\n\tFile \"{f}\", line 55, column 13, in _get_dir_path\n\t\tfail(\nError in fail: {msg}\nERROR: Error computing the main repository mapping: error during computation of main repo mapping: {msg}"
                     ));
                 }
                 Ok(full)
@@ -289,7 +305,9 @@ impl<'a> Ctx<'a> {
     /// (rules_cc, rules_java, rules_python, protobuf, ...) make those repositories visible to
     /// `@bazel_tools` files.
     fn load_bazel_tools_module(&mut self, key: &ModuleKey) -> Result<InterimModule, String> {
-        let Some(content) = zel_bazel_tools::read("MODULE.bazel") else { return Ok(synthetic_module(key)) };
+        let Some(content) = zel_bazel_tools::read("MODULE.bazel") else {
+            return Ok(synthetic_module(key));
+        };
         let content = String::from_utf8_lossy(content).to_string();
         let opts = ModuleFileOptions {
             key: ModuleKey::new("bazel_tools".to_string(), Version::empty()),
@@ -329,7 +347,9 @@ impl<'a> Ctx<'a> {
             m.extension_usages.retain(|u| {
                 let b = u.bzl_file.trim_start_matches('@');
                 match b.split_once("//") {
-                    Some((repo, _)) if !repo.is_empty() && !repo.starts_with('@') => have.iter().any(|h| h == repo) || repo == "bazel_tools",
+                    Some((repo, _)) if !repo.is_empty() && !repo.starts_with('@') => {
+                        have.iter().any(|h| h == repo) || repo == "bazel_tools"
+                    }
                     _ => true,
                 }
             });
@@ -353,7 +373,11 @@ impl<'a> Ctx<'a> {
         if key.name == "bazel_tools" {
             return self.load_bazel_tools_module(key);
         }
-        let ov = self.root_overrides.iter().find(|(n, _)| *n == key.name).map(|(_, o)| o.clone());
+        let ov = self
+            .root_overrides
+            .iter()
+            .find(|(n, _)| *n == key.name)
+            .map(|(_, o)| o.clone());
         if let Some(ModuleOverride::NonRegistry(spec)) = &ov {
             if key.name == "bazel_tools" {
                 return Ok(synthetic_module(key));
@@ -364,14 +388,19 @@ impl<'a> Ctx<'a> {
                 Some(c) => c,
                 None => {
                     // The repository fetch of the override fails first when the directory is not a repo at all.
-                    let is_repo = ["MODULE.bazel", "REPO.bazel", "WORKSPACE", "WORKSPACE.bazel"].iter().any(|f| dir.join(f).exists());
+                    let is_repo = ["MODULE.bazel", "REPO.bazel", "WORKSPACE", "WORKSPACE.bazel"]
+                        .iter()
+                        .any(|f| dir.join(f).exists());
                     if !is_repo {
                         return Err(format!(
                             "fetching {n}+: java.io.IOException: No MODULE.bazel, REPO.bazel, or WORKSPACE file found in {{OUTPUT_BASE}}/external/{n}+",
                             n = key.name
                         ));
                     }
-                    return Err(format!("MODULE.bazel expected but not found at {}", mf.display()));
+                    return Err(format!(
+                        "MODULE.bazel expected but not found at {}",
+                        mf.display()
+                    ));
                 }
             };
             let dir2 = dir.clone();
@@ -383,14 +412,16 @@ impl<'a> Ctx<'a> {
                 file_name: mf.display().to_string(),
                 include_reader: Some(Arc::new(move |label: &str| {
                     let rel = label.trim_start_matches("//").replacen(':', "/", 1);
-                    std::fs::read_to_string(dir2.join(rel)).map_err(|e| format!("error reading '{label}': {e}"))
+                    std::fs::read_to_string(dir2.join(rel))
+                        .map_err(|e| format!("error reading '{label}': {e}"))
                 })),
                 builtin_modules: builtin_modules(),
             };
             return self.eval(content, opts, key);
         }
         let urls: Vec<String> = match &ov {
-            Some(ModuleOverride::SingleVersion { registry, .. }) | Some(ModuleOverride::MultipleVersion { registry, .. })
+            Some(ModuleOverride::SingleVersion { registry, .. })
+            | Some(ModuleOverride::MultipleVersion { registry, .. })
                 if !registry.is_empty() =>
             {
                 vec![registry.clone()]
@@ -428,22 +459,36 @@ impl<'a> Ctx<'a> {
             ignore_dev_deps: true,
             isolated_extension_usages: self.opts.isolated_extension_usages,
             registry_url: Some(reg_url.clone()),
-            file_name: format!("{reg_url}/modules/{}/{}/MODULE.bazel", key.name, key.version),
+            file_name: format!(
+                "{reg_url}/modules/{}/{}/MODULE.bazel",
+                key.name, key.version
+            ),
             include_reader: None,
             builtin_modules: builtin_modules(),
         };
         self.eval(content, opts, key)
     }
 
-    fn eval(&mut self, content: String, opts: ModuleFileOptions, key: &ModuleKey) -> Result<InterimModule, String> {
+    fn eval(
+        &mut self,
+        content: String,
+        opts: ModuleFileOptions,
+        key: &ModuleKey,
+    ) -> Result<InterimModule, String> {
         let r = eval_module_file(&content, opts)?;
         self.warnings.extend(r.warnings);
         let m = r.module;
         if m.name != key.name {
-            return Err(format!("the MODULE.bazel file of {key} declares a different name ({})", m.name));
+            return Err(format!(
+                "the MODULE.bazel file of {key} declares a different name ({})",
+                m.name
+            ));
         }
         if !key.version.is_empty() && m.version != key.version {
-            return Err(format!("the MODULE.bazel file of {key} declares a different version ({})", m.version));
+            return Err(format!(
+                "the MODULE.bazel file of {key} declares a different version ({})",
+                m.version
+            ));
         }
         Ok(m)
     }
@@ -478,9 +523,16 @@ fn chain_message(chain: &str, e: &str) -> String {
             if events.contains("An error occurred during the fetch of repository") {
                 return e.to_string();
             }
-            let trailer = trailer.strip_prefix("ERROR: ").unwrap_or(&trailer).to_string();
+            let trailer = trailer
+                .strip_prefix("ERROR: ")
+                .unwrap_or(&trailer)
+                .to_string();
             let tail = format!("in module dependency chain {chain}: {trailer}");
-            return if events.is_empty() { tail } else { format!("{events}\nERROR: {tail}") };
+            return if events.is_empty() {
+                tail
+            } else {
+                format!("{events}\nERROR: {tail}")
+            };
         }
         let t = lines[last].strip_prefix("ERROR: ").unwrap_or(lines[last]);
         return format!("in module dependency chain {chain}: {t}");
@@ -507,7 +559,11 @@ fn synthetic_module(key: &ModuleKey) -> InterimModule {
 }
 
 /// Reads the root module (applying `include`s) and returns it plus overrides.
-fn eval_root(opts: &ResolveOptions, ctx_warnings: &mut Vec<String>) -> Result<(InterimModule, Vec<(String, ModuleOverride)>, Vec<PathBuf>), String> {
+#[allow(clippy::type_complexity)]
+fn eval_root(
+    opts: &ResolveOptions,
+    ctx_warnings: &mut Vec<String>,
+) -> Result<(InterimModule, Vec<(String, ModuleOverride)>, Vec<PathBuf>), String> {
     let path = root_module_file(&opts.workspace_root);
     let mut paths = vec![path.clone()];
     let content = read_file(&path).unwrap_or_default();
@@ -529,7 +585,10 @@ fn eval_root(opts: &ResolveOptions, ctx_warnings: &mut Vec<String>) -> Result<(I
             };
             let p = ws.join(&rel);
             if let Some((pkg, _)) = stripped.split_once(':') {
-                if !pkg.is_empty() && !ws.join(pkg).join("BUILD.bazel").is_file() && !ws.join(pkg).join("BUILD").is_file() {
+                if !pkg.is_empty()
+                    && !ws.join(pkg).join("BUILD.bazel").is_file()
+                    && !ws.join(pkg).join("BUILD").is_file()
+                {
                     return Err(format!(
                         "\u{1}PKG:BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - {pkg}"
                     ));
@@ -537,7 +596,9 @@ fn eval_root(opts: &ResolveOptions, ctx_warnings: &mut Vec<String>) -> Result<(I
             }
             let base = rel.rsplit('/').next().unwrap_or("");
             if base.starts_with('.') {
-                return Err(format!("the name of the file to be included must not start with '.'"));
+                return Err(
+                    "the name of the file to be included must not start with '.'".to_string(),
+                );
             }
             if !p.is_file() {
                 return Err("not a regular file".to_string());
@@ -553,7 +614,11 @@ fn eval_root(opts: &ResolveOptions, ctx_warnings: &mut Vec<String>) -> Result<(I
     // Inject --inject_repository repos (dev-dependency innate local_repository usage).
     if !opts.inject_repositories.is_empty() {
         let ext = "@bazel_tools//tools/build_defs/repo:local.bzl local_repository".to_string();
-        let idx = r.module.extension_usages.iter().position(|u| u.is_innate() && u.extension_name == ext);
+        let idx = r
+            .module
+            .extension_usages
+            .iter()
+            .position(|u| u.is_innate() && u.extension_name == ext);
         let mut usage = match idx {
             Some(i) => r.module.extension_usages.remove(i),
             None => ExtensionUsage {
@@ -575,7 +640,10 @@ fn eval_root(opts: &ResolveOptions, ctx_warnings: &mut Vec<String>) -> Result<(I
         for (n, p) in &opts.inject_repositories {
             usage.tags.push(Tag {
                 tag_name: "repo".into(),
-                attrs: vec![("name".into(), AttrVal::Str(n.clone())), ("path".into(), AttrVal::Str(p.clone()))],
+                attrs: vec![
+                    ("name".into(), AttrVal::Str(n.clone())),
+                    ("path".into(), AttrVal::Str(p.clone())),
+                ],
                 dev_dependency: true,
                 location: "<builtin>".into(),
             });
@@ -587,31 +655,48 @@ fn eval_root(opts: &ResolveOptions, ctx_warnings: &mut Vec<String>) -> Result<(I
     let mut overrides = r.overrides;
     // Command-line overrides take precedence.
     for (name, path) in &opts.override_modules {
-        let spec = RepoSpec::new(LOCAL_BZL, "local_repository", vec![("path".into(), AttrVal::Str(path.clone()))]);
+        let spec = RepoSpec::new(
+            LOCAL_BZL,
+            "local_repository",
+            vec![("path".into(), AttrVal::Str(path.clone()))],
+        );
         overrides.retain(|(n, _)| n != name);
         overrides.push((name.clone(), ModuleOverride::NonRegistry(spec)));
     }
     for (name, path) in &opts.inject_modules {
-        if overrides.iter().any(|(n, _)| n == name) && opts.override_modules.iter().any(|(n, _)| n == name) {
+        if overrides.iter().any(|(n, _)| n == name)
+            && opts.override_modules.iter().any(|(n, _)| n == name)
+        {
             return Err(format!(
                 "module '{name}' is given to both --inject_module and --override_module; use --inject_module to add a new module, or --override_module to override a module that is already a dependency"
             ));
         }
         if *name == r.module.name {
-            return Err(format!("--inject_module cannot inject the root module '{name}'"));
+            return Err(format!(
+                "--inject_module cannot inject the root module '{name}'"
+            ));
         }
         if builtin_modules().contains(name) {
             return Err(format!("--inject_module cannot inject '{name}' as it is a built-in module; use --override_module to override it instead"));
         }
-        let spec = RepoSpec::new(LOCAL_BZL, "local_repository", vec![("path".into(), AttrVal::Str(path.clone()))]);
+        let spec = RepoSpec::new(
+            LOCAL_BZL,
+            "local_repository",
+            vec![("path".into(), AttrVal::Str(path.clone()))],
+        );
         overrides.retain(|(n, _)| n != name);
         overrides.push((name.clone(), ModuleOverride::NonRegistry(spec)));
-        r.module.nodep_deps.push(ModuleKey::new(name.clone(), Version::empty()));
+        r.module
+            .nodep_deps
+            .push(ModuleKey::new(name.clone(), Version::empty()));
     }
     // built-in modules override
     for b in builtin_modules() {
         if !overrides.iter().any(|(n, _)| *n == b) {
-            overrides.push((b.clone(), ModuleOverride::NonRegistry(RepoSpec::new(LOCAL_BZL, "local_repository", vec![]))));
+            overrides.push((
+                b.clone(),
+                ModuleOverride::NonRegistry(RepoSpec::new(LOCAL_BZL, "local_repository", vec![])),
+            ));
         }
     }
     // Validation from computeForRootModule.
@@ -633,7 +718,11 @@ fn eval_root(opts: &ResolveOptions, ctx_warnings: &mut Vec<String>) -> Result<(I
     }
     for (n, o) in &overrides {
         if let ModuleOverride::SingleVersion { version, .. } = o {
-            if let Some(dep) = module.dep(n).or(module.deps.iter().map(|(_, k)| k).find(|k| k.name == *n)) {
+            if let Some(dep) =
+                module
+                    .dep(n)
+                    .or(module.deps.iter().map(|(_, k)| k).find(|k| k.name == *n))
+            {
                 if !dep.version.is_empty() && *version < dep.version {
                     return Err(format!(
                         "module '{n}' is overridden to use version '{version}', which is lower than the version '{}' requested by the root module",
@@ -649,13 +738,19 @@ fn eval_root(opts: &ResolveOptions, ctx_warnings: &mut Vec<String>) -> Result<(I
     Ok((module, overrides, paths))
 }
 
-fn apply_overrides(root_name: &str, overrides: &[(String, ModuleOverride)], k: &ModuleKey) -> ModuleKey {
+fn apply_overrides(
+    root_name: &str,
+    overrides: &[(String, ModuleOverride)],
+    k: &ModuleKey,
+) -> ModuleKey {
     if root_name == k.name {
         return ModuleKey::root();
     }
     let v = match overrides.iter().find(|(n, _)| *n == k.name).map(|(_, o)| o) {
         Some(ModuleOverride::NonRegistry(_)) => Version::empty(),
-        Some(ModuleOverride::SingleVersion { version, .. }) if !version.is_empty() => version.clone(),
+        Some(ModuleOverride::SingleVersion { version, .. }) if !version.is_empty() => {
+            version.clone()
+        }
         _ => k.version.clone(),
     };
     ModuleKey::new(k.name.clone(), v)
@@ -710,7 +805,10 @@ fn discover(ctx: &mut Ctx, root: &InterimModule) -> Result<Discovered, ResolveEr
                         || e.contains("MODULE.bazel expected but not found at")
                         || e.contains("No MODULE.bazel, REPO.bazel, or WORKSPACE file found in")
                     {
-                        return ResolveError { message: e, warnings: vec![] };
+                        return ResolveError {
+                            message: e,
+                            warnings: vec![],
+                        };
                     }
                     let mut chain = vec![dk.clone()];
                     let mut p = dk.clone();
@@ -719,10 +817,20 @@ fn discover(ctx: &mut Ctx, root: &InterimModule) -> Result<Discovered, ResolveEr
                         p = pp.clone();
                     }
                     chain.reverse();
-                    let chain_s = chain.iter().map(|c| c.to_string()).collect::<Vec<_>>().join(" -> ");
-                    ResolveError { message: chain_message(&chain_s, &e), warnings: vec![] }
+                    let chain_s = chain
+                        .iter()
+                        .map(|c| c.to_string())
+                        .collect::<Vec<_>>()
+                        .join(" -> ");
+                    ResolveError {
+                        message: chain_message(&chain_s, &e),
+                        warnings: vec![],
+                    }
                 })?;
-                graph.insert(dk.clone(), m.with_deps_transformed(&|k| apply_overrides(&rn, &ovs, k)));
+                graph.insert(
+                    dk.clone(),
+                    m.with_deps_transformed(&|k| apply_overrides(&rn, &ovs, k)),
+                );
             }
             horizon = next;
         }
@@ -744,7 +852,10 @@ fn discover(ctx: &mut Ctx, root: &InterimModule) -> Result<Discovered, ResolveEr
     }
 }
 
-fn check_injected(graph: &OrderedMap<ModuleKey, InterimModule>, injected: &[(String, String)]) -> Result<(), ResolveError> {
+fn check_injected(
+    graph: &OrderedMap<ModuleKey, InterimModule>,
+    injected: &[(String, String)],
+) -> Result<(), ResolveError> {
     if injected.is_empty() {
         return Ok(());
     }
@@ -769,7 +880,10 @@ struct Selected {
     unpruned: OrderedMap<ModuleKey, InterimModule>,
 }
 
-fn select(graph: &OrderedMap<ModuleKey, InterimModule>, overrides: &[(String, ModuleOverride)]) -> Result<Selected, ResolveError> {
+fn select(
+    graph: &OrderedMap<ModuleKey, InterimModule>,
+    overrides: &[(String, ModuleOverride)],
+) -> Result<Selected, ResolveError> {
     // allowed version sets
     let mut by_name: HashMap<&str, HashSet<&Version>> = HashMap::new();
     for k in &graph.keys {
@@ -792,7 +906,11 @@ fn select(graph: &OrderedMap<ModuleKey, InterimModule>, overrides: &[(String, Mo
         let mut target = Version::empty();
         if let Some(set) = allowed.get(name) {
             // ceiling(version): smallest allowed >= version
-            target = set.range(version.clone()..).next().cloned().unwrap_or_else(Version::empty);
+            target = set
+                .range(version.clone()..)
+                .next()
+                .cloned()
+                .unwrap_or_else(Version::empty);
         }
         (name.to_string(), target)
     };
@@ -806,7 +924,13 @@ fn select(graph: &OrderedMap<ModuleKey, InterimModule>, overrides: &[(String, Mo
     }
     let strategy = |k: &ModuleKey| -> ModuleKey {
         let g = group(&k.name, &k.version);
-        ModuleKey::new(k.name.clone(), selected.get(&g).cloned().unwrap_or_else(|| k.version.clone()))
+        ModuleKey::new(
+            k.name.clone(),
+            selected
+                .get(&g)
+                .cloned()
+                .unwrap_or_else(|| k.version.clone()),
+        )
     };
     let walk = |ignore_nodeps: bool| -> Result<OrderedMap<ModuleKey, InterimModule>, ResolveError> {
         let mut out = OrderedMap::new();
@@ -816,11 +940,15 @@ fn select(graph: &OrderedMap<ModuleKey, InterimModule>, overrides: &[(String, Mo
         known.insert(ModuleKey::root());
         while let Some((key, from)) = q.pop_front() {
             let Some(old) = graph.get(&key) else {
-                return re(format!("Module {key} unexpectedly missing from the dependency graph"));
+                return re(format!(
+                    "Module {key} unexpectedly missing from the dependency graph"
+                ));
             };
             let module = old.with_deps_transformed(&strategy);
             // visit
-            if let Some((_, ModuleOverride::MultipleVersion { versions, .. })) = overrides.iter().find(|(n, _)| *n == key.name) {
+            if let Some((_, ModuleOverride::MultipleVersion { versions, .. })) =
+                overrides.iter().find(|(n, _)| *n == key.name)
+            {
                 if group(&key.name, &key.version).1.is_empty() {
                     return re(format!(
                         "{} depends on {} which is not allowed by the multiple_version_override on {}, which allows only [{}]",
@@ -859,12 +987,18 @@ fn select(graph: &OrderedMap<ModuleKey, InterimModule>, overrides: &[(String, Mo
     for (k, m) in graph.iter() {
         unpruned.insert(k.clone(), m.with_deps_transformed(&strategy));
     }
-    Ok(Selected { resolved: pruned, unpruned })
+    Ok(Selected {
+        resolved: pruned,
+        unpruned,
+    })
 }
 
 fn bazel_version_satisfies(cur: &str, constraint: &str) -> bool {
     fn parse(v: &str) -> Vec<u64> {
-        v.split(|c: char| !c.is_ascii_digit()).filter(|x| !x.is_empty()).filter_map(|x| x.parse().ok()).collect()
+        v.split(|c: char| !c.is_ascii_digit())
+            .filter(|x| !x.is_empty())
+            .filter_map(|x| x.parse().ok())
+            .collect()
     }
     let cmp = |a: &[u64], b: &[u64]| {
         for (x, y) in a.iter().zip(b.iter()) {
@@ -902,17 +1036,30 @@ fn bazel_version_satisfies(cur: &str, constraint: &str) -> bool {
 
 fn is_allowed_yanked(opts: &ResolveOptions, key: &ModuleKey) -> bool {
     opts.allow_all_yanked
-        || opts.allowed_yanked.as_ref().is_some_and(|l| l.iter().any(|x| *x == key.to_string()))
+        || opts
+            .allowed_yanked
+            .as_ref()
+            .is_some_and(|l| l.iter().any(|x| *x == key.to_string()))
 }
 
 pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
+    let _auth_guard = crate::registry::push_auth_context(
+        opts.credential_helpers.clone(),
+        opts.client_env.clone(),
+    );
     let mut warnings = Vec::new();
-    let (root, overrides, root_paths) = eval_root(opts, &mut warnings).map_err(|m| ResolveError { message: m, warnings: warnings.clone() })?;
+    let (root, overrides, root_paths) =
+        eval_root(opts, &mut warnings).map_err(|m| ResolveError {
+            message: m,
+            warnings: warnings.clone(),
+        })?;
     for url in &opts.registries {
         // `ModuleFileFunction` strips trailing slashes from registry URLs.
         let url = url.trim_end_matches('/');
-        crate::registry::validate_registry_url(url)
-            .map_err(|e| ResolveError { message: format!("Invalid registry URL: {url}: {e}"), warnings: warnings.clone() })?;
+        crate::registry::validate_registry_url(url).map_err(|e| ResolveError {
+            message: format!("Invalid registry URL: {url}: {e}"),
+            warnings: warnings.clone(),
+        })?;
     }
     let mut ctx = Ctx {
         opts,
@@ -924,7 +1071,10 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
         root_module_file_paths: root_paths,
         local_registries: HashMap::new(),
     };
-    let fail = |ctx: &Ctx, e: ResolveError| ResolveError { message: e.message, warnings: ctx.warnings.clone() };
+    let fail = |ctx: &Ctx, e: ResolveError| ResolveError {
+        message: e.message,
+        warnings: ctx.warnings.clone(),
+    };
     let disc = discover(&mut ctx, &root).map_err(|e| fail(&ctx, e))?;
     // verify overrides on existent modules
     let existent: HashSet<&str> = disc.graph.values().map(|m| m.name.as_str()).collect();
@@ -936,21 +1086,37 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
     if !nonexistent.is_empty() {
         return Err(fail(
             &ctx,
-            ResolveError { message: format!("the root module specifies overrides on nonexistent module(s): {}", nonexistent.join(", ")), warnings: vec![] },
+            ResolveError {
+                message: format!(
+                    "the root module specifies overrides on nonexistent module(s): {}",
+                    nonexistent.join(", ")
+                ),
+                warnings: vec![],
+            },
         ));
     }
     let sel = select(&disc.graph, &overrides).map_err(|e| fail(&ctx, e))?;
 
-    // yanked versions
+    // yanked versions (`YankedVersionsFunction`: I/O and parse failures fail open with a warning).
     let mut selected_yanked = BTreeMap::new();
     for m in sel.resolved.values() {
         let Some(url) = &m.registry_url else { continue };
         let mut hashes = FileHashes::new();
-        let y = {
-            let reg = ctx.registry_for(url).map_err(|e| ResolveError { message: e, warnings: vec![] })?;
-            reg.yanked_versions(&m.name, &mut hashes).map_err(|e| fail(&ctx, ResolveError { message: e, warnings: vec![] }))?
+        let y = match ctx
+            .registry_for(url)
+            .and_then(|reg| reg.yanked_versions(&m.name, &mut hashes))
+        {
+            Ok(y) => y,
+            Err(e) => {
+                ctx.warnings.push(format!(
+                    "WARNING: Could not read metadata file for module {} from registry {url}: {e}",
+                    m.name
+                ));
+                None
+            }
         };
-        ctx.warnings.extend(crate::registry::take_registry_warnings());
+        ctx.warnings
+            .extend(crate::registry::take_registry_warnings());
         if let Some(info) = y.and_then(|y| y.get(&m.version).cloned()) {
             if is_allowed_yanked(opts, &m.key) {
                 selected_yanked.insert(m.key.clone(), info);
@@ -992,7 +1158,13 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
             }
         }
         if failure {
-            return Err(fail(&ctx, ResolveError { message: "Direct dependency check failed.".into(), warnings: vec![] }));
+            return Err(fail(
+                &ctx,
+                ResolveError {
+                    message: "Direct dependency check failed.".into(),
+                    warnings: vec![],
+                },
+            ));
         }
     }
     // bazel compatibility
@@ -1010,7 +1182,13 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
                         ctx.warnings.push(msg);
                     } else {
                         ctx.warnings.push(format!("ERROR: {msg}"));
-                        return Err(fail(&ctx, ResolveError { message: "Bazel compatibility check failed".into(), warnings: vec![] }));
+                        return Err(fail(
+                            &ctx,
+                            ResolveError {
+                                message: "Bazel compatibility check failed".into(),
+                                warnings: vec![],
+                            },
+                        ));
                     }
                 }
             }
@@ -1025,30 +1203,67 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
         if let Some(url) = &m.registry_url {
             let mut h = FileHashes::new();
             let s = {
-                let reg = ctx.registry_for(url).map_err(|e| ResolveError { message: e, warnings: vec![] })?;
-                reg.get_repo_spec(k, &module_hashes, &mut h).map_err(|e| fail(&ctx, ResolveError { message: e, warnings: vec![] }))?
+                let reg = ctx.registry_for(url).map_err(|e| ResolveError {
+                    message: e,
+                    warnings: vec![],
+                })?;
+                reg.get_repo_spec(k, &module_hashes, &mut h).map_err(|e| {
+                    fail(
+                        &ctx,
+                        ResolveError {
+                            message: e,
+                            warnings: vec![],
+                        },
+                    )
+                })?
             };
             for (a, b) in h {
                 ctx.hashes.insert(a, b);
             }
             spec = Some(s);
-        } else if let Some((_, ModuleOverride::NonRegistry(s))) = overrides.iter().find(|(n, _)| *n == k.name) {
+        } else if let Some((_, ModuleOverride::NonRegistry(s))) =
+            overrides.iter().find(|(n, _)| *n == k.name)
+        {
             if k.name != "bazel_tools" {
                 spec = Some(s.clone());
             }
         }
         // maybeAppendAdditionalPatches
-        if let Some((_, ModuleOverride::SingleVersion { patches, patch_cmds, patch_strip, .. })) =
-            overrides.iter().find(|(n, _)| *n == k.name)
+        if let Some((
+            _,
+            ModuleOverride::SingleVersion {
+                patches,
+                patch_cmds,
+                patch_strip,
+                ..
+            },
+        )) = overrides.iter().find(|(n, _)| *n == k.name)
         {
-            if (!patches.is_empty() || !patch_cmds.is_empty() || *patch_strip != 0) && spec.is_some() {
+            if (!patches.is_empty() || !patch_cmds.is_empty() || *patch_strip != 0)
+                && spec.is_some()
+            {
                 let s = spec.as_mut().unwrap();
-                s.set_attr("patches", AttrVal::List(patches.iter().map(|p| AttrVal::Str(p.clone())).collect()));
-                s.set_attr("patch_cmds", AttrVal::List(patch_cmds.iter().map(|p| AttrVal::Str(p.clone())).collect()));
-                s.set_attr("patch_args", AttrVal::List(vec![AttrVal::Str(format!("-p{patch_strip}"))]));
+                s.set_attr(
+                    "patches",
+                    AttrVal::List(patches.iter().map(|p| AttrVal::Str(p.clone())).collect()),
+                );
+                s.set_attr(
+                    "patch_cmds",
+                    AttrVal::List(patch_cmds.iter().map(|p| AttrVal::Str(p.clone())).collect()),
+                );
+                s.set_attr(
+                    "patch_args",
+                    AttrVal::List(vec![AttrVal::Str(format!("-p{patch_strip}"))]),
+                );
             }
         }
-        dep_graph.insert(k.clone(), Module { interim: m.clone(), repo_spec: spec });
+        dep_graph.insert(
+            k.clone(),
+            Module {
+                interim: m.clone(),
+                repo_spec: spec,
+            },
+        );
     }
 
     // Canonical repo names.
@@ -1058,27 +1273,72 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
     }
     let mut canonical = OrderedMap::new();
     for k in &dep_graph.keys {
-        canonical.insert(k.canonical_repo_name(name_counts[k.name.as_str()] > 1), k.clone());
+        canonical.insert(
+            k.canonical_repo_name(name_counts[k.name.as_str()] > 1),
+            k.clone(),
+        );
     }
-    let key_to_canonical: HashMap<ModuleKey, String> = canonical.iter().map(|(c, k)| (k.clone(), c.clone())).collect();
+    let key_to_canonical: HashMap<ModuleKey, String> = canonical
+        .iter()
+        .map(|(c, k)| (k.clone(), c.clone()))
+        .collect();
+
+    // `InterimModule` additional patches: Starlark list of labels parsed as main-repo labels.
+    let (root_deps_mapping, root_owner) = dep_graph
+        .get(&ModuleKey::root())
+        .map(|rm| module_repo_mapping_bazel_deps_only(rm, &key_to_canonical))
+        .unwrap_or_default();
+    for (k, m) in dep_graph.map.iter_mut() {
+        if let Some((_, ModuleOverride::SingleVersion { patches, .. })) =
+            overrides.iter().find(|(n, _)| *n == k.name)
+        {
+            if !patches.is_empty() {
+                if let Some(s) = m.repo_spec.as_mut() {
+                    let parsed_patches = patches
+                        .iter()
+                        .map(|p| {
+                            let norm = if p.starts_with('@')
+                                || p.starts_with("//")
+                                || p.starts_with(':')
+                            {
+                                p.clone()
+                            } else {
+                                format!(":{p}")
+                            };
+                            let lbl = convert_label(&norm, &root_deps_mapping, &root_owner)
+                                .unwrap_or_else(|_| p.clone());
+                            AttrVal::Label(lbl)
+                        })
+                        .collect();
+                    s.set_attr("patches", AttrVal::List(parsed_patches));
+                }
+            }
+        }
+    }
 
     // Extension usages & unique names.
     let mut usages: Vec<(ExtensionId, ModuleKey, ExtensionUsage)> = Vec::new();
     for m in dep_graph.values() {
-        let mapping = module_repo_mapping_bazel_deps_only(m, &key_to_canonical);
+        let (mapping, owner) = module_repo_mapping_bazel_deps_only(m, &key_to_canonical);
         for u in &m.extension_usages {
             let bzl_file = if u.is_innate() {
                 // Innate extension: fabricated, lives in the using module's repo.
-                let own = mapping.get(&m.repo_name).cloned().unwrap_or_default();
-                format!("@@{own}//:MODULE.bazel")
+                format!("@@{owner}//:MODULE.bazel")
             } else {
-                convert_label(&u.bzl_file, &mapping).map_err(|e| ResolveError {
-                    message: format!("invalid label for module extension found at {}: {e}", u.proxies[0].location),
+                convert_label(&u.bzl_file, &mapping, &owner).map_err(|e| ResolveError {
+                    message: format!(
+                        "invalid label for module extension found at {}: {e}",
+                        u.proxies[0].location
+                    ),
                     warnings: vec![],
                 })?
             };
             usages.push((
-                ExtensionId { bzl_file, name: u.extension_name.clone(), isolation_key: u.isolation_key.clone() },
+                ExtensionId {
+                    bzl_file,
+                    name: u.extension_name.clone(),
+                    isolation_key: u.isolation_key.clone(),
+                },
                 m.key.clone(),
                 u.clone(),
             ));
@@ -1131,7 +1391,9 @@ pub fn resolve(opts: &ResolveOptions) -> Result<Resolution, ResolveError> {
         if mk.is_root() {
             for (exported, ov) in &u.repo_overrides {
                 if let Some(c) = root_mapping.get(&ov.overriding_repo_name) {
-                    ro.entry(id.clone()).or_default().insert(exported.clone(), c.clone());
+                    ro.entry(id.clone())
+                        .or_default()
+                        .insert(exported.clone(), c.clone());
                 }
             }
         }
@@ -1145,57 +1407,94 @@ fn canonicalize_pattern(p: &str, owner: &str, mapping: &BTreeMap<String, String>
         return format!("@@{r}");
     }
     if let Some(r) = p.strip_prefix('@') {
-        let (repo, rest) = r.split_once("//").map(|(a, b)| (a, format!("//{b}"))).unwrap_or((r, String::new()));
-        let canon = mapping.get(repo).cloned().unwrap_or_else(|| repo.to_string());
+        let (repo, rest) = r
+            .split_once("//")
+            .map(|(a, b)| (a, format!("//{b}")))
+            .unwrap_or((r, String::new()));
+        let canon = mapping
+            .get(repo)
+            .cloned()
+            .unwrap_or_else(|| repo.to_string());
         return format!("@@{canon}{rest}");
     }
     format!("@@{owner}{p}")
 }
 
 fn unique_name_candidate(id: &ExtensionId, attempt: usize) -> String {
-    let disamb = if attempt == 1 { String::new() } else { attempt.to_string() };
-    let ext_name = if id.is_innate() { id.name[id.name.find(' ').unwrap() + 1..].to_string() } else { id.name.clone() };
+    let disamb = if attempt == 1 {
+        String::new()
+    } else {
+        attempt.to_string()
+    };
+    let ext_name = if id.is_innate() {
+        id.name[id.name.find(' ').unwrap() + 1..].to_string()
+    } else {
+        id.name.clone()
+    };
     let repo = id.bzl_repo();
     match &id.isolation_key {
-        Some((mk, usage)) => format!("{repo}+_{ext_name}{disamb}+{}+{}+{usage}", mk.name, mk.version),
+        Some((mk, usage)) => format!(
+            "{repo}+_{ext_name}{disamb}+{}+{}+{usage}",
+            mk.name, mk.version
+        ),
         None => format!("{repo}+{ext_name}{disamb}"),
     }
 }
 
-/// `Module.getRepoMappingWithBazelDepsOnly` as a plain map (apparent -> canonical).
-fn module_repo_mapping_bazel_deps_only(m: &Module, canon: &HashMap<ModuleKey, String>) -> HashMap<String, String> {
+/// `Module.getRepoMappingWithBazelDepsOnly` as `(apparent -> canonical, owner)`.
+fn module_repo_mapping_bazel_deps_only(
+    m: &Module,
+    canon: &HashMap<ModuleKey, String>,
+) -> (HashMap<String, String>, String) {
     let mut map = HashMap::new();
     if m.key.is_root() {
         map.insert(String::new(), String::new());
     }
     let owner = canon.get(&m.key).cloned().unwrap_or_default();
     if !m.repo_name.is_empty() {
-        map.insert(m.repo_name.clone(), owner);
+        map.insert(m.repo_name.clone(), owner.clone());
     }
     for (rn, dk) in &m.deps {
         if let Some(c) = canon.get(dk) {
             map.insert(rn.clone(), c.clone());
         }
     }
-    map
+    (map, owner)
 }
 
-/// Converts a normalized extension label (`@apparent//pkg:file.bzl` or `//pkg:file.bzl`) to the
-/// canonical `@@canonical//pkg:file.bzl` form relative to a module's mapping.
-fn convert_label(raw: &str, mapping: &HashMap<String, String>) -> Result<String, String> {
+/// Converts an extension or override label (`@apparent//pkg:file.bzl`, `//pkg:file.bzl`, or `:file.bzl`)
+/// to canonical `@@canonical//pkg:file.bzl` form relative to a module's mapping and owner repo.
+/// `//conditions` and `//visibility` without an `@` prefix always resolve in the main repo (`Label.ABSOLUTE_PACKAGE_NAMES`).
+fn convert_label(
+    raw: &str,
+    mapping: &HashMap<String, String>,
+    owner: &str,
+) -> Result<String, String> {
     if let Some(r) = raw.strip_prefix("@@") {
         return Ok(format!("@@{r}"));
     }
-    let (repo, rest) = if let Some(r) = raw.strip_prefix('@') {
+    if let Some(r) = raw.strip_prefix('@') {
         let (a, b) = r.split_once("//").unwrap_or((r, ""));
-        (a.to_string(), format!("//{b}"))
-    } else {
-        (String::new(), raw.to_string())
-    };
-    match mapping.get(&repo) {
-        Some(c) => Ok(format!("@@{c}{rest}")),
-        None => Err(format!("no repo visible as '@{repo}' here")),
+        return match mapping.get(a) {
+            Some(c) => Ok(format!("@@{c}//{b}")),
+            None => Err(format!("no repo visible as '@{a}' here")),
+        };
     }
+    let rest = if raw.starts_with("//") {
+        raw.to_string()
+    } else if let Some(t) = raw.strip_prefix(':') {
+        format!("//:{t}")
+    } else {
+        format!("//:{raw}")
+    };
+    let body = rest.trim_start_matches("//");
+    let pkg = body.split_once(':').map(|(p, _)| p).unwrap_or(body);
+    let target_repo = if pkg == "conditions" || pkg == "visibility" {
+        ""
+    } else {
+        owner
+    };
+    Ok(format!("@@{target_repo}{rest}"))
 }
 
 impl Resolution {
@@ -1217,7 +1516,13 @@ impl Resolution {
             flag_aliases: vec![],
         };
         let mut dg = OrderedMap::new();
-        dg.insert(ModuleKey::root(), Module { interim: root, repo_spec: None });
+        dg.insert(
+            ModuleKey::root(),
+            Module {
+                interim: root,
+                repo_spec: None,
+            },
+        );
         let mut names = OrderedMap::new();
         names.insert(String::new(), ModuleKey::root());
         Resolution {
@@ -1242,11 +1547,17 @@ impl Resolution {
     }
 
     pub fn canonical_name_of(&self, key: &ModuleKey) -> Option<&String> {
-        self.canonical_repo_names.iter().find(|(_, k)| *k == key).map(|(c, _)| c)
+        self.canonical_repo_names
+            .iter()
+            .find(|(_, k)| *k == key)
+            .map(|(c, _)| c)
     }
 
     fn key_to_canonical(&self) -> HashMap<ModuleKey, String> {
-        self.canonical_repo_names.iter().map(|(c, k)| (k.clone(), c.clone())).collect()
+        self.canonical_repo_names
+            .iter()
+            .map(|(c, k)| (k.clone(), c.clone()))
+            .collect()
     }
 
     /// Full repo mapping for a module: own name, deps, and repos imported from extensions
@@ -1265,12 +1576,16 @@ impl Resolution {
     }
 
     fn repo_mapping_impl(&self, key: &ModuleKey, with_overrides: bool) -> BTreeMap<String, String> {
-        self.repo_mapping_vec(key, with_overrides).into_iter().collect()
+        self.repo_mapping_vec(key, with_overrides)
+            .into_iter()
+            .collect()
     }
 
     fn repo_mapping_vec(&self, key: &ModuleKey, with_overrides: bool) -> Vec<(String, String)> {
         let canon = self.key_to_canonical();
-        let Some(m) = self.dep_graph.get(key) else { return vec![] };
+        let Some(m) = self.dep_graph.get(key) else {
+            return vec![];
+        };
         let mut out: Vec<(String, String)> = vec![];
         let put = |out: &mut Vec<(String, String)>, k: String, v: String| {
             if let Some(e) = out.iter_mut().find(|(x, _)| *x == k) {
@@ -1283,11 +1598,17 @@ impl Resolution {
             if mk != key {
                 continue;
             }
-            let Some(unique) = self.extension_unique_names.get(id) else { continue };
+            let Some(unique) = self.extension_unique_names.get(id) else {
+                continue;
+            };
             for (local, exported) in u.imports() {
                 let default = format!("{unique}+{exported}");
                 let target = if with_overrides {
-                    self.repo_overrides.get(id).and_then(|o| o.get(&exported)).cloned().unwrap_or(default)
+                    self.repo_overrides
+                        .get(id)
+                        .and_then(|o| o.get(&exported))
+                        .cloned()
+                        .unwrap_or(default)
                 } else {
                     default
                 };
@@ -1312,12 +1633,22 @@ impl Resolution {
     /// The canonical repo name for the repo `exported` generated by extension `id`.
     pub fn extension_repo_name(&self, id: &ExtensionId, exported: &str) -> Option<String> {
         let unique = self.extension_unique_names.get(id)?;
-        Some(self.repo_overrides.get(id).and_then(|o| o.get(exported)).cloned().unwrap_or_else(|| format!("{unique}+{exported}")))
+        Some(
+            self.repo_overrides
+                .get(id)
+                .and_then(|o| o.get(exported))
+                .cloned()
+                .unwrap_or_else(|| format!("{unique}+{exported}")),
+        )
     }
 
     /// All usages of an extension, by module (in dep graph order).
     pub fn usages_of(&self, id: &ExtensionId) -> Vec<(&ModuleKey, &ExtensionUsage)> {
-        self.extension_usages.iter().filter(|(i, _, _)| i == id).map(|(_, k, u)| (k, u)).collect()
+        self.extension_usages
+            .iter()
+            .filter(|(i, _, _)| i == id)
+            .map(|(_, k, u)| (k, u))
+            .collect()
     }
 
     pub fn extension_ids(&self) -> Vec<ExtensionId> {
@@ -1347,12 +1678,21 @@ impl Resolution {
     /// Later entries replace earlier ones with the same alias (insertion-ordered map).
     pub fn flag_aliases(&self) -> Vec<(String, String)> {
         const PY_FLAG_ALIASES: [(&str, &str); 2] = [
-            ("build_python_zip", "//python/config_settings:build_python_zip"),
-            ("incompatible_default_to_explicit_init_py", "//python/config_settings:incompatible_default_to_explicit_init_py"),
+            (
+                "build_python_zip",
+                "//python/config_settings:build_python_zip",
+            ),
+            (
+                "incompatible_default_to_explicit_init_py",
+                "//python/config_settings:incompatible_default_to_explicit_init_py",
+            ),
         ];
         const BAZEL_PY_FLAG_ALIASES: [(&str, &str); 2] = [
             ("python_path", "//python/config_settings:python_path"),
-            ("experimental_python_import_all_repositories", "//python/config_settings:experimental_python_import_all_repositories"),
+            (
+                "experimental_python_import_all_repositories",
+                "//python/config_settings:experimental_python_import_all_repositories",
+            ),
         ];
         let canon = self.key_to_canonical();
         let mut out: Vec<(String, String)> = vec![];
@@ -1367,7 +1707,11 @@ impl Resolution {
             let owner = canon.get(&m.key).cloned().unwrap_or_default();
             let mapping = self.repo_mapping(&m.key);
             for (k, v) in &m.flag_aliases {
-                put(&mut out, k.clone(), canonicalize_pattern(v, &owner, &mapping));
+                put(
+                    &mut out,
+                    k.clone(),
+                    canonicalize_pattern(v, &owner, &mapping),
+                );
             }
             if m.name != "rules_python" || !m.flag_aliases.is_empty() {
                 continue;
@@ -1406,7 +1750,7 @@ mod tests {
 
     fn reg(name: &str) -> (PathBuf, String) {
         let d = tmpdir(name);
-        let url = format!("file://{}", d.display());
+        let url = crate::file_url_for_path(&d);
         (d, url)
     }
 
@@ -1417,7 +1761,13 @@ mod tests {
     }
 
     fn add(reg: &Path, name: &str, ver: &str, body: &str) {
-        add_module(reg, name, ver, &format!("module(name='{name}', version='{ver}')\n{body}"), r#"{"type":"local_path","path":"/nonexistent"}"#);
+        add_module(
+            reg,
+            name,
+            ver,
+            &format!("module(name='{name}', version='{ver}')\n{body}"),
+            r#"{"type":"local_path","path":"/nonexistent"}"#,
+        );
     }
 
     #[test]
@@ -1438,7 +1788,11 @@ mod tests {
         assert_eq!(res.repo_mapping(&ModuleKey::root()).get("c").unwrap(), "c+");
         assert_eq!(res.repo_mapping(&ModuleKey::root()).get("").unwrap(), "");
         // unpruned/discovered graphs retain c@1.0
-        assert!(res.discovered_graph.keys.iter().any(|k| k.name == "c" && k.version.to_string() == "1.0"));
+        assert!(res
+            .discovered_graph
+            .keys
+            .iter()
+            .any(|k| k.name == "c" && k.version.to_string() == "1.0"));
     }
 
     #[test]
@@ -1453,10 +1807,15 @@ mod tests {
         o.check_direct_dependencies = CheckMode::Error;
         let e = resolve(&o).err().unwrap();
         assert!(e.message.contains("Direct dependency check failed"));
-        assert!(e.warnings.iter().any(|w| w.contains("For repository 'c', the root module requires module version c@1.0, but got c@2.0")));
+        assert!(e.warnings.iter().any(|w| w.contains(
+            "For repository 'c', the root module requires module version c@1.0, but got c@2.0"
+        )));
         o.check_direct_dependencies = CheckMode::Warning;
         let res = resolve(&o).unwrap();
-        assert!(res.warnings.iter().any(|w| w.contains("For repository 'c'")));
+        assert!(res
+            .warnings
+            .iter()
+            .any(|w| w.contains("For repository 'c'")));
     }
 
     #[test]
@@ -1469,7 +1828,12 @@ mod tests {
         let ws = tmpdir("ws3");
         write(&ws, "MODULE.bazel", "module(name='root')\nbazel_dep(name='a', version='1.0')\nbazel_dep(name='b', version='1.0')\nmultiple_version_override(module_name='c', versions=['1.0','2.0'])\n");
         let res = resolve(&opts(&ws, &url)).unwrap_or_else(|e| panic!("{e}"));
-        let cs: Vec<_> = res.dep_graph.keys.iter().filter(|k| k.name == "c").collect();
+        let cs: Vec<_> = res
+            .dep_graph
+            .keys
+            .iter()
+            .filter(|k| k.name == "c")
+            .collect();
         assert_eq!(cs.len(), 2);
         assert!(res.canonical_repo_names.contains_key(&"c+1.0".to_string()));
         assert!(res.canonical_repo_names.contains_key(&"c+2.0".to_string()));
@@ -1482,7 +1846,11 @@ mod tests {
         add(&r, "a", "1.5", "");
         add(&r, "loc", "1.0", "");
         let ws = tmpdir("ws4");
-        write(&ws, "local_loc/MODULE.bazel", "module(name='loc', version='9.9')\nbazel_dep(name='a', version='1.5')\n");
+        write(
+            &ws,
+            "local_loc/MODULE.bazel",
+            "module(name='loc', version='9.9')\nbazel_dep(name='a', version='1.5')\n",
+        );
         write(&ws, "MODULE.bazel", "module(name='root')\nbazel_dep(name='a', version='1.0')\nbazel_dep(name='loc', version='1.0')\nsingle_version_override(module_name='a', version='1.5')\nlocal_path_override(module_name='loc', path='local_loc')\n");
         let mut o = opts(&ws, &url);
         o.check_direct_dependencies = CheckMode::Off;
@@ -1491,26 +1859,57 @@ mod tests {
         assert_eq!(a.version.to_string(), "1.5");
         let loc = res.dep_graph.keys.iter().find(|k| k.name == "loc").unwrap();
         assert!(loc.version.is_empty());
-        assert_eq!(res.dep_graph.get(loc).unwrap().repo_spec.as_ref().unwrap().rule_name, "local_repository");
+        assert_eq!(
+            res.dep_graph
+                .get(loc)
+                .unwrap()
+                .repo_spec
+                .as_ref()
+                .unwrap()
+                .rule_name,
+            "local_repository"
+        );
     }
 
     #[test]
     fn missing_module_and_yanked() {
         let (r, url) = reg("res5");
         add(&r, "a", "1.0", "");
-        write(&r, "modules/a/metadata.json", r#"{"yanked_versions":{"1.0":"CVE-1234"}}"#);
+        write(
+            &r,
+            "modules/a/metadata.json",
+            r#"{"yanked_versions":{"1.0":"CVE-1234"}}"#,
+        );
         let ws = tmpdir("ws5");
-        write(&ws, "MODULE.bazel", "module(name='root')\nbazel_dep(name='a', version='1.0')\n");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name='a', version='1.0')\n",
+        );
         let e = resolve(&opts(&ws, &url)).err().unwrap();
         assert!(e.message.contains("Yanked version detected in your resolved dependency graph: a@1.0, for the reason: CVE-1234."), "{}", e.message);
         let mut o = opts(&ws, &url);
         o.allowed_yanked = Some(vec!["a@1.0".into()]);
         let res = resolve(&o).unwrap();
         assert_eq!(res.selected_yanked_versions.len(), 1);
-        write(&ws, "MODULE.bazel", "module(name='root')\nbazel_dep(name='nope', version='1.0')\n");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name='nope', version='1.0')\n",
+        );
         let e = resolve(&opts(&ws, &url)).err().unwrap();
-        assert!(e.message.contains("module nope@1.0 not found in registries"), "{}", e.message);
-        assert!(e.message.contains("in module dependency chain <root> -> nope@1.0"), "{}", e.message);
+        assert!(
+            e.message
+                .contains("module nope@1.0 not found in registries"),
+            "{}",
+            e.message
+        );
+        assert!(
+            e.message
+                .contains("in module dependency chain <root> -> nope@1.0"),
+            "{}",
+            e.message
+        );
     }
 
     #[test]
@@ -1522,17 +1921,20 @@ mod tests {
         let mut o = opts(&ws, &url);
         o.check_direct_dependencies = CheckMode::Off;
         let res = resolve(&o).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(res.registered_toolchains(), vec![
-            "@@//:mine",
-            "@@a+//:t",
-            "@@a+//tc:all",
-            "@@a+//other:x",
-            // bazel_tools' own registrations (MODULE.tools).
-            "@@bazel_tools//tools/launcher:all",
-            "@@bazel_tools//tools/test:all",
-            "@@bazel_tools+winsdk_configure+local_config_winsdk//:all",
-            "@@bazel_tools//tools/res:empty_rc_toolchain",
-        ]);
+        assert_eq!(
+            res.registered_toolchains(),
+            vec![
+                "@@//:mine",
+                "@@a+//:t",
+                "@@a+//tc:all",
+                "@@a+//other:x",
+                // bazel_tools' own registrations (MODULE.tools).
+                "@@bazel_tools//tools/launcher:all",
+                "@@bazel_tools//tools/test:all",
+                "@@bazel_tools+winsdk_configure+local_config_winsdk//:all",
+                "@@bazel_tools//tools/res:empty_rc_toolchain",
+            ]
+        );
         assert_eq!(res.registered_execution_platforms(), vec!["@@a+//p:plat"]);
     }
 
@@ -1547,10 +1949,131 @@ mod tests {
         let mut o = opts(&ws, &url);
         o.check_direct_dependencies = CheckMode::Off;
         let res = resolve(&o).unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(res.dep_graph.keys.iter().find(|k| k.name == "a").unwrap().version.to_string(), "1.0");
+        assert_eq!(
+            res.dep_graph
+                .keys
+                .iter()
+                .find(|k| k.name == "a")
+                .unwrap()
+                .version
+                .to_string(),
+            "1.0"
+        );
         let id = &res.extension_ids()[0];
         assert!(id.bzl_file.starts_with("@@b+//"), "{}", id.bzl_file);
         assert_eq!(res.extension_unique_names.get(id).unwrap(), "b++myext");
-        assert_eq!(res.repo_mapping(&ModuleKey::root()).get("hub").unwrap(), "b++myext+hub");
+        assert_eq!(
+            res.repo_mapping(&ModuleKey::root()).get("hub").unwrap(),
+            "b++myext+hub"
+        );
+    }
+
+    #[test]
+    fn yanked_metadata_errors_fail_open_with_warning() {
+        let (r, url) = reg("res_yank_open");
+        add(&r, "a", "1.0", "");
+        write(
+            &r,
+            "modules/a/metadata.json",
+            r#"{"yanked_versions":{"not a valid version!!!":"bad"}}"#,
+        );
+        let ws = tmpdir("ws_yank_open");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name='a', version='1.0')\n",
+        );
+        let res = resolve(&opts(&ws, &url)).unwrap();
+        assert!(
+            res.warnings
+                .iter()
+                .any(|w| w.contains("Could not read metadata file for module a")),
+            "{:?}",
+            res.warnings
+        );
+
+        // Transport/I/O error on metadata.json (directory instead of file) also fails open.
+        let (r2, url2) = reg("res_yank_io");
+        add(&r2, "a", "1.0", "");
+        std::fs::create_dir_all(r2.join("modules/a/metadata.json")).unwrap();
+        let res2 = resolve(&opts(&ws, &url2)).unwrap();
+        assert!(
+            res2.warnings
+                .iter()
+                .any(|w| w.contains("Could not read metadata file for module a")),
+            "{:?}",
+            res2.warnings
+        );
+    }
+
+    #[test]
+    fn non_root_extension_labels_and_svo_patches_resolve_in_correct_repos() {
+        // convert_label resolves repo-relative in owner, //conditions and //visibility in main repo,
+        // and rejects @//... in non-root modules.
+        let mut non_root_map = HashMap::new();
+        non_root_map.insert("b".to_string(), "b+".to_string());
+        assert_eq!(
+            convert_label("//pkg:ext.bzl", &non_root_map, "b+").unwrap(),
+            "@@b+//pkg:ext.bzl"
+        );
+        assert_eq!(
+            convert_label(":ext.bzl", &non_root_map, "b+").unwrap(),
+            "@@b+//:ext.bzl"
+        );
+        assert_eq!(
+            convert_label("//conditions:default", &non_root_map, "b+").unwrap(),
+            "@@//conditions:default"
+        );
+        assert_eq!(
+            convert_label("//visibility:public", &non_root_map, "b+").unwrap(),
+            "@@//visibility:public"
+        );
+        assert!(convert_label("@//pkg:ext.bzl", &non_root_map, "b+")
+            .unwrap_err()
+            .contains("no repo visible as '@'"));
+
+        // Non-root @//pkg extension usage fails with no repo visible as '@'.
+        let (r, url) = reg("res_nr_ext");
+        add(
+            &r,
+            "b",
+            "1.0",
+            "ext = use_extension('@//pkg:ext.bzl', 'e')\nuse_repo(ext, 'x')\n",
+        );
+        let ws = tmpdir("ws_nr_ext");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name='b', version='1.0')\n",
+        );
+        let err = resolve(&opts(&ws, &url)).unwrap_err();
+        assert!(
+            err.message.contains("no repo visible as '@'"),
+            "{}",
+            err.message
+        );
+
+        // single_version_override patches are parsed as main-repo labels (@@//:fix.patch).
+        let (r2, url2) = reg("res_svo_patch");
+        add(&r2, "a", "1.0", "");
+        add(&r2, "a", "1.1", "");
+        let ws2 = tmpdir("ws_svo_patch");
+        write(
+            &ws2,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name='a', version='1.0')\nsingle_version_override(module_name='a', version='1.1', patches=['//:fix.patch'], patch_strip=1)\n",
+        );
+        let res = resolve(&opts(&ws2, &url2)).unwrap();
+        let a_mod = res
+            .dep_graph
+            .get(&ModuleKey::new("a", Version::parse("1.1").unwrap()))
+            .unwrap();
+        let spec = a_mod.repo_spec.as_ref().unwrap();
+        assert_eq!(
+            spec.attr("patches"),
+            Some(&AttrVal::List(vec![AttrVal::Label(
+                "@@//:fix.patch".into()
+            )]))
+        );
     }
 }

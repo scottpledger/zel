@@ -126,6 +126,8 @@ pub struct AttemptResult {
     pub duration_ms: u64,
     pub log: Vec<u8>,
     pub sharding_unsupported: bool,
+    pub premature_exit: bool,
+    pub cachable: bool,
     pub run: u32,
     pub shard: u32,
     pub attempt: u32,
@@ -147,6 +149,7 @@ pub struct TestResult {
     pub log_path: PathBuf,
     pub xml_path: PathBuf,
     pub cached: bool,
+    pub cachable: bool,
     pub runs: usize,
     pub exit_code: i32,
     pub start_time_ms: u64,
@@ -160,7 +163,10 @@ pub struct TestResult {
 
 /// Writes `test-setup.sh` to `dest` (executable) if it does not already have the right contents.
 pub fn install_test_setup(dest: &Path) -> std::io::Result<()> {
-    if std::fs::read_to_string(dest).map(|c| c == TEST_SETUP_SH).unwrap_or(false) {
+    if std::fs::read_to_string(dest)
+        .map(|c| c == TEST_SETUP_SH)
+        .unwrap_or(false)
+    {
         return Ok(());
     }
     if let Some(p) = dest.parent() {
@@ -183,7 +189,10 @@ pub const LCOV_MERGER_SH: &str = include_str!("../resources/lcov_merger.sh");
 pub const COLLECT_CC_COVERAGE_SH: &str = include_str!("../resources/collect_cc_coverage.sh");
 
 fn install_script(dest: &Path, contents: &str) -> std::io::Result<()> {
-    if std::fs::read_to_string(dest).map(|c| c == contents).unwrap_or(false) {
+    if std::fs::read_to_string(dest)
+        .map(|c| c == contents)
+        .unwrap_or(false)
+    {
         return Ok(());
     }
     if let Some(p) = dest.parent() {
@@ -204,7 +213,10 @@ pub fn install_coverage_tools(tools_test_dir: &Path) -> std::io::Result<(PathBuf
     let merger = tools_test_dir.join("lcov_merger");
     install_script(&collect, COLLECT_COVERAGE_SH)?;
     install_script(&merger, LCOV_MERGER_SH)?;
-    install_script(&tools_test_dir.join("collect_cc_coverage.sh"), COLLECT_CC_COVERAGE_SH)?;
+    install_script(
+        &tools_test_dir.join("collect_cc_coverage.sh"),
+        COLLECT_CC_COVERAGE_SH,
+    )?;
     Ok((collect, merger))
 }
 
@@ -226,6 +238,38 @@ pub fn test_tmpdir_hash(exe_path: &Path, shard: u32, run: u32) -> String {
     }
 }
 
+/// Extra configuration knobs for `TestRunnerAction.setupEnvVariables`.
+#[derive(Debug, Clone)]
+pub struct TestPolicyConfig {
+    pub runfiles_enabled: bool,
+    pub test_runner_fail_fast: bool,
+    pub split_coverage_post_processing: bool,
+    pub coverage_env: BTreeMap<String, String>,
+}
+
+impl Default for TestPolicyConfig {
+    fn default() -> Self {
+        Self {
+            runfiles_enabled: true,
+            test_runner_fail_fast: false,
+            split_coverage_post_processing: false,
+            coverage_env: BTreeMap::new(),
+        }
+    }
+}
+
+fn callable_path_string(p: &PathFragment) -> String {
+    if p.is_absolute() {
+        p.path_string().to_string()
+    } else if p.is_empty() {
+        ".".to_string()
+    } else if !p.path_string().contains('/') {
+        format!("./{}", p.path_string())
+    } else {
+        p.path_string().to_string()
+    }
+}
+
 /// Builds the environment `TestRunnerAction` + `StandaloneTestStrategy` give a test, for one
 /// shard/run/attempt (variables consumed by `test-setup.sh` and the test).
 pub fn build_test_env(
@@ -233,7 +277,25 @@ pub fn build_test_env(
     attempt_dir: &Path,
     shard: u32,
     run: u32,
+    attempt: u32,
+) -> BTreeMap<String, String> {
+    build_test_env_with_policy(
+        spec,
+        attempt_dir,
+        shard,
+        run,
+        attempt,
+        &TestPolicyConfig::default(),
+    )
+}
+
+pub fn build_test_env_with_policy(
+    spec: &TestSpec,
+    attempt_dir: &Path,
+    shard: u32,
+    run: u32,
     _attempt: u32,
+    policy: &TestPolicyConfig,
 ) -> BTreeMap<String, String> {
     let tmp = if let Some(base_tmp) = &spec.test_tmpdir {
         let hash = test_tmpdir_hash(&spec.exe_path, shard, run);
@@ -244,65 +306,148 @@ pub fn build_test_env(
     };
     let _ = std::fs::remove_dir_all(&tmp);
     let _ = std::fs::create_dir_all(&tmp);
-    let rel = |p: &Path| p.strip_prefix(&spec.exec_root).map(s).unwrap_or_else(|_| s(p));
+    let er_frag = PathFragment::create(&s(&spec.exec_root));
+    let rel = |p: &Path| {
+        let pf = PathFragment::create(&s(p));
+        pf.relative_to(&er_frag)
+            .map(|r| r.path_string().to_string())
+            .unwrap_or_else(|_| pf.path_string().to_string())
+    };
     let undeclared = rel(&attempt_dir.join("test.outputs"));
     // `TestPolicy.computeTestEnvironment`, in this order: the default policy (TZ, TEST_SRCDIR,
     // TEST_TMPDIR, HOME, ...), then the configuration's action environment (`--action_env`, which
     // carries PATH), then `--test_env`, then the rule's environment; every layer can override or
     // (action/test layers) unset what the earlier ones set.
-    let mut env = zel_util::action_env::test_policy_environment(&rel(&spec.runfiles_dir), &rel(&tmp));
-    spec.base_env.action_env.resolve(&mut env, &spec.base_env.client_env);
-    spec.base_env.test_env.resolve(&mut env, &spec.base_env.client_env);
+    let mut env =
+        zel_util::action_env::test_policy_environment(&rel(&spec.runfiles_dir), &rel(&tmp));
+    spec.base_env
+        .action_env
+        .resolve(&mut env, &spec.base_env.client_env);
+    spec.base_env
+        .test_env
+        .resolve(&mut env, &spec.base_env.client_env);
     for (k, v) in &spec.env {
         env.insert(k.clone(), v.clone());
     }
-    // `TestRunnerAction.setupEnvVariables`.
+    // `TestRunnerAction.setupEnvVariables`: coverageEnv.forEach(env::putIfAbsent).
+    for (k, v) in &policy.coverage_env {
+        env.entry(k.clone()).or_insert_with(|| v.clone());
+    }
     let set = |env: &mut BTreeMap<String, String>, k: &str, v: String| {
         env.insert(k.to_string(), v);
     };
     set(&mut env, "TEST_WORKSPACE", spec.workspace_name.clone());
     set(&mut env, "TEST_TARGET", spec.label.clone());
-    let binary = format!("./{}", spec.exe_path.file_name().unwrap_or_default().to_string_lossy());
+    let binary = callable_path_string(&PathFragment::create(&spec.exe_runfiles_path));
     set(&mut env, "TEST_BINARY", binary);
     set(&mut env, "TEST_SIZE", spec.size.clone());
     set(&mut env, "TEST_TIMEOUT", spec.timeout_secs.to_string());
     // Different `TEST_RANDOM_SEED` / `TEST_RUN_NUMBER` per run when a test runs several times;
     // `--test_env` and rules may set them first.
     if spec.runs_per_test > 1 {
-        env.entry("TEST_RUN_NUMBER".into()).or_insert_with(|| (run + 1).to_string());
-        env.entry("TEST_RANDOM_SEED".into()).or_insert_with(|| (run + 1).to_string());
+        env.entry("TEST_RUN_NUMBER".into())
+            .or_insert_with(|| (run + 1).to_string());
+        env.entry("TEST_RANDOM_SEED".into())
+            .or_insert_with(|| (run + 1).to_string());
     }
-    set(&mut env, "TEST_PREMATURE_EXIT_FILE", rel(&attempt_dir.join("test.exited_prematurely")));
-    set(&mut env, "TEST_WARNINGS_OUTPUT_FILE", rel(&attempt_dir.join("test.warnings")));
-    set(&mut env, "TEST_LOGSPLITTER_OUTPUT_FILE", rel(&attempt_dir.join("test.raw_splitlogs/test.splitlogs")));
-    set(&mut env, "TEST_INFRASTRUCTURE_FAILURE_FILE", rel(&attempt_dir.join("test.infrastructure_failure")));
-    set(&mut env, "TEST_UNUSED_RUNFILES_LOG_FILE", rel(&attempt_dir.join("test.unused_runfiles_log")));
+    set(
+        &mut env,
+        "TEST_PREMATURE_EXIT_FILE",
+        rel(&attempt_dir.join("test.exited_prematurely")),
+    );
+    set(
+        &mut env,
+        "TEST_WARNINGS_OUTPUT_FILE",
+        rel(&attempt_dir.join("test.warnings")),
+    );
+    set(
+        &mut env,
+        "TEST_LOGSPLITTER_OUTPUT_FILE",
+        rel(&attempt_dir.join("test.raw_splitlogs/test.splitlogs")),
+    );
+    set(
+        &mut env,
+        "TEST_INFRASTRUCTURE_FAILURE_FILE",
+        rel(&attempt_dir.join("test.infrastructure_failure")),
+    );
+    set(
+        &mut env,
+        "TEST_UNUSED_RUNFILES_LOG_FILE",
+        rel(&attempt_dir.join("test.unused_runfiles_log")),
+    );
     set(&mut env, "TEST_UNDECLARED_OUTPUTS_DIR", undeclared);
-    set(&mut env, "TEST_UNDECLARED_OUTPUTS_MANIFEST", rel(&attempt_dir.join("test.outputs_manifest/MANIFEST")));
+    set(
+        &mut env,
+        "TEST_UNDECLARED_OUTPUTS_MANIFEST",
+        rel(&attempt_dir.join("test.outputs_manifest/MANIFEST")),
+    );
     if spec.zip_undeclared_outputs {
-        set(&mut env, "TEST_UNDECLARED_OUTPUTS_ZIP", rel(&attempt_dir.join("test.outputs/outputs.zip")));
+        set(
+            &mut env,
+            "TEST_UNDECLARED_OUTPUTS_ZIP",
+            rel(&attempt_dir.join("test.outputs/outputs.zip")),
+        );
     }
-    set(&mut env, "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS", rel(&attempt_dir.join("test.outputs_manifest/ANNOTATIONS")));
-    set(&mut env, "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR", rel(&attempt_dir.join("test.outputs_manifest")));
-    set(&mut env, "XML_OUTPUT_FILE", rel(&attempt_dir.join("test.xml")));
-    if spec.shard_count > 0 {
+    set(
+        &mut env,
+        "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS",
+        rel(&attempt_dir.join("test.outputs_manifest/ANNOTATIONS")),
+    );
+    set(
+        &mut env,
+        "TEST_UNDECLARED_OUTPUTS_ANNOTATIONS_DIR",
+        rel(&attempt_dir.join("test.outputs_manifest")),
+    );
+    set(
+        &mut env,
+        "XML_OUTPUT_FILE",
+        rel(&attempt_dir.join("test.xml")),
+    );
+    if spec.shard_count > 1 {
         set(&mut env, "TEST_TOTAL_SHARDS", spec.shard_count.to_string());
         set(&mut env, "TEST_SHARD_INDEX", shard.to_string());
-        set(&mut env, "TEST_SHARD_STATUS_FILE", rel(&attempt_dir.join("test.shard")));
+        set(
+            &mut env,
+            "TEST_SHARD_STATUS_FILE",
+            rel(&attempt_dir.join("test.shard")),
+        );
     }
     if let Some(f) = &spec.test_filter {
         set(&mut env, "TESTBRIDGE_TEST_ONLY", f.clone());
+    }
+    if policy.test_runner_fail_fast {
+        set(&mut env, "TESTBRIDGE_TEST_RUNNER_FAIL_FAST", "1".into());
+    }
+    if !policy.runfiles_enabled {
+        set(&mut env, "RUNFILES_MANIFEST_ONLY", "1".into());
     }
     if spec.coverage {
         // `TestRunnerAction.setupEnvironment` (coverage mode).
         set(&mut env, "RUNTEST_PRESERVE_CWD", "1".into());
         // collect_coverage.sh expects exec-root-relative paths (it prefixes `$ROOT/`).
-        set(&mut env, "COVERAGE_DIR", rel(&attempt_dir.join("_coverage")));
+        set(
+            &mut env,
+            "COVERAGE_DIR",
+            rel(&attempt_dir.join("_coverage")),
+        );
         if let Some(m) = &spec.coverage_manifest {
             set(&mut env, "COVERAGE_MANIFEST", rel(m));
         }
-        set(&mut env, "COVERAGE_OUTPUT_FILE", rel(&attempt_dir.join("coverage.dat")));
-        set(&mut env, "SPLIT_COVERAGE_POST_PROCESSING", "0".into());
+        set(
+            &mut env,
+            "COVERAGE_OUTPUT_FILE",
+            rel(&attempt_dir.join("coverage.dat")),
+        );
+        set(
+            &mut env,
+            "SPLIT_COVERAGE_POST_PROCESSING",
+            if policy.split_coverage_post_processing {
+                "1"
+            } else {
+                "0"
+            }
+            .into(),
+        );
         set(&mut env, "IS_COVERAGE_SPAWN", "0".into());
         // The merger comes from the test rule's `_lcov_merger` attribute in Bazel.
         if let Some(l) = &spec.lcov_merger {
@@ -341,8 +486,19 @@ pub fn format_exit_status(exit_code: i32) -> String {
 
 /// Minimal JUnit XML for a test that did not write `XML_OUTPUT_FILE` itself
 /// (like `test-setup.sh`'s generated report).
-pub fn synthesize_xml(label: &str, exit_code: i32, timed_out: bool, duration_ms: u64, log: &str) -> String {
-    let esc = |t: &str| t.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+pub fn synthesize_xml(
+    label: &str,
+    exit_code: i32,
+    timed_out: bool,
+    duration_ms: u64,
+    log: &str,
+) -> String {
+    let esc = |t: &str| {
+        t.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
     let failed = exit_code != 0 || timed_out;
     let msg = if timed_out {
         "timed out".to_string()
@@ -397,7 +553,11 @@ fn run_attempt(
     let env = build_test_env(spec, dir, shard, run, attempt);
     // test-setup.sh `cd`s into $TEST_SRCDIR/$TEST_WORKSPACE itself relative to PWD, so run from
     // the exec root and give it relative script/test paths exactly like the spawn does.
-    let rel_str = |p: &Path| p.strip_prefix(&spec.exec_root).map(s).unwrap_or_else(|_| s(p));
+    let rel_str = |p: &Path| {
+        p.strip_prefix(&spec.exec_root)
+            .map(s)
+            .unwrap_or_else(|_| s(p))
+    };
     let mut argv = vec![s(&spec.setup_script)];
     if spec.coverage {
         if let Some(c) = &spec.coverage_script {
@@ -409,7 +569,7 @@ fn run_attempt(
         // `TestTargetExecutionSettings.needsShell`: a first token without '/' (a builtin or a
         // PATH lookup) is wrapped in a shell invocation.
         let words = shell_tokenize_words(ru.trim());
-        if words.first().map_or(false, |w| !w.contains('/')) {
+        if words.first().is_some_and(|w| !w.contains('/')) {
             argv.push("/bin/bash".into());
             argv.push("-c".into());
             argv.push("\"$@\"".into());
@@ -441,6 +601,43 @@ fn run_attempt(
     let mut inputs: Vec<PathFragment> = exec
         .map(|e| e.inputs.iter().map(|i| PathFragment::create(i)).collect())
         .unwrap_or_default();
+    let mut empty_inputs: Vec<PathFragment> = Vec::new();
+    // Include runfiles tree entries (and empty-file markers) so sandbox/remote test spawns see them.
+    if spec.runfiles_dir.starts_with(&spec.exec_root) && spec.runfiles_dir.is_dir() {
+        fn collect_rf(
+            d: &Path,
+            er: &Path,
+            inputs: &mut Vec<PathFragment>,
+            empty: &mut Vec<PathFragment>,
+        ) {
+            let Ok(rd) = std::fs::read_dir(d) else { return };
+            for e in rd.flatten() {
+                let p = e.path();
+                let Ok(md) = std::fs::symlink_metadata(&p) else {
+                    continue;
+                };
+                if md.is_dir() && !md.file_type().is_symlink() {
+                    collect_rf(&p, er, inputs, empty);
+                } else if p.file_name().is_some_and(|n| n == "MANIFEST") {
+                    continue;
+                } else if let Ok(rel) = p.strip_prefix(er) {
+                    let pf = PathFragment::create(&s(rel));
+                    if !inputs.contains(&pf) {
+                        inputs.push(pf.clone());
+                    }
+                    if md.is_file() && md.len() == 0 && !md.file_type().is_symlink() {
+                        empty.push(pf);
+                    }
+                }
+            }
+        }
+        collect_rf(
+            &spec.runfiles_dir,
+            &spec.exec_root,
+            &mut inputs,
+            &mut empty_inputs,
+        );
+    }
     if let Some(m) = &spec.coverage_manifest {
         inputs.push(rel_exec(m));
     }
@@ -448,6 +645,7 @@ fn run_attempt(
         rel_exec(&dir.join("test.log")),
         rel_exec(&dir.join("test.xml")),
         rel_exec(&dir.join("test.shard")),
+        rel_exec(&dir.join("test.exited_prematurely")),
         rel_exec(&dir.join("test.infrastructure_failure")),
         rel_exec(&dir.join("test.outputs")),
     ];
@@ -455,15 +653,19 @@ fn run_attempt(
         outputs.push(rel_exec(&dir.join("coverage.dat")));
         outputs.push(rel_exec(&dir.join("_coverage")));
     }
+    let optional_outputs = outputs.clone();
     let sp = Spawn {
         mnemonic: "TestRunner".into(),
         owner_label: spec.label.clone(),
         argv,
         env,
         inputs,
+        empty_inputs,
+        optional_outputs,
         outputs,
         execution_info: info,
         kill_delay: exec.and_then(|e| e.runtime.kill_delay),
+        client_env: Some(spec.base_env.client_env.clone()),
         ..Default::default()
     };
     let execroot = PathFragment::create(&s(&spec.exec_root));
@@ -504,7 +706,11 @@ fn run_attempt(
             xml_env.insert("TEST_NAME".into(), spec.label.clone());
             xml_env.insert("TEST_SHARD_INDEX".into(), shard.to_string());
             xml_env.insert("TEST_TOTAL_SHARDS".into(), spec.shard_count.to_string());
-            let log_rel = xml_env.get("XML_OUTPUT_FILE").cloned().unwrap_or_default().replace("/test.xml", "/test.log");
+            let log_rel = xml_env
+                .get("XML_OUTPUT_FILE")
+                .cloned()
+                .unwrap_or_default()
+                .replace("/test.xml", "/test.log");
             let xml_rel = xml_env.get("XML_OUTPUT_FILE").cloned().unwrap_or_default();
             let xml_argv = vec![
                 "external/bazel_tools/tools/test/generate-xml.sh".to_string(),
@@ -546,7 +752,9 @@ fn run_attempt(
                 for l in text.lines() {
                     if let Some((_, rest)) = l.split_once("tools/test/test-setup.sh: line ") {
                         if let Some((_, tail)) = rest.split_once(": ") {
-                            cleaned.push_str(&format!("external/bazel_tools/tools/test/test-setup.sh: line 270: {tail}\n"));
+                            cleaned.push_str(&format!(
+                                "external/bazel_tools/tools/test/test-setup.sh: line 270: {tail}\n"
+                            ));
                             continue;
                         }
                     }
@@ -560,18 +768,39 @@ fn run_attempt(
                 let cleaned: String = text
                     .lines()
                     .filter(|l| !l.starts_with("Action timed out after "))
-                    .map(|l| format!("{l}\n"))
-                    .collect();
+                    .fold(String::new(), |mut acc, l| {
+                        acc.push_str(l);
+                        acc.push('\n');
+                        acc
+                    });
                 log = cleaned.into_bytes();
             }
             let mut exit_code = if timed_out { 142 } else { r.exit_code };
+            let mut premature_exit = false;
+            let mut cachable = true;
+            // Always delete TEST_PREMATURE_EXIT_FILE; if it existed when the test passed, force
+            // failed and non-cachable (`StandaloneTestStrategy.java`).
+            if std::fs::remove_file(dir.join("test.exited_prematurely")).is_ok()
+                && exit_code == 0
+                && !timed_out
+            {
+                premature_exit = true;
+                cachable = false;
+                exit_code = 1;
+                log.extend_from_slice(
+                    b"-- Test exited prematurely (TEST_PREMATURE_EXIT_FILE exists) --\n",
+                );
+            }
             let mut sharding_unsupported = false;
-            if exit_code == 0 && !timed_out && spec.shard_count > 1 && spec.check_sharding_support {
-                if !dir.join("test.shard").exists() {
-                    exit_code = 1;
-                    sharding_unsupported = true;
-                    log.extend_from_slice(b"Sharding requested, but the test runner did not advertise support for it by touching TEST_SHARD_STATUS_FILE. Either remove the 'shard_count' attribute, use a test runner that supports sharding or temporarily disable this check via --noincompatible_check_sharding_support.\n");
-                }
+            if exit_code == 0
+                && !timed_out
+                && spec.shard_count > 1
+                && spec.check_sharding_support
+                && !dir.join("test.shard").exists()
+            {
+                exit_code = 1;
+                sharding_unsupported = true;
+                log.extend_from_slice(b"Sharding requested, but the test runner did not advertise support for it by touching TEST_SHARD_STATUS_FILE. Either remove the 'shard_count' attribute, use a test runner that supports sharding or temporarily disable this check via --noincompatible_check_sharding_support.\n");
             }
             let xml = dir.join("test.xml");
             let xml_generated = !xml.exists();
@@ -583,7 +812,7 @@ fn run_attempt(
                 let log_dir = if dir.to_string_lossy().contains("test_attempts") {
                     // `<unit>/test_attempts/attempt_N.tmp` -> `<unit>`
                     let mut ld = dir.to_path_buf();
-                    while ld.file_name().map_or(false, |n| n != "test_attempts") && ld.pop() {}
+                    while ld.file_name().is_some_and(|n| n != "test_attempts") && ld.pop() {}
                     ld.pop();
                     ld
                 } else if dir.ends_with("attempt") {
@@ -620,7 +849,7 @@ fn run_attempt(
                     progress_message: format!("Testing {}", spec.label),
                     argv: logged_argv,
                     env: sp.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
-                    inputs: logged_test_inputs(spec, &dir),
+                    inputs: logged_test_inputs(spec, dir),
                     outputs: outputs_logged,
                     is_spawn: true,
                 };
@@ -633,7 +862,10 @@ fn run_attempt(
                     start_millis: 0,
                     ..Default::default()
                 };
-                let gen_res_info = zel_events::ActionResultInfo { exit_code: 0, ..res_info.clone() };
+                let gen_res_info = zel_events::ActionResultInfo {
+                    exit_code: 0,
+                    ..res_info.clone()
+                };
                 e.reporter.action_started(&info);
                 e.reporter.action_finished(&info, &res_info);
                 if xml_generated {
@@ -650,7 +882,8 @@ fn run_attempt(
                             r.exit_code.to_string(),
                         ],
                         env: {
-                            let mut e: BTreeMap<String, String> = sp.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                            let mut e: BTreeMap<String, String> =
+                                sp.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
                             e.insert("TEST_NAME".into(), spec.label.clone());
                             e.insert("TEST_SHARD_INDEX".into(), shard.to_string());
                             e.insert("TEST_TOTAL_SHARDS".into(), spec.shard_count.to_string());
@@ -658,7 +891,10 @@ fn run_attempt(
                         },
                         inputs: vec![
                             (cwd_rel(&log_dir.join("test.log")), false),
-                            ("external/bazel_tools/tools/test/generate-xml.sh".to_string(), false),
+                            (
+                                "external/bazel_tools/tools/test/generate-xml.sh".to_string(),
+                                false,
+                            ),
                         ],
                         outputs: vec![cwd_rel(&log_dir.join("test.xml"))],
                         is_spawn: true,
@@ -670,10 +906,29 @@ fn run_attempt(
             if xml_generated {
                 let _ = std::fs::write(
                     &xml,
-                    synthesize_xml(&spec.label, exit_code, timed_out, dur, &String::from_utf8_lossy(&log)),
+                    synthesize_xml(
+                        &spec.label,
+                        exit_code,
+                        timed_out,
+                        dur,
+                        &String::from_utf8_lossy(&log),
+                    ),
                 );
             }
-            AttemptResult { exit_code, timed_out, duration_ms: dur, log, sharding_unsupported, run, shard, attempt, runner: r.runner_name.clone(), xml_generated }
+            AttemptResult {
+                exit_code,
+                timed_out,
+                duration_ms: dur,
+                log,
+                sharding_unsupported,
+                premature_exit,
+                cachable,
+                run,
+                shard,
+                attempt,
+                runner: r.runner_name.clone(),
+                xml_generated,
+            }
         }
         Err(e) => AttemptResult {
             exit_code: 1,
@@ -681,6 +936,8 @@ fn run_attempt(
             duration_ms: dur,
             log: format!("Failed to run test: {e}\n").into_bytes(),
             sharding_unsupported: false,
+            premature_exit: false,
+            cachable: false,
             run,
             shard,
             attempt,
@@ -720,7 +977,8 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
     for run in 0..runs {
         for shard in 0..shards {
             let base = if runs > 1 {
-                spec.test_log_dir.join(format!("run_{}_of_{}", run + 1, runs))
+                spec.test_log_dir
+                    .join(format!("run_{}_of_{}", run + 1, runs))
             } else {
                 spec.test_log_dir.clone()
             };
@@ -744,7 +1002,10 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                 let r = run_attempt(spec, &adir, shard, run, attempt, exec);
                 last_exit = r.exit_code;
                 times.push(r.duration_ms);
-                let pass = r.exit_code == 0 && !r.timed_out && !r.sharding_unsupported;
+                let pass = r.exit_code == 0
+                    && !r.timed_out
+                    && !r.sharding_unsupported
+                    && !r.premature_exit;
                 if r.sharding_unsupported {
                     unit_status = TestStatus::NoStatus;
                 } else if pass {
@@ -757,10 +1018,7 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
                 if max_attempts > 1 && (!pass && attempt < max_attempts) {
                     let att_dir = base.join("test_attempts");
                     let _ = std::fs::create_dir_all(&att_dir);
-                    let _ = std::fs::write(
-                        att_dir.join(format!("attempt_{attempt}.log")),
-                        &r.log,
-                    );
+                    let _ = std::fs::write(att_dir.join(format!("attempt_{attempt}.log")), &r.log);
                     let x = adir.join("test.xml");
                     if x.exists() {
                         let _ = std::fs::copy(&x, att_dir.join(format!("attempt_{attempt}.xml")));
@@ -805,29 +1063,35 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
             if unit_status == TestStatus::Passed && unit_failed > 0 {
                 any_flaky = true;
             }
-                // Keep moving on to remaining shards even when sharding_unsupported is detected.
-                if unit_status == TestStatus::NoStatus && !all_attempts.last().map_or(false, |a| a.sharding_unsupported) {
-                    overall = TestStatus::NoStatus;
-                    break;
-                } else if unit_status == TestStatus::NoStatus {
-                    overall = TestStatus::NoStatus;
-                } else if !unit_status.is_passed() {
-                    // First failing status wins; timeout stays timeout.
-                    if overall == TestStatus::Passed || overall == TestStatus::Flaky {
-                        overall = unit_status;
-                    }
+            // Keep moving on to remaining shards even when sharding_unsupported is detected.
+            if unit_status == TestStatus::NoStatus
+                && !all_attempts.last().is_some_and(|a| a.sharding_unsupported)
+            {
+                overall = TestStatus::NoStatus;
+                break;
+            } else if unit_status == TestStatus::NoStatus {
+                overall = TestStatus::NoStatus;
+            } else if !unit_status.is_passed() {
+                // First failing status wins; timeout stays timeout.
+                if overall == TestStatus::Passed || overall == TestStatus::Flaky {
+                    overall = unit_status;
                 }
             }
-            if overall == TestStatus::NoStatus && !all_attempts.iter().any(|a| a.sharding_unsupported) {
-                break;
-            }
+        }
+        if overall == TestStatus::NoStatus && !all_attempts.iter().any(|a| a.sharding_unsupported) {
+            break;
+        }
     }
     if overall == TestStatus::Passed && any_flaky {
         overall = TestStatus::Flaky;
     }
     if spec.runs_per_test_detects_flakes && runs > 1 {
-        let any_pass = all_attempts.iter().any(|a| a.exit_code == 0 && !a.timed_out && !a.sharding_unsupported);
-        let any_fail = all_attempts.iter().any(|a| a.exit_code != 0 || a.timed_out || a.sharding_unsupported);
+        let any_pass = all_attempts
+            .iter()
+            .any(|a| a.exit_code == 0 && !a.timed_out && !a.sharding_unsupported);
+        let any_fail = all_attempts
+            .iter()
+            .any(|a| a.exit_code != 0 || a.timed_out || a.sharding_unsupported);
         if any_pass && any_fail {
             overall = TestStatus::Flaky;
         }
@@ -842,6 +1106,8 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
         }
     }
     let duration_ms = times.iter().copied().max().unwrap_or(0);
+    let any_uncachable =
+        all_attempts.iter().any(|a| !a.cachable && a.premature_exit) && !overall.is_passed();
     let result = TestResult {
         status: overall,
         failed_attempts,
@@ -851,6 +1117,7 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
         log_path,
         xml_path: xml_path.clone(),
         cached: false,
+        cachable: overall != TestStatus::Incomplete && !any_uncachable,
         runs: runs as usize,
         exit_code: last_exit,
         start_time_ms: start_ms,
@@ -860,7 +1127,8 @@ pub fn run_test_in(spec: &TestSpec, exec: Option<&TestExec>) -> std::io::Result<
             .flat_map(|run| (0..shards).map(move |shard| (run, shard)))
             .map(|(run, shard)| {
                 let base = if runs > 1 {
-                    spec.test_log_dir.join(format!("run_{}_of_{}", run + 1, runs))
+                    spec.test_log_dir
+                        .join(format!("run_{}_of_{}", run + 1, runs))
                 } else {
                     spec.test_log_dir.clone()
                 };
@@ -917,7 +1185,9 @@ fn merge_coverage(spec: &TestSpec, files: &[PathBuf]) -> std::io::Result<()> {
             }
         }
         _ => {
-            let Some(merger) = &spec.lcov_merger else { return Ok(()) };
+            let Some(merger) = &spec.lcov_merger else {
+                return Ok(());
+            };
             let list = spec.test_log_dir.join("coverage_reports.tmp");
             let text: Vec<String> = files.iter().map(|f| s(f)).collect();
             std::fs::write(&list, text.join("\n"))?;
@@ -927,7 +1197,10 @@ fn merge_coverage(spec: &TestSpec, files: &[PathBuf]) -> std::io::Result<()> {
                 .status()?;
             let _ = std::fs::remove_file(&list);
             if !status.success() {
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, "lcov merger failed"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    "lcov merger failed",
+                ));
             }
         }
     }
@@ -945,14 +1218,14 @@ pub fn write_cache_status(dir: &Path, r: &TestResult) -> std::io::Result<()> {
         let mut v: Vec<String> = rd
             .filter_map(|e| e.ok())
             .map(|e| e.path())
-            .filter(|p| p.extension().map_or(false, |x| x == "log"))
+            .filter(|p| p.extension().is_some_and(|x| x == "log"))
             .map(|p| s(&p))
             .collect();
         v.sort();
         failed_logs.extend(v);
     }
     let d = TestResultData {
-        cachable: Some(r.status != TestStatus::Incomplete),
+        cachable: Some(r.cachable && r.status != TestStatus::Incomplete),
         test_passed: Some(passed),
         status: Some(r.status as u64),
         failed_logs,
@@ -985,10 +1258,15 @@ pub fn read_cache_status(dir: &Path) -> Option<TestResult> {
         attempts: Vec::new(),
         failed_attempts: d.test_times.len().saturating_sub(1),
         duration_ms: dur,
-        times_ms: if d.test_times.is_empty() { vec![dur] } else { d.test_times.iter().map(|t| *t as u64).collect() },
+        times_ms: if d.test_times.is_empty() {
+            vec![dur]
+        } else {
+            d.test_times.iter().map(|t| *t as u64).collect()
+        },
         log_path: dir.join("test.log"),
         xml_path,
         cached: true,
+        cachable: d.cachable.unwrap_or(true),
         runs: 1,
         exit_code: d.exit_code.unwrap_or(0),
         start_time_ms: d.start_time_millis_epoch.unwrap_or(0).max(0) as u64,
@@ -1004,7 +1282,11 @@ fn time_in_sec(ms: u64) -> String {
 
 /// Formats one summary line exactly like `TestSummaryPrinter.print` (verbose summary on).
 pub fn format_summary_line(label: &str, r: &TestResult) -> String {
-    let cache_msg = if r.cached && !matches!(r.status, TestStatus::NoStatus | TestStatus::Incomplete | TestStatus::FailedToBuild) {
+    let cache_msg = if r.cached
+        && !matches!(
+            r.status,
+            TestStatus::NoStatus | TestStatus::Incomplete | TestStatus::FailedToBuild
+        ) {
         "(cached) "
     } else {
         ""
@@ -1015,14 +1297,19 @@ pub fn format_summary_line(label: &str, r: &TestResult) -> String {
     let attempts = r.attempts.len();
     if attempts > 1 {
         match r.status {
-            TestStatus::Flaky => line.push_str(&format!(", failed in {} out of {}", r.failed_attempts, attempts)),
+            TestStatus::Flaky => line.push_str(&format!(
+                ", failed in {} out of {}",
+                r.failed_attempts, attempts
+            )),
             TestStatus::Timeout | TestStatus::Failed => {
                 line.push_str(&format!(" in {} out of {}", r.failed_attempts, attempts))
             }
             _ => {}
         }
     }
-    if !matches!(r.status, TestStatus::NoStatus | TestStatus::FailedToBuild) && !r.times_ms.is_empty() {
+    if !matches!(r.status, TestStatus::NoStatus | TestStatus::FailedToBuild)
+        && !r.times_ms.is_empty()
+    {
         if r.times_ms.len() == 1 {
             line.push_str(&format!(" in {}", time_in_sec(r.times_ms[0])));
         } else {
@@ -1057,17 +1344,26 @@ pub fn join_english_list(items: &[String]) -> String {
 }
 
 /// The `Executed N out of M tests: ...` trailer (`TerminalTestResultNotifier.printStats`).
-pub fn format_stats(
-    executed: usize,
-    results: &[(String, TestStatus)],
-) -> String {
+pub fn format_stats(executed: usize, results: &[(String, TestStatus)]) -> String {
     let pass = results.iter().filter(|(_, s)| s.is_passed()).count();
     let nostatus = results
         .iter()
-        .filter(|(_, s)| matches!(s, TestStatus::NoStatus | TestStatus::BlazeHaltedBeforeTesting))
+        .filter(|(_, s)| {
+            matches!(
+                s,
+                TestStatus::NoStatus | TestStatus::BlazeHaltedBeforeTesting
+            )
+        })
         .count();
-    let f2b = results.iter().filter(|(_, s)| *s == TestStatus::FailedToBuild).count();
-    let failed_local = results.len().saturating_sub(pass).saturating_sub(nostatus).saturating_sub(f2b);
+    let f2b = results
+        .iter()
+        .filter(|(_, s)| *s == TestStatus::FailedToBuild)
+        .count();
+    let failed_local = results
+        .len()
+        .saturating_sub(pass)
+        .saturating_sub(nostatus)
+        .saturating_sub(f2b);
     let mut parts: Vec<String> = Vec::new();
     if pass == 1 {
         parts.push("1 test passes".into());
@@ -1076,7 +1372,12 @@ pub fn format_stats(
     }
     let mut add = |c: usize, sing: &str, plur: &str, msg: &str| {
         if c > 0 {
-            parts.push(format!("{} {} {}", c, if c == 1 { sing } else { plur }, msg));
+            parts.push(format!(
+                "{} {} {}",
+                c,
+                if c == 1 { sing } else { plur },
+                msg
+            ));
         }
     };
     add(f2b, "fails", "fail", "to build");
@@ -1100,13 +1401,109 @@ pub fn format_check_up_to_date_stats(results: &[(String, TestStatus)]) -> String
     let pass = results.iter().filter(|(_, s)| s.is_passed()).count();
     let nostatus = results
         .iter()
-        .filter(|(_, s)| matches!(s, TestStatus::NoStatus | TestStatus::BlazeHaltedBeforeTesting))
+        .filter(|(_, s)| {
+            matches!(
+                s,
+                TestStatus::NoStatus | TestStatus::BlazeHaltedBeforeTesting
+            )
+        })
         .count();
     let failed = results.len().saturating_sub(pass).saturating_sub(nostatus);
     format!(
         "\nFinished with {} passing and {} failing tests up to date, {} out of date.\n",
         pass, failed, nostatus
     )
+}
+
+/// `ShellUtils.tokenize`: whitespace separated words with single/double quotes and backslash escapes.
+pub fn shell_tokenize_words(input: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut in_word = false;
+    let mut quote: Option<char> = None;
+    let mut chars = input.chars().peekable();
+    while let Some(c) = chars.next() {
+        match quote {
+            Some(q) => {
+                if c == q {
+                    quote = None;
+                } else if c == '\\' && q == '"' {
+                    if let Some(n) = chars.next() {
+                        if n != '\\' && n != '"' {
+                            cur.push('\\');
+                        }
+                        cur.push(n);
+                    }
+                } else {
+                    cur.push(c);
+                }
+            }
+            None => match c {
+                '\'' | '"' => {
+                    quote = Some(c);
+                    in_word = true;
+                }
+                '\\' => {
+                    if let Some(n) = chars.next() {
+                        cur.push(n);
+                        in_word = true;
+                    }
+                }
+                c if c.is_whitespace() => {
+                    if in_word {
+                        out.push(std::mem::take(&mut cur));
+                        in_word = false;
+                    }
+                }
+                c => {
+                    cur.push(c);
+                    in_word = true;
+                }
+            },
+        }
+    }
+    if in_word {
+        out.push(cur);
+    }
+    out
+}
+
+/// Inputs of the test spawn as the execution log records them: every file of the runfiles tree
+/// plus the XML generator and the test setup script (`TestRunnerAction.getInputs`).
+fn logged_test_inputs(spec: &TestSpec, dir: &Path) -> Vec<(String, bool)> {
+    let _ = dir;
+    fn walk(p: &Path, out: &mut Vec<PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(p) else { return };
+        for e in rd.flatten() {
+            let path = e.path();
+            let Ok(md) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            // Symlinks to directories (tree artifacts) are single inputs like in Bazel's tree.
+            if md.is_dir() {
+                walk(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(&spec.runfiles_dir, &mut files);
+    let rel = |p: &Path| -> String {
+        p.strip_prefix(&spec.exec_root)
+            .map(|r| r.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| p.to_string_lossy().into_owned())
+    };
+    let mut v: Vec<String> = files
+        .iter()
+        .filter(|p| p.file_name().is_none_or(|n| n != "MANIFEST"))
+        .map(|p| rel(p))
+        .collect();
+    v.push("external/bazel_tools/tools/test/generate-xml.sh".to_string());
+    v.push("external/bazel_tools/tools/test/test-setup.sh".to_string());
+    v.sort();
+    v.dedup();
+    v.into_iter().map(|p| (p, false)).collect()
 }
 
 #[cfg(test)]
@@ -1161,12 +1558,18 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn pass_fail_and_env() {
         let mut sp = setup("pf", "#!/bin/sh\necho \"$TEST_TARGET $TEST_SIZE ${TEST_TOTAL_SHARDS:-0} $TEST_WORKSPACE $1\"\n[ -d \"$TEST_TMPDIR\" ] && [ \"$PWD\" = \"$TEST_SRCDIR/_main\" ] || exit 7\n");
         sp.args = vec!["argA".into()];
         let r = run_test(&sp).unwrap();
-        assert_eq!(r.status, TestStatus::Passed, "{}", String::from_utf8_lossy(&r.attempts[0].log));
+        assert_eq!(
+            r.status,
+            TestStatus::Passed,
+            "{}",
+            String::from_utf8_lossy(&r.attempts[0].log)
+        );
         let log = std::fs::read_to_string(&r.log_path).unwrap();
         assert!(log.contains("Executing tests from //pkg:t"), "{log}");
         assert!(log.contains("//pkg:t medium 0 _main argA"), "{log}");
@@ -1176,9 +1579,12 @@ mod tests {
         let sp = setup("fail", "#!/bin/sh\necho boom\nexit 3\n");
         let r = run_test(&sp).unwrap();
         assert_eq!(r.status, TestStatus::Failed);
-        assert!(std::fs::read_to_string(&r.xml_path).unwrap().contains("exited with error code 3"));
+        assert!(std::fs::read_to_string(&r.xml_path)
+            .unwrap()
+            .contains("exited with error code 3"));
     }
 
+    #[cfg(unix)]
     #[test]
     fn flaky_timeout_runs_and_shards() {
         // Fails the first attempt, passes the second.
@@ -1197,7 +1603,10 @@ mod tests {
         let r = run_test(&sp).unwrap();
         assert_eq!(r.status, TestStatus::Timeout);
 
-        let mut sp = setup("shard", "#!/bin/sh\necho \"shard $TEST_SHARD_INDEX of $TEST_TOTAL_SHARDS\"\n");
+        let mut sp = setup(
+            "shard",
+            "#!/bin/sh\necho \"shard $TEST_SHARD_INDEX of $TEST_TOTAL_SHARDS\"\n",
+        );
         sp.shard_count = 3;
         sp.runs_per_test = 2;
         let r = run_test(&sp).unwrap();
@@ -1205,7 +1614,10 @@ mod tests {
         assert_eq!(r.attempts.len(), 6);
         let log = std::fs::read_to_string(&r.log_path).unwrap();
         assert!(log.contains("shard 2 of 3"));
-        assert!(sp.test_log_dir.join("run_2_of_2/shard_3_of_3/test.log").exists());
+        assert!(sp
+            .test_log_dir
+            .join("run_2_of_2/shard_3_of_3/test.log")
+            .exists());
         assert!(format_summary_line("//pkg:t", &r).contains("Stats over 6 runs"));
 
         // Sharded test with check_sharding_support=true fails if it does not touch TEST_SHARD_STATUS_FILE
@@ -1234,6 +1646,7 @@ mod tests {
             log_path: PathBuf::new(),
             xml_path: PathBuf::new(),
             cached: false,
+            cachable: true,
             runs: 1,
         };
         let l = format_summary_line("//pkg:t", &r);
@@ -1243,107 +1656,173 @@ mod tests {
         c.cached = true;
         assert!(format_summary_line("//a:b", &c).contains("(cached) PASSED in 0.1s"));
         assert_eq!(
-            format_stats(1, &[("a".into(), TestStatus::Passed), ("b".into(), TestStatus::Failed)]),
+            format_stats(
+                1,
+                &[
+                    ("a".into(), TestStatus::Passed),
+                    ("b".into(), TestStatus::Failed)
+                ]
+            ),
             "\nExecuted 1 out of 2 tests: 1 test passes and 1 fails locally.\n"
         );
         assert_eq!(
-            format_stats(3, &[("a".into(), TestStatus::Passed), ("b".into(), TestStatus::Passed), ("c".into(), TestStatus::Passed)]),
+            format_stats(
+                3,
+                &[
+                    ("a".into(), TestStatus::Passed),
+                    ("b".into(), TestStatus::Passed),
+                    ("c".into(), TestStatus::Passed)
+                ]
+            ),
             "\nExecuted 3 out of 3 tests: 3 tests pass.\n"
         );
         assert_eq!(format_stats(0, &[]), "");
     }
 
+    #[cfg(unix)]
     #[test]
     fn custom_test_tmpdir_is_honored() {
-        let mut sp = setup("tmpdir", "#!/bin/sh\ncase \"$TEST_TMPDIR\" in */custom_tmp_*/*) exit 0;; *) exit 1;; esac\n");
+        let mut sp = setup(
+            "tmpdir",
+            "#!/bin/sh\ncase \"$TEST_TMPDIR\" in */custom_tmp_*/*) exit 0;; *) exit 1;; esac\n",
+        );
         let custom = std::env::temp_dir().join(format!("custom_tmp_{}", std::process::id()));
         sp.test_tmpdir = Some(custom.clone());
         let r = run_test(&sp).unwrap();
         assert_eq!(r.status, TestStatus::Passed);
         let _ = std::fs::remove_dir_all(&custom);
     }
-}
 
-/// `ShellUtils.tokenize`: whitespace separated words with single/double quotes and backslash escapes.
-pub fn shell_tokenize_words(input: &str) -> Vec<String> {
-    let mut out = Vec::new();
-    let mut cur = String::new();
-    let mut in_word = false;
-    let mut quote: Option<char> = None;
-    let mut chars = input.chars().peekable();
-    while let Some(c) = chars.next() {
-        match quote {
-            Some(q) => {
-                if c == q {
-                    quote = None;
-                } else if c == '\\' && q == '"' {
-                    if let Some(n) = chars.next() {
-                        cur.push(n);
-                    }
-                } else {
-                    cur.push(c);
-                }
-            }
-            None => match c {
-                '\'' | '"' => {
-                    quote = Some(c);
-                    in_word = true;
-                }
-                '\\' => {
-                    if let Some(n) = chars.next() {
-                        cur.push(n);
-                        in_word = true;
-                    }
-                }
-                c if c.is_whitespace() => {
-                    if in_word {
-                        out.push(std::mem::take(&mut cur));
-                        in_word = false;
-                    }
-                }
-                c => {
-                    cur.push(c);
-                    in_word = true;
-                }
-            },
-        }
-    }
-    if in_word {
-        out.push(cur);
-    }
-    out
-}
+    #[cfg(unix)]
+    #[test]
+    fn premature_exit_file_fails_attempt_retries_and_marks_uncachable() {
+        // Test exits 0 while leaving TEST_PREMATURE_EXIT_FILE behind => forced FAILED & uncachable.
+        let sp = setup(
+            "premature",
+            "#!/bin/sh\ntouch \"$TEST_PREMATURE_EXIT_FILE\"\nexit 0\n",
+        );
+        let r = run_test(&sp).unwrap();
+        assert_eq!(r.status, TestStatus::Failed);
+        assert!(!r.cachable);
+        assert!(r.attempts[0].premature_exit);
+        let log = std::fs::read_to_string(&r.log_path).unwrap();
+        assert!(
+            log.contains("-- Test exited prematurely (TEST_PREMATURE_EXIT_FILE exists) --"),
+            "{log}"
+        );
+        let cs = TestResultData::decode(
+            &std::fs::read(sp.test_log_dir.join("test.cache_status")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(cs.cachable, Some(false));
 
-/// Inputs of the test spawn as the execution log records them: every file of the runfiles tree
-/// plus the XML generator and the test setup script (`TestRunnerAction.getInputs`).
-fn logged_test_inputs(spec: &TestSpec, dir: &Path) -> Vec<(String, bool)> {
-    let _ = dir;
-    fn walk(p: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(rd) = std::fs::read_dir(p) else { return };
-        for e in rd.flatten() {
-            let path = e.path();
-            let Ok(md) = std::fs::symlink_metadata(&path) else { continue };
-            // Symlinks to directories (tree artifacts) are single inputs like in Bazel's tree.
-            if md.is_dir() {
-                walk(&path, out);
-            } else {
-                out.push(path);
-            }
-        }
+        // With flaky_attempts = 2, a premature exit on attempt 1 is retried.
+        let mut sp2 = setup(
+            "premature_retry",
+            "#!/bin/sh\nf=\"$TEST_SRCDIR/../../marker_ok\"\nif [ -e \"$f\" ]; then exit 0; fi\ntouch \"$f\"\ntouch \"$TEST_PREMATURE_EXIT_FILE\"\nexit 0\n",
+        );
+        sp2.flaky_attempts = 2;
+        let _ = std::fs::remove_file(sp2.exec_root.join("marker_ok"));
+        let r2 = run_test(&sp2).unwrap();
+        assert_eq!(r2.status, TestStatus::Flaky);
+        assert_eq!(r2.attempts.len(), 2);
+        assert!(r2.attempts[0].premature_exit);
+        assert!(!r2.attempts[1].premature_exit);
     }
-    let mut files = Vec::new();
-    walk(&spec.runfiles_dir, &mut files);
-    let rel = |p: &Path| -> String {
-        p.strip_prefix(&spec.exec_root).map(|r| r.to_string_lossy().into_owned()).unwrap_or_else(|_| p.to_string_lossy().into_owned())
-    };
-    let mut v: Vec<String> = files
-        .iter()
-        .filter(|p| p.file_name().map_or(true, |n| n != "MANIFEST"))
-        .map(|p| rel(p))
-        .collect();
-    v.push("external/bazel_tools/tools/test/generate-xml.sh".to_string());
-    v.push("external/bazel_tools/tools/test/test-setup.sh".to_string());
-    v.sort();
-    v.dedup();
-    v.into_iter().map(|p| (p, false)).collect()
+
+    #[test]
+    fn test_policy_env_callable_binary_shards_coverage_and_runfiles_disabled() {
+        let mut sp = setup("policy", "#!/bin/sh\nexit 0\n");
+        sp.exe_runfiles_path = "pkg/my_test".into();
+        sp.shard_count = 1; // shard_count == 1 must NOT export shard variables.
+        sp.env.insert("COV_KEEP".into(), "from_rule".into());
+        sp.base_env.test_env = zel_util::action_env::EnvConfig {
+            test_env: zel_util::action_env::parse_env_vars(["=RUNFILES_MANIFEST_ONLY"]),
+            ..Default::default()
+        }
+        .test_environment();
+
+        let mut policy = TestPolicyConfig {
+            runfiles_enabled: false,
+            test_runner_fail_fast: true,
+            split_coverage_post_processing: true,
+            coverage_env: BTreeMap::from([
+                ("COV_KEEP".into(), "from_cov".into()),
+                ("COV_NEW".into(), "added".into()),
+            ]),
+        };
+        sp.coverage = true;
+        let attempt_dir = sp.exec_root.join("bazel-out/testlogs/pkg/t/attempt");
+        let env = build_test_env_with_policy(&sp, &attempt_dir, 0, 0, 1, &policy);
+        assert_eq!(env["TEST_BINARY"], "pkg/my_test");
+        assert!(
+            !env.contains_key("TEST_TOTAL_SHARDS"),
+            "shard_count=1 is not sharded"
+        );
+        assert_eq!(env["TESTBRIDGE_TEST_RUNNER_FAIL_FAST"], "1");
+        assert_eq!(env["RUNFILES_MANIFEST_ONLY"], "1", "set after unset layers");
+        assert_eq!(
+            env["COV_KEEP"], "from_rule",
+            "coverage_env uses putIfAbsent"
+        );
+        assert_eq!(env["COV_NEW"], "added");
+        assert_eq!(env["SPLIT_COVERAGE_POST_PROCESSING"], "1");
+        assert_eq!(
+            env["XML_OUTPUT_FILE"],
+            "bazel-out/testlogs/pkg/t/attempt/test.xml"
+        );
+
+        // Single-segment exe_runfiles_path gets "./" prefix; shard_count > 1 exports shard vars.
+        sp.exe_runfiles_path = "my_test".into();
+        sp.shard_count = 2;
+        policy.runfiles_enabled = true;
+        let env2 = build_test_env_with_policy(&sp, &attempt_dir, 1, 0, 1, &policy);
+        assert_eq!(env2["TEST_BINARY"], "./my_test");
+        assert_eq!(env2["TEST_TOTAL_SHARDS"], "2");
+        assert_eq!(env2["TEST_SHARD_INDEX"], "1");
+    }
+
+    #[test]
+    fn shell_tokenize_double_quote_backslash_preserves_non_quote_slash() {
+        assert_eq!(
+            shell_tokenize_words("-Dfoo=\"\\'foo\" -Dbar=\"a\\\\b\\\"c\" \"\\n\""),
+            vec!["-Dfoo=\\'foo", "-Dbar=a\\b\"c", "\\n"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_setup_defaults_unset_empty_or_relative_home_to_test_tmpdir() {
+        // Unset HOME -> HOME="$TEST_TMPDIR"
+        let mut sp1 = setup(
+            "home_unset",
+            "#!/bin/sh\n[ \"$HOME\" = \"$TEST_TMPDIR\" ] || exit 1\n",
+        );
+        sp1.base_env.test_env = zel_util::action_env::ActionEnvironment::create(
+            Default::default(),
+            Default::default(),
+            ["HOME".to_string()].into_iter().collect(),
+        );
+        let r1 = run_test(&sp1).unwrap();
+        assert_eq!(
+            r1.status,
+            TestStatus::Passed,
+            "{}",
+            String::from_utf8_lossy(&r1.attempts[0].log)
+        );
+
+        // Relative HOME -> HOME="$TEST_TMPDIR"
+        let mut sp2 = setup(
+            "home_rel",
+            "#!/bin/sh\n[ \"$HOME\" = \"$TEST_TMPDIR\" ] || exit 1\n",
+        );
+        sp2.env.insert("HOME".to_string(), "rel/home".to_string());
+        let r2 = run_test(&sp2).unwrap();
+        assert_eq!(
+            r2.status,
+            TestStatus::Passed,
+            "{}",
+            String::from_utf8_lossy(&r2.attempts[0].log)
+        );
+    }
 }

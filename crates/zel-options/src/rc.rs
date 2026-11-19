@@ -27,10 +27,14 @@ const MAX_IMPORT_DEPTH: usize = 100;
 
 /// Buffered `BAZEL_LOG(INFO)` lines of the C++ client (`file:line`, message); the launcher
 /// flushes them in front of a fatal error (`BAZEL_DIE`), so they are collected here.
-static CLIENT_LOG: std::sync::Mutex<Vec<(&'static str, String)>> = std::sync::Mutex::new(Vec::new());
+static CLIENT_LOG: std::sync::Mutex<Vec<(&'static str, String)>> =
+    std::sync::Mutex::new(Vec::new());
 
 fn client_log(location: &'static str, msg: String) {
-    CLIENT_LOG.lock().unwrap_or_else(|e| e.into_inner()).push((location, msg));
+    CLIENT_LOG
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((location, msg));
 }
 
 /// Drains the buffered client INFO log (`("src/main/cpp/rc_file.cc:94", "Parsing the RcFile X")`, ...).
@@ -63,7 +67,8 @@ impl BazelrcConfig {
         command: &str,
         cli_args: &[String],
     ) -> Result<Vec<String>, OptionsParsingError> {
-        let (expanded, _warnings) = crate::config_expander::expand_command_args(self, command, cli_args)?;
+        let (expanded, _warnings) =
+            crate::config_expander::expand_command_args(self, command, cli_args)?;
         Ok(expanded)
     }
 
@@ -73,7 +78,8 @@ impl BazelrcConfig {
         command: &str,
         cli_args: &[String],
     ) -> Result<(Vec<String>, Vec<String>), OptionsParsingError> {
-        let (expanded, warnings) = crate::config_expander::expand_command_args(self, command, cli_args)?;
+        let (expanded, warnings) =
+            crate::config_expander::expand_command_args(self, command, cli_args)?;
         let mut notes = Vec::new();
         let commands_to_parse = get_command_ancestry(command);
         for cmd in &commands_to_parse {
@@ -90,9 +96,13 @@ impl BazelrcConfig {
                             args.join(" ")
                         );
                         if *cmd == "common" {
-                            let ignored = crate::parser::split_unsupported_common_args(command, &args).1;
+                            let ignored =
+                                crate::parser::split_unsupported_common_args(command, &args).1;
                             if !ignored.is_empty() {
-                                note.push_str(&format!("\n  Ignored as unsupported by '{command}': {}", ignored.join(" ")));
+                                note.push_str(&format!(
+                                    "\n  Ignored as unsupported by '{command}': {}",
+                                    ignored.join(" ")
+                                ));
                             }
                         }
                         notes.push(note);
@@ -175,6 +185,7 @@ impl BazelrcConfig {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn parse_file_internal(
         &mut self,
         rc_path: &PathFragment,
@@ -185,7 +196,10 @@ impl BazelrcConfig {
         visited: &mut HashSet<PathFragment>,
         depth: usize,
     ) -> Result<(), OptionsParsingError> {
-        client_log("src/main/cpp/rc_file.cc:94", format!("Parsing the RcFile {rc_path}"));
+        client_log(
+            "src/main/cpp/rc_file.cc:94",
+            format!("Parsing the RcFile {rc_path}"),
+        );
         let bytes = fs.read_file(rc_path).map_err(|e| {
             OptionsParsingError::new(format!(
                 "Unexpected error reading config file '{rc_path}': {}",
@@ -247,7 +261,10 @@ impl BazelrcConfig {
             let command = &tokens[0];
 
             // Directives: import, try-import, try-import-if-bazel-version
-            if command == "import" || command == "try-import" || command == "try-import-if-bazel-version" {
+            if command == "import"
+                || command == "try-import"
+                || command == "try-import-if-bazel-version"
+            {
                 let is_try = command.starts_with("try-import");
                 let is_version_conditioned = command == "try-import-if-bazel-version";
 
@@ -290,7 +307,9 @@ impl BazelrcConfig {
                         }
                         continue;
                     };
-                    let rel = import_target_str.trim_start_matches("%workspace%").trim_start_matches('/');
+                    let rel = import_target_str
+                        .trim_start_matches("%workspace%")
+                        .trim_start_matches('/');
                     ws.get_relative_str(rel)
                 } else {
                     let target_pf = PathFragment::create(import_target_str);
@@ -327,7 +346,10 @@ impl BazelrcConfig {
                         let loc = if import_target_str.starts_with("%workspace%") {
                             "src/main/cpp/rc_file.cc:205"
                         } else {
-                            client_log("src/main/cpp/rc_file.cc:94", format!("Parsing the RcFile {import_target_str}"));
+                            client_log(
+                                "src/main/cpp/rc_file.cc:94",
+                                format!("Parsing the RcFile {import_target_str}"),
+                            );
                             "src/main/cpp/rc_file.cc:234"
                         };
                         client_log(
@@ -344,7 +366,10 @@ impl BazelrcConfig {
                         )));
                     }
                     // A plain path is only found missing when it is read (RcFile::ParseFile).
-                    client_log("src/main/cpp/rc_file.cc:94", format!("Parsing the RcFile {resolved_path}"));
+                    client_log(
+                        "src/main/cpp/rc_file.cc:94",
+                        format!("Parsing the RcFile {resolved_path}"),
+                    );
                     return Err(OptionsParsingError::new(format!(
                         "Unexpected error reading config file '{resolved_path}': (error: 2): No such file or directory"
                     )));
@@ -374,33 +399,33 @@ impl BazelrcConfig {
                 continue;
             }
 
-const VALID_COMMANDS: &[&str] = &[
-    "always",
-    "common",
-    "startup",
-    "build",
-    "test",
-    "run",
-    "clean",
-    "info",
-    "query",
-    "cquery",
-    "aquery",
-    "coverage",
-    "version",
-    "help",
-    "shutdown",
-    "canonicalize-flags",
-    "config",
-    "dump",
-    "print_action",
-    "mobile-install",
-    "license",
-    "mod",
-    "fetch",
-    "vendor",
-    "sync",
-];
+            const VALID_COMMANDS: &[&str] = &[
+                "always",
+                "common",
+                "startup",
+                "build",
+                "test",
+                "run",
+                "clean",
+                "info",
+                "query",
+                "cquery",
+                "aquery",
+                "coverage",
+                "version",
+                "help",
+                "shutdown",
+                "canonicalize-flags",
+                "config",
+                "dump",
+                "print_action",
+                "mobile-install",
+                "license",
+                "mod",
+                "fetch",
+                "vendor",
+                "sync",
+            ];
 
             // Normal section line: command [option ...]
             let cmd_base = match command.split_once(':') {
@@ -414,12 +439,28 @@ const VALID_COMMANDS: &[&str] = &[
                 continue;
             }
 
-            // Check that --bazelrc is NOT specified in RC file!
+            // Check that rc-disallowed startup flags are NOT specified in RC file!
             for tok in &tokens[1..] {
-                if tok == "--bazelrc" || tok.starts_with("--bazelrc=") {
+                let flag_only = tok.split('=').next().unwrap_or(tok.as_str());
+                if flag_only == "--bazelrc" {
                     return Err(OptionsParsingError::new(
                         "Can't specify --bazelrc in the RC file.",
                     ));
+                }
+                if matches!(
+                    flag_only,
+                    "--system_rc"
+                        | "--nosystem_rc"
+                        | "--workspace_rc"
+                        | "--noworkspace_rc"
+                        | "--home_rc"
+                        | "--nohome_rc"
+                        | "--ignore_all_rc_files"
+                        | "--noignore_all_rc_files"
+                ) {
+                    return Err(OptionsParsingError::new(format!(
+                        "Can't specify {flag_only} in the RC file."
+                    )));
                 }
             }
 
@@ -463,6 +504,15 @@ pub fn discover_and_load_rc_files(
     if startup.ignore_all_rc_files {
         if !startup.bazelrc_files.is_empty() {
             eprintln!("WARNING: Value of --bazelrc is ignored, since --ignore_all_rc_files is on.");
+        }
+        if startup.home_rc && startup.parsed_options.contains_key("home_rc") {
+            eprintln!("WARNING: Explicit value of --home_rc is ignored, since --ignore_all_rc_files is on.");
+        }
+        if startup.system_rc && startup.parsed_options.contains_key("system_rc") {
+            eprintln!("WARNING: Explicit value of --system_rc is ignored, since --ignore_all_rc_files is on.");
+        }
+        if startup.workspace_rc && startup.parsed_options.contains_key("workspace_rc") {
+            eprintln!("WARNING: Explicit value of --workspace_rc is ignored, since --ignore_all_rc_files is on.");
         }
         return Ok(config);
     }
@@ -509,16 +559,28 @@ pub fn discover_and_load_rc_files(
         }
     }
 
-    // 5. Command-line provided --bazelrc (can be repeated)
+    // 5. Command-line provided --bazelrc (can be repeated; `/dev/null` stops further `--bazelrc`s)
     for custom_rc in &startup.bazelrc_files {
         if custom_rc == "/dev/null" {
-            continue;
+            potential_rc_files.push((PathFragment::create("/dev/null"), true));
+            break;
         }
-        let pf = PathFragment::create(custom_rc);
-        let full_pf = if pf.is_absolute() {
-            pf
+        let full_pf = if custom_rc == "~" {
+            home_dir
+                .map(PathFragment::create)
+                .unwrap_or_else(|| cwd.get_relative_str("~"))
+        } else if let Some(rest) = custom_rc.strip_prefix("~/") {
+            match home_dir {
+                Some(h) => PathFragment::create(h).get_relative_str(rest),
+                None => cwd.get_relative_str(custom_rc),
+            }
         } else {
-            cwd.get_relative(&pf)
+            let pf = PathFragment::create(custom_rc);
+            if pf.is_absolute() {
+                pf
+            } else {
+                cwd.get_relative(&pf)
+            }
         };
         potential_rc_files.push((full_pf, true));
     }
@@ -527,18 +589,17 @@ pub fn discover_and_load_rc_files(
         "src/main/cpp/option_processor.cc:437",
         format!(
             "Looking for the following rc files: {}",
-            potential_rc_files.iter().map(|(p, _)| p.path_string().to_string()).collect::<Vec<_>>().join(",")
+            potential_rc_files
+                .iter()
+                .map(|(p, _)| p.path_string().to_string())
+                .collect::<Vec<_>>()
+                .join(",")
         ),
     );
 
-    // Deduplicate and load
+    // Deduplicate by canonical path and load
     let mut visited = HashSet::new();
     for (rc_path, is_explicit) in potential_rc_files {
-        if visited.contains(&rc_path) {
-            continue;
-        }
-        visited.insert(rc_path.clone());
-
         if !fs.exists(&rc_path, true) {
             if is_explicit {
                 return Err(OptionsParsingError::new(format!(
@@ -549,15 +610,44 @@ pub fn discover_and_load_rc_files(
             continue;
         }
 
+        let canonical_key = std::fs::canonicalize(rc_path.path_string())
+            .map(|p| PathFragment::create(&p.display().to_string()))
+            .unwrap_or_else(|_| rc_path.clone());
+        if !visited.insert(canonical_key) {
+            continue;
+        }
+
         config.parse_file(&rc_path, workspace_dir, fs, build_label)?;
     }
 
     // Apply any startup options found in rc files to startup at RcFile priority
     if let Some(startup_opts) = config.sections.get("startup") {
+        let startup_map = crate::flag_tables::get_startup_options_map();
         let mut priority = OptionPriority::lowest_at_category(PriorityCategory::RcFile);
         for (flag, src) in startup_opts {
+            if let Some((f, _)) = flag.split_once('=') {
+                let naked = f.strip_prefix("--").unwrap_or(f);
+                let is_nullary = |n: &str| startup_map.get(n).is_some_and(|d| !d.requires_value());
+                let nullary_negated = naked.strip_prefix("no").is_some_and(|rest| {
+                    startup_map
+                        .get(rest)
+                        .is_some_and(|d| d.uses_boolean_syntax())
+                });
+                if f.starts_with("--")
+                    && naked != "block_for_lock"
+                    && (is_nullary(naked) || nullary_negated)
+                {
+                    return Err(OptionsParsingError::new(format!(
+                        "FATAL: In argument '{flag}': option '{f}' does not take a value."
+                    )));
+                }
+            }
             if let Err(e) = startup.apply_flag_with_priority(flag, src, priority.clone()) {
-                let prod = if startup.product_name.is_empty() { "bazel" } else { &startup.product_name };
+                let prod = if startup.product_name.is_empty() {
+                    "bazel"
+                } else {
+                    &startup.product_name
+                };
                 let msg = &e.message;
                 if msg.starts_with("Invalid argument to") {
                     return Err(OptionsParsingError::new(format!("FATAL: {msg}")));
@@ -620,7 +710,8 @@ pub fn tokenize_rc_line(line: &str) -> Vec<String> {
 /// E.g. for `test`: `["always", "common", "build", "test"]`.
 pub fn get_command_ancestry(command: &str) -> Vec<&'static str> {
     fn visit(command: &str, acc: &mut Vec<&'static str>) {
-        let Some((name, inherits, _, _)) = COMMAND_INHERITANCE.iter().find(|c| c.0 == command) else {
+        let Some((name, inherits, _, _)) = COMMAND_INHERITANCE.iter().find(|c| c.0 == command)
+        else {
             return;
         };
         for base in inherits.iter() {
@@ -636,9 +727,14 @@ pub fn get_command_ancestry(command: &str) -> Vec<&'static str> {
 /// Evaluates a Bazel version condition (e.g. `>=7.0.0`, `<8.0.0`, `==7.1.0`).
 fn eval_bazel_version_condition(condition: &str, current_version: &str) -> Result<bool, String> {
     let mut op_len = 0;
-    if condition.starts_with("<=") || condition.starts_with(">=") || condition.starts_with("==") || condition.starts_with("!=") {
+    if condition.starts_with("<=")
+        || condition.starts_with(">=")
+        || condition.starts_with("==")
+        || condition.starts_with("!=")
+    {
         op_len = 2;
-    } else if condition.starts_with('<') || condition.starts_with('>') || condition.starts_with('~') {
+    } else if condition.starts_with('<') || condition.starts_with('>') || condition.starts_with('~')
+    {
         op_len = 1;
     }
 
@@ -678,7 +774,12 @@ fn eval_bazel_version_condition(condition: &str, current_version: &str) -> Resul
 }
 
 fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
-    let clean = s.trim().trim_start_matches('v').split('-').next().unwrap_or("");
+    let clean = s
+        .trim()
+        .trim_start_matches('v')
+        .split('-')
+        .next()
+        .unwrap_or("");
     let parts: Vec<&str> = clean.split('.').collect();
     if parts.is_empty() {
         return None;
@@ -717,11 +818,8 @@ mod tests {
         let sub = ws.get_relative_str("sub");
         fs.create_directory_and_parents(&sub).unwrap();
 
-        fs.write_file(
-            &sub.get_relative_str("base.bazelrc"),
-            b"build -c opt\n",
-        )
-        .unwrap();
+        fs.write_file(&sub.get_relative_str("base.bazelrc"), b"build -c opt\n")
+            .unwrap();
 
         fs.write_file(
             &sub.get_relative_str("nested.bazelrc"),
@@ -731,7 +829,12 @@ mod tests {
 
         let mut config = BazelrcConfig::default();
         config
-            .parse_file(&sub.get_relative_str("nested.bazelrc"), Some(&ws), &fs, "7.0.0")
+            .parse_file(
+                &sub.get_relative_str("nested.bazelrc"),
+                Some(&ws),
+                &fs,
+                "7.0.0",
+            )
             .unwrap();
 
         let opts = config.get_inherited_command_options("build");
@@ -783,5 +886,76 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(err.message, "Can't specify --bazelrc in the RC file.");
+    }
+
+    #[test]
+    fn test_rc_disallow_rc_control_flags() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        fs.create_directory_and_parents(&ws).unwrap();
+        for flag in [
+            "--system_rc",
+            "--nosystem_rc",
+            "--workspace_rc",
+            "--home_rc",
+            "--nohome_rc",
+        ] {
+            fs.write_file(
+                &ws.get_relative_str(".bazelrc"),
+                format!("startup {flag}\n").as_bytes(),
+            )
+            .unwrap();
+            let mut config = BazelrcConfig::default();
+            let err = config
+                .parse_file(&ws.get_relative_str(".bazelrc"), Some(&ws), &fs, "7.0.0")
+                .unwrap_err();
+            assert!(
+                err.message.contains("Can't specify"),
+                "{flag}: {}",
+                err.message
+            );
+        }
+    }
+
+    #[test]
+    fn test_rc_dev_null_stops_later_bazelrc_and_tilde_expands_home() {
+        let fs = InMemoryFileSystem::default();
+        let ws = PathFragment::create("/workspace");
+        let home = PathFragment::create("/home/alice");
+        fs.create_directory_and_parents(&ws).unwrap();
+        fs.create_directory_and_parents(&home).unwrap();
+        fs.create_directory_and_parents(&PathFragment::create("/dev"))
+            .unwrap();
+        fs.write_file(&PathFragment::create("/dev/null"), b"")
+            .unwrap();
+        fs.write_file(&home.get_relative_str("my.rc"), b"build --jobs=7\n")
+            .unwrap();
+        fs.write_file(&ws.get_relative_str("later.rc"), b"build --jobs=99\n")
+            .unwrap();
+
+        let mut startup = StartupOptions {
+            system_rc: false,
+            workspace_rc: false,
+            home_rc: false,
+            bazelrc_files: vec![
+                "~/my.rc".to_string(),
+                "/dev/null".to_string(),
+                "/workspace/later.rc".to_string(),
+            ],
+            ..Default::default()
+        };
+
+        let cfg = discover_and_load_rc_files(
+            &mut startup,
+            Some(&ws),
+            Some("/home/alice"),
+            &ws,
+            &fs,
+            "7.0.0",
+        )
+        .unwrap();
+        let opts = cfg.get_inherited_command_options("build");
+        let flags: Vec<String> = opts.into_iter().map(|(o, _)| o).collect();
+        assert_eq!(flags, vec!["--jobs=7"]);
     }
 }

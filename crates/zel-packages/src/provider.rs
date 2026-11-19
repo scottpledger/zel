@@ -34,6 +34,20 @@ struct ProviderDef {
 
 static REGISTRY: Mutex<Vec<ProviderDef>> = Mutex::new(Vec::new());
 
+fn host_is_immutable(kind: &str, id: &str) -> bool {
+    if kind == "provider" || kind == "provider_raw" {
+        if let Ok(idx) = id.parse::<usize>() {
+            return REGISTRY
+                .lock()
+                .unwrap()
+                .get(idx)
+                .is_some_and(|d| d.key.is_some());
+        }
+        return false;
+    }
+    true
+}
+
 fn err(ctx: &EvalContext, m: impl AsRef<str>) -> StarlarkError {
     StarlarkError(format!("{}: {}", ctx.call_location, m.as_ref()))
 }
@@ -47,7 +61,10 @@ pub fn define_provider(
 ) -> Result<Value, StarlarkError> {
     for k in kw.keys() {
         if !["doc", "fields", "init"].contains(&k.as_str()) {
-            return Err(err(ctx, format!("provider() got unexpected keyword argument '{k}'")));
+            return Err(err(
+                ctx,
+                format!("provider() got unexpected keyword argument '{k}'"),
+            ));
         }
     }
     let fields_v = kw.get("fields").cloned().or_else(|| pos.get(1).cloned());
@@ -89,12 +106,20 @@ pub fn define_provider(
             ))
         }
     };
+    let _ = zel_starlark::HOST_IS_IMMUTABLE.set(host_is_immutable);
     let mut reg = REGISTRY.lock().unwrap();
-    reg.push(ProviderDef { key: None, fields, init: init.clone() });
+    reg.push(ProviderDef {
+        key: None,
+        fields,
+        init: init.clone(),
+    });
     let id = (reg.len() - 1).to_string();
     let sym = Value::Host("provider".to_string(), id.clone());
     if init.is_some() {
-        Ok(Value::Tuple(vec![sym, Value::Host("provider_raw".to_string(), id)]))
+        Ok(Value::Tuple(vec![
+            sym,
+            Value::Host("provider_raw".to_string(), id),
+        ]))
     } else {
         Ok(sym)
     }
@@ -133,7 +158,11 @@ pub fn provider_key_of(v: &Value) -> Option<String> {
             let reg = REGISTRY.lock().unwrap();
             let idx: usize = id.parse().ok()?;
             let d = reg.get(idx)?;
-            Some(d.key.clone().unwrap_or_else(|| format!("%anonymous#{idx}%<provider>")))
+            Some(
+                d.key
+                    .clone()
+                    .unwrap_or_else(|| format!("%anonymous#{idx}%<provider>")),
+            )
         }
         _ => None,
     }
@@ -145,7 +174,9 @@ pub fn provider_key_of(v: &Value) -> Option<String> {
 pub fn provider_ref_of(v: &Value) -> Option<String> {
     match v {
         Value::Provider { name } => Some(name.clone()),
-        Value::Host(kind, id) if kind == "provider" || kind == "provider_raw" => Some(format!("#pid:{id}")),
+        Value::Host(kind, id) if kind == "provider" || kind == "provider_raw" => {
+            Some(format!("#pid:{id}"))
+        }
         _ => None,
     }
 }
@@ -153,7 +184,8 @@ pub fn provider_ref_of(v: &Value) -> Option<String> {
 /// Resolves a [`provider_ref_of`] reference to the provider key.
 pub fn resolve_provider_ref(r: &str) -> String {
     match r.strip_prefix("#pid:") {
-        Some(id) => provider_key_of(&Value::Host("provider".into(), id.to_string())).unwrap_or_else(|| r.to_string()),
+        Some(id) => provider_key_of(&Value::Host("provider".into(), id.to_string()))
+            .unwrap_or_else(|| r.to_string()),
         None => r.to_string(),
     }
 }
@@ -183,7 +215,9 @@ pub fn call_provider(
         (
             d.fields.clone(),
             d.init.clone(),
-            d.key.clone().unwrap_or_else(|| format!("%anonymous#{idx}%struct")),
+            d.key
+                .clone()
+                .unwrap_or_else(|| format!("%anonymous#{idx}%struct")),
         )
     };
     let name = provider_display_name(&key).to_string();
@@ -230,13 +264,20 @@ pub fn call_provider(
                 format!(
                     "got unexpected field{} '{}' in call to instantiate provider {}",
                     if unexpected.len() > 1 { "s" } else { "" },
-                    unexpected.iter().map(|s| s.as_str()).collect::<Vec<_>>().join("', '"),
+                    unexpected
+                        .iter()
+                        .map(|s| s.as_str())
+                        .collect::<Vec<_>>()
+                        .join("', '"),
                     name
                 ),
             ));
         }
     }
-    Ok(Value::ProviderInstance { provider_name: key, fields: values })
+    Ok(Value::ProviderInstance {
+        provider_name: key,
+        fields: values,
+    })
 }
 
 /// Host dispatch for provider symbols outside the package loader (analysis time).

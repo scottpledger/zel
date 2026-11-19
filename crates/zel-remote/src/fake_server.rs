@@ -65,6 +65,8 @@ pub struct FakeConfig {
     pub drop_execute_stream_after_first_op: bool,
     pub get_tree_page_size: usize,
     pub advertise_digest_functions: Vec<i32>,
+    /// When set, Execute returns an `ExecuteResponse` with `result: None` and OK status.
+    pub omit_action_result: bool,
 }
 
 impl Default for FakeConfig {
@@ -73,13 +75,24 @@ impl Default for FakeConfig {
             exec_enabled: true,
             update_enabled: true,
             max_batch_total_size_bytes: 4 << 20,
-            high_api_version: SemVer { major: 2, minor: 3, patch: 0, prerelease: String::new() },
-            low_api_version: SemVer { major: 2, minor: 0, patch: 0, prerelease: String::new() },
+            high_api_version: SemVer {
+                major: 2,
+                minor: 3,
+                patch: 0,
+                prerelease: String::new(),
+            },
+            low_api_version: SemVer {
+                major: 2,
+                minor: 0,
+                patch: 0,
+                prerelease: String::new(),
+            },
             instance_name: String::new(),
             read_chunk: 64 * 1024,
             drop_execute_stream_after_first_op: false,
             get_tree_page_size: 0,
             advertise_digest_functions: vec![digest_function::SHA256],
+            omit_action_result: false,
         }
     }
 }
@@ -143,21 +156,44 @@ impl FakeReapiServer {
 
     /// Makes the next call whose method path contains `method_substr` fail with `status`.
     pub fn inject_fault(&self, method_substr: &str, status: GrpcStatus) {
-        self.sh.inner.lock().unwrap().faults.push_back((method_substr.to_string(), status));
+        self.sh
+            .inner
+            .lock()
+            .unwrap()
+            .faults
+            .push_back((method_substr.to_string(), status));
     }
 
     pub fn evict_on_next_read(&self, hash: &str) {
-        self.sh.inner.lock().unwrap().evict_on_read.push(hash.to_string());
+        self.sh
+            .inner
+            .lock()
+            .unwrap()
+            .evict_on_read
+            .push(hash.to_string());
     }
 
     /// The next FindMissingBlobs reports `hash` as present, then the CAS silently drops it.
     pub fn forget_after_next_find_missing(&self, hash: &str) {
-        self.sh.inner.lock().unwrap().forget_after_find_missing.push(hash.to_string());
+        self.sh
+            .inner
+            .lock()
+            .unwrap()
+            .forget_after_find_missing
+            .push(hash.to_string());
     }
 
     pub fn put_blob(&self, data: &[u8]) -> Digest {
-        let d = Digest { hash: sha256::hex_digest(data), size_bytes: data.len() as i64 };
-        self.sh.inner.lock().unwrap().cas.insert(d.hash.clone(), data.to_vec());
+        let d = Digest {
+            hash: sha256::hex_digest(data),
+            size_bytes: data.len() as i64,
+        };
+        self.sh
+            .inner
+            .lock()
+            .unwrap()
+            .cas
+            .insert(d.hash.clone(), data.to_vec());
         d
     }
 
@@ -228,15 +264,17 @@ impl FakeReapiServer {
     /// Serves one accepted transport on a background thread.
     pub fn serve_transport(&self, t: Transport) {
         let me = self.clone();
-        let _ = std::thread::Builder::new().name("fake-reapi-conn".into()).spawn(move || {
-            let Ok((_conn, rx)) = Conn::server_from(t, LocalSettings::default()) else {
-                return;
-            };
-            while let Ok(stream) = rx.recv() {
-                let me = me.clone();
-                let _ = std::thread::spawn(move || me.handle_stream(stream));
-            }
-        });
+        let _ = std::thread::Builder::new()
+            .name("fake-reapi-conn".into())
+            .spawn(move || {
+                let Ok((_conn, rx)) = Conn::server_from(t, LocalSettings::default()) else {
+                    return;
+                };
+                while let Ok(stream) = rx.recv() {
+                    let me = me.clone();
+                    let _ = std::thread::spawn(move || me.handle_stream(stream));
+                }
+            });
     }
 
     /// Accepts TCP connections forever on `listener` (spawns a thread).
@@ -245,7 +283,9 @@ impl FakeReapiServer {
         std::thread::spawn(move || {
             for s in listener.incoming().flatten() {
                 let _ = s.set_nodelay(true);
-                let (Ok(r), Ok(w)) = (s.try_clone(), s.try_clone()) else { continue };
+                let (Ok(r), Ok(w)) = (s.try_clone(), s.try_clone()) else {
+                    continue;
+                };
                 me.serve_transport(Transport {
                     reader: Box::new(r),
                     writer: Box::new(w),
@@ -264,7 +304,11 @@ impl FakeReapiServer {
         use crate::reapi_client::{ReapiClient, ReapiConfig};
         let ch = Arc::new(Channel::new(self.connector(), 4, vec![]));
         let cfg = ReapiConfig {
-            retry: RetryPolicy { initial_delay: std::time::Duration::from_millis(1), max_retries: 3, ..Default::default() },
+            retry: RetryPolicy {
+                initial_delay: std::time::Duration::from_millis(1),
+                max_retries: 3,
+                ..Default::default()
+            },
             ..Default::default()
         };
         ReapiClient::new(ch.clone(), if exec { Some(ch) } else { None }, cfg)
@@ -294,7 +338,11 @@ impl FakeReapiServer {
                 _ => return,
             }
         }
-        let path = headers.iter().find(|h| h.0 == ":path").map(|h| h.1.clone()).unwrap_or_default();
+        let path = headers
+            .iter()
+            .find(|h| h.0 == ":path")
+            .map(|h| h.1.clone())
+            .unwrap_or_default();
         let fault = {
             let mut g = self.sh.inner.lock().unwrap();
             *g.counts.entry(path.clone()).or_insert(0) += 1;
@@ -312,7 +360,12 @@ impl FakeReapiServer {
         let _ = respond(&st, res);
     }
 
-    fn dispatch(&self, path: &str, msgs: &[Vec<u8>], st: &Stream) -> Result<Vec<Vec<u8>>, GrpcStatus> {
+    fn dispatch(
+        &self,
+        path: &str,
+        msgs: &[Vec<u8>],
+        st: &Stream,
+    ) -> Result<Vec<Vec<u8>>, GrpcStatus> {
         let first = msgs.first().map(|v| v.as_slice()).unwrap_or(&[]);
         let bad = |e: zel_proto::DecodeError| GrpcStatus::new(3, format!("bad request: {e}"));
         let cfg = self.sh.cfg.lock().unwrap().clone();
@@ -342,8 +395,12 @@ impl FakeReapiServer {
             Some("FindMissingBlobs") => {
                 let r = FindMissingBlobsRequest::decode(first).map_err(bad)?;
                 let mut g = self.sh.inner.lock().unwrap();
-                let missing: Vec<Digest> =
-                    r.blob_digests.iter().filter(|d| !g.cas.contains_key(&d.hash)).cloned().collect();
+                let missing: Vec<Digest> = r
+                    .blob_digests
+                    .iter()
+                    .filter(|d| !g.cas.contains_key(&d.hash))
+                    .cloned()
+                    .collect();
                 let forget: Vec<String> = g.forget_after_find_missing.clone();
                 for d in &r.blob_digests {
                     if let Some(i) = forget.iter().position(|h| *h == d.hash) {
@@ -352,7 +409,10 @@ impl FakeReapiServer {
                         }
                     }
                 }
-                return Ok(vec![FindMissingBlobsResponse { missing_blob_digests: missing }.encode_to_vec()]);
+                return Ok(vec![FindMissingBlobsResponse {
+                    missing_blob_digests: missing,
+                }
+                .encode_to_vec()]);
             }
             Some("BatchUpdateBlobs") => {
                 let r = BatchUpdateBlobsRequest::decode(first).map_err(bad)?;
@@ -364,15 +424,23 @@ impl FakeReapiServer {
                 let mut g = self.sh.inner.lock().unwrap();
                 for item in r.requests {
                     let d = item.digest.clone().unwrap_or_default();
-                    let ok = sha256::hex_digest(&item.data) == d.hash && item.data.len() as i64 == d.size_bytes;
+                    let ok = sha256::hex_digest(&item.data) == d.hash
+                        && item.data.len() as i64 == d.size_bytes;
                     let status = if ok {
                         g.cas.insert(d.hash.clone(), item.data);
                         g.cas_writes += 1;
                         RpcStatus::default()
                     } else {
-                        RpcStatus { code: 3, message: "digest mismatch".into(), details: vec![] }
+                        RpcStatus {
+                            code: 3,
+                            message: "digest mismatch".into(),
+                            details: vec![],
+                        }
                     };
-                    resp.responses.push(BatchUpdateBlobsResponseItem { digest: Some(d), status: Some(status) });
+                    resp.responses.push(BatchUpdateBlobsResponseItem {
+                        digest: Some(d),
+                        status: Some(status),
+                    });
                 }
                 return Ok(vec![resp.encode_to_vec()]);
             }
@@ -381,12 +449,29 @@ impl FakeReapiServer {
                 let mut resp = BatchReadBlobsResponse::default();
                 let mut g = self.sh.inner.lock().unwrap();
                 for d in r.digests {
-                    let evicted = g.evict_on_read.iter().position(|h| *h == d.hash).map(|i| g.evict_on_read.remove(i)).is_some();
+                    let evicted = g
+                        .evict_on_read
+                        .iter()
+                        .position(|h| *h == d.hash)
+                        .map(|i| g.evict_on_read.remove(i))
+                        .is_some();
                     let (data, status) = match g.cas.get(&d.hash) {
                         Some(b) if !evicted => (b.clone(), RpcStatus::default()),
-                        _ => (vec![], RpcStatus { code: 5, message: "not found".into(), details: vec![] }),
+                        _ => (
+                            vec![],
+                            RpcStatus {
+                                code: 5,
+                                message: "not found".into(),
+                                details: vec![],
+                            },
+                        ),
                     };
-                    resp.responses.push(BatchReadBlobsResponseItem { digest: Some(d), data, compressor: 0, status: Some(status) });
+                    resp.responses.push(BatchReadBlobsResponseItem {
+                        digest: Some(d),
+                        data,
+                        compressor: 0,
+                        status: Some(status),
+                    });
                 }
                 return Ok(vec![resp.encode_to_vec()]);
             }
@@ -397,18 +482,32 @@ impl FakeReapiServer {
                 let mut dirs = Vec::new();
                 let mut stack = vec![root];
                 while let Some(d) = stack.pop() {
-                    let blob = g.cas.get(&d.hash).ok_or_else(|| GrpcStatus::new(5, format!("missing directory {}", d.hash)))?;
+                    let blob = g.cas.get(&d.hash).ok_or_else(|| {
+                        GrpcStatus::new(5, format!("missing directory {}", d.hash))
+                    })?;
                     let dir = Directory::decode(blob).map_err(bad)?;
                     for sub in &dir.directories {
                         stack.push(sub.digest.clone().unwrap_or_default());
                     }
                     dirs.push(dir);
                 }
-                let page = if cfg.get_tree_page_size > 0 { cfg.get_tree_page_size } else { usize::MAX };
+                let page = if cfg.get_tree_page_size > 0 {
+                    cfg.get_tree_page_size
+                } else {
+                    usize::MAX
+                };
                 let start: usize = r.page_token.parse().unwrap_or(0);
                 let end = start.saturating_add(page).min(dirs.len());
-                let next = if end < dirs.len() { end.to_string() } else { String::new() };
-                return Ok(vec![GetTreeResponse { directories: dirs[start..end].to_vec(), next_page_token: next }.encode_to_vec()]);
+                let next = if end < dirs.len() {
+                    end.to_string()
+                } else {
+                    String::new()
+                };
+                return Ok(vec![GetTreeResponse {
+                    directories: dirs[start..end].to_vec(),
+                    next_page_token: next,
+                }
+                .encode_to_vec()]);
             }
             Some(_) => return Err(GrpcStatus::new(12, "unknown CAS method")),
             None => {}
@@ -441,7 +540,12 @@ impl FakeReapiServer {
                 let r = ReadRequest::decode(first).map_err(bad)?;
                 let (_inst, hash, size) = parse_blob_resource(&r.resource_name, false)?;
                 let mut g = self.sh.inner.lock().unwrap();
-                let evicted = g.evict_on_read.iter().position(|h| *h == hash).map(|i| g.evict_on_read.remove(i)).is_some();
+                let evicted = g
+                    .evict_on_read
+                    .iter()
+                    .position(|h| *h == hash)
+                    .map(|i| g.evict_on_read.remove(i))
+                    .is_some();
                 let blob = match g.cas.get(&hash) {
                     Some(b) if !evicted => b.clone(),
                     _ => return Err(GrpcStatus::new(5, "blob not found")),
@@ -493,7 +597,10 @@ impl FakeReapiServer {
                 let mut g = self.sh.inner.lock().unwrap();
                 g.cas.insert(hash, data);
                 g.cas_writes += 1;
-                return Ok(vec![WriteResponse { committed_size: size }.encode_to_vec()]);
+                return Ok(vec![WriteResponse {
+                    committed_size: size,
+                }
+                .encode_to_vec()]);
             }
             Some(_) => return Err(GrpcStatus::new(12, "unknown ByteStream method")),
             None => {}
@@ -518,7 +625,12 @@ impl FakeReapiServer {
         }
     }
 
-    fn execute(&self, r: ExecuteRequest, cfg: &FakeConfig, st: &Stream) -> Result<Vec<Vec<u8>>, GrpcStatus> {
+    fn execute(
+        &self,
+        r: ExecuteRequest,
+        cfg: &FakeConfig,
+        st: &Stream,
+    ) -> Result<Vec<Vec<u8>>, GrpcStatus> {
         let action_digest = r.action_digest.clone().unwrap_or_default();
         let name = {
             let mut g = self.sh.inner.lock().unwrap();
@@ -527,30 +639,73 @@ impl FakeReapiServer {
         };
         let meta = |stage: i32| AnyMsg {
             type_url: EXECUTE_METADATA_TYPE.into(),
-            value: ExecuteOperationMetadata { stage, action_digest: Some(action_digest.clone()), ..Default::default() }.encode_to_vec(),
+            value: ExecuteOperationMetadata {
+                stage,
+                action_digest: Some(action_digest.clone()),
+                ..Default::default()
+            }
+            .encode_to_vec(),
         };
-        let mut ops: Vec<Operation> = vec![
-            Operation { name: name.clone(), metadata: Some(meta(execution_stage::QUEUED)), ..Default::default() },
-        ];
+        let mut ops: Vec<Operation> = vec![Operation {
+            name: name.clone(),
+            metadata: Some(meta(execution_stage::QUEUED)),
+            ..Default::default()
+        }];
         // Cache lookup.
-        let cached = if r.skip_cache_lookup { None } else { self.sh.inner.lock().unwrap().ac.get(&action_digest.hash).cloned() };
-        let done_resp = if let Some(ar) = cached {
-            ExecuteResponse { result: Some(ar), cached_result: true, ..Default::default() }
+        let cached = if r.skip_cache_lookup {
+            None
         } else {
-            ops.push(Operation { name: name.clone(), metadata: Some(meta(execution_stage::EXECUTING)), ..Default::default() });
+            self.sh
+                .inner
+                .lock()
+                .unwrap()
+                .ac
+                .get(&action_digest.hash)
+                .cloned()
+        };
+        let done_resp = if cfg.omit_action_result {
+            ExecuteResponse {
+                status: Some(RpcStatus {
+                    code: 0,
+                    message: String::new(),
+                    details: vec![],
+                }),
+                ..Default::default()
+            }
+        } else if let Some(ar) = cached {
+            ExecuteResponse {
+                result: Some(ar),
+                cached_result: true,
+                ..Default::default()
+            }
+        } else {
+            ops.push(Operation {
+                name: name.clone(),
+                metadata: Some(meta(execution_stage::EXECUTING)),
+                ..Default::default()
+            });
             self.run_action(&action_digest)
         };
         ops.push(Operation {
             name: name.clone(),
             metadata: Some(meta(execution_stage::COMPLETED)),
             done: true,
-            response: Some(AnyMsg { type_url: EXECUTE_RESPONSE_TYPE.into(), value: done_resp.encode_to_vec() }),
+            response: Some(AnyMsg {
+                type_url: EXECUTE_RESPONSE_TYPE.into(),
+                value: done_resp.encode_to_vec(),
+            }),
             ..Default::default()
         });
         self.sh.inner.lock().unwrap().ops.insert(name, ops.clone());
         if cfg.drop_execute_stream_after_first_op {
             // Stream the first op, then break the stream with UNAVAILABLE.
-            let _ = st.send_headers(&[(":status".into(), "200".into()), ("content-type".into(), "application/grpc".into())], false);
+            let _ = st.send_headers(
+                &[
+                    (":status".into(), "200".into()),
+                    ("content-type".into(), "application/grpc".into()),
+                ],
+                false,
+            );
             let _ = st.send_data(&frame_message(&ops[0].encode_to_vec()), false, None);
             return Err(GrpcStatus::new(14, "stream interrupted"));
         }
@@ -578,14 +733,32 @@ impl FakeReapiServer {
         };
         let (action, command) = {
             let g = self.sh.inner.lock().unwrap();
-            let Some(ab) = g.cas.get(&action_digest.hash) else { return missing("action", action_digest) };
+            let Some(ab) = g.cas.get(&action_digest.hash) else {
+                return missing("action", action_digest);
+            };
             let Ok(action) = Action::decode(ab) else {
-                return ExecuteResponse { status: Some(RpcStatus { code: 3, message: "bad action".into(), details: vec![] }), ..Default::default() };
+                return ExecuteResponse {
+                    status: Some(RpcStatus {
+                        code: 3,
+                        message: "bad action".into(),
+                        details: vec![],
+                    }),
+                    ..Default::default()
+                };
             };
             let cd = action.command_digest.clone().unwrap_or_default();
-            let Some(cb) = g.cas.get(&cd.hash) else { return missing("command", &cd) };
+            let Some(cb) = g.cas.get(&cd.hash) else {
+                return missing("command", &cd);
+            };
             let Ok(command) = Command::decode(cb) else {
-                return ExecuteResponse { status: Some(RpcStatus { code: 3, message: "bad command".into(), details: vec![] }), ..Default::default() };
+                return ExecuteResponse {
+                    status: Some(RpcStatus {
+                        code: 3,
+                        message: "bad command".into(),
+                        details: vec![],
+                    }),
+                    ..Default::default()
+                };
             };
             let rd = action.input_root_digest.clone().unwrap_or_default();
             // Like real servers, verify the whole input tree is present in the CAS.
@@ -599,7 +772,14 @@ impl FakeReapiServer {
                     None => return missing("input directory", &d),
                 };
                 let Ok(dir) = Directory::decode(b) else {
-                    return ExecuteResponse { status: Some(RpcStatus { code: 3, message: "bad directory".into(), details: vec![] }), ..Default::default() };
+                    return ExecuteResponse {
+                        status: Some(RpcStatus {
+                            code: 3,
+                            message: "bad directory".into(),
+                            details: vec![],
+                        }),
+                        ..Default::default()
+                    };
                 };
                 for f in &dir.files {
                     let fd = f.digest.clone().unwrap_or_default();
@@ -615,18 +795,45 @@ impl FakeReapiServer {
         };
         let exec = self.sh.executor.lock().unwrap().clone();
         let Some(exec) = exec else {
-            return ExecuteResponse { status: Some(RpcStatus { code: 12, message: "no executor".into(), details: vec![] }), ..Default::default() };
+            return ExecuteResponse {
+                status: Some(RpcStatus {
+                    code: 12,
+                    message: "no executor".into(),
+                    details: vec![],
+                }),
+                ..Default::default()
+            };
         };
         self.sh.inner.lock().unwrap().executions += 1;
-        let ctx = ExecContext { server: self, action: &action, command: &command, action_digest };
+        let ctx = ExecContext {
+            server: self,
+            action: &action,
+            command: &command,
+            action_digest,
+        };
         match exec(&ctx) {
             Ok(ar) => {
                 if !action.do_not_cache && ar.exit_code == 0 {
-                    self.sh.inner.lock().unwrap().ac.insert(action_digest.hash.clone(), ar.clone());
+                    self.sh
+                        .inner
+                        .lock()
+                        .unwrap()
+                        .ac
+                        .insert(action_digest.hash.clone(), ar.clone());
                 }
-                ExecuteResponse { result: Some(ar), ..Default::default() }
+                ExecuteResponse {
+                    result: Some(ar),
+                    ..Default::default()
+                }
             }
-            Err(e) => ExecuteResponse { status: Some(RpcStatus { code: e.code, message: e.message, details: vec![] }), ..Default::default() },
+            Err(e) => ExecuteResponse {
+                status: Some(RpcStatus {
+                    code: e.code,
+                    message: e.message,
+                    details: vec![],
+                }),
+                ..Default::default()
+            },
         }
     }
 }
@@ -652,7 +859,9 @@ fn parse_blob_resource(res: &str, write: bool) -> Result<(String, String, i64), 
     if rest.len() < 2 {
         return Err(GrpcStatus::new(3, "bad blob resource"));
     }
-    let size: i64 = rest[1].parse().map_err(|_| GrpcStatus::new(3, "bad size"))?;
+    let size: i64 = rest[1]
+        .parse()
+        .map_err(|_| GrpcStatus::new(3, "bad size"))?;
     Ok((inst, rest[0].to_string(), size))
 }
 
@@ -661,7 +870,10 @@ fn respond(st: &Stream, res: Result<Vec<Vec<u8>>, GrpcStatus>) -> io::Result<()>
     match res {
         Ok(msgs) => {
             st.send_headers(
-                &[(":status".into(), "200".into()), ("content-type".into(), "application/grpc".into())],
+                &[
+                    (":status".into(), "200".into()),
+                    ("content-type".into(), "application/grpc".into()),
+                ],
                 false,
             )?;
             for m in msgs {

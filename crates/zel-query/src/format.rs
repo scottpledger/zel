@@ -18,8 +18,8 @@
 use crate::engine::{label_cmp, Digraph, Node};
 use crate::pb::{Msg, PbVal};
 use crate::target_env::{
-    disc, java_string, possible_values, rule_attributes, rule_deps_ext, rule_outputs, target_location,
-    visibility_group_labels, AttrEntry, TInfo, TargetEnv,
+    disc, java_string, possible_values, rule_attributes, rule_deps_ext, rule_outputs,
+    target_location, visibility_group_labels, AttrEntry, TInfo, TargetEnv,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use zel_cmdline::Label;
@@ -73,9 +73,18 @@ impl LabelPrinter {
     pub fn label(&self, l: &Label) -> String {
         if l.package_name() == "visibility" && (l.name() == "public" || l.name() == "private") {
             // The built-in visibility labels always belong to the main repository.
-            return if self.consistent { format!("@@//visibility:{}", l.name()) } else { format!("//visibility:{}", l.name()) };
+            return if self.consistent {
+                format!("@@//visibility:{}", l.name())
+            } else {
+                format!("//visibility:{}", l.name())
+            };
         }
-        format!("{}//{}:{}", self.repo(l.repository().name()), l.package_name(), l.name())
+        format!(
+            "{}//{}:{}",
+            self.repo(l.repository().name()),
+            l.package_name(),
+            l.name()
+        )
     }
 
     pub fn package(&self, l: &Label) -> String {
@@ -197,7 +206,12 @@ pub fn lexicographically_sort(opts: &FormatOpts) -> bool {
 }
 
 /// Orders `nodes` for a streamed formatter according to `--order_output`.
-pub fn order_nodes(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepath: bool) -> Vec<Node> {
+pub fn order_nodes(
+    env: &TargetEnv<'_>,
+    nodes: &[Node],
+    opts: &FormatOpts,
+    top_somepath: bool,
+) -> Vec<Node> {
     match opts.order {
         OrderOutput::No => nodes.to_vec(),
         OrderOutput::Auto if top_somepath => nodes.to_vec(),
@@ -225,7 +239,11 @@ pub fn build_graph(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts) -> Di
     let no_edges = *env.digraph_no_edges.borrow();
     let pat_nodes = env.pattern_nodes.borrow();
     let mut deps = |n: &Node| -> Vec<Node> {
-        if fake_loads.contains_key(&n.label) || n.label.name() == "BUILD" || n.label.name() == "BUILD.bazel" || n.label.name().ends_with(".bzl") {
+        if fake_loads.contains_key(&n.label)
+            || n.label.name() == "BUILD"
+            || n.label.name() == "BUILD.bazel"
+            || n.label.name().ends_with(".bzl")
+        {
             return Vec::new();
         }
         if no_edges && !pat_nodes.contains(n) {
@@ -245,10 +263,26 @@ pub fn build_graph(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts) -> Di
 
 fn direct_dep_labels(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts) -> Vec<Label> {
     match &info.target {
-        Target::Rule(r) => rule_deps_ext(r, opts.implicit_deps, opts.tool_deps, opts.nodep_deps).into_iter().map(|(l, _)| l).collect(),
-        Target::OutputFile { generating_rule, .. } => vec![generating_rule.clone()],
-        Target::InputFile { .. } => if opts.nodep_deps { visibility_group_labels(&env.visibility_labels(info)) } else { Vec::new() },
-        Target::PackageGroup { label, .. } => info.pkg.group_includes.get(label.name()).cloned().unwrap_or_default(),
+        Target::Rule(r) => rule_deps_ext(r, opts.implicit_deps, opts.tool_deps, opts.nodep_deps)
+            .into_iter()
+            .map(|(l, _)| l)
+            .collect(),
+        Target::OutputFile {
+            generating_rule, ..
+        } => vec![generating_rule.clone()],
+        Target::InputFile { .. } => {
+            if opts.nodep_deps {
+                visibility_group_labels(&env.visibility_labels(info))
+            } else {
+                Vec::new()
+            }
+        }
+        Target::PackageGroup { label, .. } => info
+            .pkg
+            .group_includes
+            .get(label.name())
+            .cloned()
+            .unwrap_or_default(),
         Target::EnvironmentGroup { .. } => Vec::new(),
     }
 }
@@ -263,7 +297,12 @@ fn kind_of(info: &TInfo, opts: &FormatOpts) -> String {
 }
 
 fn full_rule_class_key(r: &zel_packages::RuleInstance) -> String {
-    match r.extra.rule_class.as_ref().and_then(|rc| rc.starlark.as_ref()) {
+    match r
+        .extra
+        .rule_class
+        .as_ref()
+        .and_then(|rc| rc.starlark.as_ref())
+    {
         Some(s) => format!("{}%{}", s.defined_in, r.rule_class),
         None => r.rule_class.clone(),
     }
@@ -334,8 +373,15 @@ pub fn format_targets(
                 if let Target::PackageGroup { label, packages } = &info.target {
                     if opts.package_group_build_output {
                         out.push_str(&format!("# {}{lt}", target_location(&info, false)));
-                        out.push_str(&format!("package_group({lt}  name = \"{}\",{lt}", label.name()));
-                        let pk = contained_packages(&info, packages, opts.package_group_includes_double_slash);
+                        out.push_str(&format!(
+                            "package_group({lt}  name = \"{}\",{lt}",
+                            label.name()
+                        ));
+                        let pk = contained_packages(
+                            &info,
+                            packages,
+                            opts.package_group_includes_double_slash,
+                        );
                         if !pk.is_empty() {
                             out.push_str(&format!("  packages = [{lt}"));
                             for p in pk {
@@ -343,7 +389,12 @@ pub fn format_targets(
                             }
                             out.push_str(&format!("  ],{lt}"));
                         }
-                        let inc = info.pkg.group_includes.get(label.name()).cloned().unwrap_or_default();
+                        let inc = info
+                            .pkg
+                            .group_includes
+                            .get(label.name())
+                            .cloned()
+                            .unwrap_or_default();
                         if !inc.is_empty() {
                             out.push_str(&format!("  includes = [{lt}"));
                             for i in inc {
@@ -358,11 +409,15 @@ pub fn format_targets(
                 // `getAssociatedRule`.
                 let rule_info = match &info.target {
                     Target::Rule(_) => Some((*info).clone()),
-                    Target::OutputFile { generating_rule, .. } => env.info(generating_rule).ok().map(|i| (*i).clone()),
+                    Target::OutputFile {
+                        generating_rule, ..
+                    } => env.info(generating_rule).ok().map(|i| (*i).clone()),
                     _ => None,
                 };
                 let Some(ri) = rule_info else { continue };
-                let Target::Rule(rule) = ri.target.clone() else { continue };
+                let Target::Rule(rule) = ri.target.clone() else {
+                    continue;
+                };
                 let rule = &rule;
                 if !printed.insert(rule.label.clone()) {
                     continue;
@@ -416,7 +471,9 @@ pub fn starlark_quote(s: &str) -> String {
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 || c as u32 == 0x7f => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c if (c as u32) < 0x20 || c as u32 == 0x7f => {
+                out.push_str(&format!("\\x{:02x}", c as u32))
+            }
             c => out.push(c),
         }
     }
@@ -439,12 +496,19 @@ pub fn repr_value(v: &AttrValue) -> String {
         AttrValue::IntList(l) => repr_list(l, |i| i.to_string()),
         AttrValue::StrDict(d) => format!(
             "{{{}}}",
-            d.iter().map(|(k, v)| format!("{}: {}", starlark_quote(k), starlark_quote(v))).collect::<Vec<_>>().join(", ")
+            d.iter()
+                .map(|(k, v)| format!("{}: {}", starlark_quote(k), starlark_quote(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         AttrValue::StrListDict(d) => format!(
             "{{{}}}",
             d.iter()
-                .map(|(k, v)| format!("{}: {}", starlark_quote(k), repr_list(v, |s| starlark_quote(s))))
+                .map(|(k, v)| format!(
+                    "{}: {}",
+                    starlark_quote(k),
+                    repr_list(v, |s| starlark_quote(s))
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -452,7 +516,9 @@ pub fn repr_value(v: &AttrValue) -> String {
             Some(l) => starlark_quote(&lp(l)),
             None => "None".to_string(),
         },
-        AttrValue::LabelList(l) | AttrValue::OutputList(l) => repr_list(l, |l| starlark_quote(&lp(l))),
+        AttrValue::LabelList(l) | AttrValue::OutputList(l) => {
+            repr_list(l, |l| starlark_quote(&lp(l)))
+        }
         AttrValue::LabelKeyedStrDict(d) => format!(
             "{{{}}}",
             d.iter()
@@ -464,6 +530,17 @@ pub fn repr_value(v: &AttrValue) -> String {
             "{{{}}}",
             d.iter()
                 .map(|(k, v)| format!("{}: {}", starlark_quote(k), starlark_quote(&lp(v))))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        AttrValue::LabelListDict(d) => format!(
+            "{{{}}}",
+            d.iter()
+                .map(|(k, v)| format!(
+                    "{}: {}",
+                    starlark_quote(k),
+                    repr_list(v, |l| starlark_quote(&lp(l)))
+                ))
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
@@ -494,14 +571,26 @@ pub fn build_rule_text(info: &TInfo, rule: &zel_packages::RuleInstance, lt: &str
 }
 
 fn build_rule(info: &TInfo, rule: &zel_packages::RuleInstance, lt: &str) -> String {
-    let loc = rule.extra.location.clone().unwrap_or_else(|| format!("{}:1:1", info.pkg.build_file));
-    let mut out = format!("# {loc}{lt}{}({lt}  name = \"{}\",{lt}", rule.rule_class, rule.label.name());
+    let loc = rule
+        .extra
+        .location
+        .clone()
+        .unwrap_or_else(|| format!("{}:1:1", info.pkg.build_file));
+    let mut out = format!(
+        "# {loc}{lt}{}({lt}  name = \"{}\",{lt}",
+        rule.rule_class,
+        rule.label.name()
+    );
     for a in rule_attributes(rule) {
         if a.name == "name" {
             continue;
         }
         if a.value.is_select() {
-            out.push_str(&format!("  {} = {},{lt}", a.name, reconstruct_select(select_parts(&a.value))));
+            out.push_str(&format!(
+                "  {} = {},{lt}",
+                a.name,
+                reconstruct_select(select_parts(&a.value))
+            ));
             continue;
         }
         if !a.explicit {
@@ -521,10 +610,26 @@ fn build_rule(info: &TInfo, rule: &zel_packages::RuleInstance, lt: &str) -> Stri
     out.push_str(&format!("){lt}"));
     // Call stack comments.
     let (_, inst_frames) = instantiation_stack(rule);
-    append_stack(&mut out, &format!("# Rule {} instantiated at (most recent call last):", rule.label.name()), &inst_frames, lt);
+    append_stack(
+        &mut out,
+        &format!(
+            "# Rule {} instantiated at (most recent call last):",
+            rule.label.name()
+        ),
+        &inst_frames,
+        lt,
+    );
     let (_, def_frames) = definition_stack(rule);
     if !def_frames.is_empty() {
-        append_stack(&mut out, &format!("# Rule {} defined at (most recent call last):", rule.rule_class), &def_frames, lt);
+        append_stack(
+            &mut out,
+            &format!(
+                "# Rule {} defined at (most recent call last):",
+                rule.rule_class
+            ),
+            &def_frames,
+            lt,
+        );
     }
     out.push_str(lt);
     out
@@ -565,7 +670,11 @@ fn definition_stack(rule: &zel_packages::RuleInstance) -> (String, Vec<(String, 
 }
 
 fn append_stack(out: &mut String, title: &str, frames: &[(String, String)], lt: &str) {
-    let max = frames.iter().map(|(l, _)| l.chars().count()).max().unwrap_or(0);
+    let max = frames
+        .iter()
+        .map(|(l, _)| l.chars().count())
+        .max()
+        .unwrap_or(0);
     if max > 0 {
         out.push_str(title);
         out.push_str(lt);
@@ -641,7 +750,9 @@ fn rank_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, min: bool
     let label = |i: usize| g.nodes[i].label.clone();
     let mut items: Vec<(i64, Label)> = Vec::new();
     if min {
-        let mut rank_nodes: Vec<usize> = (0..sc.comps.len()).filter(|&c| sc.pred[c].is_empty()).collect();
+        let mut rank_nodes: Vec<usize> = (0..sc.comps.len())
+            .filter(|&c| sc.pred[c].is_empty())
+            .collect();
         let mut seen: BTreeSet<usize> = rank_nodes.iter().copied().collect();
         let mut rank = 0;
         while !rank_nodes.is_empty() {
@@ -667,7 +778,11 @@ fn rank_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, min: bool
             rank += 1;
         }
     } else {
-        fn rank_of(c: usize, sc: &crate::engine::StrongComponents, memo: &mut BTreeMap<usize, i64>) -> i64 {
+        fn rank_of(
+            c: usize,
+            sc: &crate::engine::StrongComponents,
+            memo: &mut BTreeMap<usize, i64>,
+        ) -> i64 {
             if let Some(r) = memo.get(&c) {
                 return *r;
             }
@@ -706,10 +821,16 @@ fn rank_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, min: bool
 fn conditional_edges(env: &TargetEnv<'_>, nodes: &[Node]) -> BTreeMap<(Label, Label), Vec<String>> {
     let mut map: BTreeMap<(Label, Label), Vec<String>> = BTreeMap::new();
     for n in nodes {
-        let Ok(info) = env.info(&n.label) else { continue };
-        let Target::Rule(r) = &info.target else { continue };
+        let Ok(info) = env.info(&n.label) else {
+            continue;
+        };
+        let Target::Rule(r) = &info.target else {
+            continue;
+        };
         for a in rule_attributes(r) {
-            let AttrValue::Select(parts) = &a.value else { continue };
+            let AttrValue::Select(parts) = &a.value else {
+                continue;
+            };
             for p in parts {
                 if let SelectPart::Select { entries, .. } = p {
                     for (key, value) in entries {
@@ -743,7 +864,11 @@ fn conditions_label(
         for d in rhs {
             if let Some(conds) = cond.get(&((*s).clone(), (*d).clone())) {
                 let mut first = true;
-                let limit = if limit_opt == -1 { conds.len() } else { (limit_opt - 1) as usize };
+                let limit = if limit_opt == -1 {
+                    conds.len()
+                } else {
+                    (limit_opt - 1) as usize
+                };
                 for c in conds.iter().take(limit) {
                     if !annotated.insert(c.clone()) {
                         continue;
@@ -783,7 +908,18 @@ fn graph_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts) -> Strin
         let ra = norm(a.label.repository().name());
         let rb = norm(b.label.repository().name());
         ra.cmp(rb)
-            .then_with(|| a.label.package_identifier().package_fragment().path_string().cmp(b.label.package_identifier().package_fragment().path_string()))
+            .then_with(|| {
+                a.label
+                    .package_identifier()
+                    .package_fragment()
+                    .path_string()
+                    .cmp(
+                        b.label
+                            .package_identifier()
+                            .package_fragment()
+                            .path_string(),
+                    )
+            })
             .then_with(|| a.label.name().cmp(b.label.name()))
     };
     write_dot(
@@ -821,7 +957,11 @@ pub fn write_dot(
                 succ.sort_by(|&a, &b| cmp(&g.nodes[a], &g.nodes[b]));
             }
             for j in succ {
-                out.push_str(&format!("  \"{}\" -> \"{}\"{lt}", label(&g.nodes[i]), label(&g.nodes[j])));
+                out.push_str(&format!(
+                    "  \"{}\" -> \"{}\"{lt}",
+                    label(&g.nodes[i]),
+                    label(&g.nodes[j])
+                ));
                 let l = cond_fn(&[i], &[j]);
                 if !l.is_empty() {
                     out.push_str(&format!("  [label=\"{l}\"];{lt}"));
@@ -837,29 +977,36 @@ pub fn write_dot(
             if x == y {
                 return true;
             }
-            let (xp, yp): (BTreeSet<usize>, BTreeSet<usize>) = (g.pred[x].iter().copied().collect(), g.pred[y].iter().copied().collect());
-            let (xs, ys): (BTreeSet<usize>, BTreeSet<usize>) = (g.succ[x].iter().copied().collect(), g.succ[y].iter().copied().collect());
+            let (xp, yp): (BTreeSet<usize>, BTreeSet<usize>) = (
+                g.pred[x].iter().copied().collect(),
+                g.pred[y].iter().copied().collect(),
+            );
+            let (xs, ys): (BTreeSet<usize>, BTreeSet<usize>) = (
+                g.succ[x].iter().copied().collect(),
+                g.succ[y].iter().copied().collect(),
+            );
             xp == yp && xs == ys
         };
-        let process = |succs: &[usize], class_of: &mut Vec<Option<usize>>, classes: &mut Vec<Vec<usize>>| {
-            for (i, &child) in succs.iter().enumerate() {
-                if class_of[child].is_some() {
-                    continue;
-                }
-                let ci = classes.len();
-                classes.push(vec![child]);
-                class_of[child] = Some(ci);
-                for &sib in &succs[i + 1..] {
-                    if class_of[sib].is_some() {
+        let process =
+            |succs: &[usize], class_of: &mut Vec<Option<usize>>, classes: &mut Vec<Vec<usize>>| {
+                for (i, &child) in succs.iter().enumerate() {
+                    if class_of[child].is_some() {
                         continue;
                     }
-                    if eq(child, sib) {
-                        classes[ci].push(sib);
-                        class_of[sib] = Some(ci);
+                    let ci = classes.len();
+                    classes.push(vec![child]);
+                    class_of[child] = Some(ci);
+                    for &sib in &succs[i + 1..] {
+                        if class_of[sib].is_some() {
+                            continue;
+                        }
+                        if eq(child, sib) {
+                            classes[ci].push(sib);
+                            class_of[sib] = Some(ci);
+                        }
                     }
                 }
-            }
-        };
+            };
         let roots: Vec<usize> = (0..n).filter(|&i| g.pred[i].is_empty()).collect();
         process(&roots, &mut class_of, &mut classes);
         for i in 0..n {
@@ -867,9 +1014,9 @@ pub fn write_dot(
             process(&s, &mut class_of, &mut classes);
         }
         // Nodes not reached via roots/successors (cycle members that are nobody's successor).
-        for i in 0..n {
-            if class_of[i].is_none() {
-                class_of[i] = Some(classes.len());
+        for (i, slot) in class_of.iter_mut().enumerate().take(n) {
+            if slot.is_none() {
+                *slot = Some(classes.len());
                 classes.push(vec![i]);
             }
         }
@@ -891,7 +1038,11 @@ pub fn write_dot(
                 la.len().cmp(&lb.len())
             });
         }
-        let remap: BTreeMap<usize, usize> = order.iter().enumerate().map(|(new, &old)| (old, new)).collect();
+        let remap: BTreeMap<usize, usize> = order
+            .iter()
+            .enumerate()
+            .map(|(new, &old)| (old, new))
+            .collect();
         let sorted_classes: Vec<Vec<usize>> = order.iter().map(|&o| classes[o].clone()).collect();
         let cls = |i: usize| remap[&class_of[i].unwrap()];
         // Class graph.
@@ -912,19 +1063,20 @@ pub fn write_dot(
             let reserved = "\\n...and 9999999 more items".len() as i32;
             let actual = max - reserved;
             let mut buf = String::new();
-            let mut count = 0;
             let mut first = true;
-            for &m in &sorted_classes[c] {
+            for (count, &m) in sorted_classes[c].iter().enumerate() {
                 let s = label(&g.nodes[m]);
                 if !first {
                     buf.push_str("\\n");
                     if max != -1 && (buf.len() + s.len()) as i32 > actual {
-                        buf.push_str(&format!("...and {} more items", sorted_classes[c].len() - count));
+                        buf.push_str(&format!(
+                            "...and {} more items",
+                            sorted_classes[c].len() - count
+                        ));
                         break;
                     }
                 }
                 buf.push_str(&s);
-                count += 1;
                 first = false;
             }
             buf
@@ -985,7 +1137,11 @@ struct XmlEl {
 
 impl XmlEl {
     fn new(name: &str) -> Self {
-        XmlEl { name: name.to_string(), attrs: BTreeMap::new(), children: Vec::new() }
+        XmlEl {
+            name: name.to_string(),
+            attrs: BTreeMap::new(),
+            children: Vec::new(),
+        }
     }
     fn attr(mut self, k: &str, v: impl Into<String>) -> Self {
         self.attrs.insert(k.to_string(), v.into());
@@ -1089,43 +1245,59 @@ fn xml_value_element(e: &AttrEntry, values: &[AttrValue]) -> XmlEl {
                 let items: Vec<String> = match v {
                     AttrValue::StrList(l) => l.clone(),
                     AttrValue::IntList(l) => l.iter().map(|i| i.to_string()).collect(),
-                    AttrValue::LabelList(l) | AttrValue::OutputList(l) => l.iter().map(lp).collect(),
+                    AttrValue::LabelList(l) | AttrValue::OutputList(l) => {
+                        l.iter().map(lp).collect()
+                    }
                     _ => Vec::new(),
                 };
                 for it in items {
-                    el.children.push(xml_scalar(xml_type_name(et), Some(it), false));
+                    el.children
+                        .push(xml_scalar(xml_type_name(et), Some(it), false));
                 }
             }
             el
         }
-        AttrType::StringDict | AttrType::StringListDict | AttrType::LabelKeyedStringDict | AttrType::StringKeyedLabelDict => {
+        AttrType::StringDict
+        | AttrType::StringListDict
+        | AttrType::LabelKeyedStringDict
+        | AttrType::StringKeyedLabelDict => {
             let mut el = XmlEl::new("dict");
             let mut visited: BTreeSet<String> = BTreeSet::new();
             for v in values {
                 let pairs: Vec<(String, XmlEl)> = match v {
-                    AttrValue::StrDict(d) => d.iter().map(|(k, v)| (k.clone(), xml_scalar("string", Some(v.clone()), false))).collect(),
+                    AttrValue::StrDict(d) => d
+                        .iter()
+                        .map(|(k, v)| (k.clone(), xml_scalar("string", Some(v.clone()), false)))
+                        .collect(),
                     AttrValue::StrListDict(d) => d
                         .iter()
                         .map(|(k, v)| {
                             let mut l = XmlEl::new("list");
                             for s in v {
-                                l.children.push(xml_scalar("string", Some(s.clone()), false));
+                                l.children
+                                    .push(xml_scalar("string", Some(s.clone()), false));
                             }
                             (k.clone(), l)
                         })
                         .collect(),
-                    AttrValue::LabelKeyedStrDict(d) => {
-                        d.iter().map(|(k, v)| (lp(k), xml_scalar("string", Some(v.clone()), false))).collect()
-                    }
-                    AttrValue::StrKeyedLabelDict(d) => {
-                        d.iter().map(|(k, v)| (k.clone(), xml_scalar("label", Some(lp(v)), false))).collect()
-                    }
+                    AttrValue::LabelKeyedStrDict(d) => d
+                        .iter()
+                        .map(|(k, v)| (lp(k), xml_scalar("string", Some(v.clone()), false)))
+                        .collect(),
+                    AttrValue::StrKeyedLabelDict(d) => d
+                        .iter()
+                        .map(|(k, v)| (k.clone(), xml_scalar("label", Some(lp(v)), false)))
+                        .collect(),
                     _ => Vec::new(),
                 };
                 for (k, val) in pairs {
                     if visited.insert(k.clone()) {
                         let mut pair = XmlEl::new("pair");
-                        let key_ty = if matches!(e.ty, AttrType::LabelKeyedStringDict) { "label" } else { "string" };
+                        let key_ty = if matches!(e.ty, AttrType::LabelKeyedStringDict) {
+                            "label"
+                        } else {
+                            "string"
+                        };
                         pair.children.push(xml_scalar(key_ty, Some(k), false));
                         pair.children.push(val);
                         el.children.push(pair);
@@ -1135,19 +1307,32 @@ fn xml_value_element(e: &AttrEntry, values: &[AttrValue]) -> XmlEl {
             el
         }
         ty => {
-            let v = if multiple { None } else { values.first().and_then(scalar_string) };
+            let v = if multiple {
+                None
+            } else {
+                values.first().and_then(scalar_string)
+            };
             xml_scalar(xml_type_name(ty), v, multiple)
         }
     }
 }
 
-fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepath: bool) -> Result<String, String> {
+fn xml_output(
+    env: &TargetEnv<'_>,
+    nodes: &[Node],
+    opts: &FormatOpts,
+    top_somepath: bool,
+) -> Result<String, String> {
     let mut root = XmlEl::new("query").attr("version", "2");
     for n in order_nodes(env, nodes, opts, top_somepath) {
         let info = env.info(&n.label).map_err(|e| e.to_string())?;
         let mut el = match &info.target {
             Target::Rule(r) => {
-                let class = if opts.display_full_kind { full_rule_class_key(r) } else { r.rule_class.clone() };
+                let class = if opts.display_full_kind {
+                    full_rule_class_key(r)
+                } else {
+                    r.rule_class.clone()
+                };
                 let mut el = XmlEl::new("rule").attr("class", class);
                 for a in rule_attributes(r) {
                     if a.explicit || opts.xml_default_values {
@@ -1160,7 +1345,9 @@ fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepa
                             let mut lt_ = XmlEl::new("list");
                             lt_.set("name", "license-types");
                             let types: Vec<String> = match vals.first() {
-                                Some(AttrValue::StrList(t)) if !t.is_empty() => t.iter().map(|x| x.to_ascii_uppercase()).collect(),
+                                Some(AttrValue::StrList(t)) if !t.is_empty() => {
+                                    t.iter().map(|x| x.to_ascii_uppercase()).collect()
+                                }
                                 _ => vec!["NONE".to_string()],
                             };
                             for t in types {
@@ -1184,28 +1371,41 @@ fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepa
                     }
                 }
                 let mut inputs: Vec<Label> = crate::target_env::rule_deps_with_aspect_opt(
-                r,
-                opts.implicit_deps,
-                opts.tool_deps,
-                opts.nodep_deps,
-                &opts.aspect_deps,
-            )
-            .into_iter()
-            .filter_map(|(l, attr)| if attr == "_hidden_toolchain_types" { None } else { Some(l) })
-            .collect();
+                    r,
+                    opts.implicit_deps,
+                    opts.tool_deps,
+                    opts.nodep_deps,
+                    &opts.aspect_deps,
+                )
+                .into_iter()
+                .filter_map(|(l, attr)| {
+                    if attr == "_hidden_toolchain_types" {
+                        None
+                    } else {
+                        Some(l)
+                    }
+                })
+                .collect();
                 inputs.sort_by(label_cmp);
                 for l in inputs {
-                    el.children.push(XmlEl::new("rule-input").attr("name", lp(&l)));
+                    el.children
+                        .push(XmlEl::new("rule-input").attr("name", lp(&l)));
                 }
                 for o in rule_outputs(&info.pkg, &r.label) {
-                    el.children.push(XmlEl::new("rule-output").attr("name", lp(&o)));
+                    el.children
+                        .push(XmlEl::new("rule-output").attr("name", lp(&o)));
                 }
                 for f in &info.pkg.args.features {
-                    el.children.push(XmlEl::new("rule-default-setting").attr("name", f.clone()));
+                    el.children
+                        .push(XmlEl::new("rule-default-setting").attr("name", f.clone()));
                 }
                 el
             }
-            Target::EnvironmentGroup { label, environments, defaults } => {
+            Target::EnvironmentGroup {
+                label,
+                environments,
+                defaults,
+            } => {
                 // `XmlOutputFormatter`: `<list name="environments">` / `<list name="defaults">`.
                 let mut el = XmlEl::new("environment-group").attr("name", lp(label));
                 for (name, labels) in [("environments", environments), ("defaults", defaults)] {
@@ -1220,7 +1420,12 @@ fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepa
             }
             Target::PackageGroup { label, packages } => {
                 let mut el = XmlEl::new("package-group").attr("name", label.name().to_string());
-                let inc = info.pkg.group_includes.get(label.name()).cloned().unwrap_or_default();
+                let inc = info
+                    .pkg
+                    .group_includes
+                    .get(label.name())
+                    .cloned()
+                    .unwrap_or_default();
                 let mut incl = XmlEl::new("list");
                 for l in inc {
                     incl.children.push(xml_scalar("label", Some(lp(&l)), false));
@@ -1228,16 +1433,18 @@ fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepa
                 incl.set("name", "includes");
                 el.children.push(incl);
                 let mut pk = XmlEl::new("list");
-                for p in contained_packages(&info, packages, opts.package_group_includes_double_slash) {
+                for p in
+                    contained_packages(&info, packages, opts.package_group_includes_double_slash)
+                {
                     pk.children.push(xml_scalar("string", Some(p), false));
                 }
                 pk.set("name", "packages");
                 el.children.push(pk);
                 el
             }
-            Target::OutputFile { generating_rule, .. } => {
-                XmlEl::new("generated-file").attr("generating-rule", lp(generating_rule))
-            }
+            Target::OutputFile {
+                generating_rule, ..
+            } => XmlEl::new("generated-file").attr("generating-rule", lp(generating_rule)),
             Target::InputFile { label } => {
                 let mut el = XmlEl::new("source-file");
                 let is_fake_load = env.fake_load_targets.borrow().contains_key(label);
@@ -1247,15 +1454,21 @@ fn xml_output(env: &TargetEnv<'_>, nodes: &[Node], opts: &FormatOpts, top_somepa
                             el.children.push(XmlEl::new("load").attr("name", lp(&l)));
                         }
                         for f in &info.pkg.args.features {
-                            el.children.push(XmlEl::new("feature").attr("name", f.clone()));
+                            el.children
+                                .push(XmlEl::new("feature").attr("name", f.clone()));
                         }
-                        el.set("package_contains_errors", info.pkg.contains_errors.to_string());
+                        el.set(
+                            "package_contains_errors",
+                            info.pkg.contains_errors.to_string(),
+                        );
                     }
                     for l in visibility_group_labels(&env.visibility_labels(&info)) {
-                        el.children.push(XmlEl::new("package-group").attr("name", lp(&l)));
+                        el.children
+                            .push(XmlEl::new("package-group").attr("name", lp(&l)));
                     }
                     for l in env.visibility_labels(&info) {
-                        el.children.push(XmlEl::new("visibility-label").attr("name", lp(&l)));
+                        el.children
+                            .push(XmlEl::new("visibility-label").attr("name", lp(&l)));
                     }
                 }
                 el
@@ -1353,7 +1566,11 @@ fn write_value(m: &mut Msg, nums: &ValNums, v: &AttrValue) {
         AttrValue::Bool(b) => {
             m.bool(nums.boolean_value, "boolean_value", *b);
             if !nums.entry {
-                m.str(nums.string_value, "string_value", if *b { "true" } else { "false" });
+                m.str(
+                    nums.string_value,
+                    "string_value",
+                    if *b { "true" } else { "false" },
+                );
                 m.int32(nums.int_value, "int_value", i32::from(*b));
             }
         }
@@ -1381,7 +1598,11 @@ fn write_value(m: &mut Msg, nums: &ValNums, v: &AttrValue) {
         }
         AttrValue::IntList(l) => {
             for i in l {
-                m.rep(nums.int_list_value, "int_list_value", PbVal::Int32(*i as i32));
+                m.rep(
+                    nums.int_list_value,
+                    "int_list_value",
+                    PbVal::Int32(*i as i32),
+                );
             }
         }
         AttrValue::StrDict(d) => {
@@ -1412,7 +1633,21 @@ fn write_value(m: &mut Msg, nums: &ValNums, v: &AttrValue) {
             for (k, v) in d {
                 let mut e = Msg::new();
                 e.str(1, "key", lp(k)).str(2, "value", v.clone());
-                m.rmsg(nums.label_keyed_string_dict_value, "label_keyed_string_dict_value", e);
+                m.rmsg(
+                    nums.label_keyed_string_dict_value,
+                    "label_keyed_string_dict_value",
+                    e,
+                );
+            }
+        }
+        AttrValue::LabelListDict(d) => {
+            for (k, v) in d {
+                let mut e = Msg::new();
+                e.str(1, "key", k.clone());
+                for x in v {
+                    e.str(2, "value", lp(x));
+                }
+                m.rmsg(nums.string_list_dict_value, "string_list_dict_value", e);
             }
         }
         AttrValue::Select(_) => {}
@@ -1426,18 +1661,59 @@ fn flattened(ty: AttrType, values: Vec<AttrValue>) -> Option<AttrValue> {
         return values.into_iter().next();
     }
     match ty {
-        AttrType::Int | AttrType::String | AttrType::Label | AttrType::Output | AttrType::Bool | AttrType::Tristate => None,
+        AttrType::Int
+        | AttrType::String
+        | AttrType::Label
+        | AttrType::Output
+        | AttrType::Bool
+        | AttrType::Tristate => None,
         AttrType::StringList => Some(AttrValue::StrList(
-            values.into_iter().flat_map(|v| if let AttrValue::StrList(l) = v { l } else { Vec::new() }).collect(),
+            values
+                .into_iter()
+                .flat_map(|v| {
+                    if let AttrValue::StrList(l) = v {
+                        l
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect(),
         )),
         AttrType::LabelList => Some(AttrValue::LabelList(
-            values.into_iter().flat_map(|v| if let AttrValue::LabelList(l) = v { l } else { Vec::new() }).collect(),
+            values
+                .into_iter()
+                .flat_map(|v| {
+                    if let AttrValue::LabelList(l) = v {
+                        l
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect(),
         )),
         AttrType::OutputList => Some(AttrValue::OutputList(
-            values.into_iter().flat_map(|v| if let AttrValue::OutputList(l) = v { l } else { Vec::new() }).collect(),
+            values
+                .into_iter()
+                .flat_map(|v| {
+                    if let AttrValue::OutputList(l) = v {
+                        l
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect(),
         )),
         AttrType::IntList => Some(AttrValue::IntList(
-            values.into_iter().flat_map(|v| if let AttrValue::IntList(l) = v { l } else { Vec::new() }).collect(),
+            values
+                .into_iter()
+                .flat_map(|v| {
+                    if let AttrValue::IntList(l) = v {
+                        l
+                    } else {
+                        Vec::new()
+                    }
+                })
+                .collect(),
         )),
         AttrType::StringDict => {
             let mut m = BTreeMap::new();
@@ -1487,11 +1763,30 @@ fn flattened(ty: AttrType, values: Vec<AttrValue>) -> Option<AttrValue> {
             }
             Some(AttrValue::StrKeyedLabelDict(m))
         }
+        AttrType::LabelListDict => {
+            let mut m: Vec<(String, Vec<Label>)> = Vec::new();
+            for v in values {
+                if let AttrValue::LabelListDict(d) = v {
+                    for (k, val) in d {
+                        if let Some(e) = m.iter_mut().find(|(x, _)| *x == k) {
+                            e.1 = val;
+                        } else {
+                            m.push((k, val));
+                        }
+                    }
+                }
+            }
+            Some(AttrValue::LabelListDict(m))
+        }
     }
 }
 
 /// `AttributeFormatter.getAttributeProto`.
-pub fn attribute_proto(e: &AttrEntry, value: Option<&AttrValue>, selector_list: Option<&[SelectPart]>) -> Msg {
+pub fn attribute_proto(
+    e: &AttrEntry,
+    value: Option<&AttrValue>,
+    selector_list: Option<&[SelectPart]>,
+) -> Msg {
     let mut m = Msg::new();
     m.str(1, "name", e.name.clone());
     m.bool(13, "explicitly_specified", e.explicit);
@@ -1500,7 +1795,12 @@ pub fn attribute_proto(e: &AttrEntry, value: Option<&AttrValue>, selector_list: 
         m.bool(20, "nodep", e.nodep);
     }
     if let Some(parts) = selector_list {
-        m.en(2, "type", disc::name(disc::SELECTOR_LIST), disc::SELECTOR_LIST);
+        m.en(
+            2,
+            "type",
+            disc::name(disc::SELECTOR_LIST),
+            disc::SELECTOR_LIST,
+        );
         let mut sl = Msg::new();
         sl.en(1, "type", disc::name(e.disc), e.disc);
         for p in parts {
@@ -1515,7 +1815,10 @@ pub fn attribute_proto(e: &AttrEntry, value: Option<&AttrValue>, selector_list: 
                     sel.bool(2, "has_default_value", true);
                     sel.str(3, "no_match_error", "");
                 }
-                SelectPart::Select { entries, no_match_error } => {
+                SelectPart::Select {
+                    entries,
+                    no_match_error,
+                } => {
                     let mut has_default = false;
                     for (k, v) in entries {
                         let mut entry = Msg::new();
@@ -1539,7 +1842,9 @@ pub fn attribute_proto(e: &AttrEntry, value: Option<&AttrValue>, selector_list: 
             // `License`: the declared license types, `NONE` by default (`License.NO_LICENSE`).
             let mut l = Msg::new();
             let types: Vec<String> = match value {
-                Some(AttrValue::StrList(t)) if !t.is_empty() => t.iter().map(|x| x.to_ascii_uppercase()).collect(),
+                Some(AttrValue::StrList(t)) if !t.is_empty() => {
+                    t.iter().map(|x| x.to_ascii_uppercase()).collect()
+                }
                 _ => vec!["NONE".to_string()],
             };
             for t in types {
@@ -1561,7 +1866,12 @@ pub fn target_proto(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts) -> Msg
 /// `configured`: cquery's `ConfiguredProtoOutputFormatter.addAttributes` reads values through the
 /// `ConfiguredAttributeMapper`, so the `visibility` attribute has no value unless it was explicitly
 /// specified (the package default is not part of the attribute).
-pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, configured: bool) -> Msg {
+pub fn target_proto_ex(
+    env: &TargetEnv<'_>,
+    info: &TInfo,
+    opts: &FormatOpts,
+    configured: bool,
+) -> Msg {
     let mut t = Msg::new();
     match &info.target {
         Target::Rule(rule) => {
@@ -1570,10 +1880,18 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
             let class = rule.rule_class.clone();
             r.str(2, "rule_class", class);
             if opts.proto_locations {
-                r.str(3, "location", target_location(info, opts.relative_locations));
+                r.str(
+                    3,
+                    "location",
+                    target_location(info, opts.relative_locations),
+                );
             }
-            let pred = |n: &str| opts.proto_output_rule_attrs.iter().any(|a| a == "all" && opts.proto_output_rule_attrs.len() == 1)
-                || opts.proto_output_rule_attrs.iter().any(|a| a == n);
+            let pred = |n: &str| {
+                opts.proto_output_rule_attrs
+                    .iter()
+                    .any(|a| a == "all" && opts.proto_output_rule_attrs.len() == 1)
+                    || opts.proto_output_rule_attrs.iter().any(|a| a == n)
+            };
             let mut attrs: Vec<Msg> = Vec::new();
             let mut names: Vec<String> = Vec::new();
             for a in rule_attributes(rule) {
@@ -1582,7 +1900,13 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
                 }
                 let msg = if opts.proto_flatten_selects || !a.value.is_select() {
                     let values = possible_values(&a.value);
-                    let v = if a.null_default || (configured && a.name == "visibility" && !a.explicit) { None } else { flattened(a.ty, values) };
+                    let v = if a.null_default
+                        || (configured && a.name == "visibility" && !a.explicit)
+                    {
+                        None
+                    } else {
+                        flattened(a.ty, values)
+                    };
                     attribute_proto(&a, v.as_ref(), None)
                 } else {
                     attribute_proto(&a, None, Some(select_parts(&a.value)))
@@ -1597,7 +1921,12 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
             }
             // `ProtoOutputFormatter.toTargetProtoBuffer`: every rule of a Starlark rule class has the
             // digest of its definition environment as the last (unsorted) attribute.
-            if let Some(spec) = rule.extra.rule_class.as_ref().and_then(|rc| rc.starlark.as_ref()) {
+            if let Some(spec) = rule
+                .extra
+                .rule_class
+                .as_ref()
+                .and_then(|rc| rc.starlark.as_ref())
+            {
                 if !spec.definition_digest.is_empty() {
                     let mut h = Msg::new();
                     h.str(1, "name", "$rule_implementation_hash");
@@ -1610,7 +1939,13 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
                 let mut inputs: Vec<Label> =
                     rule_deps_ext(rule, opts.implicit_deps, opts.tool_deps, opts.nodep_deps)
                         .into_iter()
-                        .filter_map(|(l, attr)| if attr == "_hidden_toolchain_types" { None } else { Some(l) })
+                        .filter_map(|(l, attr)| {
+                            if attr == "_hidden_toolchain_types" {
+                                None
+                            } else {
+                                Some(l)
+                            }
+                        })
                         .collect();
                 inputs.sort_by(label_cmp);
                 for l in inputs {
@@ -1650,8 +1985,15 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
                 }
             }
             if opts.proto_rule_classes {
-                let rule_key = rule.extra.rule_class.as_ref()
-                    .and_then(|rc| rc.starlark.as_ref().map(|s| format!("{}%{}", s.defined_in, rc.name)))
+                let rule_key = rule
+                    .extra
+                    .rule_class
+                    .as_ref()
+                    .and_then(|rc| {
+                        rc.starlark
+                            .as_ref()
+                            .map(|s| format!("{}%{}", s.defined_in, rc.name))
+                    })
                     .unwrap_or_else(|| rule.rule_class.clone());
                 r.str(19, "rule_class_key", rule_key);
             }
@@ -1661,12 +2003,19 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
             t.en(1, "type", "RULE", 1);
             t.msg(2, "rule", r);
         }
-        Target::OutputFile { label, generating_rule } => {
+        Target::OutputFile {
+            label,
+            generating_rule,
+        } => {
             let mut g = Msg::new();
             g.str(1, "name", lp(label));
             g.str(2, "generating_rule", lp(generating_rule));
             if opts.proto_locations {
-                g.str(3, "location", target_location(info, opts.relative_locations));
+                g.str(
+                    3,
+                    "location",
+                    target_location(info, opts.relative_locations),
+                );
             }
             t.en(1, "type", "GENERATED_FILE", 3);
             t.msg(4, "generated_file", g);
@@ -1677,7 +2026,10 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
             let fake_pkg = env.fake_load_targets.borrow().get(label).cloned();
             if opts.proto_locations {
                 let loc = match &fake_pkg {
-                    Some(ref_pkg) => crate::target_env::fake_load_target_location(ref_pkg, opts.relative_locations),
+                    Some(ref_pkg) => crate::target_env::fake_load_target_location(
+                        ref_pkg,
+                        opts.relative_locations,
+                    ),
                     None => target_location(info, opts.relative_locations),
                 };
                 s.str(2, "location", loc);
@@ -1703,7 +2055,11 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
             t.en(1, "type", "SOURCE_FILE", 2);
             t.msg(3, "source_file", s);
         }
-        Target::EnvironmentGroup { label, environments, defaults } => {
+        Target::EnvironmentGroup {
+            label,
+            environments,
+            defaults,
+        } => {
             let mut g = Msg::new();
             g.str(1, "name", lp(label));
             for e in environments {
@@ -1721,7 +2077,13 @@ pub fn target_proto_ex(env: &TargetEnv<'_>, info: &TInfo, opts: &FormatOpts, con
             for p in contained_packages(info, packages, opts.package_group_includes_double_slash) {
                 g.rstr(2, "contained_package", p);
             }
-            for l in info.pkg.group_includes.get(label.name()).cloned().unwrap_or_default() {
+            for l in info
+                .pkg
+                .group_includes
+                .get(label.name())
+                .cloned()
+                .unwrap_or_default()
+            {
                 g.rstr(3, "included_package_group", lp(&l));
             }
             t.en(1, "type", "PACKAGE_GROUP", 4);

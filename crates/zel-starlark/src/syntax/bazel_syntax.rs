@@ -39,7 +39,11 @@ pub struct SyntaxError {
 impl fmt::Display for SyntaxError {
     /// `file:line:col: message` (`SyntaxError.toString`).
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}:{}:{}: {}", self.file, self.line, self.column, self.message)
+        write!(
+            f,
+            "{}:{}:{}: {}",
+            self.file, self.line, self.column, self.message
+        )
     }
 }
 
@@ -99,12 +103,22 @@ enum DotEventInfo {
 impl ParseOutput {
     /// No errors, no loads (used when the port is bypassed).
     pub fn empty() -> Self {
-        ParseOutput { errors: Vec::new(), resolver_errors: Vec::new(), dot_events: Vec::new(), loads: Vec::new() }
+        ParseOutput {
+            errors: Vec::new(),
+            resolver_errors: Vec::new(),
+            dot_events: Vec::new(),
+            loads: Vec::new(),
+        }
     }
 
     /// Port of `DotBazelFileSyntaxChecker` (`allowLiteralStarStarArgs = false`): the errors for
     /// a file of kind `where_` (`"BUILD files"`, ...), in the checker's traversal order.
-    pub fn dot_bazel_errors(&self, file: &str, where_: &str, can_load_bzl: bool) -> Vec<SyntaxError> {
+    pub fn dot_bazel_errors(
+        &self,
+        file: &str,
+        where_: &str,
+        can_load_bzl: bool,
+    ) -> Vec<SyntaxError> {
         let mut out = Vec::new();
         let mk = |pos: (usize, usize), message: String| SyntaxError {
             file: file.to_string(),
@@ -171,9 +185,18 @@ pub fn parse(file: &str, src: &str) -> ParseOutput {
         .into_iter()
         .map(|(key, off, message)| {
             let (line, column) = p.lexer.location(off);
-            let key = if key < 0 { (0, 0) } else { p.lexer.location(key) };
+            let key = if key < 0 {
+                (0, 0)
+            } else {
+                p.lexer.location(key)
+            };
             ResolverError {
-                error: SyntaxError { file: file.to_string(), line, column, message },
+                error: SyntaxError {
+                    file: file.to_string(),
+                    line,
+                    column,
+                    message,
+                },
                 key,
             }
         })
@@ -197,7 +220,9 @@ pub fn parse(file: &str, src: &str) -> ParseOutput {
                 DotEvent::For => DotEventInfo::For,
                 DotEvent::If => DotEventInfo::If,
                 DotEvent::Call(args) => DotEventInfo::Call(
-                    args.into_iter().map(|(ss, at, d)| (ss, p.lexer.location(at), d)).collect(),
+                    args.into_iter()
+                        .map(|(ss, at, d)| (ss, p.lexer.location(at), d))
+                        .collect(),
                 ),
             };
             (pos, info)
@@ -214,10 +239,20 @@ pub fn parse(file: &str, src: &str) -> ParseOutput {
                     (n, l, c)
                 })
                 .collect();
-            LoadInfo { label, line, column, symbols }
+            LoadInfo {
+                label,
+                line,
+                column,
+                symbols,
+            }
         })
         .collect();
-    ParseOutput { errors: p.lexer.errors, resolver_errors, dot_events, loads }
+    ParseOutput {
+        errors: p.lexer.errors,
+        resolver_errors,
+        dot_events,
+        loads,
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -472,7 +507,9 @@ fn isdigit(c: i32) -> bool {
     (b'0' as i32..=b'9' as i32).contains(&c)
 }
 fn isxdigit(c: i32) -> bool {
-    isdigit(c) || (b'A' as i32..=b'F' as i32).contains(&c) || (b'a' as i32..=b'f' as i32).contains(&c)
+    isdigit(c)
+        || (b'A' as i32..=b'F' as i32).contains(&c)
+        || (b'a' as i32..=b'f' as i32).contains(&c)
 }
 fn isbdigit(c: i32) -> bool {
     c == b'0' as i32 || c == b'1' as i32
@@ -484,20 +521,36 @@ fn java_double_to_string(v: f64) -> String {
         return "NaN".into();
     }
     if v.is_infinite() {
-        return if v > 0.0 { "Infinity".into() } else { "-Infinity".into() };
+        return if v > 0.0 {
+            "Infinity".into()
+        } else {
+            "-Infinity".into()
+        };
     }
     if v == 0.0 {
-        return if v.is_sign_negative() { "-0.0".into() } else { "0.0".into() };
+        return if v.is_sign_negative() {
+            "-0.0".into()
+        } else {
+            "0.0".into()
+        };
     }
     let a = v.abs();
     if (1e-3..1e7).contains(&a) {
         let s = format!("{v}");
-        if s.contains('.') { s } else { format!("{s}.0") }
+        if s.contains('.') {
+            s
+        } else {
+            format!("{s}.0")
+        }
     } else {
         // Scientific: d.dddE±n using the shortest round-trip digits.
         let s = format!("{v:e}"); // e.g. 1.5e10, 1e-7
         let (mant, exp) = s.split_once('e').unwrap();
-        let mant = if mant.contains('.') { mant.to_string() } else { format!("{mant}.0") };
+        let mant = if mant.contains('.') {
+            mant.to_string()
+        } else {
+            format!("{mant}.0")
+        };
         format!("{mant}E{exp}")
     }
 }
@@ -628,7 +681,10 @@ impl Lexer {
                 indent_len += 1;
                 self.pos += 1;
                 let p = self.pos as isize;
-                self.error("Tab characters are not allowed for indentation. Use spaces instead.", p);
+                self.error(
+                    "Tab characters are not allowed for indentation. Use spaces instead.",
+                    p,
+                );
             } else if c == '\n' {
                 indent_len = 0;
                 self.pos += 1;
@@ -643,19 +699,23 @@ impl Lexer {
             indent_len = 0;
         }
         let mut peeked = *self.indent_stack.last().unwrap();
-        if peeked < indent_len {
-            self.indent_stack.push(indent_len);
-            self.dents += 1;
-        } else if peeked > indent_len {
-            while peeked > indent_len {
-                self.indent_stack.pop();
-                self.dents -= 1;
-                peeked = *self.indent_stack.last().unwrap();
+        match peeked.cmp(&indent_len) {
+            std::cmp::Ordering::Less => {
+                self.indent_stack.push(indent_len);
+                self.dents += 1;
             }
-            if peeked < indent_len {
-                let p = self.pos as isize - 1;
-                self.error("indentation error", p);
+            std::cmp::Ordering::Greater => {
+                while peeked > indent_len {
+                    self.indent_stack.pop();
+                    self.dents -= 1;
+                    peeked = *self.indent_stack.last().unwrap();
+                }
+                if peeked < indent_len {
+                    let p = self.pos as isize - 1;
+                    self.error("indentation error", p);
+                }
             }
+            std::cmp::Ordering::Equal => {}
         }
     }
 
@@ -669,7 +729,11 @@ impl Lexer {
     }
 
     fn escaped_string_literal(&mut self, quot: char, is_raw: bool) {
-        let literal_start = if is_raw { self.pos as isize - 2 } else { self.pos as isize - 1 };
+        let literal_start = if is_raw {
+            self.pos as isize - 2
+        } else {
+            self.pos as isize - 1
+        };
         let in_triple = self.skip_triple_quote(quot);
         let mut literal = String::new();
         while self.pos < self.buffer.len() {
@@ -744,14 +808,19 @@ impl Lexer {
                             }
                             if octal > 0xff {
                                 let p = self.pos as isize - 1;
-                                self.error("octal escape sequence out of range (maximum is \\377)", p);
+                                self.error(
+                                    "octal escape sequence out of range (maximum is \\377)",
+                                    p,
+                                );
                             }
                             literal.push(char::from_u32(octal & 0xff).unwrap());
                         }
                         _ => {
                             let p = self.pos as isize - 1;
                             self.error(
-                                format!("invalid escape sequence: \\{c}. Use '\\\\' to insert '\\'."),
+                                format!(
+                                    "invalid escape sequence: \\{c}. Use '\\\\' to insert '\\'."
+                                ),
                                 p,
                             );
                             literal.push('\\');
@@ -777,7 +846,11 @@ impl Lexer {
     }
 
     fn string_literal(&mut self, quot: char, is_raw: bool) {
-        let literal_start = if is_raw { self.pos as isize - 2 } else { self.pos as isize - 1 };
+        let literal_start = if is_raw {
+            self.pos as isize - 2
+        } else {
+            self.pos as isize - 1
+        };
         let content_start = self.pos;
         if self.skip_triple_quote(quot) {
             self.pos -= 2;
@@ -1297,6 +1370,7 @@ struct Parser {
     /// Nesting of suites (`def`/`for`/`if` bodies).
     suite_depth: usize,
     /// Top-level loads: `(label, offset of the label literal)`.
+    #[allow(clippy::type_complexity)]
     loads: Vec<(String, isize, Vec<(String, isize)>)>,
 }
 
@@ -1445,7 +1519,11 @@ impl Parser {
             } else {
                 self.report_error(
                     offset,
-                    format!("syntax error at '{}': {}", Self::token_string(kind, value), message),
+                    format!(
+                        "syntax error at '{}': {}",
+                        Self::token_string(kind, value),
+                        message
+                    ),
                 );
             }
             self.recovery_mode = true;
@@ -1496,7 +1574,10 @@ impl Parser {
         }
         let msg = match k {
             TK::Assert => "'assert' not supported, use 'fail' instead".to_string(),
-            TK::Del => "'del' not supported, use '.pop()' to delete an item from a dictionary or a list".to_string(),
+            TK::Del => {
+                "'del' not supported, use '.pop()' to delete an item from a dictionary or a list"
+                    .to_string()
+            }
             TK::Import => "'import' not supported, use 'load' instead".to_string(),
             TK::Is => "'is' not supported, use '==' instead".to_string(),
             TK::Raise => "'raise' not supported, use 'fail' instead".to_string(),
@@ -1521,7 +1602,9 @@ impl Parser {
         // `Resolver.use`: an identifier created by `Parser.makeErrorExpression` reports "contains syntax errors".
         self.rerror(start, start, "contains syntax errors");
         let s = start.max(0) as usize;
-        let e = (end.max(0) as usize).min(self.lexer.buffer.len()).max(s.min(self.lexer.buffer.len()));
+        let e = (end.max(0) as usize)
+            .min(self.lexer.buffer.len())
+            .max(s.min(self.lexer.buffer.len()));
         let s = s.min(self.lexer.buffer.len());
         Ex::Ident(self.lexer.slice(s, e))
     }
@@ -1613,7 +1696,11 @@ impl Parser {
             match p {
                 ParamKind::Mandatory(name) => {
                     if let Some(ss) = star_star {
-                        self.rerror(key, at, format!("required parameter {name} may not follow **{ss}"));
+                        self.rerror(
+                            key,
+                            at,
+                            format!("required parameter {name} may not follow **{ss}"),
+                        );
                     } else if star.is_some() {
                         kw_only += 1;
                     } else if seen_optional {
@@ -1650,7 +1737,11 @@ impl Parser {
         if let Some((name, at)) = star {
             match name {
                 Some(n) => self.bind_param(key, at, n, &mut bound),
-                None if kw_only == 0 => self.rerror(key, at, "bare * must be followed by keyword-only parameters"),
+                None if kw_only == 0 => self.rerror(
+                    key,
+                    at,
+                    "bare * must be followed by keyword-only parameters",
+                ),
                 None => {}
             }
         }
@@ -1711,14 +1802,26 @@ impl Parser {
                     } else if seen_kwargs {
                         self.rerror(key, at, "positional argument may not follow **kwargs");
                     } else if keywords.is_some() {
-                        self.rerror(key, at, "positional argument may not follow keyword argument");
+                        self.rerror(
+                            key,
+                            at,
+                            "positional argument may not follow keyword argument",
+                        );
                     }
                 }
                 ArgKind::Keyword(name) => {
                     if seen_varargs {
-                        self.rerror(key, at, format!("keyword argument {name} may not follow *args"));
+                        self.rerror(
+                            key,
+                            at,
+                            format!("keyword argument {name} may not follow *args"),
+                        );
                     } else if seen_kwargs {
-                        self.rerror(key, at, format!("keyword argument {name} may not follow **kwargs"));
+                        self.rerror(
+                            key,
+                            at,
+                            format!("keyword argument {name} may not follow **kwargs"),
+                        );
                     }
                     let kws = keywords.get_or_insert_with(Vec::new);
                     if kws.contains(&name.as_str()) {
@@ -1751,7 +1854,9 @@ impl Parser {
         while self.kind() != TK::RParen && self.kind() != TK::Eof {
             if seen_arg {
                 if self.kind() == TK::For {
-                    self.syntax_error("Starlark does not support Python-style generator expressions");
+                    self.syntax_error(
+                        "Starlark does not support Python-style generator expressions",
+                    );
                 }
                 self.expect(TK::Comma);
                 if self.kind() == TK::RParen {
@@ -1781,7 +1886,10 @@ impl Parser {
             if in_set(EXPR_LIST_TERMINATOR_SET, self.kind()) {
                 if !trailing_comma_allowed {
                     let s = self.lexer.start;
-                    self.report_error(s, "Trailing comma is allowed only in parenthesized tuples.".into());
+                    self.report_error(
+                        s,
+                        "Trailing comma is allowed only in parenthesized tuples.".into(),
+                    );
                 }
                 break;
             }
@@ -1810,7 +1918,10 @@ impl Parser {
         self.next_token();
         if self.kind() == TK::String {
             let s = self.lexer.start;
-            self.report_error(s, "Implicit string concatenation is forbidden, use the + operator".into());
+            self.report_error(
+                s,
+                "Implicit string concatenation is forbidden, use the + operator".into(),
+            );
         }
         Ex::Other
     }
@@ -1842,7 +1953,9 @@ impl Parser {
                     return Ex::List;
                 }
                 if self.kind() == TK::For {
-                    self.syntax_error("Starlark does not support Python-style generator expressions");
+                    self.syntax_error(
+                        "Starlark does not support Python-style generator expressions",
+                    );
                 }
                 self.expect(TK::RParen);
                 let end = self.sync_to(EXPR_TERMINATOR_SET);
@@ -2169,10 +2282,18 @@ impl Parser {
         let mut seen: Vec<String> = Vec::new();
         for (local, local_at, orig, orig_at) in bindings {
             if orig.starts_with('_') {
-                self.rerror(-1, orig_at, format!("symbol '{orig}' is private and cannot be imported"));
+                self.rerror(
+                    -1,
+                    orig_at,
+                    format!("symbol '{orig}' is private and cannot be imported"),
+                );
             }
             if seen.contains(&local) {
-                self.rerror(-1, local_at, format!("load statement defines '{local}' more than once"));
+                self.rerror(
+                    -1,
+                    local_at,
+                    format!("load statement defines '{local}' more than once"),
+                );
             } else {
                 seen.push(local);
             }
@@ -2266,7 +2387,11 @@ impl Parser {
             let kind = self.kind();
             let at = self.next_token();
             if kind != TK::Pass && self.loop_depth == 0 {
-                self.rerror(at, at, format!("{} statement must be inside a for loop", kind.text()));
+                self.rerror(
+                    at,
+                    at,
+                    format!("{} statement must be inside a for loop", kind.text()),
+                );
             }
             return;
         }
@@ -2296,14 +2421,23 @@ impl Parser {
             self.parse_expr();
             if is_augmented_assignment(k) && matches!(lhs, Ex::List) {
                 let key = self.lexer.start;
-                self.rerror(key, op_at, "cannot perform augmented assignment on a list or tuple expression");
+                self.rerror(
+                    key,
+                    op_at,
+                    "cannot perform augmented assignment on a list or tuple expression",
+                );
             }
         }
     }
 
     /// `parseTypeAliasStatementTail`: only the diagnostics (type syntax is disabled).
     fn parse_type_alias_tail(&mut self, type_start: isize) {
-        self.syntax_error_at(type_start, TK::Identifier, &Val::Text("type".into()), "type annotations are disallowed");
+        self.syntax_error_at(
+            type_start,
+            TK::Identifier,
+            &Val::Text("type".into()),
+            "type annotations are disallowed",
+        );
         self.parse_ident();
         self.parse_optional_type_parameters();
         self.expect(TK::Equals);
@@ -2469,7 +2603,13 @@ mod tests {
         let src = "a b\nc d\ne f\ng h\ni j\nk l\nm n\n";
         assert_eq!(errs(src).len(), 5);
         let lex = "x = $ $ $ $ $ $ $\n";
-        assert!(errs(lex).iter().filter(|e| e.contains("invalid character")).count() == 7);
+        assert!(
+            errs(lex)
+                .iter()
+                .filter(|e| e.contains("invalid character"))
+                .count()
+                == 7
+        );
     }
 
     #[test]
@@ -2484,14 +2624,35 @@ mod tests {
 
     #[test]
     fn number_literals() {
-        assert_eq!(errs("x = 0x\n"), vec!["1:5: invalid hex literal", "1:5: invalid base-16 integer literal: 0x"]);
-        assert_eq!(errs("x = 09\n"), vec!["1:5: invalid octal literal: 09 (use '0o9')"]);
-        assert_eq!(errs("x = 0b1\n"), vec!["1:5: invalid octal literal: 0b1 (use '0ob1')"]);
+        assert_eq!(
+            errs("x = 0x\n"),
+            vec![
+                "1:5: invalid hex literal",
+                "1:5: invalid base-16 integer literal: 0x"
+            ]
+        );
+        assert_eq!(
+            errs("x = 09\n"),
+            vec!["1:5: invalid octal literal: 09 (use '0o9')"]
+        );
+        assert_eq!(
+            errs("x = 0b1\n"),
+            vec!["1:5: invalid octal literal: 0b1 (use '0ob1')"]
+        );
         assert_eq!(errs("x = 1e\n"), vec!["1:5: invalid float literal"]);
-        assert_eq!(errs("x = 1e999\n"), vec!["1:5: floating-point literal too large"]);
+        assert_eq!(
+            errs("x = 1e999\n"),
+            vec!["1:5: floating-point literal too large"]
+        );
         // Offending float tokens are shown with Java's Double.toString.
-        assert_eq!(errs("x = 1 1.5\n"), vec!["1:7: syntax error at '1.5': expected newline"]);
-        assert_eq!(errs("x = 1 1e10\n"), vec!["1:7: syntax error at '1.0E10': expected newline"]);
+        assert_eq!(
+            errs("x = 1 1.5\n"),
+            vec!["1:7: syntax error at '1.5': expected newline"]
+        );
+        assert_eq!(
+            errs("x = 1 1e10\n"),
+            vec!["1:7: syntax error at '1.0E10': expected newline"]
+        );
         assert_eq!(java_double_to_string(0.001), "0.001");
         assert_eq!(java_double_to_string(1e-4), "1.0E-4");
         assert_eq!(java_double_to_string(1234567.0), "1234567.0");
@@ -2500,12 +2661,18 @@ mod tests {
 
     #[test]
     fn string_token_is_quoted_in_messages() {
-        assert_eq!(errs("x = 1 'abc'\n"), vec!["1:7: syntax error at '\"abc\"': expected newline"]);
+        assert_eq!(
+            errs("x = 1 'abc'\n"),
+            vec!["1:7: syntax error at '\"abc\"': expected newline"]
+        );
     }
 
     #[test]
     fn unterminated_bracket_reports_at_newline() {
-        assert_eq!(errs("x = (1\n"), vec!["2:1: syntax error at 'newline': expected )"]);
+        assert_eq!(
+            errs("x = (1\n"),
+            vec!["2:1: syntax error at 'newline': expected )"]
+        );
     }
 
     fn rerrs(src: &str) -> Vec<String> {
@@ -2519,43 +2686,100 @@ mod tests {
     #[test]
     fn resolver_call_argument_errors() {
         // Verified against Bazel 9.3.2 (`bazel query` on a BUILD file).
-        assert_eq!(rerrs("f(a=1, 2)\n"), vec!["1:8: positional argument may not follow keyword argument"]);
-        assert_eq!(rerrs("f(a=1, a=2)\n"), vec!["1:8: duplicate keyword argument: a"]);
-        assert_eq!(rerrs("f(*a, b)\n"), vec!["1:7: positional argument may not follow *args"]);
-        assert_eq!(rerrs("f(**a, b)\n"), vec!["1:8: positional argument may not follow **kwargs"]);
-        assert_eq!(rerrs("f(**a, *b)\n"), vec!["1:8: *args may not follow **kwargs"]);
-        assert_eq!(rerrs("f(*a, *b)\n"), vec!["1:7: multiple *args not allowed"]);
-        assert_eq!(rerrs("f(**a, **b)\n"), vec!["1:8: multiple **kwargs not allowed"]);
-        assert_eq!(rerrs("f(*a, x=1)\n"), vec!["1:7: keyword argument x may not follow *args"]);
+        assert_eq!(
+            rerrs("f(a=1, 2)\n"),
+            vec!["1:8: positional argument may not follow keyword argument"]
+        );
+        assert_eq!(
+            rerrs("f(a=1, a=2)\n"),
+            vec!["1:8: duplicate keyword argument: a"]
+        );
+        assert_eq!(
+            rerrs("f(*a, b)\n"),
+            vec!["1:7: positional argument may not follow *args"]
+        );
+        assert_eq!(
+            rerrs("f(**a, b)\n"),
+            vec!["1:8: positional argument may not follow **kwargs"]
+        );
+        assert_eq!(
+            rerrs("f(**a, *b)\n"),
+            vec!["1:8: *args may not follow **kwargs"]
+        );
+        assert_eq!(
+            rerrs("f(*a, *b)\n"),
+            vec!["1:7: multiple *args not allowed"]
+        );
+        assert_eq!(
+            rerrs("f(**a, **b)\n"),
+            vec!["1:8: multiple **kwargs not allowed"]
+        );
+        assert_eq!(
+            rerrs("f(*a, x=1)\n"),
+            vec!["1:7: keyword argument x may not follow *args"]
+        );
         assert!(rerrs("f(1, x=1, *a, **k)\n").is_empty());
     }
 
     #[test]
     fn resolver_parameter_errors() {
-        assert_eq!(rerrs("def f(a, a): pass\n"), vec!["1:10: duplicate parameter: a"]);
+        assert_eq!(
+            rerrs("def f(a, a): pass\n"),
+            vec!["1:10: duplicate parameter: a"]
+        );
         assert_eq!(
             rerrs("def f(a=1, b): pass\n"),
             vec!["1:12: required positional parameter b may not follow an optional parameter"]
         );
-        assert_eq!(rerrs("def f(*): pass\n"), vec!["1:7: bare * must be followed by keyword-only parameters"]);
-        assert_eq!(rerrs("def f(*a, *b): pass\n"), vec!["1:11: multiple * parameters not allowed"]);
-        assert_eq!(rerrs("def f(**k, a): pass\n"), vec!["1:12: required parameter a may not follow **k"]);
+        assert_eq!(
+            rerrs("def f(*): pass\n"),
+            vec!["1:7: bare * must be followed by keyword-only parameters"]
+        );
+        assert_eq!(
+            rerrs("def f(*a, *b): pass\n"),
+            vec!["1:11: multiple * parameters not allowed"]
+        );
+        assert_eq!(
+            rerrs("def f(**k, a): pass\n"),
+            vec!["1:12: required parameter a may not follow **k"]
+        );
         assert!(rerrs("def f(a, b=1, *, c, d=2, **k): pass\n").is_empty());
-        assert_eq!(rerrs("x = lambda a, a: 1\n"), vec!["1:15: duplicate parameter: a"]);
+        assert_eq!(
+            rerrs("x = lambda a, a: 1\n"),
+            vec!["1:15: duplicate parameter: a"]
+        );
     }
 
     #[test]
     fn resolver_statement_errors() {
-        assert_eq!(rerrs("return 1\n"), vec!["1:1: return statements must be inside a function"]);
-        assert_eq!(rerrs("break\n"), vec!["1:1: break statement must be inside a for loop"]);
-        assert_eq!(rerrs("continue\n"), vec!["1:1: continue statement must be inside a for loop"]);
-        assert_eq!(rerrs("a, b += 1\n"), vec!["1:6: cannot perform augmented assignment on a list or tuple expression"]);
-        assert_eq!(rerrs("load('//:a.bzl', '_p')\n"), vec!["1:19: symbol '_p' is private and cannot be imported"]);
+        assert_eq!(
+            rerrs("return 1\n"),
+            vec!["1:1: return statements must be inside a function"]
+        );
+        assert_eq!(
+            rerrs("break\n"),
+            vec!["1:1: break statement must be inside a for loop"]
+        );
+        assert_eq!(
+            rerrs("continue\n"),
+            vec!["1:1: continue statement must be inside a for loop"]
+        );
+        assert_eq!(
+            rerrs("a, b += 1\n"),
+            vec!["1:6: cannot perform augmented assignment on a list or tuple expression"]
+        );
+        assert_eq!(
+            rerrs("load('//:a.bzl', '_p')\n"),
+            vec!["1:19: symbol '_p' is private and cannot be imported"]
+        );
         assert_eq!(
             rerrs("load('//:a.bzl', 'x', x = 'y')\n"),
             vec!["1:23: load statement defines 'x' more than once"]
         );
-        assert_eq!(rerrs("def f():\n  load('//:a.bzl', 'x')\n"), vec!["2:3: load statement not at top level"]);
+        assert_eq!(
+            rerrs("def f():\n  load('//:a.bzl', 'x')\n"),
+            vec!["2:3: load statement not at top level"]
+        );
         assert!(rerrs("for x in y:\n  break\n").is_empty());
     }
 }

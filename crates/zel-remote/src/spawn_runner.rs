@@ -26,7 +26,10 @@
 //! explicitly through [`RemoteSpawnRunner::materialize`] (used for top-level targets).
 
 use crate::disk_cache::{set_executable, DiskCache};
-use crate::merkle::{flatten_tree, tree_from_local_dir, BlobSource, InputKind, MerkleInput, MerkleTree, MerkleTreeComputer, TreeEntry};
+use crate::merkle::{
+    flatten_tree, tree_from_local_dir, BlobSource, InputKind, MerkleInput, MerkleTree,
+    MerkleTreeComputer, TreeEntry,
+};
 use crate::options::{DownloadMode, RemoteOptions};
 use crate::reapi_client::{is_missing_blobs_failure, ActionMeta, ReapiClient, RemoteError};
 use std::collections::{BTreeMap, HashMap};
@@ -43,7 +46,12 @@ use zel_vfs::{FileSystem, PathFragment};
 pub trait SpawnRunner: Send + Sync {
     fn name(&self) -> &str;
     fn can_exec(&self, spawn: &Spawn) -> bool;
-    fn exec(&self, spawn: &Spawn, execroot: &PathFragment, fs: &dyn FileSystem) -> io::Result<SpawnResult>;
+    fn exec(
+        &self,
+        spawn: &Spawn,
+        execroot: &PathFragment,
+        fs: &dyn FileSystem,
+    ) -> io::Result<SpawnResult>;
 }
 
 /// How one `exec` call behaves (the integration points of `RemoteSpawnStrategy`, the
@@ -66,7 +74,12 @@ pub struct ExecMode<'a> {
 
 impl Default for ExecMode<'_> {
     fn default() -> Self {
-        Self { allow_remote_exec: true, fallback: None, allow_local: true, hooks: Default::default() }
+        Self {
+            allow_remote_exec: true,
+            fallback: None,
+            allow_local: true,
+            hooks: Default::default(),
+        }
     }
 }
 
@@ -80,7 +93,12 @@ impl SpawnRunner for LocalSpawnRunner {
     fn can_exec(&self, _spawn: &Spawn) -> bool {
         true
     }
-    fn exec(&self, spawn: &Spawn, execroot: &PathFragment, fs: &dyn FileSystem) -> io::Result<SpawnResult> {
+    fn exec(
+        &self,
+        spawn: &Spawn,
+        execroot: &PathFragment,
+        fs: &dyn FileSystem,
+    ) -> io::Result<SpawnResult> {
         zel_sandbox::execute_spawn_local(spawn, execroot, fs)
     }
 }
@@ -108,7 +126,9 @@ const TREE_OUTPUT_PREFIX: &str = "zel-tree-output:";
 
 /// Marks `path` (relative to the exec root) as a directory (tree artifact) output of `spawn`.
 pub fn mark_tree_output(spawn: &mut Spawn, path: &str) {
-    spawn.execution_info.insert(format!("{TREE_OUTPUT_PREFIX}{path}"), "1".into());
+    spawn
+        .execution_info
+        .insert(format!("{TREE_OUTPUT_PREFIX}{path}"), "1".into());
 }
 
 fn tree_outputs(spawn: &Spawn) -> Vec<String> {
@@ -136,8 +156,14 @@ impl RemoteStats {
     pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         for (n, label) in [
-            (self.disk_cache_hits.load(Ordering::SeqCst), "disk cache hit"),
-            (self.remote_cache_hits.load(Ordering::SeqCst), "remote cache hit"),
+            (
+                self.disk_cache_hits.load(Ordering::SeqCst),
+                "disk cache hit",
+            ),
+            (
+                self.remote_cache_hits.load(Ordering::SeqCst),
+                "remote cache hit",
+            ),
             (self.remote_executions.load(Ordering::SeqCst), "remote"),
             (self.local_executions.load(Ordering::SeqCst), "local"),
         ] {
@@ -145,11 +171,20 @@ impl RemoteStats {
                 parts.push(format!("{n} {label}"));
             }
         }
-        let total: usize = [&self.disk_cache_hits, &self.remote_cache_hits, &self.remote_executions, &self.local_executions]
-            .iter()
-            .map(|c| c.load(Ordering::SeqCst))
-            .sum();
-        format!("{total} process{}: {}", if total == 1 { "" } else { "es" }, parts.join(", "))
+        let total: usize = [
+            &self.disk_cache_hits,
+            &self.remote_cache_hits,
+            &self.remote_executions,
+            &self.local_executions,
+        ]
+        .iter()
+        .map(|c| c.load(Ordering::SeqCst))
+        .sum();
+        format!(
+            "{total} process{}: {}",
+            if total == 1 { "" } else { "es" },
+            parts.join(", ")
+        )
     }
 }
 
@@ -172,8 +207,14 @@ impl RemoteAction {
     /// All blobs the executor needs: input tree + command + action.
     fn all_blobs(&self) -> BTreeMap<Digest, BlobSource> {
         let mut b = self.tree.blobs.clone();
-        b.insert(self.command_digest.clone(), BlobSource::Bytes(self.command_bytes.clone()));
-        b.insert(self.action_digest.clone(), BlobSource::Bytes(self.action_bytes.clone()));
+        b.insert(
+            self.command_digest.clone(),
+            BlobSource::Bytes(self.command_bytes.clone()),
+        );
+        b.insert(
+            self.action_digest.clone(),
+            BlobSource::Bytes(self.action_bytes.clone()),
+        );
         b
     }
 }
@@ -206,15 +247,23 @@ impl RemoteSpawnRunner {
         Self::new(opts, client, fallback)
     }
 
-    pub fn new(opts: RemoteOptions, client: Option<Arc<ReapiClient>>, fallback: Arc<dyn SpawnRunner>) -> Result<Self, String> {
+    pub fn new(
+        opts: RemoteOptions,
+        client: Option<Arc<ReapiClient>>,
+        fallback: Arc<dyn SpawnRunner>,
+    ) -> Result<Self, String> {
         let disk = match &opts.disk_cache {
-            Some(p) => Some(DiskCache::open(Path::new(p), opts.digest_fn, true).map_err(|e| format!("Failed to open disk cache {p}: {e}"))?),
+            Some(p) => Some(
+                DiskCache::open(Path::new(p), opts.digest_fn, true)
+                    .map_err(|e| format!("Failed to open disk cache {p}: {e}"))?,
+            ),
             None => None,
         };
         let mut warnings = Vec::new();
         if let Some(c) = &client {
             let need_exec = c.executor.is_some();
-            c.check_compatibility(need_exec).map_err(|e| e.to_string())?;
+            c.check_compatibility(need_exec)
+                .map_err(|e| e.to_string())?;
         }
         if opts.cache_compression {
             warnings.push(
@@ -245,7 +294,10 @@ impl RemoteSpawnRunner {
     }
 
     fn exec_remotely_enabled(&self) -> bool {
-        self.client.as_ref().map(|c| c.executor.is_some()).unwrap_or(false)
+        self.client
+            .as_ref()
+            .map(|c| c.executor.is_some())
+            .unwrap_or(false)
     }
 
     /// A disk cache or remote cache is configured (`RemoteSpawnCache` has something to consult).
@@ -265,7 +317,11 @@ impl RemoteSpawnRunner {
 
     // ------------------------------------------------------------------- action building
 
-    fn collect_inputs(&self, spawn: &Spawn, execroot: &Path) -> Result<Vec<MerkleInput>, Vec<String>> {
+    fn collect_inputs(
+        &self,
+        spawn: &Spawn,
+        execroot: &Path,
+    ) -> Result<Vec<MerkleInput>, Vec<String>> {
         let lazy = self.lazy.lock().unwrap();
         let mut out = Vec::new();
         let mut missing = Vec::new();
@@ -274,7 +330,10 @@ impl RemoteSpawnRunner {
             if let Some(r) = lazy.get(&rel) {
                 out.push(MerkleInput {
                     path: rel,
-                    kind: InputKind::Remote { digest: r.digest.clone(), executable: r.executable },
+                    kind: InputKind::Remote {
+                        digest: r.digest.clone(),
+                        executable: r.executable,
+                    },
                     node_properties: None,
                 });
                 continue;
@@ -287,7 +346,10 @@ impl RemoteSpawnRunner {
                     had_nested = true;
                     out.push(MerkleInput {
                         path: k.clone(),
-                        kind: InputKind::Remote { digest: r.digest.clone(), executable: r.executable },
+                        kind: InputKind::Remote {
+                            digest: r.digest.clone(),
+                            executable: r.executable,
+                        },
                         node_properties: None,
                     });
                 }
@@ -302,35 +364,56 @@ impl RemoteSpawnRunner {
                         md.permissions().mode() & 0o111 != 0
                     };
                     #[cfg(not(unix))]
-                    let exec = false;
+                    let exec = {
+                        let _ = md;
+                        false
+                    };
                     out.push(MerkleInput::file(&rel, full, exec));
                 }
                 Err(_) if had_nested => {}
                 Err(_) => missing.push(rel),
             }
         }
-        if missing.is_empty() { Ok(out) } else { Err(missing) }
+        if missing.is_empty() {
+            Ok(out)
+        } else {
+            Err(missing)
+        }
     }
 
     fn build_action(&self, spawn: &Spawn, execroot: &Path) -> Result<RemoteAction, Vec<String>> {
         let inputs = self.collect_inputs(spawn, execroot)?;
-        let tree = self.merkle.build(&inputs).map_err(|e| vec![e.to_string()])?;
+        let tree = self
+            .merkle
+            .build(&inputs)
+            .map_err(|e| vec![e.to_string()])?;
         let trees = tree_outputs(spawn);
         let mut files: Vec<String> = Vec::new();
         let mut dirs: Vec<String> = Vec::new();
         for o in &spawn.outputs {
             let p = o.path_string().to_string();
-            if trees.contains(&p) { dirs.push(p) } else { files.push(p) }
+            if trees.contains(&p) {
+                dirs.push(p)
+            } else {
+                files.push(p)
+            }
         }
         files.sort();
         dirs.sort();
-        let use_paths = self.client.as_ref().map(|c| c.supports_output_paths()).unwrap_or(true);
+        let use_paths = self
+            .client
+            .as_ref()
+            .map(|c| c.supports_output_paths())
+            .unwrap_or(true);
         let mut command = Command {
             arguments: spawn.argv.clone(),
             environment_variables: spawn
                 .env
                 .iter()
-                .map(|(k, v)| EnvironmentVariable { name: k.clone(), value: v.clone() })
+                .map(|(k, v)| EnvironmentVariable {
+                    name: k.clone(),
+                    value: v.clone(),
+                })
                 .collect(),
             ..Default::default()
         };
@@ -351,14 +434,21 @@ impl RemoteSpawnRunner {
         }
         if !props.is_empty() {
             command.platform = Some(Platform {
-                properties: props.into_iter().map(|(name, value)| PlatformProperty { name, value }).collect(),
+                properties: props
+                    .into_iter()
+                    .map(|(name, value)| PlatformProperty { name, value })
+                    .collect(),
             });
         }
         let command_bytes = command.encode_to_vec();
         let command_digest = self.opts.digest_fn.digest(&command_bytes);
         let salt = CacheSalt {
             may_be_executed_remotely: may_be_executed_remotely(spawn),
-            workspace: spawn.execution_info.get("diff-workspace-cache").cloned().unwrap_or_default(),
+            workspace: spawn
+                .execution_info
+                .get("diff-workspace-cache")
+                .cloned()
+                .unwrap_or_default(),
         }
         .encode_to_vec();
         let timeout = spawn.timeout_secs().map(|s| Duration {
@@ -392,7 +482,8 @@ impl RemoteSpawnRunner {
     // ------------------------------------------------------------------- cache reads
 
     fn read_policy(&self, spawn: &Spawn) -> (bool, bool) {
-        let remote = self.client.is_some() && self.opts.accept_cached && may_be_cached_remotely(spawn);
+        let remote =
+            self.client.is_some() && self.opts.accept_cached && may_be_cached_remotely(spawn);
         let disk = self.disk.is_some() && may_be_cached(spawn);
         (remote, disk)
     }
@@ -402,7 +493,11 @@ impl RemoteSpawnRunner {
             && self.opts.upload_local_results
             && may_be_cached_remotely(spawn)
             && !has(spawn, "no-remote-cache-upload")
-            && self.client.as_ref().map(|c| c.remote_cache_supports_update()).unwrap_or(false);
+            && self
+                .client
+                .as_ref()
+                .map(|c| c.remote_cache_supports_update())
+                .unwrap_or(false);
         let disk = self.disk.is_some() && may_be_cached(spawn);
         (remote, disk)
     }
@@ -410,12 +505,21 @@ impl RemoteSpawnRunner {
     fn lookup_cache(&self, ra: &RemoteAction, spawn: &Spawn) -> Option<CacheHit> {
         let (remote, disk) = self.read_policy(spawn);
         if disk {
-            if let Some(r) = self.disk.as_ref().and_then(|d| d.get_action_result(&ra.action_digest)) {
+            if let Some(r) = self
+                .disk
+                .as_ref()
+                .and_then(|d| d.get_action_result(&ra.action_digest))
+            {
                 return Some(CacheHit::Disk(r));
             }
         }
         if remote {
-            match self.client.as_ref().unwrap().get_action_result(&ra.action_digest, &ra.meta) {
+            match self
+                .client
+                .as_ref()
+                .unwrap()
+                .get_action_result(&ra.action_digest, &ra.meta)
+            {
                 Ok(Some(r)) => return Some(CacheHit::Remote(r)),
                 Ok(None) => {}
                 Err(e) => self.warn(format!("Remote Cache: {e}")),
@@ -433,7 +537,9 @@ impl RemoteSpawnRunner {
         }
         if let Some(c) = &self.client {
             let b = c.download_blob(d, meta)?;
-            self.stats.bytes_downloaded.fetch_add(b.len(), Ordering::SeqCst);
+            self.stats
+                .bytes_downloaded
+                .fetch_add(b.len(), Ordering::SeqCst);
             if let Some(disk) = &self.disk {
                 let _ = disk.put_blob(d, &b);
             }
@@ -483,14 +589,28 @@ impl RemoteSpawnRunner {
                     write_file(&dest, &b, f.is_executable)?;
                 }
             } else {
-                lazy_updates.push((f.path.clone(), RemoteOutput { digest, executable: f.is_executable }));
+                lazy_updates.push((
+                    f.path.clone(),
+                    RemoteOutput {
+                        digest,
+                        executable: f.is_executable,
+                    },
+                ));
             }
         }
-        for s in r.output_symlinks.iter().chain(&r.output_file_symlinks).chain(&r.output_directory_symlinks) {
+        for s in r
+            .output_symlinks
+            .iter()
+            .chain(&r.output_file_symlinks)
+            .chain(&r.output_directory_symlinks)
+        {
             make_symlink(&execroot.join(&s.path), &s.target)?;
         }
         for od in &r.output_directories {
-            let td = od.tree_digest.clone().ok_or_else(|| RemoteError::Other("output directory without tree digest".into()))?;
+            let td = od
+                .tree_digest
+                .clone()
+                .ok_or_else(|| RemoteError::Other("output directory without tree digest".into()))?;
             let tree_bytes = self.fetch_blob(&td, meta)?;
             let tree = Tree::decode(&tree_bytes)?;
             let entries = flatten_tree(&tree, self.opts.digest_fn).map_err(RemoteError::Other)?;
@@ -501,12 +621,23 @@ impl RemoteSpawnRunner {
                 match e {
                     TreeEntry::Directory { path } => std::fs::create_dir_all(base.join(path))?,
                     TreeEntry::Symlink { path, target } => make_symlink(&base.join(path), &target)?,
-                    TreeEntry::File { path, digest, executable } => {
+                    TreeEntry::File {
+                        path,
+                        digest,
+                        executable,
+                    } => {
                         if download || digest.size_bytes == 0 {
-                            let b = if digest.size_bytes == 0 { vec![] } else { self.fetch_blob(&digest, meta)? };
+                            let b = if digest.size_bytes == 0 {
+                                vec![]
+                            } else {
+                                self.fetch_blob(&digest, meta)?
+                            };
                             write_file(&base.join(&path), &b, executable)?;
                         } else {
-                            lazy_updates.push((format!("{}/{path}", od.path), RemoteOutput { digest, executable }));
+                            lazy_updates.push((
+                                format!("{}/{path}", od.path),
+                                RemoteOutput { digest, executable },
+                            ));
                         }
                     }
                 }
@@ -519,11 +650,20 @@ impl RemoteSpawnRunner {
                 .iter()
                 .map(|f| f.path.as_str())
                 .chain(r.output_directories.iter().map(|d| d.path.as_str()))
-                .chain(r.output_symlinks.iter().chain(&r.output_file_symlinks).chain(&r.output_directory_symlinks).map(|s| s.path.as_str()))
+                .chain(
+                    r.output_symlinks
+                        .iter()
+                        .chain(&r.output_file_symlinks)
+                        .chain(&r.output_directory_symlinks)
+                        .map(|s| s.path.as_str()),
+                )
                 .collect();
             for o in &spawn.outputs {
                 if !have.contains(o.path_string()) {
-                    return Err(RemoteError::Other(format!("Output {} was not created by the remote action", o.path_string())));
+                    return Err(RemoteError::Other(format!(
+                        "Output {} was not created by the remote action",
+                        o.path_string()
+                    )));
                 }
             }
         }
@@ -541,7 +681,12 @@ impl RemoteSpawnRunner {
         Ok((stdout, stderr))
     }
 
-    fn inline_or_fetch(&self, raw: &[u8], digest: &Option<Digest>, meta: &ActionMeta) -> Result<Vec<u8>, RemoteError> {
+    fn inline_or_fetch(
+        &self,
+        raw: &[u8],
+        digest: &Option<Digest>,
+        meta: &ActionMeta,
+    ) -> Result<Vec<u8>, RemoteError> {
         if !raw.is_empty() {
             return Ok(raw.to_vec());
         }
@@ -568,8 +713,11 @@ impl RemoteSpawnRunner {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             for (k, v) in items {
-                let b = self.fetch_blob(&v.digest, &meta).map_err(|e| format!("Failed to download {k}: {e}"))?;
-                write_file(&execroot.join(&k), &b, v.executable).map_err(|e| format!("Failed to write {k}: {e}"))?;
+                let b = self
+                    .fetch_blob(&v.digest, &meta)
+                    .map_err(|e| format!("Failed to download {k}: {e}"))?;
+                write_file(&execroot.join(&k), &b, v.executable)
+                    .map_err(|e| format!("Failed to write {k}: {e}"))?;
                 self.lazy.lock().unwrap().remove(&k);
                 n += 1;
             }
@@ -578,7 +726,11 @@ impl RemoteSpawnRunner {
     }
 
     fn materialize_inputs(&self, spawn: &Spawn, execroot: &Path) -> Result<(), String> {
-        let paths: Vec<String> = spawn.inputs.iter().map(|p| p.path_string().to_string()).collect();
+        let paths: Vec<String> = spawn
+            .inputs
+            .iter()
+            .map(|p| p.path_string().to_string())
+            .collect();
         self.materialize(&paths, execroot).map(|_| ())
     }
 
@@ -591,17 +743,30 @@ impl RemoteSpawnRunner {
             return;
         }
         let mut blobs: BTreeMap<Digest, BlobSource> = BTreeMap::new();
-        let mut ar = ActionResult { exit_code: res.exit_code, ..Default::default() };
+        let mut ar = ActionResult {
+            exit_code: res.exit_code,
+            ..Default::default()
+        };
         let f = self.opts.digest_fn;
         let trees = tree_outputs(spawn);
-        let mut outs: Vec<String> = spawn.outputs.iter().map(|o| o.path_string().to_string()).collect();
+        let mut outs: Vec<String> = spawn
+            .outputs
+            .iter()
+            .map(|o| o.path_string().to_string())
+            .collect();
         outs.sort();
         for o in outs {
             let full = execroot.join(&o);
-            let Ok(md) = std::fs::symlink_metadata(&full) else { continue };
+            let Ok(md) = std::fs::symlink_metadata(&full) else {
+                continue;
+            };
             if md.file_type().is_symlink() {
                 if let Ok(t) = std::fs::read_link(&full) {
-                    ar.output_symlinks.push(OutputSymlink { path: o, target: t.to_string_lossy().into_owned(), node_properties: None });
+                    ar.output_symlinks.push(OutputSymlink {
+                        path: o,
+                        target: t.to_string_lossy().into_owned(),
+                        node_properties: None,
+                    });
                 }
             } else if md.is_dir() || trees.contains(&o) {
                 match tree_from_local_dir(&full, f, &mut blobs) {
@@ -609,7 +774,11 @@ impl RemoteSpawnRunner {
                         let tb = t.encode_to_vec();
                         let td = f.digest(&tb);
                         blobs.insert(td.clone(), BlobSource::Bytes(tb));
-                        ar.output_directories.push(OutputDirectory { path: o, tree_digest: Some(td), ..Default::default() });
+                        ar.output_directories.push(OutputDirectory {
+                            path: o,
+                            tree_digest: Some(td),
+                            ..Default::default()
+                        });
                     }
                     Err(e) => {
                         self.warn(format!("Failed to upload output directory {o}: {e}"));
@@ -617,7 +786,9 @@ impl RemoteSpawnRunner {
                     }
                 }
             } else {
-                let Ok(data) = std::fs::read(&full) else { continue };
+                let Ok(data) = std::fs::read(&full) else {
+                    continue;
+                };
                 let d = f.digest(&data);
                 #[cfg(unix)]
                 let exec = {
@@ -627,14 +798,23 @@ impl RemoteSpawnRunner {
                 #[cfg(not(unix))]
                 let exec = false;
                 blobs.insert(d.clone(), BlobSource::File(full));
-                ar.output_files.push(OutputFile { path: o, digest: Some(d), is_executable: exec, ..Default::default() });
+                ar.output_files.push(OutputFile {
+                    path: o,
+                    digest: Some(d),
+                    is_executable: exec,
+                    ..Default::default()
+                });
             }
         }
         for (bytes, slot) in [(&res.stdout, 0), (&res.stderr, 1)] {
             if !bytes.is_empty() {
                 let d = f.digest(bytes);
                 blobs.insert(d.clone(), BlobSource::Bytes(bytes.clone()));
-                if slot == 0 { ar.stdout_digest = Some(d) } else { ar.stderr_digest = Some(d) }
+                if slot == 0 {
+                    ar.stdout_digest = Some(d)
+                } else {
+                    ar.stderr_digest = Some(d)
+                }
             }
         }
         if disk {
@@ -672,7 +852,8 @@ impl RemoteSpawnRunner {
         match c.execute(&ra.action_digest, skip, &ra.meta, &mut |_| {}) {
             Err(RemoteError::Exec(st)) if is_missing_blobs_failure(&st) => {
                 // The CAS lost some blobs after our check: force re-upload of everything.
-                let digests: Vec<Digest> = all.keys().filter(|d| d.size_bytes > 0).cloned().collect();
+                let digests: Vec<Digest> =
+                    all.keys().filter(|d| d.size_bytes > 0).cloned().collect();
                 c.upload_blobs(&digests, &all, &ra.meta)?;
                 c.execute(&ra.action_digest, skip, &ra.meta, &mut |_| {})
             }
@@ -680,6 +861,7 @@ impl RemoteSpawnRunner {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn result_from_action_result(
         &self,
         r: &ActionResult,
@@ -692,7 +874,11 @@ impl RemoteSpawnRunner {
     ) -> SpawnResult {
         match self.apply_result(r, spawn, execroot, meta, download) {
             Ok((stdout, stderr)) => SpawnResult {
-                status: if r.exit_code == 0 { SpawnStatus::Success } else { SpawnStatus::NonZeroExit },
+                status: if r.exit_code == 0 {
+                    SpawnStatus::Success
+                } else {
+                    SpawnStatus::NonZeroExit
+                },
                 exit_code: r.exit_code,
                 stdout,
                 stderr,
@@ -764,7 +950,11 @@ impl RemoteSpawnRunner {
 
 impl SpawnRunner for RemoteSpawnRunner {
     fn name(&self) -> &str {
-        if self.exec_remotely_enabled() { "remote" } else { "remote-cache" }
+        if self.exec_remotely_enabled() {
+            "remote"
+        } else {
+            "remote-cache"
+        }
     }
 
     fn can_exec(&self, spawn: &Spawn) -> bool {
@@ -773,7 +963,12 @@ impl SpawnRunner for RemoteSpawnRunner {
         true
     }
 
-    fn exec(&self, spawn: &Spawn, execroot: &PathFragment, fs: &dyn FileSystem) -> io::Result<SpawnResult> {
+    fn exec(
+        &self,
+        spawn: &Spawn,
+        execroot: &PathFragment,
+        fs: &dyn FileSystem,
+    ) -> io::Result<SpawnResult> {
         self.exec_ext(spawn, execroot, fs, &ExecMode::default())
     }
 }
@@ -802,34 +997,60 @@ impl RemoteSpawnRunner {
             }
         };
         let download = self.should_download(spawn);
-        match self.lookup_cache(&ra, spawn) {
-            Some(hit) => {
-                let (r, runner) = match hit {
-                    CacheHit::Disk(r) => {
-                        self.stats.disk_cache_hits.fetch_add(1, Ordering::SeqCst);
-                        (r, "disk cache hit")
-                    }
-                    CacheHit::Remote(r) => {
-                        self.stats.remote_cache_hits.fetch_add(1, Ordering::SeqCst);
-                        (r, "remote cache hit")
-                    }
-                };
-                if mode.hooks.is_cancelled() || !mode.hooks.lock(r.exit_code) {
-                    return Err(zel_sandbox::cancelled_error());
+        if let Some(hit) = self.lookup_cache(&ra, spawn) {
+            let (r, runner) = match hit {
+                CacheHit::Disk(r) => {
+                    self.stats.disk_cache_hits.fetch_add(1, Ordering::SeqCst);
+                    (r, "disk cache hit")
                 }
-                let res = self.result_from_action_result(&r, runner, spawn, &root, &ra.meta, download, start);
-                if res.status != SpawnStatus::ExecutionFailed {
-                    return Ok(res);
+                CacheHit::Remote(r) => {
+                    self.stats.remote_cache_hits.fetch_add(1, Ordering::SeqCst);
+                    (r, "remote cache hit")
                 }
-                // The cached entry was unusable (e.g. evicted blobs): treat as a miss.
-                self.warn(format!("Cached result for {} could not be applied: {}", spawn.mnemonic, String::from_utf8_lossy(&res.stderr).trim()));
+            };
+            if mode.hooks.is_cancelled() || !mode.hooks.lock(r.exit_code) {
+                return Err(zel_sandbox::cancelled_error());
             }
-            None => {}
+            let res =
+                self.result_from_action_result(&r, runner, spawn, &root, &ra.meta, download, start);
+            if res.status != SpawnStatus::ExecutionFailed {
+                return Ok(res);
+            }
+            // The cached entry was unusable (e.g. evicted blobs): treat as a miss.
+            self.warn(format!(
+                "Cached result for {} could not be applied: {}",
+                spawn.mnemonic,
+                String::from_utf8_lossy(&res.stderr).trim()
+            ));
         }
-        if mode.allow_remote_exec && self.exec_remotely_enabled() && may_be_executed_remotely(spawn) {
+        if mode.allow_remote_exec && self.exec_remotely_enabled() && may_be_executed_remotely(spawn)
+        {
             return match self.execute_remotely(&ra) {
                 Ok(resp) => {
-                    let r = resp.result.unwrap_or_default();
+                    let Some(r) = resp.result else {
+                        let e = RemoteError::Other(
+                            "Unexpected result of remote execution: no result".into(),
+                        );
+                        if self.opts.local_fallback && mode.allow_local {
+                            self.stats.fallbacks.fetch_add(1, Ordering::SeqCst);
+                            self.warn(format!(
+                                "Remote execution of {} failed, falling back to local execution: {e}",
+                                spawn.mnemonic
+                            ));
+                            return self.run_local(spawn, execroot, fs, Some(&ra), mode);
+                        }
+                        if mode.hooks.is_cancelled() || !mode.hooks.lock(1) {
+                            return Err(zel_sandbox::cancelled_error());
+                        }
+                        return Ok(self.failed(
+                            format!("Remote execution failed: {e}"),
+                            start,
+                            SpawnStatus::ExecutionFailed,
+                        ));
+                    };
+                    if !resp.message.is_empty() {
+                        self.warn(resp.message.clone());
+                    }
                     let cached = resp.cached_result;
                     if mode.hooks.is_cancelled() || !mode.hooks.lock(r.exit_code) {
                         return Err(zel_sandbox::cancelled_error());
@@ -857,10 +1078,14 @@ impl RemoteSpawnRunner {
                     Ok(res)
                 }
                 Err(e) => {
-                    let timeout = matches!(&e, RemoteError::Exec(s) if s.code == code::DEADLINE_EXCEEDED);
+                    let timeout =
+                        matches!(&e, RemoteError::Exec(s) if s.code == code::DEADLINE_EXCEEDED);
                     if self.opts.local_fallback && !timeout && mode.allow_local {
                         self.stats.fallbacks.fetch_add(1, Ordering::SeqCst);
-                        self.warn(format!("Remote execution of {} failed, falling back to local execution: {e}", spawn.mnemonic));
+                        self.warn(format!(
+                            "Remote execution of {} failed, falling back to local execution: {e}",
+                            spawn.mnemonic
+                        ));
                         return self.run_local(spawn, execroot, fs, Some(&ra), mode);
                     }
                     if mode.hooks.is_cancelled() || !mode.hooks.lock(1) {
@@ -869,7 +1094,11 @@ impl RemoteSpawnRunner {
                     Ok(self.failed(
                         format!("Remote execution failed: {e}"),
                         start,
-                        if timeout { SpawnStatus::Timeout } else { SpawnStatus::ExecutionFailed },
+                        if timeout {
+                            SpawnStatus::Timeout
+                        } else {
+                            SpawnStatus::ExecutionFailed
+                        },
                     ))
                 }
             };
@@ -878,8 +1107,15 @@ impl RemoteSpawnRunner {
     }
 }
 
-fn expand_dir(full: &Path, rel: &str, out: &mut Vec<MerkleInput>, lazy: &HashMap<String, RemoteOutput>) {
-    let Ok(rd) = std::fs::read_dir(full) else { return };
+fn expand_dir(
+    full: &Path,
+    rel: &str,
+    out: &mut Vec<MerkleInput>,
+    lazy: &HashMap<String, RemoteOutput>,
+) {
+    let Ok(rd) = std::fs::read_dir(full) else {
+        return;
+    };
     let mut entries: Vec<_> = rd.flatten().collect();
     entries.sort_by_key(|e| e.file_name());
     if entries.is_empty() {
@@ -901,7 +1137,10 @@ fn expand_dir(full: &Path, rel: &str, out: &mut Vec<MerkleInput>, lazy: &HashMap
                     md.permissions().mode() & 0o111 != 0
                 };
                 #[cfg(not(unix))]
-                let exec = false;
+                let exec = {
+                    let _ = md;
+                    false
+                };
                 out.push(MerkleInput::file(&child_rel, p, exec));
             }
             Err(_) => {}
@@ -931,6 +1170,9 @@ fn make_symlink(link: &Path, target: &str) -> io::Result<()> {
     #[cfg(not(unix))]
     {
         let _ = target;
-        Err(io::Error::new(io::ErrorKind::Unsupported, "symlinks unsupported"))
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symlinks unsupported",
+        ))
     }
 }

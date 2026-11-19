@@ -29,16 +29,30 @@ pub fn builtins_files() -> &'static [(&'static str, &'static [u8])] {
     BUILTINS
 }
 
-/// Writes the `@_builtins` tree to `dir`.
-pub fn materialize_builtins(dir: &Path) -> Result<(), String> {
-    for (rel, bytes) in BUILTINS {
+/// Fixed past timestamp (2000-01-01 UTC) so materialized embedded trees are never treated as racy.
+fn non_racy_mtime() -> std::time::SystemTime {
+    std::time::UNIX_EPOCH + std::time::Duration::from_secs(946_684_800)
+}
+
+fn write_embedded(dir: &Path, entries: &[(&str, &[u8])]) -> Result<(), String> {
+    use std::io::Write;
+    let mtime = non_racy_mtime();
+    for (rel, bytes) in entries {
         let dest = dir.join(rel);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
         }
-        std::fs::write(&dest, bytes).map_err(|e| format!("{}: {e}", dest.display()))?;
+        let mut f = std::fs::File::create(&dest).map_err(|e| format!("{}: {e}", dest.display()))?;
+        f.write_all(bytes)
+            .map_err(|e| format!("{}: {e}", dest.display()))?;
+        let _ = f.set_modified(mtime);
     }
     Ok(())
+}
+
+/// Writes the `@_builtins` tree to `dir`.
+pub fn materialize_builtins(dir: &Path) -> Result<(), String> {
+    write_embedded(dir, BUILTINS)
 }
 
 /// Returns the content of a repo-relative file (e.g. `tools/cpp/unix_cc_toolchain_config.bzl`).
@@ -48,14 +62,7 @@ pub fn read(path: &str) -> Option<&'static [u8]> {
 
 /// Writes the repository to `dir`.
 pub fn materialize(dir: &Path) -> Result<(), String> {
-    for (rel, bytes) in FILES {
-        let dest = dir.join(rel);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
-        }
-        std::fs::write(&dest, bytes).map_err(|e| format!("{}: {e}", dest.display()))?;
-    }
-    Ok(())
+    write_embedded(dir, FILES)
 }
 
 #[cfg(test)]
@@ -78,9 +85,16 @@ mod tests {
 
     #[test]
     fn builtins_present() {
-        let exports = builtins_files().iter().find(|(p, _)| *p == "exports.bzl").expect("exports.bzl");
-        assert!(std::str::from_utf8(exports.1).unwrap().contains("@_builtins//:bazel/exports.bzl"));
-        assert!(builtins_files().iter().any(|(p, _)| *p == "common/cc/cc_common_bazel.bzl"));
+        let exports = builtins_files()
+            .iter()
+            .find(|(p, _)| *p == "exports.bzl")
+            .expect("exports.bzl");
+        assert!(std::str::from_utf8(exports.1)
+            .unwrap()
+            .contains("@_builtins//:bazel/exports.bzl"));
+        assert!(builtins_files()
+            .iter()
+            .any(|(p, _)| *p == "common/cc/cc_common_bazel.bzl"));
     }
 
     #[test]

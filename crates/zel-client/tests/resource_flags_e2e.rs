@@ -2,6 +2,7 @@
 //! `--jobs=auto`, `--jobs=HOST_CPUS*.5`, `--local_test_jobs=auto`,
 //! `--local_resources=cpu=HOST_CPUS*.5`, ... must parse *and* execute, and invalid values must be
 //! rejected with Bazel's exact converter messages (exit code 2).
+#![cfg(unix)]
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -21,7 +22,11 @@ fn ws(name: &str) -> Ws {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("ws/pkg")).unwrap();
     let root = std::fs::canonicalize(&root).unwrap();
-    let w = Ws { ws: root.join("ws"), ob: root.join("ob"), root };
+    let w = Ws {
+        ws: root.join("ws"),
+        ob: root.join("ob"),
+        root,
+    };
     std::fs::write(w.ws.join("MODULE.bazel"), "module(name = \"resflags\")\n").unwrap();
     std::fs::write(
         w.ws.join("pkg/BUILD"),
@@ -33,7 +38,32 @@ fn ws(name: &str) -> Ws {
 
 impl Ws {
     fn build(&self, args: &[&str]) -> (i32, String) {
-        let o = Command::new(zel())
+        let mut c = Command::new(zel());
+        for var in [
+            "USE_ZEL_VERSION",
+            "USE_BAZEL_VERSION",
+            "USE_ZEL_FALLBACK_VERSION",
+            "USE_BAZEL_FALLBACK_VERSION",
+            "ZEL_SKIP_WRAPPER",
+            "BAZELISK_SKIP_WRAPPER",
+            "ZEL_WRAPPER",
+            "BAZEL_WRAPPER",
+            "ZEL_HOME",
+            "BAZELISK_HOME",
+            "ZEL_BASE_URL",
+            "BAZELISK_BASE_URL",
+            "ZEL_NO_DOWNLOAD",
+            "BAZELISK_NO_DOWNLOAD",
+            "ZEL_VERIFY_SHA256",
+            "BAZELISK_VERIFY_SHA256",
+            "ZEL_PRODUCT_PREFIX",
+            "ZEL_EMBED_LABEL",
+            "BAZEL_EMBED_LABEL",
+            "XDG_CACHE_HOME",
+        ] {
+            c.env_remove(var);
+        }
+        let o = c
             .current_dir(&self.ws)
             .arg(format!("--output_base={}", self.ob.display()))
             .arg("build")
@@ -133,6 +163,9 @@ fn invalid_resource_values_use_bazel_messages() {
         args.extend(flags.iter().copied());
         let (code, out) = w.build(&args);
         assert_eq!(code, 2, "{flags:?}: {out}");
-        assert!(out.lines().any(|l| l.starts_with(&expected)), "{flags:?}: expected {expected:?} in {out}");
+        assert!(
+            out.lines().any(|l| l.starts_with(&expected)),
+            "{flags:?}: expected {expected:?} in {out}"
+        );
     }
 }

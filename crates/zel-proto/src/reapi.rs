@@ -472,7 +472,10 @@ mod tests {
 
     #[test]
     fn digest_roundtrip_and_canonical_bytes() {
-        let d = Digest { hash: "ab".into(), size_bytes: 3 };
+        let d = Digest {
+            hash: "ab".into(),
+            size_bytes: 3,
+        };
         let b = d.encode_to_vec();
         assert_eq!(b, vec![0x0a, 2, b'a', b'b', 0x10, 3]);
         assert_eq!(Digest::decode(&b).unwrap(), d);
@@ -483,10 +486,16 @@ mod tests {
     fn nested_and_repeated() {
         let cmd = Command {
             arguments: vec!["a".into(), "b".into()],
-            environment_variables: vec![EnvironmentVariable { name: "X".into(), value: "1".into() }],
+            environment_variables: vec![EnvironmentVariable {
+                name: "X".into(),
+                value: "1".into(),
+            }],
             output_paths: vec!["o".into()],
             platform: Some(Platform {
-                properties: vec![PlatformProperty { name: "k".into(), value: "v".into() }],
+                properties: vec![PlatformProperty {
+                    name: "k".into(),
+                    value: "v".into(),
+                }],
             }),
             ..Default::default()
         };
@@ -495,7 +504,10 @@ mod tests {
 
     #[test]
     fn packed_and_unpacked_enums_decode() {
-        let c = CacheCapabilities { digest_functions: vec![1, 9], ..Default::default() };
+        let c = CacheCapabilities {
+            digest_functions: vec![1, 9],
+            ..Default::default()
+        };
         let packed = c.encode_to_vec();
         assert_eq!(packed, vec![0x0a, 2, 1, 9]);
         assert_eq!(CacheCapabilities::decode(&packed).unwrap(), c);
@@ -504,10 +516,17 @@ mod tests {
 
     #[test]
     fn unknown_fields_skipped_and_action_result() {
-        let mut ar = ActionResult { exit_code: 3, stdout_raw: b"hi".to_vec(), ..Default::default() };
+        let mut ar = ActionResult {
+            exit_code: 3,
+            stdout_raw: b"hi".to_vec(),
+            ..Default::default()
+        };
         ar.output_files.push(OutputFile {
             path: "p".into(),
-            digest: Some(Digest { hash: "h".into(), size_bytes: 1 }),
+            digest: Some(Digest {
+                hash: "h".into(),
+                size_bytes: 1,
+            }),
             is_executable: true,
             ..Default::default()
         });

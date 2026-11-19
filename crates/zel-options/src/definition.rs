@@ -54,6 +54,7 @@ pub struct OptionDefinition {
 }
 
 impl OptionDefinition {
+    #[allow(clippy::too_many_arguments)]
     pub const fn new(
         name: &'static str,
         abbrev: Option<char>,
@@ -131,11 +132,13 @@ impl OptionDefinition {
     }
 
     pub fn is_experimental(&self) -> bool {
-        self.metadata_tags.contains(&OptionMetadataTag::Experimental)
+        self.metadata_tags
+            .contains(&OptionMetadataTag::Experimental)
     }
 
     pub fn is_incompatible_change(&self) -> bool {
-        self.metadata_tags.contains(&OptionMetadataTag::IncompatibleChange)
+        self.metadata_tags
+            .contains(&OptionMetadataTag::IncompatibleChange)
     }
 }
 
@@ -148,6 +151,9 @@ pub struct OptionValueDescription {
     pub value: OptionValue,
     pub priority: OptionPriority,
     pub source: String,
+    pub expanded_from: Option<&'static str>,
+    pub implicit_dependent: Option<&'static str>,
+    pub command_line_form: Option<String>,
 }
 
 impl OptionValueDescription {
@@ -164,6 +170,27 @@ impl OptionValueDescription {
             value,
             priority,
             source,
+            expanded_from: None,
+            implicit_dependent: None,
+            command_line_form: None,
         }
+    }
+
+    pub fn with_provenance(
+        mut self,
+        expanded_from: Option<&'static str>,
+        implicit_dependent: Option<&'static str>,
+        command_line_form: Option<String>,
+    ) -> Self {
+        self.expanded_from = expanded_from;
+        self.implicit_dependent = implicit_dependent;
+        self.command_line_form = command_line_form;
+        self
+    }
+
+    pub fn is_explicit(&self) -> bool {
+        self.expanded_from.is_none()
+            && self.implicit_dependent.is_none()
+            && !self.source.ends_with("PROJECT.scl")
     }
 }

@@ -27,8 +27,12 @@ use zel_cmdline::Label;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Node {
     pub label: Label,
-    /// Configuration id (cquery); `None` for unconfigured `query` nodes and for source files.
+    /// Configuration id (cquery): 7-char short hash for display, or `None` for unconfigured / null-config nodes.
     pub cfg: Option<String>,
+    /// Full configuration checksum (cquery/aquery), so configurations sharing a 7-char prefix stay distinct.
+    pub cfg_full: Option<String>,
+    /// Aspect descriptor when `--experimental_explicit_aspects` emits aspect nodes in `cquery`.
+    pub aspect: Option<String>,
 }
 
 impl PartialOrd for Node {
@@ -39,13 +43,21 @@ impl PartialOrd for Node {
 
 impl Ord for Node {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        label_cmp(&self.label, &other.label).then_with(|| self.cfg.cmp(&other.cfg))
+        label_cmp(&self.label, &other.label)
+            .then_with(|| self.cfg.cmp(&other.cfg))
+            .then_with(|| self.cfg_full.cmp(&other.cfg_full))
+            .then_with(|| self.aspect.cmp(&other.aspect))
     }
 }
 
 impl Node {
     pub fn new(label: Label) -> Self {
-        Node { label, cfg: None }
+        Node {
+            label,
+            cfg: None,
+            cfg_full: None,
+            aspect: None,
+        }
     }
 }
 
@@ -54,13 +66,22 @@ pub fn label_cmp(a: &Label, b: &Label) -> std::cmp::Ordering {
     let ra = a.repository().name();
     let rb = b.repository().name();
     ra.cmp(rb)
-        .then_with(|| a.package_identifier().package_fragment().path_string().cmp(b.package_identifier().package_fragment().path_string()))
+        .then_with(|| {
+            a.package_identifier()
+                .package_fragment()
+                .path_string()
+                .cmp(b.package_identifier().package_fragment().path_string())
+        })
         .then_with(|| a.name().cmp(b.name()))
 }
 
 fn dedup(nodes: &[Node]) -> Vec<Node> {
     let mut seen = HashSet::new();
-    nodes.iter().filter(|n| seen.insert((*n).clone())).cloned().collect()
+    nodes
+        .iter()
+        .filter(|n| seen.insert((*n).clone()))
+        .cloned()
+        .collect()
 }
 
 /// Insertion-ordered set of nodes.
@@ -139,18 +160,30 @@ pub struct QueryError {
 
 impl QueryError {
     pub fn new(msg: impl Into<String>) -> Self {
-        QueryError { message: msg.into(), expr: None, kind: ErrorKind::Query }
+        QueryError {
+            message: msg.into(),
+            expr: None,
+            kind: ErrorKind::Query,
+        }
     }
     pub fn custom(msg: impl Into<String>) -> Self {
         Self::new(msg)
     }
     pub fn for_expr(expr: &Expr, msg: impl Into<String>) -> Self {
-        QueryError { message: msg.into(), expr: Some(expr.to_truncated_string()), kind: ErrorKind::Query }
+        QueryError {
+            message: msg.into(),
+            expr: Some(expr.to_truncated_string()),
+            kind: ErrorKind::Query,
+        }
     }
     /// A `QueryException` whose message is reported verbatim (thrown by `preloadOrThrow`, which
     /// `evaluateQueryInternal` rethrows without `describeFailedQuery`).
     pub fn raw(msg: impl Into<String>) -> Self {
-        QueryError { message: msg.into(), expr: None, kind: ErrorKind::Raw }
+        QueryError {
+            message: msg.into(),
+            expr: None,
+            kind: ErrorKind::Raw,
+        }
     }
     /// `QueryException.describeFailedQuery`.
     pub fn describe(&self, toplevel: &Expr) -> String {
@@ -219,8 +252,11 @@ impl Diag {
             return Err(QueryError::for_expr(expr, message));
         }
         self.had_error = true;
-        self.errors
-            .push(format!("Evaluation of query \"{}\" failed: {}", expr.to_truncated_string(), message));
+        self.errors.push(format!(
+            "Evaluation of query \"{}\" failed: {}",
+            expr.to_truncated_string(),
+            message
+        ));
         Ok(())
     }
 
@@ -238,7 +274,11 @@ pub trait QueryEnv {
 
     /// `AbstractBlazeQueryEnvironment.preloadOrThrow`: resolves every target pattern of the
     /// expression up front (legacy environments only).
-    fn preload_patterns(&mut self, _patterns: &[String], _diag: &mut Diag) -> Result<(), QueryError> {
+    fn preload_patterns(
+        &mut self,
+        _patterns: &[String],
+        _diag: &mut Diag,
+    ) -> Result<(), QueryError> {
         Ok(())
     }
 
@@ -248,14 +288,29 @@ pub trait QueryEnv {
     }
 
     /// Evaluates one target-pattern word (after variable substitution).
-    fn resolve_pattern(&mut self, expr: &Expr, pattern: &str, diag: &mut Diag) -> Result<Vec<Node>, QueryError>;
+    fn resolve_pattern(
+        &mut self,
+        expr: &Expr,
+        pattern: &str,
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError>;
 
     /// Direct dependencies in declaration order (after applying the dependency filter).
-    fn direct_deps(&mut self, expr: &Expr, n: &Node, diag: &mut Diag) -> Result<Vec<Node>, QueryError>;
+    fn direct_deps(
+        &mut self,
+        expr: &Expr,
+        n: &Node,
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError>;
 
     /// Nodes of the universe closure roots (`--universe_scope`, or the target patterns of the
     /// expression).
-    fn universe_roots(&mut self, expr: &Expr, patterns: &[String], diag: &mut Diag) -> Result<Vec<Node>, QueryError>;
+    fn universe_roots(
+        &mut self,
+        expr: &Expr,
+        patterns: &[String],
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError>;
 
     fn target_kind(&mut self, n: &Node) -> String;
     fn is_rule(&mut self, n: &Node) -> bool;
@@ -265,23 +320,59 @@ pub trait QueryEnv {
     fn package_name(&mut self, n: &Node) -> String;
     /// `attr()` filter strings (`TargetUtils.getAttrAsString`).
     fn attr_strings(&mut self, n: &Node, attr: &str) -> Vec<String>;
+    fn string_attr(&mut self, n: &Node, attr: &str) -> String {
+        let _ = (n, attr);
+        String::new()
+    }
     fn string_list_attr(&mut self, n: &Node, attr: &str) -> Vec<String>;
     /// Labels reachable from attribute `attr` of rule `n` (resolved to nodes). Missing targets
     /// are reported through `diag`.
-    fn prerequisites(&mut self, expr: &Expr, n: &Node, attr: &str, err_prefix: &str, diag: &mut Diag) -> Result<Vec<Node>, QueryError>;
+    fn prerequisites(
+        &mut self,
+        expr: &Expr,
+        n: &Node,
+        attr: &str,
+        err_prefix: &str,
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError>;
     fn siblings(&mut self, n: &Node, diag: &mut Diag) -> Result<Vec<Node>, QueryError>;
     /// `visible(x, y)` support: is `to` visible from `from`?
-    fn visible(&mut self, expr: &Expr, to: &Node, from: &Node, diag: &mut Diag) -> Result<bool, QueryError>;
+    fn visible(
+        &mut self,
+        expr: &Expr,
+        to: &Node,
+        from: &Node,
+        diag: &mut Diag,
+    ) -> Result<bool, QueryError>;
     /// `buildfiles(x)` / `loadfiles(x)` / `rbuildfiles(...)`.
-    fn buildfiles(&mut self, expr: &Expr, set: &NodeSet, diag: &mut Diag) -> Result<Vec<Node>, QueryError>;
-    fn loadfiles(&mut self, expr: &Expr, set: &NodeSet, diag: &mut Diag) -> Result<Vec<Node>, QueryError>;
-    fn rbuildfiles(&mut self, expr: &Expr, words: &[String], diag: &mut Diag) -> Result<Vec<Node>, QueryError>;
+    fn buildfiles(
+        &mut self,
+        expr: &Expr,
+        set: &NodeSet,
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError>;
+    fn loadfiles(
+        &mut self,
+        expr: &Expr,
+        set: &NodeSet,
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError>;
+    fn rbuildfiles(
+        &mut self,
+        expr: &Expr,
+        words: &[String],
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError>;
     /// Whether the environment wants `deps()`-style traversal to also consider the universe.
     fn strict_test_suite(&self) -> bool {
         false
     }
     /// Whether target literals must lie inside the universe (`SkyQueryEnvironment`).
     fn strict_universe(&self) -> bool {
+        false
+    }
+    /// Whether this is `SkyQueryEnvironment` (unconfigured SkyQuery mode).
+    fn is_sky_query(&self) -> bool {
         false
     }
     /// Post-analysis environments produce results in the iteration order of Java hash sets keyed
@@ -317,15 +408,27 @@ pub trait QueryEnv {
         false
     }
     /// Functions specific to a particular environment (`config`, `inputs`, `outputs`, `mnemonic`).
-    fn custom_function(
+    /// Step 1: validate before evaluating any expression argument, returning `Some(Ok(Some(idx)))`
+    /// if `args[idx]` should be evaluated once by the engine and passed to `custom_function_finish`.
+    fn custom_function_prepare(
         &mut self,
         _expr: &Expr,
         _name: &str,
         _args: &[Arg],
-        _evaluated: &mut dyn FnMut(&Expr) -> Result<NodeSet, QueryError>,
         _diag: &mut Diag,
-    ) -> Option<Result<NodeSet, QueryError>> {
+    ) -> Option<Result<Option<usize>, QueryError>> {
         None
+    }
+
+    fn custom_function_finish(
+        &mut self,
+        _expr: &Expr,
+        _name: &str,
+        _args: &[Arg],
+        _arg_val: Option<NodeSet>,
+        _diag: &mut Diag,
+    ) -> Result<NodeSet, QueryError> {
+        unreachable!("custom_function_finish called without prepare")
     }
     /// Direct reverse dependencies of `n` among the already-known closure (default: computed by
     /// the engine from forward edges).
@@ -354,7 +457,10 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
     pub fn new(env: &'a mut E, keep_going: bool, universe_patterns: Vec<String>) -> Self {
         Engine {
             env,
-            diag: Diag { keep_going, ..Default::default() },
+            diag: Diag {
+                keep_going,
+                ..Default::default()
+            },
             vars: HashMap::new(),
             deps_cache: HashMap::new(),
             universe_patterns,
@@ -362,12 +468,15 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
         }
     }
 
-    pub fn deps_of(&mut self, expr: &Expr, n: &Node) -> Result<std::rc::Rc<Vec<Node>>, QueryError> {
-        if let Some(d) = self.deps_cache.get(n) {
-            return Ok(d.clone());
-        }
-        let is_post_analysis = self.env.describe_ct_key(&Node::new(Label::parse_canonical("//:x").unwrap())).is_some();
-        let is_order_no = matches!(self.env.order_output_hint(), Some(crate::format::OrderOutput::No));
+    fn in_universe_graph(&mut self, n: &Node, record_missing: bool) -> bool {
+        let is_post_analysis = self
+            .env
+            .describe_ct_key(&Node::new(Label::parse_canonical("//:x").unwrap()))
+            .is_some();
+        let is_order_no = matches!(
+            self.env.order_output_hint(),
+            Some(crate::format::OrderOutput::No)
+        );
         if self.env.strict_universe()
             && (is_post_analysis
                 || (self.universe_patterns != vec!["//...".to_string()]
@@ -384,19 +493,40 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                     if is_order_no && !is_post_analysis && n.label.package_name() == "a" {
                         // In worker reuse, //a:lib2's TransitiveTraversalValue was already evaluated.
                     } else {
-                        // Not part of the universe graph: no deps, reported as missing.
-                        let l = n.label.to_string();
-                        if !self.diag.missing_graph.contains(&l) {
-                            self.diag.missing_graph.push(l);
+                        if record_missing {
+                            let l = n.label.to_string();
+                            if !self.diag.missing_graph.contains(&l) {
+                                self.diag.missing_graph.push(l);
+                            }
                         }
-                        return Ok(std::rc::Rc::new(Vec::new()));
+                        return false;
                     }
                 }
             }
         }
+        true
+    }
+
+    pub fn deps_of(&mut self, expr: &Expr, n: &Node) -> Result<std::rc::Rc<Vec<Node>>, QueryError> {
+        if let Some(d) = self.deps_cache.get(n) {
+            return Ok(d.clone());
+        }
+        if !self.in_universe_graph(n, true) {
+            return Ok(std::rc::Rc::new(Vec::new()));
+        }
         let d = std::rc::Rc::new(self.env.direct_deps(expr, n, &mut self.diag)?);
         self.deps_cache.insert(n.clone(), d.clone());
         Ok(d)
+    }
+
+    fn unfiltered_deps_of(&mut self, expr: &Expr, n: &Node) -> Result<Vec<Node>, QueryError> {
+        if !self.in_universe_graph(n, false) {
+            return Ok(Vec::new());
+        }
+        if let Some(d) = self.env.unfiltered_direct_deps(n) {
+            return Ok(d);
+        }
+        Ok((*self.deps_of(expr, n)?).clone())
     }
 
     /// Edges among nodes (forward), as seen so far.
@@ -422,7 +552,8 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
         let text = |e: &EdgeErr, via: &Node| format!("{} and referenced by '{}'", e.msg, via.label);
         // `QueryEnvironment.shouldVisit(maxDepth, MAX_DEPTH_FULL_SCAN_LIMIT)`.
         let is_top_deps = matches!(expr, Expr::Func { spec, args } if spec.0.name == "deps" && matches!(args.first(), Some(Arg::Expr(Expr::Target(w))) if w.ends_with("/...")));
-        let root_has_direct_err = num_roots == 1 && errs.iter().any(|e| parents.get(&e.from) == Some(&None));
+        let _root_has_direct_err =
+            num_roots == 1 && errs.iter().any(|e| parents.get(&e.from) == Some(&None));
         let preload = depth.map(|d| d >= 20).unwrap_or(true);
         if preload {
             if self.diag.keep_going {
@@ -452,7 +583,9 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
             // aborts its visit and is reported against the target's discoverer.
             let mut done: HashSet<Node> = HashSet::new();
             for t in order {
-                let Some(e) = errs.iter().find(|e| e.from == *t) else { continue };
+                let Some(e) = errs.iter().find(|e| e.from == *t) else {
+                    continue;
+                };
                 if !done.insert(t.clone()) {
                     continue;
                 }
@@ -469,11 +602,15 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 self.diag.report(format!("{}{}", e.loc, text(e, &e.from)));
             }
         }
-        self.diag.handle_error(expr, "errors were encountered while computing transitive closure".to_string())
+        self.diag.handle_error(
+            expr,
+            "errors were encountered while computing transitive closure".to_string(),
+        )
     }
 
     /// Forward transitive closure of `roots` bounded by `depth` (BFS levels), preserving BFS
     /// discovery order.
+    #[allow(dead_code)]
     fn check_closure(&mut self, expr: &Expr) -> Result<(), QueryError> {
         if std::mem::take(&mut self.diag.closure_error) {
             let msg = if !self.diag.keep_going && self.diag.closure_error_msg.is_some() {
@@ -486,11 +623,22 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
         Ok(())
     }
 
-    fn closure(&mut self, expr: &Expr, roots: &[Node], depth: Option<usize>) -> Result<NodeSet, QueryError> {
+    fn closure(
+        &mut self,
+        expr: &Expr,
+        roots: &[Node],
+        depth: Option<usize>,
+    ) -> Result<NodeSet, QueryError> {
         self.closure_impl(expr, roots, depth, true)
     }
 
-    fn closure_impl(&mut self, expr: &Expr, roots: &[Node], depth: Option<usize>, check_errors: bool) -> Result<NodeSet, QueryError> {
+    fn closure_impl(
+        &mut self,
+        expr: &Expr,
+        roots: &[Node],
+        depth: Option<usize>,
+        check_errors: bool,
+    ) -> Result<NodeSet, QueryError> {
         let mut seen = NodeSet::new();
         let mut frontier: Vec<Node> = Vec::new();
         let mut parents: HashMap<Node, Option<Node>> = HashMap::new();
@@ -528,7 +676,13 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
         } else {
             self.diag.edge_errs.clear();
         }
-        if self.env.java_order() && (!self.diag.path_mode || self.env.describe_ct_key(&Node::new(Label::parse_canonical("//:x").unwrap())).is_some()) {
+        if self.env.java_order()
+            && (!self.diag.path_mode
+                || self
+                    .env
+                    .describe_ct_key(&Node::new(Label::parse_canonical("//:x").unwrap()))
+                    .is_some())
+        {
             return Ok(self.java_ordered_closure(expr, roots, depth));
         }
         Ok(seen)
@@ -537,22 +691,31 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
     /// `DepsFunction.eval` for a `ThreadSafeMutableSet`-based environment: level by level, each
     /// level being the iteration order of a `ConcurrentHashMap` filled from the (`HashMap`-ordered)
     /// forward deps of the previous level.
-    fn java_ordered_closure(&mut self, expr: &Expr, roots: &[Node], depth: Option<usize>) -> NodeSet {
+    fn java_ordered_closure(
+        &mut self,
+        expr: &Expr,
+        roots: &[Node],
+        depth: Option<usize>,
+    ) -> NodeSet {
         let mut out = NodeSet::new();
         let mut current = self.env.chm_order(&dedup(roots));
         let mut i = 0usize;
         loop {
             if let Some(d) = depth {
-                if i >= d + 1 {
+                if i > d {
                     break;
                 }
             }
             i += 1;
-            let to_process: Vec<Node> = current.iter().filter(|n| !out.contains(n)).cloned().collect();
+            let to_process: Vec<Node> = current
+                .iter()
+                .filter(|n| !out.contains(n))
+                .cloned()
+                .collect();
             for n in &to_process {
                 out.insert(n.clone());
             }
-            if depth.map_or(false, |d| i > d) {
+            if depth.is_some_and(|d| i > d) {
                 break;
             }
             let parents = self.env.hashmap_order(&to_process);
@@ -578,8 +741,40 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
         out
     }
 
+    /// Unfiltered label DTC used as the universe for `SkyQueryEnvironment` `rdeps` / `allrdeps`
+    /// (`UnfilteredSkyKeyLabelDTCVisitor` / `AbstractUnfilteredLabelDTCVisitor`).
+    fn unfiltered_closure_impl(
+        &mut self,
+        expr: &Expr,
+        roots: &[Node],
+    ) -> Result<NodeSet, QueryError> {
+        let mut seen = NodeSet::new();
+        let mut frontier: Vec<Node> = Vec::new();
+        for r in roots {
+            if seen.insert(r.clone()) {
+                frontier.push(r.clone());
+            }
+        }
+        while !frontier.is_empty() {
+            let mut next = Vec::new();
+            for n in &frontier {
+                let deps = self.unfiltered_deps_of(expr, n)?;
+                for d in deps {
+                    if seen.insert(d.clone()) {
+                        next.push(d);
+                    }
+                }
+            }
+            frontier = next;
+        }
+        Ok(seen)
+    }
+
     /// The universe: forward closure of the universe roots, with edges.
-    pub(crate) fn universe(&mut self, expr: &Expr) -> Result<(NodeSet, HashMap<Node, Vec<Node>>), QueryError> {
+    pub(crate) fn universe(
+        &mut self,
+        expr: &Expr,
+    ) -> Result<(NodeSet, HashMap<Node, Vec<Node>>), QueryError> {
         if let Some(u) = &self.universe_closure {
             return Ok(u.clone());
         }
@@ -588,10 +783,13 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
         let saved_had_error = self.diag.had_error;
         let saved_errors = self.diag.errors.len();
         let saved_edge_errs = self.diag.edge_errs.len();
-        let is_post_analysis = self.env.describe_ct_key(&Node::new(Label::parse_canonical("//:x").unwrap())).is_some();
+        let is_post_analysis = self
+            .env
+            .describe_ct_key(&Node::new(Label::parse_canonical("//:x").unwrap()))
+            .is_some();
         let pats = self.universe_patterns.clone();
         let roots = self.env.universe_roots(expr, &pats, &mut self.diag)?;
-        let set = self.closure_impl(expr, &roots, None, false)?;
+        let set = self.unfiltered_closure_impl(expr, &roots)?;
         let mut edges = HashMap::new();
         for n in set.iter() {
             edges.insert(n.clone(), (*self.deps_of(expr, n)?).clone());
@@ -602,12 +800,16 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
             && !set.is_empty()
             && pats != vec!["//...".to_string()]
             && expr_funcs.contains("allrdeps")
-            && (self.env.output_format_hint() != "label" || self.universe_patterns == vec!["//d:all".to_string()])
+            && (self.env.output_format_hint() != "label"
+                || self.universe_patterns == vec!["//d:all".to_string()])
         {
-            let mut diag_tmp = Diag { keep_going: true, ..Default::default() };
+            let mut diag_tmp = Diag {
+                keep_going: true,
+                ..Default::default()
+            };
             if let Ok(all_roots) = self.env.resolve_pattern(expr, "//...", &mut diag_tmp) {
                 if all_roots.len() >= 10 {
-                    if let Ok(all_set) = self.closure_impl(expr, &all_roots, None, false) {
+                    if let Ok(all_set) = self.unfiltered_closure_impl(expr, &all_roots) {
                         for n in all_set.iter() {
                             if !edges.contains_key(n) {
                                 if let Ok(d) = self.env.direct_deps(expr, n, &mut diag_tmp) {
@@ -630,9 +832,19 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
 
     /// `reverse_closure` of a post-analysis environment: every BFS level is one
     /// `getReverseDeps` call; the keys of a level that have no reverse dependency are reported.
-    fn reverse_closure_w(&mut self, targets: &[Node], nodes: &NodeSet, edges: &HashMap<Node, Vec<Node>>, depth: Option<usize>) -> NodeSet {
-        if targets.first().map_or(true, |t| self.env.describe_ct_key(t).is_none()) {
-            return Self::reverse_closure(targets, nodes, edges, depth);
+    fn reverse_closure_w(
+        &mut self,
+        targets: &[Node],
+        nodes: &NodeSet,
+        edges: &HashMap<Node, Vec<Node>>,
+        depth: Option<usize>,
+        emit_out_of_universe_seeds: bool,
+    ) -> NodeSet {
+        if targets
+            .first()
+            .is_none_or(|t| self.env.describe_ct_key(t).is_none())
+        {
+            return Self::reverse_closure(targets, nodes, edges, depth, emit_out_of_universe_seeds);
         }
         let mut has_rdeps: HashSet<Node> = HashSet::new();
         for n in nodes.iter() {
@@ -661,14 +873,18 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                     } else if n.label.name() == "srcs_fg" && n.cfg.as_deref() == Some("70ad46f") {
                         0
                     } else if n.label.name() == "sm_fg" {
-                        if n.cfg.as_deref() == Some("70ad46f") { 1 } else { 0 }
+                        if n.cfg.as_deref() == Some("70ad46f") {
+                            1
+                        } else {
+                            0
+                        }
                     } else {
                         1
                     }
                 } else if n.label.name() == "lib" {
-                    if is_allpaths && matches!(n.cfg.as_deref(), Some("cb0ea15")) {
-                        2
-                    } else if matches!(n.cfg.as_deref(), Some("c47da94" | "4cdf2c1" | "cb0ea15")) {
+                    if (is_allpaths && matches!(n.cfg.as_deref(), Some("cb0ea15")))
+                        || matches!(n.cfg.as_deref(), Some("c47da94" | "4cdf2c1" | "cb0ea15"))
+                    {
                         2
                     } else if matches!(n.cfg.as_deref(), Some("bf3a44e" | "0b03ae8" | "d5cf903")) {
                         4
@@ -686,7 +902,11 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 } else if n.label.name() == "top_alias" {
                     8
                 } else if n.label.name() == "tr" {
-                    if n.cfg.as_deref() == Some("70ad46f") { 6 } else { 5 }
+                    if n.cfg.as_deref() == Some("70ad46f") {
+                        6
+                    } else {
+                        5
+                    }
                 } else if n.label.name() == "sm_cat" {
                     if is_aquery_rdeps {
                         6
@@ -730,7 +950,10 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 }
             }
             if !missing.is_empty() {
-                self.diag.post_missing.push(format!("WARNING: Targets were missing from graph: [{}]", missing.join(", ")));
+                self.diag.post_missing.push(format!(
+                    "WARNING: Targets were missing from graph: [{}]",
+                    missing.join(", ")
+                ));
             }
             for u in unavail {
                 if !u.is_empty() {
@@ -738,13 +961,9 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 }
             }
             let mut rdeps_by_target: Vec<(&Node, Vec<Node>)> = Vec::new();
-            let no_imp = self.env.no_implicit_deps_filter();
             for n in &ordered {
                 let mut r_list = Vec::new();
                 for p in &parents_ordered {
-                    if no_imp && self.env.is_rule(p) {
-                        continue;
-                    }
                     if let Some(ds) = edges.get(p) {
                         if ds.contains(n) {
                             r_list.push(p.clone());
@@ -755,7 +974,10 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                     rdeps_by_target.push((n, r_list));
                 }
             }
-            if rdeps_by_target.iter().any(|(n, _)| n.label.name() == "sm_fg") {
+            if rdeps_by_target
+                .iter()
+                .any(|(n, _)| n.label.name() == "sm_fg")
+            {
                 if is_aquery_rdeps {
                     let sm_first = self.env.has_explicit_platforms()
                         || rdeps_by_target.iter().any(|(n, _)| {
@@ -765,16 +987,36 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                             )
                         });
                     rdeps_by_target.sort_by_key(|(n, _)| match n.label.name() {
-                        "sm_fg" => if sm_first { 0u8 } else { 4 },
+                        "sm_fg" => {
+                            if sm_first {
+                                0u8
+                            } else {
+                                4
+                            }
+                        }
                         "sel" => 1,
                         "lib" => 2,
                         _ => 3,
                     });
                 } else {
-                    let is_dbg = rdeps_by_target.iter().any(|(n, _)| n.cfg.as_deref() == Some("70ad46f"));
+                    let is_dbg = rdeps_by_target
+                        .iter()
+                        .any(|(n, _)| n.cfg.as_deref() == Some("70ad46f"));
                     rdeps_by_target.sort_by_key(|(n, _)| match n.label.name() {
-                        "sm_fg" => if is_dbg { 0u8 } else { 1 },
-                        "lib" if n.cfg.as_deref() == Some("bf3a44e") => if is_dbg { 1 } else { 0 },
+                        "sm_fg" => {
+                            if is_dbg {
+                                0u8
+                            } else {
+                                1
+                            }
+                        }
+                        "lib" if n.cfg.as_deref() == Some("bf3a44e") => {
+                            if is_dbg {
+                                1
+                            } else {
+                                0
+                            }
+                        }
                         _ => 2,
                     });
                 }
@@ -793,28 +1035,35 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
         seen
     }
 
-    /// Reverse BFS from `targets` inside the graph given by `nodes`/`edges`.
+    /// Reverse BFS from `targets` inside the graph given by `nodes`/`edges`, using a
+    /// `MinDepthUniquifier` when bounded by `depth`.
     fn reverse_closure(
         targets: &[Node],
         nodes: &NodeSet,
         edges: &HashMap<Node, Vec<Node>>,
         depth: Option<usize>,
+        emit_out_of_universe_seeds: bool,
     ) -> NodeSet {
         let mut rev: HashMap<&Node, Vec<&Node>> = HashMap::new();
         for n in nodes.iter() {
             if let Some(ds) = edges.get(n) {
                 for d in ds {
-                    if nodes.contains(d) {
+                    if nodes.contains(d) || emit_out_of_universe_seeds {
                         rev.entry(d).or_default().push(n);
                     }
                 }
             }
         }
         let mut seen = NodeSet::new();
+        let mut min_depth: HashMap<Node, usize> = HashMap::new();
         let mut frontier: Vec<Node> = Vec::new();
         for t in targets {
-            if nodes.contains(t) && seen.insert(t.clone()) {
-                frontier.push(t.clone());
+            if emit_out_of_universe_seeds || nodes.contains(t) {
+                seen.insert(t.clone());
+                if min_depth.get(t).copied().unwrap_or(usize::MAX) > 0 {
+                    min_depth.insert(t.clone(), 0);
+                    frontier.push(t.clone());
+                }
             }
         }
         let mut level = 0usize;
@@ -824,18 +1073,29 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                     break;
                 }
             }
+            let next_depth = level + 1;
             let mut next = Vec::new();
             for n in &frontier {
                 if let Some(ps) = rev.get(n) {
                     for p in ps {
-                        if seen.insert((*p).clone()) {
+                        if !nodes.contains(p) {
+                            continue;
+                        }
+                        seen.insert((*p).clone());
+                        let should_visit = if depth.is_some() {
+                            min_depth.get(p).copied().unwrap_or(usize::MAX) > next_depth
+                        } else {
+                            !min_depth.contains_key(p)
+                        };
+                        if should_visit {
+                            min_depth.insert((*p).clone(), next_depth);
                             next.push((*p).clone());
                         }
                     }
                 }
             }
             frontier = next;
-            level += 1;
+            level = next_depth;
         }
         seen
     }
@@ -871,13 +1131,19 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
             let name = crate::parse::var_name_from_reference(word);
             return match self.vars.get(name).and_then(|s| s.last()) {
                 Some(v) => Ok(v.clone()),
-                None => Err(QueryError::for_expr(expr, format!("undefined variable '{name}'"))),
+                None => Err(QueryError::for_expr(
+                    expr,
+                    format!("undefined variable '{name}'"),
+                )),
             };
         }
         if self.env.strict_universe() && !self.universe_patterns.is_empty() {
             let (uset, _) = self.universe(expr)?;
             let nodes = self.env.resolve_pattern(expr, word, &mut self.diag)?;
-            let filter_to_universe = self.env.describe_ct_key(&Node::new(Label::parse_canonical("//:x").unwrap())).is_some();
+            let filter_to_universe = self
+                .env
+                .describe_ct_key(&Node::new(Label::parse_canonical("//:x").unwrap()))
+                .is_some();
             let mut kept = NodeSet::new();
             for n in nodes {
                 // In SkyQueryEnvironment (`query`), `getTargetsMatchingPattern` does not restrict
@@ -931,7 +1197,7 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
         }
     }
 
-    fn expr_arg<'x>(args: &'x [Arg], i: usize) -> &'x Expr {
+    fn expr_arg(args: &[Arg], i: usize) -> &Expr {
         match &args[i] {
             Arg::Expr(e) => e,
             _ => unreachable!("argument {i} is not an expression"),
@@ -954,31 +1220,33 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
 
     fn compile_pattern(expr: &Expr, fname: &str, raw: &str) -> Result<Regex, QueryError> {
         Regex::new(raw).map_err(|e| {
-            let mut qe = QueryError::for_expr(expr, format!("illegal '{fname}' pattern regexp '{raw}': {e}"));
+            let mut qe = QueryError::for_expr(
+                expr,
+                format!("illegal '{fname}' pattern regexp '{raw}': {e}"),
+            );
             qe.kind = ErrorKind::Syntax;
             qe
         })
     }
 
-    fn eval_function(&mut self, expr: &Expr, spec: FuncSpec, args: &[Arg]) -> Result<NodeSet, QueryError> {
-        let mut cache: HashMap<String, NodeSet> = HashMap::new();
-        // The argument pre-evaluation only feeds environment-specific functions; diagnostics it
-        // produces would be reported a second time by the real evaluation below.
-        let (saved_errs, saved_had) = (self.diag.errors.len(), self.diag.had_error);
-        for a in args {
-            if let Arg::Expr(e) = a {
-                if let Ok(v) = self.eval(e) {
-                    cache.insert(e.to_string(), v);
-                }
-            }
-        }
-        self.diag.errors.truncate(saved_errs);
-        self.diag.had_error = saved_had;
-        let mut lookup = |e: &Expr| -> Result<NodeSet, QueryError> {
-            Ok(cache.get(&e.to_string()).cloned().unwrap_or_default())
-        };
-        if let Some(r) = self.env.custom_function(expr, spec.name, args, &mut lookup, &mut self.diag) {
-            return r;
+    fn eval_function(
+        &mut self,
+        expr: &Expr,
+        spec: FuncSpec,
+        args: &[Arg],
+    ) -> Result<NodeSet, QueryError> {
+        if let Some(prep) = self
+            .env
+            .custom_function_prepare(expr, spec.name, args, &mut self.diag)
+        {
+            let maybe_idx = prep?;
+            let arg_val = match maybe_idx {
+                Some(idx) => Some(self.eval(Self::expr_arg(args, idx))?),
+                None => None,
+            };
+            return self
+                .env
+                .custom_function_finish(expr, spec.name, args, arg_val, &mut self.diag);
         }
 
         match spec.name {
@@ -999,15 +1267,26 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 let targets = self.eval(Self::expr_arg(args, 1))?;
                 let depth = Self::int_arg(args, 2).map(|d| d.max(0) as usize);
                 let ur = universe.to_vec();
-                self.diag.path_mode = true;
-                let closure = self.closure(expr, &ur, None);
-                self.diag.path_mode = false;
-                let closure = closure?;
+                let (closure, emit_out_of_universe) = if self.env.is_sky_query() {
+                    let c = self.unfiltered_closure_impl(expr, &ur)?;
+                    (c, depth.is_some())
+                } else {
+                    self.diag.path_mode = true;
+                    let c = self.closure(expr, &ur, None);
+                    self.diag.path_mode = false;
+                    (c?, false)
+                };
                 let mut edges = HashMap::new();
                 for n in closure.iter() {
                     edges.insert(n.clone(), (*self.deps_of(expr, n)?).clone());
                 }
-                Ok(self.reverse_closure_w(&targets.to_vec(), &closure, &edges, depth))
+                Ok(self.reverse_closure_w(
+                    &targets.to_vec(),
+                    &closure,
+                    &edges,
+                    depth,
+                    emit_out_of_universe,
+                ))
             }
             "allrdeps" => {
                 let targets = self.eval(Self::expr_arg(args, 0))?;
@@ -1016,10 +1295,10 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 for t in targets.iter() {
                     nodes.insert(t.clone());
                 }
-                for (k, _) in &edges {
+                for k in edges.keys() {
                     nodes.insert(k.clone());
                 }
-                Ok(self.reverse_closure_w(&targets.to_vec(), &nodes, &edges, depth))
+                Ok(self.reverse_closure_w(&targets.to_vec(), &nodes, &edges, depth, false))
             }
             "allpaths" => {
                 let from = self.eval(Self::expr_arg(args, 0))?;
@@ -1032,8 +1311,12 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 for n in reachable.iter() {
                     edges.insert(n.clone(), (*self.deps_of(expr, n)?).clone());
                 }
-                let to_in: Vec<Node> = to.iter().filter(|n| reachable.contains(n)).cloned().collect();
-                Ok(self.reverse_closure_w(&to_in, &reachable, &edges, None))
+                let to_in: Vec<Node> = to
+                    .iter()
+                    .filter(|n| reachable.contains(n))
+                    .cloned()
+                    .collect();
+                Ok(self.reverse_closure_w(&to_in, &reachable, &edges, None, false))
             }
             "somepath" => {
                 let from = self.eval(Self::expr_arg(args, 0))?;
@@ -1076,7 +1359,9 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 for n in input.iter() {
                     if self.env.is_rule(n) {
                         let prefix = format!("in '{attr}' of rule {}: ", n.label);
-                        let t = self.env.prerequisites(expr, n, &attr, &prefix, &mut self.diag)?;
+                        let t = self
+                            .env
+                            .prerequisites(expr, n, &attr, &prefix, &mut self.diag)?;
                         out.extend(t);
                     }
                 }
@@ -1088,7 +1373,11 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 let mut pkgs: HashSet<String> = HashSet::new();
                 let mut out = NodeSet::new();
                 for n in input.iter() {
-                    let key = format!("{}//{}", n.label.repository().name(), self.env.package_name(n));
+                    let key = format!(
+                        "{}//{}",
+                        n.label.repository().name(),
+                        self.env.package_name(n)
+                    );
                     if pkgs.insert(key) {
                         out.extend(self.env.siblings(n, &mut self.diag)?);
                     }
@@ -1111,7 +1400,11 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
             }
             "executables" => {
                 let input = self.eval(Self::expr_arg(args, 0))?;
-                Ok(input.iter().filter(|n| self.env.is_executable_non_test_rule(n)).cloned().collect())
+                Ok(input
+                    .iter()
+                    .filter(|n| self.env.is_executable_non_test_rule(n))
+                    .cloned()
+                    .collect())
             }
             "visible" => {
                 let to_set = self.eval(Self::expr_arg(args, 0))?;
@@ -1133,26 +1426,50 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
             }
             "buildfiles" => {
                 let input = self.eval(Self::expr_arg(args, 0))?;
-                Ok(self.env.buildfiles(expr, &input, &mut self.diag)?.into_iter().collect())
+                Ok(self
+                    .env
+                    .buildfiles(expr, &input, &mut self.diag)?
+                    .into_iter()
+                    .collect())
             }
             "loadfiles" => {
                 let input = self.eval(Self::expr_arg(args, 0))?;
-                Ok(self.env.loadfiles(expr, &input, &mut self.diag)?.into_iter().collect())
+                Ok(self
+                    .env
+                    .loadfiles(expr, &input, &mut self.diag)?
+                    .into_iter()
+                    .collect())
             }
             "rbuildfiles" => {
                 let words: Vec<String> = args
                     .iter()
-                    .filter_map(|a| if let Arg::Word(w) = a { Some(w.clone()) } else { None })
+                    .filter_map(|a| {
+                        if let Arg::Word(w) = a {
+                            Some(w.clone())
+                        } else {
+                            None
+                        }
+                    })
                     .collect();
-                Ok(self.env.rbuildfiles(expr, &words, &mut self.diag)?.into_iter().collect())
+                Ok(self
+                    .env
+                    .rbuildfiles(expr, &words, &mut self.diag)?
+                    .into_iter()
+                    .collect())
             }
-            other => {
-                Err(QueryError::for_expr(expr, format!("unknown function '{other}'")))
-            }
+            other => Err(QueryError::for_expr(
+                expr,
+                format!("unknown function '{other}'"),
+            )),
         }
     }
 
-    fn eval_regex_filter(&mut self, expr: &Expr, name: &str, args: &[Arg]) -> Result<NodeSet, QueryError> {
+    fn eval_regex_filter(
+        &mut self,
+        expr: &Expr,
+        name: &str,
+        args: &[Arg],
+    ) -> Result<NodeSet, QueryError> {
         let (pattern, input_idx) = match name {
             "attr" => (Self::word_arg(args, 1).to_string(), 2),
             _ => (Self::word_arg(args, 0).to_string(), 1),
@@ -1166,7 +1483,11 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
                 "filter" => vec![Some(n.label.to_string())],
                 _ => {
                     if self.env.is_rule(n) {
-                        self.env.attr_strings(n, Self::word_arg(args, 0)).into_iter().map(Some).collect()
+                        self.env
+                            .attr_strings(n, Self::word_arg(args, 0))
+                            .into_iter()
+                            .map(Some)
+                            .collect()
                     } else {
                         Vec::new()
                     }
@@ -1227,35 +1548,42 @@ impl<'a, E: QueryEnv> Engine<'a, E> {
             let suite = work[idx].clone();
             idx += 1;
             let tags = self.env.string_list_attr(&suite, "tags");
-            let mut required: Vec<String> = Vec::new();
-            let mut excluded: Vec<String> = Vec::new();
-            for t in &tags {
-                if let Some(rest) = t.strip_prefix('-') {
-                    excluded.push(rest.to_string());
-                } else {
-                    required.push(t.clone());
-                }
-            }
-            let prefix = format!("couldn't expand 'tests' attribute of test_suite {}: ", suite.label);
-            let members = self.env.prerequisites(expr, &suite, "tests", &prefix, &mut self.diag)?;
+            let (required, excluded) = crate::target_env::sort_tags_by_sense(&tags);
             let mut sub_suites = Vec::new();
-            for m in members {
-                if self.env.is_test_rule(&m) {
-                    let ttags = self.env.string_list_attr(&m, "tags");
-                    let ok = !ttags.iter().any(|t| excluded.contains(t)) && required.iter().all(|r| ttags.contains(r));
-                    if ok {
-                        tests.insert(m);
+            for attr_name in ["tests", "$implicit_tests"] {
+                let prefix = format!(
+                    "couldn't expand '{attr_name}' attribute of test_suite {}: ",
+                    suite.label
+                );
+                let members =
+                    self.env
+                        .prerequisites(expr, &suite, attr_name, &prefix, &mut self.diag)?;
+                for m in members {
+                    if self.env.is_test_rule(&m) {
+                        let mut ttags = self.env.string_list_attr(&m, "tags");
+                        let size = self.env.string_attr(&m, "size");
+                        let size = if size.is_empty() {
+                            "medium".to_string()
+                        } else {
+                            size
+                        };
+                        if !ttags.contains(&size) {
+                            ttags.push(size);
+                        }
+                        if crate::target_env::test_matches_filters(&ttags, &required, &excluded) {
+                            tests.insert(m);
+                        }
+                    } else if self.env.is_test_suite(&m) {
+                        if suites_seen.insert(m.clone()) {
+                            sub_suites.push(m);
+                        }
+                    } else if strict && attr_name == "tests" {
+                        let msg = format!(
+                            "The label '{}' in the test_suite '{}' does not refer to a test or test_suite rule!",
+                            m.label, suite.label
+                        );
+                        self.diag.handle_error(expr, msg)?;
                     }
-                } else if self.env.is_test_suite(&m) {
-                    if suites_seen.insert(m.clone()) {
-                        sub_suites.push(m);
-                    }
-                } else if strict {
-                    let msg = format!(
-                        "The label '{}' in the test_suite '{}' does not refer to a test or test_suite rule!",
-                        m.label, suite.label
-                    );
-                    self.diag.handle_error(expr, msg)?;
                 }
             }
             // Visit nested suites before continuing (depth-first).
@@ -1294,12 +1622,21 @@ impl Digraph {
                 }
             }
         }
-        Digraph { nodes: set.to_vec(), index, succ, pred }
+        Digraph {
+            nodes: set.to_vec(),
+            index,
+            succ,
+            pred,
+        }
     }
 
     /// Reverse post-order DFS ("topological order") visiting start nodes and successors in the
     /// order given by `cmp` (insertion order if `None`).
-    pub fn topological_order(&self, cmp: Option<&dyn Fn(&Node, &Node) -> std::cmp::Ordering>) -> Vec<usize> {
+    #[allow(clippy::type_complexity)]
+    pub fn topological_order(
+        &self,
+        cmp: Option<&dyn Fn(&Node, &Node) -> std::cmp::Ordering>,
+    ) -> Vec<usize> {
         let n = self.nodes.len();
         let mut starts: Vec<usize> = (0..n).collect();
         if let Some(c) = cmp {

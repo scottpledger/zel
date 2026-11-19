@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -28,8 +29,14 @@ pub struct Url {
 
 impl Url {
     pub fn parse(s: &str) -> Result<Url, String> {
-        let (scheme, rest) = s.split_once(':').ok_or_else(|| format!("Invalid URL (no scheme): {}", s))?;
-        if scheme.is_empty() || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c)) {
+        let (scheme, rest) = s
+            .split_once(':')
+            .ok_or_else(|| format!("Invalid URL (no scheme): {}", s))?;
+        if scheme.is_empty()
+            || !scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+        {
             return Err(format!("Invalid URL scheme: {}", s));
         }
         let scheme = scheme.to_ascii_lowercase();
@@ -61,9 +68,14 @@ impl Url {
             None => (None, authority),
         };
         let (host, port) = if let Some(r) = hostport.strip_prefix('[') {
-            let (h, after) = r.split_once(']').ok_or_else(|| format!("Invalid URL (bad IPv6 host): {}", s))?;
+            let (h, after) = r
+                .split_once(']')
+                .ok_or_else(|| format!("Invalid URL (bad IPv6 host): {}", s))?;
             let port = match after.strip_prefix(':') {
-                Some(p) if !p.is_empty() => Some(p.parse::<u16>().map_err(|_| format!("Invalid port in URL: {}", s))?),
+                Some(p) if !p.is_empty() => Some(
+                    p.parse::<u16>()
+                        .map_err(|_| format!("Invalid port in URL: {}", s))?,
+                ),
                 _ => None,
             };
             (h.to_string(), port)
@@ -71,13 +83,22 @@ impl Url {
             let port = if p.is_empty() {
                 None
             } else {
-                Some(p.parse::<u16>().map_err(|_| format!("Invalid port in URL: {}", s))?)
+                Some(
+                    p.parse::<u16>()
+                        .map_err(|_| format!("Invalid port in URL: {}", s))?,
+                )
             };
             (h.to_string(), port)
         } else {
             (hostport.to_string(), None)
         };
-        Ok(Url { scheme, userinfo, host, port, path_and_query: tail })
+        Ok(Url {
+            scheme,
+            userinfo,
+            host,
+            port,
+            path_and_query: tail,
+        })
     }
 
     pub fn path(&self) -> &str {
@@ -85,7 +106,11 @@ impl Url {
     }
 
     pub fn host_header(&self) -> String {
-        let h = if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() };
+        let h = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
         match self.port {
             Some(p) if Some(p) != default_port(&self.scheme) => format!("{}:{}", h, p),
             _ => h,
@@ -93,10 +118,21 @@ impl Url {
     }
 
     pub fn to_url_string(&self) -> String {
-        let h = if self.host.contains(':') { format!("[{}]", self.host) } else { self.host.clone() };
-        let ui = self.userinfo.as_ref().map(|u| format!("{}@", u)).unwrap_or_default();
+        let h = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        let ui = self
+            .userinfo
+            .as_ref()
+            .map(|u| format!("{}@", u))
+            .unwrap_or_default();
         let port = self.port.map(|p| format!(":{}", p)).unwrap_or_default();
-        format!("{}://{}{}{}{}", self.scheme, ui, h, port, self.path_and_query)
+        format!(
+            "{}://{}{}{}{}",
+            self.scheme, ui, h, port, self.path_and_query
+        )
     }
 
     /// Resolve a (possibly relative) redirect location against this URL.
@@ -155,12 +191,27 @@ fn percent_decode(s: &str) -> String {
 
 fn file_url_to_path(u: &Url) -> Result<PathBuf, String> {
     if !u.host.is_empty() && u.host != "localhost" {
-        return Err(format!("Unsupported file URL host '{}': file:// URLs must be absolute paths", u.host));
+        return Err(format!(
+            "Unsupported file URL host '{}': file:// URLs must be absolute paths",
+            u.host
+        ));
     }
     let p = percent_decode(u.path());
     if !p.starts_with('/') {
-        return Err(format!("file URL must have an absolute path: {}", u.to_url_string()));
+        return Err(format!(
+            "file URL must have an absolute path: {}",
+            u.to_url_string()
+        ));
     }
+    #[cfg(windows)]
+    let p = {
+        let b = p.as_bytes();
+        if b.len() >= 3 && b[0] == b'/' && b[1].is_ascii_alphabetic() && b[2] == b':' {
+            p[1..].to_string()
+        } else {
+            p
+        }
+    };
     Ok(PathBuf::from(p))
 }
 
@@ -206,7 +257,7 @@ fn class_escape(c: char) -> Option<(bool, Vec<(char, char)>)> {
     }
 }
 
-impl<'a> RParser<'a> {
+impl RParser<'_> {
     fn parse_alts(&mut self, depth: usize) -> Result<Vec<Vec<Node>>, String> {
         let mut alts = vec![self.parse_seq(depth)?];
         while self.i < self.c.len() && self.c[self.i] == '|' {
@@ -238,17 +289,23 @@ impl<'a> RParser<'a> {
             '?' => (0, 1),
             '{' => {
                 let close = self.c[self.i..].iter().position(|&c| c == '}');
-                let Some(close) = close else { return Err(format!("Unclosed counted closure at index {}", self.i)) };
+                let Some(close) = close else {
+                    return Err(format!("Unclosed counted closure at index {}", self.i));
+                };
                 let body: String = self.c[self.i + 1..self.i + close].iter().collect();
                 let (a, b) = match body.split_once(',') {
                     Some((a, b)) => (a, Some(b)),
                     None => (body.as_str(), None),
                 };
-                let min: usize = a.parse().map_err(|_| format!("Illegal repetition at index {}", self.i))?;
+                let min: usize = a
+                    .parse()
+                    .map_err(|_| format!("Illegal repetition at index {}", self.i))?;
                 let max = match b {
                     None => min,
                     Some("") => usize::MAX,
-                    Some(b) => b.parse().map_err(|_| format!("Illegal repetition at index {}", self.i))?,
+                    Some(b) => b
+                        .parse()
+                        .map_err(|_| format!("Illegal repetition at index {}", self.i))?,
                 };
                 self.i += close;
                 (min, max)
@@ -274,7 +331,10 @@ impl<'a> RParser<'a> {
             '.' => Ok(Node::Any),
             '^' => Ok(Node::Start),
             '$' => Ok(Node::End),
-            '*' | '+' | '?' => Err(format!("Dangling meta character '{}' near index {}", ch, start)),
+            '*' | '+' | '?' => Err(format!(
+                "Dangling meta character '{}' near index {}",
+                ch, start
+            )),
             '(' => {
                 let mut idx = None;
                 if self.c.get(self.i) == Some(&'?') && self.c.get(self.i + 1) == Some(&':') {
@@ -301,7 +361,10 @@ impl<'a> RParser<'a> {
                 let mut first = true;
                 loop {
                     let Some(&c) = self.c.get(self.i) else {
-                        return Err(format!("Unclosed character class near index {}", self.c.len().saturating_sub(1)));
+                        return Err(format!(
+                            "Unclosed character class near index {}",
+                            self.c.len().saturating_sub(1)
+                        ));
                     };
                     self.i += 1;
                     if c == ']' && !first {
@@ -322,7 +385,9 @@ impl<'a> RParser<'a> {
                         }
                         lo = e;
                     }
-                    if self.c.get(self.i) == Some(&'-') && self.c.get(self.i + 1).map(|&c| c != ']').unwrap_or(false) {
+                    if self.c.get(self.i) == Some(&'-')
+                        && self.c.get(self.i + 1).map(|&c| c != ']').unwrap_or(false)
+                    {
                         let mut hi = self.c[self.i + 1];
                         self.i += 2;
                         if hi == '\\' {
@@ -364,12 +429,19 @@ type Caps = Vec<Option<(usize, usize)>>;
 impl Regex {
     pub fn new(pattern: &str) -> Result<Regex, String> {
         let chars: Vec<char> = pattern.chars().collect();
-        let mut p = RParser { c: &chars, i: 0, groups: 0 };
+        let mut p = RParser {
+            c: &chars,
+            i: 0,
+            groups: 0,
+        };
         let alts = p.parse_alts(0)?;
         if p.i < chars.len() {
             return Err(format!("Unmatched closing ')' near index {}", p.i));
         }
-        Ok(Regex { alts, groups: p.groups })
+        Ok(Regex {
+            alts,
+            groups: p.groups,
+        })
     }
 
     /// Full-string match; returns capture groups (index 0 = whole match).
@@ -398,14 +470,26 @@ impl Regex {
     }
 }
 
-fn m_seq(s: &[char], nodes: &[Node], pos: usize, caps: &mut Caps, k: &mut dyn FnMut(usize, &mut Caps) -> bool) -> bool {
+fn m_seq(
+    s: &[char],
+    nodes: &[Node],
+    pos: usize,
+    caps: &mut Caps,
+    k: &mut dyn FnMut(usize, &mut Caps) -> bool,
+) -> bool {
     let Some((first, rest)) = nodes.split_first() else {
         return k(pos, caps);
     };
     m_node(s, first, pos, caps, &mut |p, c| m_seq(s, rest, p, c, k))
 }
 
-fn m_node(s: &[char], n: &Node, pos: usize, caps: &mut Caps, k: &mut dyn FnMut(usize, &mut Caps) -> bool) -> bool {
+fn m_node(
+    s: &[char],
+    n: &Node,
+    pos: usize,
+    caps: &mut Caps,
+    k: &mut dyn FnMut(usize, &mut Caps) -> bool,
+) -> bool {
     match n {
         Node::Lit(c) => s.get(pos) == Some(c) && k(pos + 1, caps),
         Node::Any => pos < s.len() && s[pos] != '\n' && k(pos + 1, caps),
@@ -440,7 +524,9 @@ fn m_node(s: &[char], n: &Node, pos: usize, caps: &mut Caps, k: &mut dyn FnMut(u
             }
             false
         }
-        Node::Repeat(inner, min, max, greedy) => m_rep(s, inner, *min, *max, *greedy, 0, pos, caps, k),
+        Node::Repeat(inner, min, max, greedy) => {
+            m_rep(s, inner, *min, *max, *greedy, 0, pos, caps, k)
+        }
     }
 }
 
@@ -457,7 +543,9 @@ fn m_rep(
     k: &mut dyn FnMut(usize, &mut Caps) -> bool,
 ) -> bool {
     if count < min {
-        return m_node(s, inner, pos, caps, &mut |p, c| m_rep(s, inner, min, max, greedy, count + 1, p, c, k));
+        return m_node(s, inner, pos, caps, &mut |p, c| {
+            m_rep(s, inner, min, max, greedy, count + 1, p, c, k)
+        });
     }
     if greedy {
         if count < max
@@ -628,18 +716,31 @@ impl UrlRewriter {
                         ));
                     }
                     let re = Regex::new(parts[1]).map_err(|e| {
-                        format!("{}: Invalid regex in `rewrite`: {} in `{}`", loc, e.to_string().replace(" near index ", " at index "), parts[1])
+                        format!(
+                            "{}: Invalid regex in `rewrite`: {} in `{}`",
+                            loc,
+                            e.to_string().replace(" near index ", " at index "),
+                            parts[1]
+                        )
                     })?;
-                    r.rewrites.push((parts[1].to_string(), re, parts[2].to_string()));
+                    r.rewrites
+                        .push((parts[1].to_string(), re, parts[2].to_string()));
                 }
                 "all_blocked_message" => {
                     if parts.len() == 1 {
-                        return Err(format!("{}: all_blocked_message must be followed by a message", loc));
+                        return Err(format!(
+                            "{}: all_blocked_message must be followed by a message",
+                            loc
+                        ));
                     }
                     if r.all_blocked_message.is_some() {
-                        return Err(format!("{}: At most one all_blocked_message directive is allowed", loc));
+                        return Err(format!(
+                            "{}: At most one all_blocked_message directive is allowed",
+                            loc
+                        ));
                     }
-                    let idx = line.find("all_blocked_message").unwrap() + "all_blocked_message".len() + 1;
+                    let idx =
+                        line.find("all_blocked_message").unwrap() + "all_blocked_message".len() + 1;
                     r.all_blocked_message = Some(line.get(idx..).unwrap_or("").to_string());
                 }
                 _ => return Err(format!("{}: Unable to parse: {}", loc, line)),
@@ -650,19 +751,40 @@ impl UrlRewriter {
 
     /// `UrlRewriter.getDownloaderUrlRewriter`: `configs` are relative to the workspace root; an
     /// empty entry disables the rewriter.
-    pub fn from_config_paths(workspace: &Path, configs: &[String]) -> Result<Option<UrlRewriter>, String> {
+    pub fn from_config_paths(
+        workspace: &Path,
+        configs: &[String],
+    ) -> Result<Option<UrlRewriter>, String> {
         if configs.is_empty() || configs.iter().any(|c| c.is_empty()) {
             return Ok(None);
         }
-        let abs: Vec<PathBuf> = configs.iter().map(|c| if Path::new(c).is_absolute() { PathBuf::from(c) } else { workspace.join(c) }).collect();
-        let missing: Vec<String> = abs.iter().filter(|p| !p.exists()).map(|p| p.display().to_string()).collect();
+        let abs: Vec<PathBuf> = configs
+            .iter()
+            .map(|c| {
+                if Path::new(c).is_absolute() {
+                    PathBuf::from(c)
+                } else {
+                    workspace.join(c)
+                }
+            })
+            .collect();
+        let missing: Vec<String> = abs
+            .iter()
+            .filter(|p| !p.exists())
+            .map(|p| p.display().to_string())
+            .collect();
         if !missing.is_empty() {
-            return Err(format!("Failed to parse downloader config: Unable to find downloader config file {}", missing.join(",")));
+            return Err(format!(
+                "Failed to parse downloader config: Unable to find downloader config file {}",
+                missing.join(",")
+            ));
         }
         let mut r = UrlRewriter::default();
         for (c, p) in configs.iter().zip(&abs) {
-            let text = fs::read_to_string(p).map_err(|e| format!("Failed to parse downloader config: {e}"))?;
-            r.parse_into(c, &text).map_err(|e| format!("Failed to parse downloader config at {e}"))?;
+            let text = fs::read_to_string(p)
+                .map_err(|e| format!("Failed to parse downloader config: {e}"))?;
+            r.parse_into(c, &text)
+                .map_err(|e| format!("Failed to parse downloader config at {e}"))?;
         }
         Ok(Some(r))
     }
@@ -724,7 +846,10 @@ impl UrlRewriter {
                     out.push(c);
                     continue;
                 }
-                let blocked = self.block.iter().any(|h| h == "*" || Self::host_matches(&cu, h));
+                let blocked = self
+                    .block
+                    .iter()
+                    .any(|h| h == "*" || Self::host_matches(&cu, h));
                 if !blocked {
                     out.push(c);
                 }
@@ -734,7 +859,10 @@ impl UrlRewriter {
     }
 
     pub fn blocked_message(&self, original: &[String]) -> String {
-        let mut m = format!("Configured URL rewriter blocked all URLs: [{}]", original.join(", "));
+        let mut m = format!(
+            "Configured URL rewriter blocked all URLs: [{}]",
+            original.join(", ")
+        );
         if let Some(x) = &self.all_blocked_message {
             m.push_str(" - ");
             m.push_str(x);
@@ -759,7 +887,10 @@ impl RepositoryCache {
     }
 
     pub fn entry_dir(&self, c: &Checksum) -> PathBuf {
-        self.root.join("content_addressable").join(c.algorithm.name()).join(c.hex())
+        self.root
+            .join("content_addressable")
+            .join(c.algorithm.name())
+            .join(c.hex())
     }
 
     pub fn entry_file(&self, c: &Checksum) -> PathBuf {
@@ -794,10 +925,12 @@ impl RepositoryCache {
 
     pub fn put(&self, c: &Checksum, data: &[u8], canonical_id: &str) -> Result<(), String> {
         let dir = self.entry_dir(c);
-        fs::create_dir_all(&dir).map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
+        fs::create_dir_all(&dir)
+            .map_err(|e| format!("Failed to create {}: {}", dir.display(), e))?;
         let tmp = dir.join(format!("tmp-{}-{}", std::process::id(), next_counter()));
         fs::write(&tmp, data).map_err(|e| format!("Failed to write {}: {}", tmp.display(), e))?;
-        fs::rename(&tmp, dir.join("file")).map_err(|e| format!("Failed to store cache entry {}: {}", dir.display(), e))?;
+        fs::rename(&tmp, dir.join("file"))
+            .map_err(|e| format!("Failed to store cache entry {}: {}", dir.display(), e))?;
         if !canonical_id.is_empty() {
             let _ = fs::write(self.id_file(c, canonical_id), b"");
         }
@@ -855,6 +988,8 @@ pub struct Downloader {
     pub timeout: Duration,
     pub max_redirects: usize,
     pub curl_binary: String,
+    pub credential_helpers: Vec<(String, PathBuf)>,
+    pub client_env: BTreeMap<String, String>,
 }
 
 impl Default for Downloader {
@@ -869,6 +1004,8 @@ impl Default for Downloader {
             timeout: Duration::from_secs(60),
             max_redirects: 20,
             curl_binary: "curl".to_string(),
+            credential_helpers: Vec::new(),
+            client_env: BTreeMap::new(),
         }
     }
 }
@@ -879,7 +1016,10 @@ struct FetchError {
 }
 
 fn fe(msg: impl Into<String>, retryable: bool) -> FetchError {
-    FetchError { msg: msg.into(), retryable }
+    FetchError {
+        msg: msg.into(),
+        retryable,
+    }
 }
 
 /// Build the effective checksum from `sha256`/`integrity`.
@@ -912,15 +1052,16 @@ impl Downloader {
             req.context.clone()
         };
 
-        let finish = |data: &[u8], url: String, from_cache: bool| -> Result<DownloadResult, String> {
-            Ok(DownloadResult {
-                path: req.output.clone(),
-                sha256: crate::hash::sha256_hex(data),
-                integrity: format!("sha256-{}", base64_encode(&crate::hash::sha256(data))),
-                url,
-                from_cache,
-            })
-        };
+        let finish =
+            |data: &[u8], url: String, from_cache: bool| -> Result<DownloadResult, String> {
+                Ok(DownloadResult {
+                    path: req.output.clone(),
+                    sha256: crate::hash::sha256_hex(data),
+                    integrity: format!("sha256-{}", base64_encode(&crate::hash::sha256(data))),
+                    url,
+                    from_cache,
+                })
+            };
 
         // 1. Already present with the right checksum.
         if let Some(c) = &checksum {
@@ -933,7 +1074,8 @@ impl Downloader {
             // 2. Repository cache.
             if let Some(cache) = &self.repo_cache {
                 if let Some(f) = cache.get(c, &req.canonical_id)? {
-                    let data = fs::read(&f).map_err(|e| format!("Failed to read {}: {}", f.display(), e))?;
+                    let data = fs::read(&f)
+                        .map_err(|e| format!("Failed to read {}: {}", f.display(), e))?;
                     self.write_output(&req.output, &data, req.executable)?;
                     // `DownloadCacheHitEvent(context, cacheKey, mainUrl)`.
                     return finish(&data, req.urls.first().cloned().unwrap_or_default(), true);
@@ -951,7 +1093,11 @@ impl Downloader {
                         if c.matches(&data) {
                             if let Some(cache) = &self.repo_cache {
                                 if let Err(e) = cache.put(c, &data, &req.canonical_id) {
-                                    eprintln!("WARNING: Failed to copy {} to repository cache: {}", cand.display(), e);
+                                    eprintln!(
+                                        "WARNING: Failed to copy {} to repository cache: {}",
+                                        cand.display(),
+                                        e
+                                    );
                                 }
                             }
                             self.write_output(&req.output, &data, req.executable)?;
@@ -963,7 +1109,10 @@ impl Downloader {
         }
 
         if self.disable_download {
-            return Err(format!("Failed to download {}: download is disabled.", context));
+            return Err(format!(
+                "Failed to download {}: download is disabled.",
+                context
+            ));
         }
 
         let urls: Vec<String> = match &self.rewriter {
@@ -977,7 +1126,10 @@ impl Downloader {
             None => req.urls.clone(),
         };
         if urls.is_empty() {
-            return Err(format!("Error downloading [] to {}: no URLs given", req.output.display()));
+            return Err(format!(
+                "Error downloading [] to {}: no URLs given",
+                req.output.display()
+            ));
         }
 
         let mut attempt = 0u32;
@@ -991,7 +1143,12 @@ impl Downloader {
                         if let Some(c) = &checksum {
                             if let Err(e) = c.verify(&data) {
                                 let e = if !req.integrity.is_empty() {
-                                    format!("Checksum was {}-{} but wanted {}", c.algorithm.name(), base64_encode(&c.algorithm.digest(&data)), c.to_integrity())
+                                    format!(
+                                        "Checksum was {}-{} but wanted {}",
+                                        c.algorithm.name(),
+                                        base64_encode(&c.algorithm.digest(&data)),
+                                        c.to_integrity()
+                                    )
                                 } else {
                                     e
                                 };
@@ -1016,7 +1173,11 @@ impl Downloader {
                                 },
                             };
                             if let Err(e) = cache.put(&key, &data, &req.canonical_id) {
-                                eprintln!("WARNING: Failed to copy {} to repository cache: {}", req.output.display(), e);
+                                eprintln!(
+                                    "WARNING: Failed to copy {} to repository cache: {}",
+                                    req.output.display(),
+                                    e
+                                );
                             }
                         }
                         return finish(&data, url.clone(), false);
@@ -1026,7 +1187,8 @@ impl Downloader {
                         // Retries of HTTP-level failures are silent (`HttpConnector`); `DownloadManager`'s own
                         // retries (`UnknownHostException`) call the downloader again, which reports every URL
                         // failure of every pass (`HttpDownloader.recordFailure`).
-                        let outer = e.msg.starts_with("Unknown host") || e.msg == "Connection refused";
+                        let outer =
+                            e.msg.starts_with("Unknown host") || e.msg == "Connection refused";
                         if outer || !(e.retryable && attempt < self.retries) {
                             record_warning(url, &e.msg);
                         }
@@ -1052,14 +1214,23 @@ impl Downloader {
     }
 
     fn set_mode(&self, p: &Path, exec: bool) -> Result<(), String> {
-        let mode = if exec { 0o755 } else { 0o644 };
-        fs::set_permissions(p, fs::Permissions::from_mode(mode))
-            .map_err(|e| format!("Failed to chmod {}: {}", p.display(), e))
+        #[cfg(unix)]
+        {
+            let mode = if exec { 0o755 } else { 0o644 };
+            fs::set_permissions(p, fs::Permissions::from_mode(mode))
+                .map_err(|e| format!("Failed to chmod {}: {}", p.display(), e))
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = (p, exec);
+            Ok(())
+        }
     }
 
     fn write_output(&self, out: &Path, data: &[u8], exec: bool) -> Result<(), String> {
         if let Some(parent) = out.parent() {
-            fs::create_dir_all(parent).map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
+            fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create {}: {}", parent.display(), e))?;
         }
         let tmp = out.with_extension(format!("zel-tmp-{}-{}", std::process::id(), next_counter()));
         fs::write(&tmp, data).map_err(|e| format!("Failed to write {}: {}", tmp.display(), e))?;
@@ -1071,45 +1242,52 @@ impl Downloader {
     }
 
     fn headers_for(&self, url: &str, req: &DownloadRequest, parsed: &Url) -> Vec<(String, String)> {
-        let mut h: Vec<(String, String)> = req.headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let mut h: Vec<(String, String)> = req
+            .headers
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         if let Some(a) = req.auth.get(url) {
             let login = a.get("login").cloned().unwrap_or_default();
             let password = a.get("password").cloned().unwrap_or_default();
             match a.get("type").map(|s| s.as_str()) {
                 Some("basic") => h.push((
                     "Authorization".into(),
-                    format!("Basic {}", base64_encode(format!("{}:{}", login, password).as_bytes())),
+                    format!(
+                        "Basic {}",
+                        base64_encode(format!("{}:{}", login, password).as_bytes())
+                    ),
                 )),
                 Some("pattern") => {
                     let p = a.get("pattern").cloned().unwrap_or_default();
                     h.push((
                         "Authorization".into(),
-                        p.replace("<login>", &login).replace("<password>", &password),
+                        p.replace("<login>", &login)
+                            .replace("<password>", &password),
                     ));
                 }
                 _ => {}
             }
         } else if let Some(ui) = &parsed.userinfo {
-            if !h.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")) {
-                h.push(("Authorization".into(), format!("Basic {}", base64_encode(percent_decode(ui).as_bytes()))));
+            if !h
+                .iter()
+                .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+            {
+                h.push((
+                    "Authorization".into(),
+                    format!("Basic {}", base64_encode(percent_decode(ui).as_bytes())),
+                ));
             }
         }
-        if !h.iter().any(|(k, _)| k.eq_ignore_ascii_case("authorization")) {
-            if let Some(netrc) = crate::netrc::Netrc::load_user_netrc() {
-                if let Some(m) = netrc.get_credential(&parsed.host) {
-                    if let Some(pwd) = &m.password {
-                        if let Some(login) = &m.login {
-                            h.push((
-                                "Authorization".into(),
-                                format!("Basic {}", base64_encode(format!("{}:{}", login, pwd).as_bytes())),
-                            ));
-                        } else {
-                            h.push((
-                                "Authorization".into(),
-                                format!("Bearer {pwd}"),
-                            ));
-                        }
-                    }
+        if !h
+            .iter()
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"))
+        {
+            if let Ok(extra) =
+                crate::netrc::resolve_auth_headers(url, &self.credential_helpers, &self.client_env)
+            {
+                for (k, v) in extra {
+                    h.push((k, v));
                 }
             }
         }
@@ -1121,7 +1299,8 @@ impl Downloader {
         match parsed.scheme.as_str() {
             "file" => {
                 let p = file_url_to_path(&parsed).map_err(|e| fe(e, false))?;
-                fs::read(&p).map_err(|e| fe(format!("{} ({})", p.display(), java_io_reason(&e)), false))
+                fs::read(&p)
+                    .map_err(|e| fe(format!("{} ({})", p.display(), java_io_reason(&e)), false))
             }
             "http" => {
                 let headers = self.headers_for(url, req, &parsed);
@@ -1131,14 +1310,29 @@ impl Downloader {
                 let headers = self.headers_for(url, req, &parsed);
                 self.curl_get(&parsed.to_url_string_without_userinfo(), &headers)
             }
-            other => Err(fe(format!("Unsupported URL scheme '{}' in {}", other, url), false)),
+            other => Err(fe(
+                format!("Unsupported URL scheme '{}' in {}", other, url),
+                false,
+            )),
         }
     }
 
     fn curl_get(&self, url: &str, headers: &[(String, String)]) -> Result<Vec<u8>, FetchError> {
-        let tmp = std::env::temp_dir().join(format!("zel-curl-{}-{}", std::process::id(), next_counter()));
+        let tmp = std::env::temp_dir().join(format!(
+            "zel-curl-{}-{}",
+            std::process::id(),
+            next_counter()
+        ));
         let mut cmd = Command::new(&self.curl_binary);
-        cmd.args(["-fsSL", "--connect-timeout", "2", "--max-redirs", &self.max_redirects.to_string(), "-o"]).arg(&tmp);
+        cmd.args([
+            "-fsSL",
+            "--connect-timeout",
+            "2",
+            "--max-redirs",
+            &self.max_redirects.to_string(),
+            "-o",
+        ])
+        .arg(&tmp);
         for (k, v) in headers {
             cmd.arg("-H").arg(format!("{}: {}", k, v));
         }
@@ -1162,16 +1356,23 @@ impl Downloader {
             let code = out.status.code().unwrap_or(-1);
             if code == 6 {
                 // `UnknownHostException` (retried by `DownloadManager`).
-                let host = url.split("://").nth(1).and_then(|r| r.split(['/', ':']).next()).unwrap_or("");
+                let host = url
+                    .split("://")
+                    .nth(1)
+                    .and_then(|r| r.split(['/', ':']).next())
+                    .unwrap_or("");
                 return Err(fe(format!("Unknown host: {host}"), false));
             }
             if code == 7 {
                 return Err(fe("Connection refused".to_string(), true));
             }
-            let retryable = stderr.contains("error: 5") || stderr.contains("error: 429") || matches!(code, 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56);
+            let retryable = stderr.contains("error: 5")
+                || stderr.contains("error: 429")
+                || matches!(code, 6 | 7 | 18 | 28 | 35 | 52 | 55 | 56);
             return Err(fe(format!("GET {} failed: {}", url, stderr), retryable));
         }
-        let data = fs::read(&tmp).map_err(|e| fe(format!("Failed to read curl output: {}", e), false));
+        let data =
+            fs::read(&tmp).map_err(|e| fe(format!("Failed to read curl output: {}", e), false));
         let _ = fs::remove_file(&tmp);
         data
     }
@@ -1219,15 +1420,20 @@ impl Downloader {
                 reqs.push_str(&format!("{}: {}\r\n", k, v));
             }
             reqs.push_str("\r\n");
-            w.write_all(reqs.as_bytes()).map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
+            w.write_all(reqs.as_bytes())
+                .map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
             let mut r = BufReader::new(stream);
             let mut line = String::new();
-            r.read_line(&mut line).map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
+            r.read_line(&mut line)
+                .map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
             let status_line = line.trim_end().to_string();
             let mut it = status_line.splitn(3, ' ');
             let version = it.next().unwrap_or("");
             if !version.starts_with("HTTP/") {
-                return Err(fe(format!("Invalid HTTP response from {}: '{}'", addr_str, status_line), true));
+                return Err(fe(
+                    format!("Invalid HTTP response from {}: '{}'", addr_str, status_line),
+                    true,
+                ));
             }
             let code: u16 = it
                 .next()
@@ -1237,7 +1443,9 @@ impl Downloader {
             let mut hdrs: Vec<(String, String)> = Vec::new();
             loop {
                 line.clear();
-                let n = r.read_line(&mut line).map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
+                let n = r
+                    .read_line(&mut line)
+                    .map_err(|e| fe(format!("{}: {}", addr_str, e), true))?;
                 if n == 0 || line == "\r\n" || line == "\n" {
                     break;
                 }
@@ -1247,12 +1455,17 @@ impl Downloader {
             }
             let get = |k: &str| hdrs.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
             if matches!(code, 301 | 302 | 303 | 307 | 308) {
-                let loc = get("location").ok_or_else(|| fe(format!("Redirect {} without Location header", code), false))?;
+                let loc = get("location").ok_or_else(|| {
+                    fe(format!("Redirect {} without Location header", code), false)
+                })?;
                 let next = url.join(&loc).map_err(|e| fe(e, false))?;
                 match next.scheme.as_str() {
                     "http" => {}
                     "https" => {
-                        return self.curl_get(&next.to_url_string_without_userinfo(), &strip_auth(&headers, &url, &next));
+                        return self.curl_get(
+                            &next.to_url_string_without_userinfo(),
+                            &strip_auth(&headers, &url, &next),
+                        );
                     }
                     s => return Err(fe(format!("Redirect to unsupported scheme '{}'", s), false)),
                 }
@@ -1269,12 +1482,15 @@ impl Downloader {
                 let retryable = code == 503 || code == 408 || code == 429;
                 return Err(fe(format!("GET returned {} {}", code, reason), retryable));
             }
-            let chunked = get("transfer-encoding").map(|v| v.to_ascii_lowercase().contains("chunked")).unwrap_or(false);
+            let chunked = get("transfer-encoding")
+                .map(|v| v.to_ascii_lowercase().contains("chunked"))
+                .unwrap_or(false);
             let mut body = Vec::new();
             if chunked {
                 loop {
                     line.clear();
-                    r.read_line(&mut line).map_err(|e| fe(format!("Error reading chunk: {}", e), true))?;
+                    r.read_line(&mut line)
+                        .map_err(|e| fe(format!("Error reading chunk: {}", e), true))?;
                     let size_s = line.trim().split(';').next().unwrap_or("").to_string();
                     let size = usize::from_str_radix(&size_s, 16)
                         .map_err(|_| fe(format!("Invalid chunk size '{}'", size_s), true))?;
@@ -1283,30 +1499,52 @@ impl Downloader {
                     }
                     let start = body.len();
                     body.resize(start + size, 0);
-                    r.read_exact(&mut body[start..]).map_err(|e| fe(format!("Premature end of chunked body: {}", e), true))?;
+                    r.read_exact(&mut body[start..])
+                        .map_err(|e| fe(format!("Premature end of chunked body: {}", e), true))?;
                     let mut crlf = [0u8; 2];
-                    r.read_exact(&mut crlf).map_err(|e| fe(format!("Premature end of chunked body: {}", e), true))?;
+                    r.read_exact(&mut crlf)
+                        .map_err(|e| fe(format!("Premature end of chunked body: {}", e), true))?;
                 }
             } else if let Some(cl) = get("content-length") {
-                let n: usize = cl.parse().map_err(|_| fe(format!("Invalid Content-Length '{}'", cl), false))?;
+                let n: usize = cl
+                    .parse()
+                    .map_err(|_| fe(format!("Invalid Content-Length '{}'", cl), false))?;
                 let mut got = Vec::new();
-                r.take(n as u64).read_to_end(&mut got).map_err(|e| fe(format!("Error reading body: {}", e), true))?;
+                r.take(n as u64)
+                    .read_to_end(&mut got)
+                    .map_err(|e| fe(format!("Error reading body: {}", e), true))?;
                 if got.len() != n {
                     return Err(fe(
-                        format!("Download size mismatch: Content-Length was {} but got {} bytes", n, got.len()),
+                        format!(
+                            "Download size mismatch: Content-Length was {} but got {} bytes",
+                            n,
+                            got.len()
+                        ),
                         true,
                     ));
                 }
                 body = got;
             } else {
-                r.read_to_end(&mut body).map_err(|e| fe(format!("Error reading body: {}", e), true))?;
+                r.read_to_end(&mut body)
+                    .map_err(|e| fe(format!("Error reading body: {}", e), true))?;
             }
-            if get("content-encoding").map(|v| v.eq_ignore_ascii_case("gzip")).unwrap_or(false) {
-                body = crate::archive::gunzip(&body).map_err(|e| fe(format!("Bad gzip content-encoding: {}", e), false))?;
+            if get("content-encoding")
+                .map(|v| v.eq_ignore_ascii_case("gzip"))
+                .unwrap_or(false)
+            {
+                body = crate::archive::gunzip(&body)
+                    .map_err(|e| fe(format!("Bad gzip content-encoding: {}", e), false))?;
             }
             return Ok(body);
         }
-        Err(fe(format!("Too many redirects (more than {}) fetching {}", self.max_redirects, start.to_url_string()), false))
+        Err(fe(
+            format!(
+                "Too many redirects (more than {}) fetching {}",
+                self.max_redirects,
+                start.to_url_string()
+            ),
+            false,
+        ))
     }
 }
 
@@ -1319,12 +1557,15 @@ impl Url {
 }
 
 fn strip_auth(headers: &[(String, String)], from: &Url, to: &Url) -> Vec<(String, String)> {
-    if from.host.eq_ignore_ascii_case(&to.host) && from.port == to.port && from.scheme == to.scheme {
+    if from.host.eq_ignore_ascii_case(&to.host) && from.port == to.port && from.scheme == to.scheme
+    {
         return headers.to_vec();
     }
     headers
         .iter()
-        .filter(|(k, _)| !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("cookie"))
+        .filter(|(k, _)| {
+            !k.eq_ignore_ascii_case("authorization") && !k.eq_ignore_ascii_case("cookie")
+        })
         .cloned()
         .collect()
 }
@@ -1354,27 +1595,37 @@ fn candidate_file_names(urls: &[String], output: &Path) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hash::{sha256_hex, sha1_hex};
+    use crate::hash::{sha1_hex, sha256_hex};
     use std::net::TcpListener;
     use std::sync::{Arc, Mutex};
 
     fn tmpdir(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("zel-download-test-{}-{}", std::process::id(), name));
+        let p =
+            std::env::temp_dir().join(format!("zel-download-test-{}-{}", std::process::id(), name));
         let _ = fs::remove_dir_all(&p);
         fs::create_dir_all(&p).unwrap();
         p
     }
 
     fn file_url(p: &Path) -> String {
-        format!("file://{}", p.display())
+        crate::file_url_for_path(p)
     }
 
     fn req(urls: Vec<String>, out: PathBuf) -> DownloadRequest {
-        DownloadRequest { urls, output: out, ..Default::default() }
+        DownloadRequest {
+            urls,
+            output: out,
+            ..Default::default()
+        }
     }
 
     fn quick() -> Downloader {
-        Downloader { retries: 0, retry_wait: Duration::from_millis(1), timeout: Duration::from_secs(5), ..Default::default() }
+        Downloader {
+            retries: 0,
+            retry_wait: Duration::from_millis(1),
+            timeout: Duration::from_secs(5),
+            ..Default::default()
+        }
     }
 
     /// Serve `n` connections with a handler returning raw response bytes for (path, request text).
@@ -1420,7 +1671,8 @@ mod tests {
     }
 
     fn ok(body: &[u8]) -> Vec<u8> {
-        let mut r = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
+        let mut r =
+            format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len()).into_bytes();
         r.extend_from_slice(body);
         r
     }
@@ -1458,7 +1710,15 @@ mod tests {
         let res = quick().download(&r).unwrap();
         assert_eq!(res.sha256, sha);
         assert_eq!(fs::read(d.join("out/dl.txt")).unwrap(), b"hello");
-        assert_eq!(fs::metadata(d.join("out/dl.txt")).unwrap().permissions().mode() & 0o777, 0o755);
+        #[cfg(unix)]
+        assert_eq!(
+            fs::metadata(d.join("out/dl.txt"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
         assert!(res.integrity.starts_with("sha256-"));
 
         // bad checksum
@@ -1482,7 +1742,10 @@ mod tests {
         assert!(quick().download(&r).unwrap_err().contains("not both"));
         r.sha256 = "zz".into();
         r.integrity.clear();
-        assert!(quick().download(&r).unwrap_err().contains("Invalid SHA-256"));
+        assert!(quick()
+            .download(&r)
+            .unwrap_err()
+            .contains("Invalid SHA-256"));
     }
 
     #[test]
@@ -1490,13 +1753,20 @@ mod tests {
         let d = tmpdir("fallback");
         fs::write(d.join("good"), b"data").unwrap();
         let r = req(
-            vec![file_url(&d.join("missing")), "ftp://x/y".to_string(), file_url(&d.join("good"))],
+            vec![
+                file_url(&d.join("missing")),
+                "ftp://x/y".to_string(),
+                file_url(&d.join("good")),
+            ],
             d.join("o"),
         );
         let res = quick().download(&r).unwrap();
         assert_eq!(res.url, file_url(&d.join("good")));
         // all fail
-        let r = req(vec![file_url(&d.join("m1")), file_url(&d.join("m2"))], d.join("o2"));
+        let r = req(
+            vec![file_url(&d.join("m1")), file_url(&d.join("m2"))],
+            d.join("o2"),
+        );
         let e = quick().download(&r).unwrap_err();
         assert!(e.starts_with("Error downloading ["), "{}", e);
         assert!(quick().download(&req(vec![], d.join("o3"))).is_err());
@@ -1507,11 +1777,17 @@ mod tests {
         let d = tmpdir("cache");
         fs::write(d.join("s"), b"cached").unwrap();
         let sha = sha256_hex(b"cached");
-        let dl = Downloader { repo_cache: Some(RepositoryCache::new(d.join("cache"))), ..quick() };
+        let dl = Downloader {
+            repo_cache: Some(RepositoryCache::new(d.join("cache"))),
+            ..quick()
+        };
         let mut r = req(vec![file_url(&d.join("s"))], d.join("o1"));
         r.sha256 = sha.clone();
         dl.download(&r).unwrap();
-        let entry = d.join("cache/content_addressable/sha256").join(&sha).join("file");
+        let entry = d
+            .join("cache/content_addressable/sha256")
+            .join(&sha)
+            .join("file");
         assert_eq!(fs::read(&entry).unwrap(), b"cached");
         // delete the source; second download must hit cache
         fs::remove_file(d.join("s")).unwrap();
@@ -1521,7 +1797,10 @@ mod tests {
         assert!(res.from_cache);
         assert_eq!(fs::read(d.join("o2")).unwrap(), b"cached");
         // download disabled but cached ok
-        let dl2 = Downloader { disable_download: true, ..dl.clone() };
+        let dl2 = Downloader {
+            disable_download: true,
+            ..dl.clone()
+        };
         r2.output = d.join("o3");
         dl2.download(&r2).unwrap();
         // corrupt cache entry gives error
@@ -1535,9 +1814,17 @@ mod tests {
     fn cache_without_checksum_stores_by_computed_sha() {
         let d = tmpdir("cache-nosum");
         fs::write(d.join("s"), b"zzz").unwrap();
-        let dl = Downloader { repo_cache: Some(RepositoryCache::new(d.join("cache"))), ..quick() };
-        dl.download(&req(vec![file_url(&d.join("s"))], d.join("o"))).unwrap();
-        assert!(d.join("cache/content_addressable/sha256").join(sha256_hex(b"zzz")).join("file").exists());
+        let dl = Downloader {
+            repo_cache: Some(RepositoryCache::new(d.join("cache"))),
+            ..quick()
+        };
+        dl.download(&req(vec![file_url(&d.join("s"))], d.join("o")))
+            .unwrap();
+        assert!(d
+            .join("cache/content_addressable/sha256")
+            .join(sha256_hex(b"zzz"))
+            .join("file")
+            .exists());
     }
 
     #[test]
@@ -1557,11 +1844,18 @@ mod tests {
     fn sha1_cache_dir() {
         let d = tmpdir("sha1");
         fs::write(d.join("s"), b"one").unwrap();
-        let dl = Downloader { repo_cache: Some(RepositoryCache::new(d.join("cache"))), ..quick() };
+        let dl = Downloader {
+            repo_cache: Some(RepositoryCache::new(d.join("cache"))),
+            ..quick()
+        };
         let mut r = req(vec![file_url(&d.join("s"))], d.join("o"));
         r.integrity = format!("sha1-{}", base64_encode(&crate::hash::sha1(b"one")));
         dl.download(&r).unwrap();
-        assert!(d.join("cache/content_addressable/sha1").join(sha1_hex(b"one")).join("file").exists());
+        assert!(d
+            .join("cache/content_addressable/sha1")
+            .join(sha1_hex(b"one"))
+            .join("file")
+            .exists());
     }
 
     #[test]
@@ -1576,25 +1870,43 @@ mod tests {
             repo_cache: Some(RepositoryCache::new(d.join("cache"))),
             ..quick()
         };
-        let mut r = req(vec!["https://example.com/x/archive-1.0.tar.gz?foo=1".into()], d.join("out"));
+        let mut r = req(
+            vec!["https://example.com/x/archive-1.0.tar.gz?foo=1".into()],
+            d.join("out"),
+        );
         r.sha256 = sha256_hex(b"from distdir");
         let res = dl.download(&r).unwrap();
         assert!(res.from_cache);
         assert_eq!(fs::read(d.join("out")).unwrap(), b"from distdir");
-        assert!(d.join("cache/content_addressable/sha256").join(&r.sha256).join("file").exists());
+        assert!(d
+            .join("cache/content_addressable/sha256")
+            .join(&r.sha256)
+            .join("file")
+            .exists());
         // checksum mismatch in distdir is ignored -> disabled download error
-        let mut r = req(vec!["https://example.com/wrong-1.0.tar.gz".into()], d.join("out2"));
+        let mut r = req(
+            vec!["https://example.com/wrong-1.0.tar.gz".into()],
+            d.join("out2"),
+        );
         r.sha256 = sha256_hex(b"expected");
         r.context = "repository @foo".into();
         let e = dl.download(&r).unwrap_err();
-        assert_eq!(e, "Failed to download repository @foo: download is disabled.");
+        assert_eq!(
+            e,
+            "Failed to download repository @foo: download is disabled."
+        );
     }
 
     #[test]
     fn disable_download_message_default_context() {
         let d = tmpdir("disabled");
-        let dl = Downloader { disable_download: true, ..quick() };
-        let e = dl.download(&req(vec!["http://h/f".into()], d.join("o"))).unwrap_err();
+        let dl = Downloader {
+            disable_download: true,
+            ..quick()
+        };
+        let e = dl
+            .download(&req(vec!["http://h/f".into()], d.join("o")))
+            .unwrap_err();
         assert_eq!(e, "Failed to download http://h/f: download is disabled.");
     }
 
@@ -1648,22 +1960,33 @@ mod tests {
             return;
         }
         let d = tmpdir("http2");
-        let (port, _) = serve(6, |path, _| match path {
+        let (port, _) = serve(6, |path, _| {
+            match path {
             "/redir" => b"HTTP/1.1 302 Found\r\nLocation: /chunked\r\nContent-Length: 0\r\n\r\n".to_vec(),
             "/chunked" => b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6;ext=1\r\n world\r\n0\r\n\r\n".to_vec(),
             "/short" => b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nabc".to_vec(),
             _ => b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n".to_vec(),
+        }
         });
         let base = format!("http://127.0.0.1:{}", port);
-        quick().download(&req(vec![format!("{}/redir", base)], d.join("a"))).unwrap();
+        quick()
+            .download(&req(vec![format!("{}/redir", base)], d.join("a")))
+            .unwrap();
         assert_eq!(fs::read(d.join("a")).unwrap(), b"hello world");
-        let e = quick().download(&req(vec![format!("{}/nothing", base)], d.join("b"))).unwrap_err();
+        let e = quick()
+            .download(&req(vec![format!("{}/nothing", base)], d.join("b")))
+            .unwrap_err();
         assert!(e.contains("GET returned 404 Not Found"), "{}", e);
-        let e = quick().download(&req(vec![format!("{}/short", base)], d.join("c"))).unwrap_err();
+        let e = quick()
+            .download(&req(vec![format!("{}/short", base)], d.join("c")))
+            .unwrap_err();
         assert!(e.contains("size mismatch"), "{}", e);
         // fallback from 404 to chunked
         quick()
-            .download(&req(vec![format!("{}/nothing", base), format!("{}/chunked", base)], d.join("e")))
+            .download(&req(
+                vec![format!("{}/nothing", base), format!("{}/chunked", base)],
+                d.join("e"),
+            ))
             .unwrap();
         assert_eq!(fs::read(d.join("e")).unwrap(), b"hello world");
     }
@@ -1685,8 +2008,15 @@ mod tests {
                 ok(b"finally")
             }
         });
-        let dl = Downloader { retries: 5, ..quick() };
-        dl.download(&req(vec![format!("http://127.0.0.1:{}/x", port)], d.join("o"))).unwrap();
+        let dl = Downloader {
+            retries: 5,
+            ..quick()
+        };
+        dl.download(&req(
+            vec![format!("http://127.0.0.1:{}/x", port)],
+            d.join("o"),
+        ))
+        .unwrap();
         assert_eq!(fs::read(d.join("o")).unwrap(), b"finally");
         assert_eq!(*counter.lock().unwrap(), 3);
     }
@@ -1697,19 +2027,40 @@ mod tests {
             return;
         }
         let d = tmpdir("http-fail");
-        let e = quick().download(&req(vec!["http://127.0.0.1:1/x".into()], d.join("o"))).unwrap_err();
+        let e = quick()
+            .download(&req(vec!["http://127.0.0.1:1/x".into()], d.join("o")))
+            .unwrap_err();
         assert!(e.starts_with("Error downloading ["), "{}", e);
-        let (port, _) = serve(30, |_, _| b"HTTP/1.1 301 Moved\r\nLocation: /again\r\nContent-Length: 0\r\n\r\n".to_vec());
-        let dl = Downloader { max_redirects: 3, ..quick() };
-        let e = dl.download(&req(vec![format!("http://127.0.0.1:{}/x", port)], d.join("o"))).unwrap_err();
-        assert!(e.contains("Too many redirects") || e.contains("Redirect loop detected"), "{}", e);
+        let (port, _) = serve(30, |_, _| {
+            b"HTTP/1.1 301 Moved\r\nLocation: /again\r\nContent-Length: 0\r\n\r\n".to_vec()
+        });
+        let dl = Downloader {
+            max_redirects: 3,
+            ..quick()
+        };
+        let e = dl
+            .download(&req(
+                vec![format!("http://127.0.0.1:{}/x", port)],
+                d.join("o"),
+            ))
+            .unwrap_err();
+        assert!(
+            e.contains("Too many redirects") || e.contains("Redirect loop detected"),
+            "{}",
+            e
+        );
     }
 
     #[test]
     fn https_without_curl_is_clear_error() {
         let d = tmpdir("https");
-        let dl = Downloader { curl_binary: "zel-nonexistent-curl".into(), ..quick() };
-        let e = dl.download(&req(vec!["https://example.invalid/f".into()], d.join("o"))).unwrap_err();
+        let dl = Downloader {
+            curl_binary: "zel-nonexistent-curl".into(),
+            ..quick()
+        };
+        let e = dl
+            .download(&req(vec!["https://example.invalid/f".into()], d.join("o")))
+            .unwrap_err();
         assert!(e.contains("binary is required for https URLs"), "{}", e);
     }
 
@@ -1727,7 +2078,10 @@ mod tests {
         assert!(r.full_match("").is_none());
         assert!(Regex::new("x{2,3}").unwrap().full_match("xxx").is_some());
         assert!(Regex::new("x{2,3}").unwrap().full_match("xxxx").is_none());
-        assert!(Regex::new("[a-c]+|\\d+").unwrap().full_match("123").is_some());
+        assert!(Regex::new("[a-c]+|\\d+")
+            .unwrap()
+            .full_match("123")
+            .is_some());
         assert!(Regex::new("(").is_err());
         assert!(Regex::new("[a").is_err());
         assert!(Regex::new("*a").is_err());
@@ -1782,10 +2136,16 @@ mod tests {
 
     #[test]
     fn downloader_config_errors() {
-        assert!(UrlRewriter::parse("c", "block a b\n").unwrap_err().contains("Only the host name is allowed after `block`"));
+        assert!(UrlRewriter::parse("c", "block a b\n")
+            .unwrap_err()
+            .contains("Only the host name is allowed after `block`"));
         assert!(UrlRewriter::parse("c", "rewrite a\n").is_err());
-        assert!(UrlRewriter::parse("c", "rewrite ( x\n").unwrap_err().contains("Invalid regex"));
-        assert!(UrlRewriter::parse("c", "bogus x\n").unwrap_err().contains("Unable to parse"));
+        assert!(UrlRewriter::parse("c", "rewrite ( x\n")
+            .unwrap_err()
+            .contains("Invalid regex"));
+        assert!(UrlRewriter::parse("c", "bogus x\n")
+            .unwrap_err()
+            .contains("Unable to parse"));
         assert!(UrlRewriter::parse("c", "all_blocked_message\n").is_err());
         assert!(UrlRewriter::parse("c", "all_blocked_message a\nall_blocked_message b\n").is_err());
         assert!(UrlRewriter::parse("c", "").is_ok());
@@ -1800,12 +2160,28 @@ mod tests {
         fs::write(d.join("real"), b"mirrored").unwrap();
         let (port, _) = serve(1, |_, _| ok(b"from-mirror"));
         let cfg = format!("rewrite original.example/(.*) 127.0.0.1:{}/$1\n", port);
-        let dl = Downloader { rewriter: Some(UrlRewriter::parse("c", &cfg).unwrap()), ..quick() };
-        dl.download(&req(vec!["http://original.example/path/f".into()], d.join("o"))).unwrap();
+        let dl = Downloader {
+            rewriter: Some(UrlRewriter::parse("c", &cfg).unwrap()),
+            ..quick()
+        };
+        dl.download(&req(
+            vec!["http://original.example/path/f".into()],
+            d.join("o"),
+        ))
+        .unwrap();
         assert_eq!(fs::read(d.join("o")).unwrap(), b"from-mirror");
-        let dl = Downloader { rewriter: Some(UrlRewriter::parse("c", "block *\n").unwrap()), ..quick() };
-        let e = dl.download(&req(vec!["http://x.example/f".into()], d.join("o2"))).unwrap_err();
-        assert!(e.starts_with("Configured URL rewriter blocked all URLs"), "{}", e);
+        let dl = Downloader {
+            rewriter: Some(UrlRewriter::parse("c", "block *\n").unwrap()),
+            ..quick()
+        };
+        let e = dl
+            .download(&req(vec!["http://x.example/f".into()], d.join("o2")))
+            .unwrap_err();
+        assert!(
+            e.starts_with("Configured URL rewriter blocked all URLs"),
+            "{}",
+            e
+        );
     }
 
     #[test]
@@ -1818,12 +2194,17 @@ mod tests {
 
     #[test]
     fn file_url_forms() {
-        assert_eq!(file_url_to_path(&Url::parse("file:///a/b%20c").unwrap()).unwrap(), PathBuf::from("/a/b c"));
-        assert_eq!(file_url_to_path(&Url::parse("file://localhost/a").unwrap()).unwrap(), PathBuf::from("/a"));
+        assert_eq!(
+            file_url_to_path(&Url::parse("file:///a/b%20c").unwrap()).unwrap(),
+            PathBuf::from("/a/b c")
+        );
+        assert_eq!(
+            file_url_to_path(&Url::parse("file://localhost/a").unwrap()).unwrap(),
+            PathBuf::from("/a")
+        );
         assert!(file_url_to_path(&Url::parse("file://remote/a").unwrap()).is_err());
     }
 }
-
 
 thread_local! {
     static WARNINGS: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -1836,26 +2217,44 @@ pub fn take_warnings() -> Vec<String> {
 }
 
 fn record_warning(url: &str, msg: &str) {
-    let unrecoverable = "com.google.devtools.build.lib.bazel.repository.downloader.UnrecoverableHttpException";
+    let unrecoverable =
+        "com.google.devtools.build.lib.bazel.repository.downloader.UnrecoverableHttpException";
     let class = if let Some(rest) = msg.strip_prefix("GET returned ") {
-        let code: u32 = rest.split(' ').next().and_then(|c| c.parse().ok()).unwrap_or(0);
+        let code: u32 = rest
+            .split(' ')
+            .next()
+            .and_then(|c| c.parse().ok())
+            .unwrap_or(0);
         if code == 404 || code == 410 {
             "java.io.FileNotFoundException"
-        } else if (code < 500 && code != 403 && code != 408 && code != 429) || code == 501 || code == 505 {
+        } else if (code < 500 && code != 403 && code != 408 && code != 429)
+            || code == 501
+            || code == 505
+        {
             unrecoverable
         } else {
             "java.io.IOException"
         }
     } else if msg == "Connection refused" {
         "java.net.ConnectException"
-    } else if msg.starts_with("Checksum was") || msg.starts_with("Redirect loop") || msg.starts_with("Unknown host") {
+    } else if msg.starts_with("Checksum was")
+        || msg.starts_with("Redirect loop")
+        || msg.starts_with("Unknown host")
+    {
         unrecoverable
-    } else if msg.ends_with("(No such file or directory)") || msg.ends_with("(Permission denied)") || msg.ends_with("(Is a directory)") {
+    } else if msg.ends_with("(No such file or directory)")
+        || msg.ends_with("(Permission denied)")
+        || msg.ends_with("(Is a directory)")
+    {
         "java.io.FileNotFoundException"
     } else {
         "java.io.IOException"
     };
-    WARNINGS.with(|w| w.borrow_mut().push(format!("WARNING: Download from {url} failed: class {class} {msg}")));
+    WARNINGS.with(|w| {
+        w.borrow_mut().push(format!(
+            "WARNING: Download from {url} failed: class {class} {msg}"
+        ))
+    });
 }
 
 /// The libc-style reason Java appends to `FileNotFoundException` messages.

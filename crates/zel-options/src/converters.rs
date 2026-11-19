@@ -76,7 +76,10 @@ pub fn convert_duration(input: &str) -> Result<Duration, OptionsParsingError> {
         return Ok(Duration::ZERO);
     }
     let illegal = || err(format!("Illegal duration '{input}'."));
-    let digits_end = input.bytes().position(|b| !b.is_ascii_digit()).unwrap_or(input.len());
+    let digits_end = input
+        .bytes()
+        .position(|b| !b.is_ascii_digit())
+        .unwrap_or(input.len());
     if digits_end == 0 {
         return Err(illegal());
     }
@@ -118,7 +121,10 @@ pub fn convert_bytesize(input: &str) -> Result<u64, OptionsParsingError> {
         return Err(invalid());
     }
     let value: i64 = num_part.parse().map_err(|_| invalid())?;
-    value.checked_mul(mult).map(|v| v as u64).ok_or_else(invalid)
+    value
+        .checked_mul(mult)
+        .map(|v| v as u64)
+        .ok_or_else(invalid)
 }
 
 /// `Converters.AssignmentConverter`.
@@ -145,7 +151,10 @@ pub fn convert_flag_alias(input: &str) -> Result<(String, String), OptionsParsin
     let label = &input[idx + 1..];
 
     // `Pattern.matches("\\w*", shortForm)`: ASCII word characters only.
-    if !alias.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_') {
+    if !alias
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    {
         return Err(err(format!(
             "{alias} should only consist of word characters to be a valid alias name."
         )));
@@ -155,7 +164,10 @@ pub fn convert_flag_alias(input: &str) -> Result<(String, String), OptionsParsin
     }
     // `OptionsParser.STARLARK_SKIPPED_PREFIXES`.
     let long_form = format!("--{label}");
-    if !["--//", "--no//", "--@", "--no@"].iter().any(|p| long_form.starts_with(p)) {
+    if !["--//", "--no//", "--@", "--no@"]
+        .iter()
+        .any(|p| long_form.starts_with(p))
+    {
         return Err(err("--flag_alias only supports Starlark build settings."));
     }
     Ok((alias.to_string(), label.to_string()))
@@ -170,7 +182,11 @@ pub fn join_english_list(items: &[&str]) -> String {
         }
         out.push_str(item);
     }
-    if out.is_empty() { "nothing".to_string() } else { out }
+    if out.is_empty() {
+        "nothing".to_string()
+    } else {
+        out
+    }
 }
 
 /// `EnumConverter.convert` / `BoolOrEnumConverter.convert`; returns the matched constant.
@@ -215,13 +231,19 @@ fn split_list(input: &str, sep: char) -> Vec<String> {
 }
 
 /// `SeparatedOptionListConverter` with `allowEmptyValues == false`.
-fn split_list_non_empty(input: &str, sep: char, description: &str) -> Result<Vec<String>, OptionsParsingError> {
+fn split_list_non_empty(
+    input: &str,
+    sep: char,
+    description: &str,
+) -> Result<Vec<String>, OptionsParsingError> {
     let result = split_list(input, sep);
     if result.iter().any(|s| s.is_empty()) {
         if result.len() == 1 {
             return Ok(Vec::new());
         }
-        return Err(err(format!("Empty values are not allowed as part of this {description}")));
+        return Err(err(format!(
+            "Empty values are not allowed as part of this {description}"
+        )));
     }
     Ok(result)
 }
@@ -259,11 +281,15 @@ pub fn convert_range(input: &str, min: i32, max: i32) -> Result<i32, OptionsPars
 
 /// `TestConfiguration.RunsPerTestConverter` / `ExecutionOptions.TestAttemptsConverter`
 /// (both `PerLabelOptionsConverter`s): `N`, (`default` for attempts) or `regex@N`.
-fn convert_per_label_attempts(input: &str, attempts: bool) -> Result<OptionValue, OptionsParsingError> {
+fn convert_per_label_attempts(
+    input: &str,
+    attempts: bool,
+) -> Result<OptionValue, OptionsParsingError> {
     let validate = |v: &str| -> Result<(), OptionsParsingError> {
         if attempts {
             if v != "default" {
-                let n = java_parse_int(v).ok_or_else(|| err(format!("'{input}' has a non-numeric value")))?;
+                let n = java_parse_int(v)
+                    .ok_or_else(|| err(format!("'{input}' has a non-numeric value")))?;
                 if n < 1 {
                     return Err(err(format!("'{v}' should be >= 1")));
                 } else if n > 10 {
@@ -271,7 +297,8 @@ fn convert_per_label_attempts(input: &str, attempts: bool) -> Result<OptionValue
                 }
             }
         } else {
-            let n = java_parse_int(v).ok_or_else(|| err(format!("'{input}' has a non-numeric value")))?;
+            let n = java_parse_int(v)
+                .ok_or_else(|| err(format!("'{input}' has a non-numeric value")))?;
             if n <= 0 {
                 return Err(err(format!("'{input}' has a value < 1")));
             }
@@ -282,14 +309,16 @@ fn convert_per_label_attempts(input: &str, attempts: bool) -> Result<OptionValue
     if java_parse_int(input).is_some() || (attempts && input == "default") {
         if attempts {
             validate(input)?;
-        } else if java_parse_int(input).map_or(false, |n| n <= 0) {
+        } else if java_parse_int(input).is_some_and(|n| n <= 0) {
             return Err(err(format!("'{input}' should be >= 1")));
         }
         return Ok(OptionValue::String(input.to_string()));
     }
     // `parseAsRegex`: last unescaped '@' separates the filter from the (single) option.
     let bytes: Vec<char> = input.chars().collect();
-    let at = (0..bytes.len()).rev().find(|&i| bytes[i] == '@' && (i == 0 || bytes[i - 1] != '\\'));
+    let at = (0..bytes.len())
+        .rev()
+        .find(|&i| bytes[i] == '@' && (i == 0 || bytes[i - 1] != '\\'));
     let opts: Vec<String> = match at {
         None => Vec::new(),
         Some(i) => {
@@ -305,11 +334,16 @@ fn convert_per_label_attempts(input: &str, attempts: bool) -> Result<OptionValue
                 }
             }
             out.push(cur);
-            out.into_iter().filter(|o| !o.trim().is_empty()).map(|o| o.replace("\\,", ",").replace("\\@", "@")).collect()
+            out.into_iter()
+                .filter(|o| !o.trim().is_empty())
+                .map(|o| o.replace("\\,", ",").replace("\\@", "@"))
+                .collect()
         }
     };
     if opts.len() != 1 {
-        return Err(err(format!("'{input}' has multiple runs for a single pattern")));
+        return Err(err(format!(
+            "'{input}' has multiple runs for a single pattern"
+        )));
     }
     validate(&opts[0])?;
     Ok(OptionValue::String(input.to_string()))
@@ -328,10 +362,18 @@ fn convert_test_timeout(input: &str) -> Result<OptionValue, OptionsParsingError>
     let mut timeouts: Vec<Option<i64>> = vec![None; 4];
     match values.len() {
         1 => timeouts.iter_mut().for_each(|t| *t = Some(values[0])),
-        4 => timeouts.iter_mut().zip(&values).for_each(|(t, v)| *t = Some(*v)),
+        4 => timeouts
+            .iter_mut()
+            .zip(&values)
+            .for_each(|(t, v)| *t = Some(*v)),
         _ => return Err(err("Invalid number of comma-separated entries")),
     }
-    let defaults = [("short", 60), ("moderate", 300), ("long", 900), ("eternal", 3600)];
+    let defaults = [
+        ("short", 60),
+        ("moderate", 300),
+        ("long", 900),
+        ("eternal", 3600),
+    ];
     let mut map = BTreeMap::new();
     for ((label, default), t) in defaults.iter().zip(timeouts) {
         let secs = match t {
@@ -352,10 +394,17 @@ fn convert_test_resources(input: &str) -> Result<OptionValue, OptionsParsingErro
         values.push(DoubleSpec::ASSIGNMENT.convert(s, &host).map_err(err)?);
     }
     if values.len() != 1 && values.len() != 4 {
-        return Err(err(format!("Invalid number of comma-separated entries in {input}")));
+        return Err(err(format!(
+            "Invalid number of comma-separated entries in {input}"
+        )));
     }
-    let amounts = (0..4).map(|i| OptionValue::Double(values[i.min(values.len() - 1)])).collect();
-    Ok(OptionValue::Entry(name, Box::new(OptionValue::List(amounts))))
+    let amounts = (0..4)
+        .map(|i| OptionValue::Double(values[i.min(values.len() - 1)]))
+        .collect();
+    Ok(OptionValue::Entry(
+        name,
+        Box::new(OptionValue::List(amounts)),
+    ))
 }
 
 /// `WorkerOptions.MultiResourceConverter`: `[name=]value` where `auto` means "unset".
@@ -365,7 +414,9 @@ fn convert_multi_resource(input: &str) -> Result<OptionValue, OptionsParsingErro
         return Ok(unset(""));
     }
     let value = |v: &str| -> Result<OptionValue, OptionsParsingError> {
-        Ok(OptionValue::Int(IntegerSpec::WORKER_VALUE.convert_detected(v).map_err(err)?))
+        Ok(OptionValue::Int(
+            IntegerSpec::WORKER_VALUE.convert_detected(v).map_err(err)?,
+        ))
     };
     match input.find('=') {
         None => Ok(OptionValue::Entry(String::new(), Box::new(value(input)?))),
@@ -465,7 +516,12 @@ pub(crate) fn convert_custom(name: &str, raw: &str) -> Result<OptionValue, Optio
             }
             Ok(OptionValue::Entry(
                 key.to_string(),
-                Box::new(OptionValue::List(values.into_iter().map(|v| OptionValue::String(v.to_string())).collect())),
+                Box::new(OptionValue::List(
+                    values
+                        .into_iter()
+                        .map(|v| OptionValue::String(v.to_string()))
+                        .collect(),
+                )),
             ))
         }
         "AssignmentConverter" => {
@@ -495,7 +551,9 @@ pub(crate) fn convert_custom(name: &str, raw: &str) -> Result<OptionValue, Optio
                 return Ok(OptionValue::String(raw.to_string()));
             }
             convert_bytesize(raw).map_err(|_| {
-                err(format!("Expected a boolean or a size in bytes (e.g. 5M), but got: {raw}"))
+                err(format!(
+                    "Expected a boolean or a size in bytes (e.g. 5M), but got: {raw}"
+                ))
             })?;
             Ok(OptionValue::String(raw.to_string()))
         }
@@ -511,7 +569,9 @@ pub(crate) fn convert_custom(name: &str, raw: &str) -> Result<OptionValue, Optio
             if matches!(lower.as_str(), "none" | "lite" | "full") {
                 Ok(OptionValue::String(lower))
             } else {
-                Err(err(format!("Not a valid transition verbosity: '{raw}' (should be full, lite or none)")))
+                Err(err(format!(
+                    "Not a valid transition verbosity: '{raw}' (should be full, lite or none)"
+                )))
             }
         }
         "IncludeConfigFragmentsEnumConverter" | "ShowRequiredConfigFragmentsConverter" => {
@@ -529,7 +589,10 @@ pub(crate) fn convert_custom(name: &str, raw: &str) -> Result<OptionValue, Optio
 
 /// Converts `raw` for the option `def`: like [`convert_value`], but also runs the validating ports of the
 /// Java converters in `converters_ext` for `OptionType::Custom` options.
-pub fn convert_option(raw: &str, def: &crate::definition::OptionDefinition) -> Result<OptionValue, OptionsParsingError> {
+pub fn convert_option(
+    raw: &str,
+    def: &crate::definition::OptionDefinition,
+) -> Result<OptionValue, OptionsParsingError> {
     if let OptionType::Custom(name) = &def.option_type {
         if let Some(r) = crate::converters_ext::convert_custom_ext(def, name, raw) {
             return r;
@@ -558,8 +621,10 @@ pub fn convert_value(
         }
         OptionType::ListString => Ok(string_list(convert_comma_list(raw))),
         OptionType::ListLabel => {
-            let items: Vec<OptionValue> =
-                convert_comma_list(raw).into_iter().map(OptionValue::Label).collect();
+            let items: Vec<OptionValue> = convert_comma_list(raw)
+                .into_iter()
+                .map(OptionValue::Label)
+                .collect();
             Ok(OptionValue::List(items))
         }
         OptionType::Map => {
@@ -574,8 +639,8 @@ pub fn convert_value(
             Ok(OptionValue::Int(spec.convert_detected(raw).map_err(err)?))
         }
         OptionType::ResourceAssignment => {
-            let (name, v) = rc::convert_resource_assignment(raw, &HostResources::detect_cached)
-                .map_err(err)?;
+            let (name, v) =
+                rc::convert_resource_assignment(raw, &HostResources::detect_cached).map_err(err)?;
             Ok(OptionValue::Entry(name, Box::new(OptionValue::Double(v))))
         }
         OptionType::Custom(name) => convert_custom(name, raw),
@@ -607,10 +672,7 @@ mod tests {
         assert_eq!(convert_tristate("AUTO").unwrap(), TriState::Auto);
         assert_eq!(convert_tristate("true").unwrap(), TriState::Yes);
         assert_eq!(convert_tristate("no").unwrap(), TriState::No);
-        assert_eq!(
-            msg(convert_tristate("Maybe")),
-            "'maybe' is not a boolean"
-        );
+        assert_eq!(msg(convert_tristate("Maybe")), "'maybe' is not a boolean");
     }
 
     #[test]
@@ -648,14 +710,29 @@ mod tests {
         assert_eq!(d("0s"), Duration::ZERO);
         assert_eq!(d("007s"), Duration::from_secs(7));
         // A bare number other than 0 has no unit, which Bazel rejects.
-        for bad in ["120", "xyz", "", "s", "5 s", "5S", "-5s", "1.5s", "5sec", "+5s", "5s\n"] {
-            assert_eq!(msg(convert_duration(bad)), format!("Illegal duration '{bad}'."), "{bad:?}");
+        for bad in [
+            "120", "xyz", "", "s", "5 s", "5S", "-5s", "1.5s", "5sec", "+5s", "5s\n",
+        ] {
+            assert_eq!(
+                msg(convert_duration(bad)),
+                format!("Illegal duration '{bad}'."),
+                "{bad:?}"
+            );
         }
-        assert_eq!(msg(convert_duration("99999999999999999999s")), "Illegal duration '99999999999999999999s'.");
+        assert_eq!(
+            msg(convert_duration("99999999999999999999s")),
+            "Illegal duration '99999999999999999999s'."
+        );
         // RemoteDurationConverter: unit-less means seconds.
-        assert_eq!(convert_remote_duration("60").unwrap(), Duration::from_secs(60));
+        assert_eq!(
+            convert_remote_duration("60").unwrap(),
+            Duration::from_secs(60)
+        );
         assert_eq!(convert_remote_duration("0").unwrap(), Duration::ZERO);
-        assert_eq!(convert_remote_duration("2m").unwrap(), Duration::from_secs(120));
+        assert_eq!(
+            convert_remote_duration("2m").unwrap(),
+            Duration::from_secs(120)
+        );
         assert_eq!(msg(convert_remote_duration("x")), "Illegal duration 'x'.");
     }
 
@@ -667,10 +744,20 @@ mod tests {
         assert_eq!(convert_bytesize("2G").unwrap(), 2 * 1024 * 1024 * 1024);
         assert_eq!(convert_bytesize("1T").unwrap(), 1024u64.pow(4));
         for bad in ["", "K", "1.5G", "10k", "10KB", " 10", "-1", "1 K", "10X"] {
-            assert_eq!(msg(convert_bytesize(bad)), format!("Invalid size: {bad}"), "{bad:?}");
+            assert_eq!(
+                msg(convert_bytesize(bad)),
+                format!("Invalid size: {bad}"),
+                "{bad:?}"
+            );
         }
-        assert_eq!(msg(convert_bytesize("9223372036854775807T")), "Invalid size: 9223372036854775807T");
-        assert_eq!(msg(convert_bytesize("99999999999999999999")), "Invalid size: 99999999999999999999");
+        assert_eq!(
+            msg(convert_bytesize("9223372036854775807T")),
+            "Invalid size: 9223372036854775807T"
+        );
+        assert_eq!(
+            msg(convert_bytesize("99999999999999999999")),
+            "Invalid size: 99999999999999999999"
+        );
     }
 
     #[test]
@@ -683,7 +770,10 @@ mod tests {
         assert_eq!(msg(convert_assignment("NO_EQUALS")), want);
         assert_eq!(msg(convert_assignment("=v")), want);
 
-        assert_eq!(convert_flag_alias("x=//a:b").unwrap(), ("x".to_string(), "//a:b".to_string()));
+        assert_eq!(
+            convert_flag_alias("x=//a:b").unwrap(),
+            ("x".to_string(), "//a:b".to_string())
+        );
         assert_eq!(
             msg(convert_flag_alias("x")),
             "Flag alias definitions must be in the form of a 'name=label' assignment"
@@ -696,8 +786,14 @@ mod tests {
             msg(convert_flag_alias("a-b=//a:b")),
             "a-b should only consist of word characters to be a valid alias name."
         );
-        assert_eq!(msg(convert_flag_alias("a=//a:b=c")), "--flag_alias does not support flag value assignment.");
-        assert_eq!(msg(convert_flag_alias("a=cpu")), "--flag_alias only supports Starlark build settings.");
+        assert_eq!(
+            msg(convert_flag_alias("a=//a:b=c")),
+            "--flag_alias does not support flag value assignment."
+        );
+        assert_eq!(
+            msg(convert_flag_alias("a=cpu")),
+            "--flag_alias only supports Starlark build settings."
+        );
     }
 
     #[test]
@@ -733,13 +829,19 @@ mod tests {
         assert!(r("3").is_ok() && r("//foo/.*,-//foo/bar/.*@3").is_ok());
         assert_eq!(msg(r("0")), "'0' should be >= 1");
         assert_eq!(msg(r("-1")), "'-1' should be >= 1");
-        assert_eq!(msg(r("abc")), "'abc' has multiple runs for a single pattern");
+        assert_eq!(
+            msg(r("abc")),
+            "'abc' has multiple runs for a single pattern"
+        );
         assert_eq!(msg(r("x@0")), "'x@0' has a value < 1");
         assert_eq!(msg(r("x@y")), "'x@y' has a non-numeric value");
         assert!(a("default").is_ok() && a("10").is_ok() && a("//:t@2").is_ok());
         assert_eq!(msg(a("0")), "'0' should be >= 1");
         assert_eq!(msg(a("11")), "'11' should be <= 10");
-        assert_eq!(msg(a("abc")), "'abc' has multiple runs for a single pattern");
+        assert_eq!(
+            msg(a("abc")),
+            "'abc' has multiple runs for a single pattern"
+        );
     }
 
     #[test]
@@ -748,7 +850,10 @@ mod tests {
         assert_eq!(convert_comma_list("a,,b,"), vec!["a", "", "b", ""]);
         let ne = |s: &str| convert_custom("CommaSeparatedNonEmptyOptionListConverter", s);
         assert_eq!(ne("").unwrap(), OptionValue::List(vec![]));
-        assert_eq!(ne("a,b").unwrap(), string_list(vec!["a".into(), "b".into()]));
+        assert_eq!(
+            ne("a,b").unwrap(),
+            string_list(vec!["a".into(), "b".into()])
+        );
         let want = "Empty values are not allowed as part of this comma-separated list of options";
         assert_eq!(msg(ne("a,,b")), want);
         assert_eq!(msg(ne(",")), want);
@@ -759,19 +864,31 @@ mod tests {
         );
         assert_eq!(
             convert_custom("ColonSeparatedOptionListConverter", "%workspace%:/x::y").unwrap(),
-            string_list(vec!["%workspace%".into(), "/x".into(), "".into(), "y".into()])
+            string_list(vec![
+                "%workspace%".into(),
+                "/x".into(),
+                "".into(),
+                "y".into()
+            ])
         );
         let sl = |s: &str| convert_custom("StringToStringListConverter", s);
         assert_eq!(
             sl("Genrule=local,sandboxed").unwrap(),
-            OptionValue::Entry("Genrule".into(), Box::new(string_list(vec!["local".into(), "sandboxed".into()])))
+            OptionValue::Entry(
+                "Genrule".into(),
+                Box::new(string_list(vec!["local".into(), "sandboxed".into()]))
+            )
         );
         assert_eq!(
             sl("local").unwrap(),
             OptionValue::Entry("".into(), Box::new(string_list(vec!["local".into()])))
         );
-        assert_eq!(sl("G=").unwrap(), OptionValue::Entry("G".into(), Box::new(OptionValue::List(vec![]))));
-        let want = "Variable definitions must not contain empty strings or leading / trailing commas";
+        assert_eq!(
+            sl("G=").unwrap(),
+            OptionValue::Entry("G".into(), Box::new(OptionValue::List(vec![])))
+        );
+        let want =
+            "Variable definitions must not contain empty strings or leading / trailing commas";
         assert_eq!(msg(sl("G=a,,b")), want);
         assert_eq!(msg(sl("G=,a")), want);
     }
@@ -784,11 +901,26 @@ mod tests {
         assert_eq!(msg(convert_range("a", 0, 10)), "'a' is not an int");
         assert_eq!(msg(convert_range("0x5", 0, 10)), "'0x5' is not an int");
         let c = |n: &str, s: &str| convert_custom(n, s);
-        assert_eq!(c("PercentageConverter", "100").unwrap(), OptionValue::Int(100));
-        assert_eq!(msg(c("PercentageConverter", "101")), "'101' should be <= 100");
-        assert_eq!(msg(c("PositiveIntegerConverter", "0")), "'0' should be >= 1");
-        assert_eq!(msg(c("ProgressReportIntervalConverter", "3601")), "'3601' should be <= 3600");
-        assert_eq!(c("OptionalPercentageConverter", "-1").unwrap(), OptionValue::Int(-1));
+        assert_eq!(
+            c("PercentageConverter", "100").unwrap(),
+            OptionValue::Int(100)
+        );
+        assert_eq!(
+            msg(c("PercentageConverter", "101")),
+            "'101' should be <= 100"
+        );
+        assert_eq!(
+            msg(c("PositiveIntegerConverter", "0")),
+            "'0' should be >= 1"
+        );
+        assert_eq!(
+            msg(c("ProgressReportIntervalConverter", "3601")),
+            "'3601' should be <= 3600"
+        );
+        assert_eq!(
+            c("OptionalPercentageConverter", "-1").unwrap(),
+            OptionValue::Int(-1)
+        );
         assert_eq!(
             c("MaxStdoutErrBytesConverter", "-1").unwrap(),
             OptionValue::Int((i32::MAX - 8) >> 1)
@@ -803,20 +935,41 @@ mod tests {
             _ => unreachable!(),
         };
         let to_owned = |v: Vec<(&str, &str)>| -> Vec<(String, String)> {
-            v.into_iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+            v.into_iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
         };
         let all = |n: &str| -> Vec<(String, String)> {
-            ["eternal", "long", "moderate", "short"].iter().map(|l| (l.to_string(), n.to_string())).collect()
+            ["eternal", "long", "moderate", "short"]
+                .iter()
+                .map(|l| (l.to_string(), n.to_string()))
+                .collect()
         };
         assert_eq!(t("30"), all("30"));
         assert_eq!(t("30,"), all("30"));
         assert_eq!(
             t("1,2,3,4"),
-            to_owned(vec![("eternal", "4"), ("long", "3"), ("moderate", "2"), ("short", "1")])
+            to_owned(vec![
+                ("eternal", "4"),
+                ("long", "3"),
+                ("moderate", "2"),
+                ("short", "1")
+            ])
         );
         // Non-positive entries fall back to the label's default.
-        assert_eq!(t("-1"), to_owned(vec![("eternal", "3600"), ("long", "900"), ("moderate", "300"), ("short", "60")]));
-        assert_eq!(msg(convert_test_timeout("1,2")), "Invalid number of comma-separated entries");
+        assert_eq!(
+            t("-1"),
+            to_owned(vec![
+                ("eternal", "3600"),
+                ("long", "900"),
+                ("moderate", "300"),
+                ("short", "60")
+            ])
+        );
+        assert_eq!(
+            msg(convert_test_timeout("1,2")),
+            "Invalid number of comma-separated entries"
+        );
         assert_eq!(msg(convert_test_timeout("abc")), "'abc' is not an int");
         assert_eq!(msg(convert_test_timeout("30s")), "'30s' is not an int");
     }
@@ -826,9 +979,18 @@ mod tests {
         use zel_util::resource_converter::IntegerSpec as S;
         let host = HostResources::detect_cached();
         let cpus = host.host_cpus();
-        assert_eq!(convert_value("auto", &OptionType::Resource(S::JOBS)).unwrap(), OptionValue::Int(cpus.min(5000)));
-        assert_eq!(convert_value("auto", &OptionType::Resource(S::LOCAL_TEST_JOBS)).unwrap(), OptionValue::Int(0));
-        assert_eq!(convert_value("7", &OptionType::Resource(S::JOBS)).unwrap(), OptionValue::Int(7));
+        assert_eq!(
+            convert_value("auto", &OptionType::Resource(S::JOBS)).unwrap(),
+            OptionValue::Int(cpus.min(5000))
+        );
+        assert_eq!(
+            convert_value("auto", &OptionType::Resource(S::LOCAL_TEST_JOBS)).unwrap(),
+            OptionValue::Int(0)
+        );
+        assert_eq!(
+            convert_value("7", &OptionType::Resource(S::JOBS)).unwrap(),
+            OptionValue::Int(7)
+        );
         assert_eq!(
             msg(convert_value("0", &OptionType::Resource(S::JOBS))),
             "Value '(0)' must be at least 1."
@@ -842,10 +1004,22 @@ mod tests {
             "Variable definitions must be in the form of a 'name=value' assignment"
         );
         let mr = |s: &str| convert_multi_resource(s).unwrap();
-        assert_eq!(mr("auto"), OptionValue::Entry("".into(), Box::new(OptionValue::Void)));
-        assert_eq!(mr("4"), OptionValue::Entry("".into(), Box::new(OptionValue::Int(4))));
-        assert_eq!(mr("Javac=2"), OptionValue::Entry("Javac".into(), Box::new(OptionValue::Int(2))));
-        assert_eq!(mr("Javac=auto"), OptionValue::Entry("Javac".into(), Box::new(OptionValue::Void)));
+        assert_eq!(
+            mr("auto"),
+            OptionValue::Entry("".into(), Box::new(OptionValue::Void))
+        );
+        assert_eq!(
+            mr("4"),
+            OptionValue::Entry("".into(), Box::new(OptionValue::Int(4)))
+        );
+        assert_eq!(
+            mr("Javac=2"),
+            OptionValue::Entry("Javac".into(), Box::new(OptionValue::Int(2)))
+        );
+        assert_eq!(
+            mr("Javac=auto"),
+            OptionValue::Entry("Javac".into(), Box::new(OptionValue::Void))
+        );
         assert_eq!(
             msg(convert_multi_resource("Javac=-1")),
             "Value '(-1.000000)' must be at least 0.000000."
@@ -855,7 +1029,12 @@ mod tests {
             tr,
             OptionValue::Entry(
                 "memory".into(),
-                Box::new(OptionValue::List(vec![10.0, 30.0, 60.0, 100.0].into_iter().map(OptionValue::Double).collect()))
+                Box::new(OptionValue::List(
+                    vec![10.0, 30.0, 60.0, 100.0]
+                        .into_iter()
+                        .map(OptionValue::Double)
+                        .collect()
+                ))
             )
         );
         assert_eq!(

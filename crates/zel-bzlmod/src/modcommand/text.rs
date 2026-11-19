@@ -48,13 +48,24 @@ struct TextFormatter<'a, 'b> {
 pub fn format(ctx: &FormatCtx<'_>) -> String {
     let mut f = TextFormatter {
         ctx,
-        charset: if ctx.opts.charset == Charset::Ascii { &ASCII } else { &UTF8 },
+        charset: if ctx.opts.charset == Charset::Ascii {
+            &ASCII
+        } else {
+            &UTF8
+        },
         is_last_child_stack: vec![],
         seen_extensions: HashSet::new(),
         visited: HashSet::new(),
         out: String::new(),
     };
-    f.print_module(&ModuleKey::root(), None, IsExpanded::True, IsIndirect::False, IsCycle::False, 0);
+    f.print_module(
+        &ModuleKey::root(),
+        None,
+        IsExpanded::True,
+        IsIndirect::False,
+        IsCycle::False,
+        0,
+    );
     f.out.push('\n');
     f.out
 }
@@ -83,7 +94,13 @@ impl TextFormatter<'_, '_> {
         self.out.push_str(s);
     }
 
-    fn print_extension(&mut self, key: &ModuleKey, id: &ExtensionId, unexpanded: bool, depth: usize) {
+    fn print_extension(
+        &mut self,
+        key: &ModuleKey,
+        id: &ExtensionId,
+        unexpanded: bool,
+        depth: usize,
+    ) {
         let info = self.ctx.opts.extension_info;
         self.print_tree_drawing(IsIndirect::False, depth);
         self.out.push('$');
@@ -99,9 +116,19 @@ impl TextFormatter<'_, '_> {
         let repo_imports = self.ctx.ext_imports.repos_imported_by(id, key);
         let mut unused_repos = vec![];
         if !unexpanded && info == ExtensionShow::All {
-            let imported: std::collections::BTreeSet<String> =
-                self.ctx.ext_imports.get(id).map(|m| m.keys().cloned().collect()).unwrap_or_default();
-            unused_repos = self.ctx.insp.repos_of(id).difference(&imported).cloned().collect::<Vec<_>>();
+            let imported: std::collections::BTreeSet<String> = self
+                .ctx
+                .ext_imports
+                .get(id)
+                .map(|m| m.keys().cloned().collect())
+                .unwrap_or_default();
+            unused_repos = self
+                .ctx
+                .insp
+                .repos_of(id)
+                .difference(&imported)
+                .cloned()
+                .collect::<Vec<_>>();
         }
         let total = repo_imports.len() + unused_repos.len();
         let mut curr = 1;
@@ -165,7 +192,11 @@ impl TextFormatter<'_, '_> {
         };
         if key.is_root() {
             if let Some(root) = ctx.insp.dep_graph.get(&ModuleKey::root()) {
-                let v = if root.version.is_empty() { "_".to_string() } else { root.version.to_string() };
+                let v = if root.version.is_empty() {
+                    "_".to_string()
+                } else {
+                    root.version.to_string()
+                };
                 self.out.push_str(&format!("<root> ({}@{})", root.name, v));
             } else {
                 self.out.push_str("<root> (@_)");
@@ -223,7 +254,14 @@ impl TextFormatter<'_, '_> {
         for (child_key, meta) in node.children_sorted_by_edge_type() {
             self.is_last_child_stack.push(curr == total);
             curr += 1;
-            self.print_module(&child_key, Some(key), meta.expanded, meta.indirect, meta.cycle, depth + 1);
+            self.print_module(
+                &child_key,
+                Some(key),
+                meta.expanded,
+                meta.indirect,
+                meta.cycle,
+                depth + 1,
+            );
             self.is_last_child_stack.pop();
         }
     }

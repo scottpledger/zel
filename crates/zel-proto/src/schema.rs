@@ -70,14 +70,14 @@ impl FieldType {
 
     /// Whether repeated fields of this type may be packed.
     pub fn is_packable(&self) -> bool {
-        !matches!(
-            self,
-            Self::String | Self::Bytes | Self::Message(_)
-        )
+        !matches!(self, Self::String | Self::Bytes | Self::Message(_))
     }
 
     pub fn is_unsigned(&self) -> bool {
-        matches!(self, Self::UInt32 | Self::UInt64 | Self::Fixed32 | Self::Fixed64)
+        matches!(
+            self,
+            Self::UInt32 | Self::UInt64 | Self::Fixed32 | Self::Fixed64
+        )
     }
 
     pub fn is_64bit_int(&self) -> bool {
@@ -161,7 +161,10 @@ impl EnumDesc {
     }
 
     pub fn name_of(&self, n: i32) -> Option<&str> {
-        self.values.iter().find(|(_, v)| *v == n).map(|(s, _)| s.as_str())
+        self.values
+            .iter()
+            .find(|(_, v)| *v == n)
+            .map(|(s, _)| s.as_str())
     }
 
     pub fn number_of(&self, name: &str) -> Option<i32> {
@@ -354,7 +357,11 @@ impl Parser {
         if self.eat_sym(c) {
             Ok(())
         } else {
-            Err(format!("expected '{c}' at token {} got {:?}", self.p, self.peek()))
+            Err(format!(
+                "expected '{c}' at token {} got {:?}",
+                self.p,
+                self.peek()
+            ))
         }
     }
 
@@ -511,7 +518,11 @@ impl Parser {
                 o => return Err(format!("unexpected in enum {name}: {o:?}")),
             }
         }
-        Ok(RawEnum { name, values, exit_codes })
+        Ok(RawEnum {
+            name,
+            values,
+            exit_codes,
+        })
     }
 
     fn parse_message(&mut self) -> Result<RawMessage, String> {
@@ -525,7 +536,11 @@ impl Parser {
         Ok(m)
     }
 
-    fn parse_message_body(&mut self, m: &mut RawMessage, oneof: Option<&str>) -> Result<(), String> {
+    fn parse_message_body(
+        &mut self,
+        m: &mut RawMessage,
+        oneof: Option<&str>,
+    ) -> Result<(), String> {
         while !self.eat_sym('}') {
             let Some(t) = self.peek().cloned() else {
                 return Err(format!("unterminated message {}", m.name));
@@ -569,7 +584,11 @@ impl Parser {
     }
 
     fn parse_field(&mut self, m: &mut RawMessage, oneof: Option<&str>) -> Result<(), String> {
-        let mut label = if oneof.is_some() { Label::Optional } else { Label::Singular };
+        let mut label = if oneof.is_some() {
+            Label::Optional
+        } else {
+            Label::Singular
+        };
         let first = self.dotted()?;
         let mut ty = first.clone();
         match first.as_str() {
@@ -703,7 +722,11 @@ fn resolve(scope: &str, name: &str, c: &Collected) -> FieldType {
         let mut v = Vec::new();
         let mut sc = scope.to_string();
         loop {
-            v.push(if sc.is_empty() { name.to_string() } else { format!("{sc}.{name}") });
+            v.push(if sc.is_empty() {
+                name.to_string()
+            } else {
+                format!("{sc}.{name}")
+            });
             match sc.rfind('.') {
                 Some(i) => sc.truncate(i),
                 None if !sc.is_empty() => sc.clear(),
@@ -771,8 +794,16 @@ fn link(files: Vec<RawFile>) -> Registry {
             });
         }
         fields.sort_by_key(|f| f.number);
-        let by_name = fields.iter().enumerate().map(|(i, f)| (f.name.clone(), i)).collect();
-        let by_number = fields.iter().enumerate().map(|(i, f)| (f.number, i)).collect();
+        let by_name = fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.name.clone(), i))
+            .collect();
+        let by_number = fields
+            .iter()
+            .enumerate()
+            .map(|(i, f)| (f.number, i))
+            .collect();
         reg.messages.insert(
             full.clone(),
             MessageDesc {
@@ -832,9 +863,18 @@ mod tests {
         )])
         .unwrap();
         let x = r.message("a.b.X").unwrap();
-        assert_eq!(x.field_by_name("y").unwrap().ty, FieldType::Message("a.b.X.Y".into()));
-        assert_eq!(x.field_by_name("z").unwrap().ty, FieldType::Message("a.b.Z".into()));
-        assert_eq!(x.field_by_name("e").unwrap().ty, FieldType::Enum("a.b.X.E".into()));
+        assert_eq!(
+            x.field_by_name("y").unwrap().ty,
+            FieldType::Message("a.b.X.Y".into())
+        );
+        assert_eq!(
+            x.field_by_name("z").unwrap().ty,
+            FieldType::Message("a.b.Z".into())
+        );
+        assert_eq!(
+            x.field_by_name("e").unwrap().ty,
+            FieldType::Enum("a.b.X.E".into())
+        );
         assert!(x.field_by_name("m").unwrap().map.is_some());
     }
 }
@@ -853,16 +893,30 @@ mod failure_detail_tests {
         }
         let c = Category::named("spawn", "NON_ZERO_EXIT").unwrap();
         assert_eq!(c.exit_code(), Some(1));
-        assert_eq!(Category::Interrupted(InterruptedCode::Interrupted).exit_code(), Some(8));
-        assert_eq!(Category::Command(CommandCode::AnotherCommandRunning).exit_code(), Some(9));
+        assert_eq!(
+            Category::Interrupted(InterruptedCode::Interrupted).exit_code(),
+            Some(8)
+        );
+        assert_eq!(
+            Category::Command(CommandCode::AnotherCommandRunning).exit_code(),
+            Some(9)
+        );
     }
 
     fn first_code(cat: &str) -> String {
         let reg = crate::schema::registry();
-        let f = reg.message("failure_details.FailureDetail").unwrap().field_by_name(cat).unwrap();
-        let crate::schema::FieldType::Message(sub) = &f.ty else { panic!() };
+        let f = reg
+            .message("failure_details.FailureDetail")
+            .unwrap()
+            .field_by_name(cat)
+            .unwrap();
+        let crate::schema::FieldType::Message(sub) = &f.ty else {
+            panic!()
+        };
         let cf = reg.message(sub).unwrap().field_by_number(1).unwrap();
-        let crate::schema::FieldType::Enum(en) = &cf.ty else { panic!() };
+        let crate::schema::FieldType::Enum(en) = &cf.ty else {
+            panic!()
+        };
         reg.enum_desc(en).unwrap().values[0].0.clone()
     }
 }

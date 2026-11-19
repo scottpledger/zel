@@ -14,7 +14,9 @@
 
 //! Minimal POSIX process/signal helpers shared by the client and the daemon (no external crates).
 
-use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
+#[cfg(unix)]
+use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicI32, AtomicUsize};
 
 pub const SIGINT: i32 = 2;
 pub const SIGKILL: i32 = 9;
@@ -36,7 +38,7 @@ extern "C" {
 extern "C" fn on_signal(sig: i32) {
     #[cfg(target_os = "linux")]
     unsafe {
-        let _ = signal(sig, on_signal as usize);
+        let _ = signal(sig, on_signal as *const () as usize);
     }
     LAST_SIGNAL.store(sig, Ordering::SeqCst);
     SIGNAL_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -49,7 +51,7 @@ pub fn install_handler(sig: i32) {
     // On glibc, `signal` is BSD-compatible (`SA_RESTART`), so re-install immediately inside `on_signal`.
     unsafe {
         let _ = sysv_signal;
-        signal(sig, on_signal as usize);
+        signal(sig, on_signal as *const () as usize);
     }
     #[cfg(not(unix))]
     let _ = sig;
@@ -66,6 +68,19 @@ pub fn ignore_signal(sig: i32) {
     let _ = sig;
 }
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(
+        desired_access: u32,
+        inherit_handle: i32,
+        process_id: u32,
+    ) -> *mut core::ffi::c_void;
+    fn GetExitCodeProcess(process: *mut core::ffi::c_void, exit_code: *mut u32) -> i32;
+    fn TerminateProcess(process: *mut core::ffi::c_void, exit_code: u32) -> i32;
+    fn CloseHandle(object: *mut core::ffi::c_void) -> i32;
+}
+
 /// True if a process with `pid` exists (signal 0 probe; EPERM counts as alive).
 pub fn process_alive(pid: i32) -> bool {
     #[cfg(unix)]
@@ -77,7 +92,25 @@ pub fn process_alive(pid: i32) -> bool {
         let rc = unsafe { kill(pid, 0) };
         rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1)
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+        const STILL_ACTIVE: u32 = 259;
+        if pid <= 0 {
+            return false;
+        }
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid as u32);
+            if h.is_null() {
+                return false;
+            }
+            let mut code: u32 = 0;
+            let ok = GetExitCodeProcess(h, &mut code);
+            CloseHandle(h);
+            ok != 0 && code == STILL_ACTIVE
+        }
+    }
+    #[cfg(all(not(unix), not(windows)))]
     {
         let _ = pid;
         false
@@ -94,7 +127,23 @@ pub fn send_signal(pid: i32, sig: i32) -> bool {
         // SAFETY: plain kill(2).
         unsafe { kill(pid, sig) == 0 }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        const PROCESS_TERMINATE: u32 = 0x0001;
+        if pid <= 0 || (sig != SIGKILL && sig != SIGTERM) {
+            return false;
+        }
+        unsafe {
+            let h = OpenProcess(PROCESS_TERMINATE, 0, pid as u32);
+            if h.is_null() {
+                return false;
+            }
+            let ok = TerminateProcess(h, 1);
+            CloseHandle(h);
+            ok != 0
+        }
+    }
+    #[cfg(all(not(unix), not(windows)))]
     {
         let _ = (pid, sig);
         false
@@ -123,6 +172,8 @@ pub fn is_tty(fd: i32) -> bool {
 
 /// Terminal width of `fd` (TIOCGWINSZ), falling back to `$COLUMNS`, then 80.
 pub fn terminal_columns(fd: i32) -> usize {
+    #[cfg(not(unix))]
+    let _ = fd;
     #[cfg(unix)]
     {
         #[repr(C)]
@@ -144,7 +195,11 @@ pub fn terminal_columns(fd: i32) -> usize {
             return ws.col as usize;
         }
     }
-    std::env::var("COLUMNS").ok().and_then(|c| c.parse().ok()).filter(|c| *c > 0).unwrap_or(80)
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|c| c.parse().ok())
+        .filter(|c| *c > 0)
+        .unwrap_or(80)
 }
 
 #[cfg(unix)]
@@ -171,7 +226,11 @@ pub fn resident_bytes() -> u64 {
         // SAFETY: RUSAGE_SELF with a correctly sized, zero-initialised struct.
         if unsafe { getrusage(0, &mut ru) } == 0 {
             let v = ru.maxrss.max(0) as u64;
-            return if cfg!(target_os = "macos") { v } else { v * 1024 };
+            return if cfg!(target_os = "macos") {
+                v
+            } else {
+                v * 1024
+            };
         }
     }
     0
@@ -214,7 +273,11 @@ pub fn unlimit_coredumps() {
     {
         const RLIMIT_CORE: i32 = 4;
         // RLIM_INFINITY
-        let inf: u64 = if cfg!(target_os = "macos") { u64::MAX >> 1 } else { u64::MAX };
+        let inf: u64 = if cfg!(target_os = "macos") {
+            u64::MAX >> 1
+        } else {
+            u64::MAX
+        };
         let lim = [inf, inf];
         // SAFETY: setrlimit with a valid 2-word rlimit.
         unsafe {
@@ -240,7 +303,15 @@ fn sysctl_u64(name: &str) -> Option<u64> {
     let mut v: u64 = 0;
     let mut len = std::mem::size_of::<u64>();
     // SAFETY: valid NUL-terminated name and an 8-byte output buffer.
-    let rc = unsafe { sysctlbyname(c.as_ptr(), &mut v as *mut u64 as *mut _, &mut len, std::ptr::null_mut(), 0) };
+    let rc = unsafe {
+        sysctlbyname(
+            c.as_ptr(),
+            &mut v as *mut u64 as *mut _,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
     (rc == 0).then_some(v)
 }
 
@@ -258,7 +329,14 @@ pub fn free_memory_fraction() -> Option<f64> {
     {
         let t = std::fs::read_to_string("/proc/meminfo").ok()?;
         let get = |k: &str| -> Option<f64> {
-            t.lines().find_map(|l| l.strip_prefix(k)?.trim().trim_end_matches("kB").trim().parse().ok())
+            t.lines().find_map(|l| {
+                l.strip_prefix(k)?
+                    .trim()
+                    .trim_end_matches("kB")
+                    .trim()
+                    .parse()
+                    .ok()
+            })
         };
         Some(get("MemAvailable:")? / get("MemTotal:")?)
     }

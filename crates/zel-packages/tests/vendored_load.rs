@@ -19,17 +19,33 @@ fn loader() -> Option<Arc<PackageLoader>> {
     for e in std::fs::read_dir(&bcr).unwrap() {
         let e = e.unwrap();
         let name = e.file_name().to_string_lossy().to_string();
-        let mut vers: Vec<_> = std::fs::read_dir(e.path()).unwrap().map(|v| v.unwrap().path()).collect();
+        let mut vers: Vec<_> = std::fs::read_dir(e.path())
+            .unwrap()
+            .map(|v| v.unwrap().path())
+            .collect();
         vers.sort();
         let Some(v) = vers.last() else { continue };
         let canon = name.clone();
-        external.insert(canon.clone(), PathFragment::create(&std::fs::canonicalize(v).unwrap().to_string_lossy()));
+        external.insert(
+            canon.clone(),
+            PathFragment::create(&std::fs::canonicalize(v).unwrap().to_string_lossy()),
+        );
         apparent.insert(name.clone(), RepositoryName::create(&canon).unwrap());
     }
     // Apparent names that differ from module names.
-    apparent.insert("com_google_protobuf".into(), RepositoryName::create("protobuf").unwrap());
-    apparent.insert("abseil-cpp".into(), RepositoryName::create("abseil-cpp").unwrap());
-    let main = PathFragment::create(&std::env::temp_dir().join("zel-vendored-main").to_string_lossy());
+    apparent.insert(
+        "com_google_protobuf".into(),
+        RepositoryName::create("protobuf").unwrap(),
+    );
+    apparent.insert(
+        "abseil-cpp".into(),
+        RepositoryName::create("abseil-cpp").unwrap(),
+    );
+    let main = PathFragment::create(
+        &std::env::temp_dir()
+            .join("zel-vendored-main")
+            .to_string_lossy(),
+    );
     std::fs::create_dir_all(main.path_string()).unwrap();
     let mut r = SimpleRepoResolver::new(main);
     r.external = external;
@@ -54,7 +70,10 @@ fn probe_entry_points() {
         ("@@rules_cc//cc:cc_import.bzl", "cc_import"),
         ("@@rules_cc//cc:defs.bzl", "cc_common"),
         ("@@rules_cc//cc/toolchains:cc_toolchain.bzl", "cc_toolchain"),
-        ("@@rules_cc//cc/private/toolchain:unix_cc_toolchain_config.bzl", "cc_toolchain_config"),
+        (
+            "@@rules_cc//cc/private/toolchain:unix_cc_toolchain_config.bzl",
+            "cc_toolchain_config",
+        ),
         ("@@rules_java//java:java_library.bzl", "java_library"),
         ("@@rules_java//java:java_binary.bzl", "java_binary"),
         ("@@rules_java//java:java_test.bzl", "java_test"),
@@ -64,7 +83,10 @@ fn probe_entry_points() {
         ("@@rules_python//python:py_test.bzl", "py_test"),
         ("@@protobuf//bazel:proto_library.bzl", "proto_library"),
         ("@@protobuf//bazel:cc_proto_library.bzl", "cc_proto_library"),
-        ("@@protobuf//bazel:java_proto_library.bzl", "java_proto_library"),
+        (
+            "@@protobuf//bazel:java_proto_library.bzl",
+            "java_proto_library",
+        ),
         ("@@protobuf//bazel:py_proto_library.bzl", "py_proto_library"),
     ];
     match l.builtins_error() {
@@ -81,5 +103,9 @@ fn probe_entry_points() {
             }
         }
     }
-    eprintln!("{} of {} entry points load", entries.len() - failed, entries.len());
+    eprintln!(
+        "{} of {} entry points load",
+        entries.len() - failed,
+        entries.len()
+    );
 }

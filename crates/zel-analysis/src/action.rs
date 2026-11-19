@@ -39,7 +39,11 @@ impl Eq for ResourceSet {}
 impl Default for ResourceSet {
     /// `ResourceSet.createWithRamCpu(250, 1)` — the Bazel default for spawn actions.
     fn default() -> Self {
-        Self { memory_mb: 250.0, cpu: 1.0, local_test_count: 0 }
+        Self {
+            memory_mb: 250.0,
+            cpu: 1.0,
+            local_test_count: 0,
+        }
     }
 }
 
@@ -95,7 +99,9 @@ pub const DEFAULT_PARAM_FILE_THRESHOLD: usize = 128 * 1024;
 pub fn shell_escape(s: &str) -> String {
     // `ShellEscaper.escape`: safe chars `@%-_+:,./` + ASCII alphanumerics, plus `~` unless leading.
     let safe = |c: char| c.is_ascii_alphanumeric() || "@%-_+:,./".contains(c);
-    if !s.is_empty() && (s.chars().all(safe) || (!s.starts_with('~') && s.chars().all(|c| safe(c) || c == '~'))) {
+    if !s.is_empty()
+        && (s.chars().all(safe) || (!s.starts_with('~') && s.chars().all(|c| safe(c) || c == '~')))
+    {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
@@ -108,7 +114,10 @@ pub enum FileContent {
     /// `ctx.actions.write(output, "text")`
     Literal(String),
     /// `ctx.actions.write(output, args)`: arguments rendered into a param file.
-    Args { args: Vec<String>, format: ParamFileFormat },
+    Args {
+        args: Vec<String>,
+        format: ParamFileFormat,
+    },
 }
 
 impl FileContent {
@@ -149,10 +158,17 @@ pub enum ActionKind {
         shell_command: Option<String>,
     },
     /// `ctx.actions.write` (`FileWriteAction` / `ParameterFileWriteAction`).
-    FileWrite { content: FileContent, is_executable: bool },
+    FileWrite {
+        content: FileContent,
+        is_executable: bool,
+    },
     /// `ctx.actions.symlink` (`SymlinkAction`): output is a symlink to `target_file` (an
     /// artifact input) or, for `target_path`, an unresolved symlink.
-    Symlink { target_file: Option<Artifact>, target_path: Option<String>, is_executable: bool },
+    Symlink {
+        target_file: Option<Artifact>,
+        target_path: Option<String>,
+        is_executable: bool,
+    },
     /// `ctx.actions.expand_template` (`TemplateExpansionAction`).
     TemplateExpand {
         template: Artifact,
@@ -162,6 +178,18 @@ pub enum ActionKind {
         /// `computed_substitutions`, applied after plain ones.
         computed_substitutions: Vec<(String, String)>,
     },
+}
+
+/// Target type for `SymlinkAction` (`SymlinkAction.TargetType`) / `UnresolvedSymlinkAction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SymlinkTargetType {
+    #[default]
+    Unspecified,
+    File,
+    Directory,
+    Executable,
+    Fileset,
+    Other,
 }
 
 /// A registered action (`ctx.actions.*`). All the common fields live on the struct.
@@ -189,6 +217,16 @@ pub struct Action {
     pub action_env: Option<zel_util::action_env::ActionEnvironment>,
     /// `toolchain=` / `exec_group=` selecting the execution platform.
     pub exec_group: Option<String>,
+    /// Execution platform label for this action (`ActionOwner.getExecutionPlatform`).
+    pub exec_platform: Option<String>,
+    /// Execution properties from the execution platform / rule (`ActionOwner.getExecProperties`).
+    pub exec_properties: BTreeMap<String, String>,
+    /// Symlink target type (`SymlinkAction.TargetType` / `UnresolvedSymlinkAction`).
+    pub symlink_target_type: SymlinkTargetType,
+    /// `use_exec_root_for_source` for `actions.symlink`.
+    pub use_exec_root_for_source: bool,
+    /// True for `actions.do_nothing` (`PseudoAction`): recorded in analysis, no-op on execution.
+    pub is_pseudo: bool,
     /// Runfiles-tree inputs (`input_manifests`): executable -> runfiles manifest artifact.
     pub input_manifests: Vec<Artifact>,
     /// Set for `JavaCompileAction`s that run with a reduced classpath.
@@ -268,6 +306,11 @@ impl Action {
             use_default_shell_env: false,
             action_env: None,
             exec_group: None,
+            exec_platform: None,
+            exec_properties: BTreeMap::new(),
+            symlink_target_type: SymlinkTargetType::Unspecified,
+            use_exec_root_for_source: false,
+            is_pseudo: false,
             input_manifests: Vec::new(),
             java_compile: None,
             key_info: None,
@@ -298,40 +341,102 @@ impl Action {
         self.inputs.first()
     }
 
+    /// Whether this action may be shared (`AbstractAction.isShareable`).
+    pub fn is_shareable(&self) -> bool {
+        true
+    }
+
     /// Whether two such actions generating the same output may coexist
     /// (`Actions.canBeShared`): same mnemonic, same key, equal inputs/outputs ignoring owner.
     pub fn can_be_shared(&self, other: &Action) -> bool {
-        self.mnemonic == other.mnemonic
+        self.is_shareable()
+            && other.is_shareable()
+            && self.mnemonic == other.mnemonic
             && self.key() == other.key()
-            && same_paths(&self.inputs, &other.inputs)
-            && same_paths(&self.outputs, &other.outputs)
+            && same_artifacts_without_owner(&self.inputs, &other.inputs)
+            && same_artifacts_without_owner(&self.outputs, &other.outputs)
     }
 
     /// `Action.getKey`: fingerprint over everything affecting the action's behaviour.
     pub fn key(&self) -> String {
         let mut fp = Fingerprint::new();
+        if self.is_pseudo {
+            fp.add_str("PseudoAction")
+                .add_str(&self.mnemonic)
+                .add_str(&format!("empty action {}", self.owner.canonical_form()));
+            for inp in &self.inputs {
+                fp.add_str(inp.exec_path.path_string());
+            }
+            return fp.hex_digest_and_reset();
+        }
         fp.add_str(&self.mnemonic);
         match &self.kind {
-            ActionKind::Spawn { executable, arguments, shell_command } => {
+            ActionKind::Spawn {
+                executable,
+                arguments,
+                shell_command,
+            } => {
                 fp.add_str("Spawn").add_str(executable);
                 for a in arguments {
                     fp.add_strings(a.args.iter());
                     if let Some(p) = &a.param_file {
-                        fp.add_str(&p.flag_format).add_bool(p.use_always);
+                        let fmt_tag = match p.format {
+                            ParamFileFormat::Shell => "SHELL_QUOTED",
+                            ParamFileFormat::Multiline => "UNQUOTED",
+                            ParamFileFormat::FlagPerLine => "FLAG_PER_LINE",
+                        };
+                        fp.add_str(&p.flag_format)
+                            .add_str(fmt_tag)
+                            .add_bool(p.use_always);
                     }
                 }
                 fp.add_str(shell_command.as_deref().unwrap_or(""));
+                if let Some(ep) = &self.exec_platform {
+                    fp.add_str(ep);
+                }
+                for (k, v) in &self.exec_properties {
+                    fp.add_str(k).add_str(v);
+                }
             }
-            ActionKind::FileWrite { content, is_executable } => {
-                fp.add_str("FileWrite").add_bytes(&content.render()).add_bool(*is_executable);
+            ActionKind::FileWrite {
+                content,
+                is_executable,
+            } => {
+                fp.add_str("332877c7-ca9f-4731-b387-54f620408522")
+                    .add_bool(*is_executable)
+                    .add_bytes(&content.render());
             }
-            ActionKind::Symlink { target_file, target_path, is_executable } => {
+            ActionKind::Symlink {
+                target_file,
+                target_path,
+                is_executable,
+            } => {
+                let tt = match self.symlink_target_type {
+                    SymlinkTargetType::Unspecified => "UNSPECIFIED",
+                    SymlinkTargetType::File => "FILE",
+                    SymlinkTargetType::Directory => "DIRECTORY",
+                    SymlinkTargetType::Executable => "EXECUTABLE",
+                    SymlinkTargetType::Fileset => "FILESET",
+                    SymlinkTargetType::Other => "OTHER",
+                };
                 fp.add_str("Symlink")
-                    .add_str(target_file.as_ref().map(|a| a.exec_path.path_string()).unwrap_or(""))
+                    .add_str(tt)
+                    .add_bool(self.use_exec_root_for_source)
+                    .add_str(
+                        target_file
+                            .as_ref()
+                            .map(|a| a.exec_path.path_string())
+                            .unwrap_or(""),
+                    )
                     .add_str(target_path.as_deref().unwrap_or(""))
                     .add_bool(*is_executable);
             }
-            ActionKind::TemplateExpand { template, substitutions, is_executable, computed_substitutions } => {
+            ActionKind::TemplateExpand {
+                template,
+                substitutions,
+                is_executable,
+                computed_substitutions,
+            } => {
                 fp.add_str("TemplateExpand")
                     .add_str(template.exec_path.path_string())
                     .add_bool(*is_executable);
@@ -357,6 +462,68 @@ impl Action {
         for o in &self.outputs {
             fp.add_str(o.exec_path.path_string());
         }
+        if let Some(info) = &self.key_info {
+            match info.as_ref() {
+                ActionKeyInfo::RepoMapping {
+                    packages,
+                    runfiles_owner_repos,
+                    has_runfiles_symlinks,
+                    root_symlink_segments,
+                    workspace_name,
+                    compact,
+                } => {
+                    fp.add_str("RepoMapping")
+                        .add_str(workspace_name)
+                        .add_bool(*has_runfiles_symlinks)
+                        .add_bool(*compact);
+                    for p in packages.to_vec() {
+                        fp.add_str(&p.package).add_str(&p.repo);
+                        for (k, v) in p.mapping {
+                            fp.add_str(&k).add_str(&v);
+                        }
+                    }
+                    for (ep, r) in runfiles_owner_repos.to_vec() {
+                        fp.add_str(&ep).add_str(&r);
+                    }
+                    for (p, seg) in root_symlink_segments.to_vec() {
+                        fp.add_str(&p).add_str(&seg);
+                    }
+                }
+                ActionKeyInfo::TestRunner(tr) => {
+                    fp.add_str("TestRunner")
+                        .add_strings(tr.args.iter())
+                        .add_str(&tr.test_filter)
+                        .add_bool(tr.fail_fast)
+                        .add_str(&tr.run_under)
+                        .add_str(&tr.size)
+                        .add_str(&tr.timeout_category)
+                        .add_str(&tr.timeout)
+                        .add_strings(tr.tags.iter())
+                        .add_bool(tr.remotable)
+                        .add_i32(tr.shard_num)
+                        .add_i32(tr.total_shards)
+                        .add_i32(tr.run_number)
+                        .add_i32(tr.total_runs)
+                        .add_bool(tr.coverage)
+                        .add_bool(tr.zip_undeclared);
+                    for (k, v) in &tr.coverage_env {
+                        fp.add_str(k).add_str(v);
+                    }
+                    for (k, v) in &tr.extra_env.0 {
+                        fp.add_str(k).add_str(v);
+                    }
+                    fp.add_strings(tr.extra_env.1.iter());
+                    for (k, v) in &tr.action_env.0 {
+                        fp.add_str(k).add_str(v);
+                    }
+                    fp.add_strings(tr.action_env.1.iter());
+                    for (k, v) in &tr.test_env.0 {
+                        fp.add_str(k).add_str(v);
+                    }
+                    fp.add_strings(tr.test_env.1.iter());
+                }
+            }
+        }
         fp.hex_digest_and_reset()
     }
 
@@ -366,7 +533,12 @@ impl Action {
     pub fn command_line(&self) -> (Vec<String>, Vec<(String, Vec<u8>)>) {
         let mut argv = Vec::new();
         let mut params = Vec::new();
-        let ActionKind::Spawn { executable, arguments, .. } = &self.kind else {
+        let ActionKind::Spawn {
+            executable,
+            arguments,
+            ..
+        } = &self.kind
+        else {
             return (argv, params);
         };
         argv.push(executable.clone());
@@ -378,13 +550,18 @@ impl Action {
         for (i, a) in arguments.iter().enumerate() {
             match &a.param_file {
                 Some(pf) => {
-                    let total: usize = a.args.iter().map(|s| s.len() + 1).sum();
+                    let total: usize = a.args.iter().map(|s| s.encode_utf16().count() + 1).sum();
                     if pf.use_always || total > DEFAULT_PARAM_FILE_THRESHOLD {
                         let lead = pf.leading_args.min(a.args.len());
                         argv.extend(a.args[..lead].iter().cloned());
                         let path = format!("{primary}-{i}.params");
-                        argv.push(pf.flag_format.replace("%s", &path));
-                        params.push((path, render_param_file(&a.args[lead..], pf.format).into_bytes()));
+                        let formatted = crate::args::format_arg(&pf.flag_format, &path)
+                            .unwrap_or_else(|_| pf.flag_format.replace("%s", &path));
+                        argv.push(formatted);
+                        params.push((
+                            path,
+                            render_param_file(&a.args[lead..], pf.format).into_bytes(),
+                        ));
                     } else {
                         argv.extend(a.args.iter().cloned());
                     }
@@ -398,7 +575,12 @@ impl Action {
     /// `CommandLines.allArguments`: the executable and every argument, *including* the ones that
     /// go into param files (what `aquery` reports as the command line).
     pub fn all_arguments(&self) -> Vec<String> {
-        let ActionKind::Spawn { executable, arguments, .. } = &self.kind else {
+        let ActionKind::Spawn {
+            executable,
+            arguments,
+            ..
+        } = &self.kind
+        else {
             return Vec::new();
         };
         let mut argv = vec![executable.clone()];
@@ -412,12 +594,19 @@ impl Action {
     /// `FileWriteAction`s listed *before* the action that uses them (and as its inputs).
     pub fn lower(&self) -> Vec<ActionAnalysisMetadata> {
         let mut out = Vec::new();
+        if self.is_pseudo {
+            return out;
+        }
         match &self.kind {
             ActionKind::Spawn { .. } => {
                 let (argv, params) = self.command_line();
                 let mut inputs = self.inputs.clone();
                 let mut java_compile = self.java_compile.clone();
-                let primary_path = self.outputs.first().map(|o| o.exec_path.path_string().to_string()).unwrap_or_default();
+                let primary_path = self
+                    .outputs
+                    .first()
+                    .map(|o| o.exec_path.path_string().to_string())
+                    .unwrap_or_default();
                 for (path, body) in params {
                     // The classpath param file of a reduced-classpath Java compile is written by
                     // the executor (its content depends on `.jdeps` files read at execution time).
@@ -434,8 +623,14 @@ impl Action {
                         is_unresolved_symlink: false,
                         exec_path: PathFragment::create(&path),
                         root_relative_path: PathFragment::create(
-                            path.strip_prefix(&format!("{}/", self.outputs.first().map(|o| o.root_path()).unwrap_or_default()))
-                                .unwrap_or(&path),
+                            path.strip_prefix(&format!(
+                                "{}/",
+                                self.outputs
+                                    .first()
+                                    .map(|o| o.root_path())
+                                    .unwrap_or_default()
+                            ))
+                            .unwrap_or(&path),
                         ),
                         owner_label: self.owner.clone(),
                     };
@@ -450,67 +645,118 @@ impl Action {
                 out.push(ActionAnalysisMetadata::SpawnAction {
                     owner: self.owner.clone(),
                     mnemonic: self.mnemonic.clone(),
-                    progress_message: self
-                        .progress_message
-                        .clone()
-                        .unwrap_or_else(|| {
-                            if self.mnemonic == "Genrule" {
-                                format!("Executing genrule {}", self.owner)
-                            } else {
-                                format!("Running {} for {}", self.mnemonic, self.owner)
-                            }
-                        }),
+                    progress_message: self.progress_message.clone().unwrap_or_else(|| {
+                        if self.mnemonic == "Genrule" {
+                            format!("Executing genrule {}", self.owner)
+                        } else {
+                            format!("Running {} for {}", self.mnemonic, self.owner)
+                        }
+                    }),
                     argv,
-                    env: self.action_env.as_ref().map(|e| e.fixed_env().clone()).unwrap_or_else(|| self.env.clone()),
-                    inherited_env: self.action_env.as_ref().map(|e| e.inherited_env().clone()).unwrap_or_default(),
-                    unset_env: self.action_env.as_ref().map(|e| e.unset_env().clone()).unwrap_or_default(),
+                    env: self
+                        .action_env
+                        .as_ref()
+                        .map(|e| e.fixed_env().clone())
+                        .unwrap_or_else(|| self.env.clone()),
+                    inherited_env: self
+                        .action_env
+                        .as_ref()
+                        .map(|e| e.inherited_env().clone())
+                        .unwrap_or_default(),
+                    unset_env: self
+                        .action_env
+                        .as_ref()
+                        .map(|e| e.unset_env().clone())
+                        .unwrap_or_default(),
                     inputs,
                     outputs: self.outputs.clone(),
                     execution_info: self.execution_requirements.clone(),
+                    tools: self.tools.clone(),
                     java_compile: java_compile.map(Box::new),
                 });
             }
-            ActionKind::FileWrite { content, is_executable } => {
-                out.push(ActionAnalysisMetadata::FileWriteAction {
-                    owner: self.owner.clone(),
-                    output: self.outputs[0].clone(),
-                    content: content.render(),
-                    is_executable: *is_executable,
-                });
-            }
-            ActionKind::Symlink { target_file, target_path, is_executable } => {
-                let input_path = match (target_file, target_path) {
-                    (Some(f), _) => f.exec_path.clone(),
-                    (None, Some(p)) => PathFragment::create(p),
-                    (None, None) => PathFragment::empty(),
-                };
-                out.push(ActionAnalysisMetadata::SymlinkAction {
-                    owner: self.owner.clone(),
-                    input_path,
-                    output: self.outputs[0].clone(),
-                    is_executable: *is_executable,
-                });
-            }
-            ActionKind::TemplateExpand { template, substitutions, is_executable, computed_substitutions } => {
-                let mut subs: BTreeMap<String, String> = substitutions.iter().cloned().collect();
-                for (k, v) in computed_substitutions {
-                    subs.insert(k.clone(), v.clone());
+            ActionKind::FileWrite {
+                content,
+                is_executable,
+            } => {
+                if let Some(output) = self.outputs.first() {
+                    out.push(ActionAnalysisMetadata::FileWriteAction {
+                        owner: self.owner.clone(),
+                        output: output.clone(),
+                        content: content.render(),
+                        is_executable: *is_executable,
+                    });
                 }
-                out.push(ActionAnalysisMetadata::TemplateExpansionAction {
-                    owner: self.owner.clone(),
-                    template: template.clone(),
-                    output: self.outputs[0].clone(),
-                    substitutions: subs,
-                    is_executable: *is_executable,
-                });
+            }
+            ActionKind::Symlink {
+                target_file,
+                target_path,
+                is_executable,
+            } => {
+                if let Some(output) = self.outputs.first() {
+                    let input_path = match (target_file, target_path) {
+                        (Some(f), _) => f.exec_path.clone(),
+                        (None, Some(p)) => PathFragment::create(p),
+                        (None, None) => PathFragment::empty(),
+                    };
+                    out.push(ActionAnalysisMetadata::SymlinkAction {
+                        owner: self.owner.clone(),
+                        input_path,
+                        output: output.clone(),
+                        is_executable: *is_executable,
+                    });
+                }
+            }
+            ActionKind::TemplateExpand {
+                template,
+                substitutions,
+                is_executable,
+                computed_substitutions,
+            } => {
+                if let Some(output) = self.outputs.first() {
+                    let mut subs: BTreeMap<String, String> =
+                        substitutions.iter().cloned().collect();
+                    for (k, v) in computed_substitutions {
+                        subs.insert(k.clone(), v.clone());
+                    }
+                    out.push(ActionAnalysisMetadata::TemplateExpansionAction {
+                        owner: self.owner.clone(),
+                        template: template.clone(),
+                        output: output.clone(),
+                        substitutions: subs,
+                        is_executable: *is_executable,
+                    });
+                }
             }
         }
         out
     }
 }
 
-fn same_paths(a: &[Artifact], b: &[Artifact]) -> bool {
-    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.exec_path == y.exec_path)
+fn same_artifacts_without_owner(a: &[Artifact], b: &[Artifact]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(x, y)| x.equals_without_owner(y))
+}
+
+/// `Actions.escapedPath`: escapes `_`, `/`, `\`, `:`, `@` for use as a filename.
+pub fn escaped_path(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    for c in path.chars() {
+        match c {
+            '_' => out.push_str("_U"),
+            '/' => out.push_str("_S"),
+            '\\' => out.push_str("_B"),
+            ':' => out.push_str("_C"),
+            '@' => out.push_str("_A"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// `Actions.isRunfilesArtifactPair`: exempts a `.runfiles` tree paired with `<tree>/MANIFEST`.
+pub fn is_runfiles_artifact_pair(outer: &Artifact, inner: &Artifact) -> bool {
+    outer.is_runfiles_tree()
+        && inner.exec_path.path_string() == format!("{}/MANIFEST", outer.exec_path.path_string())
 }
 
 /// Error from [`ActionGraph::register`] (`ActionConflictException`).
@@ -533,11 +779,16 @@ impl std::error::Error for ActionConflict {}
 #[derive(Debug, Default)]
 pub struct ActionGraph {
     generating: BTreeMap<String, Action>,
+    artifacts: BTreeMap<String, Artifact>,
 }
 
 impl ActionGraph {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn size(&self) -> usize {
+        self.generating.len()
     }
 
     pub fn actions(&self) -> impl Iterator<Item = &Action> {
@@ -548,10 +799,25 @@ impl ActionGraph {
         self.generating.get(exec_path)
     }
 
+    /// `ActionGraph.getGeneratingAction(Artifact)`: returns `None` for source artifacts.
+    pub fn generating_action_by_artifact(&self, artifact: &Artifact) -> Option<&Action> {
+        if artifact.is_source {
+            return None;
+        }
+        self.generating.get(artifact.exec_path.path_string())
+    }
+
     /// Registers `action`, mirroring `MapBasedActionGraph.registerAction` plus the
     /// `ArtifactPrefixConflict` check and `Actions.canBeShared` sharing rule.
     pub fn register(&mut self, action: &Action) -> Result<(), ActionConflict> {
-        for out in &action.outputs {
+        for (idx, out) in action.outputs.iter().enumerate() {
+            if out.is_source {
+                return Err(ActionConflict {
+                    artifact: out.exec_path.path_string().to_string(),
+                    is_prefix_conflict: false,
+                    message: format!("Source in outputs: {}", out.exec_path),
+                });
+            }
             let p = out.exec_path.path_string().to_string();
             if let Some(prev) = self.generating.get(&p) {
                 if prev.can_be_shared(action) {
@@ -567,17 +833,60 @@ impl ActionGraph {
                     ),
                 });
             }
-            // Prefix conflict: one output is a directory prefix of another.
-            for (other, prev) in &self.generating {
-                let (short, long, first_a, second_a) = if p.len() < other.len() {
-                    (&p, other, action, prev)
+            // Check intra-action prefix conflicts among this action's own outputs.
+            for other_out in action.outputs.iter().skip(idx + 1) {
+                let q = other_out.exec_path.path_string().to_string();
+                let (short, long, short_a, long_a) = if p.len() < q.len() {
+                    (&p, &q, out, other_out)
                 } else {
-                    (other, &p, prev, action)
+                    (&q, &p, other_out, out)
+                };
+                if long.len() > short.len()
+                    && long.starts_with(short.as_str())
+                    && long.as_bytes()[short.len()] == b'/'
+                    && !is_runfiles_artifact_pair(short_a, long_a)
+                {
+                    return Err(ActionConflict {
+                        artifact: short.clone(),
+                        is_prefix_conflict: true,
+                        message: format!(
+                            "One of the output paths '{}' (belonging to {}) and '{}' (belonging to {}) is a prefix of the other. These actions cannot be simultaneously present; please rename one of the output files or build just one of them",
+                            short, action.owner, long, action.owner
+                        ),
+                    });
+                }
+            }
+            // Prefix conflict against outputs already in the graph (exempting runfiles-manifest).
+            for (other, prev) in &self.generating {
+                let (short, long, first_a, second_a, short_art, long_art) = if p.len() < other.len()
+                {
+                    (
+                        &p,
+                        other,
+                        action,
+                        prev,
+                        Some(out),
+                        self.artifacts.get(other),
+                    )
+                } else {
+                    (
+                        other,
+                        &p,
+                        prev,
+                        action,
+                        self.artifacts.get(other),
+                        Some(out),
+                    )
                 };
                 if long.len() > short.len()
                     && long.starts_with(short.as_str())
                     && long.as_bytes()[short.len()] == b'/'
                 {
+                    if let (Some(sa), Some(la)) = (short_art, long_art) {
+                        if is_runfiles_artifact_pair(sa, la) {
+                            continue;
+                        }
+                    }
                     return Err(ActionConflict {
                         artifact: p.clone(),
                         is_prefix_conflict: true,
@@ -590,11 +899,53 @@ impl ActionGraph {
             }
         }
         for out in &action.outputs {
+            let key = out.exec_path.path_string().to_string();
             self.generating
-                .entry(out.exec_path.path_string().to_string())
+                .entry(key.clone())
                 .or_insert_with(|| action.clone());
+            self.artifacts.entry(key).or_insert_with(|| out.clone());
         }
         Ok(())
+    }
+
+    /// `Actions.findArtifactPrefixConflicts`: sorts all registered outputs using
+    /// `PathFragment::hierarchical_cmp`, reports outer strict-prefix pairs (skipping inner
+    /// pairs when `x << y << z`), and exempts `<tree>.runfiles` + `<tree>.runfiles/MANIFEST`.
+    pub fn find_artifact_prefix_conflicts(&self) -> Vec<ActionConflict> {
+        let mut arts: Vec<&Artifact> = self.artifacts.values().collect();
+        arts.sort_by(|a, b| a.exec_path.hierarchical_cmp(&b.exec_path));
+        let mut conflicts = Vec::new();
+        let mut idx = 0usize;
+        while idx + 1 < arts.len() {
+            let art_i = arts[idx];
+            let mut j = idx + 1;
+            let mut advanced = false;
+            while j < arts.len() {
+                let art_j = arts[j];
+                if art_j.exec_path.path_string().len() > art_i.exec_path.path_string().len()
+                    && art_j.exec_path.starts_with(&art_i.exec_path)
+                {
+                    if !is_runfiles_artifact_pair(art_i, art_j) {
+                        let a_i = &self.generating[art_i.exec_path.path_string()];
+                        let a_j = &self.generating[art_j.exec_path.path_string()];
+                        conflicts.push(ActionConflict {
+                            artifact: art_i.exec_path.path_string().to_string(),
+                            is_prefix_conflict: true,
+                            message: format!(
+                                "One of the output paths '{}' (belonging to {}) and '{}' (belonging to {}) is a prefix of the other. These actions cannot be simultaneously present; please rename one of the output files or build just one of them",
+                                art_i.exec_path, a_i.owner, art_j.exec_path, a_j.owner
+                            ),
+                        });
+                    }
+                    j += 1;
+                    advanced = true;
+                } else {
+                    break;
+                }
+            }
+            idx = if advanced { j } else { idx + 1 };
+        }
+        conflicts
     }
 }
 
@@ -609,12 +960,70 @@ fn detail(sb: &mut String, key: &str, a: &str, b: &str) {
     sb.push('\n');
 }
 
-/// `ActionConflictException.debugSuffix` (the parts that exist in this model).
+fn non_empty_or_null(s: &str) -> &str {
+    if s.is_empty() {
+        "(null)"
+    } else {
+        s
+    }
+}
+
+fn diff_artifact_lists(sb: &mut String, label: &str, a: &[Artifact], b: &[Artifact]) {
+    let mut diffs = Vec::new();
+    let max_len = a.len().max(b.len());
+    for i in 0..max_len {
+        let left = a.get(i);
+        let right = b.get(i);
+        let equal = match (left, right) {
+            (Some(l), Some(r)) => l.equals_without_owner(r),
+            _ => false,
+        };
+        if !equal {
+            diffs.push(format!(
+                "  {}: {} vs {}",
+                i,
+                left.map(|x| x.exec_path.path_string())
+                    .unwrap_or("(absent)"),
+                right
+                    .map(|x| x.exec_path.path_string())
+                    .unwrap_or("(absent)"),
+            ));
+            if diffs.len() >= 5 {
+                break;
+            }
+        }
+    }
+    if !diffs.is_empty() {
+        sb.push_str(label);
+        sb.push_str(" differ:\n");
+        for d in diffs {
+            sb.push_str(&d);
+            sb.push('\n');
+        }
+    }
+}
+
+/// `ActionConflictException.debugSuffix` (matching Bazel's conflict diagnostics).
 fn debug_suffix(a: &Action, b: &Action) -> String {
     let mut sb = String::new();
-    detail(&mut sb, "Label", &a.owner.canonical_form(), &b.owner.canonical_form());
-    detail(&mut sb, "RuleClass", &a.owner_kind, &b.owner_kind);
-    detail(&mut sb, "Configuration", &a.owner_config, &b.owner_config);
+    detail(
+        &mut sb,
+        "Label",
+        &a.owner.canonical_form(),
+        &b.owner.canonical_form(),
+    );
+    detail(
+        &mut sb,
+        "RuleClass",
+        non_empty_or_null(&a.owner_kind),
+        non_empty_or_null(&b.owner_kind),
+    );
+    detail(
+        &mut sb,
+        "Configuration",
+        non_empty_or_null(&a.owner_config),
+        non_empty_or_null(&b.owner_config),
+    );
     detail(&mut sb, "Mnemonic", &a.mnemonic, &b.mnemonic);
     detail(&mut sb, "Action key", &a.key(), &b.key());
     detail(
@@ -623,10 +1032,24 @@ fn debug_suffix(a: &Action, b: &Action) -> String {
         a.progress_message.as_deref().unwrap_or("(null)"),
         b.progress_message.as_deref().unwrap_or("(null)"),
     );
-    let pi = |x: &Action| x.primary_input().map(|i| i.to_string()).unwrap_or("(null)".into());
-    detail(&mut sb, "PrimaryInput", &pi(a), &pi(b));
-    let po = |x: &Action| x.primary_output().map(|i| i.to_string()).unwrap_or("(null)".into());
+    let pi = |x: &Action| {
+        x.primary_input()
+            .map(|i| i.to_string())
+            .unwrap_or("(null)".into())
+    };
+    let pi_a = pi(a);
+    let pi_b = pi(b);
+    detail(&mut sb, "PrimaryInput", &pi_a, &pi_b);
+    let po = |x: &Action| {
+        x.primary_output()
+            .map(|i| i.to_string())
+            .unwrap_or("(null)".into())
+    };
     detail(&mut sb, "PrimaryOutput", &po(a), &po(b));
+    if pi_a == pi_b {
+        diff_artifact_lists(&mut sb, "MandatoryInputs", &a.inputs, &b.inputs);
+        diff_artifact_lists(&mut sb, "Outputs", &a.outputs, &b.outputs);
+    }
     sb
 }
 
@@ -635,14 +1058,21 @@ mod tests {
     use super::*;
 
     fn art(p: &str) -> Artifact {
-        Artifact::derived("k8-fastbuild", PathFragment::create(p), Label::parse_canonical("//a:b").unwrap())
+        Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create(p),
+            Label::parse_canonical("//a:b").unwrap(),
+        )
     }
 
     fn write(owner: &str, out: &str, text: &str) -> Action {
         let mut a = Action::new(
             Label::parse_canonical(owner).unwrap(),
             "FileWrite",
-            ActionKind::FileWrite { content: FileContent::Literal(text.into()), is_executable: false },
+            ActionKind::FileWrite {
+                content: FileContent::Literal(text.into()),
+                is_executable: false,
+            },
         );
         a.outputs.push(art(out));
         a
@@ -659,6 +1089,61 @@ mod tests {
         ), "{}", e.message);
         assert!(e.message.contains("Mnemonic: FileWrite\n"));
         assert!(!e.is_prefix_conflict);
+    }
+
+    #[test]
+    fn action_keys_include_param_format_exec_props_and_symlink_type() {
+        let mut s1 = Action::new(
+            Label::parse_canonical("//a:s").unwrap(),
+            "Tool",
+            ActionKind::Spawn {
+                executable: "/bin/true".into(),
+                arguments: vec![CommandLineArgs {
+                    args: vec!["--flag".into()],
+                    param_file: Some(ParamFileInfo {
+                        flag_format: "100%%-%s".into(),
+                        format: ParamFileFormat::Shell,
+                        use_always: true,
+                        leading_args: 0,
+                    }),
+                }],
+                shell_command: None,
+            },
+        );
+        s1.outputs.push(art("a/out"));
+        let mut s2 = s1.clone();
+        if let ActionKind::Spawn { arguments, .. } = &mut s2.kind {
+            arguments[0].param_file.as_mut().unwrap().format = ParamFileFormat::Multiline;
+        }
+        assert_ne!(s1.key(), s2.key());
+        let (argv, _) = s1.command_line();
+        assert_eq!(argv[1], "100%-bazel-out/k8-fastbuild/bin/a/out-0.params");
+
+        let mut sym1 = Action::new(
+            Label::parse_canonical("//a:l").unwrap(),
+            "Symlink",
+            ActionKind::Symlink {
+                target_file: Some(art("a/in")),
+                target_path: None,
+                is_executable: false,
+            },
+        );
+        sym1.symlink_target_type = SymlinkTargetType::File;
+        let mut sym2 = sym1.clone();
+        sym2.use_exec_root_for_source = true;
+        assert_ne!(sym1.key(), sym2.key());
+
+        let mut pseudo = Action::new(
+            Label::parse_canonical("//a:p").unwrap(),
+            "Nothing",
+            ActionKind::Spawn {
+                executable: String::new(),
+                arguments: vec![],
+                shell_command: None,
+            },
+        );
+        pseudo.is_pseudo = true;
+        assert!(pseudo.lower().is_empty());
     }
 
     #[test]
@@ -679,7 +1164,11 @@ mod tests {
                 executable: "/bin/tool".into(),
                 arguments: vec![CommandLineArgs {
                     args: vec!["--x".into(), "a b".into()],
-                    param_file: Some(ParamFileInfo { use_always: true, leading_args: 0, ..Default::default() }),
+                    param_file: Some(ParamFileInfo {
+                        use_always: true,
+                        leading_args: 0,
+                        ..Default::default()
+                    }),
                 }],
                 shell_command: None,
             },
@@ -688,8 +1177,114 @@ mod tests {
         let (argv, params) = a.command_line();
         assert_eq!(argv[0], "/bin/tool");
         assert_eq!(argv[1], "@bazel-out/k8-fastbuild/bin/a/out-0.params");
-        assert_eq!(String::from_utf8(params[0].1.clone()).unwrap(), "--x\n'a b'\n");
+        assert_eq!(
+            String::from_utf8(params[0].1.clone()).unwrap(),
+            "--x\n'a b'\n"
+        );
         let lowered = a.lower();
         assert_eq!(lowered.len(), 2);
+    }
+
+    #[test]
+    fn escaped_path_matches_bazel_actions() {
+        assert_eq!(escaped_path("a/b_c:d\\e@f"), "a_Sb_Uc_Cd_Be_Af");
+    }
+
+    #[test]
+    fn sharing_checks_artifact_root_and_key_info() {
+        let a1 = write("//a:b", "a/x", "1");
+        let mut a2 = Action::new(
+            Label::parse_canonical("//a:c").unwrap(),
+            "FileWrite",
+            ActionKind::FileWrite {
+                content: FileContent::Literal("1".into()),
+                is_executable: false,
+            },
+        );
+        a2.outputs.push(Artifact::derived_in_root(
+            "k8-fastbuild",
+            crate::ArtifactRoot::Genfiles,
+            PathFragment::create("a/x"),
+            Label::parse_canonical("//a:c").unwrap(),
+        ));
+        assert!(
+            !a1.can_be_shared(&a2),
+            "different ArtifactRoot must not share"
+        );
+
+        let mut t1 = write("//a:b", "a/y", "1");
+        let mut t2 = write("//a:c", "a/y", "1");
+        t1.key_info = Some(std::sync::Arc::new(ActionKeyInfo::TestRunner(Box::new(
+            TestRunnerKey {
+                test_filter: "A".into(),
+                ..Default::default()
+            },
+        ))));
+        t2.key_info = Some(std::sync::Arc::new(ActionKeyInfo::TestRunner(Box::new(
+            TestRunnerKey {
+                test_filter: "B".into(),
+                ..Default::default()
+            },
+        ))));
+        assert_ne!(t1.key(), t2.key());
+        assert!(!t1.can_be_shared(&t2));
+    }
+
+    #[test]
+    fn runfiles_manifest_exempted_from_prefix_conflict_and_intra_action_prefix_caught() {
+        let mut g = ActionGraph::new();
+        let mut tree_act = Action::new(
+            Label::parse_canonical("//a:b").unwrap(),
+            "RunfilesTree",
+            ActionKind::FileWrite {
+                content: FileContent::Literal(String::new()),
+                is_executable: false,
+            },
+        );
+        let mut tree_art = art("a/bin.runfiles");
+        tree_art.is_tree_artifact = true;
+        tree_act.outputs.push(tree_art);
+        g.register(&tree_act).unwrap();
+
+        let manifest_act = write("//a:b", "a/bin.runfiles/MANIFEST", "m");
+        g.register(&manifest_act).unwrap();
+        assert!(g.find_artifact_prefix_conflicts().is_empty());
+
+        // Intra-action prefix conflict
+        let mut bad = write("//a:bad", "a/dir", "1");
+        bad.outputs.push(art("a/dir/file"));
+        let err = g.register(&bad).unwrap_err();
+        assert!(err.is_prefix_conflict);
+    }
+
+    #[test]
+    fn source_output_rejected_and_null_owner_fields_formatted() {
+        let mut g = ActionGraph::new();
+        let mut src_out = Action::new(
+            Label::parse_canonical("//a:b").unwrap(),
+            "FileWrite",
+            ActionKind::FileWrite {
+                content: FileContent::Literal("x".into()),
+                is_executable: false,
+            },
+        );
+        src_out.outputs.push(Artifact::source(
+            PathFragment::create("a/src.txt"),
+            Label::parse_canonical("//a:b").unwrap(),
+        ));
+        assert!(g.register(&src_out).is_err());
+
+        g.register(&write("//a:b", "a/z", "1")).unwrap();
+        let err = g.register(&write("//a:c", "a/z", "2")).unwrap_err();
+        assert!(
+            err.message.contains("RuleClass: (null)\n"),
+            "{}",
+            err.message
+        );
+        assert!(
+            err.message.contains("Configuration: (null)\n"),
+            "{}",
+            err.message
+        );
     }
 }

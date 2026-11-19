@@ -199,6 +199,7 @@ fn build_language_proto() -> Vec<u8> {
                 AttrType::IntList => 16,
                 AttrType::LabelKeyedStringDict => 21,
                 AttrType::StringKeyedLabelDict => 19,
+                AttrType::LabelListDict => 12,
             };
             varint(&mut a, 2 << 3);
             varint(&mut a, disc);
@@ -219,17 +220,24 @@ impl BlazeRuntime {
     fn collect_info_items(&self, parsed: &ParsedCommandOptions) -> BTreeMap<String, InfoItem> {
         let p = product_name();
         let desc: BTreeMap<String, String> = info_key_descriptions().into_iter().collect();
-        let cpu = parsed.get_str("cpu").map(str::to_string).unwrap_or_else(|| Self::host_cpu().to_string());
+        let cpu = parsed
+            .get_str("cpu")
+            .map(str::to_string)
+            .unwrap_or_else(|| Self::host_cpu().to_string());
         let mode = parsed.compilation_mode.clone();
         let dirs = &self.dirs;
-        let ws = self.in_workspace();
+        let _ws = self.in_workspace();
         let pkg_path = {
             let v = parsed
                 .parsed_options
                 .get("package_path")
                 .map(|d| d.raw_values.clone())
                 .unwrap_or_default();
-            if v.is_empty() { "%workspace%".to_string() } else { v.join(":") }
+            if v.is_empty() {
+                "%workspace%".to_string()
+            } else {
+                v.join(":")
+            }
         };
         let server_log = {
             let link = dirs.server_log();
@@ -262,9 +270,9 @@ impl BlazeRuntime {
                 }
             }
         }
-        let install_md5 = super::install_md5().map(str::to_string).unwrap_or_else(|| {
-            dirs.install_base.base_name().to_string()
-        });
+        let install_md5 = super::install_md5()
+            .map(str::to_string)
+            .unwrap_or_else(|| dirs.install_base.base_name().to_string());
         let mk = |name: &str, hidden: bool, requires_ws: bool, value: Vec<u8>| InfoItem {
             name: name.to_string(),
             description: desc.get(name).cloned().unwrap_or_default(),
@@ -272,16 +280,21 @@ impl BlazeRuntime {
             requires_workspace: requires_ws,
             value,
         };
-        let real_base = std::fs::canonicalize(dirs.output_base.path_string())
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| dirs.output_base.path_string().to_string());
-        let real_ws = std::fs::canonicalize(dirs.workspace_dir.path_string())
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| dirs.workspace_dir.path_string().to_string());
+        let canonical_str = |p: &str| -> Option<String> {
+            let c = std::fs::canonicalize(p).ok()?;
+            let s = c.to_string_lossy();
+            #[cfg(windows)]
+            let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+            Some(s.to_string())
+        };
+        let real_base = canonical_str(dirs.output_base.path_string())
+            .unwrap_or_else(|| dirs.output_base.path_string().to_string());
+        let real_ws = canonical_str(dirs.workspace_dir.path_string())
+            .unwrap_or_else(|| dirs.workspace_dir.path_string().to_string());
         let real_path = |pf: &zel_vfs::PathFragment| -> String {
             let s = pf.path_string();
-            if let Ok(c) = std::fs::canonicalize(s) {
-                return c.display().to_string();
+            if let Some(c) = canonical_str(s) {
+                return c;
             }
             if let Some(rel) = s.strip_prefix(dirs.output_base.path_string()) {
                 return format!("{}{rel}", real_base);
@@ -292,8 +305,8 @@ impl BlazeRuntime {
             s.to_string()
         };
         let real_str = |s: &str| -> String {
-            if let Ok(c) = std::fs::canonicalize(s) {
-                return c.display().to_string();
+            if let Some(c) = canonical_str(s) {
+                return c;
             }
             if let Some(rel) = s.strip_prefix(dirs.output_base.path_string()) {
                 return format!("{}{rel}", real_base);
@@ -314,7 +327,9 @@ impl BlazeRuntime {
             let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
             (
                 format!("Zel native runtime (build {version}) by The Zel Authors"),
-                format!("Zel native code (build {version}, {platform} compiled) by The Zel Authors"),
+                format!(
+                    "Zel native code (build {version}, {platform} compiled) by The Zel Authors"
+                ),
             )
         };
         // `CharacterEncodingInfoItem`: the client starts the server JVM with `-Dfile.encoding=ISO-8859-1`
@@ -333,13 +348,19 @@ impl BlazeRuntime {
             } else {
                 locale.split('.').nth(1).unwrap_or("UTF-8")
             };
-            format!("file.encoding = ISO-8859-1, defaultCharset = ISO-8859-1, sun.jnu.encoding = {jnu}")
+            format!(
+                "file.encoding = ISO-8859-1, defaultCharset = ISO-8859-1, sun.jnu.encoding = {jnu}"
+            )
         };
         // `StarlarkSemantics.toString()` of the `BuildLanguageOptions` semantics (non-default pairs only).
-        let starlark_semantics = zel_options::starlark_semantics_string(
-            &|flag| parsed.get_bool(flag),
-            &|flag| parsed.parsed_options.get(flag).map(|d| d.raw_values.clone()).unwrap_or_default(),
-        );
+        let starlark_semantics =
+            zel_options::starlark_semantics_string(&|flag| parsed.get_bool(flag), &|flag| {
+                parsed
+                    .parsed_options
+                    .get(flag)
+                    .map(|d| d.raw_values.clone())
+                    .unwrap_or_default()
+            });
         let worker_metrics = crate::exec_phase::worker_metrics_text(dirs.output_base.path_string());
 
         // Real measurable process memory:
@@ -352,28 +373,83 @@ impl BlazeRuntime {
         let used_after_gc = rss;
 
         let mut items: Vec<InfoItem> = vec![
-            mk("workspace", false, true, text(real_path(&dirs.workspace_dir))),
-            mk("install_base", false, false, text(real_path(&dirs.install_base))),
-            mk("install_md5", true, false, text(install_md5)),
-            mk("output_base", false, false, text(real_path(&dirs.output_base))),
-            mk("execution_root", false, true, text(real_path(&dirs.execroot()))),
-            mk("output_path", false, true, text(real_path(&dirs.output_path()))),
-            mk("client-env", true, false, text(client_env_text)),
-            mk(&format!("{p}-bin"), false, true, text(real_path(&dirs.bazel_bin(&cpu, &mode)))),
-            mk(&format!("{p}-genfiles"), false, true, text(real_path(&dirs.bazel_genfiles(&cpu, &mode)))),
-            mk(&format!("{p}-testlogs"), false, true, text(real_path(&dirs.bazel_testlogs(&cpu, &mode)))),
             mk(
-                "release",
+                "workspace",
                 false,
-                false,
-                text(crate::release_name()),
+                true,
+                text(real_path(&dirs.workspace_dir)),
             ),
-            mk("server_pid", false, false, text(self.server_pid.to_string())),
+            mk(
+                "install_base",
+                false,
+                false,
+                text(real_path(&dirs.install_base)),
+            ),
+            mk("install_md5", true, false, text(install_md5)),
+            mk(
+                "output_base",
+                false,
+                false,
+                text(real_path(&dirs.output_base)),
+            ),
+            mk(
+                "execution_root",
+                false,
+                true,
+                text(real_path(&dirs.execroot())),
+            ),
+            mk(
+                "output_path",
+                false,
+                true,
+                text(real_path(&dirs.output_path())),
+            ),
+            mk("client-env", true, false, text(client_env_text)),
+            mk(
+                &format!("{p}-bin"),
+                false,
+                true,
+                text(real_path(&dirs.bazel_bin(&cpu, &mode))),
+            ),
+            mk(
+                &format!("{p}-genfiles"),
+                false,
+                true,
+                text(real_path(&dirs.bazel_genfiles(&cpu, &mode))),
+            ),
+            mk(
+                &format!("{p}-testlogs"),
+                false,
+                true,
+                text(real_path(&dirs.bazel_testlogs(&cpu, &mode))),
+            ),
+            mk("release", false, false, text(crate::release_name())),
+            mk(
+                "server_pid",
+                false,
+                false,
+                text(self.server_pid.to_string()),
+            ),
             mk("server_log", false, false, text(real_str(&server_log))),
             mk("package_path", false, true, text(pkg_path.clone())),
-            mk("used-heap-size", false, false, text(pretty_print_bytes(used_heap))),
-            mk("used-heap-size-after-gc", true, false, text(pretty_print_bytes(used_after_gc))),
-            mk("committed-heap-size", false, false, text(pretty_print_bytes(committed_heap))),
+            mk(
+                "used-heap-size",
+                false,
+                false,
+                text(pretty_print_bytes(used_heap)),
+            ),
+            mk(
+                "used-heap-size-after-gc",
+                true,
+                false,
+                text(pretty_print_bytes(used_after_gc)),
+            ),
+            mk(
+                "committed-heap-size",
+                false,
+                false,
+                text(pretty_print_bytes(committed_heap)),
+            ),
             mk(
                 "max-heap-size",
                 false,
@@ -384,43 +460,39 @@ impl BlazeRuntime {
             // Garbage collection runs and accumulated time are 0.
             mk("gc-time", false, false, text("0ms")),
             mk("gc-count", false, false, text("0")),
-            mk(
-                "java-runtime",
-                false,
-                false,
-                text(java_runtime),
-            ),
+            mk("java-runtime", false, false, text(java_runtime)),
             mk("java-vm", false, false, text(java_vm)),
             mk("java-home", false, false, text(java_home)),
-            mk(
-                "character-encoding",
-                false,
-                false,
-                text(character_encoding),
-            ),
+            mk("character-encoding", false, false, text(character_encoding)),
             mk("build-language", true, true, build_language_proto()),
             mk("default-package-path", true, true, text(pkg_path)),
-            mk(
-                "starlark-semantics",
-                true,
-                false,
-                text(starlark_semantics),
-            ),
+            mk("starlark-semantics", true, false, text(starlark_semantics)),
             mk("worker_metrics", true, false, text(worker_metrics)),
             mk(
                 "local_resources",
                 false,
                 false,
-                text(format!("RAM={}MB, CPU={:.1}", host.host_ram_mb(), host.cpus)),
+                text(format!(
+                    "RAM={}MB, CPU={:.1}",
+                    host.host_ram_mb(),
+                    host.cpus
+                )),
             ),
-            mk("command_log", false, false, text(real_path(&dirs.command_log()))),
+            mk(
+                "command_log",
+                false,
+                false,
+                text(real_path(&dirs.command_log())),
+            ),
             mk(
                 "repository_cache",
                 false,
                 false,
-                text(real_path(&dirs.output_user_root.get_relative_str("cache/repos/v1"))),
+                text(real_path(
+                    &dirs.output_user_root.get_relative_str("cache/repos/v1"),
+                )),
             ),
-            mk("peak-heap-size", true, false, text("unknown".to_string())),
+            mk("peak-heap-size", true, false, text("unknown")),
         ];
         let mut map = BTreeMap::new();
         for i in items.drain(..) {
@@ -432,7 +504,10 @@ impl BlazeRuntime {
     /// Variables of the default configuration's `getMakeEnvironment()` that do not depend on a
     /// C++ toolchain (the toolchain-derived `CC`, `AR`, ... are not modelled).
     fn make_environment(&self, parsed: &ParsedCommandOptions) -> Vec<(String, String)> {
-        let cpu = parsed.get_str("cpu").map(str::to_string).unwrap_or_else(|| Self::host_cpu().to_string());
+        let cpu = parsed
+            .get_str("cpu")
+            .map(str::to_string)
+            .unwrap_or_else(|| Self::host_cpu().to_string());
         let mode = &parsed.compilation_mode;
         let target_cpu = match cpu.as_str() {
             "darwin_arm64" => "aarch64",
@@ -474,13 +549,20 @@ impl BlazeRuntime {
             for (k, v) in self.make_environment(&parsed) {
                 items.insert(
                     k.clone(),
-                    InfoItem { name: k, description: v.clone(), hidden: false, requires_workspace: false, value: text(v) },
+                    InfoItem {
+                        name: k,
+                        description: v.clone(),
+                        hidden: false,
+                        requires_workspace: false,
+                        value: text(v),
+                    },
                 );
             }
         }
         let print_keys = residue.len() != 1;
-        let is_proto_output = args.iter().any(|a| a == "--info_output_type=response_proto" || a == "-info_output_type=response_proto")
-            || parsed.get_str("info_output_type") == Some("response_proto");
+        let is_proto_output = args.iter().any(|a| {
+            a == "--info_output_type=response_proto" || a == "-info_output_type=response_proto"
+        }) || parsed.get_str("info_output_type") == Some("response_proto");
 
         if is_proto_output {
             let mut info_items = Vec::new();
@@ -511,14 +593,15 @@ impl BlazeRuntime {
                 info_item: info_items,
                 print_keys,
             };
-            let mut any = zel_proto::Any::default();
-            any.type_url = "type.googleapis.com/command_server.InfoResponse".to_string();
-            any.value = info_resp.encode_to_vec();
+            let any = zel_proto::Any {
+                type_url: "type.googleapis.com/command_server.InfoResponse".to_string(),
+                value: info_resp.encode_to_vec(),
+            };
             extensions.push(any);
             return ExitCode::SUCCESS;
         }
 
-        let mut emit = |stdout: &mut Vec<u8>, item: &InfoItem| {
+        let emit = |stdout: &mut Vec<u8>, item: &InfoItem| {
             if print_keys {
                 stdout.extend_from_slice(item.name.as_bytes());
                 stdout.extend_from_slice(b": ");
@@ -559,7 +642,10 @@ impl BlazeRuntime {
                 "unknown key(s): {}",
                 unknown
                     .iter()
-                    .map(|k| format!("'{k}'{}", zel_options::spellcheck::did_you_mean(k, names.iter().copied())))
+                    .map(|k| format!(
+                        "'{k}'{}",
+                        zel_options::spellcheck::did_you_mean(k, names.iter().copied())
+                    ))
                     .collect::<Vec<_>>()
                     .join(", ")
             );

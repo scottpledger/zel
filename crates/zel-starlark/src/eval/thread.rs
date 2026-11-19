@@ -60,8 +60,12 @@ impl StarlarkThread {
         location: Location,
     ) -> Result<(), StarlarkError> {
         let name = function_name.into();
-        if !self.semantics.allow_recursion && self.frames.iter().any(|f| f.function_id == function_id) {
-            return Err(StarlarkError(format!("function '{name}' called recursively")));
+        if !self.semantics.allow_recursion
+            && self.frames.iter().any(|f| f.function_id == function_id)
+        {
+            return Err(StarlarkError(format!(
+                "function '{name}' called recursively"
+            )));
         }
         let mut frame = CallFrame::new(name, location);
         frame.function_id = function_id;
@@ -95,13 +99,21 @@ impl StarlarkThread {
     /// `<toplevel>` frame.
     pub fn format_stack_trace_at(&self, at: &Location) -> String {
         let mut entries: Vec<(String, Location)> = Vec::new();
-        if let Some(first) = self.frames.first() {
+        let non_comp: Vec<&CallFrame> = self
+            .frames
+            .iter()
+            .filter(|f| f.function_name != "<comprehension>")
+            .collect();
+        if let Some(first) = non_comp.first() {
             if !first.location.file.is_empty() {
                 entries.push(("<toplevel>".to_string(), first.location.clone()));
             }
         }
-        for (i, f) in self.frames.iter().enumerate() {
-            let pos = self.frames.get(i + 1).map(|n| n.location.clone()).unwrap_or_else(|| at.clone());
+        for (i, f) in non_comp.iter().enumerate() {
+            let pos = non_comp
+                .get(i + 1)
+                .map(|n| n.location.clone())
+                .unwrap_or_else(|| at.clone());
             entries.push((f.function_name.clone(), pos));
         }
         if entries.is_empty() {
@@ -109,8 +121,11 @@ impl StarlarkThread {
         }
         let mut out = format!("{at}: Traceback (most recent call last):\n");
         for (name, loc) in entries {
-            out.push_str(&format!("\tFile \"{}\", line {}, column {}, in {}\n", loc.file, loc.line, loc.column, name));
-            if let Some(src) = source_line(&loc.file, loc.line as usize) {
+            out.push_str(&format!(
+                "\tFile \"{}\", line {}, column {}, in {}\n",
+                loc.file, loc.line, loc.column, name
+            ));
+            if let Some(src) = source_line(&loc.file, loc.line) {
                 out.push_str(&format!("\t\t{src}\n"));
             }
         }
@@ -150,7 +165,11 @@ pub fn source_line(file: &str, line: usize) -> Option<String> {
     if file.is_empty() || line == 0 {
         return None;
     }
-    if let Some(r) = SOURCES.with(|s| s.borrow().get(file).map(|t| t.lines().nth(line - 1).map(|l| l.trim().to_string()))) {
+    if let Some(r) = SOURCES.with(|s| {
+        s.borrow()
+            .get(file)
+            .map(|t| t.lines().nth(line - 1).map(|l| l.trim().to_string()))
+    }) {
         return r;
     }
     let text = std::fs::read_to_string(file).ok()?;

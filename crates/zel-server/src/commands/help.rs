@@ -16,11 +16,11 @@
 //! every topic, with option documentation generated from the option definitions.
 
 use super::{expand_product, info, product_name, COMMANDS};
-use crate::{build_label, writeln_bytes, BlazeRuntime};
+use crate::{writeln_bytes, BlazeRuntime};
 use std::collections::HashSet;
 use zel_options::{
-    OptionDefinition, OptionDocumentationCategory as Cat, OptionEffectTag, OptionMetadataTag, OptionType,
-    ParsedCommandOptions, ALL_COMMAND_OPTIONS, ALL_STARTUP_OPTIONS,
+    OptionDefinition, OptionDocumentationCategory as Cat, OptionEffectTag, OptionMetadataTag,
+    OptionType, ParsedCommandOptions, ALL_COMMAND_OPTIONS, ALL_STARTUP_OPTIONS,
 };
 use zel_util::ExitCode;
 
@@ -241,7 +241,11 @@ fn join_english(values: &[&str]) -> String {
         0 => String::new(),
         1 => values[0].to_string(),
         2 => format!("{} or {}", values[0], values[1]),
-        _ => format!("{}, or {}", values[..values.len() - 1].join(", "), values[values.len() - 1]),
+        _ => format!(
+            "{}, or {}",
+            values[..values.len() - 1].join(", "),
+            values[values.len() - 1]
+        ),
     }
 }
 
@@ -250,7 +254,11 @@ fn join_english_and(values: &[String]) -> String {
         0 => String::new(),
         1 => values[0].clone(),
         2 => format!("{} and {}", values[0], values[1]),
-        _ => format!("{}, and {}", values[..values.len() - 1].join(", "), values[values.len() - 1]),
+        _ => format!(
+            "{}, and {}",
+            values[..values.len() - 1].join(", "),
+            values[values.len() - 1]
+        ),
     }
 }
 
@@ -266,7 +274,10 @@ fn break_opportunities(p: &[char]) -> Vec<usize> {
             ends.push(i);
             continue;
         }
-        if (c == '-' && i > 0 && p[i - 1].is_alphanumeric() && p.get(i + 1).map(|n| n.is_alphanumeric()).unwrap_or(false))
+        if (c == '-'
+            && i > 0
+            && p[i - 1].is_alphanumeric()
+            && p.get(i + 1).map(|n| n.is_alphanumeric()).unwrap_or(false))
             || (c == '/' && p.get(i + 1).map(|n| n.is_alphabetic()).unwrap_or(false))
         {
             ends.push(i + 1);
@@ -315,7 +326,11 @@ pub fn paragraph_fill(input: &str, indent: usize, width: usize) -> String {
 
 /// `OptionsUsage.getUsage(option, usage, verbosity, data, includeTags)`.
 fn option_usage(d: &OptionDefinition, usage: &mut String, v: HelpVerbosity, include_tags: bool) {
-    let flag = if d.uses_boolean_syntax() { format!("[no]{}", d.name) } else { d.name.to_string() };
+    let flag = if d.uses_boolean_syntax() {
+        format!("[no]{}", d.name)
+    } else {
+        d.name.to_string()
+    };
     usage.push_str("  --");
     usage.push_str(&flag);
     if v == HelpVerbosity::Short {
@@ -382,7 +397,11 @@ fn option_usage(d: &OptionDefinition, usage: &mut String, v: HelpVerbosity, incl
             .map(|t| t.as_str().to_ascii_lowercase()),
     );
     if !tags.is_empty() {
-        usage.push_str(&paragraph_fill(&format!("Tags: {}", tags.join(", ")), 6, 80));
+        usage.push_str(&paragraph_fill(
+            &format!("Tags: {}", tags.join(", ")),
+            6,
+            80,
+        ));
         usage.push('\n');
     }
 }
@@ -391,8 +410,11 @@ fn option_usage(d: &OptionDefinition, usage: &mut String, v: HelpVerbosity, incl
 fn options_by_category<'a>(defs: &[&'a OptionDefinition]) -> Vec<(Cat, Vec<&'a OptionDefinition>)> {
     let mut out = Vec::new();
     for cat in DOCUMENTATION_ORDER {
-        let mut v: Vec<&OptionDefinition> =
-            defs.iter().copied().filter(|d| d.documentation_category == *cat).collect();
+        let mut v: Vec<&OptionDefinition> = defs
+            .iter()
+            .copied()
+            .filter(|d| d.documentation_category == *cat)
+            .collect();
         v.sort_by(|a, b| a.name.cmp(b.name));
         out.push((*cat, v));
     }
@@ -417,10 +439,16 @@ pub fn describe_options(defs: &[&OptionDefinition], v: HelpVerbosity) -> String 
 }
 
 /// `BlazeCommandUtils.expandHelpTopic`.
-pub fn expand_help_topic(topic: &str, template: &str, defs: &[&OptionDefinition], v: HelpVerbosity) -> String {
+pub fn expand_help_topic(
+    topic: &str,
+    template: &str,
+    defs: &[&OptionDefinition],
+    v: HelpVerbosity,
+) -> String {
     let p = product_name();
     let options = describe_options(defs, v).replace("%{product}", p);
     let mut s = template
+        .replace("\r\n", "\n")
         .replace("%{product}", p)
         .replace("%{command}", topic)
         .replace("%{options}", &options)
@@ -465,21 +493,29 @@ fn command_template(name: &str) -> &'static str {
 /// Every option of a command (`BlazeCommandUtils.getOptions` -> the options of all of the command's options
 /// classes), including undocumented ones, sorted by name (`OptionsParser.visitOptions`).
 pub fn command_all_options(command: &str) -> Vec<&'static OptionDefinition> {
-    let mut v: Vec<&'static OptionDefinition> =
-        ALL_COMMAND_OPTIONS.iter().filter(|d| d.commands.contains(&command)).collect();
+    let mut v: Vec<&'static OptionDefinition> = ALL_COMMAND_OPTIONS
+        .iter()
+        .filter(|d| d.commands.contains(&command))
+        .collect();
     v.sort_by(|a, b| a.name.cmp(b.name));
     v
 }
 
 /// The documented options of a command (what `help <command>` / `OptionsParser.describeOptions` describe).
 pub fn command_options(command: &str) -> Vec<&'static OptionDefinition> {
-    command_all_options(command).into_iter().filter(|d| d.documentation_category != Cat::Undocumented).collect()
+    command_all_options(command)
+        .into_iter()
+        .filter(|d| d.documentation_category != Cat::Undocumented)
+        .collect()
 }
 
 /// `BlazeCommandUtils.getUsage` for a command.
 pub fn command_usage(command: &str, v: HelpVerbosity) -> String {
     let defs: Vec<&OptionDefinition> = if command == "startup_options" {
-        ALL_STARTUP_OPTIONS.iter().filter(|d| d.documentation_category != Cat::Undocumented).collect()
+        ALL_STARTUP_OPTIONS
+            .iter()
+            .filter(|d| d.documentation_category != Cat::Undocumented)
+            .collect()
     } else {
         command_options(command)
     };
@@ -492,7 +528,10 @@ pub fn command_usage(command: &str, v: HelpVerbosity) -> String {
 }
 
 fn version_line() -> String {
-    format!("{:>80}\n", format!("[{} {}]", product_name(), crate::release_name()))
+    format!(
+        "{:>80}\n",
+        format!("[{} {}]", product_name(), crate::release_name())
+    )
 }
 
 fn generic_help() -> String {
@@ -502,7 +541,11 @@ fn generic_help() -> String {
         if c.hidden {
             continue;
         }
-        s.push_str(&format!("  {:<19} {}\n", c.name, expand_product(c.short_description)));
+        s.push_str(&format!(
+            "  {:<19} {}\n",
+            c.name,
+            expand_product(c.short_description)
+        ));
     }
     s.push_str(&format!(
         "\nGetting more help:\n  {p} help <command>\n                   Prints help and options for <command>.\n  {p} help startup_options\n                   Options for the JVM hosting {p}.\n  {p} help target-syntax\n                   Explains the syntax for specifying targets.\n  {p} help info-keys\n                   Displays a list of keys used by the info command.\n"
@@ -518,7 +561,12 @@ fn completion_line(d: &OptionDefinition, out: &mut String) {
         OptionType::Custom(c) => *c,
         _ => "",
     };
-    if d.allow_multiple && !matches!(d.option_type, OptionType::Boolean | OptionType::TriState | OptionType::Void) {
+    if d.allow_multiple
+        && !matches!(
+            d.option_type,
+            OptionType::Boolean | OptionType::TriState | OptionType::Void
+        )
+    {
         out.push_str("=\n");
         return;
     }
@@ -528,18 +576,25 @@ fn completion_line(d: &OptionDefinition, out: &mut String) {
         OptionType::Enum(spec) => out.push_str(&format!("={{{}}}\n", spec.values.join(","))),
         OptionType::Label => out.push_str("=label\n"),
         OptionType::Void => out.push('\n'),
-        OptionType::Custom(_) if !d.enum_values.is_empty() => {
-            out.push_str(&format!("={{{}}}\n", d.enum_values.join(",").to_lowercase()))
-        }
+        OptionType::Custom(_) if !d.enum_values.is_empty() => out.push_str(&format!(
+            "={{{}}}\n",
+            d.enum_values.join(",").to_lowercase()
+        )),
         OptionType::Custom(_)
             if matches!(
                 conv,
-                "LabelConverter" | "EmptyToNullLabelConverter" | "LibcTopLabelConverter" | "HostPlatformConverter"
+                "LabelConverter"
+                    | "EmptyToNullLabelConverter"
+                    | "LibcTopLabelConverter"
+                    | "HostPlatformConverter"
             ) =>
         {
             out.push_str("=label\n")
         }
-        OptionType::Custom(_) if conv.contains("PathFragment") || matches!(conv, "DiskCacheConverter" | "ExecutionLogFileConverter") => {
+        OptionType::Custom(_)
+            if conv.contains("PathFragment")
+                || matches!(conv, "DiskCacheConverter" | "ExecutionLogFileConverter") =>
+        {
             out.push_str("=path\n")
         }
         _ => out.push_str("=\n"),
@@ -547,8 +602,11 @@ fn completion_line(d: &OptionDefinition, out: &mut String) {
 }
 
 fn completion_options(defs: &[&OptionDefinition]) -> String {
-    let mut sorted: Vec<&OptionDefinition> =
-        defs.iter().copied().filter(|d| d.documentation_category != Cat::Undocumented).collect();
+    let mut sorted: Vec<&OptionDefinition> = defs
+        .iter()
+        .copied()
+        .filter(|d| d.documentation_category != Cat::Undocumented)
+        .collect();
     sorted.sort_by(|a, b| a.name.cmp(b.name));
     let mut out = String::new();
     for d in sorted {
@@ -578,14 +636,20 @@ fn completion_variables() -> String {
     out.push_str("\"\n");
 
     out.push_str("BAZEL_STARTUP_OPTIONS=\"\n");
-    let startup_defs: Vec<&OptionDefinition> = ALL_STARTUP_OPTIONS.iter().filter(|d| !d.is_internal()).collect();
+    let startup_defs: Vec<&OptionDefinition> = ALL_STARTUP_OPTIONS
+        .iter()
+        .filter(|d| !d.is_internal())
+        .collect();
     out.push_str(&completion_options(&startup_defs));
     out.push_str("\"\n");
 
     for c in &sorted_commands {
         let var_name = upper_underscore(c.name);
         if !c.completion.is_empty() {
-            out.push_str(&format!("BAZEL_COMMAND_{var_name}_ARGUMENT=\"{}\"\n", c.completion));
+            out.push_str(&format!(
+                "BAZEL_COMMAND_{var_name}_ARGUMENT=\"{}\"\n",
+                c.completion
+            ));
         }
         out.push_str(&format!("BAZEL_COMMAND_{var_name}_FLAGS=\"\n"));
         let defs = command_options(c.name);
@@ -605,8 +669,16 @@ fn base64(data: &[u8]) -> String {
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         s.push(T[(n >> 18) as usize & 63] as char);
         s.push(T[(n >> 12) as usize & 63] as char);
-        s.push(if ch.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        s.push(if ch.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        s.push(if ch.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        s.push(if ch.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     s
 }
@@ -639,7 +711,10 @@ fn java_hashmap_iteration_order(keys: &[&str]) -> Vec<usize> {
         let spread = h ^ (h >> 16);
         buckets[(spread as usize) & (capacity - 1)].push(i);
     }
-    buckets.into_iter().flat_map(|b| b.into_iter().rev()).collect()
+    buckets
+        .into_iter()
+        .flat_map(|b| b.into_iter().rev())
+        .collect()
 }
 
 /// `HelpCommand.emitFlagsAsProtoHelp`: every non-internal option of the startup options and of every command's
@@ -647,7 +722,8 @@ fn java_hashmap_iteration_order(keys: &[&str]) -> Vec<usize> {
 /// creates the `FlagInfo`, each visit appends the command — serialized as a `FlagCollection` in `HashMap` order.
 fn flags_as_proto() -> String {
     let mut visited: Vec<(&'static OptionDefinition, Vec<&'static str>)> = Vec::new();
-    let mut index: std::collections::HashMap<&'static str, usize> = std::collections::HashMap::new();
+    let mut index: std::collections::HashMap<&'static str, usize> =
+        std::collections::HashMap::new();
     let mut visit = |d: &'static OptionDefinition, command: &'static str| {
         if d.is_internal() {
             return;
@@ -730,17 +806,29 @@ fn bytes_into(collection: &mut Vec<u8>, flag: &[u8]) {
 }
 
 fn html_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 /// commonmark-java `Escaping.escapeHtml`: `&`, `<`, `>` and `"` only (not `'`, unlike Guava's `HtmlEscapers`).
+#[allow(dead_code)]
 fn commonmark_escape(s: &str) -> String {
-    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn option_usage_html(d: &OptionDefinition, usage: &mut String, command: Option<&str>) {
     let plain = d.name;
-    let flag = if d.uses_boolean_syntax() { format!("[no]{plain}") } else { plain.to_string() };
+    let flag = if d.uses_boolean_syntax() {
+        format!("[no]{plain}")
+    } else {
+        plain.to_string()
+    };
     let anchor = match command {
         Some(c) => format!("{c}-flag--{plain}"),
         None => format!("flag--{plain}"),
@@ -822,12 +910,17 @@ fn option_usage_html(d: &OptionDefinition, usage: &mut String, command: Option<&
 fn options_html(defs: &[&OptionDefinition], command: Option<&str>) -> String {
     let mut desc = String::new();
     for (cat, list) in options_by_category(defs) {
-        let list: Vec<&&OptionDefinition> =
-            list.iter().filter(|d| !d.effect_tags.contains(&OptionEffectTag::NoOp)).collect();
+        let list: Vec<&&OptionDefinition> = list
+            .iter()
+            .filter(|d| !d.effect_tags.contains(&OptionEffectTag::NoOp))
+            .collect();
         if list.is_empty() {
             continue;
         }
-        desc.push_str(&format!("<dl>{}:\n", html_escape(category_description(cat))));
+        desc.push_str(&format!(
+            "<dl>{}:\n",
+            html_escape(category_description(cat))
+        ));
         for d in list {
             option_usage_html(d, &mut desc, command);
         }
@@ -857,7 +950,9 @@ fn get_command_inherits(cmd: &str) -> Vec<&'static str> {
 /// from the command table and the option classes of each command (`COMMAND_OPTION_CLASSES`:
 /// the classes of `@Command(options)` plus the module-contributed ones, *not* inherited ones).
 fn everything_as_html() -> String {
-    use zel_options::{COMMAND_INHERITANCE, COMMAND_OPTION_CLASSES, COMMON_OPTION_CLASSES, FRAGMENT_OPTION_CLASSES};
+    use zel_options::{
+        COMMAND_INHERITANCE, COMMAND_OPTION_CLASSES, COMMON_OPTION_CLASSES, FRAGMENT_OPTION_CLASSES,
+    };
     let mut result = String::new();
     result.push_str("<h2>Commands</h2>\n<table>\n");
     // `getSortedCommands`: every registered command, hidden ones included, in name order.
@@ -866,14 +961,20 @@ fn everything_as_html() -> String {
     for c in sorted_commands.iter().filter(|c| !c.hidden) {
         let short_desc = expand_product(c.short_description);
         result.push_str("<tr>\n");
-        result.push_str(&format!("  <td><a href=\"#{}\"><code>{}</code></a></td>\n", c.name, c.name));
+        result.push_str(&format!(
+            "  <td><a href=\"#{}\"><code>{}</code></a></td>\n",
+            c.name, c.name
+        ));
         result.push_str(&format!("  <td>{}</td>\n", html_escape(&short_desc)));
         result.push_str("</tr>\n");
     }
     result.push_str("</table>\n\n");
 
     result.push_str("<h2>Startup Options</h2>\n");
-    let startup_defs: Vec<&OptionDefinition> = ALL_STARTUP_OPTIONS.iter().filter(|d| !d.is_internal()).collect();
+    let startup_defs: Vec<&OptionDefinition> = ALL_STARTUP_OPTIONS
+        .iter()
+        .filter(|d| !d.is_internal())
+        .collect();
     result.push_str(&options_html(&startup_defs, Some("startup_options")));
     result.push('\n');
 
@@ -887,16 +988,29 @@ fn everything_as_html() -> String {
 
     for c in &sorted_commands {
         let cap_name = capitalize(c.name);
-        result.push_str(&format!("<h2><a name=\"{}\">{} Options</a></h2>\n", c.name, cap_name));
+        result.push_str(&format!(
+            "<h2><a name=\"{}\">{} Options</a></h2>\n",
+            c.name, cap_name
+        ));
         if c.hidden {
             continue;
         }
         let inherits = get_command_inherits(c.name);
         if !inherits.is_empty() {
-            let links: Vec<String> = inherits.iter().map(|n| format!("<a href=\"#{n}\">{n}</a>")).collect();
-            result.push_str(&format!("<p>Inherits all options from {}.</p>\n\n", join_english_and(&links)));
+            let links: Vec<String> = inherits
+                .iter()
+                .map(|n| format!("<a href=\"#{n}\">{n}</a>"))
+                .collect();
+            result.push_str(&format!(
+                "<p>Inherits all options from {}.</p>\n\n",
+                join_english_and(&links)
+            ));
         }
-        let direct: &[&str] = COMMAND_OPTION_CLASSES.iter().find(|e| e.0 == c.name).map(|e| e.1).unwrap_or(&[]);
+        let direct: &[&str] = COMMAND_OPTION_CLASSES
+            .iter()
+            .find(|e| e.0 == c.name)
+            .map(|e| e.1)
+            .unwrap_or(&[]);
         let cmd_defs: Vec<&OptionDefinition> = ALL_COMMAND_OPTIONS
             .iter()
             .filter(|d| direct.contains(&d.java_class) && !d.is_internal())
@@ -906,7 +1020,11 @@ fn everything_as_html() -> String {
 
         // The configuration (fragment) options follow, without a command-specific anchor and
         // minus the names already listed above.
-        if COMMAND_INHERITANCE.iter().find(|e| e.0 == c.name).is_some_and(|e| e.2) {
+        if COMMAND_INHERITANCE
+            .iter()
+            .find(|e| e.0 == c.name)
+            .is_some_and(|e| e.2)
+        {
             let listed: HashSet<&str> = options_by_category(&cmd_defs)
                 .iter()
                 .flat_map(|(_, l)| l.iter().map(|d| d.name))
@@ -914,7 +1032,8 @@ fn everything_as_html() -> String {
             let cfg_defs: Vec<&OptionDefinition> = ALL_COMMAND_OPTIONS
                 .iter()
                 .filter(|d| {
-                    (direct.contains(&d.java_class) || FRAGMENT_OPTION_CLASSES.contains(&d.java_class))
+                    (direct.contains(&d.java_class)
+                        || FRAGMENT_OPTION_CLASSES.contains(&d.java_class))
                         && !d.is_internal()
                         && !listed.contains(d.name)
                 })
@@ -928,7 +1047,11 @@ fn everything_as_html() -> String {
     for tag in ALL_EFFECT_TAGS {
         let desc = effect_tag_description(*tag);
         result.push_str("<tr>\n");
-        result.push_str(&format!("<td id=\"effect_tag_{}\"><code>{}</code></td>\n", tag.as_str(), tag.as_str().to_ascii_lowercase()));
+        result.push_str(&format!(
+            "<td id=\"effect_tag_{}\"><code>{}</code></td>\n",
+            tag.as_str(),
+            tag.as_str().to_ascii_lowercase()
+        ));
         result.push_str(&format!("<td>{}</td>\n", html_escape(&desc)));
         result.push_str("</tr>\n");
     }
@@ -941,7 +1064,11 @@ fn everything_as_html() -> String {
         }
         let desc = metadata_tag_description(*tag);
         result.push_str("<tr>\n");
-        result.push_str(&format!("<td id=\"metadata_tag_{}\"><code>{}</code></td>\n", tag.as_str(), tag.as_str().to_ascii_lowercase()));
+        result.push_str(&format!(
+            "<td id=\"metadata_tag_{}\"><code>{}</code></td>\n",
+            tag.as_str(),
+            tag.as_str().to_ascii_lowercase()
+        ));
         result.push_str(&format!("<td>{}</td>\n", html_escape(desc)));
         result.push_str("</tr>\n");
     }
@@ -952,7 +1079,12 @@ fn everything_as_html() -> String {
 
 impl BlazeRuntime {
     /// `HelpCommand.exec`.
-    pub(crate) fn cmd_help(&self, args: &[String], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> ExitCode {
+    pub(crate) fn cmd_help(
+        &self,
+        args: &[String],
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
         let parsed = match ParsedCommandOptions::parse_for_command("help", args) {
             Ok(p) => p,
             Err(e) => {
@@ -986,14 +1118,23 @@ impl BlazeRuntime {
         }
         if residue[0] == "completion" {
             if residue.len() > 2 {
-                writeln_bytes(stderr, "ERROR: The completion command takes at most one argument");
+                writeln_bytes(
+                    stderr,
+                    "ERROR: The completion command takes at most one argument",
+                );
                 return ExitCode::COMMAND_LINE_ERROR;
             }
             match residue.get(1).map(String::as_str) {
                 Some("bash") => {
-                    writeln_bytes(stdout, include_str!("../../resources/help/bazel-complete-header.bash"));
+                    writeln_bytes(
+                        stdout,
+                        include_str!("../../resources/help/bazel-complete-header.bash"),
+                    );
                     put(stdout, &completion_variables());
-                    writeln_bytes(stdout, include_str!("../../resources/help/bazel-complete-template.bash"));
+                    writeln_bytes(
+                        stdout,
+                        include_str!("../../resources/help/bazel-complete-template.bash"),
+                    );
                 }
                 None => put(stdout, &completion_variables()),
                 Some(other) => {
@@ -1014,10 +1155,7 @@ impl BlazeRuntime {
         match subject {
             "startup_options" => {
                 put(stdout, &version_line());
-                put(
-                    stdout,
-                    &command_usage("startup_options", verbosity),
-                );
+                put(stdout, &command_usage("startup_options", verbosity));
                 return ExitCode::SUCCESS;
             }
             "target-syntax" => {
@@ -1050,7 +1188,10 @@ impl BlazeRuntime {
             _ => {}
         }
         if !COMMANDS.iter().any(|c| c.name == subject) {
-            writeln_bytes(stderr, &format!("ERROR: '{subject}' is not a known command"));
+            writeln_bytes(
+                stderr,
+                &format!("ERROR: '{subject}' is not a known command"),
+            );
             return ExitCode::COMMAND_LINE_ERROR;
         }
         put(stdout, &version_line());
@@ -1088,7 +1229,8 @@ mod tests {
     }
 
     fn flags() -> Vec<Msg> {
-        let coll = Msg::decode("bazel_flags.FlagCollection", &b64_decode(&flags_as_proto())).unwrap();
+        let coll =
+            Msg::decode("bazel_flags.FlagCollection", &b64_decode(&flags_as_proto())).unwrap();
         coll.get_msgs("flag_infos").into_iter().cloned().collect()
     }
 
@@ -1118,11 +1260,18 @@ mod tests {
             .collect();
         assert_eq!(names.len(), expected.len());
         // undocumented options are included (HelpCommand visits every option)
-        assert!(names.contains(&"enable_bzlmod") && names.contains(&"client_env") && names.contains(&"write_command_log"));
+        assert!(
+            names.contains(&"enable_bzlmod")
+                && names.contains(&"client_env")
+                && names.contains(&"write_command_log")
+        );
         // no ghost flags
         assert!(!names.contains(&"help"));
         // the same-named startup/command option is one flag, `startup` first (startup options are visited first)
-        let wcl = flags.iter().find(|f| f.get_str("name") == "write_command_log").unwrap();
+        let wcl = flags
+            .iter()
+            .find(|f| f.get_str("name") == "write_command_log")
+            .unwrap();
         let cmds = commands(wcl);
         assert_eq!(cmds[0], "startup");
         assert!(cmds.contains(&"build".to_string()) && cmds.contains(&"query".to_string()));
@@ -1132,13 +1281,20 @@ mod tests {
         assert_eq!(find("run"), ["run"]);
         assert_eq!(find("start"), ["mobile-install"]);
         assert_eq!(find("expunge"), ["clean"]);
-        assert!(find("jobs").contains(&"info".to_string()) && find("jobs").contains(&"clean".to_string()));
+        assert!(
+            find("jobs").contains(&"info".to_string())
+                && find("jobs").contains(&"clean".to_string())
+        );
         assert!(!find("jobs").contains(&"query".to_string()));
         // commands are sorted by name after `startup`
         for f in &flags {
             let c = commands(f);
             let rest: Vec<&String> = c.iter().filter(|c| *c != "startup").collect();
-            assert!(rest.windows(2).all(|w| w[0] < w[1]), "{}: {c:?}", f.get_str("name"));
+            assert!(
+                rest.windows(2).all(|w| w[0] < w[1]),
+                "{}: {c:?}",
+                f.get_str("name")
+            );
         }
     }
 
@@ -1146,16 +1302,29 @@ mod tests {
     fn flags_as_proto_serializes_explicit_presence_fields() {
         let flags = flags();
         let jobs = flags.iter().find(|f| f.get_str("name") == "jobs").unwrap();
-        assert!(jobs.has("has_negative_flag") && jobs.has("allows_multiple") && jobs.has("requires_value"));
+        assert!(
+            jobs.has("has_negative_flag")
+                && jobs.has("allows_multiple")
+                && jobs.has("requires_value")
+        );
         assert!(!jobs.get_bool("has_negative_flag") && jobs.get_bool("requires_value"));
         assert_eq!(jobs.get_str("abbreviation"), "j");
         assert_eq!(jobs.get_str("default_value"), "auto");
         assert_eq!(jobs.get_str("documentation_category"), "EXECUTION_STRATEGY");
-        let cm = flags.iter().find(|f| f.get_str("name") == "compilation_mode").unwrap();
+        let cm = flags
+            .iter()
+            .find(|f| f.get_str("name") == "compilation_mode")
+            .unwrap();
         assert_eq!(cm.get_str("abbreviation"), "c");
-        assert!(cm.has("type_converter") && cm.get_str("type_converter").is_empty(), "nested `Converter` class -> \"\"");
+        assert!(
+            cm.has("type_converter") && cm.get_str("type_converter").is_empty(),
+            "nested `Converter` class -> \"\""
+        );
         // undocumented flags keep their category; special-null defaults carry no default_value
-        let ebz = flags.iter().find(|f| f.get_str("name") == "enable_bzlmod").unwrap();
+        let ebz = flags
+            .iter()
+            .find(|f| f.get_str("name") == "enable_bzlmod")
+            .unwrap();
         assert_eq!(ebz.get_str("documentation_category"), "UNDOCUMENTED");
         assert_eq!(ebz.get_str("old_name"), "experimental_enable_bzlmod");
         let long = flags.iter().find(|f| f.get_str("name") == "long").unwrap();
@@ -1189,11 +1358,29 @@ mod tests {
 
     #[test]
     fn help_command_lists_exactly_the_options_of_the_command() {
-        let build: HashSet<&str> = command_all_options("build").iter().map(|d| d.name).collect();
-        for leaked in ["order_output", "run", "start", "script_path", "expunge", "keep_going_dummy"] {
-            assert!(!build.contains(leaked), "{leaked} must not be a build option");
+        let build: HashSet<&str> = command_all_options("build")
+            .iter()
+            .map(|d| d.name)
+            .collect();
+        for leaked in [
+            "order_output",
+            "run",
+            "start",
+            "script_path",
+            "expunge",
+            "keep_going_dummy",
+        ] {
+            assert!(
+                !build.contains(leaked),
+                "{leaked} must not be a build option"
+            );
         }
-        for owned in ["write_command_log", "jobs", "compilation_mode", "client_env"] {
+        for owned in [
+            "write_command_log",
+            "jobs",
+            "compilation_mode",
+            "client_env",
+        ] {
             assert!(build.contains(owned), "{owned} missing from build");
         }
         let usage = command_usage("build", HelpVerbosity::Medium);
@@ -1203,7 +1390,9 @@ mod tests {
         // every command shows the client options block (RepositoryOptions et al. are common options)
         for c in ["clean", "info", "dump", "version", "query", "build"] {
             assert!(
-                command_usage(c, HelpVerbosity::Medium).contains("Options that appear before the command and are parsed by the client:"),
+                command_usage(c, HelpVerbosity::Medium).contains(
+                    "Options that appear before the command and are parsed by the client:"
+                ),
                 "{c}"
             );
         }
@@ -1216,12 +1405,27 @@ mod everything_as_html_tests {
     fn lists_per_command_options_including_superclass_options() {
         let html = super::everything_as_html();
         // R7-1: per-command option documentation (declaring classes are matched by binary name).
-        assert!(html.matches("<dt").count() > 1500, "only {} <dt>", html.matches("<dt").count());
-        for anchor in ["build-flag--jobs", "query-flag--universe_scope", "aquery-flag--include_aspects", "cquery-flag--output"] {
-            assert!(html.contains(&format!("<dt id=\"{anchor}\"")), "{anchor} missing");
+        assert!(
+            html.matches("<dt").count() > 1500,
+            "only {} <dt>",
+            html.matches("<dt").count()
+        );
+        for anchor in [
+            "build-flag--jobs",
+            "query-flag--universe_scope",
+            "aquery-flag--include_aspects",
+            "cquery-flag--output",
+        ] {
+            assert!(
+                html.contains(&format!("<dt id=\"{anchor}\"")),
+                "{anchor} missing"
+            );
         }
         // commonmark-java does not escape apostrophes, Markdown renders `_x_` as emphasis.
         assert!(html.contains("use 'batch' CPU scheduling"));
-        assert!(html.contains("${OUTPUT_ROOT}/<em>blaze</em>${USER}") || html.contains("${OUTPUT_ROOT}/_blaze_${USER}"));
+        assert!(
+            html.contains("${OUTPUT_ROOT}/<em>blaze</em>${USER}")
+                || html.contains("${OUTPUT_ROOT}/_blaze_${USER}")
+        );
     }
 }

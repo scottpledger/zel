@@ -13,17 +13,18 @@
 // limitations under the License.
 
 //! `ctx.actions.args()` (`Args.java`): `add`, `add_all`, `add_joined`, `use_param_file`,
-//! `set_param_file_format`. Arguments are materialised eagerly (including `map_each`
-//! callbacks) when called, rather than lazily at execution time.
+//! `set_param_file_format`.
 
 use crate::objects::{artifact_of, file_value};
-use crate::{CommandLineArgs, ParamFileFormat, ParamFileInfo};
+use crate::{Artifact, CommandLineArgs, ParamFileFormat, ParamFileInfo};
 use std::collections::BTreeMap;
 use zel_starlark::{EvalContext, StarlarkError, Value};
 
 /// Prefix of a command-line element that stands for the files of a tree artifact (directory):
 /// `\u{1}ZEL_TREE\u{1}<format_each>\u{1}<before_each>\u{1}<exec path of the directory>`.
 pub const TREE_MARKER: &str = "\u{1}ZEL_TREE\u{1}";
+const TREE_HEAD_MARKER: &str = "\u{1}ZEL_TREE_HEAD\u{1}";
+const TREE_TAIL_MARKER: &str = "\u{1}ZEL_TREE_TAIL\u{1}";
 const TREE_SEP: char = '\u{1}';
 
 /// Expands the tree-artifact placeholders of `argv` (see [`TREE_MARKER`]). `list_dir` returns the
@@ -34,25 +35,101 @@ pub fn expand_tree_artifact_args(
     list_dir: &dyn Fn(&str) -> Result<Vec<String>, String>,
 ) -> Result<Vec<String>, String> {
     let mut out = Vec::with_capacity(argv.len());
-    for a in argv {
-        let Some(rest) = a.strip_prefix(TREE_MARKER) else {
-            out.push(a.clone());
-            continue;
-        };
-        let mut parts = rest.splitn(3, TREE_SEP);
-        let (fmt, before, dir) = (
-            parts.next().unwrap_or(""),
-            parts.next().unwrap_or(""),
-            parts.next().unwrap_or(""),
-        );
-        for f in list_dir(dir)? {
-            if !before.is_empty() {
-                out.push(before.to_string());
+    let mut i = 0;
+    while i < argv.len() {
+        let a = &argv[i];
+        if let Some(head) = a.strip_prefix(TREE_HEAD_MARKER) {
+            // Conditional group: HEAD, one or more TREE_MARKERs, optional TAIL.
+            i += 1;
+            let mut group_expanded = Vec::new();
+            while i < argv.len() {
+                if let Some(rest) = argv[i].strip_prefix(TREE_MARKER) {
+                    expand_one_tree(rest, list_dir, &mut group_expanded)?;
+                    i += 1;
+                } else {
+                    break;
+                }
             }
-            out.push(if fmt.is_empty() { f } else { format_arg(fmt, &f).map_err(|e| e.0)? });
+            let tail = if i < argv.len() {
+                if let Some(t) = argv[i].strip_prefix(TREE_TAIL_MARKER) {
+                    i += 1;
+                    Some(t)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if !group_expanded.is_empty() {
+                out.push(head.to_string());
+                out.extend(group_expanded);
+                if let Some(t) = tail {
+                    out.push(t.to_string());
+                }
+            }
+            continue;
         }
+        if a.starts_with(TREE_MARKER) {
+            let mut group_expanded = Vec::new();
+            while i < argv.len() {
+                if let Some(r) = argv[i].strip_prefix(TREE_MARKER) {
+                    expand_one_tree(r, list_dir, &mut group_expanded)?;
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+            let tail = if i < argv.len() {
+                if let Some(t) = argv[i].strip_prefix(TREE_TAIL_MARKER) {
+                    i += 1;
+                    Some(t)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+            if !group_expanded.is_empty() {
+                out.extend(group_expanded);
+                if let Some(t) = tail {
+                    out.push(t.to_string());
+                }
+            }
+            continue;
+        }
+        if let Some(t) = a.strip_prefix(TREE_TAIL_MARKER) {
+            out.push(t.to_string());
+            i += 1;
+            continue;
+        }
+        out.push(a.clone());
+        i += 1;
     }
     Ok(out)
+}
+
+fn expand_one_tree(
+    rest: &str,
+    list_dir: &dyn Fn(&str) -> Result<Vec<String>, String>,
+    out: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut parts = rest.splitn(3, TREE_SEP);
+    let (fmt, before, dir) = (
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+    );
+    for f in list_dir(dir)? {
+        if !before.is_empty() {
+            out.push(before.to_string());
+        }
+        out.push(if fmt.is_empty() {
+            f
+        } else {
+            format_arg(fmt, &f).map_err(|e| e.0)?
+        });
+    }
+    Ok(())
 }
 
 #[derive(Default)]
@@ -60,6 +137,7 @@ pub(crate) struct ArgsBuilder {
     pub args: Vec<String>,
     pub param_file: Option<ParamFileInfo>,
     pub format: Option<ParamFileFormat>,
+    pub directory_artifacts: Vec<Artifact>,
 }
 
 impl ArgsBuilder {
@@ -67,10 +145,11 @@ impl ArgsBuilder {
         let mut p = self.param_file.clone();
         if let (Some(p), Some(f)) = (p.as_mut(), self.format) {
             p.format = f;
-        } else if p.is_none() && self.format.is_some() {
-            // set_param_file_format alone does not enable param files.
         }
-        CommandLineArgs { args: self.args.clone(), param_file: p }
+        CommandLineArgs {
+            args: self.args.clone(),
+            param_file: p,
+        }
     }
 }
 
@@ -78,11 +157,36 @@ fn e(m: impl Into<String>) -> StarlarkError {
     StarlarkError(m.into())
 }
 
+/// Validates a `SingleStringArgFormatter` format string (`%s` exactly once, `%%` is literal `%`).
+pub(crate) fn validate_format_str(param: &str, fmt: &str) -> Result<(), StarlarkError> {
+    let mut seen = 0;
+    let mut chars = fmt.chars();
+    while let Some(c) = chars.next() {
+        if c == '%' {
+            match chars.next() {
+                Some('s') => seen += 1,
+                Some('%') => {}
+                _ => {
+                    return Err(e(format!(
+                        "Invalid value for parameter \"{param}\": Expected string with a single \"%s\", got \"{fmt}\""
+                    )))
+                }
+            }
+        }
+    }
+    if seen != 1 {
+        return Err(e(format!(
+            "Invalid value for parameter \"{param}\": Expected string with a single \"%s\", got \"{fmt}\""
+        )));
+    }
+    Ok(())
+}
+
 /// `SingleStringArgFormatter`: substitutes the single `%s`; `%%` is a literal percent.
 pub(crate) fn format_arg(fmt: &str, arg: &str) -> Result<String, StarlarkError> {
     let mut out = String::new();
     let mut seen = 0;
-    let mut chars = fmt.chars().peekable();
+    let mut chars = fmt.chars();
     while let Some(c) = chars.next() {
         if c == '%' {
             match chars.next() {
@@ -114,6 +218,8 @@ pub(crate) fn stringify(v: &Value, what: &str) -> Result<String, StarlarkError> 
     match v {
         Value::String(s) => Ok(s.clone()),
         Value::Int(i) => Ok(i.to_string()),
+        Value::Bool(b) => Ok(if *b { "True" } else { "False" }.to_string()),
+        Value::Float(f) => Ok(zel_starlark::format_float(*f)),
         Value::Label(l) => Ok(l.canonical_form()),
         Value::Host(k, _) if k == "file" => {
             Ok(artifact_of(v).expect("file").exec_path.path_string().to_string())
@@ -126,26 +232,40 @@ pub(crate) fn stringify(v: &Value, what: &str) -> Result<String, StarlarkError> 
     }
 }
 
-fn flatten(v: &Value) -> Result<Vec<Value>, StarlarkError> {
+fn flatten(v: &Value, func: &str) -> Result<Vec<Value>, StarlarkError> {
     match v {
         Value::Depset(d) => Ok(d.to_list()),
         Value::List(_) | Value::Tuple(_) => zel_starlark::eval::builtins::value_to_sequence(v),
         other => Err(e(format!(
-            "in call to add_all(), parameter 'values' got value of type '{}', want 'sequence or depset'",
+            "in call to {func}(), parameter 'values' got value of type '{}', want 'sequence or depset'",
             other.type_name()
         ))),
     }
 }
 
-fn arg<'a>(pos: &'a [Value], kw: &'a BTreeMap<String, Value>, i: usize, name: &str) -> Option<&'a Value> {
+fn arg<'a>(
+    pos: &'a [Value],
+    kw: &'a BTreeMap<String, Value>,
+    i: usize,
+    name: &str,
+) -> Option<&'a Value> {
     kw.get(name).or_else(|| pos.get(i))
 }
 
 fn check_kw(
     func: &str,
+    pos: &[Value],
+    max_pos: usize,
     kw: &BTreeMap<String, Value>,
     allowed: &[&str],
 ) -> Result<(), StarlarkError> {
+    if pos.len() > max_pos {
+        return Err(e(format!(
+            "{func}() accepts no more than {max_pos} positional argument{} but got {}",
+            if max_pos == 1 { "" } else { "s" },
+            pos.len()
+        )));
+    }
     for k in kw.keys() {
         if !allowed.contains(&k.as_str()) {
             return Err(e(format!("{func}() got unexpected keyword argument '{k}'")));
@@ -154,10 +274,29 @@ fn check_kw(
     Ok(())
 }
 
-fn truthy(v: Option<&Value>, default: bool) -> bool {
+fn want_bool(
+    v: Option<&Value>,
+    func: &str,
+    param: &str,
+    default: bool,
+) -> Result<bool, StarlarkError> {
     match v {
-        None | Some(Value::None) => default,
-        Some(x) => x.is_truthy(),
+        None => Ok(default),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(other) => Err(e(format!(
+            "in call to {func}(), parameter '{param}' got value of type '{}', want 'bool'",
+            other.type_name()
+        ))),
+    }
+}
+
+fn want_arg_name(v: &Value) -> Result<String, StarlarkError> {
+    match v {
+        Value::String(s) => Ok(s.clone()),
+        other => Err(e(format!(
+            "expected value of type 'string' for arg name, got '{}'",
+            other.type_name()
+        ))),
     }
 }
 
@@ -172,30 +311,69 @@ fn opt_str(v: Option<&Value>, func: &str, param: &str) -> Result<Option<String>,
     }
 }
 
-/// Applies `map_each` (`None` → identity) to the elements, returning the expanded strings.
+fn validate_map_each(
+    fn_val: Option<&Value>,
+    allow_closure: bool,
+) -> Result<Option<&Value>, StarlarkError> {
+    let Some(f) = fn_val else { return Ok(None) };
+    if matches!(f, Value::None) {
+        return Ok(None);
+    }
+    if let Value::UserFunction(u) = f {
+        if !allow_closure && (!u.closure.scopes.is_empty() || u.name == "<lambda>") {
+            return Err(e(format!(
+                "to avoid unintended retention of analysis data structures, the map_each function (declared at {}) must be declared by a top-level def statement",
+                u.location
+            )));
+        }
+    }
+    Ok(Some(f))
+}
+
+enum MappedItem {
+    Concrete(String),
+    TreeDir(String),
+}
+
+/// Applies `map_each` (`None` → identity) to the elements, returning the expanded items.
 fn map_elements(
     ctx: &mut EvalContext,
     items: Vec<Value>,
     map_each: Option<&Value>,
+    expand_dirs: bool,
     func: &str,
-) -> Result<Vec<String>, StarlarkError> {
+) -> Result<Vec<MappedItem>, StarlarkError> {
     let mut out = Vec::new();
     for it in items {
         match map_each {
-            None | Some(Value::None) => out.push(stringify(&it, func)?),
+            None => {
+                if expand_dirs {
+                    if let Some(a) = artifact_of(&it) {
+                        if a.is_tree_artifact {
+                            out.push(MappedItem::TreeDir(a.exec_path.path_string().to_string()));
+                            continue;
+                        }
+                    }
+                }
+                out.push(MappedItem::Concrete(stringify(&it, func)?));
+            }
             Some(f) => {
-                // `map_each(value, tree_expander)`: a two-parameter callback also receives the
-                // directory expander.
-                let wants_expander = matches!(f, Value::UserFunction(u) if u.params.iter().filter(|p| !p.is_args && !p.is_kwargs && p.default.is_none() && !p.is_kw_only).count() >= 2);
-                let call_args = if wants_expander { vec![it, Value::Host("tree_expander".into(), "0".into())] } else { vec![it] };
+                // `Args.java`: pass the directory expander when the user function declares
+                // 2 or more parameters (including optional / keyword-only / *args / **kwargs).
+                let wants_expander = matches!(f, Value::UserFunction(u) if u.params.len() >= 2);
+                let call_args = if wants_expander {
+                    vec![it, Value::Host("tree_expander".into(), "0".into())]
+                } else {
+                    vec![it]
+                };
                 let r = ctx.call_value(f.clone(), call_args, BTreeMap::new())?;
                 match r {
                     Value::None => {}
-                    Value::String(s) => out.push(s),
+                    Value::String(s) => out.push(MappedItem::Concrete(s)),
                     Value::List(_) | Value::Tuple(_) => {
                         for x in zel_starlark::eval::builtins::value_to_sequence(&r)? {
                             match x {
-                                Value::String(s) => out.push(s),
+                                Value::String(s) => out.push(MappedItem::Concrete(s)),
                                 other => {
                                     return Err(e(format!(
                                         "Expected map_each to return string, None, or list of strings, found list containing {}",
@@ -207,9 +385,9 @@ fn map_elements(
                     }
                     other => {
                         return Err(e(format!(
-                            "Expected map_each to return string, None, or list of strings, found {}",
-                            other.type_name()
-                        )))
+                        "Expected map_each to return string, None, or list of strings, found {}",
+                        other.type_name()
+                    )))
                     }
                 }
             }
@@ -227,143 +405,246 @@ pub(crate) fn args_method(
 ) -> Result<Value, StarlarkError> {
     match method {
         "add" => {
-            check_kw("add", kw, &["arg_name_or_value", "value", "format"])?;
-            let first = arg(pos, kw, 0, "arg_name_or_value")
-                .ok_or_else(|| e("add() missing 1 required positional argument: arg_name_or_value"))?;
+            check_kw("add", pos, 2, kw, &["arg_name_or_value", "value", "format"])?;
+            let first = arg(pos, kw, 0, "arg_name_or_value").ok_or_else(|| {
+                e("add() missing 1 required positional argument: arg_name_or_value")
+            })?;
             let value = arg(pos, kw, 1, "value");
-            let fmt = opt_str(kw.get("format").or_else(|| pos.get(2)), "add", "format")?;
+            let fmt = opt_str(kw.get("format"), "add", "format")?;
+            if let Some(f) = &fmt {
+                validate_format_str("format", f)?;
+            }
             let fmtd = |s: String| match &fmt {
                 Some(f) => format_arg(f, &s),
                 None => Ok(s),
             };
+            let check_single = |v: &Value| -> Result<(), StarlarkError> {
+                if matches!(v, Value::Depset(_) | Value::List(_) | Value::Tuple(_)) {
+                    return Err(e(
+                        "Args.add() doesn't accept vectorized arguments. Please use Args.add_all() or Args.add_joined() instead.",
+                    ));
+                }
+                if artifact_of(v).is_some_and(|a| a.is_tree_artifact) {
+                    return Err(e(
+                        "Cannot add directories to Args#add since they may expand to multiple values. Either use Args#add_all (if you want expansion) or args.add(directory.path) (if you do not).",
+                    ));
+                }
+                Ok(())
+            };
             match value {
                 // 9.3.2: a `None` value is stringified (`args.add("--flag", None)` -> `--flag None`).
                 Some(v) => {
-                    b.args.push(stringify(first, "add")?);
-                    let vs = if matches!(v, Value::None) { "None".to_string() } else { stringify(v, "add")? };
+                    check_single(v)?;
+                    b.args.push(want_arg_name(first)?);
+                    let vs = if matches!(v, Value::None) {
+                        "None".to_string()
+                    } else {
+                        stringify(v, "add")?
+                    };
                     b.args.push(fmtd(vs)?);
                 }
-                None => b.args.push(fmtd(stringify(first, "add")?)?),
+                None => {
+                    check_single(first)?;
+                    let vs = if matches!(first, Value::None) {
+                        "None".to_string()
+                    } else {
+                        stringify(first, "add")?
+                    };
+                    b.args.push(fmtd(vs)?);
+                }
             }
             Ok(Value::Host("args".into(), String::new()))
         }
         "add_all" => {
             check_kw(
                 "add_all",
+                pos,
+                2,
                 kw,
                 &[
-                    "arg_name_or_values", "values", "map_each", "format_each", "before_each",
-                    "omit_if_empty", "uniquify", "expand_directories", "terminate_with",
+                    "arg_name_or_values",
+                    "values",
+                    "map_each",
+                    "format_each",
+                    "before_each",
+                    "omit_if_empty",
+                    "uniquify",
+                    "expand_directories",
+                    "terminate_with",
                     "allow_closure",
                 ],
             )?;
-            let first = arg(pos, kw, 0, "arg_name_or_values")
-                .ok_or_else(|| e("add_all() missing 1 required positional argument: arg_name_or_values"))?;
+            let first = arg(pos, kw, 0, "arg_name_or_values").ok_or_else(|| {
+                e("add_all() missing 1 required positional argument: arg_name_or_values")
+            })?;
             let (name, values) = match arg(pos, kw, 1, "values") {
-                Some(v) => (Some(stringify(first, "add_all")?), v.clone()),
+                Some(v) => (Some(want_arg_name(first)?), v.clone()),
                 None => (None, first.clone()),
             };
-            let items = flatten(&values)?;
+            let items = flatten(&values, "add_all")?;
             let before_each = opt_str(kw.get("before_each"), "add_all", "before_each")?;
             let format_each = opt_str(kw.get("format_each"), "add_all", "format_each")?;
             let terminate = opt_str(kw.get("terminate_with"), "add_all", "terminate_with")?;
-            let mut items = items;
-            if truthy(kw.get("uniquify"), false) {
-                let mut seen = std::collections::HashSet::new();
-                items.retain(|i| seen.insert(i.clone()));
+            if let Some(f) = &format_each {
+                validate_format_str("format_each", f)?;
             }
-            // Directories (tree artifacts) are expanded to their files *at execution time*
-            // (`expand_directories`, default True). Only possible without `map_each`, which
-            // would need the children at analysis time; those keep the directory path.
-            let expand_dirs = truthy(kw.get("expand_directories"), true)
-                && matches!(kw.get("map_each"), None | Some(Value::None));
-            let tree_paths: std::collections::HashSet<String> = if expand_dirs {
-                items
-                    .iter()
-                    .filter_map(artifact_of)
-                    .filter(|a| a.is_tree_artifact)
-                    .map(|a| a.exec_path.path_string().to_string())
-                    .collect()
-            } else {
-                Default::default()
-            };
-            let mut strs = map_elements(ctx, items, kw.get("map_each"), "add_all")?;
-            if truthy(kw.get("uniquify"), false) {
-                let mut seen = std::collections::HashSet::new();
-                strs.retain(|s| seen.insert(s.clone()));
+            let omit_if_empty =
+                want_bool(kw.get("omit_if_empty"), "add_all", "omit_if_empty", true)?;
+            let uniquify = want_bool(kw.get("uniquify"), "add_all", "uniquify", false)?;
+            let expand_dirs_param = want_bool(
+                kw.get("expand_directories"),
+                "add_all",
+                "expand_directories",
+                true,
+            )?;
+            let allow_closure =
+                want_bool(kw.get("allow_closure"), "add_all", "allow_closure", false)?;
+            let map_each = validate_map_each(kw.get("map_each"), allow_closure)?;
+
+            if expand_dirs_param {
+                for item in &items {
+                    if let Some(a) = artifact_of(item) {
+                        if a.is_tree_artifact {
+                            b.directory_artifacts.push(a);
+                        }
+                    }
+                }
             }
-            if strs.is_empty() && truthy(kw.get("omit_if_empty"), true) {
+            let expand_dirs = expand_dirs_param && map_each.is_none();
+            let mut mapped = map_elements(ctx, items, map_each, expand_dirs, "add_all")?;
+            if uniquify {
+                let mut seen = std::collections::HashSet::new();
+                mapped.retain(|m| match m {
+                    MappedItem::Concrete(s) => seen.insert((0u8, s.clone())),
+                    MappedItem::TreeDir(d) => seen.insert((1u8, d.clone())),
+                });
+            }
+            if mapped.is_empty() && omit_if_empty {
                 return Ok(Value::None);
             }
+            let has_concrete = mapped.iter().any(|m| matches!(m, MappedItem::Concrete(_)));
+            let only_trees_omit = omit_if_empty && !has_concrete && !mapped.is_empty();
             if let Some(n) = name {
-                b.args.push(n);
+                if only_trees_omit {
+                    b.args.push(format!("{TREE_HEAD_MARKER}{n}"));
+                } else {
+                    b.args.push(n);
+                }
             }
-            for s in strs {
-                if tree_paths.contains(&s) {
-                    // Placeholder expanded by `expand_tree_artifact_args` before the spawn runs.
-                    if let Some(f) = &format_each {
-                        format_arg(f, "")?;
+            for item in mapped {
+                match item {
+                    MappedItem::TreeDir(dir) => {
+                        b.args.push(format!(
+                            "{TREE_MARKER}{}{TREE_SEP}{}{TREE_SEP}{dir}",
+                            format_each.clone().unwrap_or_default(),
+                            before_each.clone().unwrap_or_default()
+                        ));
                     }
-                    b.args.push(format!(
-                        "{TREE_MARKER}{}{TREE_SEP}{}{TREE_SEP}{s}",
-                        format_each.clone().unwrap_or_default(),
-                        before_each.clone().unwrap_or_default()
-                    ));
-                    continue;
+                    MappedItem::Concrete(s) => {
+                        let s = match &format_each {
+                            Some(f) => format_arg(f, &s)?,
+                            None => s,
+                        };
+                        if let Some(be) = &before_each {
+                            b.args.push(be.clone());
+                        }
+                        b.args.push(s);
+                    }
                 }
-                let s = match &format_each {
-                    Some(f) => format_arg(f, &s)?,
-                    None => s,
-                };
-                if let Some(be) = &before_each {
-                    b.args.push(be.clone());
-                }
-                b.args.push(s);
             }
             if let Some(t) = terminate {
-                b.args.push(t);
+                if only_trees_omit {
+                    b.args.push(format!("{TREE_TAIL_MARKER}{t}"));
+                } else {
+                    b.args.push(t);
+                }
             }
             Ok(Value::None)
         }
         "add_joined" => {
             check_kw(
                 "add_joined",
+                pos,
+                2,
                 kw,
                 &[
-                    "arg_name_or_values", "values", "join_with", "map_each", "format_each",
-                    "format_joined", "omit_if_empty", "uniquify", "expand_directories",
+                    "arg_name_or_values",
+                    "values",
+                    "join_with",
+                    "map_each",
+                    "format_each",
+                    "format_joined",
+                    "omit_if_empty",
+                    "uniquify",
+                    "expand_directories",
                     "allow_closure",
                 ],
             )?;
-            let first = arg(pos, kw, 0, "arg_name_or_values")
-                .ok_or_else(|| e("add_joined() missing 1 required positional argument: arg_name_or_values"))?;
+            let first = arg(pos, kw, 0, "arg_name_or_values").ok_or_else(|| {
+                e("add_joined() missing 1 required positional argument: arg_name_or_values")
+            })?;
             let (name, values) = match arg(pos, kw, 1, "values") {
-                Some(v) => (Some(stringify(first, "add_joined")?), v.clone()),
+                Some(v) => (Some(want_arg_name(first)?), v.clone()),
                 None => (None, first.clone()),
             };
-            let join_with = match kw.get("join_with").or_else(|| pos.get(2)) {
+            let join_with = match kw.get("join_with") {
                 Some(Value::String(s)) => s.clone(),
-                _ => return Err(e("add_joined() missing 1 required positional argument: join_with")),
+                Some(other) => {
+                    return Err(e(format!(
+                        "in call to add_joined(), parameter 'join_with' got value of type '{}', want 'string'",
+                        other.type_name()
+                    )))
+                }
+                None => return Err(e("add_joined() missing 1 required keyword-only argument: join_with")),
             };
             let format_each = opt_str(kw.get("format_each"), "add_joined", "format_each")?;
             let format_joined = opt_str(kw.get("format_joined"), "add_joined", "format_joined")?;
-            let mut items = flatten(&values)?;
-            if truthy(kw.get("uniquify"), false) {
-                let mut seen = std::collections::HashSet::new();
-                items.retain(|i| seen.insert(i.clone()));
+            if let Some(f) = &format_each {
+                validate_format_str("format_each", f)?;
             }
-            let strs = map_elements(ctx, items, kw.get("map_each"), "add_joined")?;
-            if strs.is_empty() && truthy(kw.get("omit_if_empty"), true) {
+            if let Some(f) = &format_joined {
+                validate_format_str("format_joined", f)?;
+            }
+            let omit_if_empty =
+                want_bool(kw.get("omit_if_empty"), "add_joined", "omit_if_empty", true)?;
+            let uniquify = want_bool(kw.get("uniquify"), "add_joined", "uniquify", false)?;
+            let _expand_dirs = want_bool(
+                kw.get("expand_directories"),
+                "add_joined",
+                "expand_directories",
+                true,
+            )?;
+            let allow_closure = want_bool(
+                kw.get("allow_closure"),
+                "add_joined",
+                "allow_closure",
+                false,
+            )?;
+            let map_each = validate_map_each(kw.get("map_each"), allow_closure)?;
+
+            let items = flatten(&values, "add_joined")?;
+            let mapped = map_elements(ctx, items, map_each, false, "add_joined")?;
+            let mut strs: Vec<String> = mapped
+                .into_iter()
+                .map(|m| match m {
+                    MappedItem::Concrete(s) | MappedItem::TreeDir(s) => s,
+                })
+                .collect();
+            if uniquify {
+                let mut seen = std::collections::HashSet::new();
+                strs.retain(|s| seen.insert(s.clone()));
+            }
+            if strs.is_empty() && omit_if_empty {
                 return Ok(Value::None);
             }
-            let mut mapped = Vec::new();
+            let mut formatted = Vec::with_capacity(strs.len());
             for s in strs {
-                mapped.push(match &format_each {
+                formatted.push(match &format_each {
                     Some(f) => format_arg(f, &s)?,
                     None => s,
                 });
             }
-            let mut joined = mapped.join(&join_with);
+            let mut joined = formatted.join(&join_with);
             if let Some(f) = format_joined {
                 joined = format_arg(&f, &joined)?;
             }
@@ -374,26 +655,53 @@ pub(crate) fn args_method(
             Ok(Value::None)
         }
         "use_param_file" => {
-            check_kw("use_param_file", kw, &["param_file_arg", "use_always"])?;
+            check_kw(
+                "use_param_file",
+                pos,
+                1,
+                kw,
+                &["param_file_arg", "use_always"],
+            )?;
             let flag = match arg(pos, kw, 0, "param_file_arg") {
                 Some(Value::String(s)) => s.clone(),
-                _ => return Err(e("use_param_file() missing 1 required positional argument: param_file_arg")),
+                Some(other) => {
+                    return Err(e(format!(
+                        "in call to use_param_file(), parameter 'param_file_arg' got value of type '{}', want 'string'",
+                        other.type_name()
+                    )))
+                }
+                None => return Err(e("use_param_file() missing 1 required positional argument: param_file_arg")),
             };
-            if flag.matches("%s").count() != 1 {
-                return Err(e(
-                    "Invalid value for parameter \"param_file_arg\": Expected string with a single \"%s\"",
-                ));
-            }
-            let use_always = truthy(arg(pos, kw, 1, "use_always"), false);
-            let fmt = b.param_file.as_ref().map(|p| p.format).unwrap_or(ParamFileFormat::Shell);
-            b.param_file = Some(ParamFileInfo { flag_format: flag, format: fmt, use_always, leading_args: 0 });
+            validate_format_str("param_file_arg", &flag)?;
+            let use_always =
+                want_bool(kw.get("use_always"), "use_param_file", "use_always", false)?;
+            let fmt = b
+                .param_file
+                .as_ref()
+                .map(|p| p.format)
+                .unwrap_or(ParamFileFormat::Shell);
+            b.param_file = Some(ParamFileInfo {
+                flag_format: flag,
+                format: fmt,
+                use_always,
+                leading_args: 0,
+            });
             Ok(Value::None)
         }
         "set_param_file_format" => {
-            check_kw("set_param_file_format", kw, &["format"])?;
+            check_kw("set_param_file_format", pos, 1, kw, &["format"])?;
+            if b.format.is_some() {
+                return Err(e("set_param_file_format() may only be called once"));
+            }
             let f = match arg(pos, kw, 0, "format") {
                 Some(Value::String(s)) => s.clone(),
-                _ => return Err(e("set_param_file_format() missing 1 required positional argument: format")),
+                Some(other) => {
+                    return Err(e(format!(
+                        "in call to set_param_file_format(), parameter 'format' got value of type '{}', want 'string'",
+                        other.type_name()
+                    )))
+                }
+                None => return Err(e("set_param_file_format() missing 1 required positional argument: format")),
             };
             let fmt = match f.as_str() {
                 "shell" => ParamFileFormat::Shell,
@@ -436,9 +744,29 @@ mod tests {
             Ok(vec!["out/tree/a".into(), "out/tree/b".into()])
         })
         .unwrap();
-        assert_eq!(got, vec!["tool", "--in=out/tree/a", "--in=out/tree/b", "last"]);
-        let got = expand_tree_artifact_args(&[format!("{TREE_MARKER}{TREE_SEP}-I{TREE_SEP}d")], &|_| Ok(vec!["d/x".into()])).unwrap();
+        assert_eq!(
+            got,
+            vec!["tool", "--in=out/tree/a", "--in=out/tree/b", "last"]
+        );
+        let got =
+            expand_tree_artifact_args(&[format!("{TREE_MARKER}{TREE_SEP}-I{TREE_SEP}d")], &|_| {
+                Ok(vec!["d/x".into()])
+            })
+            .unwrap();
         assert_eq!(got, vec!["-I", "d/x"]);
+        // Empty tree with omit_if_empty drops HEAD and TAIL.
+        let empty = vec![
+            format!("{TREE_HEAD_MARKER}--inputs"),
+            format!("{TREE_MARKER}{TREE_SEP}{TREE_SEP}empty_dir"),
+            format!("{TREE_TAIL_MARKER}--end"),
+        ];
+        assert!(expand_tree_artifact_args(&empty, &|_| Ok(vec![]))
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            expand_tree_artifact_args(&empty, &|_| Ok(vec!["empty_dir/f".into()])).unwrap(),
+            vec!["--inputs", "empty_dir/f", "--end"]
+        );
     }
 
     #[test]
@@ -447,5 +775,7 @@ mod tests {
         assert_eq!(format_arg("100%%-%s", "v").unwrap(), "100%-v");
         assert!(format_arg("no placeholder", "v").is_err());
         assert!(format_arg("%s %s", "v").is_err());
+        assert!(validate_format_str("param_file_arg", "%%s").is_err());
+        assert!(validate_format_str("param_file_arg", "100%%-%s").is_ok());
     }
 }

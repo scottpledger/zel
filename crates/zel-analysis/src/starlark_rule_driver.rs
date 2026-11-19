@@ -88,7 +88,12 @@ fn attr_to_value(
             },
         )]
     } else if let Some(t) = &attr.cfg_transition {
-        crate::transition::apply_transition_split(t, cfg, attrs_for_transition)?
+        crate::transition::apply_transition_split_with_resolver(
+            t,
+            cfg,
+            attrs_for_transition,
+            Some(inputs.resolver.as_ref()),
+        )?
     } else {
         vec![(None, cfg.clone())]
     };
@@ -150,10 +155,17 @@ fn attr_to_value_in(
         if !attr.providers.is_empty() {
             // Source/generated files are accepted when the attribute allows files.
             let is_file = ct.rule_class == "source file" || ct.rule_class == "generated file";
+            let file_allowed = match &attr.allowed_files {
+                zel_packages::attr::FileTypes::Any => !attr.files_unspecified,
+                zel_packages::attr::FileTypes::NoFiles => false,
+                zel_packages::attr::FileTypes::Extensions(exts) => {
+                    exts.iter().any(|e| ct.label.name().ends_with(e))
+                }
+            };
             let ok = attr.providers.iter().any(|group| group.iter().all(|k| ct.providers.contains_key(&zel_packages::provider::resolve_provider_ref(k))));
             // An allowed rule class (`allow_rules`) is accepted even without the providers.
             let allowed_class = attr.allowed_rule_classes.as_ref().map(|l| l.contains(&ct.rule_class)).unwrap_or(false);
-            if !ok && !allowed_class && !(is_file && !matches!(attr.allowed_files, zel_packages::attr::FileTypes::NoFiles)) {
+            if !(ok || allowed_class || is_file && file_allowed) {
                 let desc = attr
                     .providers
                     .iter()
@@ -224,6 +236,20 @@ fn attr_to_value_in(
             deps: vec![],
             split: None,
         },
+        AttrValue::LabelListDict(d) => {
+            let mut cts = Vec::new();
+            let mut entries = Vec::new();
+            for (k, ls) in d {
+                let mut vs = Vec::new();
+                for l in ls {
+                    let ct = resolve(l)?;
+                    vs.push(target_value(ct.clone()));
+                    cts.push(ct);
+                }
+                entries.push((Value::String(k.clone()), mk_list(vs)));
+            }
+            ConvertedAttr { value: mk_dict(entries), deps: cts, split: None }
+        }
         AttrValue::Label(None) => ConvertedAttr { value: Value::None, deps: vec![], split: None },
         AttrValue::Label(Some(l)) => {
             let ct = resolve(l)?;
@@ -242,9 +268,14 @@ fn attr_to_value_in(
         }
         AttrValue::LabelKeyedStrDict(items) => {
             let mut cts = Vec::new();
-            let mut entries = Vec::new();
+            let mut entries: Vec<(Value, Value)> = Vec::new();
+            let mut seen_labels: BTreeSet<Label> = BTreeSet::new();
             for (l, s) in items {
                 let ct = resolve(l)?;
+                let dep_lbl = ct.dependency_label().clone();
+                if !seen_labels.insert(dep_lbl.clone()) {
+                    return Err(format!("Duplicate key '{}' in attribute '{}'", dep_lbl.canonical_form(), attr.name));
+                }
                 entries.push((target_value(ct.clone()), Value::String(s.clone())));
                 cts.push(ct);
             }
@@ -282,6 +313,8 @@ struct AttrBundle {
     predeclared: Vec<Artifact>,
     /// `ctx.split_attr`: attribute → (split key → target(s)).
     split_fields: BTreeMap<String, Value>,
+    /// Non-fatal attribute errors recorded via `RuleContext.attributeError`.
+    attr_errors: Vec<String>,
 }
 
 impl AttrBundle {
@@ -313,12 +346,13 @@ fn convert_rule_attrs(
     let mut deps_by_attr: BTreeMap<String, Vec<Arc<ConfiguredTarget>>> = BTreeMap::new();
     let mut split_fields: BTreeMap<String, Value> = BTreeMap::new();
     let mut predeclared: Vec<Artifact> = Vec::new();
+    let mut attr_errors: Vec<String> = Vec::new();
     let resolver = inputs.resolver.clone();
     // Plain (non-label) attribute values, passed to attribute transitions as `attr`.
     let raw_attrs = {
         let mut m = BTreeMap::new();
         for (name, attr) in attrs {
-            if matches!(attr.ty, AttrType::Label | AttrType::LabelList | AttrType::LabelKeyedStringDict | AttrType::StringKeyedLabelDict | AttrType::Output | AttrType::OutputList) {
+            if matches!(attr.ty, AttrType::Label | AttrType::LabelList | AttrType::LabelKeyedStringDict | AttrType::StringKeyedLabelDict | AttrType::LabelListDict | AttrType::Output | AttrType::OutputList) {
                 continue;
             }
             let av = rule.extra.attr_values.get(name).cloned().unwrap_or_else(|| attr.default_value());
@@ -366,61 +400,109 @@ fn convert_rule_attrs(
                     }
                 }
                 None => match &attr.computed_default {
-                    Some(f) => computed_default_value(f, attr, name, &raw_attrs).map_err(wrap)?,
+                    Some(f) => computed_default_value(f, attr, name, &raw_attrs, rule, &inputs.resolver).map_err(wrap)?,
                     None => attr.default_value(),
                 },
             },
         };
         let av = crate::select::resolve_select(&av, name, rule, cfg, resolver.as_ref()).map_err(wrap)?;
+        if attr.non_empty {
+            let is_empty = match &av {
+                AttrValue::LabelList(l) | AttrValue::OutputList(l) => l.is_empty(),
+                AttrValue::StrList(l) => l.is_empty(),
+                AttrValue::IntList(l) => l.is_empty(),
+                AttrValue::StrDict(d) => d.is_empty(),
+                AttrValue::StrListDict(d) => d.is_empty(),
+                AttrValue::LabelKeyedStrDict(d) => d.is_empty(),
+                AttrValue::StrKeyedLabelDict(d) => d.is_empty(),
+                _ => false,
+            };
+            if is_empty {
+                attr_errors.push(wrap(format!("in {name} attribute of {} rule {}: attribute must be non empty", rule.rule_class, rule.label.canonical_form())));
+            }
+        }
+        if matches!(attr.ty, AttrType::LabelList) {
+            if let AttrValue::LabelList(ls) = &av {
+                let mut seen = BTreeSet::new();
+                for l in ls {
+                    if !seen.insert(l) {
+                        attr_errors.push(wrap(format!("in {name} attribute of {} rule {}: Label '{}' is duplicated", rule.rule_class, rule.label.canonical_form(), l.canonical_form())));
+                    }
+                }
+            }
+        }
         let conv = attr_to_value(attr, &av, rule, cfg, inputs, pkg_dir, out_root, Some(&raw_attrs), hook).map_err(wrap)?;
+        let skyname = name
+            .strip_prefix('$')
+            .or_else(|| name.strip_prefix(':'))
+            .map(|r| format!("_{r}"))
+            .unwrap_or_else(|| name.clone());
+        let expose_starlark = !matches!(attr.ty, AttrType::Tristate)
+            && name != "exec_group_compatible_with"
+            && is_valid_starlark_ident(&skyname)
+            && !attr_fields.contains_key(&skyname);
         match attr.ty {
-            AttrType::Label | AttrType::LabelList | AttrType::LabelKeyedStringDict | AttrType::StringKeyedLabelDict => {
+            AttrType::Label | AttrType::LabelList | AttrType::LabelKeyedStringDict | AttrType::StringKeyedLabelDict | AttrType::LabelListDict => {
                 let files = files_of_deps(&conv.deps);
-                files_fields.insert(name.clone(), mk_list(files.iter().map(file_value).collect()));
-                if attr.allow_single_file || attr.executable {
+                if expose_starlark {
+                    files_fields.insert(skyname.clone(), mk_list(files.iter().map(file_value).collect()));
+                }
+                if attr.allow_single_file && expose_starlark {
                     let single = if files.len() == 1 {
-                        Some(files[0].clone())
-                    } else if conv.deps.is_empty() || !attr.allow_single_file {
-                        // An `executable = True` attribute only needs the dependency's
-                        // executable (`ctx.executable`); the single-file requirement is
-                        // `allow_single_file`'s.
+                        let f = &files[0];
+                        if !f.is_tree_artifact {
+                            if let zel_packages::attr::FileTypes::Extensions(exts) = &attr.allowed_files {
+                                if !exts.is_empty() && !exts.iter().any(|e| f.exec_path.path_string().ends_with(e.as_str())) {
+                                    attr_errors.push(wrap(format!(
+                                        "in {name} attribute of {} rule {}: '{}' does not match expected type: {}",
+                                        rule.rule_class,
+                                        rule.label.canonical_form(),
+                                        f.exec_path,
+                                        exts.join(", ")
+                                    )));
+                                }
+                            }
+                        }
+                        Some(f.clone())
+                    } else if conv.deps.is_empty() {
                         None
                     } else {
-                        return Err(wrap(format!(
+                        attr_errors.push(wrap(format!(
                             "'{}' produces {} files, but attribute '{name}' of rule {} requires exactly one",
                             conv.deps[0].label.canonical_form(),
                             files.len(),
                             rule.label.canonical_form()
                         )));
+                        None
                     };
-                    if attr.allow_single_file {
-                        file_fields.insert(name.clone(), single.as_ref().map(file_value).unwrap_or(Value::None));
-                    }
-                    if attr.executable {
-                        let exe = match conv.deps.first() {
-                            None => Value::None,
-                            Some(d) => match &d.default_info.executable {
-                                Some(e) => file_value(e),
-                                // FilesToRunProvider.fromSingleExecutableArtifact: a source file is its
-                                // own executable.
-                                None if d.rule_class == "source file" && d.default_info.files.len() == 1 => {
-                                    file_value(&d.default_info.files[0])
-                                }
-                                None => {
-                                    return Err(wrap(format!(
-                                        "'{}' does not have mandatory executable output for attribute '{name}'",
-                                        d.label.canonical_form()
-                                    )))
-                                }
-                            },
-                        };
-                        exe_fields.insert(name.clone(), exe);
-                    }
+                    file_fields.insert(skyname.clone(), single.as_ref().map(file_value).unwrap_or(Value::None));
+                }
+                if attr.executable && matches!(attr.ty, AttrType::Label) && expose_starlark {
+                    let exe = match conv.deps.first() {
+                        None => Value::None,
+                        Some(d) => match &d.default_info.executable {
+                            Some(e) => file_value(e),
+                            // FilesToRunProvider.fromSingleExecutableArtifact: a file target is its own executable.
+                            None if (d.rule_class == "source file" || d.rule_class == "generated file") && d.default_info.files.len() == 1 => {
+                                file_value(&d.default_info.files[0])
+                            }
+                            None => {
+                                attr_errors.push(wrap(format!(
+                                    "'{}' does not have mandatory executable output for attribute '{name}'",
+                                    d.label.canonical_form()
+                                )));
+                                Value::None
+                            }
+                        },
+                    };
+                    exe_fields.insert(skyname.clone(), exe);
                 }
                 deps_by_attr.insert(name.clone(), conv.deps.clone());
             }
             AttrType::Output | AttrType::OutputList => {
-                outputs_fields.insert(name.clone(), conv.value.clone());
+                if expose_starlark {
+                    outputs_fields.insert(skyname.clone(), conv.value.clone());
+                }
                 for v in sequence(&conv.value).unwrap_or_else(|| vec![conv.value.clone()]) {
                     if let Some(a) = artifact_of(&v) {
                         predeclared.push(a);
@@ -429,12 +511,14 @@ fn convert_rule_attrs(
             }
             _ => {}
         }
-        if let Some(sv) = &conv.split {
-            split_fields.insert(name.clone(), sv.clone());
+        if expose_starlark {
+            if let Some(sv) = &conv.split {
+                split_fields.insert(skyname.clone(), sv.clone());
+            }
+            attr_fields.insert(skyname, conv.value);
         }
-        attr_fields.insert(name.clone(), conv.value);
     }
-    Ok(AttrBundle { attr_fields, file_fields, files_fields, exe_fields, outputs_fields, deps_by_attr, predeclared, split_fields })
+    Ok(AttrBundle { attr_fields, file_fields, files_fields, exe_fields, outputs_fields, deps_by_attr, predeclared, split_fields, attr_errors })
 }
 
 /// Analyses a Starlark-defined rule: runs its `implementation` with a real `ctx`.
@@ -504,6 +588,7 @@ pub fn analyze_starlark_rule(
         deps_by_attr,
         mut predeclared,
         split_fields,
+        attr_errors,
     } = convert_rule_attrs(rule, &rc.attrs, cfg, &inputs, &pkg_dir, out_root, &wrap, None)?;
     // `BaseRuleClasses.TestBaseRule`: the hidden test tool attributes are prerequisites (exec
     // configuration) of every test rule; resolving them records the dependency edges (and the
@@ -589,11 +674,19 @@ pub fn analyze_starlark_rule(
         actions: Mutex::new(Vec::new()),
         graph: Mutex::new(ActionGraph::new()),
         declared_trees: Mutex::new(BTreeSet::new()),
+        declared_files: Mutex::new(BTreeSet::new()),
+        declared_artifacts: Mutex::new(Vec::new()),
+        rule_errors: Mutex::new(attr_errors),
         make_vars,
         frozen: Mutex::new(false),
         rule_struct: None,
         aspect_ids: Vec::new(),
         aspect_fragments: Vec::new(),
+        aspect_toolchains_declared: Vec::new(),
+        base_toolchains: BTreeMap::new(),
+        base_exec_groups: BTreeSet::new(),
+        base_exec_group_toolchains: BTreeMap::new(),
+        base_exec_group_platforms: BTreeMap::new(),
         split_attr: Value::Struct(Arc::new(StructValue::new(split_fields))),
     });
 
@@ -606,7 +699,9 @@ pub fn analyze_starlark_rule(
         .call_value(spec.implementation.clone(), vec![Value::Host("ctx".into(), "0".into())], BTreeMap::new())
         .map_err(|e| wrap(e.0));
     *st.frozen.lock().unwrap() = true;
+    ectx.mutability.freeze();
     let ret = ret?;
+    ret.freeze();
 
     // 4. Providers.
     finish_target(&st, &rc, rule, cfg, ret)
@@ -624,6 +719,8 @@ fn computed_default_value(
     attr: &Attribute,
     name: &str,
     raw_attrs: &Value,
+    rule: &RuleInstance,
+    resolver: &Arc<dyn DepResolver>,
 ) -> Result<AttrValue, String> {
     let Value::UserFunction(def) = f else { return Err(format!("attribute '{name}': invalid computed default")) };
     let mut kw = BTreeMap::new();
@@ -635,6 +732,42 @@ fn computed_default_value(
         }
     }
     let mut ctx = EvalContext::default();
+    let owner = rule.label.package_identifier().clone();
+    let resolver_arc = Arc::clone(resolver);
+    ctx.host = Some(Arc::new(move |ctx, host_name, pos, _kw| {
+        if host_name == "Label" {
+            let v = pos.first().ok_or_else(|| {
+                zel_starlark::StarlarkError("Label() missing 1 required positional argument: input".into())
+            })?;
+            match v {
+                Value::Label(_) => Ok(v.clone()),
+                Value::String(s) => {
+                    let (pkg, mapping) = match ctx.current_label_ctx() {
+                        Some((p, m)) => (p, m),
+                        None => {
+                            let entries = resolver_arc.repo_mapping_entries(owner.repository().name());
+                            let mut map = std::collections::HashMap::new();
+                            for (a, c) in entries {
+                                if let Ok(rn) = zel_cmdline::RepositoryName::create(&c) {
+                                    map.insert(a, rn);
+                                }
+                            }
+                            (owner.clone(), zel_cmdline::RepositoryMapping::new(map, owner.repository().clone()))
+                        }
+                    };
+                    Label::parse_with_package_context(s, &pkg, &mapping)
+                        .map(Value::Label)
+                        .map_err(|e| zel_starlark::StarlarkError(e.to_string()))
+                }
+                other => Err(zel_starlark::StarlarkError(format!(
+                    "in call to Label(), parameter 'input' got value of type '{}', want 'string or Label'",
+                    other.type_name()
+                ))),
+            }
+        } else {
+            Err(zel_starlark::StarlarkError(format!("unknown builtin 'host:{host_name}'")))
+        }
+    }));
     let r = ctx
         .call_value(f.clone(), vec![], kw)
         .map_err(|e| format!("in computed default of attribute '{name}': {}", e.0))?;
@@ -719,6 +852,17 @@ fn finish_target(
         }
         other => return Err(format!("Rule should return a struct or a list, but got {}", type_name(other))),
     }
+    let mut from_test_environment = false;
+    if let Some(Value::ProviderInstance { fields, .. }) = declared.remove("TestEnvironment") {
+        from_test_environment = true;
+        let as_run_env = Value::ProviderInstance {
+            provider_name: "RunEnvironmentInfo".to_string(),
+            fields,
+        };
+        if declared.insert("RunEnvironmentInfo".to_string(), as_run_env).is_some() {
+            return Err("Multiple conflicting returned providers with key RunEnvironmentInfo".to_string());
+        }
+    }
 
     let analysis_test = rc
         .starlark
@@ -774,6 +918,10 @@ fn finish_target(
         st.register(a).map_err(|e| e.0)?;
         analysis_test_exe = Some(exe);
     }
+    if !st.rule_errors.lock().unwrap().is_empty() {
+        return Err(st.rule_errors.lock().unwrap().join("\n"));
+    }
+    st.validate_artifacts()?;
     let default_info = declared.remove("DefaultInfo");
     let run_environment = match declared.get("RunEnvironmentInfo") {
         Some(Value::ProviderInstance { fields, .. }) => {
@@ -840,10 +988,35 @@ fn finish_target(
         _ => None,
     };
     let fields = match &default_info {
-        Some(Value::ProviderInstance { fields, .. }) => fields.clone(),
+        Some(Value::ProviderInstance { fields, .. }) => {
+            for k in fields.keys() {
+                if !matches!(k.as_str(), "files" | "runfiles" | "data_runfiles" | "default_runfiles" | "executable") {
+                    return Err(format!("DefaultInfo() got unexpected keyword argument '{k}'"));
+                }
+            }
+            fields.clone()
+        }
         _ => BTreeMap::new(),
     };
     let is_exec_rule = rc.is_executable || rc.is_test;
+    let mut rule_warnings: Vec<String> = Vec::new();
+    if run_environment.is_some() && !is_exec_rule {
+        let msg = format!(
+            "in {} rule {}: Returning RunEnvironmentInfo from a non-executable, non-test target has no effect",
+            rule.rule_class,
+            label.canonical_form().trim_start_matches("@@")
+        );
+        if from_test_environment {
+            let loc = rule.extra.location.as_deref().unwrap_or("");
+            if loc.is_empty() {
+                rule_warnings.push(format!("WARNING: {msg}"));
+            } else {
+                rule_warnings.push(format!("WARNING: {loc}: {msg}"));
+            }
+        } else {
+            return Err(msg);
+        }
+    }
     let mut executable = match get_field(&fields, "executable") {
         Some(v) => Some(artifact_of(v).ok_or_else(|| {
             format!(
@@ -950,9 +1123,9 @@ fn finish_target(
         return Err("Test rules have to define runfiles".to_string());
     }
 
-    let mut extra_actions: Vec<Action> = Vec::new();
+    let build_manifests = cfg.bool_option("build_runfile_manifests", true);
     let mut runfiles_support = None;
-    if is_exec_or_test && !default_runfiles.is_empty() {
+    if is_exec_or_test && !default_runfiles.is_empty() && build_manifests {
         let exe = executable.clone().ok_or("executable must not be null")?;
         let manifest = Artifact::derived_in_root(
             &cfg.mnemonic(),
@@ -971,8 +1144,7 @@ fn finish_target(
         a.progress_message = Some(format!("Creating source manifest for {}", label.canonical_form()));
         a.inputs = default_runfiles.artifacts.clone();
         a.outputs.push(manifest.clone());
-        st.register(a.clone()).map_err(|e| e.0)?;
-        let _ = &mut extra_actions;
+        st.register(a).map_err(|e| e.0)?;
         // `RunfilesSupport.createRepoMappingManifestAction`: <executable>.repo_mapping in bin.
         let repo_mapping = st.repo_mapping_for(&default_runfiles);
         let rm_artifact = Artifact::derived_in_root(
@@ -1030,6 +1202,7 @@ fn finish_target(
 
     // Output groups.
     let mut groups: BTreeMap<String, Vec<Artifact>> = BTreeMap::new();
+    let mut normalized_og_fields: BTreeMap<String, Value> = BTreeMap::new();
     if let Some(Value::ProviderInstance { fields, .. }) = declared.get("OutputGroupInfo") {
         for (g, v) in fields {
             let files = match v {
@@ -1041,6 +1214,8 @@ fn finish_target(
                     ))
                 }
             };
+            let files = dedup(files);
+            normalized_og_fields.insert(g.clone(), files_depset(&files));
             groups.insert(g.clone(), files);
         }
     }
@@ -1072,9 +1247,13 @@ fn finish_target(
         providers.insert("BuildSettingProvider".to_string(), provider_instance("BuildSettingProvider", vec![("value", v)]));
     }
     providers.insert("DefaultInfo".to_string(), default_info_value);
-    if !providers.contains_key("OutputGroupInfo") {
-        providers.insert("OutputGroupInfo".to_string(), provider_instance("OutputGroupInfo", vec![]));
-    }
+    providers.insert(
+        "OutputGroupInfo".to_string(),
+        Value::ProviderInstance {
+            provider_name: "OutputGroupInfo".to_string(),
+            fields: normalized_og_fields,
+        },
+    );
 
     let mut ct = ConfiguredTarget::new(label.clone(), cfg.clone(), rule.rule_class.clone());
     ct.default_info = DefaultInfo {
@@ -1092,6 +1271,7 @@ fn finish_target(
     ct.instrumented_files = instrumented;
     ct.testonly = rule.testonly;
     ct.is_test = rc.is_test;
+    ct.warnings = rule_warnings;
     Ok(ct)
 }
 

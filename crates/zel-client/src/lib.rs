@@ -19,7 +19,9 @@
 pub mod bazelisk;
 pub mod daemon_client;
 
-pub use bazelisk::{plan_invocation, BazeliskEnv, LauncherAction, ResolvedVersionSpec, VersionSource};
+pub use bazelisk::{
+    plan_invocation, BazeliskEnv, LauncherAction, ResolvedVersionSpec, VersionSource,
+};
 
 use std::io::{self, BufReader, BufWriter, Write};
 use std::net::{TcpListener, TcpStream};
@@ -29,9 +31,7 @@ use std::time::Duration;
 use zel_options::{discover_and_load_rc_files, split_command_line, StartupOptions};
 use zel_proto::command_server::{PingRequest, PingResponse, RunRequest, RunResponse, ServerInfo};
 use zel_proto::grpc_framing::{read_grpc_frame, write_grpc_frame};
-use zel_server::{
-    create_default_runtime, serve_command_server, BlazeDirectories, BlazeRuntime, RpcMethod,
-};
+use zel_server::{create_default_runtime, BlazeDirectories, BlazeRuntime, RpcMethod};
 use zel_util::ExitCode;
 use zel_vfs::{FileSystem, PathFragment};
 
@@ -163,7 +163,14 @@ pub fn execute_cli<O: Write + Send, E: Write + Send>(
     stderr_writer: &mut E,
 ) -> i32 {
     let mut exec_request = None;
-    execute_cli_with_exec(raw_args, cwd, fs, stdout_writer, stderr_writer, &mut exec_request)
+    execute_cli_with_exec(
+        raw_args,
+        cwd,
+        fs,
+        stdout_writer,
+        stderr_writer,
+        &mut exec_request,
+    )
 }
 
 /// Directories the client substitutes for `PathToReplace` placeholders in an `ExecRequest`.
@@ -242,7 +249,7 @@ pub fn perform_exec_request(pending: &PendingExec) -> i32 {
         use std::os::unix::process::CommandExt;
         let err = cmd.exec();
         eprintln!("ERROR: Cannot execute {}: {}", argv[0], err);
-        return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+        ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code()
     }
     #[cfg(not(unix))]
     match cmd.status() {
@@ -277,7 +284,9 @@ struct Tm {
 
 fn client_timestamp() -> String {
     let now = std::time::SystemTime::now();
-    let since = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let since = now
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
     let secs = since.as_secs();
     let millis = since.subsec_millis();
     #[cfg(unix)]
@@ -285,7 +294,10 @@ fn client_timestamp() -> String {
         let t = secs as i64;
         let mut tm: Tm = std::mem::zeroed();
         if !localtime_r(&t, &mut tm).is_null() {
-            return format!("{:02}:{:02}:{:02}.{:03}", tm.tm_hour, tm.tm_min, tm.tm_sec, millis);
+            return format!(
+                "{:02}:{:02}:{:02}.{:03}",
+                tm.tm_hour, tm.tm_min, tm.tm_sec, millis
+            );
         }
     }
     let s = secs % 60;
@@ -300,7 +312,11 @@ fn fatal_blaze_error(msg: &str) -> String {
     } else {
         msg.strip_prefix("ERROR: ").unwrap_or(msg)
     };
-    format!("[FATAL {} src/main/cpp/blaze.cc:1275] {}", client_timestamp(), clean)
+    format!(
+        "[FATAL {} src/main/cpp/blaze.cc:1275] {}",
+        client_timestamp(),
+        clean
+    )
 }
 
 /// `OptionProcessor::PrintStartupOptionsProvenanceMessage` /
@@ -317,14 +333,20 @@ fn startup_provenance_lines(startup: &StartupOptions, sep: &str) -> Vec<String> 
             continue;
         }
         if !last_rc.is_empty() && src != last_rc {
-            lines.push(format!("INFO: Reading 'startup' options from {last_rc}: {}", accumulated.join(sep)));
+            lines.push(format!(
+                "INFO: Reading 'startup' options from {last_rc}: {}",
+                accumulated.join(sep)
+            ));
             accumulated.clear();
         }
         last_rc = src;
         accumulated.push(String::from_utf8_lossy(&o.option).to_string());
     }
     if !last_rc.is_empty() {
-        lines.push(format!("INFO: Reading 'startup' options from {last_rc}: {}", accumulated.join(sep)));
+        lines.push(format!(
+            "INFO: Reading 'startup' options from {last_rc}: {}",
+            accumulated.join(sep)
+        ));
     }
     lines
 }
@@ -344,8 +366,13 @@ fn fatal_after_rc_parsing(startup: &StartupOptions, msg: &str) -> String {
     out
 }
 
+#[allow(dead_code)]
 fn error_option_processor(msg: &str) -> String {
-    format!("[ERROR {} src/main/cpp/option_processor.cc:362] {}", client_timestamp(), msg)
+    format!(
+        "[ERROR {} src/main/cpp/option_processor.cc:362] {}",
+        client_timestamp(),
+        msg
+    )
 }
 
 /// Like [`execute_cli`] but surfaces a server `ExecRequest` (as used by `run`) to the caller.
@@ -365,8 +392,15 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     // Built-in Bazelisk behavior: version resolution (`USE_BAZEL_VERSION`, `.bazelversion`),
     // enforcement and `tools/bazel` wrapper delegation. Only against the host file system.
     let proc_env = BazeliskEnv::from_process_env();
-    let is_host_fs = proc_env.current_exe.as_ref().is_some_and(|exe| fs.exists(exe, true));
-    let bazelisk_env = if is_host_fs { proc_env } else { BazeliskEnv::default() };
+    let is_host_fs = proc_env
+        .current_exe
+        .as_ref()
+        .is_some_and(|exe| fs.exists(exe, true));
+    let bazelisk_env = if is_host_fs {
+        proc_env
+    } else {
+        BazeliskEnv::default()
+    };
     {
         let ws = find_workspace_root(fs.as_ref(), cwd);
         match bazelisk::plan_invocation(fs.as_ref(), cwd, &ws, raw_args, &bazelisk_env) {
@@ -375,7 +409,12 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
                     let _ = writeln!(stderr_writer, "{warn}");
                 }
             }
-            Ok(LauncherAction::ExecExternal { program, args, env_vars, spec }) => {
+            Ok(LauncherAction::ExecExternal {
+                program,
+                args,
+                env_vars,
+                spec,
+            }) => {
                 if let Some(ref warn) = spec.warn_message {
                     let _ = writeln!(stderr_writer, "{warn}");
                 }
@@ -405,7 +444,11 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     let (mut startup, command, raw_cmd_args) = match split_command_line(raw_args) {
         Ok(res) => res,
         Err(e) => {
-            let _ = writeln!(stderr_writer, "{}", fatal_blaze_error(&e.format_bazel_error()));
+            let _ = writeln!(
+                stderr_writer,
+                "{}",
+                fatal_blaze_error(&e.format_bazel_error())
+            );
             return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
         }
     };
@@ -419,7 +462,9 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
 
     // Outside a workspace the workspace is empty (output base = md5(""), like blaze.cc).
     let workspace_found = find_workspace_root_opt(fs.as_ref(), cwd);
-    let workspace_dir = workspace_found.clone().unwrap_or_else(|| PathFragment::create(""));
+    let workspace_dir = workspace_found
+        .clone()
+        .unwrap_or_else(|| PathFragment::create(""));
 
     let home = std::env::var("HOME").ok();
     let user = std::env::var("USER").unwrap_or_else(|_| "bazel".to_string());
@@ -436,18 +481,29 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         Ok(cfg) => cfg,
         Err(e) => {
             // `ParseErrorToExitCode`: unreadable rc files are INTERNAL_ERROR, everything else BAD_ARGV.
-            let code = if e.message.starts_with("Unexpected error reading config file") {
+            let code = if e
+                .message
+                .starts_with("Unexpected error reading config file")
+            {
                 ExitCode::BLAZE_INTERNAL_ERROR
             } else {
                 ExitCode::COMMAND_LINE_ERROR
             };
-            let msg = e.message.strip_prefix("FATAL: ").unwrap_or(&e.message).to_string();
+            let msg = e
+                .message
+                .strip_prefix("FATAL: ")
+                .unwrap_or(&e.message)
+                .to_string();
             let _ = writeln!(stderr_writer, "{}", fatal_after_rc_parsing(&startup, &msg));
             return code.numeric_exit_code();
         }
     };
     if let Some(e) = startup.deferred_error.take() {
-        let _ = writeln!(stderr_writer, "{}", fatal_after_rc_parsing(&startup, &e.message));
+        let _ = writeln!(
+            stderr_writer,
+            "{}",
+            fatal_after_rc_parsing(&startup, &e.message)
+        );
         return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
     }
 
@@ -455,7 +511,14 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         if let Some(ref ws) = workspace_found {
             let rc_file = ws.get_relative_str(".bazelrc");
             if fs.exists(&rc_file, false) {
-                let real_rc = std::fs::canonicalize(rc_file.path_string()).unwrap_or_else(|_| std::path::PathBuf::from(rc_file.path_string()));
+                let real_rc = std::fs::canonicalize(rc_file.path_string())
+                    .map(|p| {
+                        let s = p.to_string_lossy();
+                        #[cfg(windows)]
+                        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+                        std::path::PathBuf::from(s.to_string())
+                    })
+                    .unwrap_or_else(|_| std::path::PathBuf::from(rc_file.path_string()));
                 let _ = writeln!(
                     stderr_writer,
                     "WARNING: The following rc files are no longer being read, please transfer their contents or import their path into one of the standard rc files:\n{}",
@@ -467,11 +530,17 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
 
     // Check for explicit empty command string: `zel ''`
     if command.is_empty() && raw_args.iter().any(|a| a.is_empty()) {
-        let prefix = if startup.product_name.is_empty() { "bazel" } else { &startup.product_name };
+        let prefix = if startup.product_name.is_empty() {
+            "bazel"
+        } else {
+            &startup.product_name
+        };
         let _ = writeln!(
             stderr_writer,
             "{}",
-            fatal_blaze_error(&format!("Command cannot be the empty string.\n  For more info, run '{prefix} help'."))
+            fatal_blaze_error(&format!(
+                "Command cannot be the empty string.\n  For more info, run '{prefix} help'."
+            ))
         );
         return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
     }
@@ -517,13 +586,14 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     // `canonicalize-flags` (whose `--for_command` only affects how the command line is parsed).
     let rc_command = effective_cmd.as_str();
 
-    let (expanded_cmd_args, rc_diagnostics) = match rc_config.expand_command_args_with_diagnostics(rc_command, &raw_cmd_args) {
-        Ok(res) => res,
-        Err(e) => {
-            let _ = writeln!(stderr_writer, "ERROR: {e}");
-            return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
-        }
-    };
+    let (expanded_cmd_args, rc_diagnostics) =
+        match rc_config.expand_command_args_with_diagnostics(rc_command, &raw_cmd_args) {
+            Ok(res) => res,
+            Err(e) => {
+                let _ = writeln!(stderr_writer, "ERROR: {e}");
+                return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
+            }
+        };
     let output_user_root = startup.resolve_output_user_root(&user, home.as_deref());
     let output_base = startup.resolve_output_base(&workspace_dir, &user, home.as_deref());
     let install_md5 = binary_install_md5();
@@ -534,12 +604,22 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     if let Some(desc) = startup.parsed_options.get("server_javabase") {
         let jb = desc.raw_values.last().cloned().unwrap_or_default();
         if !jb.is_empty() {
-            let java = std::path::Path::new(&jb).join("bin/java");
+            let java = std::path::Path::new(&jb).join(if cfg!(windows) {
+                "bin/java.exe"
+            } else {
+                "bin/java"
+            });
             let problem = match std::fs::metadata(&java) {
                 Err(_) => Some(format!("Couldn't find java at '{}'.", java.display())),
                 Ok(m) => {
-                    use std::os::unix::fs::PermissionsExt;
-                    if m.is_dir() || m.permissions().mode() & 0o111 == 0 {
+                    #[cfg(unix)]
+                    let non_exec = {
+                        use std::os::unix::fs::PermissionsExt;
+                        m.is_dir() || m.permissions().mode() & 0o111 == 0
+                    };
+                    #[cfg(not(unix))]
+                    let non_exec = m.is_dir();
+                    if non_exec {
                         Some(format!(
                             "Java at '{}' exists but is not executable: {}",
                             java.display(),
@@ -557,7 +637,10 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
                     format!("in {}", desc.source)
                 };
                 let _ = writeln!(stderr_writer, "ERROR: {p}");
-                let _ = writeln!(stderr_writer, "ERROR:   The java path was specified by a '--server_javabase' option {src}");
+                let _ = writeln!(
+                    stderr_writer,
+                    "ERROR:   The java path was specified by a '--server_javabase' option {src}"
+                );
                 return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
             }
         }
@@ -577,10 +660,25 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
             .iter()
             .take_while(|a| a.as_str() != "--")
             .any(|a| a == "--repo_contents_cache" || a.starts_with("--repo_contents_cache="))
-        && !matches!(effective_cmd.as_str(), "help" | "version" | "shutdown" | "clean")
+        && !matches!(
+            effective_cmd.as_str(),
+            "help" | "version" | "shutdown" | "clean"
+        )
     {
-        let real = |p: &str| std::fs::canonicalize(p).map(|c| c.display().to_string()).unwrap_or_else(|_| p.to_string());
-        let cache = format!("{}/cache/repos/v1/contents", real(output_user_root.path_string()));
+        let real = |p: &str| {
+            std::fs::canonicalize(p)
+                .map(|c| {
+                    let s = c.to_string_lossy();
+                    #[cfg(windows)]
+                    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
+                    s.to_string()
+                })
+                .unwrap_or_else(|_| p.to_string())
+        };
+        let cache = format!(
+            "{}/cache/repos/v1/contents",
+            real(output_user_root.path_string())
+        );
         let ws = real(workspace_dir.path_string());
         if cache.starts_with(&format!("{}/", ws.trim_end_matches('/'))) {
             let _ = writeln!(
@@ -593,7 +691,10 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
 
     // `shutdown` without a live server returns in the client before any option provenance is printed.
     let shutdown_without_server = effective_cmd == "shutdown"
-        && daemon_client::find_running_server(&std::path::Path::new(output_base.path_string()).join("server")).is_none();
+        && daemon_client::find_running_server(
+            &std::path::Path::new(output_base.path_string()).join("server"),
+        )
+        .is_none();
     // `--announce_rc` is an option of the invoked command: arguments after a `--` terminator are residue
     // (e.g. the flags `canonicalize-flags` is asked to canonicalize) and never set it.
     let announce_rc = !shutdown_without_server
@@ -618,8 +719,95 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         }
     }
 
-    let mut full_argv_bytes = Vec::with_capacity(2 + expanded_cmd_args.len());
+    if effective_cmd == "exec-server" && startup.batch {
+        let _ = writeln!(
+            stderr_writer,
+            "FATAL: exec-server command is not compatible with --batch"
+        );
+        return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
+    }
+
+    // Acquire install-base and output-base locks (`blaze.cc` `RunLauncher` -> `AcquireLocks`),
+    // recording total wait time for `--command_wait_time`.
+    let exe_path = match std::env::current_exe() {
+        Ok(e) => e,
+        Err(e) => {
+            let _ = writeln!(stderr_writer, "ERROR: cannot determine own path: {e}");
+            return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+        }
+    };
+    let (install_lock, install_wait_ms) = if startup_flag(&startup, "lock_install_base", true) {
+        match daemon_client::acquire_install_base_lock(
+            install_base.path_string(),
+            startup.batch,
+            stderr_writer,
+        ) {
+            Ok(v) => v,
+            Err(code) => return code,
+        }
+    } else {
+        (None, 0)
+    };
+    let (output_lock, output_wait_ms) = match daemon_client::acquire_output_base_lock(
+        std::path::Path::new(output_base.path_string()),
+        startup.batch,
+        startup.block_for_lock,
+        stderr_writer,
+    ) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let wait_ms = install_wait_ms + output_wait_ms;
+    let client_locks = daemon_client::ClientLocks {
+        install_lock,
+        output_lock,
+    };
+
+    if effective_cmd == "exec-server" {
+        let spec = daemon_client::ServerSpec {
+            exe: exe_path,
+            startup: &startup,
+            workspace_dir: workspace_dir.path_string(),
+            output_base: output_base.path_string(),
+            install_base: install_base.path_string(),
+            output_user_root: output_user_root.path_string(),
+            install_md5: &install_md5,
+        };
+        let server_dir = spec.server_dir();
+        if let Some(existing) =
+            daemon_client::find_running_server_with_timeout(&server_dir, spec.connect_timeout())
+        {
+            let _ = writeln!(
+                stderr_writer,
+                "FATAL: exec-server failed, please shut down existing server pid={} and retry.",
+                existing.info.pid
+            );
+            return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
+        }
+        let mut none_srv = None;
+        if let Err((code, msg)) =
+            daemon_client::ensure_correct_running_version(&spec, &mut none_srv)
+        {
+            let _ = writeln!(stderr_writer, "FATAL: {msg}");
+            return code;
+        }
+        let _ = std::fs::create_dir_all(&server_dir);
+        let _ = std::fs::write(
+            server_dir.join("server.pid.txt"),
+            format!("{}\n", std::process::id()),
+        );
+        let server_args = spec.server_args();
+        let _ = std::fs::write(server_dir.join("cmdline"), server_args.join("\0"));
+        if !workspace_dir.path_string().is_empty() {
+            let _ = std::env::set_current_dir(workspace_dir.path_string());
+        }
+        drop(client_locks);
+        return run_background_daemon(&server_args);
+    }
+
+    let mut full_argv_bytes = Vec::with_capacity(3 + expanded_cmd_args.len());
     full_argv_bytes.push(effective_cmd.as_bytes().to_vec());
+    full_argv_bytes.push(format!("--command_wait_time={wait_ms}").into_bytes());
     // Like Bazel's C++ client, tell the server the directory the client was started in so that
     // relative target patterns (`:foo`, `...`, `sub/pkg:all`) resolve against it. The flag goes
     // right after the command name, i.e. before any `--` terminator.
@@ -644,18 +832,25 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     }
     // Terminal facts for the server-side UI (`--isatty`, `--terminal_columns`), like blaze.cc.
     // User-supplied values (appended below) win because they come later.
-    if matches!(effective_cmd.as_str(), "build" | "test" | "run" | "coverage") {
+    if matches!(
+        effective_cmd.as_str(),
+        "build" | "test" | "run" | "coverage"
+    ) {
         let tty = zel_server::sys::is_tty(2);
         full_argv_bytes.push(format!("--isatty={}", if tty { 1 } else { 0 }).into_bytes());
         full_argv_bytes.push(
-            format!("--terminal_columns={}", zel_server::sys::terminal_columns(2)).into_bytes(),
+            format!(
+                "--terminal_columns={}",
+                zel_server::sys::terminal_columns(2)
+            )
+            .into_bytes(),
         );
     }
     for a in &expanded_cmd_args {
         full_argv_bytes.push(a.as_bytes().to_vec());
     }
 
-    let mut run_req = RunRequest {
+    let run_req = RunRequest {
         cookie: "batch-cookie".to_string(),
         arg: full_argv_bytes,
         block_for_lock: startup.block_for_lock,
@@ -668,9 +863,13 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     };
 
     if effective_cmd == "shutdown" {
-        let in_ws = find_workspace_root_opt(fs.as_ref(), &cwd).is_some();
+        let in_ws = find_workspace_root_opt(fs.as_ref(), cwd).is_some();
         if !in_ws {
-            let prod = if startup.product_name.is_empty() { "Bazel" } else { &startup.product_name };
+            let prod = if startup.product_name.is_empty() {
+                "Bazel"
+            } else {
+                &startup.product_name
+            };
             let _ = writeln!(
                 stderr_writer,
                 "WARNING: Running command \"shutdown\" in batch mode.  Batch mode is triggered\n\
@@ -686,7 +885,10 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         if daemon_client::find_running_server(&server_dir).is_none() {
             return 0;
         }
-        let parsed = match zel_options::ParsedCommandOptions::parse_for_command("shutdown", &expanded_cmd_args) {
+        let parsed = match zel_options::ParsedCommandOptions::parse_for_command(
+            "shutdown",
+            &expanded_cmd_args,
+        ) {
             Ok(p) => p,
             Err(e) => {
                 let _ = writeln!(stderr_writer, "{}", e.format_bazel_error());
@@ -694,12 +896,16 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
             }
         };
         if !parsed.targets.is_empty() {
-            let _ = writeln!(stderr_writer, "ERROR: Unrecognized arguments: {}", parsed.targets.join(" "));
+            let _ = writeln!(
+                stderr_writer,
+                "ERROR: Unrecognized arguments: {}",
+                parsed.targets.join(" ")
+            );
             return ExitCode::COMMAND_LINE_ERROR.numeric_exit_code();
         }
     }
 
-    // Persistent server mode (default): lock, find / (re)start the daemon, stream the command.
+    // Persistent server mode (default): find / (re)start the daemon, stream the command, release locks when Run RPC starts.
     if !startup.batch && std::path::Path::new(cwd.path_string()).is_dir() {
         let paths = ExecPathContext {
             output_base: output_base.path_string().to_string(),
@@ -708,16 +914,41 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
         };
         return run_with_daemon(
             &startup,
+            exe_path,
             run_req,
             paths,
             output_user_root.path_string(),
+            client_locks,
             stdout_writer,
             stderr_writer,
             exec_request,
         );
     }
 
-    // Fallback / `--batch` mode execution
+    // Fallback / `--batch` mode execution (`RunBatchMode`: kill any running server on this output_base,
+    // keep locks held for the duration of the command).
+    let spec = daemon_client::ServerSpec {
+        exe: exe_path,
+        startup: &startup,
+        workspace_dir: workspace_dir.path_string(),
+        output_base: output_base.path_string(),
+        install_base: install_base.path_string(),
+        output_user_root: output_user_root.path_string(),
+        install_md5: &install_md5,
+    };
+    let server_dir = spec.server_dir();
+    if let Some(existing) =
+        daemon_client::find_running_server_with_timeout(&server_dir, spec.connect_timeout())
+    {
+        daemon_client::kill_running_server(
+            Some(&existing),
+            &server_dir,
+            startup.block_for_lock,
+            spec.connect_timeout(),
+        );
+    }
+    let mut none_srv = None;
+    let _ = daemon_client::ensure_correct_running_version(&spec, &mut none_srv);
     let paths = ExecPathContext {
         output_base: output_base.path_string().to_string(),
         workspace_dir: workspace_dir.path_string().to_string(),
@@ -731,9 +962,13 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     };
     let runtime = BlazeRuntime::new(dirs, fs, std::process::id());
     let resp = runtime.dispatch_command(&run_req, "batch-cookie");
+    drop(client_locks);
     let _ = stdout_writer.write_all(&resp.standard_output);
     let _ = stderr_writer.write_all(&resp.standard_error);
-    *exec_request = resp.exec_request.clone().map(|request| PendingExec { request, paths });
+    *exec_request = resp
+        .exec_request
+        .clone()
+        .map(|request| PendingExec { request, paths });
     resp.exit_code
 }
 
@@ -762,8 +997,10 @@ pub fn binary_install_md5() -> String {
                     format!("{}|{}|{}", exe.display(), m.len(), mtime).as_bytes(),
                 )
             });
-            let cache_dir = std::env::temp_dir()
-                .join(format!("zel-install-md5-{}", std::env::var("USER").unwrap_or_default()));
+            let cache_dir = std::env::temp_dir().join(format!(
+                "zel-install-md5-{}",
+                std::env::var("USER").unwrap_or_default()
+            ));
             if let Some(k) = &key {
                 if let Ok(v) = std::fs::read_to_string(cache_dir.join(k)) {
                     if v.len() == 32 {
@@ -796,8 +1033,15 @@ pub fn startup_flag(startup: &StartupOptions, name: &str, default: bool) -> bool
 }
 
 /// `--failure_detail_out`: writes the serialized `FailureDetail` of a failed command.
-fn write_failure_detail(startup: &StartupOptions, detail: Option<&zel_proto::failure_details::FailureDetail>) {
-    let Some(d) = startup.parsed_options.get("failure_detail_out").and_then(|d| d.raw_values.last()) else {
+fn write_failure_detail(
+    startup: &StartupOptions,
+    detail: Option<&zel_proto::failure_details::FailureDetail>,
+) {
+    let Some(d) = startup
+        .parsed_options
+        .get("failure_detail_out")
+        .and_then(|d| d.raw_values.last())
+    else {
         return;
     };
     if d.is_empty() {
@@ -808,11 +1052,14 @@ fn write_failure_detail(startup: &StartupOptions, detail: Option<&zel_proto::fai
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_with_daemon<O: Write, E: Write>(
     startup: &StartupOptions,
+    exe: std::path::PathBuf,
     run_req: RunRequest,
     paths: ExecPathContext,
     output_user_root: &str,
+    locks: daemon_client::ClientLocks,
     stdout_writer: &mut O,
     stderr_writer: &mut E,
     exec_request: &mut Option<PendingExec>,
@@ -821,13 +1068,6 @@ fn run_with_daemon<O: Write, E: Write>(
     let user = std::env::var("USER").unwrap_or_else(|_| "bazel".to_string());
     let home = std::env::var("HOME").ok();
     let install_base = startup.resolve_install_base(&install_md5, &user, home.as_deref());
-    let exe = match std::env::current_exe() {
-        Ok(e) => e,
-        Err(e) => {
-            let _ = writeln!(stderr_writer, "ERROR: cannot determine own path: {e}");
-            return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
-        }
-    };
     let spec = daemon_client::ServerSpec {
         exe,
         startup,
@@ -838,26 +1078,6 @@ fn run_with_daemon<O: Write, E: Write>(
         install_md5: &install_md5,
     };
     let debug = startup_flag(startup, "client_debug", false);
-    // `--lock_install_base`: a shared lock on `<install_base>.lock` while the install is in use.
-    let _install_lock = if startup_flag(startup, "lock_install_base", true) {
-        match daemon_client::acquire_install_base_lock(install_base.path_string()) {
-            Ok(l) => l,
-            Err(e) => {
-                let _ = writeln!(stderr_writer, "FATAL: open failed for install base lock: {}", daemon_client::errno_string(&e));
-                return ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code();
-            }
-        }
-    } else {
-        None
-    };
-    let lock = match daemon_client::acquire_output_base_lock(
-        std::path::Path::new(&paths.output_base),
-        startup.block_for_lock,
-        stderr_writer,
-    ) {
-        Ok(l) => l,
-        Err(code) => return code,
-    };
     let server = match daemon_client::connect_or_start(&spec, stderr_writer) {
         Ok(s) => s,
         Err((code, msg)) => {
@@ -865,7 +1085,6 @@ fn run_with_daemon<O: Write, E: Write>(
             return code;
         }
     };
-    drop(lock);
     if debug {
         let _ = writeln!(
             stderr_writer,
@@ -886,6 +1105,7 @@ fn run_with_daemon<O: Write, E: Write>(
         stdout_writer,
         stderr_writer,
         spec.connect_timeout(),
+        Some(locks),
     );
     if let Some(status) = outcome.abrupt {
         let _ = writeln!(
@@ -902,7 +1122,10 @@ fn run_with_daemon<O: Write, E: Write>(
     if resp.termination_expected {
         daemon_client::await_server_exit(&spec.server_dir(), server.info.pid);
     }
-    *exec_request = resp.exec_request.clone().map(|request| PendingExec { request, paths });
+    *exec_request = resp
+        .exec_request
+        .clone()
+        .map(|request| PendingExec { request, paths });
     resp.exit_code
 }
 
@@ -986,8 +1209,8 @@ pub fn spawn_detached_daemon(
     response_cookie: &str,
 ) -> io::Result<u32> {
     let _ = startup;
-    let child = Command::new(exe_path)
-        .arg("--internal_server_daemon")
+    let mut cmd = Command::new(exe_path);
+    cmd.arg("--internal_server_daemon")
         .arg(format!("--workspace_directory={workspace_dir}"))
         .arg(format!("--output_base={output_base}"))
         .arg(format!("--install_base={install_base}"))
@@ -996,8 +1219,22 @@ pub fn spawn_detached_daemon(
         .arg(format!("--response_cookie={response_cookie}"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    #[cfg(windows)]
+    let child = {
+        use std::os::windows::process::CommandExt;
+        const DETACHED_PROCESS: u32 = 0x0000_0008;
+        const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+        cmd.creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP);
+        daemon_client::spawn_without_inherited_stdio(&mut cmd)?
+    };
+    #[cfg(not(windows))]
+    let child = cmd.spawn()?;
     Ok(child.id())
 }
 
@@ -1056,10 +1293,7 @@ mod tests {
             &mut err,
         );
         assert_eq!(code, 0);
-        assert_eq!(
-            String::from_utf8_lossy(&out).trim(),
-            "--config=opt"
-        );
+        assert_eq!(String::from_utf8_lossy(&out).trim(), "--config=opt");
 
         // 3. Test `bazel query //app/...`
         out.clear();

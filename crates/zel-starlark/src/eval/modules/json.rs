@@ -19,12 +19,27 @@ use crate::types::value::{format_float, Value};
 use std::sync::{Arc, Mutex};
 
 pub fn json_encode(x: &Value) -> Result<String, StarlarkError> {
+    json_encode_with_host(x, &mut |_, _| Ok(None))
+}
+
+pub type HostStructResolver<'a> =
+    &'a mut dyn FnMut(&str, &str) -> Result<Option<Value>, StarlarkError>;
+
+pub fn json_encode_with_host(
+    x: &Value,
+    resolve_host: HostStructResolver<'_>,
+) -> Result<String, StarlarkError> {
     let mut out = String::new();
-    encode_val(x, &mut out, 0)?;
+    encode_val(x, &mut out, 0, resolve_host)?;
     Ok(out)
 }
 
-fn encode_val(x: &Value, out: &mut String, depth: usize) -> Result<(), StarlarkError> {
+fn encode_val(
+    x: &Value,
+    out: &mut String,
+    depth: usize,
+    resolve_host: HostStructResolver<'_>,
+) -> Result<(), StarlarkError> {
     if depth > 500 {
         return Err(StarlarkError("nesting depth limit exceeded".to_string()));
     }
@@ -45,14 +60,13 @@ fn encode_val(x: &Value, out: &mut String, depth: usize) -> Result<(), StarlarkE
         Value::String(s) => append_quoted_json(s, out),
         Value::List(l) => {
             out.push('[');
-            let guard = l.lock().unwrap();
-            for (i, elem) in guard.elements.iter().enumerate() {
+            let elems = l.lock().unwrap().elements.clone();
+            for (i, elem) in elems.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                encode_val(elem, out, depth + 1).map_err(|e| {
-                    StarlarkError(format!("at list index {i}: {}", e.0))
-                })?;
+                encode_val(elem, out, depth + 1, resolve_host)
+                    .map_err(|e| StarlarkError(format!("at list index {i}: {}", e.0)))?;
             }
             out.push(']');
         }
@@ -62,9 +76,8 @@ fn encode_val(x: &Value, out: &mut String, depth: usize) -> Result<(), StarlarkE
                 if i > 0 {
                     out.push(',');
                 }
-                encode_val(elem, out, depth + 1).map_err(|e| {
-                    StarlarkError(format!("at tuple index {i}: {}", e.0))
-                })?;
+                encode_val(elem, out, depth + 1, resolve_host)
+                    .map_err(|e| StarlarkError(format!("at tuple index {i}: {}", e.0)))?;
             }
             out.push(']');
         }
@@ -80,19 +93,19 @@ fn encode_val(x: &Value, out: &mut String, depth: usize) -> Result<(), StarlarkE
         }
         Value::Set(s) => {
             out.push('[');
-            let guard = s.lock().unwrap();
-            for (i, elem) in guard.elements.iter().enumerate() {
+            let elems = s.lock().unwrap().elements.clone();
+            for (i, elem) in elems.iter().enumerate() {
                 if i > 0 {
                     out.push(',');
                 }
-                encode_val(elem, out, depth + 1)?;
+                encode_val(elem, out, depth + 1, resolve_host)?;
             }
             out.push(']');
         }
         Value::Dict(d) => {
-            let guard = d.lock().unwrap();
+            let entries = d.lock().unwrap().entries.clone();
             // Validate all keys are strings
-            for (k, _) in &guard.entries {
+            for (k, _) in &entries {
                 if !matches!(k, Value::String(_)) {
                     return Err(StarlarkError(format!(
                         "dict has {} key, want string",
@@ -101,7 +114,7 @@ fn encode_val(x: &Value, out: &mut String, depth: usize) -> Result<(), StarlarkE
                 }
             }
             // Sort keys lexicographically for determinism
-            let mut sorted_entries = guard.entries.clone();
+            let mut sorted_entries = entries;
             sorted_entries.sort_by(|(k1, _), (k2, _)| {
                 k1.as_str().unwrap_or("").cmp(k2.as_str().unwrap_or(""))
             });
@@ -113,7 +126,7 @@ fn encode_val(x: &Value, out: &mut String, depth: usize) -> Result<(), StarlarkE
                 }
                 append_quoted_json(k.as_str().unwrap(), out);
                 out.push(':');
-                encode_val(v, out, depth + 1).map_err(|e| {
+                encode_val(v, out, depth + 1, resolve_host).map_err(|e| {
                     StarlarkError(format!("in dict key {:?}: {}", k.as_str().unwrap(), e.0))
                 })?;
             }
@@ -127,11 +140,33 @@ fn encode_val(x: &Value, out: &mut String, depth: usize) -> Result<(), StarlarkE
                 }
                 append_quoted_json(k, out);
                 out.push(':');
-                encode_val(v, out, depth + 1).map_err(|e| {
-                    StarlarkError(format!("in struct field .{k}: {}", e.0))
-                })?;
+                encode_val(v, out, depth + 1, resolve_host)
+                    .map_err(|e| StarlarkError(format!("in struct field .{k}: {}", e.0)))?;
             }
             out.push('}');
+        }
+        Value::ProviderInstance { fields, .. } => {
+            out.push('{');
+            for (i, (k, v)) in fields.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                append_quoted_json(k, out);
+                out.push(':');
+                encode_val(v, out, depth + 1, resolve_host)
+                    .map_err(|e| StarlarkError(format!("in struct field .{k}: {}", e.0)))?;
+            }
+            out.push('}');
+        }
+        Value::Host(k, id) => {
+            if let Some(encodable) = resolve_host(k, id)? {
+                encode_val(&encodable, out, depth + 1, resolve_host)?;
+            } else {
+                return Err(StarlarkError(format!(
+                    "cannot encode {} as JSON",
+                    x.type_name()
+                )));
+            }
         }
         other => {
             return Err(StarlarkError(format!(
@@ -214,7 +249,10 @@ pub fn json_indent(s: &str, prefix: &str, indent: &str) -> Result<String, Starla
                 while next_idx < chars.len() && chars[next_idx].is_whitespace() {
                     next_idx += 1;
                 }
-                if next_idx < chars.len() && ((c == '{' && chars[next_idx] == '}') || (c == '[' && chars[next_idx] == ']')) {
+                if next_idx < chars.len()
+                    && ((c == '{' && chars[next_idx] == '}')
+                        || (c == '[' && chars[next_idx] == ']'))
+                {
                     i = next_idx;
                     out.push(chars[i]);
                 } else {
@@ -291,7 +329,9 @@ impl JsonDecoder {
         let val = self.parse_value()?;
         self.skip_ws();
         if self.pos < self.chars.len() {
-            return Err(StarlarkError("unexpected trailing data in JSON".to_string()));
+            return Err(StarlarkError(
+                "unexpected trailing data in JSON".to_string(),
+            ));
         }
         Ok(val)
     }
@@ -309,7 +349,9 @@ impl JsonDecoder {
             '[' => self.parse_array(),
             '{' => self.parse_object(),
             '-' | '0'..='9' => self.parse_number(),
-            other => Err(StarlarkError(format!("unexpected character '{other}' in JSON"))),
+            other => Err(StarlarkError(format!(
+                "unexpected character '{other}' in JSON"
+            ))),
         }
     }
 
@@ -345,36 +387,37 @@ impl JsonDecoder {
                     'u' => {
                         let mut hex = String::new();
                         for _ in 0..4 {
-                            hex.push(
-                                self.next()
-                                    .ok_or_else(|| StarlarkError("incomplete \\uXXXX escape".to_string()))?,
-                            );
+                            hex.push(self.next().ok_or_else(|| {
+                                StarlarkError("incomplete \\uXXXX escape".to_string())
+                            })?);
                         }
-                        let code = u32::from_str_radix(&hex, 16)
-                            .map_err(|_| StarlarkError(format!("invalid hex in \\u escape: {hex}")))?;
+                        let code = u32::from_str_radix(&hex, 16).map_err(|_| {
+                            StarlarkError(format!("invalid hex in \\u escape: {hex}"))
+                        })?;
 
                         // Check for surrogate pairs: if high surrogate \uD800..\uDBFF
-                        if (0xD800..=0xDBFF).contains(&code) {
-                            if self.peek() == Some('\\') && self.chars.get(self.pos + 1) == Some(&'u') {
-                                self.pos += 2; // consume \u
-                                let mut hex2 = String::new();
-                                for _ in 0..4 {
-                                    hex2.push(self.next().ok_or_else(|| {
-                                        StarlarkError("incomplete \\uXXXX escape".to_string())
-                                    })?);
-                                }
-                                let code2 = u32::from_str_radix(&hex2, 16).map_err(|_| {
-                                    StarlarkError(format!("invalid hex in \\u escape: {hex2}"))
-                                })?;
-                                if (0xDC00..=0xDFFF).contains(&code2) {
-                                    let full = 0x10000 + (((code - 0xD800) << 10) | (code2 - 0xDC00));
-                                    out.push(char::from_u32(full).unwrap_or('\u{FFFD}'));
-                                    continue;
-                                } else {
-                                    out.push('\u{FFFD}');
-                                    out.push(char::from_u32(code2).unwrap_or('\u{FFFD}'));
-                                    continue;
-                                }
+                        if (0xD800..=0xDBFF).contains(&code)
+                            && self.peek() == Some('\\')
+                            && self.chars.get(self.pos + 1) == Some(&'u')
+                        {
+                            self.pos += 2; // consume \u
+                            let mut hex2 = String::new();
+                            for _ in 0..4 {
+                                hex2.push(self.next().ok_or_else(|| {
+                                    StarlarkError("incomplete \\uXXXX escape".to_string())
+                                })?);
+                            }
+                            let code2 = u32::from_str_radix(&hex2, 16).map_err(|_| {
+                                StarlarkError(format!("invalid hex in \\u escape: {hex2}"))
+                            })?;
+                            if (0xDC00..=0xDFFF).contains(&code2) {
+                                let full = 0x10000 + (((code - 0xD800) << 10) | (code2 - 0xDC00));
+                                out.push(char::from_u32(full).unwrap_or('\u{FFFD}'));
+                                continue;
+                            } else {
+                                out.push('\u{FFFD}');
+                                out.push(char::from_u32(code2).unwrap_or('\u{FFFD}'));
+                                continue;
                             }
                         }
                         out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
@@ -410,14 +453,13 @@ impl JsonDecoder {
         let num_str: String = self.chars[start..end].iter().collect();
 
         if is_float {
-            let f = num_str.parse::<f64>().map_err(|e| {
-                StarlarkError(format!("invalid float in JSON '{num_str}': {e}"))
-            })?;
+            let f = num_str
+                .parse::<f64>()
+                .map_err(|e| StarlarkError(format!("invalid float in JSON '{num_str}': {e}")))?;
             Ok(Value::Float(f))
         } else {
-            let bi = BigInt::from_str_radix(&num_str, 10).map_err(|e| {
-                StarlarkError(format!("invalid integer in JSON '{num_str}': {e}"))
-            })?;
+            let bi = BigInt::from_str_radix(&num_str, 10)
+                .map_err(|e| StarlarkError(format!("invalid integer in JSON '{num_str}': {e}")))?;
             Ok(Value::Int(bi))
         }
     }
@@ -442,7 +484,11 @@ impl JsonDecoder {
                     self.next();
                     break;
                 }
-                _ => return Err(StarlarkError("expected ',' or ']' in JSON array".to_string())),
+                _ => {
+                    return Err(StarlarkError(
+                        "expected ',' or ']' in JSON array".to_string(),
+                    ))
+                }
             }
         }
         Ok(Value::List(Arc::new(Mutex::new(StarlarkList::new(items)))))
@@ -459,12 +505,16 @@ impl JsonDecoder {
         loop {
             self.skip_ws();
             if self.peek() != Some('"') {
-                return Err(StarlarkError("expected string key in JSON object".to_string()));
+                return Err(StarlarkError(
+                    "expected string key in JSON object".to_string(),
+                ));
             }
             let key = Value::String(self.parse_string()?);
             self.skip_ws();
             if self.next() != Some(':') {
-                return Err(StarlarkError("expected ':' after key in JSON object".to_string()));
+                return Err(StarlarkError(
+                    "expected ':' after key in JSON object".to_string(),
+                ));
             }
             let val = self.parse_value()?;
             let _ = dict.insert(key, val);
@@ -477,7 +527,11 @@ impl JsonDecoder {
                     self.next();
                     break;
                 }
-                _ => return Err(StarlarkError("expected ',' or '}' in JSON object".to_string())),
+                _ => {
+                    return Err(StarlarkError(
+                        "expected ',' or '}' in JSON object".to_string(),
+                    ))
+                }
             }
         }
         Ok(Value::Dict(Arc::new(Mutex::new(dict))))

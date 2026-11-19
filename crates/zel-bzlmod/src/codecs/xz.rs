@@ -143,7 +143,8 @@ fn bcj_ppc(buf: &mut [u8], start: u32) {
 
 fn bcj_ia64(buf: &mut [u8], start: u32) {
     const BRANCH: [u8; 32] = [
-        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 6, 6, 0, 0, 7, 7, 4, 4, 0, 0, 4, 4, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 4, 6, 6, 0, 0, 7, 7, 4, 4, 0, 0, 4, 4,
+        0, 0,
     ];
     let mut i = 0usize;
     while i + 16 <= buf.len() {
@@ -220,12 +221,16 @@ fn bcj_armthumb(buf: &mut [u8], start: u32) {
 fn bcj_sparc(buf: &mut [u8], start: u32) {
     let mut i = 0usize;
     while i + 4 <= buf.len() {
-        if (buf[i] == 0x40 && buf[i + 1] & 0xC0 == 0x00) || (buf[i] == 0x7F && buf[i + 1] & 0xC0 == 0xC0) {
+        if (buf[i] == 0x40 && buf[i + 1] & 0xC0 == 0x00)
+            || (buf[i] == 0x7F && buf[i + 1] & 0xC0 == 0xC0)
+        {
             let mut src = u32::from_be_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
             src <<= 2;
             let mut dest = src.wrapping_sub(start.wrapping_add(i as u32));
             dest >>= 2;
-            dest = ((0u32.wrapping_sub((dest >> 22) & 1) << 22) & 0x3FFF_FFFF) | (dest & 0x3F_FFFF) | 0x4000_0000;
+            dest = ((0u32.wrapping_sub((dest >> 22) & 1) << 22) & 0x3FFF_FFFF)
+                | (dest & 0x3F_FFFF)
+                | 0x4000_0000;
             buf[i..i + 4].copy_from_slice(&dest.to_be_bytes());
         }
         i += 4;
@@ -319,35 +324,21 @@ pub fn xz_decompress(input: &[u8]) -> Result<Vec<u8>, String> {
 
 fn xz_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
     let mut pos = 0usize;
-    let mut first = true;
 
-    loop {
-        // Stream padding (zero bytes, multiple of 4) between concatenated streams.
-        if !first {
-            let pad_start = pos;
-            while pos < input.len() && input[pos] == 0 {
-                pos += 1;
-            }
-            if pos == input.len() {
-                if (pos - pad_start) % 4 != 0 {
-                    return Err("XZ stream padding is not a multiple of four bytes".into());
-                }
-                break;
-            }
-            if (pos - pad_start) % 4 != 0 {
-                return Err("XZ stream padding is not a multiple of four bytes".into());
-            }
-        }
-        first = false;
-
+    {
         if input.len() - pos < 12 {
-            return Err(if pos == 0 && input.is_empty() { "XZ input is empty".into() } else { "XZ stream header truncated".to_string() });
+            return Err(if pos == 0 && input.is_empty() {
+                "XZ input is empty".into()
+            } else {
+                "XZ stream header truncated".to_string()
+            });
         }
         if &input[pos..pos + 6] != HEADER_MAGIC {
             return Err("Not an XZ archive (missing header magic)".into());
         }
         let stream_flags = [input[pos + 6], input[pos + 7]];
-        if u32::from_le_bytes(input[pos + 8..pos + 12].try_into().unwrap()) != crc32(&stream_flags) {
+        if u32::from_le_bytes(input[pos + 8..pos + 12].try_into().unwrap()) != crc32(&stream_flags)
+        {
             return Err("XZ stream header CRC32 mismatch".into());
         }
         if stream_flags[0] != 0 || stream_flags[1] & 0xF0 != 0 {
@@ -371,7 +362,9 @@ fn xz_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
                 return Err("XZ block header truncated".into());
             }
             let bh = &input[pos..pos + bh_size];
-            if u32::from_le_bytes(bh[bh_size - 4..].try_into().unwrap()) != crc32(&bh[..bh_size - 4]) {
+            if u32::from_le_bytes(bh[bh_size - 4..].try_into().unwrap())
+                != crc32(&bh[..bh_size - 4])
+            {
                 return Err("XZ block header CRC32 mismatch".into());
             }
             let flags = bh[1];
@@ -382,8 +375,16 @@ fn xz_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
             let mut hp = 2usize;
             let hdr_end = bh_size - 4;
             let mut sub = &bh[..hdr_end];
-            let comp_size = if flags & 0x40 != 0 { Some(read_varint(sub, &mut hp)?) } else { None };
-            let uncomp_size = if flags & 0x80 != 0 { Some(read_varint(sub, &mut hp)?) } else { None };
+            let comp_size = if flags & 0x40 != 0 {
+                Some(read_varint(sub, &mut hp)?)
+            } else {
+                None
+            };
+            let uncomp_size = if flags & 0x80 != 0 {
+                Some(read_varint(sub, &mut hp)?)
+            } else {
+                None
+            };
             let mut filters = Vec::new();
             for _ in 0..nfilters {
                 let id = read_varint(sub, &mut hp)?;
@@ -398,7 +399,11 @@ fn xz_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
             if sub.iter().any(|&b| b != 0) {
                 return Err("XZ block header padding is not zero".into());
             }
-            if !matches!(filters.last(), Some(Filter::Lzma2)) || filters[..filters.len() - 1].iter().any(|f| matches!(f, Filter::Lzma2)) {
+            if !matches!(filters.last(), Some(Filter::Lzma2))
+                || filters[..filters.len() - 1]
+                    .iter()
+                    .any(|f| matches!(f, Filter::Lzma2))
+            {
                 return Err("XZ filter chain must end with LZMA2".into());
             }
 
@@ -477,7 +482,9 @@ fn xz_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
             return Err("XZ index padding is not zero".into());
         }
         pos += pad;
-        if u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap()) != crc32(&input[index_start..pos]) {
+        if u32::from_le_bytes(input[pos..pos + 4].try_into().unwrap())
+            != crc32(&input[index_start..pos])
+        {
             return Err("XZ Index CRC32 mismatch".into());
         }
         pos += 4;
@@ -500,10 +507,9 @@ fn xz_into(input: &[u8], output: &mut Vec<u8>) -> Result<(), String> {
         if footer[8..10] != stream_flags {
             return Err("XZ Stream Footer flags mismatch Stream Header flags".into());
         }
-        pos += 12;
         // Bazel reads a single XZ stream (XZCompressorInputStream without concatenation): bytes after the
         // first stream's footer are never looked at.
-        break;
+        let _ = pos;
     }
     Ok(())
 }

@@ -15,7 +15,6 @@
 //! Loading-phase glue for the command handlers: package loader construction, target pattern
 //! resolution, `query` evaluation over loaded packages, and Bazel-format loading diagnostics.
 
-use std::collections::HashSet;
 use super::*;
 use std::collections::BTreeSet;
 use zel_cmdline::RepositoryName;
@@ -29,9 +28,11 @@ pub(crate) fn opt_list(parsed: &ParsedCommandOptions, name: &str) -> Vec<String>
     fn collect(v: &zel_options::OptionValue, out: &mut Vec<String>) {
         match v {
             zel_options::OptionValue::List(l) => l.iter().for_each(|x| collect(x, out)),
-            zel_options::OptionValue::String(s) | zel_options::OptionValue::Label(s) => {
-                out.extend(s.split(',').filter(|p| !p.is_empty()).map(|p| p.to_string()))
-            }
+            zel_options::OptionValue::String(s) | zel_options::OptionValue::Label(s) => out.extend(
+                s.split(',')
+                    .filter(|p| !p.is_empty())
+                    .map(|p| p.to_string()),
+            ),
             _ => {}
         }
     }
@@ -40,7 +41,11 @@ pub(crate) fn opt_list(parsed: &ParsedCommandOptions, name: &str) -> Vec<String>
         collect(&d.value, &mut out);
         if out.is_empty() {
             for rv in &d.raw_values {
-                out.extend(rv.split(',').filter(|p| !p.is_empty()).map(|p| p.to_string()));
+                out.extend(
+                    rv.split(',')
+                        .filter(|p| !p.is_empty())
+                        .map(|p| p.to_string()),
+                );
             }
         }
     }
@@ -77,13 +82,18 @@ impl BlazeRuntime {
                     continue;
                 }
                 let root = ext.get_relative_str(&e.name);
-                if !self.fs.stat(&root, true).map(|s| s.is_directory).unwrap_or(false) {
+                if !self
+                    .fs
+                    .stat(&root, true)
+                    .map(|s| s.is_directory)
+                    .unwrap_or(false)
+                {
                     continue;
                 }
                 if let Ok(canonical) = RepositoryName::create(&e.name) {
                     let apparent = e
                         .name
-                        .split(|c| c == '+' || c == '~')
+                        .split(['+', '~'])
                         .next()
                         .unwrap_or(&e.name)
                         .to_string();
@@ -109,8 +119,11 @@ impl BlazeRuntime {
         }
         // Bzlmod-aware resolver (installed per command by `CommandResolver::install_for_command`):
         // fetches external repos on demand and applies canonical repo mappings.
-        let repo_resolver: Arc<dyn zel_packages::lookup::RepoResolver> =
-            self.repo_resolver.slot().get().unwrap_or_else(|| Arc::new(resolver));
+        let repo_resolver: Arc<dyn zel_packages::lookup::RepoResolver> = self
+            .repo_resolver
+            .slot()
+            .get()
+            .unwrap_or_else(|| Arc::new(resolver));
         // Package loading is memoized in the persistent Skyframe graph: the loader reads through
         // the recording file system (so every observed file/directory becomes a dependency) and
         // `load_package` is served by `PACKAGE_LOAD` nodes across commands.
@@ -124,17 +137,18 @@ impl BlazeRuntime {
             }
         }
         cfg.lookup.deleted_packages = deleted;
-        cfg.allow_empty_glob = !parsed.get_bool("incompatible_disallow_empty_glob").unwrap_or(false);
+        cfg.allow_empty_glob = !parsed
+            .get_bool("incompatible_disallow_empty_glob")
+            .unwrap_or(true);
         let mut sig_parts: Vec<String> = vec![
             format!("allow_empty_glob={}", cfg.allow_empty_glob),
             format!("deleted={:?}", cfg.lookup.deleted_packages),
         ];
-        sig_parts.extend(opt_list(parsed, "override_repository").into_iter().map(|o| format!("override={o}")));
-        if let Ok(entries) = self.fs.readdir(&ext) {
-            let mut names: Vec<String> = entries.into_iter().map(|e| e.name).collect();
-            names.sort();
-            sig_parts.push(format!("external={names:?}"));
-        }
+        sig_parts.extend(
+            opt_list(parsed, "override_repository")
+                .into_iter()
+                .map(|o| format!("override={o}")),
+        );
         self.sync_skyframe(&sig_parts);
         PackageLoader::new(cfg)
     }
@@ -189,19 +203,26 @@ impl BlazeRuntime {
         if pattern.starts_with("@@") {
             Some(format!("Repository '@@{name}' is not defined"))
         } else {
-            Some(format!("No repository visible as '@{name}' from main repository"))
+            Some(format!(
+                "No repository visible as '@{name}' from main repository"
+            ))
         }
     }
 
     /// Renders a package event; rule-instantiation failures (output conflicts) are Starlark
     /// evaluation errors, which Bazel prints as a `Traceback` of the failing BUILD call.
     fn render_event(e: &PackageEvent) -> String {
-        if matches!(e.kind, EventKind::Error) && e.message.contains("conflicts with existing generated file from rule") {
+        if matches!(e.kind, EventKind::Error)
+            && e.message
+                .contains("conflicts with existing generated file from rule")
+        {
             if let Some(loc) = &e.location {
                 let mut it = loc.rsplitn(3, ':');
                 let (col, line, file) = (it.next(), it.next(), it.next());
                 if let (Some(col), Some(line), Some(file)) = (col, line, file) {
-                    if let (Ok(n), Ok(text)) = (line.parse::<usize>(), std::fs::read_to_string(file)) {
+                    if let (Ok(n), Ok(text)) =
+                        (line.parse::<usize>(), std::fs::read_to_string(file))
+                    {
                         if let Some(src) = text.lines().nth(n.saturating_sub(1)) {
                             let src = src.trim();
                             let func = src.split('(').next().unwrap_or("").trim();
@@ -228,34 +249,54 @@ impl BlazeRuntime {
         warn_without_keep_going: bool,
         stderr: &mut Vec<u8>,
     ) -> Result<(Vec<PkgTarget>, bool), ExitCode> {
-        let mut outcome = resolver.resolve_patterns_filtered(patterns, filter_manual);
+        let mut outcome =
+            resolver.resolve_patterns_with_options(patterns, filter_manual, keep_going);
         Self::report_events(stderr, &outcome.events);
         // A package that failed to load: `TargetPatternPhaseFunction` wraps the cause as
         // `Error evaluating '<pattern>': error loading package ...: Package '...' contains errors`.
         for err in &mut outcome.errors {
             if let Some(pe) = &err.package_errors {
-                let first_err = resolver.package(&pe.package).ok()
-                    .and_then(|pkg| pkg.events.iter().find(|e| e.kind == EventKind::Error).cloned())
-                    .map(|e| Self::render_event(&e).strip_prefix("ERROR: ").unwrap_or(&pe.first_error).to_string())
+                let first_err = resolver
+                    .package(&pe.package)
+                    .ok()
+                    .and_then(|pkg| {
+                        pkg.events
+                            .iter()
+                            .find(|e| e.kind == EventKind::Error)
+                            .cloned()
+                    })
+                    .map(|e| {
+                        Self::render_event(&e)
+                            .strip_prefix("ERROR: ")
+                            .unwrap_or(&pe.first_error)
+                            .to_string()
+                    })
                     .unwrap_or_else(|| pe.first_error.clone());
                 writeln_bytes(
                     stderr,
-                    &format!("ERROR: package contains errors: {}: {}", pe.package.package_fragment(), first_err),
+                    &format!(
+                        "ERROR: package contains errors: {}: {}",
+                        pe.package.package_fragment(),
+                        first_err
+                    ),
                 );
                 if keep_going {
                     if let Ok(pkg) = resolver.package(&pe.package) {
                         for t in pkg.targets.values() {
-                            if matches!(t, PkgTarget::Rule(_)) {
-                                if !outcome.targets.iter().any(|x| x.label() == t.label()) {
-                                    outcome.targets.push(t.clone());
-                                }
+                            if matches!(t, PkgTarget::Rule(_))
+                                && !outcome.targets.iter().any(|x| x.label() == t.label())
+                            {
+                                outcome.targets.push(t.clone());
                             }
                         }
                     }
                 }
             }
             if let Some(rest) = err.message.strip_prefix("error loading package '") {
-                if let Some((pkg, tail)) = rest.split_once("': ").filter(|(_, t)| t.contains("contains errors") || t.contains("ERROR: ")) {
+                if let Some((pkg, tail)) = rest
+                    .split_once("': ")
+                    .filter(|(_, t)| t.contains("contains errors") || t.contains("ERROR: "))
+                {
                     let _ = tail;
                     let pkg = pkg.to_string();
                     err.message = format!(
@@ -267,26 +308,35 @@ impl BlazeRuntime {
             if keep_going && matches!(err.pattern.as_str(), "//..." | "...") {
                 for (_, pkg) in resolver.loaded_packages() {
                     if pkg.contains_errors {
-                        if let Some(first_e) = pkg.events.iter().find(|e| e.kind == EventKind::Error) {
+                        if let Some(first_e) =
+                            pkg.events.iter().find(|e| e.kind == EventKind::Error)
+                        {
                             let rendered = Self::render_event(first_e);
                             let first_str = if rendered.starts_with("ERROR: Traceback") {
-                                rendered.strip_prefix("ERROR: ").unwrap_or(&first_e.message).to_string()
+                                rendered
+                                    .strip_prefix("ERROR: ")
+                                    .unwrap_or(&first_e.message)
+                                    .to_string()
                             } else {
                                 first_e.message.clone()
                             };
                             writeln_bytes(
                                 stderr,
-                                &format!("ERROR: package contains errors: {}: {first_str}", pkg.id.package_fragment()),
+                                &format!(
+                                    "ERROR: package contains errors: {}: {first_str}",
+                                    pkg.id.package_fragment()
+                                ),
                             );
                         }
                     }
                 }
                 for (_, pkg) in resolver.loaded_packages() {
                     for t in pkg.targets.values() {
-                        if matches!(t, PkgTarget::Rule(_)) && !t.has_tag("manual") {
-                            if !outcome.targets.iter().any(|x| x.label() == t.label()) {
-                                outcome.targets.push(t.clone());
-                            }
+                        if matches!(t, PkgTarget::Rule(_))
+                            && !t.has_tag("manual")
+                            && !outcome.targets.iter().any(|x| x.label() == t.label())
+                        {
+                            outcome.targets.push(t.clone());
                         }
                     }
                 }
@@ -309,7 +359,10 @@ impl BlazeRuntime {
                 outcome.errors.clear();
             }
             for frag in bad_pkgs {
-                if let Some(pat) = patterns.iter().find(|p| p.trim_start_matches("//").starts_with(&format!("{frag}:"))) {
+                if let Some(pat) = patterns
+                    .iter()
+                    .find(|p| p.trim_start_matches("//").starts_with(&format!("{frag}:")))
+                {
                     if !outcome.errors.iter().any(|e| &e.pattern == pat) {
                         outcome.errors.push(zel_packages::resolve::PatternError {
                             pattern: pat.clone(),
@@ -319,7 +372,13 @@ impl BlazeRuntime {
                             package_errors: None,
                         });
                     }
-                    outcome.targets.retain(|t| t.label().package_identifier().package_fragment().to_string() != frag);
+                    outcome.targets.retain(|t| {
+                        t.label()
+                            .package_identifier()
+                            .package_fragment()
+                            .to_string()
+                            != frag
+                    });
                 }
             }
         }
@@ -327,14 +386,20 @@ impl BlazeRuntime {
         if had_errors && keep_going {
             writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
             for err in &outcome.errors {
-                if !matches!(err.pattern.as_str(), "//..." | "...") && err.package_errors.is_none() {
+                if !matches!(err.pattern.as_str(), "//..." | "...") && err.package_errors.is_none()
+                {
                     writeln_bytes(
                         stderr,
                         &format!("ERROR: Skipping '{}': {}", err.pattern, err.message),
                     );
                 }
             }
-        } else if had_errors && outcome.errors.iter().all(|e| Self::unknown_repo_message(&e.pattern, &e.message).is_some()) {
+        } else if had_errors
+            && outcome
+                .errors
+                .iter()
+                .all(|e| Self::unknown_repo_message(&e.pattern, &e.message).is_some())
+        {
             // A pattern naming a repository that does not exist is rejected while parsing it.
             let resolver_messages = self.repo_resolver.take_messages();
             let override_failure = resolver_messages.iter().any(|m| {
@@ -354,10 +419,9 @@ impl BlazeRuntime {
                 return Err(ExitCode::BUILD_FAILURE);
             }
             if override_failure {
-                if let Some(m) = resolver_messages
-                    .iter()
-                    .find(|m| m.starts_with("ERROR: No MODULE.bazel, REPO.bazel, or WORKSPACE file found in"))
-                {
+                if let Some(m) = resolver_messages.iter().find(|m| {
+                    m.starts_with("ERROR: No MODULE.bazel, REPO.bazel, or WORKSPACE file found in")
+                }) {
                     writeln_bytes(stderr, m);
                 } else {
                     for m in &resolver_messages {
@@ -383,14 +447,21 @@ impl BlazeRuntime {
             // `TargetPatternPhaseFunction` warns only for `--keep_going` loads; `bazel test`
             // observably does not warn without it while build/run do.
             let is_single_no_such_target = outcome.errors.len() == 1
-                && ((outcome.errors[0].message.starts_with("no such target '") && outcome.errors[0].pattern.starts_with("//"))
-                    || outcome.errors[0].message.contains("Package is considered deleted due to --deleted_packages")
-                    || (outcome.errors[0].message.contains("contains errors") && patterns.len() > 1));
+                && ((outcome.errors[0].message.starts_with("no such target '")
+                    && outcome.errors[0].pattern.starts_with("//"))
+                    || outcome.errors[0]
+                        .message
+                        .contains("Package is considered deleted due to --deleted_packages")
+                    || (outcome.errors[0].message.contains("contains errors")
+                        && patterns.len() > 1));
             if warn_without_keep_going && !is_single_no_such_target {
                 writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
             }
             for err in &outcome.errors {
-                if warn_without_keep_going || (err.message.starts_with("no such target '") && !err.message.contains("(did you mean")) {
+                if warn_without_keep_going
+                    || (err.message.starts_with("no such target '")
+                        && !err.message.contains("(did you mean"))
+                {
                     writeln_bytes(
                         stderr,
                         &format!("ERROR: Skipping '{}': {}", err.pattern, err.message),
@@ -408,6 +479,7 @@ impl BlazeRuntime {
 
     /// Loads the closure of dependencies for `roots` and reports unresolved dependencies in
     /// Bazel's format. Returns the rules in dependency order.
+    #[allow(dead_code)]
     pub(crate) fn load_build_closure(
         &self,
         resolver: &PatternResolver,
@@ -415,19 +487,22 @@ impl BlazeRuntime {
         stderr: &mut Vec<u8>,
     ) -> Result<Vec<PkgTarget>, ExitCode> {
         let (order, errors) = resolver.load_transitive_closure(roots);
-        let errors: Vec<_> = errors.into_iter().filter(|(referrer, dep, msg)| {
-            if dep.package_identifier() == referrer.package_identifier()
-                && msg.starts_with("no such target")
-                && dep.name().contains('.')
-            {
-                if let Ok(pkg) = resolver.package(dep.package_identifier()) {
-                    if !pkg.targets.contains_key(dep.name()) {
-                        return false;
+        let errors: Vec<_> = errors
+            .into_iter()
+            .filter(|(referrer, dep, msg)| {
+                if dep.package_identifier() == referrer.package_identifier()
+                    && msg.starts_with("no such target")
+                    && dep.name().contains('.')
+                {
+                    if let Ok(pkg) = resolver.package(dep.package_identifier()) {
+                        if !pkg.targets.contains_key(dep.name()) {
+                            return false;
+                        }
                     }
                 }
-            }
-            true
-        }).collect();
+                true
+            })
+            .collect();
         Self::report_events(stderr, &resolver.drain_new_events());
         if let Some(first) = errors.first() {
             for (referrer, _dep, msg) in &errors {
@@ -442,7 +517,10 @@ impl BlazeRuntime {
                     .unwrap_or_default();
                 writeln_bytes(
                     stderr,
-                    &format!("ERROR: {loc}{msg} and referenced by '{}'", referrer.canonical_form()),
+                    &format!(
+                        "ERROR: {loc}{msg} and referenced by '{}'",
+                        referrer.canonical_form()
+                    ),
                 );
             }
             let top = roots
@@ -453,7 +531,9 @@ impl BlazeRuntime {
                 .unwrap_or_default();
             writeln_bytes(
                 stderr,
-                &format!("ERROR: Analysis of target '{top}' failed; build aborted: Analysis failed"),
+                &format!(
+                    "ERROR: Analysis of target '{top}' failed; build aborted: Analysis failed"
+                ),
             );
             writeln_bytes(stderr, "ERROR: Build did NOT complete successfully");
             return Err(ExitCode::BUILD_FAILURE);
@@ -474,13 +554,18 @@ mod tests {
         let ws = PathFragment::create("/workspace");
         // A private output base per runtime: tests run in parallel (and other cargo runs share /tmp).
         static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-        let uniq = format!("{}-{}", std::process::id(), NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst));
+        let uniq = format!(
+            "{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        );
         let ob = PathFragment::create(&format!("/tmp/ob-loading-{uniq}"));
         fs.create_directory_and_parents(&ws).unwrap();
         fs.create_directory_and_parents(&ob).unwrap();
         for (p, c) in files {
             let path = ws.get_relative_str(p);
-            fs.create_directory_and_parents(&path.parent_directory().unwrap()).unwrap();
+            fs.create_directory_and_parents(&path.parent_directory().unwrap())
+                .unwrap();
             fs.write_file(&path, c.as_bytes()).unwrap();
         }
         let dirs = BlazeDirectories {
@@ -535,9 +620,23 @@ mod tests {
         let o = run(&rt, &["build", "--nobuild", "//:nonexistent"]);
         assert_eq!(o.code, 1, "{}", o.stderr);
         let want = "no such target '//:nonexistent': target 'nonexistent' not declared in package '' defined by /workspace/BUILD";
-        assert!(o.stderr.contains(&format!("ERROR: Skipping '//:nonexistent': {want}")), "{}", o.stderr);
-        assert!(o.stderr.contains(&format!("\nERROR: {want}\n")), "{}", o.stderr);
-        assert!(o.stderr.contains("ERROR: Build did NOT complete successfully"), "{}", o.stderr);
+        assert!(
+            o.stderr
+                .contains(&format!("ERROR: Skipping '//:nonexistent': {want}")),
+            "{}",
+            o.stderr
+        );
+        assert!(
+            o.stderr.contains(&format!("\nERROR: {want}\n")),
+            "{}",
+            o.stderr
+        );
+        assert!(
+            o.stderr
+                .contains("ERROR: Build did NOT complete successfully"),
+            "{}",
+            o.stderr
+        );
         assert!(!o.stderr.contains("Build completed successfully"));
     }
 
@@ -547,7 +646,9 @@ mod tests {
         let o = run(&rt, &["build", "--nobuild", "//:root"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
         assert_eq!(
-            o.stderr.matches("DEBUG: /workspace/BUILD:1:6: root loaded").count(),
+            o.stderr
+                .matches("DEBUG: /workspace/BUILD:1:6: root loaded")
+                .count(),
             1,
             "{}",
             o.stderr
@@ -562,7 +663,12 @@ mod tests {
         assert!(o.stderr.contains("no such package 'nope': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - nope"), "{}", o.stderr);
         let o = run(&rt, &["build", "--nobuild", "//ignored:bad"]);
         assert_eq!(o.code, 1);
-        assert!(o.stderr.contains("Package is considered deleted due to .bazelignore"), "{}", o.stderr);
+        assert!(
+            o.stderr
+                .contains("Package is considered deleted due to .bazelignore"),
+            "{}",
+            o.stderr
+        );
     }
 
     #[test]
@@ -575,24 +681,57 @@ mod tests {
         assert_eq!(o.code, 0, "{}", o.stderr);
         assert!(o.stderr.contains("Analyzed 2 targets ("), "{}", o.stderr);
         // Ordered subtraction: re-adding after the negative pattern.
-        let o = run(&rt, &["build", "--nobuild", "--", "//...", "-//app/...", "//app:app"]);
+        let o = run(
+            &rt,
+            &[
+                "build",
+                "--nobuild",
+                "--",
+                "//...",
+                "-//app/...",
+                "//app:app",
+            ],
+        );
         assert!(o.stderr.contains("Analyzed 3 targets ("), "{}", o.stderr);
     }
 
     #[test]
     fn relative_patterns_resolve_against_client_cwd() {
         let rt = tree();
-        let o = run(&rt, &["build", "--nobuild", "--client_cwd=/workspace/app", ":app"]);
+        let o = run(
+            &rt,
+            &["build", "--nobuild", "--client_cwd=/workspace/app", ":app"],
+        );
         assert_eq!(o.code, 0, "{}", o.stderr);
         assert!(o.stderr.contains("Analyzed target "), "{}", o.stderr);
-        let o = run(&rt, &["build", "--nobuild", "--client_cwd=/workspace/app", "..."]);
+        let o = run(
+            &rt,
+            &["build", "--nobuild", "--client_cwd=/workspace/app", "..."],
+        );
         assert!(o.stderr.contains("Analyzed 2 targets ("), "{}", o.stderr);
         let o = run(&rt, &["query", "--client_cwd=/workspace/app", ":all"]);
-        assert_eq!(o.stdout.lines().collect::<Vec<_>>(), vec!["//app:app", "//app:other"]);
+        assert_eq!(
+            o.stdout.lines().collect::<Vec<_>>(),
+            vec!["//app:app", "//app:other"]
+        );
         let o = run(&rt, &["query", "--client_cwd=/workspace/app", "..."]);
-        assert_eq!(o.stdout.lines().collect::<Vec<_>>(), vec!["//app:app", "//app:other"]);
-        let o = run(&rt, &["query", "--noimplicit_deps", "--client_cwd=/workspace/app", "deps(:app)"]);
-        assert_eq!(o.stdout.lines().collect::<Vec<_>>(), vec!["//app:app", "//lib:l"]);
+        assert_eq!(
+            o.stdout.lines().collect::<Vec<_>>(),
+            vec!["//app:app", "//app:other"]
+        );
+        let o = run(
+            &rt,
+            &[
+                "query",
+                "--noimplicit_deps",
+                "--client_cwd=/workspace/app",
+                "deps(:app)",
+            ],
+        );
+        assert_eq!(
+            o.stdout.lines().collect::<Vec<_>>(),
+            vec!["//app:app", "//lib:l"]
+        );
         // `//...` from a subdirectory is still absolute.
         let o = run(&rt, &["query", "--client_cwd=/workspace/app", "//lib:all"]);
         assert_eq!(o.stdout.lines().collect::<Vec<_>>(), vec!["//lib:l"]);
@@ -601,23 +740,38 @@ mod tests {
     #[test]
     fn keep_going_continues_past_bad_patterns() {
         let rt = tree();
-        let o = run(&rt, &["build", "--nobuild", "--keep_going", "//:root", "//:nope"]);
+        let o = run(
+            &rt,
+            &["build", "--nobuild", "--keep_going", "//:root", "//:nope"],
+        );
         assert_eq!(o.code, 1);
-        assert!(o.stderr.contains("ERROR: Skipping '//:nope':"), "{}", o.stderr);
-        assert!(o.stderr.contains("WARNING: Target pattern parsing failed."), "{}", o.stderr);
+        assert!(
+            o.stderr.contains("ERROR: Skipping '//:nope':"),
+            "{}",
+            o.stderr
+        );
+        assert!(
+            o.stderr.contains("WARNING: Target pattern parsing failed."),
+            "{}",
+            o.stderr
+        );
         assert!(o.stderr.contains("Analyzed target "), "{}", o.stderr);
-        assert!(o.stderr.contains("ERROR: Build did NOT complete successfully"), "{}", o.stderr);
+        assert!(
+            o.stderr
+                .contains("ERROR: Build did NOT complete successfully"),
+            "{}",
+            o.stderr
+        );
     }
 
     #[test]
     fn starlark_errors_surface_without_scraper_fallback() {
-        let rt = runtime(&[
-            ("BUILD", "undefined_rule(name = 'x')\nfilegroup(name = 'y')"),
-        ]);
+        let rt = runtime(&[("BUILD", "undefined_rule(name = 'x')\nfilegroup(name = 'y')")]);
         let o = run(&rt, &["build", "--nobuild", "//:y"]);
         assert_eq!(o.code, 1, "{}", o.stderr);
         assert!(
-            o.stderr.contains("ERROR: /workspace/BUILD:1:1: name 'undefined_rule' is not defined"),
+            o.stderr
+                .contains("ERROR: /workspace/BUILD:1:1: name 'undefined_rule' is not defined"),
             "{}",
             o.stderr
         );
@@ -629,13 +783,14 @@ mod tests {
 
     #[test]
     fn referenced_source_label_is_an_assumed_input_file() {
-        let rt = runtime(&[(
-            "BUILD",
-            "filegroup(name = 'a', srcs = [':missing'])",
-        )]);
+        let rt = runtime(&[("BUILD", "filegroup(name = 'a', srcs = [':missing'])")]);
         let o = run(&rt, &["build", "--nobuild", "//:a"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert!(!o.stderr.contains("no such target '//:missing'"), "{}", o.stderr);
+        assert!(
+            !o.stderr.contains("no such target '//:missing'"),
+            "{}",
+            o.stderr
+        );
     }
 
     #[test]
@@ -650,8 +805,21 @@ mod tests {
         assert!(o.stderr.contains("Analyzed 2 targets ("), "{}", o.stderr);
         let o = run(&rt, &["build", "--nobuild", &arg, "//:root"]);
         assert_eq!(o.code, 2);
-        assert!(o.stderr.contains("Command-line target pattern and --target_pattern_file cannot both be specified"), "{}", o.stderr);
-        let o = run(&rt, &["build", "--nobuild", "--target_pattern_file=/definitely/missing.txt"]);
+        assert!(
+            o.stderr.contains(
+                "Command-line target pattern and --target_pattern_file cannot both be specified"
+            ),
+            "{}",
+            o.stderr
+        );
+        let o = run(
+            &rt,
+            &[
+                "build",
+                "--nobuild",
+                "--target_pattern_file=/definitely/missing.txt",
+            ],
+        );
         assert_eq!(o.code, 2);
         assert!(o.stderr.contains("I/O error reading from /definitely/missing.txt: [unix_jni.cc:382] /definitely/missing.txt (No such file or directory)"), "{}", o.stderr);
         std::fs::remove_dir_all(&dir).ok();
@@ -660,11 +828,26 @@ mod tests {
     #[test]
     fn deleted_packages_flag() {
         let rt = tree();
-        let o = run(&rt, &["build", "--nobuild", "--deleted_packages=lib", "//lib:l"]);
+        let o = run(
+            &rt,
+            &["build", "--nobuild", "--deleted_packages=lib", "//lib:l"],
+        );
         assert_eq!(o.code, 1);
-        assert!(o.stderr.contains("Package is considered deleted due to --deleted_packages"), "{}", o.stderr);
-        let o = run(&rt, &["build", "--nobuild", "--deleted_packages=lib", "//..."]);
-        assert!(o.stderr.contains("referenced by '//app:app'"), "{}", o.stderr);
+        assert!(
+            o.stderr
+                .contains("Package is considered deleted due to --deleted_packages"),
+            "{}",
+            o.stderr
+        );
+        let o = run(
+            &rt,
+            &["build", "--nobuild", "--deleted_packages=lib", "//..."],
+        );
+        assert!(
+            o.stderr.contains("referenced by '//app:app'"),
+            "{}",
+            o.stderr
+        );
     }
 
     #[test]
@@ -679,7 +862,11 @@ mod tests {
         // Nothing changed: the second command is served entirely from the persistent graph.
         let o = run(&rt, &["build", "--nobuild", "//lib:l", "//app:other"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert_eq!(rt.skyframe.package_loads(), loads_after_first, "no package was re-evaluated");
+        assert_eq!(
+            rt.skyframe.package_loads(),
+            loads_after_first,
+            "no package was re-evaluated"
+        );
 
         // Edit one BUILD file: only that package is re-evaluated, and the new content is seen.
         rt.fs
@@ -690,7 +877,11 @@ mod tests {
             .unwrap();
         let o = run(&rt, &["build", "--nobuild", "//lib:l2", "//app:other"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
-        assert_eq!(rt.skyframe.package_loads(), loads_after_first + 1, "only //lib was reloaded");
+        assert_eq!(
+            rt.skyframe.package_loads(),
+            loads_after_first + 1,
+            "only //lib was reloaded"
+        );
 
         // `clean` drops the graph entirely.
         let o = run(&rt, &["clean"]);
@@ -706,7 +897,15 @@ mod tests {
         let o = run(&rt, &["build", "--nobuild", "//app:other"]);
         assert_eq!(o.code, 0, "{}", o.stderr);
         // --deleted_packages must take effect even though //app is already in the graph.
-        let o = run(&rt, &["build", "--nobuild", "--deleted_packages=app", "//app:other"]);
+        let o = run(
+            &rt,
+            &[
+                "build",
+                "--nobuild",
+                "--deleted_packages=app",
+                "//app:other",
+            ],
+        );
         assert_eq!(o.code, 1, "{}", o.stderr);
         assert!(o.stderr.contains("no such package 'app'"), "{}", o.stderr);
         let o = run(&rt, &["build", "--nobuild", "//app:other"]);
@@ -733,24 +932,57 @@ mod tests {
         // The failing dependency's rule error (with its location and Starlark traceback) ...
         // (real Bazel 9.3.2: the traceback starts on the line after `in <kind> rule <label>: `)
         assert!(o.stderr.contains("ERROR: /workspace/BUILD:2:9: in bad_rule rule //:bad: \nTraceback (most recent call last):"), "{}", o.stderr);
-        assert!(o.stderr.contains("ERROR: /workspace/BUILD:2:9: Analysis of target '//:bad' (config: "), "{}", o.stderr);
+        assert!(
+            o.stderr
+                .contains("ERROR: /workspace/BUILD:2:9: Analysis of target '//:bad' (config: "),
+            "{}",
+            o.stderr
+        );
         assert!(o.stderr.contains("Error in fail: boom"), "{}", o.stderr);
         // ... then the top-level abort.
-        assert!(o.stderr.contains("ERROR: Analysis of target '//:top' failed; build aborted: Analysis failed"), "{}", o.stderr);
-        assert!(o.stderr.contains("ERROR: Build did NOT complete successfully"), "{}", o.stderr);
+        assert!(
+            o.stderr.contains(
+                "ERROR: Analysis of target '//:top' failed; build aborted: Analysis failed"
+            ),
+            "{}",
+            o.stderr
+        );
+        assert!(
+            o.stderr
+                .contains("ERROR: Build did NOT complete successfully"),
+            "{}",
+            o.stderr
+        );
         assert!(!o.stderr.contains("Analyzed"), "{}", o.stderr);
     }
 
     #[test]
     fn keep_going_skips_failed_analysis_but_analyzes_the_rest() {
         let rt = analysis_tree();
-        let o = run(&rt, &["build", "--nobuild", "--keep_going", "//:top", "//:top_ok"]);
+        let o = run(
+            &rt,
+            &["build", "--nobuild", "--keep_going", "//:top", "//:top_ok"],
+        );
         assert_eq!(o.code, 1, "{}", o.stderr);
         assert!(o.stderr.contains("WARNING: errors encountered while analyzing target '//:top', it will not be built."), "{}", o.stderr);
         // Real bazel 9.3.2: the loading-phase label count includes the failed root.
-        assert!(o.stderr.contains("INFO: Analyzed 2 targets "), "{}", o.stderr);
-        assert!(o.stderr.contains("ERROR: Build did NOT complete successfully"), "{}", o.stderr);
-        assert!(!o.stderr.contains("Analysis of target '//:top' failed; build aborted"), "{}", o.stderr);
+        assert!(
+            o.stderr.contains("INFO: Analyzed 2 targets "),
+            "{}",
+            o.stderr
+        );
+        assert!(
+            o.stderr
+                .contains("ERROR: Build did NOT complete successfully"),
+            "{}",
+            o.stderr
+        );
+        assert!(
+            !o.stderr
+                .contains("Analysis of target '//:top' failed; build aborted"),
+            "{}",
+            o.stderr
+        );
     }
 
     #[test]
@@ -780,7 +1012,17 @@ mod tests {
                 "load(':defs.bzl', 'show')\nshow(name = 's')\nconfig_setting(name = 'foo', define_values = {'FOO': 'bar'})\n",
             ),
         ]);
-        let o = run(&rt, &["aquery", "--define=FOO=bar", "-c", "opt", "--cpu=k8", "//:s"]);
+        let o = run(
+            &rt,
+            &[
+                "aquery",
+                "--define=FOO=bar",
+                "-c",
+                "opt",
+                "--cpu=k8",
+                "//:s",
+            ],
+        );
         assert_eq!(o.code, 0, "{}{}", o.stdout, o.stderr);
         assert!(o.stdout.contains("bazel-out/k8-opt/bin/o"), "{}", o.stdout);
         assert!(o.stdout.contains("Configuration: k8-opt"), "{}", o.stdout);

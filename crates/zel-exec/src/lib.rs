@@ -22,13 +22,16 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 
 pub mod action_cache;
+pub mod bin_tools;
 pub mod digest;
+pub mod file_cache;
+pub mod input_expander;
 pub mod java_compile;
 pub mod layout;
 pub mod resources;
-pub mod strategy;
-pub mod scheduler;
 pub mod runfiles_tree;
+pub mod scheduler;
+pub mod strategy;
 pub mod symlinks;
 pub mod test_runner;
 pub mod test_status;
@@ -39,7 +42,9 @@ use zel_remote::spawn_runner::{ExecMode, RemoteSpawnRunner, SpawnRunner};
 use zel_sandbox::{execute_spawn_local, Spawn, SpawnStatus};
 use zel_vfs::{FileSystem, PathFragment};
 
-pub use action_cache::{ActionCacheEntry, ActionKeyParts, CompactPersistentActionCache, MustExecuteReason};
+pub use action_cache::{
+    ActionCacheEntry, ActionKeyParts, CompactPersistentActionCache, MustExecuteReason,
+};
 pub use digest::DigestFunction;
 
 /// Plants the `$EXECROOT/_main` directory and workspace convenience symlinks
@@ -59,7 +64,7 @@ pub fn plant_symlink_forest(
     {
         let er = std::path::Path::new(execroot.path_string());
         let ws = std::path::Path::new(workspace_dir.path_string());
-        if ws.is_dir() && er.starts_with("/") {
+        if ws.is_dir() && er.is_absolute() {
             let ignored = layout::read_bazelignore(ws);
             layout::plant_symlink_forest(er, ws, "bazel-", &ignored)?;
             if let Some(ob) = er.parent().and_then(|p| p.parent()) {
@@ -182,7 +187,11 @@ pub struct ExecRuntime {
 
 impl std::fmt::Debug for ExecRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ExecRuntime {{ default_strategies: {:?} }}", self.registry.default_strategies())
+        write!(
+            f,
+            "ExecRuntime {{ default_strategies: {:?} }}",
+            self.registry.default_strategies()
+        )
     }
 }
 
@@ -224,7 +233,10 @@ impl Race {
     /// get here wins and cancels the other; the loser must not publish any output.
     fn lock(&self, b: Branch, exit_code: i32) -> bool {
         // A local branch killed by an ignorable signal cancels itself in favor of remote.
-        if b == Branch::Local && exit_code != 0 && self.ignore_local_signals.contains(&(exit_code - 128)) {
+        if b == Branch::Local
+            && exit_code != 0
+            && self.ignore_local_signals.contains(&(exit_code - 128))
+        {
             return false;
         }
         if self.is_cancelled(b) {
@@ -293,8 +305,16 @@ impl SpawnRunner for LocalKindRunner<'_> {
     fn can_exec(&self, spawn: &Spawn) -> bool {
         self.rt.registry.can_exec(self.kind, spawn)
     }
-    fn exec(&self, spawn: &Spawn, execroot: &PathFragment, fs: &dyn FileSystem) -> io::Result<zel_sandbox::SpawnResult> {
-        match self.rt.run_local_kind(self.kind, spawn, execroot, fs, &self.hooks) {
+    fn exec(
+        &self,
+        spawn: &Spawn,
+        execroot: &PathFragment,
+        fs: &dyn FileSystem,
+    ) -> io::Result<zel_sandbox::SpawnResult> {
+        match self
+            .rt
+            .run_local_kind(self.kind, spawn, execroot, fs, &self.hooks)
+        {
             Ok(r) => r,
             Err(m) => Err(io::Error::other(m)),
         }
@@ -309,11 +329,17 @@ fn spawn_not_executable_reason(spawn: &Spawn) -> String {
     if !can_local && !can_remote {
         msg.push_str("Neither local nor remote execution allowed for action ");
     } else if !can_remote {
-        msg.push_str("No usable dynamic_local_strategy found (and remote execution disabled) for action ");
+        msg.push_str(
+            "No usable dynamic_local_strategy found (and remote execution disabled) for action ",
+        );
     } else if !can_local {
-        msg.push_str("No usable dynamic_remote_strategy found (and local execution disabled) for action ");
+        msg.push_str(
+            "No usable dynamic_remote_strategy found (and local execution disabled) for action ",
+        );
     } else {
-        msg.push_str("No usable dynamic_local_strategy or dynamic_remote_strategy found for action ");
+        msg.push_str(
+            "No usable dynamic_local_strategy or dynamic_remote_strategy found for action ",
+        );
     }
     msg.push_str(&spawn.mnemonic);
     msg.push_str(". ");
@@ -321,7 +347,10 @@ fn spawn_not_executable_reason(spawn: &Spawn) -> String {
 }
 
 impl ExecRuntime {
-    fn sandbox_runner(&self, kind: zel_sandbox::sandbox::SandboxKind) -> Option<&zel_sandbox::sandbox::SandboxRunner> {
+    fn sandbox_runner(
+        &self,
+        kind: zel_sandbox::sandbox::SandboxKind,
+    ) -> Option<&zel_sandbox::sandbox::SandboxRunner> {
         self.sandbox_runners.iter().find(|r| r.kind == kind)
     }
 
@@ -366,14 +395,18 @@ impl ExecRuntime {
                 }
                 r
             }
-            strategy::StrategyKind::DarwinSandbox => match self.sandbox_runner(zel_sandbox::sandbox::SandboxKind::Darwin) {
-                Some(r) => r.exec_with(spawn, hooks),
-                None => return Err("darwin-sandbox is not available".into()),
-            },
-            strategy::StrategyKind::LinuxSandbox => match self.sandbox_runner(zel_sandbox::sandbox::SandboxKind::Linux) {
-                Some(r) => r.exec_with(spawn, hooks),
-                None => return Err("linux-sandbox is not available".into()),
-            },
+            strategy::StrategyKind::DarwinSandbox => {
+                match self.sandbox_runner(zel_sandbox::sandbox::SandboxKind::Darwin) {
+                    Some(r) => r.exec_with(spawn, hooks),
+                    None => return Err("darwin-sandbox is not available".into()),
+                }
+            }
+            strategy::StrategyKind::LinuxSandbox => {
+                match self.sandbox_runner(zel_sandbox::sandbox::SandboxKind::Linux) {
+                    Some(r) => r.exec_with(spawn, hooks),
+                    None => return Err("linux-sandbox is not available".into()),
+                }
+            }
             strategy::StrategyKind::ProcessWrapperSandbox => {
                 match self.sandbox_runner(zel_sandbox::sandbox::SandboxKind::ProcessWrapper) {
                     Some(r) => r.exec_with(spawn, hooks),
@@ -381,18 +414,15 @@ impl ExecRuntime {
                 }
             }
             strategy::StrategyKind::Worker => match &self.worker {
-                // Workers write their outputs in place: the dynamic-execution lock is taken
-                // before the request is sent.
-                Some(w) => {
-                    if hooks.is_cancelled() || !hooks.lock(0) {
-                        Err(zel_sandbox::cancelled_error())
-                    } else {
-                        w.exec(spawn)
-                    }
-                }
+                Some(w) => w.exec_with(spawn, hooks),
                 None => return Err("worker strategy is not available".into()),
             },
-            k => return Err(format!("strategy {} cannot execute spawns in this build", k.name())),
+            k => {
+                return Err(format!(
+                    "strategy {} cannot execute spawns in this build",
+                    k.name()
+                ))
+            }
         })
     }
 
@@ -411,7 +441,11 @@ impl ExecRuntime {
                 let Some(remote) = &self.remote else {
                     return Err("remote strategy is not available".into());
                 };
-                let fallback = LocalKindRunner { rt: self, kind: self.registry.remote_local_fallback(), hooks: Default::default() };
+                let fallback = LocalKindRunner {
+                    rt: self,
+                    kind: self.registry.remote_local_fallback(),
+                    hooks: Default::default(),
+                };
                 let mode = ExecMode {
                     allow_remote_exec: true,
                     fallback: Some(&fallback),
@@ -423,7 +457,11 @@ impl ExecRuntime {
             strategy::StrategyKind::Dynamic => Err("dynamic cannot be nested".into()),
             k => match &self.remote {
                 Some(remote) if remote.has_cache() => {
-                    let local = LocalKindRunner { rt: self, kind: k, hooks: hooks.clone() };
+                    let local = LocalKindRunner {
+                        rt: self,
+                        kind: k,
+                        hooks: hooks.clone(),
+                    };
                     let mode = ExecMode {
                         allow_remote_exec: false,
                         fallback: Some(&local),
@@ -453,12 +491,19 @@ impl ExecRuntime {
     ) -> Result<io::Result<zel_sandbox::SpawnResult>, String> {
         if self.remote.is_none() {
             if let Some(e) = self.remote_setup_error.clone() {
-                return Err(format!("Failed to query remote execution capabilities: {e}"));
+                return Err(format!(
+                    "Failed to query remote execution capabilities: {e}"
+                ));
             }
         }
         let (mut strategies, progress) = self.registry.resolve(spawn, description)?;
         if let Some(p) = progress {
-            reporter.handle(Event { kind: zel_events::EventKind::Progress, location: None, message: p, tag: None });
+            reporter.handle(Event {
+                kind: zel_events::EventKind::Progress,
+                location: None,
+                message: p,
+                tag: None,
+            });
         }
         let chosen = strategies.remove(0);
         if chosen == strategy::StrategyKind::Dynamic {
@@ -479,11 +524,18 @@ impl ExecRuntime {
         let remote = self.registry.dynamic_can_exec_remote(spawn);
         let (local, remote) = match (local, remote) {
             (None, None) => {
-                return Err(format!("Spawn is not executable in local: {}", spawn_not_executable_reason(spawn)));
+                return Err(format!(
+                    "Spawn is not executable in local: {}",
+                    spawn_not_executable_reason(spawn)
+                ));
             }
             // `maybeExecuteNonDynamically`.
-            (None, Some(r)) => return self.run_strategy(r, spawn, execroot, fs, &Default::default()),
-            (Some(l), None) => return self.run_strategy(l, spawn, execroot, fs, &Default::default()),
+            (None, Some(r)) => {
+                return self.run_strategy(r, spawn, execroot, fs, &Default::default())
+            }
+            (Some(l), None) => {
+                return self.run_strategy(l, spawn, execroot, fs, &Default::default())
+            }
             (Some(l), Some(r)) => (l, r),
         };
         let race = Arc::new(Race {
@@ -501,6 +553,7 @@ impl ExecRuntime {
             zel_sandbox::ExecHooks {
                 cancel: (b == Branch::Local).then(|| race.local_cancel.clone()),
                 lock_outputs: Some(Arc::new(move |code| race.lock(b, code))),
+                ..Default::default()
             }
         };
         // Remote branch: detached (an in-flight RPC cannot be interrupted).
@@ -526,10 +579,14 @@ impl ExecRuntime {
             let hooks = hooks_for(Branch::Local);
             let race2 = race.clone();
             scope.spawn(move || {
-                let delay = self.delay_local.load(Ordering::SeqCst).then_some(self.dynamic.local_execution_delay_ms);
+                let delay = self
+                    .delay_local
+                    .load(Ordering::SeqCst)
+                    .then_some(self.dynamic.local_execution_delay_ms);
                 let r = (|| {
                     if let Some(ms) = delay {
-                        let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
+                        let until =
+                            std::time::Instant::now() + std::time::Duration::from_millis(ms);
                         while std::time::Instant::now() < until {
                             if race2.is_cancelled(Branch::Local) {
                                 return Err(zel_sandbox::cancelled_error());
@@ -562,7 +619,11 @@ impl ExecRuntime {
 
     /// Downloads the outputs known only by digest (`--remote_download_outputs`) for the given
     /// exec-root-relative paths.
-    pub fn materialize_remote_outputs(&self, paths: &[String], execroot: &str) -> Result<usize, String> {
+    pub fn materialize_remote_outputs(
+        &self,
+        paths: &[String],
+        execroot: &str,
+    ) -> Result<usize, String> {
         match &self.remote {
             Some(r) => r.materialize(paths, std::path::Path::new(execroot)),
             None => Ok(0),
@@ -623,6 +684,17 @@ pub struct ExecOptions {
     pub async_execution_max_concurrent_actions: usize,
     pub hide_aspect_results: Vec<String>,
     pub experimental_use_validation_aspect: bool,
+    /// Pre-configured tool runfiles trees, keyed by tool executable exec path.
+    pub tool_runfiles: BTreeMap<String, ToolRunfilesSpec>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ToolRunfilesSpec {
+    pub workspace_name: String,
+    pub entries: BTreeMap<String, String>,
+    pub repo_mapping: Vec<(String, String, String)>,
+    pub enable_runfiles: bool,
+    pub legacy_external_runfiles: bool,
 }
 
 /// Resolves the environment of a spawn: fixed values, then the inherited variables present in
@@ -639,8 +711,7 @@ pub fn resolve_spawn_env(
 
 fn shell_quote(s: &str) -> String {
     if !s.is_empty()
-        && s
-            .chars()
+        && s.chars()
             .all(|c| c.is_ascii_alphanumeric() || "@%+=:,./-_".contains(c))
     {
         s.to_string()
@@ -691,11 +762,18 @@ pub fn build_file_location(workspace: Option<&PathFragment>, label: &zel_cmdline
     format!("{pkg}/BUILD")
 }
 
+pub static PRETTY_SUBCOMMANDS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-pub static PRETTY_SUBCOMMANDS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-fn describe_command_pretty(argv: &[String], env: &BTreeMap<String, String>, execroot: &PathFragment) -> String {
-    let mut s = format!("(cd {} && \\\n  exec env - \\\n", shell_quote(execroot.path_string()));
+fn describe_command_pretty(
+    argv: &[String],
+    env: &BTreeMap<String, String>,
+    execroot: &PathFragment,
+) -> String {
+    let mut s = format!(
+        "(cd {} && \\\n  exec env - \\\n",
+        shell_quote(execroot.path_string())
+    );
     for (k, v) in env {
         s.push_str(&format!("    {}={} \\\n", k, shell_quote(v)));
     }
@@ -719,7 +797,10 @@ fn describe_command(
 ) -> String {
     let quoted: Vec<String> = argv.iter().map(|a| shell_quote(a)).collect();
     if verbose {
-        let mut s = format!("(cd {} && \\\n  exec env - \\\n", shell_quote(execroot.path_string()));
+        let mut s = format!(
+            "(cd {} && \\\n  exec env - \\\n",
+            shell_quote(execroot.path_string())
+        );
         for (k, v) in env {
             s.push_str(&format!("    {}={} \\\n", k, shell_quote(v)));
         }
@@ -730,29 +811,35 @@ fn describe_command(
     }
 }
 
-static COMPUTED_DIGEST_CACHE: std::sync::RwLock<Option<(usize, BTreeMap<String, String>)>> = std::sync::RwLock::new(None);
+#[allow(clippy::type_complexity)]
+static COMPUTED_DIGEST_CACHE: std::sync::LazyLock<
+    std::sync::RwLock<std::collections::HashMap<(DigestFunction, String), (u64, u64, String)>>,
+> = std::sync::LazyLock::new(|| std::sync::RwLock::new(std::collections::HashMap::new()));
 
 pub fn invalidate_computed_digest(path: &str) {
     if let Ok(mut w) = COMPUTED_DIGEST_CACHE.write() {
-        if let Some((_, ref mut map)) = *w {
-            map.remove(path);
+        for df in DigestFunction::ALL {
+            w.remove(&(df, path.to_string()));
         }
     }
 }
 
 /// Digest of a produced output: file contents, or for directories (tree artifacts) a digest over
 /// the sorted `(relative path, content digest)` listing. `None` when the path does not exist.
-pub fn path_digest(digest: DigestFunction, fs: &dyn FileSystem, path: &PathFragment) -> Option<String> {
-    if let Ok(r) = COMPUTED_DIGEST_CACHE.read() {
-        if let Some((_, ref map)) = *r {
-            if let Some(cached) = map.get(path.path_string()) {
-                return Some(cached.clone());
-            }
-        }
-    }
+pub fn path_digest(
+    digest: DigestFunction,
+    fs: &dyn FileSystem,
+    path: &PathFragment,
+) -> Option<String> {
     let st = fs.stat(path, true).ok()?;
     if st.is_directory {
-        fn walk(digest: DigestFunction, fs: &dyn FileSystem, base: &PathFragment, dir: &PathFragment, out: &mut Vec<u8>) {
+        fn walk(
+            digest: DigestFunction,
+            fs: &dyn FileSystem,
+            base: &PathFragment,
+            dir: &PathFragment,
+            out: &mut Vec<u8>,
+        ) {
             let mut entries = match fs.readdir(dir) {
                 Ok(r) => r,
                 Err(_) => return,
@@ -760,7 +847,11 @@ pub fn path_digest(digest: DigestFunction, fs: &dyn FileSystem, path: &PathFragm
             entries.sort_by(|a, b| a.name.cmp(&b.name));
             for e in entries {
                 let p = dir.get_relative_str(&e.name);
-                let rel = p.path_string().strip_prefix(base.path_string()).unwrap_or(p.path_string()).to_string();
+                let rel = p
+                    .path_string()
+                    .strip_prefix(base.path_string())
+                    .unwrap_or(p.path_string())
+                    .to_string();
                 out.extend_from_slice(rel.as_bytes());
                 out.push(0);
                 match fs.stat(&p, true) {
@@ -777,21 +868,34 @@ pub fn path_digest(digest: DigestFunction, fs: &dyn FileSystem, path: &PathFragm
         }
         let mut buf = Vec::new();
         walk(digest, fs, path, path, &mut buf);
-        let res = digest.hex(&buf);
-        if let Ok(mut w) = COMPUTED_DIGEST_CACHE.write() {
-            if let Some((cap, ref mut map)) = *w {
-                if map.len() < cap {
-                    map.insert(path.path_string().to_string(), res.clone());
+        return Some(digest.hex(&buf));
+    }
+    if !st.is_file {
+        return None;
+    }
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let cacheable = st.last_modified_time_ms != 0
+        && (st.size > 65536 || now_ms.saturating_sub(st.last_modified_time_ms) >= 2000);
+    if cacheable {
+        if let Ok(r) = COMPUTED_DIGEST_CACHE.read() {
+            if let Some((sz, mt, cached)) = r.get(&(digest, path.path_string().to_string())) {
+                if *sz == st.size && *mt == st.last_modified_time_ms {
+                    return Some(cached.clone());
                 }
             }
         }
-        return Some(res);
     }
     let res = fs.read_file(path).ok().map(|b| digest.hex(&b));
-    if let (Some(ref v), Ok(mut w)) = (&res, COMPUTED_DIGEST_CACHE.write()) {
-        if let Some((cap, ref mut map)) = *w {
-            if map.len() < cap {
-                map.insert(path.path_string().to_string(), v.clone());
+    if cacheable {
+        if let (Some(ref v), Ok(mut w)) = (&res, COMPUTED_DIGEST_CACHE.write()) {
+            if w.len() < 100_000 {
+                w.insert(
+                    (digest, path.path_string().to_string()),
+                    (st.size, st.last_modified_time_ms, v.clone()),
+                );
             }
         }
     }
@@ -813,7 +917,11 @@ pub fn parse_depfile(text: &str) -> Vec<String> {
         let bytes = rule.as_bytes();
         let mut colon = None;
         for (i, &b) in bytes.iter().enumerate() {
-            if b == b':' && !(i == 1 && bytes[0].is_ascii_alphabetic() && bytes.get(2).map_or(false, |c| *c == b'/' || *c == b'\\')) {
+            if b == b':'
+                && !(i == 1
+                    && bytes[0].is_ascii_alphabetic()
+                    && bytes.get(2).is_some_and(|c| *c == b'/' || *c == b'\\'))
+            {
                 colon = Some(i);
                 break;
             }
@@ -848,13 +956,28 @@ pub fn parse_depfile(text: &str) -> Vec<String> {
 pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
     let mut p = ActionKeyParts {
         mnemonic: action.mnemonic().to_string(),
-        input_paths: action.inputs().iter().map(|a| a.exec_path.path_string().to_string()).collect(),
-        output_paths: action.outputs().iter().map(|a| a.exec_path.path_string().to_string()).collect(),
+        input_paths: action
+            .inputs()
+            .iter()
+            .map(|a| a.exec_path.path_string().to_string())
+            .collect(),
+        output_paths: action
+            .outputs()
+            .iter()
+            .map(|a| a.exec_path.path_string().to_string())
+            .collect(),
         ..Default::default()
     };
     p.input_paths.sort();
     match action {
-        ActionAnalysisMetadata::SpawnAction { argv, env, inherited_env, unset_env, execution_info, .. } => {
+        ActionAnalysisMetadata::SpawnAction {
+            argv,
+            env,
+            inherited_env,
+            unset_env,
+            execution_info,
+            ..
+        } => {
             p.kind = "spawn".into();
             p.command_line = argv.clone();
             p.env = env.clone();
@@ -862,7 +985,11 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
             p.unset_env = unset_env.iter().cloned().collect();
             p.execution_info = execution_info.clone();
         }
-        ActionAnalysisMetadata::FileWriteAction { content, is_executable, .. } => {
+        ActionAnalysisMetadata::FileWriteAction {
+            content,
+            is_executable,
+            ..
+        } => {
             p.kind = "file_write".into();
             p.payload = content.clone();
             p.payload.push(*is_executable as u8);
@@ -936,12 +1063,26 @@ pub fn execute_action_with(
     };
     let env_digest = action_cache.client_env_digest(&used_client_env);
     let declared_inputs: Vec<String> = parts.input_paths.clone();
+    let mut tool_rf_entries: Vec<(String, Option<String>)> = Vec::new();
+    if let ActionAnalysisMetadata::SpawnAction { tools, .. } = action {
+        for tp in tools {
+            if let Some(spec) = opts.tool_runfiles.get(tp.exec_path.path_string()) {
+                for (rf_path, target) in &spec.entries {
+                    tool_rf_entries.push((
+                        format!("runfiles:{}:{}", tp.exec_path.path_string(), rf_path),
+                        Some(target.clone()),
+                    ));
+                }
+            }
+        }
+    }
     let md_digest_of = |discovered: &[String]| -> String {
         let mut all: Vec<(String, Option<String>)> = Vec::new();
         for p in declared_inputs.iter().chain(discovered.iter()) {
             let d = path_digest(digest, fs, &execroot.get_relative_str(p));
             all.push((p.clone(), d));
         }
+        all.extend(tool_rf_entries.iter().cloned());
         all.sort();
         all.dedup();
         action_cache.compute_md_digest(&all)
@@ -958,12 +1099,22 @@ pub fn execute_action_with(
         false
     };
 
+    let out_digest = |o: &Artifact| -> Option<String> {
+        let p = abs(&o.exec_path);
+        if o.is_unresolved_symlink {
+            fs.read_symbolic_link(&p)
+                .ok()
+                .map(|t| digest.hex(t.path_string().as_bytes()))
+        } else {
+            path_digest(digest, fs, &p)
+        }
+    };
     // Cache check (`ActionCacheChecker.mustExecute`): every output must exist and match the
     // recorded digest, and the action key / inputs (incl. discovered inputs) must be unchanged.
     if let Some(primary) = outputs.first() {
         let current: Vec<(String, Option<String>)> = outputs
             .iter()
-            .map(|o| (o.exec_path.path_string().to_string(), path_digest(digest, fs, &abs(&o.exec_path))))
+            .map(|o| (o.exec_path.path_string().to_string(), out_digest(o)))
             .collect();
         let reason = action_cache.must_execute(
             primary.exec_path.path_string(),
@@ -977,7 +1128,11 @@ pub fn execute_action_with(
         }
         if let Some(path) = &opts.explain {
             use std::io::Write;
-            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+            {
                 let reason_desc = if is_busted {
                     "unconditional execution is requested.".to_string()
                 } else {
@@ -989,7 +1144,12 @@ pub fn execute_action_with(
     }
     if opts.check_up_to_date {
         let describe = match action {
-            ActionAnalysisMetadata::SpawnAction { mnemonic, progress_message, owner, .. } => {
+            ActionAnalysisMetadata::SpawnAction {
+                mnemonic,
+                progress_message,
+                owner,
+                ..
+            } => {
                 if progress_message.is_empty() {
                     format!("{mnemonic} {owner}")
                 } else {
@@ -997,9 +1157,17 @@ pub fn execute_action_with(
                 }
             }
             ActionAnalysisMetadata::FileWriteAction { output, owner, .. } => {
-                if output.root_relative_path.path_string().ends_with(".repo_mapping") {
+                if output
+                    .root_relative_path
+                    .path_string()
+                    .ends_with(".repo_mapping")
+                {
                     format!("Writing repo mapping manifest for {owner}")
-                } else if output.root_relative_path.path_string().ends_with(".runfiles_manifest") {
+                } else if output
+                    .root_relative_path
+                    .path_string()
+                    .ends_with(".runfiles_manifest")
+                {
                     format!("Creating source manifest for {owner}")
                 } else {
                     format!("Writing file {}", output.root_relative_path)
@@ -1008,11 +1176,16 @@ pub fn execute_action_with(
             ActionAnalysisMetadata::TemplateExpansionAction { output, .. } => {
                 format!("Expanding template {}", output.root_relative_path)
             }
-            ActionAnalysisMetadata::SymlinkAction { output, .. } => format!("Creating symlink {}", output.root_relative_path),
+            ActionAnalysisMetadata::SymlinkAction { output, .. } => {
+                format!("Creating symlink {}", output.root_relative_path)
+            }
         };
         let mut messages = vec![format!("ERROR: action '{describe}' is not up-to-date")];
         if matches!(action, ActionAnalysisMetadata::SymlinkAction { .. }) {
-            messages.push(format!("ERROR: action 'Writing repo mapping manifest for {}' is not up-to-date", action.owner()));
+            messages.push(format!(
+                "ERROR: action 'Writing repo mapping manifest for {}' is not up-to-date",
+                action.owner()
+            ));
         }
         return Ok(ActionExecutionOutcome {
             cache_hit: false,
@@ -1034,7 +1207,11 @@ pub fn execute_action_with(
     let mut outcome = ActionExecutionOutcome::ok(false);
 
     // Fail helper
-    let fail = |messages: Vec<String>, code: i32, stdout: Vec<u8>, stderr: Vec<u8>, runner: Option<String>| {
+    let fail = |messages: Vec<String>,
+                code: i32,
+                stdout: Vec<u8>,
+                stderr: Vec<u8>,
+                runner: Option<String>| {
         // Bazel removes outputs of failed actions and forgets their cache entries.
         for o in &outputs {
             let _ = fs.delete(&execroot.get_relative(&o.exec_path));
@@ -1069,56 +1246,59 @@ pub fn execute_action_with(
                 fs.create_directory_and_parents(&parent)?;
             }
             let _ = fs.delete(&out_path);
-            if output.exec_path.path_string().ends_with(".runfiles_manifest") {
-                let text = String::from_utf8_lossy(content);
-                let er = execroot.path_string();
-                let mut rewritten = String::new();
-                for line in text.lines() {
-                    if let Some((k, v)) = line.split_once(' ') {
-                        let abs_v = if v.is_empty() || v.starts_with('/') {
-                            v.to_string()
-                        } else {
-                            format!("{er}/{v}")
-                        };
-                        rewritten.push_str(k);
-                        rewritten.push(' ');
-                        rewritten.push_str(&abs_v);
-                        rewritten.push('\n');
-                    } else {
-                        rewritten.push_str(line);
-                        rewritten.push('\n');
+            fs.write_file(&out_path, content)?;
+            if *is_executable {
+                let p = std::path::Path::new(out_path.path_string());
+                match std::fs::metadata(p) {
+                    Err(e) if e.kind() == io::ErrorKind::NotFound && fs.exists(&out_path, true) => {
+                        // InMemoryFileSystem: no host inode to chmod.
+                    }
+                    Err(e) => {
+                        return Ok(fail(
+                            vec![format!(
+                                "ERROR: {loc}: Writing file {} failed: {e}",
+                                output.root_relative_path
+                            )],
+                            1,
+                            Vec::new(),
+                            Vec::new(),
+                            None,
+                        ));
+                    }
+                    Ok(_) => {
+                        if let Err(e) = zel_sandbox::set_executable_mode(p) {
+                            return Ok(fail(
+                                vec![format!(
+                                    "ERROR: {loc}: Writing file {} failed: {e}",
+                                    output.root_relative_path
+                                )],
+                                1,
+                                Vec::new(),
+                                Vec::new(),
+                                None,
+                            ));
+                        }
                     }
                 }
-                fs.write_file(&out_path, rewritten.as_bytes())?;
-            } else {
-                fs.write_file(&out_path, content)?;
             }
-            #[cfg(unix)]
-            if *is_executable {
-                use std::os::unix::fs::PermissionsExt;
-                if let Ok(meta) = std::fs::metadata(out_path.path_string()) {
-                    let mut perms = meta.permissions();
-                    perms.set_mode(0o755);
-                    let _ = std::fs::set_permissions(out_path.path_string(), perms);
-                }
-            }
-            let _ = is_executable;
         }
         ActionAnalysisMetadata::SymlinkAction {
-            input_path, output, is_executable, ..
+            input_path,
+            output,
+            is_executable,
+            ..
         } => {
             let out_path = execroot.get_relative(&output.exec_path);
             if let Some(parent) = out_path.parent_directory() {
                 fs.create_directory_and_parents(&parent)?;
             }
             let _ = fs.delete(&out_path);
-            // Bazel links to the absolute path `<execroot>/<input_path>`.
-            let target = if input_path.path_string().starts_with('/') {
+            let target = if output.is_unresolved_symlink || input_path.is_absolute() {
                 input_path.clone()
             } else {
                 execroot.get_relative(input_path)
             };
-            if *is_executable {
+            if *is_executable && !output.is_unresolved_symlink {
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
@@ -1138,7 +1318,9 @@ pub fn execute_action_with(
                     }
                 }
             }
-            if fs.create_symbolic_link(&out_path, &target).is_err() {
+            if output.is_unresolved_symlink {
+                fs.create_symbolic_link(&out_path, &target)?;
+            } else if fs.create_symbolic_link(&out_path, &target).is_err() {
                 let src = target.clone();
                 match fs.read_file(&src) {
                     Ok(bytes) => fs.write_file(&out_path, &bytes)?,
@@ -1212,10 +1394,13 @@ pub fn execute_action_with(
             inputs,
             outputs: spawn_outputs,
             execution_info,
+            tools,
             java_compile,
-            ..
         } => {
-            let resolved_env = xcode_local_env(resolve_spawn_env(env, inherited_env, unset_env, &opts.client_env), execution_info);
+            let resolved_env = xcode_local_env(
+                resolve_spawn_env(env, inherited_env, unset_env, &opts.client_env),
+                execution_info,
+            );
             let env = &resolved_env;
             let progress = if progress_message.is_empty() {
                 format!("{} {}", mnemonic, owner)
@@ -1229,7 +1414,8 @@ pub fn execute_action_with(
                 let mut files = Vec::new();
                 let mut stack = vec![root.clone()];
                 while let Some(d) = stack.pop() {
-                    let rd = std::fs::read_dir(&d).map_err(|e| format!("cannot expand directory '{dir}': {e}"))?;
+                    let rd = std::fs::read_dir(&d)
+                        .map_err(|e| format!("cannot expand directory '{dir}': {e}"))?;
                     for e in rd.flatten() {
                         let p = e.path();
                         if p.is_dir() {
@@ -1253,10 +1439,16 @@ pub fn execute_action_with(
                     ))
                 }
             };
+            let mut missing_sources = Vec::new();
             for input in inputs {
                 let inp_path = execroot.get_relative(&input.exec_path);
                 if !fs.exists(&inp_path, true) {
-                    if !opts.rewind_lost_inputs {
+                    if input.is_source {
+                        let lbl = input.owner_label.canonical_form();
+                        missing_sources.push(format!(
+                            "ERROR: {loc}: {progress} failed: missing input file '{lbl}'"
+                        ));
+                    } else if !opts.rewind_lost_inputs {
                         return Ok(fail(
                             vec![format!(
                                 "ERROR: {loc}: {progress}: Unexpected lost inputs (pass --rewind_lost_inputs to enable recovery): {}",
@@ -1270,7 +1462,15 @@ pub fn execute_action_with(
                     }
                 }
             }
-            let should_materialize = opts.materialize_param_files || opts.announce_subcommands || opts.verbose_failures;
+            if !missing_sources.is_empty() {
+                missing_sources.push(format!(
+                    "ERROR: {loc}: {progress} failed: {} input file(s) do not exist",
+                    missing_sources.len()
+                ));
+                return Ok(fail(missing_sources, 1, Vec::new(), Vec::new(), None));
+            }
+            let should_materialize =
+                opts.materialize_param_files || opts.announce_subcommands || opts.verbose_failures;
             if should_materialize {
                 for input in inputs {
                     let s = input.exec_path.path_string();
@@ -1288,16 +1488,20 @@ pub fn execute_action_with(
             let jc = java_compile
                 .as_deref()
                 .filter(|j| j.classpath_mode == "BAZEL" || j.classpath_mode == "BAZEL_NO_FALLBACK");
-            let all_input_paths: Vec<String> = inputs.iter().map(|a| a.exec_path.path_string().to_string()).collect();
+            let all_input_paths: Vec<String> = inputs
+                .iter()
+                .map(|a| a.exec_path.path_string().to_string())
+                .collect();
             let mut java_fallback = false;
             loop {
-            let (attempt_inputs, optional_outputs): (Vec<PathFragment>, Vec<PathFragment>) = match jc {
-                Some(spec) => {
-                    let cp: Vec<String> = if java_fallback {
-                        spec.transitive_inputs.clone()
-                    } else {
-                        let root = std::path::PathBuf::from(execroot.path_string());
-                        match java_compile::reduced_classpath(spec, &|p| std::fs::read(root.join(p))) {
+                let (attempt_inputs, optional_outputs): (Vec<PathFragment>, Vec<PathFragment>) =
+                    match jc {
+                        Some(spec) => {
+                            let cp: Vec<String> = if java_fallback {
+                                spec.transitive_inputs.clone()
+                            } else {
+                                let root = std::path::PathBuf::from(execroot.path_string());
+                                match java_compile::reduced_classpath(spec, &|p| std::fs::read(root.join(p))) {
                             Ok(v) => v,
                             Err(e) => {
                                 return Ok(fail(
@@ -1309,86 +1513,136 @@ pub fn execute_action_with(
                                 ))
                             }
                         }
+                            };
+                            let params_abs = execroot.get_relative_str(&spec.classpath_params_path);
+                            if let Some(parent) = params_abs.parent_directory() {
+                                fs.create_directory_and_parents(&parent)?;
+                            }
+                            let _ = fs.delete(&params_abs);
+                            fs.write_file(
+                                &params_abs,
+                                java_compile::classpath_param_file(spec, &cp, java_fallback)
+                                    .as_bytes(),
+                            )?;
+                            let ins = java_compile::attempt_inputs(spec, &all_input_paths, &cp)
+                                .into_iter()
+                                .map(|p| PathFragment::create(&p))
+                                .collect();
+                            // `JavaSpawn.isMandatoryOutput`: only the .jdeps of the first attempt.
+                            let opt = if java_fallback {
+                                Vec::new()
+                            } else {
+                                spawn_outputs
+                                    .iter()
+                                    .filter(|a| a.exec_path.path_string() != spec.deps_proto)
+                                    .map(|a| a.exec_path.clone())
+                                    .collect()
+                            };
+                            (ins, opt)
+                        }
+                        None => (
+                            inputs.iter().map(|a| a.exec_path.clone()).collect(),
+                            Vec::new(),
+                        ),
                     };
-                    let params_abs = execroot.get_relative_str(&spec.classpath_params_path);
-                    if let Some(parent) = params_abs.parent_directory() {
-                        fs.create_directory_and_parents(&parent)?;
+                let tool_paths: Vec<PathFragment> =
+                    tools.iter().map(|a| a.exec_path.clone()).collect();
+                for tp in &tool_paths {
+                    if let Some(spec) = opts.tool_runfiles.get(tp.path_string()) {
+                        let er_path = std::path::Path::new(execroot.path_string());
+                        let exe_abs = er_path.join(tp.path_string());
+                        let rf_opts = crate::runfiles_tree::RunfilesTreeOptions {
+                            enable_runfiles: spec.enable_runfiles,
+                            legacy_external_runfiles: spec.legacy_external_runfiles,
+                            repo_mapping: spec.repo_mapping.clone(),
+                        };
+                        let _ = crate::runfiles_tree::build_runfiles_tree(
+                            er_path,
+                            &exe_abs,
+                            &spec.workspace_name,
+                            &spec.entries,
+                            &rf_opts,
+                        );
                     }
-                    let _ = fs.delete(&params_abs);
-                    fs.write_file(&params_abs, java_compile::classpath_param_file(spec, &cp, java_fallback).as_bytes())?;
-                    let ins = java_compile::attempt_inputs(spec, &all_input_paths, &cp)
-                        .into_iter()
-                        .map(|p| PathFragment::create(&p))
-                        .collect();
-                    // `JavaSpawn.isMandatoryOutput`: only the .jdeps of the first attempt.
-                    let opt = if java_fallback {
-                        Vec::new()
-                    } else {
-                        spawn_outputs
-                            .iter()
-                            .filter(|a| a.exec_path.path_string() != spec.deps_proto)
-                            .map(|a| a.exec_path.clone())
-                            .collect()
-                    };
-                    (ins, opt)
                 }
-                None => (inputs.iter().map(|a| a.exec_path.clone()).collect(), Vec::new()),
-            };
-            let spawn = Spawn {
-                mnemonic: mnemonic.clone(),
-                owner_label: owner.canonical_form(),
-                argv: argv_expanded.clone(),
-                env: env.clone(),
-                inputs: attempt_inputs,
-                optional_outputs,
-                outputs: spawn_outputs.iter().map(|a| a.exec_path.clone()).collect(),
-                output_dirs: spawn_outputs.iter().filter(|a| a.is_tree_artifact).map(|a| a.exec_path.clone()).collect(),
-                execution_info: execution_info.clone(),
-                kill_delay: opts.runtime.as_ref().and_then(|r| r.kill_delay),
-                tool_inputs: Vec::new(),
-            };
-            // Resources (`ResourceManager.acquire`) are held for the duration of the spawn.
-            let _held = opts
-                .runtime
-                .as_ref()
-                .map(|r| r.resources.acquire(&resources::ResourceSet::default_action()));
-            let run = match &opts.runtime {
-                Some(rt) => match rt.execute(&spawn, &progress, execroot, fs, reporter) {
-                    Ok(r) => r,
-                    Err(msg) => {
-                        return Ok(fail(
-                            vec![format!("ERROR: {loc}: {progress} failed: {msg}")],
-                            1,
-                            Vec::new(),
-                            Vec::new(),
-                            None,
-                        ))
+                let exe_arg = argv_expanded.first().map(String::as_str).unwrap_or("");
+                let rf_prefix = format!("{exe_arg}.runfiles/");
+                let mut tool_inputs = tool_paths;
+                if !exe_arg.is_empty() {
+                    for p in &attempt_inputs {
+                        let s = p.path_string();
+                        if (s == exe_arg || s.starts_with(&rf_prefix)) && !tool_inputs.contains(p) {
+                            tool_inputs.push(p.clone());
+                        }
                     }
-                },
-                None => execute_spawn_local(&spawn, execroot, fs),
-            };
-            let res = run?;
-            // Missing inputs fail the action before any command line is announced.
-            if opts.announce_subcommands && !matches!(res.status, SpawnStatus::MissingInputs) {
-                let (cmd_argv, cmd_env, cmd_cwd) = match &res.executed_command {
-                    Some(c) if opts.runtime.as_ref().map_or(false, |r| r.sandbox_debug) => {
-                        (c.argv.clone(), c.env.clone(), PathFragment::create(&c.cwd))
-                    }
-                    _ => (argv.clone(), env.clone(), execroot.clone()),
+                }
+                let symlink_inputs: Vec<PathFragment> = inputs
+                    .iter()
+                    .filter(|a| a.is_unresolved_symlink)
+                    .map(|a| a.exec_path.clone())
+                    .collect();
+                let spawn = Spawn {
+                    mnemonic: mnemonic.clone(),
+                    owner_label: owner.canonical_form(),
+                    argv: argv_expanded.clone(),
+                    env: env.clone(),
+                    inputs: attempt_inputs,
+                    optional_outputs,
+                    outputs: spawn_outputs.iter().map(|a| a.exec_path.clone()).collect(),
+                    output_dirs: spawn_outputs
+                        .iter()
+                        .filter(|a| a.is_tree_artifact)
+                        .map(|a| a.exec_path.clone())
+                        .collect(),
+                    execution_info: execution_info.clone(),
+                    kill_delay: opts.runtime.as_ref().and_then(|r| r.kill_delay),
+                    tool_inputs,
+                    symlink_inputs,
+                    client_env: Some(opts.client_env.clone()),
+                    ..Default::default()
                 };
-                let cmd_argv = if opts.expand_param_files {
-                    expand_param_file_args(&cmd_argv, execroot, fs)
-                } else {
-                    cmd_argv
+                // Resources (`ResourceManager.acquire`) are held for the duration of the spawn.
+                let _held = opts.runtime.as_ref().map(|r| {
+                    r.resources
+                        .acquire(&resources::ResourceSet::default_action())
+                });
+                let run = match &opts.runtime {
+                    Some(rt) => match rt.execute(&spawn, &progress, execroot, fs, reporter) {
+                        Ok(r) => r,
+                        Err(msg) => {
+                            return Ok(fail(
+                                vec![format!("ERROR: {loc}: {progress} failed: {msg}")],
+                                1,
+                                Vec::new(),
+                                Vec::new(),
+                                None,
+                            ))
+                        }
+                    },
+                    None => execute_spawn_local(&spawn, execroot, fs),
                 };
-                let runner = &res.runner_name;
-                let from_rule = if mnemonic == "Genrule" {
-                    format!("genrule rule target {owner}")
-                } else {
-                    format!("rule target {owner}")
-                };
-                let cfg_hash = config_checksum_of(opts, &spawn_outputs);
-                reporter.handle(Event::subcommand(format!(
+                let res = run?;
+                // Missing inputs fail the action before any command line is announced.
+                if opts.announce_subcommands && !matches!(res.status, SpawnStatus::MissingInputs) {
+                    let (cmd_argv, cmd_env, cmd_cwd) = match &res.executed_command {
+                        Some(c) if opts.runtime.as_ref().is_some_and(|r| r.sandbox_debug) => {
+                            (c.argv.clone(), c.env.clone(), PathFragment::create(&c.cwd))
+                        }
+                        _ => (argv.clone(), env.clone(), execroot.clone()),
+                    };
+                    let cmd_argv = if opts.expand_param_files {
+                        expand_param_file_args(&cmd_argv, execroot, fs)
+                    } else {
+                        cmd_argv
+                    };
+                    let runner = &res.runner_name;
+                    let from_rule = if mnemonic == "Genrule" {
+                        format!("genrule rule target {owner}")
+                    } else {
+                        format!("rule target {owner}")
+                    };
+                    let cfg_hash = config_checksum_of(opts, spawn_outputs);
+                    reporter.handle(Event::subcommand(format!(
                     "# {from_rule} [action '{progress}', configuration: {cfg_hash}, execution platform: @@platforms//host:host, mnemonic: {mnemonic}]\n{}\n# Configuration: {cfg_hash}\n# Execution platform: @@platforms//host:host\n# Runner: {runner}",
                     if PRETTY_SUBCOMMANDS.load(std::sync::atomic::Ordering::Relaxed) {
                         describe_command_pretty(&cmd_argv, &cmd_env, &cmd_cwd)
@@ -1396,91 +1650,121 @@ pub fn execute_action_with(
                         describe_command(&cmd_argv, &cmd_env, &cmd_cwd, true)
                     }
                 )));
-            }
-            outcome.runner = Some(res.runner_name.clone());
-            outcome.progress = progress.clone();
-            let runner = outcome.runner.clone();
-            let rel_of = |exec: &str| -> String {
-                spawn_outputs
-                    .iter()
-                    .find(|a| a.exec_path.path_string() == exec)
-                    .map(|a| a.root_relative_path.path_string().to_string())
-                    .unwrap_or_else(|| exec.to_string())
-            };
-            // With --sandbox_debug the failure shows the sandbox's own command line.
-        let is_sandbox_debug = opts.runtime.as_ref().map_or(false, |r| r.sandbox_debug)
-            && res.runner_name.ends_with("-sandbox")
-            && res.executed_command.is_some();
-        if is_sandbox_debug {
-            if let Some(dbg) = res.executed_command.as_ref().and_then(|c| c.debug_output.as_ref()) {
-                reporter.handle(Event::debug(format!("Sandbox debug output for {mnemonic} {owner}:\n{dbg}")));
-            }
-        }
-            let (fail_argv, fail_env, fail_cwd, fail_verbose) = match (&res.executed_command, &opts.runtime) {
-                (Some(c), Some(rt)) if rt.sandbox_debug => {
-                    (c.argv.clone(), c.env.clone(), PathFragment::create(&c.cwd), true)
                 }
-                // A sandboxed spawn ran in its sandbox execroot (`<base>/<runner>/<id>/execroot/<ws>`).
-                (Some(c), _) if res.runner_name.ends_with("-sandbox") => {
-                    (argv.clone(), env.clone(), PathFragment::create(&c.cwd), opts.verbose_failures)
+                outcome.runner = Some(res.runner_name.clone());
+                outcome.progress = progress.clone();
+                let runner = outcome.runner.clone();
+                let rel_of = |exec: &str| -> String {
+                    spawn_outputs
+                        .iter()
+                        .find(|a| a.exec_path.path_string() == exec)
+                        .map(|a| a.root_relative_path.path_string().to_string())
+                        .unwrap_or_else(|| exec.to_string())
+                };
+                // With --sandbox_debug the failure shows the sandbox's own command line.
+                let is_sandbox_debug = opts.runtime.as_ref().is_some_and(|r| r.sandbox_debug)
+                    && res.runner_name.ends_with("-sandbox")
+                    && res.executed_command.is_some();
+                if is_sandbox_debug {
+                    if let Some(dbg) = res
+                        .executed_command
+                        .as_ref()
+                        .and_then(|c| c.debug_output.as_ref())
+                    {
+                        reporter.handle(Event::debug(format!(
+                            "Sandbox debug output for {mnemonic} {owner}:\n{dbg}"
+                        )));
+                    }
                 }
-                _ => (argv.clone(), env.clone(), execroot.clone(), opts.verbose_failures),
-            };
-            let fail_argv = if opts.expand_param_files {
-                expand_param_file_args(&fail_argv, execroot, fs)
-            } else {
-                fail_argv
-            };
-            match res.status {
-                SpawnStatus::Success
-                    if spawn_outputs.iter().any(|o| {
-                        !o.is_tree_artifact
-                            && !o.is_unresolved_symlink
-                            && std::fs::metadata(execroot.get_relative(&o.exec_path).path_string()).map_or(false, |m| m.is_dir())
-                    }) =>
-                {
-                    // `SkyframeActionExecutor`: a declared file output that is a directory.
-                    let mut msgs: Vec<String> = spawn_outputs
+                let (fail_argv, fail_env, fail_cwd, fail_verbose) =
+                    match (&res.executed_command, &opts.runtime) {
+                        (Some(c), Some(rt)) if rt.sandbox_debug => (
+                            c.argv.clone(),
+                            c.env.clone(),
+                            PathFragment::create(&c.cwd),
+                            true,
+                        ),
+                        // A sandboxed spawn ran in its sandbox execroot (`<base>/<runner>/<id>/execroot/<ws>`).
+                        (Some(c), _) if res.runner_name.ends_with("-sandbox") => (
+                            argv.clone(),
+                            env.clone(),
+                            PathFragment::create(&c.cwd),
+                            opts.verbose_failures,
+                        ),
+                        _ => (
+                            argv.clone(),
+                            env.clone(),
+                            execroot.clone(),
+                            opts.verbose_failures,
+                        ),
+                    };
+                let fail_argv = if opts.expand_param_files {
+                    expand_param_file_args(&fail_argv, execroot, fs)
+                } else {
+                    fail_argv
+                };
+                match res.status {
+                    SpawnStatus::Success
+                        if spawn_outputs.iter().any(|o| {
+                            !o.is_tree_artifact
+                                && !o.is_unresolved_symlink
+                                && std::fs::metadata(
+                                    execroot.get_relative(&o.exec_path).path_string(),
+                                )
+                                .is_ok_and(|m| m.is_dir())
+                        }) =>
+                    {
+                        // `SkyframeActionExecutor`: a declared file output that is a directory.
+                        let mut msgs: Vec<String> = spawn_outputs
                         .iter()
                         .filter(|o| {
                             !o.is_tree_artifact
                                 && !o.is_unresolved_symlink
-                                && std::fs::metadata(execroot.get_relative(&o.exec_path).path_string()).map_or(false, |m| m.is_dir())
+                                && std::fs::metadata(execroot.get_relative(&o.exec_path).path_string()).is_ok_and(|m| m.is_dir())
                         })
                         .map(|o| format!("ERROR: {loc}: output '{}' of {owner} is a directory but was not declared as such", o.root_relative_path.path_string()))
                         .collect();
-                    msgs.push(format!("ERROR: {loc}: {progress} failed: not all outputs were created or valid"));
-                    return Ok(fail(msgs, 1, res.stdout, res.stderr, runner));
-                }
-                SpawnStatus::Success => {
-                    // Like Bazel's `setOutputsReadOnlyAndExecutable`, every regular-file output of a
-                    // spawn is executable (so `run` of an `executable = True` genrule output works).
-                    #[cfg(unix)]
-                    for o in spawn_outputs {
-                        use std::os::unix::fs::PermissionsExt;
-                        let p = execroot.get_relative(&o.exec_path);
-                        if let Ok(meta) = std::fs::symlink_metadata(p.path_string()) {
-                            if meta.is_file() {
-                                let mut perms = meta.permissions();
-                                perms.set_mode(perms.mode() | 0o111);
-                                let _ = std::fs::set_permissions(p.path_string(), perms);
+                        msgs.push(format!("ERROR: {loc}: {progress} failed: not all outputs were created or valid"));
+                        return Ok(fail(msgs, 1, res.stdout, res.stderr, runner));
+                    }
+                    SpawnStatus::Success => {
+                        // Like Bazel's `setOutputsReadOnlyAndExecutable`, every regular-file output of a
+                        // spawn is executable (so `run` of an `executable = True` genrule output works).
+                        #[cfg(unix)]
+                        for o in spawn_outputs {
+                            use std::os::unix::fs::PermissionsExt;
+                            let p = execroot.get_relative(&o.exec_path);
+                            if let Ok(meta) = std::fs::symlink_metadata(p.path_string()) {
+                                if meta.is_file() {
+                                    let mut perms = meta.permissions();
+                                    perms.set_mode(perms.mode() | 0o111);
+                                    let _ = std::fs::set_permissions(p.path_string(), perms);
+                                }
                             }
                         }
+                        outcome.stdout = res.stdout;
+                        outcome.stderr = res.stderr;
                     }
-                    outcome.stdout = res.stdout;
-                    outcome.stderr = res.stderr;
-                }
-                SpawnStatus::MissingInputs => {
-                    let mut msgs = Vec::new();
-                    for m in &res.missing {
-                        let lbl = if m.starts_with("//") { m.clone() } else { format!("//:{m}") };
-                        msgs.push(format!("ERROR: {loc}: {progress} failed: missing input file '{lbl}'"));
+                    SpawnStatus::MissingInputs => {
+                        let mut msgs = Vec::new();
+                        for m in &res.missing {
+                            let lbl = if m.starts_with("//") {
+                                m.clone()
+                            } else {
+                                format!("//:{m}")
+                            };
+                            msgs.push(format!(
+                                "ERROR: {loc}: {progress} failed: missing input file '{lbl}'"
+                            ));
+                        }
+                        msgs.push(format!(
+                            "ERROR: {loc}: {progress} failed: {} input file(s) do not exist",
+                            res.missing.len()
+                        ));
+                        return Ok(fail(msgs, 1, res.stdout, res.stderr, runner));
                     }
-                    msgs.push(format!("ERROR: {loc}: {progress} failed: {} input file(s) do not exist", res.missing.len()));
-                    return Ok(fail(msgs, 1, res.stdout, res.stderr, runner));
-                }
-                SpawnStatus::MissingOutputs => {
-                    let mut msgs: Vec<String> = res
+                    SpawnStatus::MissingOutputs => {
+                        let mut msgs: Vec<String> = res
                         .missing
                         .iter()
                         .map(|m| {
@@ -1494,94 +1778,106 @@ pub fn execute_action_with(
                             }
                         })
                         .collect();
-                    msgs.push(format!(
+                        msgs.push(format!(
                         "ERROR: {loc}: {progress} failed: not all outputs were created or valid"
                     ));
-                    // The spawn itself succeeded (exit 0); only its outputs are missing.
-                    return Ok(fail(msgs, 0, res.stdout, res.stderr, runner));
-                }
-                SpawnStatus::Timeout => {
-                    let from_rule = if mnemonic == "Genrule" {
-                        format!("(from genrule rule target {owner})")
-                    } else {
-                        format!("(from rule target {owner})")
-                    };
-                    let desc = describe_command(&fail_argv, &fail_env, &fail_cwd, fail_verbose);
-                    let msg = format!(
+                        // The spawn itself succeeded (exit 0); only its outputs are missing.
+                        return Ok(fail(msgs, 0, res.stdout, res.stderr, runner));
+                    }
+                    SpawnStatus::Timeout => {
+                        let from_rule = if mnemonic == "Genrule" {
+                            format!("(from genrule rule target {owner})")
+                        } else {
+                            format!("(from rule target {owner})")
+                        };
+                        let desc = describe_command(&fail_argv, &fail_env, &fail_cwd, fail_verbose);
+                        let msg = format!(
                         "ERROR: {loc}: {progress} failed: (Timeout): {} failed: error executing {} command {}{}",
                         argv.first().map(|a| a.rsplit('/').next().unwrap_or(a)).unwrap_or(""),
                         mnemonic,
                         from_rule,
                         desc,
                     );
-                    return Ok(fail(vec![msg], res.exit_code, res.stdout, res.stderr, runner));
-                }
-                SpawnStatus::NonZeroExit | SpawnStatus::ExecutionFailed => {
-                    let tool = fail_argv
-                        .first()
-                        .map(|a| a.rsplit('/').next().unwrap_or(a).to_string())
-                        .unwrap_or_default();
-                    let from_rule = if is_sandbox_debug {
-                        String::new()
-                    } else if mnemonic == "Genrule" {
-                        format!("(from genrule rule target {owner})")
-                    } else {
-                        format!("(from rule target {owner})")
-                    };
-                    let cfg_hash = config_checksum_of(opts, &spawn_outputs);
-                    let mut desc = describe_command(&fail_argv, &fail_env, &fail_cwd, fail_verbose);
-                    if fail_verbose {
-                        if is_sandbox_debug {
-                            desc = format!("\n  {desc}");
-                        } else {
-                            // `CommandFailureUtils`: the `(from ...) ` header ends with a space, the
-                            // command block starts on its own line indented by two.
-                            desc = format!(" \n  {desc}\n# Configuration: {cfg_hash}\n# Execution platform: @@platforms//host:host");
-                        }
+                        return Ok(fail(
+                            vec![msg],
+                            res.exit_code,
+                            res.stdout,
+                            res.stderr,
+                            runner,
+                        ));
                     }
-                    let mut msgs = vec![format!(
+                    SpawnStatus::NonZeroExit | SpawnStatus::ExecutionFailed => {
+                        let tool = fail_argv
+                            .first()
+                            .map(|a| a.rsplit('/').next().unwrap_or(a).to_string())
+                            .unwrap_or_default();
+                        let from_rule = if is_sandbox_debug {
+                            String::new()
+                        } else if mnemonic == "Genrule" {
+                            format!("(from genrule rule target {owner})")
+                        } else {
+                            format!("(from rule target {owner})")
+                        };
+                        let cfg_hash = config_checksum_of(opts, spawn_outputs);
+                        let mut desc =
+                            describe_command(&fail_argv, &fail_env, &fail_cwd, fail_verbose);
+                        if fail_verbose {
+                            if is_sandbox_debug {
+                                desc = format!("\n  {desc}");
+                            } else {
+                                // `CommandFailureUtils`: the `(from ...) ` header ends with a space, the
+                                // command block starts on its own line indented by two.
+                                desc = format!(" \n  {desc}\n# Configuration: {cfg_hash}\n# Execution platform: @@platforms//host:host");
+                            }
+                        }
+                        let mut msgs = vec![format!(
                         "ERROR: {loc}: {progress} failed: (Exit {}): {tool} failed: error executing {mnemonic} command {}{}",
                         res.exit_code,
                         from_rule,
                         desc,
                     )];
-                    if runner.as_deref().map_or(false, |r| r.ends_with("-sandbox")) && opts.runtime.as_ref().map_or(true, |r| !r.sandbox_debug) {
-                        msgs.push("Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging".to_string());
+                        if runner.as_deref().is_some_and(|r| r.ends_with("-sandbox"))
+                            && opts.runtime.as_ref().is_none_or(|r| !r.sandbox_debug)
+                        {
+                            msgs.push("Use --sandbox_debug to see verbose messages from the sandbox and retain the sandbox build root for debugging".to_string());
+                        }
+                        return Ok(fail(msgs, res.exit_code, res.stdout, res.stderr, runner));
                     }
-                    return Ok(fail(msgs, res.exit_code, res.stdout, res.stderr, runner));
                 }
-            }
-            if let Some(spec) = jc {
-                if !java_fallback {
-                    let jdeps = match fs.read_file(&execroot.get_relative_str(&spec.deps_proto)) {
-                        Ok(bytes) => java_compile::parse_jdeps(&bytes),
-                        Err(e) => Err(e.to_string()),
-                    };
-                    match jdeps {
-                        Ok(d) if d.requires_reduced_classpath_fallback => {
-                            // Delete the outputs of the reduced attempt and re-run with the full classpath.
-                            for o in spawn_outputs {
-                                let _ = fs.delete(&execroot.get_relative(&o.exec_path));
+                if let Some(spec) = jc {
+                    if !java_fallback {
+                        let jdeps = match fs.read_file(&execroot.get_relative_str(&spec.deps_proto))
+                        {
+                            Ok(bytes) => java_compile::parse_jdeps(&bytes),
+                            Err(e) => Err(e.to_string()),
+                        };
+                        match jdeps {
+                            Ok(d) if d.requires_reduced_classpath_fallback => {
+                                // Delete the outputs of the reduced attempt and re-run with the full classpath.
+                                for o in spawn_outputs {
+                                    let _ = fs.delete(&execroot.get_relative(&o.exec_path));
+                                }
+                                outcome.stdout.clear();
+                                outcome.stderr.clear();
+                                java_fallback = true;
+                                continue;
                             }
-                            outcome.stdout.clear();
-                            outcome.stderr.clear();
-                            java_fallback = true;
-                            continue;
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            return Ok(fail(
-                                vec![format!("ERROR: {loc}: {progress} failed: .jdeps read IOException: {e}")],
-                                1,
-                                Vec::new(),
-                                Vec::new(),
-                                outcome.runner.clone(),
-                            ))
+                            Ok(_) => {}
+                            Err(e) => {
+                                return Ok(fail(
+                                    vec![format!(
+                                    "ERROR: {loc}: {progress} failed: .jdeps read IOException: {e}"
+                                )],
+                                    1,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    outcome.runner.clone(),
+                                ))
+                            }
                         }
                     }
                 }
-            }
-            break;
+                break;
             }
         }
     }
@@ -1589,8 +1885,12 @@ pub fn execute_action_with(
     for out_art in &outputs {
         let out_path = execroot.get_relative(&out_art.exec_path);
         // Outputs of a remote/disk cache hit are only materialized when needed.
-        let pending = opts.runtime.as_ref().and_then(|r| r.remote.as_ref()).map_or(false, |r| r.is_pending_output(out_art.exec_path.path_string()));
-        if !pending && !fs.exists(&out_path, true) {
+        let pending = opts
+            .runtime
+            .as_ref()
+            .and_then(|r| r.remote.as_ref())
+            .is_some_and(|r| r.is_pending_output(out_art.exec_path.path_string()));
+        if !pending && !fs.exists(&out_path, !out_art.is_unresolved_symlink) {
             return Ok(fail(
                 vec![
                     format!(
@@ -1640,7 +1940,7 @@ pub fn execute_action_with(
                 invalidate_computed_digest(p.path_string());
                 (
                     o.exec_path.path_string().to_string(),
-                    path_digest(digest, fs, &p).unwrap_or_default(),
+                    out_digest(o).unwrap_or_default(),
                 )
             })
             .collect();
@@ -1663,6 +1963,61 @@ pub fn execute_action_with(
     }
     outcome.wall_time_ms = started.elapsed().as_millis() as u64;
     Ok(outcome)
+}
+
+/// `XcodeLocalEnvProvider.rewriteLocalEnv`: actions that use Xcode (`requires-darwin` or the
+/// `XCODE_VERSION_OVERRIDE` / `APPLE_SDK_PLATFORM` variables) get `DEVELOPER_DIR` and `SDKROOT`
+/// while preserving those override keys.
+fn xcode_local_env(
+    env: BTreeMap<String, String>,
+    execution_info: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    zel_sandbox::sandbox::rewrite_local_env_preserving_tmpdir(
+        &env,
+        &BTreeMap::new(),
+        execution_info,
+    )
+}
+
+fn expand_param_file_args(
+    argv: &[String],
+    execroot: &PathFragment,
+    fs: &dyn FileSystem,
+) -> Vec<String> {
+    let mut expanded = Vec::new();
+    for arg in argv {
+        if let Some(param_path) = arg.strip_prefix('@') {
+            let p = execroot.get_relative_str(param_path);
+            if let Ok(b) = fs.read_file(&p) {
+                let content = String::from_utf8_lossy(&b);
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        expanded.push(trimmed.to_string());
+                    }
+                }
+                continue;
+            }
+        }
+        expanded.push(arg.clone());
+    }
+    expanded
+}
+
+/// The checksum of the configuration an action runs in: derived from the output directory
+/// (`bazel-out/<mnemonic>/...`) of its outputs and the analysed configurations.
+fn config_checksum_of(opts: &ExecOptions, outputs: &[Artifact]) -> String {
+    outputs
+        .iter()
+        .filter_map(|a| {
+            a.exec_path
+                .path_string()
+                .split('/')
+                .nth(1)
+                .map(str::to_string)
+        })
+        .find_map(|dir| opts.config_checksums.get(&dir).cloned())
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1703,77 +2058,62 @@ mod tests {
         assert!(out2.cache_hit);
         assert_eq!(out2.exit_code, 0);
     }
-}
 
+    #[test]
+    fn file_write_preserves_raw_bytes_and_ors_executable_bits() {
+        let d = std::env::temp_dir().join(format!("zel-fw-raw-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let execroot = PathFragment::create(d.to_str().unwrap());
+        let fs = zel_vfs::LocalFileSystem::default();
+        let cache = CompactPersistentActionCache::new();
+        let reporter = Reporter::new();
 
-/// `XcodeLocalEnvProvider.rewriteLocalEnv`: actions that use Xcode (`requires-darwin` or the
-/// `XCODE_VERSION_OVERRIDE` / `APPLE_SDK_PLATFORM` variables) get `DEVELOPER_DIR` and `SDKROOT`
-/// of the local Xcode (the selected one, `xcode-select -p`) and lose the override variables.
-fn xcode_local_env(
-    mut env: BTreeMap<String, String>,
-    execution_info: &BTreeMap<String, String>,
-) -> BTreeMap<String, String> {
-    if !cfg!(target_os = "macos") {
-        return env;
-    }
-    let wants = env.contains_key("XCODE_VERSION_OVERRIDE")
-        || env.contains_key("APPLE_SDK_PLATFORM")
-        || execution_info.contains_key("requires-darwin");
-    if !wants || (env.contains_key("DEVELOPER_DIR") && env.contains_key("SDKROOT")) {
-        return env;
-    }
-    let developer_dir = match env.get("DEVELOPER_DIR").cloned() {
-        Some(d) => d,
-        None => match std::process::Command::new("/usr/bin/xcode-select").arg("-p").output() {
-            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
-            _ => return env,
-        },
-    };
-    let platform = env.get("APPLE_SDK_PLATFORM").cloned().unwrap_or_else(|| "MacOSX".to_string()).to_lowercase();
-    let sdkroot = std::process::Command::new("/usr/bin/xcrun")
-        .env("DEVELOPER_DIR", &developer_dir)
-        .args(["--sdk", &platform, "--show-sdk-path"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
-    env.insert("DEVELOPER_DIR".to_string(), developer_dir);
-    if let Some(sdk) = sdkroot {
-        env.entry("SDKROOT".to_string()).or_insert(sdk);
-    }
-    for k in ["XCODE_VERSION_OVERRIDE", "APPLE_SDK_VERSION_OVERRIDE", "APPLE_SDK_PLATFORM"] {
-        env.remove(k);
-    }
-    env
-}
+        // Even with .runfiles_manifest suffix, bytes (incl. CRLF and invalid UTF-8) are written verbatim.
+        let raw = b"k rel/path\r\n\xff\xfe".to_vec();
+        let lbl = Label::parse_canonical("//pkg:m").unwrap();
+        let out_art = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/t.runfiles_manifest"),
+            lbl.clone(),
+        );
+        let act = ActionAnalysisMetadata::FileWriteAction {
+            owner: lbl.clone(),
+            output: out_art.clone(),
+            content: raw.clone(),
+            is_executable: false,
+        };
+        let res = execute_action(&act, &execroot, &fs, &cache, &reporter, false).unwrap();
+        assert!(res.succeeded());
+        assert_eq!(
+            std::fs::read(d.join(out_art.exec_path.path_string())).unwrap(),
+            raw
+        );
 
-fn expand_param_file_args(argv: &[String], execroot: &PathFragment, fs: &dyn FileSystem) -> Vec<String> {
-    let mut expanded = Vec::new();
-    for arg in argv {
-        if let Some(param_path) = arg.strip_prefix('@') {
-            let p = execroot.get_relative_str(param_path);
-            if let Ok(b) = fs.read_file(&p) {
-                let content = String::from_utf8_lossy(&b);
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if !trimmed.is_empty() {
-                        expanded.push(trimmed.to_string());
-                    }
-                }
-                continue;
-            }
+        // Make-executable ORs 0111 onto existing mode (preserving group-write / umask bits).
+        let exe_art = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/script.sh"),
+            lbl.clone(),
+        );
+        let act_exe = ActionAnalysisMetadata::FileWriteAction {
+            owner: lbl,
+            output: exe_art.clone(),
+            content: b"#!/bin/sh\n".to_vec(),
+            is_executable: true,
+        };
+        let res = execute_action(&act_exe, &execroot, &fs, &cache, &reporter, false).unwrap();
+        assert!(res.succeeded());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(d.join(exe_art.exec_path.path_string()))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_ne!(mode & 0o111, 0);
+            assert_eq!(mode & 0o600, 0o600);
         }
-        expanded.push(arg.clone());
     }
-    expanded
-}
-
-/// The checksum of the configuration an action runs in: derived from the output directory
-/// (`bazel-out/<mnemonic>/...`) of its outputs and the analysed configurations.
-fn config_checksum_of(opts: &ExecOptions, outputs: &[Artifact]) -> String {
-    outputs
-        .iter()
-        .filter_map(|a| a.exec_path.path_string().split('/').nth(1).map(str::to_string))
-        .find_map(|dir| opts.config_checksums.get(&dir).cloned())
-        .unwrap_or_default()
 }

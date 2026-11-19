@@ -1,6 +1,7 @@
 //! The client environment reaches actions through the real `zel` binary: the client sends it as
 //! `--client_env` arguments with every command, so a persistent daemon started under one
 //! environment still sees each command's own environment (and never its own).
+#![cfg(unix)]
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -9,13 +10,14 @@ fn zel() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_zel"))
 }
 
-
 /// A hermetic local registry built once per test process from the vendored closure under
 /// `third_party` (`scripts/make_vendored_registry.py`); no network is ever used.
 fn local_registry() -> PathBuf {
     static REG: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
     REG.get_or_init(|| {
-        let root = env!("CARGO_MANIFEST_DIR").strip_suffix("/crates/zel-client").unwrap_or("/Users/pledger/Development/zel");
+        let root = env!("CARGO_MANIFEST_DIR")
+            .strip_suffix("/crates/zel-client")
+            .unwrap_or("/Users/pledger/Development/zel");
         let dir = std::env::temp_dir().join(format!("zel-client-registry-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let st = std::process::Command::new("python3")
@@ -30,8 +32,11 @@ fn local_registry() -> PathBuf {
 }
 
 fn registry_flag(cmd: &str) -> Option<String> {
-    matches!(cmd, "build" | "test" | "run" | "coverage" | "query" | "cquery" | "aquery" | "fetch")
-        .then(|| format!("--registry=file://{}", local_registry().display()))
+    matches!(
+        cmd,
+        "build" | "test" | "run" | "coverage" | "query" | "cquery" | "aquery" | "fetch"
+    )
+    .then(|| format!("--registry=file://{}", local_registry().display()))
 }
 
 /// Bazel 9 has no native `sh_*` rules: BUILD files load them from `@rules_shell`.
@@ -42,7 +47,9 @@ fn shell_loads(rel: &str, content: &str) -> String {
     let mut out = String::new();
     for name in ["sh_binary", "sh_test", "sh_library"] {
         if content.contains(&format!("{name}(")) {
-            out.push_str(&format!("load(\"@rules_shell//shell:{name}.bzl\", \"{name}\")\n"));
+            out.push_str(&format!(
+                "load(\"@rules_shell//shell:{name}.bzl\", \"{name}\")\n"
+            ));
         }
     }
     out.push_str(content);
@@ -60,19 +67,30 @@ fn ws(name: &str) -> Ws {
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(root.join("ws/p")).unwrap();
     let root = std::fs::canonicalize(&root).unwrap();
-    let w = Ws { ws: root.join("ws"), ob: root.join("ob"), root };
-    std::fs::write(w.ws.join("MODULE.bazel"), "module(name = \"e2e\")\nbazel_dep(name = \"rules_shell\", version = \"0.6.1\")\n").unwrap();
+    let w = Ws {
+        ws: root.join("ws"),
+        ob: root.join("ob"),
+        root,
+    };
+    std::fs::write(
+        w.ws.join("MODULE.bazel"),
+        "module(name = \"e2e\")\nbazel_dep(name = \"rules_shell\", version = \"0.6.1\")\n",
+    )
+    .unwrap();
     std::fs::write(w.ws.join("BUILD"), "").unwrap();
     std::fs::write(
         w.ws.join("p/BUILD"),
-        shell_loads("p/BUILD", r#"
+        shell_loads(
+            "p/BUILD",
+            r#"
 genrule(
     name = "dump",
     outs = ["dump.txt"],
     cmd = "for v in PATH FOO CLIENT_ONLY; do echo \"ENV $$v=$${!v-<unset>}\"; done > $@",
 )
 sh_binary(name = "bin", srcs = ["bin.sh"])
-"#),
+"#,
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -81,14 +99,47 @@ sh_binary(name = "bin", srcs = ["bin.sh"])
     )
     .unwrap();
     use std::os::unix::fs::PermissionsExt;
-    std::fs::set_permissions(w.ws.join("p/bin.sh"), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(
+        w.ws.join("p/bin.sh"),
+        std::fs::Permissions::from_mode(0o755),
+    )
+    .unwrap();
     w
 }
 
 impl Ws {
     fn zel(&self, env: &[(&str, &str)], args: &[&str]) -> (i32, String) {
         let mut c = Command::new(zel());
-        c.current_dir(&self.ws).arg(format!("--output_base={}", self.ob.display())).arg(args[0]).args(registry_flag(args[0])).args(&args[1..]).env("HOME", &self.root);
+        for var in [
+            "USE_ZEL_VERSION",
+            "USE_BAZEL_VERSION",
+            "USE_ZEL_FALLBACK_VERSION",
+            "USE_BAZEL_FALLBACK_VERSION",
+            "ZEL_SKIP_WRAPPER",
+            "BAZELISK_SKIP_WRAPPER",
+            "ZEL_WRAPPER",
+            "BAZEL_WRAPPER",
+            "ZEL_HOME",
+            "BAZELISK_HOME",
+            "ZEL_BASE_URL",
+            "BAZELISK_BASE_URL",
+            "ZEL_NO_DOWNLOAD",
+            "BAZELISK_NO_DOWNLOAD",
+            "ZEL_VERIFY_SHA256",
+            "BAZELISK_VERIFY_SHA256",
+            "ZEL_PRODUCT_PREFIX",
+            "ZEL_EMBED_LABEL",
+            "BAZEL_EMBED_LABEL",
+            "XDG_CACHE_HOME",
+        ] {
+            c.env_remove(var);
+        }
+        c.current_dir(&self.ws)
+            .arg(format!("--output_base={}", self.ob.display()))
+            .arg(args[0])
+            .args(registry_flag(args[0]))
+            .args(&args[1..])
+            .env("HOME", &self.root);
         for (k, v) in env {
             c.env(k, v);
         }
@@ -123,11 +174,17 @@ impl Drop for Ws {
 fn each_command_sees_its_own_client_environment() {
     let w = ws("percmd");
     // The first command starts the daemon under FOO=daemon-start.
-    let (code, out) = w.zel(&[("FOO", "daemon-start"), ("CLIENT_ONLY", "x")], &["build", "//p:dump", "--action_env=FOO"]);
+    let (code, out) = w.zel(
+        &[("FOO", "daemon-start"), ("CLIENT_ONLY", "x")],
+        &["build", "//p:dump", "--action_env=FOO"],
+    );
     assert_eq!(code, 0, "{out}");
     assert!(w.dump().contains("ENV FOO=daemon-start\n"), "{}", w.dump());
     // A later command with another value: the daemon's own environment is stale.
-    let (code, out) = w.zel(&[("FOO", "second")], &["build", "//p:dump", "--action_env=FOO"]);
+    let (code, out) = w.zel(
+        &[("FOO", "second")],
+        &["build", "//p:dump", "--action_env=FOO"],
+    );
     assert_eq!(code, 0, "{out}");
     let d = w.dump();
     assert!(d.contains("ENV FOO=second\n"), "{d}");
@@ -143,8 +200,21 @@ fn each_command_sees_its_own_client_environment() {
 fn bazel_run_executes_with_run_env_and_clears_runfiles_variables() {
     let w = ws("run");
     let (code, out) = w.zel(
-        &[("FOO", "clientfoo"), ("CLIENT_ONLY", "x"), ("RUN1", "clientrun1"), ("RUNFILES_DIR", "/stale"), ("TEST_SRCDIR", "/stale")],
-        &["run", "//p:bin", "--run_env=RUN1", "--run_env=FOO=cli", "--run_env==CLIENT_ONLY", "--action_env=ACT=1"],
+        &[
+            ("FOO", "clientfoo"),
+            ("CLIENT_ONLY", "x"),
+            ("RUN1", "clientrun1"),
+            ("RUNFILES_DIR", "/stale"),
+            ("TEST_SRCDIR", "/stale"),
+        ],
+        &[
+            "run",
+            "//p:bin",
+            "--run_env=RUN1",
+            "--run_env=FOO=cli",
+            "--run_env==CLIENT_ONLY",
+            "--action_env=ACT=1",
+        ],
     );
     assert_eq!(code, 0, "{out}");
     for line in [
@@ -155,7 +225,13 @@ fn bazel_run_executes_with_run_env_and_clears_runfiles_variables() {
         "ENV TEST_SRCDIR=<unset>",
         "ENV ACT=<unset>",
     ] {
-        assert!(out.lines().any(|l| l == line), "missing `{line}` in:\n{out}");
+        assert!(
+            out.lines().any(|l| l == line),
+            "missing `{line}` in:\n{out}"
+        );
     }
-    assert!(out.contains(&format!("ENV BUILD_WORKSPACE_DIRECTORY={}", w.ws.display())), "{out}");
+    assert!(
+        out.contains(&format!("ENV BUILD_WORKSPACE_DIRECTORY={}", w.ws.display())),
+        "{out}"
+    );
 }

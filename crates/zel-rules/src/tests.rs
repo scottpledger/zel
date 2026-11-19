@@ -48,30 +48,48 @@ impl Ws {
         }
         // Bazel 9 has no native `sh_*` rules; in-memory workspaces load a stand-in for `@rules_shell`
         // on the BUILD file's first line.
-        let names: Vec<&str> = ["sh_binary", "sh_library", "sh_test"].into_iter().filter(|n| c.contains(&format!("{n}("))).collect();
+        let names: Vec<&str> = ["sh_binary", "sh_library", "sh_test"]
+            .into_iter()
+            .filter(|n| c.contains(&format!("{n}(")))
+            .collect();
         if (p == "BUILD" || p.ends_with("/BUILD")) && !names.is_empty() {
             let q: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
             let content = format!("load(\"//:sh_stub.bzl\", {}); {c}", q.join(", "));
             self.fs.write_file(&path, content.as_bytes()).unwrap();
-            self.fs.write_file(&self.root.get_relative_str("sh_stub.bzl"), SH_STUB.as_bytes()).unwrap();
+            self.fs
+                .write_file(
+                    &self.root.get_relative_str("sh_stub.bzl"),
+                    SH_STUB.as_bytes(),
+                )
+                .unwrap();
             return;
         }
         self.fs.write_file(&path, c.as_bytes()).unwrap();
     }
     fn resolver(&self) -> Arc<TargetResolver> {
-        self.resolver_with(BuildConfigurationKey::target("k8", "fastbuild"), AnalysisConfig::new()).0
+        self.resolver_with(
+            BuildConfigurationKey::target("k8", "fastbuild"),
+            AnalysisConfig::new(),
+        )
+        .0
     }
     fn resolver_with(
         &self,
         cfg: BuildConfigurationKey,
         acfg: AnalysisConfig,
     ) -> (Arc<TargetResolver>, BuildConfigurationKey) {
-        let lc = LoaderConfig::new(self.fs.clone(), Arc::new(SimpleRepoResolver::new(self.root.clone())));
+        let lc = LoaderConfig::new(
+            self.fs.clone(),
+            Arc::new(SimpleRepoResolver::new(self.root.clone())),
+        );
         (TargetResolver::new(PackageLoader::new(lc), acfg), cfg)
     }
     fn analyze(&self, label: &str) -> Result<Arc<ConfiguredTarget>, String> {
         let r = self.resolver();
-        r.analyze(&Label::parse_canonical(label).unwrap(), &BuildConfigurationKey::target("k8", "fastbuild"))
+        r.analyze(
+            &Label::parse_canonical(label).unwrap(),
+            &BuildConfigurationKey::target("k8", "fastbuild"),
+        )
     }
 }
 
@@ -100,22 +118,34 @@ def _impl(ctx):
 greet = rule(implementation = _impl, attrs = {"who": attr.string(default = "world")})
 "#,
         ),
-        ("BUILD", "load(\":defs.bzl\", \"greet\")\ngreet(name = \"g\", who = \"zel\")\n"),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"greet\")\ngreet(name = \"g\", who = \"zel\")\n",
+        ),
     ]);
     let ct = ws.analyze("//:g").unwrap();
     assert_eq!(ct.typed_actions.len(), 1);
     let a = &ct.typed_actions[0];
     assert_eq!(a.mnemonic, "FileWrite");
     match &a.kind {
-        ActionKind::FileWrite { content, is_executable } => {
+        ActionKind::FileWrite {
+            content,
+            is_executable,
+        } => {
             assert_eq!(content.render(), b"hello zel\n");
             assert!(!is_executable);
         }
         other => panic!("{other:?}"),
     }
-    assert_eq!(a.outputs[0].exec_path.to_string(), "bazel-out/k8-fastbuild/bin/g.txt");
+    assert_eq!(
+        a.outputs[0].exec_path.to_string(),
+        "bazel-out/k8-fastbuild/bin/g.txt"
+    );
     assert_eq!(ct.default_info.files.len(), 1);
-    assert_eq!(ct.default_info.files[0].exec_path.to_string(), "bazel-out/k8-fastbuild/bin/g.txt");
+    assert_eq!(
+        ct.default_info.files[0].exec_path.to_string(),
+        "bazel-out/k8-fastbuild/bin/g.txt"
+    );
     assert_eq!(ct.actions.len(), 1);
 }
 
@@ -173,16 +203,26 @@ bin(name = "x", deps = [":a", ":b"])
     assert_eq!(
         argv,
         vec![
-            "/bin/bash", "-c", "echo hi > $1", "",
-            "--out", "bazel-out/k8-fastbuild/bin/x.out",
-            "--in", "a.txt", "b.txt",
-            "--vals", "A,B"
+            "/bin/bash",
+            "-c",
+            "echo hi > $1",
+            "",
+            "--out",
+            "bazel-out/k8-fastbuild/bin/x.out",
+            "--in",
+            "a.txt",
+            "b.txt",
+            "--vals",
+            "A,B"
         ]
     );
     assert_eq!(inputs, vec!["a.txt", "b.txt"]);
     assert_eq!(outputs, vec!["bazel-out/k8-fastbuild/bin/x.out"]);
     let a = &ct.typed_actions[0];
-    assert_eq!(a.progress_message.as_deref(), Some("Generating x.out for //:x"));
+    assert_eq!(
+        a.progress_message.as_deref(),
+        Some("Generating x.out for //:x")
+    );
     assert_eq!(a.env["A"], "b");
 }
 
@@ -202,17 +242,26 @@ def _b(ctx):
 b = rule(implementation = _b, attrs = {"dep": attr.label()})
 "#,
         ),
-        ("BUILD", "load(\":defs.bzl\", \"a\", \"b\")\na(name = \"a\")\nb(name = \"b\", dep = \":a\")\n"),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"a\", \"b\")\na(name = \"a\")\nb(name = \"b\", dep = \":a\")\n",
+        ),
     ]);
     let e = ws.analyze("//:b").unwrap_err();
-    assert!(e.contains("<target //:a> (rule 'a') doesn't contain declared provider 'P'"), "{e}");
+    assert!(
+        e.contains("<target //:a> (rule 'a') doesn't contain declared provider 'P'"),
+        "{e}"
+    );
     assert!(e.contains("in b rule //:b"), "{e}");
 }
 
 #[test]
 fn executable_rule_requires_executable() {
     let ws = Ws::new(&[
-        ("defs.bzl", "def _i(ctx):\n    return []\nr = rule(implementation = _i, executable = True)\n"),
+        (
+            "defs.bzl",
+            "def _i(ctx):\n    return []\nr = rule(implementation = _i, executable = True)\n",
+        ),
         ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"r\")\n"),
     ]);
     let e = ws.analyze("//:r").unwrap_err();
@@ -233,7 +282,10 @@ def _i(ctx):
 r = rule(implementation = _i, executable = True, attrs = {"data": attr.label_list(allow_files = True)})
 "#,
         ),
-        ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"r\", data = [\"d.txt\"])\n"),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"r\")\nr(name = \"r\", data = [\"d.txt\"])\n",
+        ),
         ("d.txt", "d"),
     ]);
     let ct = ws.analyze("//:r").unwrap();
@@ -242,8 +294,19 @@ r = rule(implementation = _i, executable = True, attrs = {"data": attr.label_lis
     let m = rs.runfiles.manifest_entries("_main");
     assert_eq!(m["_main/d.txt"], "d.txt");
     assert_eq!(m["_main/r"], "bazel-out/k8-fastbuild/bin/r");
-    assert_eq!(ct.default_info.executable.as_ref().unwrap().exec_path.to_string(), "bazel-out/k8-fastbuild/bin/r");
-    assert!(ct.typed_actions.iter().any(|a| a.mnemonic == "SourceSymlinkManifest"));
+    assert_eq!(
+        ct.default_info
+            .executable
+            .as_ref()
+            .unwrap()
+            .exec_path
+            .to_string(),
+        "bazel-out/k8-fastbuild/bin/r"
+    );
+    assert!(ct
+        .typed_actions
+        .iter()
+        .any(|a| a.mnemonic == "SourceSymlinkManifest"));
 }
 
 #[test]
@@ -275,7 +338,10 @@ fn declare_file_outside_package_is_rejected() {
     ]);
     let e = ws.analyze("//p:r").unwrap_err();
     assert!(e.contains("the output artifact '"), "{e}");
-    assert!(e.contains("is not under package directory 'p' for target '//p:r'"), "{e}");
+    assert!(
+        e.contains("is not under package directory 'p' for target '//p:r'"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -294,14 +360,20 @@ def _i(ctx):
 r = rule(implementation = _i, attrs = {"tmpl": attr.label(allow_single_file = True)})
 "#,
         ),
-        ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"r\", tmpl = \"t.in\")\n"),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"r\")\nr(name = \"r\", tmpl = \"t.in\")\n",
+        ),
         ("t.in", "name=%N%"),
     ]);
     let ct = ws.analyze("//:r").unwrap();
     assert_eq!(ct.typed_actions.len(), 2);
     assert_eq!(ct.typed_actions[0].mnemonic, "TemplateExpand");
     assert_eq!(ct.typed_actions[1].mnemonic, "Symlink");
-    assert_eq!(ct.typed_actions[1].inputs[0].exec_path.to_string(), "bazel-out/k8-fastbuild/bin/out.txt");
+    assert_eq!(
+        ct.typed_actions[1].inputs[0].exec_path.to_string(),
+        "bazel-out/k8-fastbuild/bin/out.txt"
+    );
 }
 
 #[test]
@@ -320,7 +392,10 @@ r = rule(implementation = _i)
         ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"r\")\n"),
     ]);
     let e = ws.analyze("//:r").unwrap_err();
-    assert!(e.contains("Exactly one of \"target_file\" or \"target_path\" is required"), "{e}");
+    assert!(
+        e.contains("Exactly one of \"target_file\" or \"target_path\" is required"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -342,10 +417,12 @@ r = rule(implementation = _i, attrs = {"srcs": attr.label_list(allow_files = Tru
         ("s.txt", "s"),
     ]);
     let ct = ws.analyze("//:r").unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     assert_eq!(
         String::from_utf8(content.render()).unwrap(),
-        "cat s.txt > s.txt fastbuild $ bazel-out/k8-fastbuild/bin"
+        "cat ./s.txt > ./s.txt fastbuild $ bazel-out/k8-fastbuild/bin"
     );
 }
 
@@ -369,8 +446,16 @@ filegroup(name = "nomatch", srcs = select({":opt": ["o.txt"]}))
     let e = ws.analyze("//:nomatch").unwrap_err();
     assert!(e.contains("configurable attribute \"srcs\" in //:nomatch doesn't match this configuration. Would a default condition help?\n\nConditions checked:\n //:opt\n\nTo see a condition's definition, run: bazel query --output=build <condition label>."), "{e}");
     // opt config picks the other branch.
-    let (r, _) = ws.resolver_with(BuildConfigurationKey::target("k8", "opt"), AnalysisConfig::new());
-    let ct = r.analyze(&Label::parse_canonical("//:fg").unwrap(), &BuildConfigurationKey::target("k8", "opt")).unwrap();
+    let (r, _) = ws.resolver_with(
+        BuildConfigurationKey::target("k8", "opt"),
+        AnalysisConfig::new(),
+    );
+    let ct = r
+        .analyze(
+            &Label::parse_canonical("//:fg").unwrap(),
+            &BuildConfigurationKey::target("k8", "opt"),
+        )
+        .unwrap();
     assert_eq!(ct.default_info.files[0].exec_path.to_string(), "o.txt");
 }
 
@@ -399,7 +484,13 @@ genrule(
         argv[2],
         "source external/bazel_tools/tools/genrule/genrule-setup.sh; cat p/in.txt p/in.txt > bazel-out/k8-fastbuild/bin/p/out.txt; echo bazel-out/k8-fastbuild/bin/p bazel-out/k8-fastbuild/bin/p"
     );
-    assert_eq!(inputs, vec!["p/in.txt", "external/bazel_tools/tools/genrule/genrule-setup.sh"]);
+    assert_eq!(
+        inputs,
+        vec![
+            "p/in.txt",
+            "external/bazel_tools/tools/genrule/genrule-setup.sh"
+        ]
+    );
     assert_eq!(outputs, vec!["bazel-out/k8-fastbuild/bin/p/out.txt"]);
     assert_eq!(ct.typed_actions[0].progress_message.as_deref(), None);
 }
@@ -420,7 +511,10 @@ genrule(name = "two", srcs = ["a", "b"], outs = ["o2"], cmd = "cp $< $@")
     let e = ws.analyze("//:nocmd").unwrap_err();
     assert!(e.contains("missing value for `cmd` attribute, you can also set `cmd_ps` or `cmd_bat` on Windows and `cmd_bash` on other platforms."), "{e}");
     let e = ws.analyze("//:two").unwrap_err();
-    assert!(e.contains("variable '$<' : more than one input file"), "{e}");
+    assert!(
+        e.contains("variable '$<' : more than one input file"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -438,7 +532,10 @@ fn visibility_and_testonly_enforced() {
 
 #[test]
 fn language_rules_are_not_native() {
-    let ws = Ws::new(&[("BUILD", "cc_library(name = \"l\", srcs = [\"a.cc\"])\n"), ("a.cc", "")]);
+    let ws = Ws::new(&[
+        ("BUILD", "cc_library(name = \"l\", srcs = [\"a.cc\"])\n"),
+        ("a.cc", ""),
+    ]);
     // Bazel 9: cc_library comes from @rules_cc; without a load() it is undefined.
     let e = ws.analyze("//:l").unwrap_err();
     assert!(e.contains("name 'cc_library' is not defined"), "{e}");
@@ -466,7 +563,9 @@ r = rule(implementation = _i, cfg = opt_t)
     let p = ct.typed_actions[0].outputs[0].exec_path.to_string();
     // compilation_mode is explicit in the directory name, so there is no ST-hash.
     assert!(p.starts_with("bazel-out/k8-opt/bin/"), "{p}");
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     assert_eq!(content.render(), b"opt");
 }
 
@@ -491,8 +590,12 @@ r = rule(implementation = _i, cfg = copt_t)
     let ct = ws.analyze("//:r").unwrap();
     let p = ct.typed_actions[0].outputs[0].exec_path.to_string();
     // sha256(varint-len-prefixed "//command_line_option:copt=[-O2, -g]")[..12]
-    let want = zel_analysis::transition_directory_name_fragment(["//command_line_option:copt=[-O2, -g]"]);
-    assert!(p.starts_with(&format!("bazel-out/k8-fastbuild-{want}/bin/")), "{p} vs {want}");
+    let want =
+        zel_analysis::transition_directory_name_fragment(["//command_line_option:copt=[-O2, -g]"]);
+    assert!(
+        p.starts_with(&format!("bazel-out/k8-fastbuild-{want}/bin/")),
+        "{p} vs {want}"
+    );
 }
 
 #[test]
@@ -549,10 +652,7 @@ load("//tc:defs.bzl", "use_tc")
 use_tc(name = "u")
 "#,
         ),
-        (
-            "tc/use.bzl",
-            "",
-        ),
+        ("tc/use.bzl", ""),
     ]);
     ws.write(
         "tc/defs.bzl",
@@ -571,13 +671,22 @@ use_tc = rule(implementation = _use, toolchains = ["//tc:t"])
     let mut acfg = AnalysisConfig::new();
     acfg.registered_toolchains = vec![Label::parse_canonical("//tc:tc").unwrap()];
     let (r, cfg) = ws.resolver_with(BuildConfigurationKey::target("k8", "fastbuild"), acfg);
-    let ct = r.analyze(&Label::parse_canonical("//:u").unwrap(), &cfg).unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ct = r
+        .analyze(&Label::parse_canonical("//:u").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     assert_eq!(content.render(), b"mytool");
 
     // No registered toolchains → Bazel's error text.
-    let (r, cfg) = ws.resolver_with(BuildConfigurationKey::target("k8", "fastbuild"), AnalysisConfig::new());
-    let e = r.analyze(&Label::parse_canonical("//:u").unwrap(), &cfg).unwrap_err();
+    let (r, cfg) = ws.resolver_with(
+        BuildConfigurationKey::target("k8", "fastbuild"),
+        AnalysisConfig::new(),
+    );
+    let e = r
+        .analyze(&Label::parse_canonical("//:u").unwrap(), &cfg)
+        .unwrap_err();
     assert!(e.contains("While resolving toolchains for target //:u: No matching toolchains found for target platform @@platforms//host:host:\n  //tc:t\nTo debug, rerun with --toolchain_resolution_debug='//tc:t'"), "{e}");
 }
 
@@ -615,7 +724,9 @@ filegroup(name = "fg", srcs = select({":is_red": ["r.txt"], ":is_blue": ["b.txt"
     let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
     cfg.flag_values.insert("//:color".into(), "blue".into());
     let (r, _) = ws.resolver_with(cfg.clone(), AnalysisConfig::new());
-    let ct = r.analyze(&Label::parse_canonical("//:fg").unwrap(), &cfg).unwrap();
+    let ct = r
+        .analyze(&Label::parse_canonical("//:fg").unwrap(), &cfg)
+        .unwrap();
     assert_eq!(ct.default_info.files[0].exec_path.to_string(), "b.txt");
 }
 
@@ -624,15 +735,33 @@ fn starlark_executable_symlink_action() {
     // `ctx.actions.symlink(is_executable = True)` is a `SymlinkAction.toExecutable`: mnemonic
     // `ExecutableSymlink`, progress message with the root-relative output path.
     let ws = Ws::new(&[
-        ("BUILD", "sh_binary(name = \"s\", srcs = [\"s.sh\"], data = [\"d.txt\"])\n"),
+        (
+            "BUILD",
+            "sh_binary(name = \"s\", srcs = [\"s.sh\"], data = [\"d.txt\"])\n",
+        ),
         ("s.sh", "#!/bin/sh\n"),
         ("d.txt", ""),
     ]);
     let ct = ws.analyze("//:s").unwrap();
     assert_eq!(ct.typed_actions[0].mnemonic, "ExecutableSymlink");
-    assert_eq!(ct.typed_actions[0].progress_message.as_deref(), Some("Creating symlink s"));
-    assert_eq!(ct.default_info.executable.as_ref().unwrap().exec_path.to_string(), "bazel-out/k8-fastbuild/bin/s");
-    assert!(ct.default_info.default_runfiles.iter().any(|f| f.exec_path.to_string() == "d.txt"));
+    assert_eq!(
+        ct.typed_actions[0].progress_message.as_deref(),
+        Some("Creating symlink s")
+    );
+    assert_eq!(
+        ct.default_info
+            .executable
+            .as_ref()
+            .unwrap()
+            .exec_path
+            .to_string(),
+        "bazel-out/k8-fastbuild/bin/s"
+    );
+    assert!(ct
+        .default_info
+        .default_runfiles
+        .iter()
+        .any(|f| f.exec_path.to_string() == "d.txt"));
 }
 
 #[test]
@@ -645,7 +774,10 @@ fn provider_fields_schema_errors() {
         ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"r\")\n"),
     ]);
     let e = ws.analyze("//:r").unwrap_err();
-    assert!(e.contains("got unexpected field 'b' in call to instantiate provider P"), "{e}");
+    assert!(
+        e.contains("got unexpected field 'b' in call to instantiate provider P"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -674,7 +806,10 @@ fn alias_and_filegroup_forward_providers() {
 
 #[test]
 fn dependency_cycle_is_detected() {
-    let ws = Ws::new(&[("BUILD", "filegroup(name = \"a\", srcs = [\":b\"])\nfilegroup(name = \"b\", srcs = [\":a\"])\n")]);
+    let ws = Ws::new(&[(
+        "BUILD",
+        "filegroup(name = \"a\", srcs = [\":b\"])\nfilegroup(name = \"b\", srcs = [\":a\"])\n",
+    )]);
     let e = ws.analyze("//:a").unwrap_err();
     assert!(e.contains("cycle in dependency graph"), "{e}");
 }
@@ -721,19 +856,33 @@ r = rule(
 )
 "#,
         ),
-        ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"r\", extra = \"r_extra.txt\")\n"),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"r\")\nr(name = \"r\", extra = \"r_extra.txt\")\n",
+        ),
     ]);
     let ct = ws.analyze("//:r").unwrap();
-    let mut files: Vec<String> = ct.default_info.files.iter().map(|f| f.exec_path.to_string()).collect();
+    let mut files: Vec<String> = ct
+        .default_info
+        .files
+        .iter()
+        .map(|f| f.exec_path.to_string())
+        .collect();
     files.sort();
     assert_eq!(
         files,
-        vec!["bazel-out/k8-fastbuild/bin/r.log", "bazel-out/k8-fastbuild/bin/r_extra.txt"]
+        vec![
+            "bazel-out/k8-fastbuild/bin/r.log",
+            "bazel-out/k8-fastbuild/bin/r_extra.txt"
+        ]
     );
     assert_eq!(ct.typed_actions.len(), 2);
     // The output file targets are addressable and resolve to the same artifacts.
     let o = ws.analyze("//:r.log").unwrap();
-    assert_eq!(o.default_info.files[0].exec_path.to_string(), "bazel-out/k8-fastbuild/bin/r.log");
+    assert_eq!(
+        o.default_info.files[0].exec_path.to_string(),
+        "bazel-out/k8-fastbuild/bin/r.log"
+    );
 }
 
 #[test]
@@ -769,8 +918,13 @@ top(name = "t", dep = ":a")
         ("c.txt", ""),
     ]);
     let ct = ws.analyze("//:t").unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
-    assert_eq!(String::from_utf8(content.render()).unwrap(), "c.txt\nb.txt\na.txt");
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
+    assert_eq!(
+        String::from_utf8(content.render()).unwrap(),
+        "c.txt\nb.txt\na.txt"
+    );
 }
 
 #[test]
@@ -801,7 +955,14 @@ r = rule(implementation = _i, attrs = {"srcs": attr.label_list(allow_files = Tru
     ]);
     let ct = ws.analyze("//:r").unwrap();
     let (argv, params) = ct.typed_actions[0].command_line();
-    assert_eq!(argv, vec!["/usr/bin/tool", "@bazel-out/k8-fastbuild/bin/o-0.params", "tail"]);
+    assert_eq!(
+        argv,
+        vec![
+            "/usr/bin/tool",
+            "@bazel-out/k8-fastbuild/bin/o-0.params",
+            "tail"
+        ]
+    );
     assert_eq!(
         String::from_utf8(params[0].1.clone()).unwrap(),
         "-Id\n-Ie\n--out\nbazel-out/k8-fastbuild/bin/o\n"
@@ -810,7 +971,10 @@ r = rule(implementation = _i, attrs = {"srcs": attr.label_list(allow_files = Tru
     assert_eq!(ct.actions.len(), 2);
     assert_eq!(ct.actions[0].mnemonic(), "FileWrite");
     assert_eq!(ct.actions[1].mnemonic(), "Tool");
-    assert!(ct.actions[1].inputs().iter().any(|i| i.exec_path.to_string().ends_with("o-0.params")));
+    assert!(ct.actions[1]
+        .inputs()
+        .iter()
+        .any(|i| i.exec_path.to_string().ends_with("o-0.params")));
 }
 
 #[test]
@@ -838,7 +1002,9 @@ r = rule(implementation = _impl, attrs = {
         ),
     ]);
     let ct = ws.analyze("//:r").unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     assert_eq!(content.render(), b"1,2,3,x=f");
     // Wrong element type → Bazel's error text.
     let ws = Ws::new(&[
@@ -846,7 +1012,10 @@ r = rule(implementation = _impl, attrs = {
         ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"r\", nums = [\"a\"])\n"),
     ]);
     let e = ws.analyze("//:r").unwrap_err();
-    assert!(e.contains("expected value of type 'int' for element 0 of attribute 'nums' in 'r' rule"), "{e}");
+    assert!(
+        e.contains("expected value of type 'int' for element 0 of attribute 'nums' in 'r' rule"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -896,7 +1065,10 @@ fn ctx_attr_name_is_the_target_name() {
         ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"nm\")\n"),
     ]);
     let ct = ws.analyze("//:nm").unwrap();
-    assert_eq!(ct.default_info.files[0].exec_path.to_string(), "bazel-out/k8-fastbuild/bin/nm.out");
+    assert_eq!(
+        ct.default_info.files[0].exec_path.to_string(),
+        "bazel-out/k8-fastbuild/bin/nm.out"
+    );
 }
 
 const ASPECT_DEFS: &str = r#"
@@ -934,7 +1106,9 @@ fn aspect_propagates_along_attr_aspects_and_is_visible_to_the_rule() {
         ),
     ]);
     let ct = ws.analyze("//:t").unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     // count(a)=1, count(b)=2, count(c)=1+1+2=4.
     assert_eq!(content.render(), b"4");
 }
@@ -972,7 +1146,9 @@ top = rule(implementation = _top, attrs = {"deps": attr.label_list(aspects = [as
         ),
     ]);
     let ct = ws.analyze("//:t").unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     assert_eq!(content.render(), b"True,False");
 }
 
@@ -992,33 +1168,62 @@ asp = aspect(
 )
 "#,
         ),
-        ("BUILD", "filegroup(name = \"fg\", srcs = [\"a.txt\", \"b.txt\"])\n"),
+        (
+            "BUILD",
+            "filegroup(name = \"fg\", srcs = [\"a.txt\", \"b.txt\"])\n",
+        ),
         ("a.txt", ""),
         ("b.txt", ""),
     ]);
     let r = ws.resolver();
-    let asp = r.loader().load_bzl_export(&Label::parse_canonical("//:defs.bzl").unwrap(), "asp").unwrap();
+    let asp = r
+        .loader()
+        .load_bzl_export(&Label::parse_canonical("//:defs.bzl").unwrap(), "asp")
+        .unwrap();
     let cfg = BuildConfigurationKey::target("k8", "fastbuild");
     let l = Label::parse_canonical("//:fg").unwrap();
-    let ct = r.analyze_with_aspects(&l, &cfg, std::slice::from_ref(&asp), &Default::default()).unwrap();
+    let ct = r
+        .analyze_with_aspects(&l, &cfg, std::slice::from_ref(&asp), &Default::default())
+        .unwrap();
     let report = &ct.output_groups.groups["report"];
     assert_eq!(report.len(), 1);
-    assert_eq!(report[0].exec_path.to_string(), "bazel-out/k8-fastbuild/bin/fg.txt");
+    assert_eq!(
+        report[0].exec_path.to_string(),
+        "bazel-out/k8-fastbuild/bin/fg.txt"
+    );
     let a = ct.typed_actions.last().unwrap();
-    let ActionKind::FileWrite { content, .. } = &a.kind else { panic!() };
+    let ActionKind::FileWrite { content, .. } = &a.kind else {
+        panic!()
+    };
     assert_eq!(content.render(), b"filegroup:a.txt,b.txt://:defs.bzl%asp");
     // Parameters from --aspects_parameters.
     let mut params = std::collections::BTreeMap::new();
     params.insert("suffix".to_string(), "log".to_string());
     let r2 = ws.resolver();
-    let asp2 = r2.loader().load_bzl_export(&Label::parse_canonical("//:defs.bzl").unwrap(), "asp").unwrap();
-    let ct = r2.analyze_with_aspects(&l, &cfg, std::slice::from_ref(&asp2), &params).unwrap();
-    assert!(ct.output_groups.groups["report"][0].exec_path.to_string().ends_with("fg.log"));
+    let asp2 = r2
+        .loader()
+        .load_bzl_export(&Label::parse_canonical("//:defs.bzl").unwrap(), "asp")
+        .unwrap();
+    let ct = r2
+        .analyze_with_aspects(&l, &cfg, std::slice::from_ref(&asp2), &params)
+        .unwrap();
+    assert!(ct.output_groups.groups["report"][0]
+        .exec_path
+        .to_string()
+        .ends_with("fg.log"));
     params.insert("suffix".to_string(), "bad".to_string());
     let r3 = ws.resolver();
-    let asp3 = r3.loader().load_bzl_export(&Label::parse_canonical("//:defs.bzl").unwrap(), "asp").unwrap();
-    let e = r3.analyze_with_aspects(&l, &cfg, std::slice::from_ref(&asp3), &params).unwrap_err();
-    assert!(e.contains("has to be one of 'txt', 'log' instead of 'bad'"), "{e}");
+    let asp3 = r3
+        .loader()
+        .load_bzl_export(&Label::parse_canonical("//:defs.bzl").unwrap(), "asp")
+        .unwrap();
+    let e = r3
+        .analyze_with_aspects(&l, &cfg, std::slice::from_ref(&asp3), &params)
+        .unwrap_err();
+    assert!(
+        e.contains("has to be one of 'txt', 'log' instead of 'bad'"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -1095,10 +1300,17 @@ uses = rule(
         ),
     ]);
     let mut acfg = AnalysisConfig::new();
-    acfg.registered_toolchains = vec![Label::parse_canonical("//:tca").unwrap(), Label::parse_canonical("//:tcb").unwrap()];
+    acfg.registered_toolchains = vec![
+        Label::parse_canonical("//:tca").unwrap(),
+        Label::parse_canonical("//:tcb").unwrap(),
+    ];
     let (r, cfg) = ws.resolver_with(BuildConfigurationKey::target("k8", "fastbuild"), acfg);
-    let ct = r.analyze(&Label::parse_canonical("//:u").unwrap(), &cfg).unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ct = r
+        .analyze(&Label::parse_canonical("//:u").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     assert_eq!(content.render(), b"AB");
 }
 
@@ -1133,14 +1345,25 @@ top = rule(implementation = _top, attrs = {"dep": attr.label(cfg = split_t)})
         ("BUILD", "load(\":defs.bzl\", \"leaf\", \"top\")\nleaf(name = \"l\")\ntop(name = \"t\", dep = \":l\")\n"),
     ]);
     let ct = ws.analyze("//:t").unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     let text = String::from_utf8(content.render()).unwrap();
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines.len(), 3, "{text}");
-    let dbg_hash = zel_analysis::transition_directory_name_fragment(["//command_line_option:copt=[-g]"]);
-    let opt_hash = zel_analysis::transition_directory_name_fragment(["//command_line_option:copt=[-O2]"]);
-    assert_eq!(lines[0], format!("dbg=bazel-out/k8-fastbuild-{dbg_hash}/bin/l.txt"));
-    assert_eq!(lines[1], format!("opt=bazel-out/k8-fastbuild-{opt_hash}/bin/l.txt"), "{text}");
+    let dbg_hash =
+        zel_analysis::transition_directory_name_fragment(["//command_line_option:copt=[-g]"]);
+    let opt_hash =
+        zel_analysis::transition_directory_name_fragment(["//command_line_option:copt=[-O2]"]);
+    assert_eq!(
+        lines[0],
+        format!("dbg=bazel-out/k8-fastbuild-{dbg_hash}/bin/l.txt")
+    );
+    assert_eq!(
+        lines[1],
+        format!("opt=bazel-out/k8-fastbuild-{opt_hash}/bin/l.txt"),
+        "{text}"
+    );
     assert_eq!(lines[2], "flat=2");
 }
 
@@ -1165,7 +1388,10 @@ t = rule(implementation = _impl, executable = True)
     let ct = ws.analyze("//:t").unwrap();
     let env = ct.run_environment.as_ref().expect("run environment");
     assert_eq!(env.environment.get("A").map(String::as_str), Some("1"));
-    assert_eq!(env.inherited_environment, vec!["HOME".to_string(), "PATH".to_string()]);
+    assert_eq!(
+        env.inherited_environment,
+        vec!["HOME".to_string(), "PATH".to_string()]
+    );
     let ws = Ws::new(&[
         (
             "defs.bzl",
@@ -1209,11 +1435,16 @@ bin = rule(implementation = _bin, fragments = ["cpp", "platform"], attrs = {"src
         let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
         cfg.options.insert("copt".into(), "-O1,-Wall".into());
         if coverage {
-            cfg.options.insert("collect_code_coverage".into(), "true".into());
+            cfg.options
+                .insert("collect_code_coverage".into(), "true".into());
         }
         let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
-        let ct = r.analyze(&Label::parse_canonical("//:b").unwrap(), &cfg).unwrap();
-        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+        let ct = r
+            .analyze(&Label::parse_canonical("//:b").unwrap(), &cfg)
+            .unwrap();
+        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+            panic!()
+        };
         String::from_utf8(content.render()).unwrap()
     };
     assert_eq!(run(false), "-O1,-Wall|@@platforms//host:host||False");
@@ -1266,25 +1497,43 @@ use = rule(implementation = _use, attrs = {"tool": attr.label(cfg = config.exec(
     ]);
     let ct = ws.analyze("//:t").unwrap();
     assert!(ct.is_test);
-    let exe = ct.default_info.executable.clone().expect("analysis test executable");
+    let exe = ct
+        .default_info
+        .executable
+        .clone()
+        .expect("analysis test executable");
     assert_eq!(exe.exec_path.to_string(), "bazel-out/k8-fastbuild/bin/t");
-    let ActionKind::FileWrite { content, is_executable } = &ct.typed_actions[0].kind else { panic!() };
+    let ActionKind::FileWrite {
+        content,
+        is_executable,
+    } = &ct.typed_actions[0].kind
+    else {
+        panic!()
+    };
     assert!(is_executable);
     assert_eq!(content.render(), b"#!/bin/sh\nexit 0\n");
     // Late-bound default from the configuration option.
     let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
-    cfg.options.insert("crosstool_top".into(), "//tc:toolchain".into());
+    cfg.options
+        .insert("crosstool_top".into(), "//tc:toolchain".into());
     let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
-    let e = r.analyze(&Label::parse_canonical("//:lb").unwrap(), &cfg).unwrap_err();
+    let e = r
+        .analyze(&Label::parse_canonical("//:lb").unwrap(), &cfg)
+        .unwrap_err();
     assert!(e.contains("no such package 'tc'"), "{e}");
     let ct = ws.analyze("//:lb").unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     assert_eq!(content.render(), b"none");
     // cfg = config.exec(exec_group = ...): the tool is built in the exec configuration.
     let ct = ws.analyze("//:u").unwrap();
     assert_eq!(
         ct.default_info.files[0].exec_path.to_string(),
-        format!("bazel-out/{}-opt-exec/bin/tool.txt", zel_analysis::build_options::auto_host_cpu())
+        format!(
+            "bazel-out/{}-opt-exec/bin/tool.txt",
+            zel_analysis::build_options::auto_host_cpu()
+        )
     );
 }
 
@@ -1315,9 +1564,14 @@ undeclared = rule(implementation = _bad)
         ("tool.sh", ""),
     ]);
     let ct = ws.analyze("//:u").unwrap();
-    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
     assert_eq!(content.render(), b"hello:tool.sh");
-    assert_eq!(ct.default_info.files[0].exec_path.to_string(), "bazel-out/k8-fastbuild/bin/u.out");
+    assert_eq!(
+        ct.default_info.files[0].exec_path.to_string(),
+        "bazel-out/k8-fastbuild/bin/u.out"
+    );
     let e = ws.analyze("//:bad").unwrap_err();
     assert!(e.contains("does not declare it in 'subrules'"), "{e}");
 }
@@ -1393,8 +1647,12 @@ r(name = "wants_blue", cv = ":blue")
         let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
         cfg.platforms = vec!["//:p_red".to_string()];
         let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
-        let ct = r.analyze(&Label::parse_canonical(target).unwrap(), &cfg).unwrap();
-        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else { panic!() };
+        let ct = r
+            .analyze(&Label::parse_canonical(target).unwrap(), &cfg)
+            .unwrap();
+        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+            panic!()
+        };
         String::from_utf8(content.render()).unwrap()
     };
     assert_eq!(run("//:wants_red"), "True");
@@ -1434,13 +1692,17 @@ use(name = "u")
     let ws = Ws::new(files);
     let analyze = |acfg: AnalysisConfig| {
         let (r, cfg) = ws.resolver_with(BuildConfigurationKey::target("k8", "fastbuild"), acfg);
-        r.analyze(&Label::parse_canonical("//:u").unwrap(), &cfg).map(|ct| ct.default_info.files[0].exec_path.to_string())
+        r.analyze(&Label::parse_canonical("//:u").unwrap(), &cfg)
+            .map(|ct| ct.default_info.files[0].exec_path.to_string())
     };
     // Toolchain registered by pattern, but no execution platform has the gizmo constraint.
     let mut acfg = AnalysisConfig::new();
     acfg.toolchain_patterns = vec!["//:all".to_string()];
     let e = analyze(acfg).unwrap_err();
-    assert!(e.contains("No matching toolchains found for target platform"), "{e}");
+    assert!(
+        e.contains("No matching toolchains found for target platform"),
+        "{e}"
+    );
     // With the execution platform registered (pattern), resolution succeeds.
     let mut acfg = AnalysisConfig::new();
     acfg.toolchain_patterns = vec!["//:all".to_string()];
@@ -1451,4 +1713,591 @@ use(name = "u")
     acfg.toolchain_patterns = vec!["//:impl".to_string()];
     let e = analyze(acfg).unwrap_err();
     assert!(e.contains("invalid registered toolchain '//:impl'"), "{e}");
+}
+
+#[test]
+fn alias_chain_visibility_testonly_and_package_group() {
+    let ws = Ws::new(&[
+        (
+            "a/BUILD",
+            r#"
+filegroup(name = "priv", srcs = [], testonly = True)
+filegroup(name = "pub", srcs = [], visibility = ["//visibility:public"])
+alias(name = "mid", actual = ":priv", visibility = ["//visibility:public"])
+package_group(name = "pg", packages = ["//..."])
+"#,
+        ),
+        (
+            "b/BUILD",
+            r#"
+alias(name = "top_alias", actual = "//a:mid", visibility = ["//visibility:public"])
+filegroup(name = "bad_testonly", srcs = [":top_alias"])
+filegroup(name = "bad_pg", srcs = ["//a:pg"])
+"#,
+        ),
+    ]);
+    let e = ws.analyze("//b:bad_testonly").unwrap_err();
+    assert!(
+        e.contains("testonly")
+            && e.contains("alias '//b:top_alias' referring to target '//a:priv' through '//a:mid'"),
+        "{e}"
+    );
+    let e_pg = ws.analyze("//b:bad_pg").unwrap_err();
+    assert!(e_pg.contains("misplaced package_group"), "{e_pg}");
+}
+
+#[test]
+fn validation_artifacts_featureset_and_ctx_methods() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _orphan(ctx):
+    ctx.actions.declare_file("orphan.txt")
+    ctx.actions.do_nothing(mnemonic = "Noop")
+    return []
+orphan = rule(implementation = _orphan)
+
+def _dir_conflict(ctx):
+    f = ctx.actions.declare_file("same")
+    d = ctx.actions.declare_directory("same")
+    return [DefaultInfo(files = depset([f, d]))]
+dir_conflict = rule(implementation = _dir_conflict)
+
+def _feat_and_ctx(ctx):
+    out = ctx.actions.declare_file("out.txt")
+    args = ctx.actions.args()
+    ok_ph = ctx.check_placeholders("hello %{name}", ["name"])
+    bad_ph = ctx.check_placeholders("hello %{bad}", ["name"])
+    lbl = ctx.package_relative_label(":out.txt")
+    _ = ctx.info_file
+    _ = ctx.version_file
+    ctx.actions.write(
+        out,
+        ",".join(ctx.features)
+            + "|"
+            + ",".join(ctx.disabled_features)
+            + "|"
+            + str(len(ctx.configuration.short_id))
+            + "|"
+            + str(ok_ph)
+            + ","
+            + str(bad_ph)
+            + "|"
+            + str(lbl)
+            + "|"
+            + str(ctx.toolchains.toolchain_types()),
+    )
+    return [DefaultInfo(files = depset([out]))]
+feat_rule = rule(implementation = _feat_and_ctx)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+package(features = ["pkg_on", "layering_check", "pkg_off"])
+load(":defs.bzl", "orphan", "dir_conflict", "feat_rule")
+orphan(name = "o")
+dir_conflict(name = "dc")
+feat_rule(name = "f", features = ["no_layering_check", "-pkg_off", "rule_on"])
+"#,
+        ),
+    ]);
+    let e_orphan = ws.analyze("//:o").unwrap_err();
+    assert!(
+        e_orphan.contains("The following files have no generating action:\norphan.txt"),
+        "{e_orphan}"
+    );
+    let e_dc = ws.analyze("//:dc").unwrap_err();
+    assert!(
+        e_dc.contains("'same' has already been declared as a regular file, not directory."),
+        "{e_dc}"
+    );
+
+    let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cfg.options
+        .insert("features".into(), "-pkg_on,cli_on".into());
+    let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
+    let ct = r
+        .analyze(&Label::parse_canonical("//:f").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    assert_eq!(
+        text,
+        "cli_on,rule_on|layering_check,pkg_off,pkg_on|7|True,False|@@//:out.txt|[]"
+    );
+}
+
+#[test]
+fn ctx_guards_fragments_toolchains_and_args_validation() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _bad_rule_ctx(ctx):
+    return [ctx.rule]
+bad_rule = rule(implementation = _bad_rule_ctx)
+
+def _bad_frag(ctx):
+    return [ctx.fragments.cpp]
+bad_frag = rule(implementation = _bad_frag)
+
+def _bad_tc(ctx):
+    return [ctx.toolchains["//:missing"]]
+bad_tc = rule(implementation = _bad_tc)
+
+def _bad_args(ctx):
+    a = ctx.actions.args()
+    a.use_param_file("%%s")
+    return []
+bad_args = rule(implementation = _bad_args)
+
+def _bad_closure(ctx):
+    a = ctx.actions.args()
+    a.add_all(["x"], map_each = lambda s: s)
+    return []
+bad_closure = rule(implementation = _bad_closure)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "bad_rule", "bad_frag", "bad_tc", "bad_args", "bad_closure")
+bad_rule(name = "r")
+bad_frag(name = "f")
+bad_tc(name = "t")
+bad_args(name = "a")
+bad_closure(name = "c")
+"#,
+        ),
+    ]);
+    assert!(ws
+        .analyze("//:r")
+        .unwrap_err()
+        .contains("'rule' is only available in aspect implementations"));
+    assert!(ws
+        .analyze("//:f")
+        .unwrap_err()
+        .contains("has to declare 'cpp' as a required fragment"));
+    assert!(ws
+        .analyze("//:t")
+        .unwrap_err()
+        .contains("Toolchains are not valid in this context"));
+    assert!(ws
+        .analyze("//:a")
+        .unwrap_err()
+        .contains("Expected string with a single \"%s\""));
+    assert!(ws
+        .analyze("//:c")
+        .unwrap_err()
+        .contains("must be declared by a top-level def statement"));
+}
+
+#[test]
+fn aspect_requires_propagation_and_action_conflict() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+BaseInfo = provider(fields = ["n"])
+OuterInfo = provider(fields = ["vals"])
+
+def _base_impl(target, ctx):
+    n = 1
+    for d in ctx.rule.attr.deps:
+        if BaseInfo in d:
+            n += d[BaseInfo].n
+    return [BaseInfo(n = n)]
+
+# Note: base_asp has empty attr_aspects, yet must propagate along outer_asp's attr_aspects.
+base_asp = aspect(implementation = _base_impl)
+
+def _outer_impl(target, ctx):
+    vals = [target[BaseInfo].n]
+    for d in ctx.rule.attr.deps:
+        vals.append(d[BaseInfo].n)
+        vals.extend(d[OuterInfo].vals)
+    return [OuterInfo(vals = vals)]
+
+outer_asp = aspect(implementation = _outer_impl, attr_aspects = ["deps"], requires = [base_asp])
+
+def _lib(ctx):
+    return [DefaultInfo()]
+lib = rule(implementation = _lib, attrs = {"deps": attr.label_list()})
+
+def _top(ctx):
+    out = ctx.actions.declare_file("out.txt")
+    vals = []
+    for d in ctx.attr.deps:
+        vals.extend(d[OuterInfo].vals)
+    ctx.actions.write(out, ",".join([str(v) for v in vals]))
+    return [DefaultInfo(files = depset([out]))]
+top = rule(implementation = _top, attrs = {"deps": attr.label_list(aspects = [outer_asp])})
+
+def _conflict_rule(ctx):
+    f = ctx.actions.declare_file("shared.txt")
+    ctx.actions.write(f, "from_rule")
+    return [DefaultInfo(files = depset([f]))]
+c_rule = rule(implementation = _conflict_rule)
+
+def _conflict_asp(target, ctx):
+    f = ctx.actions.declare_file("shared.txt")
+    ctx.actions.write(f, "from_asp")
+    return []
+c_asp = aspect(implementation = _conflict_asp)
+c_top = rule(implementation = _top, attrs = {"deps": attr.label_list(aspects = [c_asp])})
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "lib", "top", "c_rule", "c_top")
+lib(name = "a")
+lib(name = "b", deps = [":a"])
+top(name = "t", deps = [":b"])
+c_rule(name = "cr")
+c_top(name = "ct", deps = [":cr"])
+"#,
+        ),
+    ]);
+    let ct = ws.analyze("//:t").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!()
+    };
+    assert_eq!(String::from_utf8(content.render()).unwrap(), "1,1,1");
+
+    let e_conflict = ws.analyze("//:ct").unwrap_err();
+    assert!(e_conflict.contains("conflicting actions"), "{e_conflict}");
+}
+
+#[test]
+fn output_file_executable_and_platform_exec_properties() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _use_exe(ctx):
+    return [DefaultInfo(files = depset([ctx.executable.tool]))]
+use_exe = rule(implementation = _use_exe, attrs = {"tool": attr.label(executable = True, cfg = "exec")})
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "use_exe")
+genrule(name = "gen", outs = ["tool.sh"], cmd = "echo hi > $@", executable = True)
+use_exe(name = "u", tool = ":tool.sh")
+platform(name = "p1", exec_properties = {"a": "1", "b": "2"})
+platform(name = "p2", parents = [":p1"], exec_properties = {"a": "", "c": "3"})
+platform(name = "bad_multi", parents = [":p1", ":p2"])
+"#,
+        ),
+    ]);
+    let ct = ws.analyze("//:u").unwrap();
+    assert!(ct.default_info.files[0]
+        .exec_path
+        .path_string()
+        .ends_with("tool.sh"));
+
+    let p2 = ws.analyze("//:p2").unwrap();
+    let Value::ProviderInstance { fields, .. } = &p2.providers["PlatformInfo"] else {
+        panic!()
+    };
+    let Value::Dict(ep) = &fields["exec_properties"] else {
+        panic!()
+    };
+    let items: BTreeMap<String, String> = ep
+        .lock()
+        .unwrap()
+        .items()
+        .into_iter()
+        .map(|(k, v)| {
+            (
+                k.as_str().unwrap().to_string(),
+                v.as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert!(!items.contains_key("a"));
+    assert_eq!(items.get("b").map(String::as_str), Some("2"));
+    assert_eq!(items.get("c").map(String::as_str), Some("3"));
+
+    assert!(ws
+        .analyze("//:bad_multi")
+        .unwrap_err()
+        .contains("at most one parent"));
+}
+
+#[test]
+fn alias_of_test_is_not_test_and_records_alias_chain() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r##"
+def _t_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(exe, "#!/bin/sh\nexit 0\n", is_executable = True)
+    return [DefaultInfo(executable = exe)]
+my_test = rule(implementation = _t_impl, test = True)
+"##,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "my_test")
+my_test(name = "t", testonly = True)
+alias(name = "a1", actual = ":t")
+alias(name = "a2", actual = ":a1")
+"#,
+        ),
+    ]);
+    let (r, cfg) = ws.resolver_with(
+        BuildConfigurationKey::target("k8", "fastbuild"),
+        AnalysisConfig::new(),
+    );
+    let real_t = r
+        .analyze(&Label::parse_canonical("//:t").unwrap(), &cfg)
+        .unwrap();
+    assert!(real_t.is_test);
+    assert!(real_t.testonly);
+    assert!(!real_t.actions.is_empty());
+
+    let a2 = r
+        .analyze(&Label::parse_canonical("//:a2").unwrap(), &cfg)
+        .unwrap();
+    assert!(!a2.is_test, "alias of a test must not be marked is_test");
+    assert!(a2.testonly, "alias must inherit testonly from actual");
+    assert!(a2.actions.is_empty());
+    assert!(a2.typed_actions.is_empty());
+    let Some(Value::ProviderInstance { fields, .. }) = a2.providers.get("AliasProvider") else {
+        panic!("expected AliasProvider on alias target");
+    };
+    assert_eq!(
+        fields.get("actual_label"),
+        Some(&Value::Label(Label::parse_canonical("//:t").unwrap()))
+    );
+    assert_eq!(
+        fields.get("original_label"),
+        Some(&Value::Label(Label::parse_canonical("//:a2").unwrap()))
+    );
+    let Some(Value::List(chain)) = fields.get("alias_chain") else {
+        panic!("expected alias_chain list");
+    };
+    let chain_labels: Vec<String> = chain
+        .lock()
+        .unwrap()
+        .elements
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    assert_eq!(chain_labels, vec!["@@//:a2", "@@//:a1"]);
+    // Actual's actions remain reachable on the resolved target graph.
+    assert!(r
+        .analyzed_targets()
+        .iter()
+        .any(|ct| ct.label == real_t.label && !ct.actions.is_empty()));
+}
+
+#[test]
+fn genrule_toolchains_make_vars_and_tool_runfiles_inputs() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r##"
+def _tv_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".dat")
+    ctx.actions.write(out, "data")
+    return [
+        DefaultInfo(files = depset([out])),
+        platform_common.TemplateVariableInfo(vars = {"FROM_ATTR": "attr_val"}),
+    ]
+tv_rule = rule(implementation = _tv_impl)
+
+def _tc_impl(ctx):
+    tool = ctx.actions.declare_file("tc_tool")
+    ctx.actions.write(tool, "tc", is_executable = True)
+    return [
+        DefaultInfo(files = depset([tool])),
+        platform_common.ToolchainInfo(bin = tool),
+        platform_common.TemplateVariableInfo(vars = {"FROM_TC": "tc_val"}),
+    ]
+my_tc = rule(implementation = _tc_impl)
+
+def _bin_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name)
+    ctx.actions.write(exe, "#!/bin/sh\n", is_executable = True)
+    rf_file = ctx.actions.declare_file(ctx.label.name + ".rf")
+    ctx.actions.write(rf_file, "rf")
+    rf = ctx.runfiles(files = [rf_file])
+    return [DefaultInfo(executable = exe, files = depset([exe]), runfiles = rf)]
+my_bin = rule(implementation = _bin_impl, executable = True)
+
+def _plain_impl(ctx):
+    return []
+plain = rule(implementation = _plain_impl)
+"##,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "tv_rule", "my_tc", "my_bin", "plain")
+toolchain_type(name = "tt")
+my_tc(name = "tc_impl")
+toolchain(name = "tc", toolchain_type = ":tt", toolchain = ":tc_impl")
+tv_rule(name = "tv")
+my_bin(name = "tool_bin")
+plain(name = "bad_tc")
+genrule(
+    name = "g",
+    outs = ["g.out"],
+    tools = [":tool_bin"],
+    toolchains = [":tv", ":tt"],
+    cmd = "echo $(FROM_ATTR) $(FROM_TC) $(MY_DEF) $(location :tv) $(location :tc_impl) $(location :tool_bin) > $@",
+)
+genrule(
+    name = "bad_g",
+    outs = ["bad.out"],
+    toolchains = [":bad_tc"],
+    cmd = "echo hi > $@",
+)
+"#,
+        ),
+    ]);
+    let mut acfg = AnalysisConfig::new();
+    acfg.registered_toolchains = vec![Label::parse_canonical("//:tc").unwrap()];
+    let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cfg.user_defines
+        .insert("MY_DEF".to_string(), "def_val".to_string());
+    let (r, cfg) = ws.resolver_with(cfg, acfg);
+    let ct = r
+        .analyze(&Label::parse_canonical("//:g").unwrap(), &cfg)
+        .unwrap();
+    let (_, argv, inputs, _) = spawn_of(&ct, 0);
+    assert!(
+        argv[2].contains("attr_val tc_val def_val bazel-out/k8-fastbuild/bin/tv.dat bazel-out/k8-fastbuild/bin/tc_tool bazel-out/"),
+        "{}",
+        argv[2]
+    );
+    // Tool executable + runfiles manifest (not individual runfiles file) + toolchain tools are inputs.
+    assert!(
+        inputs
+            .iter()
+            .any(|p| p.ends_with("tool_bin.runfiles_manifest")),
+        "{inputs:?}"
+    );
+    assert!(
+        !inputs.iter().any(|p| p.ends_with("tool_bin.rf")),
+        "{inputs:?}"
+    );
+    assert!(inputs.iter().any(|p| p.ends_with("tv.dat")), "{inputs:?}");
+    assert!(inputs.iter().any(|p| p.ends_with("tc_tool")), "{inputs:?}");
+
+    let err = r
+        .analyze(&Label::parse_canonical("//:bad_g").unwrap(), &cfg)
+        .unwrap_err();
+    assert!(
+        err.contains("TemplateVariableInfo") && err.contains("ToolchainTypeInfo"),
+        "{err}"
+    );
+}
+
+#[test]
+fn external_bzl_helper_rule_resolves_toolchains_in_defining_repo() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let main_root = PathFragment::create("/ws");
+    let bt_root = PathFragment::create("/bt");
+    let plat_root = PathFragment::create("/platforms");
+    for d in [
+        "/ws",
+        "/bt/tools/launcher",
+        "/platforms/host",
+        "/platforms/os",
+        "/platforms/cpu",
+    ] {
+        fs.create_directory_and_parents(&PathFragment::create(d))
+            .unwrap();
+    }
+    fs.write_file(
+        &PathFragment::create("/platforms/host/BUILD"),
+        b"package(default_visibility = ['//visibility:public'])\nplatform(name = 'host')\n",
+    )
+    .unwrap();
+    fs.write_file(&PathFragment::create("/platforms/os/BUILD"), b"")
+        .unwrap();
+    fs.write_file(&PathFragment::create("/platforms/cpu/BUILD"), b"")
+        .unwrap();
+    fs.write_file(&PathFragment::create("/bt/tools/BUILD"), b"")
+        .unwrap();
+    fs.write_file(
+        &PathFragment::create("/bt/tools/build_defs.bzl"),
+        br#"
+def _current_toolchain_base_impl(ctx, *, toolchain_type):
+    executable = ctx.actions.declare_file(ctx.label.name)
+    ctx.actions.symlink(output = executable, target_file = ctx.toolchains[toolchain_type].binary)
+    return DefaultInfo(executable = executable)
+
+def _make_current_toolchain_rule(toolchain_type):
+    return rule(
+        implementation = lambda ctx: _current_toolchain_base_impl(ctx, toolchain_type = toolchain_type),
+        toolchains = [toolchain_type],
+        executable = True,
+    )
+
+current_launcher_binary = _make_current_toolchain_rule("//tools/launcher:launcher_toolchain_type")
+
+def _tc_impl(ctx):
+    return [platform_common.ToolchainInfo(binary = ctx.file.binary)]
+
+tc_rule = rule(implementation = _tc_impl, attrs = {"binary": attr.label(allow_single_file = True, mandatory = True)})
+"#,
+    )
+    .unwrap();
+    fs.write_file(
+        &PathFragment::create("/bt/tools/launcher/BUILD"),
+        br#"
+load("//tools:build_defs.bzl", "current_launcher_binary", "tc_rule")
+toolchain_type(name = "launcher_toolchain_type")
+tc_rule(name = "empty_impl", binary = "empty.sh")
+toolchain(name = "3_no_launcher_toolchain", toolchain_type = ":launcher_toolchain_type", toolchain = ":empty_impl")
+current_launcher_binary(name = "launcher")
+"#,
+    )
+    .unwrap();
+    fs.write_file(
+        &PathFragment::create("/bt/tools/launcher/empty.sh"),
+        b"#!/bin/sh\n",
+    )
+    .unwrap();
+    fs.write_file(&PathFragment::create("/ws/BUILD"), b"")
+        .unwrap();
+
+    let mut repo_resolver = SimpleRepoResolver::new(main_root);
+    repo_resolver.external.insert("bazel_tools".into(), bt_root);
+    repo_resolver.external.insert("platforms".into(), plat_root);
+    let lc = LoaderConfig::new(fs, Arc::new(repo_resolver));
+    let mut acfg = AnalysisConfig::new();
+    acfg.registered_toolchains =
+        vec![
+            Label::parse_canonical("@@bazel_tools//tools/launcher:3_no_launcher_toolchain")
+                .unwrap(),
+        ];
+    let r = TargetResolver::new(PackageLoader::new(lc), acfg);
+    let ct = r
+        .analyze(
+            &Label::parse_canonical("@@bazel_tools//tools/launcher:launcher").unwrap(),
+            &BuildConfigurationKey::target("k8", "fastbuild"),
+        )
+        .unwrap();
+    assert_eq!(
+        ct.default_info
+            .executable
+            .as_ref()
+            .unwrap()
+            .root_relative_path
+            .path_string(),
+        "external/bazel_tools/tools/launcher/launcher"
+    );
 }

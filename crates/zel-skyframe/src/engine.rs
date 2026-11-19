@@ -57,7 +57,11 @@ pub struct ErrorInfo {
 
 impl ErrorInfo {
     fn from_error(key: &SkyKey, e: SkyFunctionError) -> Self {
-        Self { error: Some(e), root_causes: vec![key.clone()], cycles: vec![] }
+        Self {
+            error: Some(e),
+            root_causes: vec![key.clone()],
+            cycles: vec![],
+        }
     }
 
     pub fn message(&self) -> String {
@@ -72,6 +76,10 @@ impl ErrorInfo {
         self.error.as_ref().map(|e| e.transient).unwrap_or(false)
     }
 
+    pub fn is_catastrophic(&self) -> bool {
+        self.error.as_ref().map(|e| e.catastrophic).unwrap_or(false)
+    }
+
     /// Error of `parent` caused by the failure of its dependency `child`.
     fn bubbled(parent: &SkyKey, child: &ErrorInfo) -> Self {
         let cycles = child
@@ -83,7 +91,11 @@ impl ErrorInfo {
                 CycleInfo::new(path, c.cycle.clone())
             })
             .collect();
-        Self { error: child.error.clone(), root_causes: child.root_causes.clone(), cycles }
+        Self {
+            error: child.error.clone(),
+            root_causes: child.root_causes.clone(),
+            cycles,
+        }
     }
 }
 
@@ -124,7 +136,14 @@ struct Node {
 
 impl Node {
     fn new() -> Self {
-        Self { value: None, last_changed: 0, last_evaluated: 0, deps: vec![], rdeps: HashSet::new(), dirty: Dirty::NeedsRebuild }
+        Self {
+            value: None,
+            last_changed: 0,
+            last_evaluated: 0,
+            deps: vec![],
+            rdeps: HashSet::new(),
+            dirty: Dirty::NeedsRebuild,
+        }
     }
     fn is_done(&self) -> bool {
         self.value.is_some() && self.dirty == Dirty::Clean
@@ -141,14 +160,19 @@ impl Graph {
         let mut n = 0;
         let mut stack: Vec<(SkyKey, bool)> = keys.iter().map(|k| (k.clone(), rebuild)).collect();
         while let Some((k, rb)) = stack.pop() {
-            let Some(node) = self.nodes.get_mut(&k) else { continue };
-            let target = if rb { Dirty::NeedsRebuild } else { Dirty::CheckDeps };
-            // Already (at least as) dirty nodes have already propagated to their rdeps.
-            let already = match (node.dirty, target) {
-                (Dirty::NeedsRebuild, _) => true,
-                (Dirty::CheckDeps, Dirty::CheckDeps) => true,
-                _ => false,
+            let Some(node) = self.nodes.get_mut(&k) else {
+                continue;
             };
+            let target = if rb {
+                Dirty::NeedsRebuild
+            } else {
+                Dirty::CheckDeps
+            };
+            // Already (at least as) dirty nodes have already propagated to their rdeps.
+            let already = matches!(
+                (node.dirty, target),
+                (Dirty::NeedsRebuild, _) | (Dirty::CheckDeps, Dirty::CheckDeps)
+            );
             if already && node.value.is_some() {
                 continue;
             }
@@ -192,6 +216,7 @@ pub struct EvaluationResult {
     pub stats: EvaluationStats,
     pub version: Version,
     pub aborted: bool,
+    pub catastrophic: bool,
 }
 
 impl EvaluationResult {
@@ -217,7 +242,10 @@ impl Default for EvaluationOptions {
     fn default() -> Self {
         Self {
             keep_going: true,
-            threads: std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(32),
+            threads: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+                .min(32),
             cancel: None,
         }
     }
@@ -260,7 +288,11 @@ impl<'a> Environment<'a> {
         }
     }
 
-    fn request(&mut self, keys: &[SkyKey], or_error: bool) -> Vec<Result<Option<Arc<dyn SkyValue>>, SkyFunctionError>> {
+    fn request(
+        &mut self,
+        keys: &[SkyKey],
+        or_error: bool,
+    ) -> Vec<Result<Option<Arc<dyn SkyValue>>, SkyFunctionError>> {
         let mut group = Vec::new();
         for k in keys {
             if self.seen.insert(k.clone()) {
@@ -280,7 +312,10 @@ impl<'a> Environment<'a> {
                 Lookup::Value(v) => Ok(Some(v)),
                 Lookup::Error(info) => {
                     if or_error {
-                        Err(info.error.clone().unwrap_or_else(|| SkyFunctionError::persistent(info.message())))
+                        Err(info
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| SkyFunctionError::persistent(info.message())))
                     } else {
                         self.values_missing = true;
                         self.error_deps.push((k.clone(), info));
@@ -300,16 +335,24 @@ impl<'a> Environment<'a> {
 
     /// Requests one dependency; `None` if it is not (yet) available.
     pub fn get_value(&mut self, key: &SkyKey) -> Option<Arc<dyn SkyValue>> {
-        self.request(std::slice::from_ref(key), false).pop().and_then(|r| r.ok().flatten())
+        self.request(std::slice::from_ref(key), false)
+            .pop()
+            .and_then(|r| r.ok().flatten())
     }
 
     /// Requests several dependencies at once (they are evaluated in parallel).
     pub fn get_values(&mut self, keys: &[SkyKey]) -> Vec<Option<Arc<dyn SkyValue>>> {
-        self.request(keys, false).into_iter().map(|r| r.ok().flatten()).collect()
+        self.request(keys, false)
+            .into_iter()
+            .map(|r| r.ok().flatten())
+            .collect()
     }
 
     /// `getValueOrThrow`: a failed dependency is returned as `Err` instead of failing this node.
-    pub fn get_value_or_error(&mut self, key: &SkyKey) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+    pub fn get_value_or_error(
+        &mut self,
+        key: &SkyKey,
+    ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
         self.request(std::slice::from_ref(key), true).pop().unwrap()
     }
 
@@ -345,6 +388,7 @@ struct RunState {
     roots: Vec<SkyKey>,
     done: bool,
     aborted: bool,
+    catastrophic: bool,
     keep_going: bool,
     version: Version,
     stats: EvaluationStats,
@@ -407,7 +451,11 @@ impl InMemoryMemoizingEvaluator {
         }
     }
 
-    pub fn register_function(&mut self, name: SkyFunctionName, func: Arc<dyn SkyFunction>) -> &mut Self {
+    pub fn register_function(
+        &mut self,
+        name: SkyFunctionName,
+        func: Arc<dyn SkyFunction>,
+    ) -> &mut Self {
         self.functions.insert(name, func);
         self
     }
@@ -423,7 +471,14 @@ impl InMemoryMemoizingEvaluator {
 
     /// Total number of dependency edges (node -> direct dep) in the graph.
     pub fn edge_count(&self) -> usize {
-        self.core.lock().unwrap().graph.nodes.values().map(|n| n.deps.iter().map(|g| g.len()).sum::<usize>()).sum()
+        self.core
+            .lock()
+            .unwrap()
+            .graph
+            .nodes
+            .values()
+            .map(|n| n.deps.iter().map(|g| g.len()).sum::<usize>())
+            .sum()
     }
 
     pub fn contains(&self, key: &SkyKey) -> bool {
@@ -432,20 +487,49 @@ impl InMemoryMemoizingEvaluator {
 
     /// Whether `key` currently holds a clean value (not dirty).
     pub fn is_clean(&self, key: &SkyKey) -> bool {
-        self.core.lock().unwrap().graph.nodes.get(key).map(|n| n.is_done()).unwrap_or(false)
+        self.core
+            .lock()
+            .unwrap()
+            .graph
+            .nodes
+            .get(key)
+            .map(|n| n.is_done())
+            .unwrap_or(false)
     }
 
     pub fn keys_with_function(&self, name: SkyFunctionName) -> Vec<SkyKey> {
-        self.core.lock().unwrap().graph.nodes.keys().filter(|k| k.function_name() == name).cloned().collect()
+        self.core
+            .lock()
+            .unwrap()
+            .graph
+            .nodes
+            .keys()
+            .filter(|k| k.function_name() == name)
+            .cloned()
+            .collect()
     }
 
     /// Direct dependencies recorded for `key` (flattened, request order).
     pub fn direct_deps(&self, key: &SkyKey) -> Vec<SkyKey> {
-        self.core.lock().unwrap().graph.nodes.get(key).map(|n| n.deps.iter().flatten().cloned().collect()).unwrap_or_default()
+        self.core
+            .lock()
+            .unwrap()
+            .graph
+            .nodes
+            .get(key)
+            .map(|n| n.deps.iter().flatten().cloned().collect())
+            .unwrap_or_default()
     }
 
     pub fn reverse_deps(&self, key: &SkyKey) -> Vec<SkyKey> {
-        self.core.lock().unwrap().graph.nodes.get(key).map(|n| n.rdeps.iter().cloned().collect()).unwrap_or_default()
+        self.core
+            .lock()
+            .unwrap()
+            .graph
+            .nodes
+            .get(key)
+            .map(|n| n.rdeps.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// Injects (or updates) a value for a node that has no function (`Injectable.inject`).
@@ -453,7 +537,11 @@ impl InMemoryMemoizingEvaluator {
     pub fn inject_precomputed(&self, key: SkyKey, value: Arc<dyn SkyValue>) {
         let next = self.version() + 1;
         let mut core = self.core.lock().unwrap();
-        let node = core.graph.nodes.entry(key.clone()).or_insert_with(Node::new);
+        let node = core
+            .graph
+            .nodes
+            .entry(key.clone())
+            .or_insert_with(Node::new);
         let changed = match &node.value {
             Some(NodeValue::Value(old)) => !old.eq_value(value.as_ref()),
             _ => true,
@@ -471,9 +559,30 @@ impl InMemoryMemoizingEvaluator {
     }
 
     /// Marks `keys` as changed externally (`NeedsRebuild`) and their transitive reverse
-    /// dependencies as needing verification. Returns the number of nodes dirtied.
+    /// dependencies as needing verification (`DirtyType.CHANGE`). Returns the number of nodes dirtied.
     pub fn invalidate(&self, keys: &[SkyKey]) -> usize {
         let mut core = self.core.lock().unwrap();
+        core.graph.mark_dirty(keys, true)
+    }
+
+    /// Marks `keys` and their transitive reverse dependencies as needing dependency verification
+    /// (`DirtyType.DIRTY` -> `CHECK_DEPENDENCIES`).
+    pub fn mark_dirty(&self, keys: &[SkyKey]) -> usize {
+        let mut core = self.core.lock().unwrap();
+        core.graph.mark_dirty(keys, false)
+    }
+
+    /// Marks `keys` for rewinding (`DirtyType.REWIND` -> `NEEDS_REBUILDING` without keeping the
+    /// prior cached value for change pruning) and marks reverse dependencies `CheckDeps`.
+    pub fn rewind(&self, keys: &[SkyKey]) -> usize {
+        let mut core = self.core.lock().unwrap();
+        for k in keys {
+            if let Some(node) = core.graph.nodes.get_mut(k) {
+                node.value = None;
+                node.last_evaluated = 0;
+            }
+            core.transient_errors.remove(k);
+        }
         core.graph.mark_dirty(keys, true)
     }
 
@@ -481,8 +590,13 @@ impl InMemoryMemoizingEvaluator {
     /// Their remaining reverse dependencies are dirtied so they get rebuilt.
     pub fn delete_functions(&self, names: &[SkyFunctionName]) -> usize {
         let mut core = self.core.lock().unwrap();
-        let victims: Vec<SkyKey> =
-            core.graph.nodes.keys().filter(|k| names.contains(&k.function_name())).cloned().collect();
+        let victims: Vec<SkyKey> = core
+            .graph
+            .nodes
+            .keys()
+            .filter(|k| names.contains(&k.function_name()))
+            .cloned()
+            .collect();
         let vset: HashSet<SkyKey> = victims.iter().cloned().collect();
         let mut survivors_dirty: Vec<SkyKey> = Vec::new();
         for k in &victims {
@@ -492,8 +606,12 @@ impl InMemoryMemoizingEvaluator {
         }
         // Remove edges from surviving deps to the victims.
         for k in &victims {
-            let deps: Vec<SkyKey> =
-                core.graph.nodes.get(k).map(|n| n.deps.iter().flatten().cloned().collect()).unwrap_or_default();
+            let deps: Vec<SkyKey> = core
+                .graph
+                .nodes
+                .get(k)
+                .map(|n| n.deps.iter().flatten().cloned().collect())
+                .unwrap_or_default();
             for d in deps {
                 if let Some(dn) = core.graph.nodes.get_mut(&d) {
                     dn.rdeps.remove(k);
@@ -523,7 +641,15 @@ impl InMemoryMemoizingEvaluator {
 
     /// Keys of all nodes whose value was computed by one of the given functions.
     pub fn keys_by_function(&self, names: &[SkyFunctionName]) -> Vec<SkyKey> {
-        self.core.lock().unwrap().graph.nodes.keys().filter(|k| names.contains(&k.function_name())).cloned().collect()
+        self.core
+            .lock()
+            .unwrap()
+            .graph
+            .nodes
+            .keys()
+            .filter(|k| names.contains(&k.function_name()))
+            .cloned()
+            .collect()
     }
 
     /// Clean values of all nodes computed by the given functions.
@@ -563,6 +689,14 @@ impl InMemoryMemoizingEvaluator {
             *v += 1;
             *v
         };
+        // Deduplicate roots in insertion order (`ParallelEvaluator.eval`).
+        let mut seen_roots = HashSet::new();
+        let unique_roots: Vec<SkyKey> = roots
+            .iter()
+            .filter(|k| seen_roots.insert((*k).clone()))
+            .cloned()
+            .collect();
+        let mut short_circuited = false;
         {
             let mut core = self.core.lock().unwrap();
             // Transient errors are re-evaluated on every build (`ErrorTransienceValue`).
@@ -571,14 +705,34 @@ impl InMemoryMemoizingEvaluator {
             let mut run = RunState::empty();
             run.keep_going = opts.keep_going;
             run.version = version;
-            run.roots = roots.to_vec();
+            run.roots = unique_roots.clone();
+            if !opts.keep_going {
+                // When keep_going is false, any already-done cached error root short-circuits
+                // evaluation of remaining roots.
+                for r in &unique_roots {
+                    if let Some(n) = core.graph.nodes.get(r) {
+                        if n.is_done() {
+                            if let Some(NodeValue::Error(e)) = &n.value {
+                                run.failed.insert(r.clone(), e.clone());
+                                run.aborted = true;
+                                if e.is_catastrophic() {
+                                    run.catastrophic = true;
+                                }
+                                short_circuited = true;
+                            }
+                        }
+                    }
+                }
+            }
             core.run = run;
-            for r in roots {
-                Self::schedule(&mut core, r);
+            if !short_circuited {
+                for r in &unique_roots {
+                    Self::schedule(&mut core, r);
+                }
             }
         }
-        // Nothing to do if every root is already clean (the common warm case).
-        let work = !self.core.lock().unwrap().run.ready.is_empty();
+        // Nothing to do if every root is already clean (the common warm case) or short-circuited.
+        let work = !short_circuited && !self.core.lock().unwrap().run.ready.is_empty();
         let threads = if work { opts.threads.max(1) } else { 0 };
         let cancel = opts.cancel.clone();
         std::thread::scope(|s| {
@@ -597,29 +751,46 @@ impl InMemoryMemoizingEvaluator {
             stats: run.stats,
             version,
             aborted: run.aborted,
+            catastrophic: run.catastrophic,
         };
-        for r in roots {
+        for r in &unique_roots {
             match core.graph.nodes.get(r) {
                 Some(n) if n.is_done() => match n.value.as_ref().unwrap() {
                     NodeValue::Value(v) => {
-                        result.values.insert(r.clone(), Arc::clone(v));
+                        if opts.keep_going || !result.error_infos.contains_key(r) {
+                            result.values.insert(r.clone(), Arc::clone(v));
+                        }
                     }
                     NodeValue::Error(e) => {
-                        result.error_infos.entry(r.clone()).or_insert_with(|| e.clone());
+                        if !short_circuited {
+                            result
+                                .error_infos
+                                .entry(r.clone())
+                                .or_insert_with(|| e.clone());
+                        }
                     }
                 },
                 _ => {}
             }
         }
-        let infos: Vec<(SkyKey, ErrorInfo)> = result.error_infos.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        let infos: Vec<(SkyKey, ErrorInfo)> = result
+            .error_infos
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
         for (k, info) in infos {
+            if info.is_catastrophic() {
+                result.catastrophic = true;
+            }
             if let Some(e) = &info.error {
                 result.errors.insert(k.clone(), e.clone());
             } else if !info.cycles.is_empty() {
-                result.errors.insert(k.clone(), SkyFunctionError::persistent(info.message()));
+                result
+                    .errors
+                    .insert(k.clone(), SkyFunctionError::persistent(info.message()));
             }
         }
-        for r in roots {
+        for r in &unique_roots {
             if let Some(info) = result.error_infos.get(r) {
                 for c in &info.cycles {
                     let mut closed = c.path_to_cycle.clone();
@@ -639,7 +810,13 @@ impl InMemoryMemoizingEvaluator {
         if core.run.inflight.contains_key(key) {
             return;
         }
-        if core.graph.nodes.get(key).map(|n| n.is_done()).unwrap_or(false) {
+        if core
+            .graph
+            .nodes
+            .get(key)
+            .map(|n| n.is_done())
+            .unwrap_or(false)
+        {
             return;
         }
         core.run.inflight.insert(key.clone(), Inflight::default());
@@ -687,7 +864,12 @@ impl InMemoryMemoizingEvaluator {
                         return;
                     }
                     core = match cancel {
-                        Some(_) => self.cv.wait_timeout(core, std::time::Duration::from_millis(20)).unwrap().0,
+                        Some(_) => {
+                            self.cv
+                                .wait_timeout(core, std::time::Duration::from_millis(20))
+                                .unwrap()
+                                .0
+                        }
                         None => self.cv.wait(core).unwrap(),
                     };
                 }
@@ -709,7 +891,13 @@ impl InMemoryMemoizingEvaluator {
         let step = {
             let mut core = self.core.lock().unwrap();
             self.prepare(&mut core, &key)
-                .map(|compute| if compute { Step::Compute(self.function_for(&key)) } else { Step::Nothing })
+                .map(|compute| {
+                    if compute {
+                        Step::Compute(self.function_for(&key))
+                    } else {
+                        Step::Nothing
+                    }
+                })
                 .unwrap_or(Step::Nothing)
         };
         let Step::Compute(func_opt) = step else {
@@ -725,7 +913,14 @@ impl InMemoryMemoizingEvaluator {
         if core.run.aborted {
             return;
         }
-        let Environment { groups, handled, missing, error_deps, values_missing, .. } = env;
+        let Environment {
+            groups,
+            handled,
+            missing,
+            error_deps,
+            values_missing,
+            ..
+        } = env;
         match outcome {
             Err(p) => {
                 let msg = p
@@ -733,7 +928,10 @@ impl InMemoryMemoizingEvaluator {
                     .map(|s| s.to_string())
                     .or_else(|| p.downcast_ref::<String>().cloned())
                     .unwrap_or_else(|| "unknown panic".into());
-                let info = ErrorInfo::from_error(&key, SkyFunctionError::persistent(format!("SkyFunction for {key} panicked: {msg}")));
+                let info = ErrorInfo::from_error(
+                    &key,
+                    SkyFunctionError::persistent(format!("SkyFunction for {key} panicked: {msg}")),
+                );
                 Self::finish_error(&mut core, &key, info, true, groups);
             }
             Ok(Err(e)) => {
@@ -745,7 +943,9 @@ impl InMemoryMemoizingEvaluator {
                     // A function must not produce a value while deps are missing; treat as a bug.
                     let info = ErrorInfo::from_error(
                         &key,
-                        SkyFunctionError::persistent(format!("SkyFunction for {key} returned a value with missing dependencies")),
+                        SkyFunctionError::persistent(format!(
+                            "SkyFunction for {key} returned a value with missing dependencies"
+                        )),
                     );
                     Self::finish_error(&mut core, &key, info, true, groups);
                 } else {
@@ -781,7 +981,13 @@ impl InMemoryMemoizingEvaluator {
                 // Wait for the missing deps (which may have completed in the meantime).
                 let mut waiting = Vec::new();
                 for d in missing {
-                    if core.graph.nodes.get(&d).map(|n| n.is_done()).unwrap_or(false) {
+                    if core
+                        .graph
+                        .nodes
+                        .get(&d)
+                        .map(|n| n.is_done())
+                        .unwrap_or(false)
+                    {
                         continue;
                     }
                     waiting.push(d);
@@ -799,7 +1005,13 @@ impl InMemoryMemoizingEvaluator {
         }
     }
 
-    fn wait_on(core: &mut Core, key: &SkyKey, waiting: Vec<SkyKey>, handled: HashSet<SkyKey>, groups: Vec<Vec<SkyKey>>) {
+    fn wait_on(
+        core: &mut Core,
+        key: &SkyKey,
+        waiting: Vec<SkyKey>,
+        handled: HashSet<SkyKey>,
+        groups: Vec<Vec<SkyKey>>,
+    ) {
         if waiting.is_empty() {
             // Everything already available: restart right away.
             if let Some(i) = core.run.inflight.get_mut(key) {
@@ -810,7 +1022,11 @@ impl InMemoryMemoizingEvaluator {
         }
         for d in &waiting {
             Self::schedule(core, d);
-            core.run.waiters.entry(d.clone()).or_default().push(key.clone());
+            core.run
+                .waiters
+                .entry(d.clone())
+                .or_default()
+                .push(key.clone());
         }
         let i = core.run.inflight.entry(key.clone()).or_default();
         i.running = false;
@@ -823,8 +1039,22 @@ impl InMemoryMemoizingEvaluator {
     /// when nothing more to do now (done, or waiting on deps).
     fn prepare(&self, core: &mut Core, key: &SkyKey) -> Option<bool> {
         let version = core.run.version;
-        let node = core.graph.nodes.entry(key.clone()).or_insert_with(Node::new);
+        let node = core
+            .graph
+            .nodes
+            .entry(key.clone())
+            .or_insert_with(Node::new);
         if node.is_done() {
+            if let Some(NodeValue::Error(e)) = &node.value {
+                let err = e.clone();
+                if !core.run.keep_going || err.is_catastrophic() {
+                    core.run.failed.insert(key.clone(), err.clone());
+                    core.run.aborted = true;
+                    if err.is_catastrophic() {
+                        core.run.catastrophic = true;
+                    }
+                }
+            }
             Self::complete(core, key);
             return Some(false);
         }
@@ -856,7 +1086,10 @@ impl InMemoryMemoizingEvaluator {
             }
             if !waiting.is_empty() {
                 // A dependency vanished from the graph (deleted) counts as a change.
-                let missing_from_graph: bool = waiting.iter().any(|d| !core.graph.nodes.contains_key(d) && !self.functions.contains_key(&d.function_name()));
+                let missing_from_graph: bool = waiting.iter().any(|d| {
+                    !core.graph.nodes.contains_key(d)
+                        && !self.functions.contains_key(&d.function_name())
+                });
                 if missing_from_graph {
                     let n = core.graph.nodes.get_mut(key).unwrap();
                     n.dirty = Dirty::NeedsRebuild;
@@ -866,10 +1099,25 @@ impl InMemoryMemoizingEvaluator {
                 return Some(false);
             }
             // Verified clean: nothing changed, keep the value (no function call).
-            let n = core.graph.nodes.get_mut(key).unwrap();
-            n.dirty = Dirty::Clean;
-            n.last_evaluated = version;
+            let cached_err = {
+                let n = core.graph.nodes.get_mut(key).unwrap();
+                n.dirty = Dirty::Clean;
+                n.last_evaluated = version;
+                match &n.value {
+                    Some(NodeValue::Error(e)) => Some(e.clone()),
+                    _ => None,
+                }
+            };
             core.run.stats.cleaned.push(key.clone());
+            if let Some(err) = cached_err {
+                if !core.run.keep_going || err.is_catastrophic() {
+                    core.run.failed.insert(key.clone(), err.clone());
+                    core.run.aborted = true;
+                    if err.is_catastrophic() {
+                        core.run.catastrophic = true;
+                    }
+                }
+            }
             Self::complete(core, key);
             return Some(false);
         }
@@ -885,8 +1133,12 @@ impl InMemoryMemoizingEvaluator {
     fn store_value(core: &mut Core, key: &SkyKey, value: NodeValue, groups: Vec<Vec<SkyKey>>) {
         let version = core.run.version;
         // Update the dependency edges.
-        let old_deps: HashSet<SkyKey> =
-            core.graph.nodes.get(key).map(|n| n.deps.iter().flatten().cloned().collect()).unwrap_or_default();
+        let old_deps: HashSet<SkyKey> = core
+            .graph
+            .nodes
+            .get(key)
+            .map(|n| n.deps.iter().flatten().cloned().collect())
+            .unwrap_or_default();
         let new_deps: HashSet<SkyKey> = groups.iter().flatten().cloned().collect();
         for d in old_deps.difference(&new_deps) {
             if let Some(dn) = core.graph.nodes.get_mut(d) {
@@ -894,10 +1146,19 @@ impl InMemoryMemoizingEvaluator {
             }
         }
         for d in &new_deps {
-            core.graph.nodes.entry(d.clone()).or_insert_with(Node::new).rdeps.insert(key.clone());
+            core.graph
+                .nodes
+                .entry(d.clone())
+                .or_insert_with(Node::new)
+                .rdeps
+                .insert(key.clone());
         }
         let node = core.graph.nodes.get_mut(key).unwrap();
-        let unchanged = node.value.as_ref().map(|old| old.same_as(&value)).unwrap_or(false);
+        let unchanged = node
+            .value
+            .as_ref()
+            .map(|old| old.same_as(&value))
+            .unwrap_or(false);
         if !unchanged {
             node.last_changed = version;
         } else {
@@ -919,9 +1180,18 @@ impl InMemoryMemoizingEvaluator {
 
     /// Finishes `key` with an error. `origin` is true for errors produced by the function itself
     /// (as opposed to bubbled from a dependency).
-    fn finish_error(core: &mut Core, key: &SkyKey, info: ErrorInfo, origin: bool, groups: Vec<Vec<SkyKey>>) {
-        if origin && !core.run.keep_going {
+    fn finish_error(
+        core: &mut Core,
+        key: &SkyKey,
+        info: ErrorInfo,
+        _origin: bool,
+        groups: Vec<Vec<SkyKey>>,
+    ) {
+        if !core.run.keep_going || info.is_catastrophic() {
             core.run.aborted = true;
+        }
+        if info.is_catastrophic() {
+            core.run.catastrophic = true;
         }
         core.run.failed.insert(key.clone(), info.clone());
         Self::finish_value(core, key, NodeValue::Error(info), groups);
@@ -938,24 +1208,50 @@ impl InMemoryMemoizingEvaluator {
                 _ => None,
             };
             for w in waiters {
-                let Some(inf) = core.run.inflight.get_mut(&w) else { continue };
+                let Some(inf) = core.run.inflight.get_mut(&w) else {
+                    continue;
+                };
                 inf.waiting_on.retain(|x| x != &k);
                 if let Some(ce) = &child_err {
                     if !inf.handled.contains(&k) {
                         // Bubble: `w` fails with the child's error (unless it is mid-compute).
                         let mut info = ErrorInfo::bubbled(&w, ce);
                         info.root_causes = ce.root_causes.clone();
+                        if !core.run.keep_going || ce.is_catastrophic() {
+                            core.run.aborted = true;
+                        }
+                        if ce.is_catastrophic() {
+                            core.run.catastrophic = true;
+                        }
                         core.run.failed.insert(w.clone(), info.clone());
                         // Remove w from remaining waiters so it is not woken again.
-                        let remaining: Vec<SkyKey> = core.run.inflight.get(&w).map(|i| i.waiting_on.clone()).unwrap_or_default();
+                        let remaining: Vec<SkyKey> = core
+                            .run
+                            .inflight
+                            .get(&w)
+                            .map(|i| i.waiting_on.clone())
+                            .unwrap_or_default();
                         for r in remaining {
                             if let Some(ws) = core.run.waiters.get_mut(&r) {
                                 ws.retain(|x| x != &w);
                             }
                         }
                         let groups = {
-                            let g = core.run.inflight.get(&w).map(|i| i.groups.clone()).unwrap_or_default();
-                            if g.is_empty() { core.graph.nodes.get(&w).map(|n| n.deps.clone()).unwrap_or_default() } else { g }
+                            let g = core
+                                .run
+                                .inflight
+                                .get(&w)
+                                .map(|i| i.groups.clone())
+                                .unwrap_or_default();
+                            if g.is_empty() {
+                                core.graph
+                                    .nodes
+                                    .get(&w)
+                                    .map(|n| n.deps.clone())
+                                    .unwrap_or_default()
+                            } else {
+                                g
+                            }
                         };
                         Self::store_value(core, &w, NodeValue::Error(info), groups);
                         stack.push(w);
@@ -973,15 +1269,27 @@ impl InMemoryMemoizingEvaluator {
 
     fn detect_cycles(core: &mut Core) {
         // Waiting graph among unfinished nodes.
-        let mut order: Vec<SkyKey> = core.run.roots.iter().filter(|r| core.run.inflight.contains_key(*r)).cloned().collect();
-        let mut rest: Vec<SkyKey> = core.run.inflight.keys().filter(|k| !order.contains(k)).cloned().collect();
+        let mut order: Vec<SkyKey> = core
+            .run
+            .roots
+            .iter()
+            .filter(|r| core.run.inflight.contains_key(*r))
+            .cloned()
+            .collect();
+        let mut rest: Vec<SkyKey> = core
+            .run
+            .inflight
+            .keys()
+            .filter(|k| !order.contains(k))
+            .cloned()
+            .collect();
         rest.sort();
         order.extend(rest);
         let mut visited: HashSet<SkyKey> = HashSet::new();
         let mut cycles: Vec<Vec<SkyKey>> = Vec::new();
         let mut seen_ids: HashSet<Vec<SkyKey>> = HashSet::new();
-        for start in order {
-            if visited.contains(&start) {
+        for start in &order {
+            if visited.contains(start) {
                 continue;
             }
             // Iterative DFS with explicit path and child iterators.
@@ -989,7 +1297,12 @@ impl InMemoryMemoizingEvaluator {
             let mut idx: Vec<usize> = vec![0];
             visited.insert(start.clone());
             while let Some(top) = path.last().cloned() {
-                let edges: Vec<SkyKey> = core.run.inflight.get(&top).map(|i| i.waiting_on.clone()).unwrap_or_default();
+                let edges: Vec<SkyKey> = core
+                    .run
+                    .inflight
+                    .get(&top)
+                    .map(|i| i.waiting_on.clone())
+                    .unwrap_or_default();
                 let i = *idx.last().unwrap();
                 if i >= edges.len() {
                     path.pop();
@@ -1003,6 +1316,23 @@ impl InMemoryMemoizingEvaluator {
                 }
                 if let Some(pos) = path.iter().position(|p| *p == next) {
                     let cycle: Vec<SkyKey> = path[pos..].to_vec();
+                    if !core.run.keep_going {
+                        // With keep_going off (`SimpleCycleDetector`): report only the first
+                        // cycle as `ErrorInfo::from_cycle(path_to_cycle, cycle)` without committing
+                        // cycle nodes to the graph or evaluating later roots.
+                        let path_to_cycle = path[..pos].to_vec();
+                        let info = ErrorInfo {
+                            error: None,
+                            root_causes: vec![cycle[0].clone()],
+                            cycles: vec![CycleInfo::new(path_to_cycle, cycle)],
+                        };
+                        core.run.failed.insert(start.clone(), info);
+                        core.run.aborted = true;
+                        core.run.done = true;
+                        core.run.inflight.clear();
+                        core.run.waiters.clear();
+                        return;
+                    }
                     let mut id = cycle.clone();
                     id.sort();
                     if seen_ids.insert(id) {
@@ -1033,8 +1363,21 @@ impl InMemoryMemoizingEvaluator {
                 };
                 core.run.failed.insert(m.clone(), info.clone());
                 let groups = {
-                    let g = core.run.inflight.get(m).map(|i| i.groups.clone()).unwrap_or_default();
-                    if g.is_empty() { core.graph.nodes.get(m).map(|n| n.deps.clone()).unwrap_or_default() } else { g }
+                    let g = core
+                        .run
+                        .inflight
+                        .get(m)
+                        .map(|i| i.groups.clone())
+                        .unwrap_or_default();
+                    if g.is_empty() {
+                        core.graph
+                            .nodes
+                            .get(m)
+                            .map(|n| n.deps.clone())
+                            .unwrap_or_default()
+                    } else {
+                        g
+                    }
                 };
                 core.graph.nodes.entry(m.clone()).or_insert_with(Node::new);
                 Self::store_value(core, m, NodeValue::Error(info), groups);
@@ -1043,7 +1386,12 @@ impl InMemoryMemoizingEvaluator {
         }
         // Remove members from the waiting structures.
         for m in &members {
-            let wo = core.run.inflight.remove(m).map(|i| i.waiting_on).unwrap_or_default();
+            let wo = core
+                .run
+                .inflight
+                .remove(m)
+                .map(|i| i.waiting_on)
+                .unwrap_or_default();
             for r in wo {
                 if let Some(ws) = core.run.waiters.get_mut(&r) {
                     ws.retain(|x| x != m);
@@ -1060,9 +1408,19 @@ impl InMemoryMemoizingEvaluator {
     fn fail_stalled(core: &mut Core) {
         let keys: Vec<SkyKey> = core.run.inflight.keys().cloned().collect();
         for k in keys {
-            let info = ErrorInfo::from_error(&k, SkyFunctionError::persistent(format!("evaluation of {k} stalled: unresolved dependencies")));
+            let info = ErrorInfo::from_error(
+                &k,
+                SkyFunctionError::persistent(format!(
+                    "evaluation of {k} stalled: unresolved dependencies"
+                )),
+            );
             core.run.failed.insert(k.clone(), info.clone());
-            let groups = core.run.inflight.get(&k).map(|i| i.groups.clone()).unwrap_or_default();
+            let groups = core
+                .run
+                .inflight
+                .get(&k)
+                .map(|i| i.groups.clone())
+                .unwrap_or_default();
             core.graph.nodes.entry(k.clone()).or_insert_with(Node::new);
             Self::store_value(core, &k, NodeValue::Error(info), groups);
         }
@@ -1081,6 +1439,7 @@ impl RunState {
             roots: Vec::new(),
             done: false,
             aborted: false,
+            catastrophic: false,
             keep_going: true,
             version: 0,
             stats: EvaluationStats::default(),
@@ -1093,7 +1452,14 @@ impl RunState {
 struct MissingFunction(SkyFunctionName);
 
 impl SkyFunction for MissingFunction {
-    fn compute(&self, key: &SkyKey, _env: &mut Environment<'_>) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
-        Err(SkyFunctionError::persistent(format!("No SkyFunction registered for {} (key {key})", self.0)))
+    fn compute(
+        &self,
+        key: &SkyKey,
+        _env: &mut Environment<'_>,
+    ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        Err(SkyFunctionError::persistent(format!(
+            "No SkyFunction registered for {} (key {key})",
+            self.0
+        )))
     }
 }

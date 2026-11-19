@@ -2,14 +2,14 @@
 
 pub mod bz2;
 pub mod lzma;
+pub mod sevenz;
 pub mod xz;
 pub mod zstd;
-pub mod sevenz;
 
 pub use bz2::bunzip2;
+pub use sevenz::extract_7z;
 pub use xz::xz_decompress;
 pub use zstd::zstd_decompress;
-pub use sevenz::extract_7z;
 
 use std::cell::RefCell;
 thread_local! {

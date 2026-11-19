@@ -12,7 +12,9 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use crate::types::mutability::Mutability;
 use crate::types::value::Value;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StarlarkError(pub String);
@@ -25,11 +27,26 @@ impl std::fmt::Display for StarlarkError {
 
 impl std::error::Error for StarlarkError {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone)]
 pub struct StarlarkList {
     pub elements: Vec<Value>,
     pub frozen: bool,
     pub iter_count: usize,
+    pub mutability: Arc<Mutability>,
+}
+
+impl PartialEq for StarlarkList {
+    fn eq(&self, other: &Self) -> bool {
+        self.elements == other.elements
+    }
+}
+
+impl Eq for StarlarkList {}
+
+impl Default for StarlarkList {
+    fn default() -> Self {
+        Self::new(Vec::new())
+    }
 }
 
 impl StarlarkList {
@@ -38,12 +55,37 @@ impl StarlarkList {
             elements,
             frozen: false,
             iter_count: 0,
+            mutability: Mutability::create(),
         }
     }
 
+    pub fn new_in(elements: Vec<Value>, mutability: Arc<Mutability>) -> Self {
+        Self {
+            elements,
+            frozen: false,
+            iter_count: 0,
+            mutability,
+        }
+    }
+
+    pub fn empty_frozen() -> Self {
+        Self {
+            elements: Vec::new(),
+            frozen: true,
+            iter_count: 0,
+            mutability: Mutability::immutable(),
+        }
+    }
+
+    pub fn is_frozen(&self) -> bool {
+        self.frozen || self.mutability.is_frozen()
+    }
+
     pub fn check_mutable(&self) -> Result<(), StarlarkError> {
-        if self.frozen {
-            return Err(StarlarkError("trying to mutate a frozen list value".to_string()));
+        if self.is_frozen() {
+            return Err(StarlarkError(
+                "trying to mutate a frozen list value".to_string(),
+            ));
         }
         if self.iter_count > 0 {
             return Err(StarlarkError(
@@ -54,12 +96,29 @@ impl StarlarkList {
     }
 
     pub fn freeze(&mut self) {
-        if !self.frozen {
+        if !self.is_frozen() {
             self.frozen = true;
             for elem in &self.elements {
                 elem.freeze();
             }
         }
+    }
+
+    pub fn unsafe_shallow_freeze(&mut self) -> Result<(), StarlarkError> {
+        if self.is_frozen() {
+            return Err(StarlarkError(
+                "cannot call unsafeShallowFreeze() on an object whose Mutability is already frozen"
+                    .to_string(),
+            ));
+        }
+        if !self.mutability.allows_unsafe_shallow_freeze() {
+            return Err(StarlarkError(
+                "cannot call unsafeShallowFreeze() on an object whose Mutability does not allow it"
+                    .to_string(),
+            ));
+        }
+        self.mutability = Mutability::immutable();
+        Ok(())
     }
 
     pub fn append(&mut self, item: Value) -> Result<(), StarlarkError> {
@@ -83,11 +142,7 @@ impl StarlarkList {
     pub fn insert(&mut self, index: i64, item: Value) -> Result<(), StarlarkError> {
         self.check_mutable()?;
         let len = self.elements.len() as i64;
-        let mut idx = if index < 0 {
-            len + index
-        } else {
-            index
-        };
+        let mut idx = if index < 0 { len + index } else { index };
         if idx < 0 {
             idx = 0;
         } else if idx > len {

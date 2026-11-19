@@ -26,14 +26,23 @@ impl<'a> Rc<'a> {
             return Err("LZMA data corrupt (range coder first byte not zero)".into());
         }
         let code = u32::from_be_bytes([data[1], data[2], data[3], data[4]]);
-        Ok(Self { data, pos: 5, range: 0xFFFF_FFFF, code })
+        Ok(Self {
+            data,
+            pos: 5,
+            range: 0xFFFF_FFFF,
+            code,
+        })
     }
 
     #[inline(always)]
     fn normalize(&mut self) {
         if self.range < TOP {
             self.range <<= 8;
-            let b = if self.pos < self.data.len() { self.data[self.pos] } else { 0 };
+            let b = if self.pos < self.data.len() {
+                self.data[self.pos]
+            } else {
+                0
+            };
             self.pos += 1;
             self.code = (self.code << 8) | b as u32;
         }
@@ -108,7 +117,13 @@ struct LenDec {
 
 impl LenDec {
     fn new() -> Self {
-        Self { choice: PROB_INIT, choice2: PROB_INIT, low: [[PROB_INIT; 8]; 16], mid: [[PROB_INIT; 8]; 16], high: [PROB_INIT; 256] }
+        Self {
+            choice: PROB_INIT,
+            choice2: PROB_INIT,
+            low: [[PROB_INIT; 8]; 16],
+            mid: [[PROB_INIT; 8]; 16],
+            high: [PROB_INIT; 256],
+        }
     }
     #[inline(always)]
     fn decode(&mut self, rc: &mut Rc, pos_state: usize) -> usize {
@@ -207,7 +222,11 @@ impl LzmaDecoder {
             let pos_state = pos & pb_mask;
 
             if rc.bit(&mut self.is_match[state][pos_state]) == 0 {
-                let prev = if pos > 0 { out[out.len() - 1] as usize } else { 0 };
+                let prev = if pos > 0 {
+                    out[out.len() - 1] as usize
+                } else {
+                    0
+                };
                 let base = 0x300 * (((pos & lp_mask) << lc) + (prev >> (8 - lc)));
                 let probs = &mut self.lit[base..base + 0x300];
                 let mut sym = 1usize;
@@ -228,7 +247,13 @@ impl LzmaDecoder {
                     }
                 }
                 out.push(sym as u8);
-                state = if state < 4 { 0 } else if state < 10 { state - 3 } else { state - 6 };
+                state = if state < 4 {
+                    0
+                } else if state < 10 {
+                    state - 3
+                } else {
+                    state - 6
+                };
                 continue;
             }
 
@@ -241,7 +266,10 @@ impl LzmaDecoder {
                     if rc.bit(&mut self.is_rep0_long[state][pos_state]) == 0 {
                         // short rep
                         if reps[0] > pos {
-                            return Err(format!("LZMA repeat offset {} > available bytes {}", reps[0], pos));
+                            return Err(format!(
+                                "LZMA repeat offset {} > available bytes {}",
+                                reps[0], pos
+                            ));
                         }
                         state = if state < 7 { 9 } else { 11 };
                         let b = out[out.len() - reps[0]];
@@ -295,7 +323,10 @@ impl LzmaDecoder {
             }
 
             if reps[0] > pos {
-                return Err(format!("LZMA repeat offset {} > available bytes {}", reps[0], pos));
+                return Err(format!(
+                    "LZMA repeat offset {} > available bytes {}",
+                    reps[0], pos
+                ));
             }
             let remaining = limit - out.len();
             let mut copy = len;
@@ -324,7 +355,13 @@ impl LzmaDecoder {
 }
 
 /// Decompresses a raw LZMA stream (7z coder / .lzma payload) producing exactly `unpack_size` bytes.
-pub fn lzma_decompress(data: &[u8], unpack_size: usize, lc: u32, lp: u32, pb: u32) -> Result<Vec<u8>, String> {
+pub fn lzma_decompress(
+    data: &[u8],
+    unpack_size: usize,
+    lc: u32,
+    lp: u32,
+    pb: u32,
+) -> Result<Vec<u8>, String> {
     if lc > 8 || lp > 4 || pb > 4 {
         return Err("LZMA properties out of range".into());
     }
@@ -347,7 +384,11 @@ pub fn lzma_decompress(data: &[u8], unpack_size: usize, lc: u32, lp: u32, pb: u3
 /// Decodes an LZMA2 stream, appending to `out`; the dictionary starts at the current end of `out`.
 /// Returns the number of input bytes consumed (including the end marker byte).
 /// With `expected_len`, the stream may end without an end marker once that many bytes are produced.
-pub fn lzma2_decode_into(input: &[u8], out: &mut Vec<u8>, expected_len: Option<usize>) -> Result<usize, String> {
+pub fn lzma2_decode_into(
+    input: &[u8],
+    out: &mut Vec<u8>,
+    expected_len: Option<usize>,
+) -> Result<usize, String> {
     let start_len = out.len();
     let mut dict_start = start_len;
     let mut need_dict_reset = true;
@@ -399,7 +440,10 @@ pub fn lzma2_decode_into(input: &[u8], out: &mut Vec<u8>, expected_len: Option<u
         if pos + 4 > input.len() {
             return Err("LZMA2 data truncated".into());
         }
-        let unpack = ((((control & 0x1F) as usize) << 16) | ((input[pos] as usize) << 8) | input[pos + 1] as usize) + 1;
+        let unpack = ((((control & 0x1F) as usize) << 16)
+            | ((input[pos] as usize) << 8)
+            | input[pos + 1] as usize)
+            + 1;
         let pack = (((input[pos + 2] as usize) << 8) | input[pos + 3] as usize) + 1;
         pos += 4;
         let mode = (control >> 5) & 3;

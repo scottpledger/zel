@@ -21,7 +21,10 @@ fn shl_beyond_64_bits() {
     assert_eq!(as_decimal(&eval_x("x = 1 << 70")), "1180591620717411303424");
     assert_eq!(as_decimal(&eval_x("x = 1<<70")), "1180591620717411303424");
     assert_eq!(as_decimal(&eval_x("x = 3 << 65")), "110680464442257309696");
-    assert_eq!(as_decimal(&eval_x("x = 1 << 100")), "1267650600228229401496703205376");
+    assert_eq!(
+        as_decimal(&eval_x("x = 1 << 100")),
+        "1267650600228229401496703205376"
+    );
     assert_eq!(as_decimal(&eval_x("x = 1 << 64")), "18446744073709551616");
     assert_eq!(as_decimal(&eval_x("x = 1 << 63")), "9223372036854775808");
     assert_eq!(as_decimal(&eval_x("x = 1 << 32")), "4294967296");
@@ -29,8 +32,14 @@ fn shl_beyond_64_bits() {
 
 #[test]
 fn shl_with_variable_and_augmented_assignment() {
-    assert_eq!(as_decimal(&eval_x("y = 70\nx = 1 << y")), "1180591620717411303424");
-    assert_eq!(as_decimal(&eval_x("x = 1\nx <<= 70")), "1180591620717411303424");
+    assert_eq!(
+        as_decimal(&eval_x("y = 70\nx = 1 << y")),
+        "1180591620717411303424"
+    );
+    assert_eq!(
+        as_decimal(&eval_x("x = 1\nx <<= 70")),
+        "1180591620717411303424"
+    );
     assert_eq!(
         as_decimal(&eval_x("def f(n):\n    return 1 << n\nx = f(70)")),
         "1180591620717411303424"
@@ -42,7 +51,10 @@ fn shr_roundtrip_and_negative() {
     assert_eq!(as_decimal(&eval_x("x = (1 << 70) >> 69")), "2");
     assert_eq!(as_decimal(&eval_x("x = (1 << 70) >> 70")), "1");
     assert_eq!(as_decimal(&eval_x("x = (1 << 200) >> 199")), "2");
-    assert_eq!(as_decimal(&eval_x("x = -1 << 70")), "-1180591620717411303424");
+    assert_eq!(
+        as_decimal(&eval_x("x = -1 << 70")),
+        "-1180591620717411303424"
+    );
     assert_eq!(as_decimal(&eval_x("x = -(1 << 70) >> 69")), "-2");
 }
 

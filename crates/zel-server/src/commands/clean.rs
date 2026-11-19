@@ -48,11 +48,17 @@ fn move_to_temp(path: &Path) -> std::io::Result<PathBuf> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            format!("Cannot move root directory {} to temporary directory", path.display()),
+            format!(
+                "Cannot move root directory {} to temporary directory",
+                path.display()
+            ),
         )
     })?;
     let uuid = random_uuid_string();
-    let base = path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    let base = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
     let temp = parent.join(format!("{base}_tmp_{}_{uuid}", std::process::id()));
     std::fs::rename(path, &temp)?;
     Ok(temp)
@@ -60,6 +66,7 @@ fn move_to_temp(path: &Path) -> std::io::Result<PathBuf> {
 
 /// `AsyncDirectoryCleaner.spawnDaemonizedDeletion` without the `daemonize` helper: a detached
 /// shell (own process group) that makes directories writable and removes the tree.
+#[cfg(unix)]
 fn spawn_deletion(parent: &Path, name: &str) -> std::io::Result<()> {
     use std::os::unix::process::CommandExt;
     std::process::Command::new("/bin/sh")
@@ -76,6 +83,16 @@ fn spawn_deletion(parent: &Path, name: &str) -> std::io::Result<()> {
         .process_group(0)
         .spawn()
         .map(|_| ())
+}
+
+#[cfg(not(unix))]
+fn spawn_deletion(parent: &Path, name: &str) -> std::io::Result<()> {
+    let target = parent.join(name);
+    std::thread::spawn(move || {
+        make_writable_tree(&target);
+        let _ = std::fs::remove_dir_all(&target);
+    });
+    Ok(())
 }
 
 /// `deleteTreesBelow`: removes everything inside `dir` but keeps `dir`.
@@ -100,13 +117,29 @@ fn delete_trees_below(dir: &Path) -> std::io::Result<()> {
 
 /// Output trees may be read-only (`chmod -w` on artifacts); make directories writable first.
 fn make_writable_tree(p: &Path) {
-    use std::os::unix::fs::PermissionsExt;
     if let Ok(md) = std::fs::symlink_metadata(p) {
+        #[cfg(unix)]
         if md.is_dir() {
+            use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755));
             if let Ok(rd) = std::fs::read_dir(p) {
                 for e in rd.flatten() {
                     make_writable_tree(&e.path());
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let mut perms = md.permissions();
+            if perms.readonly() {
+                perms.set_readonly(false);
+                let _ = std::fs::set_permissions(p, perms);
+            }
+            if md.is_dir() {
+                if let Ok(rd) = std::fs::read_dir(p) {
+                    for e in rd.flatten() {
+                        make_writable_tree(&e.path());
+                    }
                 }
             }
         }
@@ -123,11 +156,18 @@ impl BlazeRuntime {
         if ws.is_empty() {
             return;
         }
-        let ws_name = Path::new(ws).file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        let ws_name = Path::new(ws)
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let mut failures = Vec::new();
         for suffix in [ws_name.as_str(), "out", "bin", "testlogs", "genfiles"] {
             let name = format!("{prefix}{suffix}");
-            let link = if name.starts_with('/') { PathBuf::from(&name) } else { Path::new(ws).join(&name) };
+            let link = if name.starts_with('/') {
+                PathBuf::from(&name)
+            } else {
+                Path::new(ws).join(&name)
+            };
             match std::fs::symlink_metadata(&link) {
                 Ok(md) if md.file_type().is_symlink() => {
                     if let Err(e) = std::fs::remove_file(&link) {
@@ -165,7 +205,7 @@ impl BlazeRuntime {
     pub(crate) fn cmd_clean(
         &self,
         args: &[String],
-        _stdout: &mut Vec<u8>,
+        _stdout: &mut [u8],
         stderr: &mut Vec<u8>,
         termination_expected: &mut bool,
     ) -> ExitCode {
@@ -177,15 +217,26 @@ impl BlazeRuntime {
             }
         };
         if !parsed.targets.is_empty() {
-            writeln_bytes(stderr, &format!("ERROR: Unrecognized arguments: {}", parsed.targets.join(" ")));
+            writeln_bytes(
+                stderr,
+                &format!(
+                    "ERROR: Unrecognized arguments: {}",
+                    parsed.targets.join(" ")
+                ),
+            );
             return ExitCode::COMMAND_LINE_ERROR;
         }
-        let expunge = parsed.expunge || parsed.expunge_async || parsed.get_bool("expunge").unwrap_or(false);
+        let expunge =
+            parsed.expunge || parsed.expunge_async || parsed.get_bool("expunge").unwrap_or(false);
         let r#async = parsed.get_bool("async").unwrap_or(false) || parsed.expunge_async;
         // `canUseAsync`: asynchronous deletion is unavailable on Windows.
         let async_ok = !cfg!(windows);
         let r#async = if r#async && !async_ok {
-            let fallback = if expunge { "--expunge" } else { "synchronous clean" };
+            let fallback = if expunge {
+                "--expunge"
+            } else {
+                "synchronous clean"
+            };
             writeln_bytes(
                 stderr,
                 &format!("INFO: --async cannot be used on non-Linux platforms, falling back to {fallback}"),
@@ -243,9 +294,15 @@ impl BlazeRuntime {
                     let real_tmp = std::fs::canonicalize(&tmp).unwrap_or_else(|_| tmp.clone());
                     writeln_bytes(
                         stderr,
-                        &format!("INFO: Output base moved to {} for deletion", real_tmp.display()),
+                        &format!(
+                            "INFO: Output base moved to {} for deletion",
+                            real_tmp.display()
+                        ),
                     );
-                    let name = tmp.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    let name = tmp
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
                     if let Err(e) = spawn_deletion(tmp.parent().unwrap_or(Path::new("/")), &name) {
                         return fail(stderr, format!("{}: {e}", real_tmp.display()));
                     }
@@ -259,14 +316,22 @@ impl BlazeRuntime {
                 if execroot.exists() {
                     match move_to_temp(&execroot) {
                         Ok(tmp) => {
-                            let real_tmp = std::fs::canonicalize(&tmp).unwrap_or_else(|_| tmp.clone());
+                            let real_tmp =
+                                std::fs::canonicalize(&tmp).unwrap_or_else(|_| tmp.clone());
                             writeln_bytes(
                                 stderr,
-                                &format!("INFO: Output tree moved to {} for deletion", real_tmp.display()),
+                                &format!(
+                                    "INFO: Output tree moved to {} for deletion",
+                                    real_tmp.display()
+                                ),
                             );
-                            let name =
-                                tmp.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                            if let Err(e) = spawn_deletion(tmp.parent().unwrap_or(Path::new("/")), &name) {
+                            let name = tmp
+                                .file_name()
+                                .map(|s| s.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            if let Err(e) =
+                                spawn_deletion(tmp.parent().unwrap_or(Path::new("/")), &name)
+                            {
                                 return fail(stderr, format!("{}: {e}", tmp.display()));
                             }
                         }
@@ -286,6 +351,10 @@ impl BlazeRuntime {
         if expunge {
             // `BlazeCommandResult.shutdownOnSuccess()`.
             self.shutdown_requested.store(true, Ordering::SeqCst);
+            self.skip_action_cache_save.store(true, Ordering::SeqCst);
+            if !r#async {
+                self.expunge_requested.store(true, Ordering::SeqCst);
+            }
             *termination_expected = true;
         }
         ExitCode::SUCCESS

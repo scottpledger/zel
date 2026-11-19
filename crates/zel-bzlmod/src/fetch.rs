@@ -5,7 +5,7 @@ use crate::ctx::{build_attr_struct, CtxData, CtxKind};
 use crate::model::*;
 use crate::resolve::ExtensionId;
 use crate::rt::*;
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use zel_starlark::Value;
@@ -22,7 +22,12 @@ fn marker_attribute_json(value: &AttrVal) -> crate::json::Json {
         AttrVal::Dict(entries) => Json::Obj(
             entries
                 .iter()
-                .map(|(key, value)| (crate::model::escape_attr_string(key), marker_attribute_json(value)))
+                .map(|(key, value)| {
+                    (
+                        crate::model::escape_attr_string(key),
+                        marker_attribute_json(value),
+                    )
+                })
                 .collect(),
         ),
         value => value.to_json(),
@@ -52,9 +57,26 @@ fn java_os_name_and_arch() -> (&'static str, &'static str) {
     (name, arch)
 }
 
+fn bazel_tools_digest() -> &'static str {
+    static DIGEST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    DIGEST.get_or_init(|| {
+        let mut fp = crate::hash::Fingerprint::new();
+        for (path, bytes) in zel_bazel_tools::files() {
+            fp.add_string(path).add_bytes(bytes);
+        }
+        fp.hex_digest()
+    })
+}
+
 /// Whether the content of a marker file belongs to the repo with predeclared hash `fp`: its first
 /// line is the hash and every recorded input line is still up to date (`DigestWriter.readMarkerFile`).
-pub fn marker_is_current(content: &str, fp: &str, env: &BTreeMap<String, String>, ws: &Path, external: &Path) -> bool {
+pub fn marker_is_current(
+    content: &str,
+    fp: &str,
+    env: &BTreeMap<String, String>,
+    ws: &Path,
+    external: &Path,
+) -> bool {
     let mut lines = content.split('\n').filter(|l| !l.is_empty());
     if lines.next() != Some(fp) {
         return false;
@@ -69,10 +91,17 @@ impl Rt {
         use crate::hash::Fingerprint;
         let (repo, pkg, name) = parse_bzl_label(&spec.bzl_file);
         let key = format!("@@{repo}//{pkg}:{name}");
-        let fingerprint_key = if repo.is_empty() { format!("//{pkg}:{name}") } else { key.clone() };
+        let fingerprint_key = if repo.is_empty() {
+            format!("//{pkg}:{name}")
+        } else {
+            key.clone()
+        };
         let digest = self.bzl_transitive_digest(&key);
         let environ = self.rule_environ(spec).unwrap_or_default();
-        let mut env_inputs: Vec<(String, Option<String>)> = environ.iter().map(|e| (e.clone(), self.opts.client_env.get(e).cloned())).collect();
+        let mut env_inputs: Vec<(String, Option<String>)> = environ
+            .iter()
+            .map(|e| (e.clone(), self.opts.client_env.get(e).cloned()))
+            .collect();
         env_inputs.sort();
         env_inputs.dedup_by(|a, b| a.0 == b.0);
         let attrs_json = crate::json::Json::Obj(vec![(
@@ -99,7 +128,8 @@ impl Rt {
             .add_string(arch);
         fp.add_int(env_inputs.len() as i32);
         for (k, v) in &env_inputs {
-            fp.add_string(&format!("ENV:{}", crate::ctx::escape_input(k))).add_nullable_string(v.as_deref());
+            fp.add_string(&format!("ENV:{}", crate::ctx::escape_input(k)))
+                .add_nullable_string(v.as_deref());
         }
         let mapping = self.recorded_repo_mapping_entries(&key);
         fp.add_int(mapping.len() as i32);
@@ -111,37 +141,52 @@ impl Rt {
 
     /// `(source repo, apparent name, canonical name)` for every `@apparent//...` load of the
     /// transitive load graph of `key`, in load order (the rule's `recordedRepoMappingEntries`).
-    pub(crate) fn recorded_repo_mapping_entries(self: &Arc<Self>, key: &str) -> Vec<(String, String, String)> {
+    pub(crate) fn recorded_repo_mapping_entries(
+        self: &Arc<Self>,
+        key: &str,
+    ) -> Vec<(String, String, String)> {
+        if let Some(cached) = self.state.lock().unwrap().bzl_load_mappings.get(key) {
+            return cached.clone();
+        }
         let mut out: Vec<(String, String, String)> = vec![];
         let mut seen: Vec<String> = vec![];
         self.collect_load_mappings(key, &mut out, &mut seen);
+        self.state
+            .lock()
+            .unwrap()
+            .bzl_load_mappings
+            .insert(key.to_string(), out.clone());
         out
     }
 
-    fn collect_load_mappings(self: &Arc<Self>, key: &str, out: &mut Vec<(String, String, String)>, seen: &mut Vec<String>) {
+    fn collect_load_mappings(
+        self: &Arc<Self>,
+        key: &str,
+        out: &mut Vec<(String, String, String)>,
+        seen: &mut Vec<String>,
+    ) {
         if seen.iter().any(|k| k == key) {
             return;
         }
         seen.push(key.to_string());
         let (repo, pkg, name) = parse_bzl_label(key);
-        let Ok(dir) = self.fetch_repo(&repo) else { return };
-        let path = if pkg.is_empty() { dir.join(&name) } else { dir.join(&pkg).join(&name) };
-        let Ok(bytes) = std::fs::read(path) else { return };
-        let text = String::from_utf8_lossy(&bytes).to_string();
-        let loads: Vec<String> = zel_starlark::Lexer::new(key, &text)
-            .lex_all()
-            .ok()
-            .and_then(|t| zel_starlark::Parser::new(t).parse_module().ok())
-            .map(|stmts| {
-                stmts
-                    .iter()
-                    .filter_map(|s| match s {
-                        zel_starlark::Stmt::Load(l, _) => Some(l.module_label.clone()),
-                        _ => None,
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let loads = if let Some(cached) = self.state.lock().unwrap().bzl_loads_cache.get(key) {
+            cached.clone()
+        } else {
+            let Ok(dir) = self.fetch_repo(&repo) else {
+                return;
+            };
+            let path = if pkg.is_empty() {
+                dir.join(&name)
+            } else {
+                dir.join(&pkg).join(&name)
+            };
+            let Ok(bytes) = std::fs::read(path) else {
+                return;
+            };
+            let text = String::from_utf8_lossy(&bytes).to_string();
+            self.bzl_loads_of(key, &text)
+        };
         for l in loads {
             if let Some(rest) = l.strip_prefix('@') {
                 if !rest.starts_with('@') {
@@ -186,8 +231,12 @@ impl Rt {
         }
         // Extension-generated.
         for id in res.extension_ids() {
-            let Some(unique) = res.extension_unique_names.get(&id) else { continue };
-            let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) else { continue };
+            let Some(unique) = res.extension_unique_names.get(&id) else {
+                continue;
+            };
+            let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) else {
+                continue;
+            };
             let result = self.eval_extension(&id)?;
             if let Some((_, spec)) = result.generated.iter().find(|(n, _)| n == exported) {
                 return Ok(Some(spec.clone()));
@@ -200,15 +249,27 @@ impl Rt {
     /// the using module for innate (`use_repo_rule`) repos, the extension's repo otherwise.
     pub fn repo_context(&self, canonical: &str) -> String {
         let res = &self.resolution;
-        if res.canonical_repo_names.contains_key(&canonical.to_string()) {
+        if res
+            .canonical_repo_names
+            .contains_key(&canonical.to_string())
+        {
             return canonical.to_string();
         }
         for id in res.extension_ids() {
-            let Some(unique) = res.extension_unique_names.get(&id) else { continue };
-            let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) else { continue };
+            let Some(unique) = res.extension_unique_names.get(&id) else {
+                continue;
+            };
+            let Some(exported) = canonical.strip_prefix(&format!("{unique}+")) else {
+                continue;
+            };
             if id.is_innate() {
                 for (mk, u) in res.usages_of(&id) {
-                    let declares = u.tags.iter().any(|t| t.tag_name == "repo" && t.attrs.iter().any(|(k, v)| k == "name" && v.as_str() == Some(exported)));
+                    let declares = u.tags.iter().any(|t| {
+                        t.tag_name == "repo"
+                            && t.attrs
+                                .iter()
+                                .any(|(k, v)| k == "name" && v.as_str() == Some(exported))
+                    });
                     if declares {
                         return res.canonical_name_of(mk).cloned().unwrap_or_default();
                     }
@@ -234,14 +295,33 @@ impl Rt {
             if st.fetching.iter().any(|f| f == canonical) {
                 let mut chain = st.fetching.clone();
                 chain.push(canonical.to_string());
-                return Err(format!("Circular repository dependency while fetching: {}", chain.iter().map(|c| format!("@@{c}")).collect::<Vec<_>>().join(" -> ")));
+                return Err(format!(
+                    "Circular repository dependency while fetching: {}",
+                    chain
+                        .iter()
+                        .map(|c| format!("@@{c}"))
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                ));
             }
         }
-        self.state.lock().unwrap().fetching.push(canonical.to_string());
+        self.state
+            .lock()
+            .unwrap()
+            .fetching
+            .push(canonical.to_string());
         let r = self.fetch_repo_inner(canonical, &dir);
-        self.state.lock().unwrap().fetching.retain(|c| c != canonical);
+        self.state
+            .lock()
+            .unwrap()
+            .fetching
+            .retain(|c| c != canonical);
         r?;
-        self.state.lock().unwrap().fetched.insert(canonical.to_string());
+        self.state
+            .lock()
+            .unwrap()
+            .fetched
+            .insert(canonical.to_string());
         Ok(dir)
     }
 
@@ -266,7 +346,11 @@ impl Rt {
                     p.display()
                 ));
             }
-            let s = RepoSpec::new(LOCAL_BZL, "local_repository", vec![("path".into(), AttrVal::Str(p.display().to_string()))]);
+            let s = RepoSpec::new(
+                LOCAL_BZL,
+                "local_repository",
+                vec![("path".into(), AttrVal::Str(p.display().to_string()))],
+            );
             spec = Some(s);
         } else if canonical == "bazel_tools" {
             return self.make_bazel_tools(dir);
@@ -276,9 +360,18 @@ impl Rt {
         let Some(spec) = spec else {
             return Err(format!("Repository '@@{canonical}' has no repo spec (is the module a non-registry override with a missing source?)"));
         };
+        let is_local = self.is_local_rule(&spec);
         let fp = self.predeclared_input_hash(canonical, &spec);
-        let marker_ok = |m: &str| marker_is_current(m, &fp, &self.opts.client_env, &self.opts.workspace_root, &self.external_dir());
-        if !self.opts.force && dir.symlink_metadata().is_ok() {
+        let marker_ok = |m: &str| {
+            marker_is_current(
+                m,
+                &fp,
+                &self.opts.client_env,
+                &self.opts.workspace_root,
+                &self.external_dir(),
+            )
+        };
+        if !self.opts.force && dir.exists() {
             if let Ok(m) = std::fs::read_to_string(&marker) {
                 if marker_ok(&m) {
                     return Ok(());
@@ -287,7 +380,7 @@ impl Rt {
         }
         // Repo contents cache lookup?
         if let Some(rcc_dir) = &self.opts.repo_contents_cache {
-            if !self.opts.force {
+            if !self.opts.force && !is_local {
                 let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
                 let candidates = cache.get_candidate_repos(&fp);
                 for cand in candidates {
@@ -328,9 +421,11 @@ impl Rt {
                         }
                         return Ok(());
                     }
-                } else if vdir.is_dir() && !self.opts.force {
+                } else if vdir.is_dir() && !self.opts.force && !is_local {
                     let vmarker = v.join(format!("@{canonical}.marker"));
-                    let up_to_date = std::fs::read_to_string(&vmarker).map(|m| marker_ok(&m)).unwrap_or(false);
+                    let up_to_date = std::fs::read_to_string(&vmarker)
+                        .map(|m| marker_ok(&m))
+                        .unwrap_or(false);
                     if up_to_date || self.opts.disable_download {
                         let _ = remove_any(dir);
                         #[cfg(unix)]
@@ -362,15 +457,18 @@ impl Rt {
         let _ = remove_any(dir);
         let _ = std::fs::remove_file(&marker);
         // Bazel reports `Fetching repository @@x; <rule>` only as UI progress, never in the log.
-        let (is_reproducible, recorded_inputs) = match self.run_rule(&spec, canonical, &self.repo_context(canonical), dir) {
-            Ok(rep) => rep,
-            Err(e) => {
-                let _ = remove_any(dir);
-                return Err(e);
-            }
-        };
+        let (is_reproducible, recorded_inputs) =
+            match self.run_rule(&spec, canonical, &self.repo_context(canonical), dir) {
+                Ok(rep) => rep,
+                Err(e) => {
+                    let _ = remove_any(dir);
+                    return Err(e);
+                }
+            };
         if let Some(msg) = Self::ensure_repo_boundary(dir) {
-            return Err(format!("fetching {canonical}: java.io.IOException: {msg}\nERROR: {msg}"));
+            return Err(format!(
+                "fetching {canonical}: java.io.IOException: {msg}\nERROR: {msg}"
+            ));
         }
         let mut marker_text = format!("{fp}\n");
         for (k, v) in &recorded_inputs {
@@ -384,15 +482,22 @@ impl Rt {
 
         // `RepositoryFetchFunction`: reproducible non-local repos get their symlinks replanted (absolute targets under
         // the external root become relative) before they may enter the repo contents cache.
-        if is_reproducible && !(spec.rule_name == "local_repository" || spec.rule_name == "new_local_repository") {
-            if let Err(e) = replant_symlinks_relative(dir, &self.opts.workspace_root, &self.external_dir()) {
-                return Err(format!("error replanting symlinks in repo {canonical} before caching: {e}"));
+        if is_reproducible
+            && !(spec.rule_name == "local_repository" || spec.rule_name == "new_local_repository")
+        {
+            if let Err(e) =
+                replant_symlinks_relative(dir, &self.opts.workspace_root, &self.external_dir())
+            {
+                return Err(format!(
+                    "error replanting symlinks in repo {canonical} before caching: {e}"
+                ));
             }
         }
         // If repo_contents_cache is enabled, cache reproducible repos
         if is_reproducible {
             if let Some(rcc_dir) = &self.opts.repo_contents_cache {
-                let is_local = spec.rule_name == "local_repository" || spec.rule_name == "new_local_repository";
+                let is_local = spec.rule_name == "local_repository"
+                    || spec.rule_name == "new_local_repository";
                 if !is_local {
                     let cache = crate::repo_contents_cache::RepoContentsCache::new(rcc_dir);
                     let _ = cache.move_to_cache(dir, &marker, &fp);
@@ -402,16 +507,39 @@ impl Rt {
         Ok(())
     }
 
-    fn rule_environ(self: &Arc<Self>, spec: &RepoSpec) -> Option<Vec<String>> {
+    fn rule_meta(self: &Arc<Self>, spec: &RepoSpec) -> Option<(bool, Vec<String>)> {
         let (repo, pkg, name) = parse_bzl_label(&spec.bzl_file);
         let key = format!("@@{repo}//{pkg}:{name}");
-        let ctx = self.eval_bzl_fresh(&key, &repo, &pkg, &name).ok()?;
-        match ctx.globals.get(&spec.rule_name) {
-            Some(Value::Host(k, id)) if k == "repository_rule" => {
-                Some(self.state.lock().unwrap().rule_defs[id.parse::<usize>().ok()?].environ.clone())
-            }
-            _ => None,
+        let cache_key = (key.clone(), spec.rule_name.clone());
+        if let Some(cached) = self.state.lock().unwrap().rule_meta_cache.get(&cache_key) {
+            return Some(cached.clone());
         }
+        let ctx = self.eval_bzl_fresh(&key, &repo, &pkg, &name).ok()?;
+        let meta = match ctx.globals.get(&spec.rule_name) {
+            Some(Value::Host(k, id)) if k == "repository_rule" => {
+                let st = self.state.lock().unwrap();
+                let def = st.rule_defs.get(id.parse::<usize>().ok()?)?;
+                (def.local, def.environ.clone())
+            }
+            _ => return None,
+        };
+        self.state
+            .lock()
+            .unwrap()
+            .rule_meta_cache
+            .insert(cache_key, meta.clone());
+        Some(meta)
+    }
+
+    fn rule_environ(self: &Arc<Self>, spec: &RepoSpec) -> Option<Vec<String>> {
+        self.rule_meta(spec).map(|(_, environ)| environ)
+    }
+
+    fn is_local_rule(self: &Arc<Self>, spec: &RepoSpec) -> bool {
+        if spec.rule_name == "local_repository" || spec.rule_name == "new_local_repository" {
+            return true;
+        }
+        self.rule_meta(spec).is_some_and(|(local, _)| local)
     }
 
     /// `RepositoryFetchFunction`: a fetched repo needs a boundary file; a symlinked repo root (think
@@ -423,25 +551,55 @@ impl Rt {
             }
         }
         if dir.is_symlink() {
-            return Some(format!("No MODULE.bazel, REPO.bazel, or WORKSPACE file found in {}", dir.display()));
+            return Some(format!(
+                "No MODULE.bazel, REPO.bazel, or WORKSPACE file found in {}",
+                dir.display()
+            ));
         }
         let _ = std::fs::File::create(dir.join("REPO.bazel"));
         None
     }
 
     fn make_bazel_tools(&self, dir: &Path) -> Result<(), String> {
+        let marker = self.marker_path("bazel_tools");
+        let digest = bazel_tools_digest();
+        if !self.opts.force && dir.join("MODULE.bazel").exists() && dir.join("BUILD.bazel").exists()
+        {
+            if let Ok(m) = std::fs::read_to_string(&marker) {
+                if m.trim() == digest {
+                    return Ok(());
+                }
+            }
+        }
         let _ = remove_any(dir);
+        let _ = std::fs::remove_file(&marker);
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         // Bazel's real embedded `@bazel_tools` (//tools, BUILD.tools -> BUILD).
         zel_bazel_tools::materialize(dir)?;
-        std::fs::write(dir.join("BUILD.bazel"), "package(default_visibility = [\"//visibility:public\"])\n").map_err(|e| e.to_string())?;
+        std::fs::write(
+            dir.join("BUILD.bazel"),
+            "package(default_visibility = [\"//visibility:public\"])\n",
+        )
+        .map_err(|e| e.to_string())?;
         let _ = std::fs::remove_file(dir.join("BUILD"));
+        let _ = std::fs::write(&marker, format!("{digest}\n"));
         Ok(())
     }
 
-    pub(crate) fn run_rule(self: &Arc<Self>, spec: &RepoSpec, canonical: &str, ctx_repo: &str, dir: &Path) -> Result<(bool, Vec<(String, Option<String>)>), String> {
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn run_rule(
+        self: &Arc<Self>,
+        spec: &RepoSpec,
+        canonical: &str,
+        ctx_repo: &str,
+        dir: &Path,
+    ) -> Result<(bool, Vec<(String, Option<String>)>), String> {
         let (repo, pkg, name) = parse_bzl_label(&spec.bzl_file);
-        let repo = if repo.starts_with('@') { repo.trim_start_matches('@').to_string() } else { repo };
+        let repo = if repo.starts_with('@') {
+            repo.trim_start_matches('@').to_string()
+        } else {
+            repo
+        };
         let key = format!("@@{repo}//{pkg}:{name}");
         let mut c = self.eval_bzl_fresh(&key, &repo, &pkg, &name).map_err(|e| match e.strip_prefix(crate::rt::STATIC_FAILURE_MARK) {
             Some(msgs) => {
@@ -466,14 +624,39 @@ impl Rt {
             }
         })?;
         let def = match c.globals.get(&spec.rule_name) {
-            Some(Value::Host(k, id)) if k == "repository_rule" => self.state.lock().unwrap().rule_defs[id.parse::<usize>().unwrap_or(0)].clone(),
-            _ => return Err(format!("'{}' is not a repository rule exported by {key}", spec.rule_name)),
+            Some(Value::Host(k, id)) if k == "repository_rule" => {
+                self.state.lock().unwrap().rule_defs[id.parse::<usize>().unwrap_or(0)].clone()
+            }
+            _ => {
+                return Err(format!(
+                    "'{}' is not a repository rule exported by {key}",
+                    spec.rule_name
+                ))
+            }
         };
-        let given_name = spec.attrs.iter().find(|(k, _)| k == "name").and_then(|(_, v)| v.as_str()).unwrap_or(canonical).to_string();
+        let _given_name = spec
+            .attrs
+            .iter()
+            .find(|(k, _)| k == "name")
+            .and_then(|(_, v)| v.as_str())
+            .unwrap_or(canonical)
+            .to_string();
         let mut attrs = spec.attrs.clone();
         attrs.retain(|(k, _)| k != "name");
         let mut defs = def.attrs.clone();
-        defs.insert(0, ("name".into(), AttrDef { kind: "string".into(), default: None, mandatory: false, values: vec![], allow_empty: true }));
+        defs.insert(
+            0,
+            (
+                "name".into(),
+                AttrDef {
+                    kind: "string".into(),
+                    default: None,
+                    mandatory: false,
+                    values: vec![],
+                    allow_empty: true,
+                },
+            ),
+        );
         let mut given = attrs.clone();
         given.push(("name".into(), AttrVal::Str(canonical.to_string())));
         let attr_struct = build_attr_struct(self, &defs, &given, ctx_repo, "", (&repo, &pkg))?;
@@ -492,7 +675,10 @@ impl Rt {
             kind: CtxKind::Repository,
             name: canonical.to_string(),
             canonical: canonical.to_string(),
-            dir: match (dir.parent().and_then(|p| std::fs::canonicalize(p).ok()), dir.file_name()) {
+            dir: match (
+                dir.parent().and_then(|p| crate::canonical_no_unc(p).ok()),
+                dir.file_name(),
+            ) {
                 (Some(p), Some(n)) => p.join(n),
                 _ => dir.to_path_buf(),
             },
@@ -511,16 +697,24 @@ impl Rt {
         };
         let idx = self.register_ctx(data);
         crate::ctx::CTX_CACHE_HITS.with(|h| h.borrow_mut().clear());
-        let r = c.call_value(def.implementation.clone(), vec![Value::Host("repository_ctx".into(), idx.to_string())], BTreeMap::new());
+        let r = c.call_value(
+            def.implementation.clone(),
+            vec![Value::Host("repository_ctx".into(), idx.to_string())],
+            BTreeMap::new(),
+        );
         self.drop_ctx(idx);
         if let Err(e) = r.clone() {
             let prefix = {
                 let mut pre = if canonical.ends_with('+') {
                     String::new()
                 } else {
-                    format!("INFO: Repo {canonical} defined by rule {} in {key}\n", def.name)
+                    format!(
+                        "INFO: Repo {canonical} defined by rule {} in {key}\n",
+                        def.name
+                    )
                 };
-                let hits = crate::ctx::CTX_CACHE_HITS.with(|h| std::mem::take(&mut *h.borrow_mut()));
+                let hits =
+                    crate::ctx::CTX_CACHE_HITS.with(|h| std::mem::take(&mut *h.borrow_mut()));
                 if !hits.is_empty() {
                     let ctx = format!("repository @@{canonical}");
                     pre.push_str(&format!("INFO: {ctx}' used the following cache hits instead of downloading the corresponding file.\n"));
@@ -533,25 +727,47 @@ impl Rt {
             };
             let e = zel_starlark::StarlarkError(e.0);
             let unlocated_message = e.0.strip_prefix("0:0: ").unwrap_or(&e.0);
-            if e.0.starts_with("0:0: ") || (!e.0.contains('\n') && split_location_prefix(&e.0).is_none()) {
+            if e.0.starts_with("0:0: ")
+                || (!e.0.contains('\n') && split_location_prefix(&e.0).is_none())
+            {
                 if let Value::UserFunction(function) = &def.implementation {
                     let at = &function.location;
                     let column = at.column + 4; // the function name after `def `
                     let source = std::fs::read_to_string(&at.file)
                         .ok()
-                        .and_then(|text| text.lines().nth(at.line.saturating_sub(1)).map(|line| line.trim().to_string()))
+                        .and_then(|text| {
+                            text.lines()
+                                .nth(at.line.saturating_sub(1))
+                                .map(|line| line.trim().to_string())
+                        })
                         .unwrap_or_default();
-                    let unlocated_message = unlocated_message.rsplit_once("Error: ").map(|(_, message)| message.trim()).unwrap_or(unlocated_message);
+                    let unlocated_message = unlocated_message
+                        .rsplit_once("Error: ")
+                        .map(|(_, message)| message.trim())
+                        .unwrap_or(unlocated_message);
                     return Err(format!(
                         "{prefix}ERROR: {}:{}:{}: An error occurred during the fetch of repository '{canonical}':\n   Traceback (most recent call last):\n\tFile \"{}\", line {}, column {}, in {}\n\t\t{source}\nError: {}\nERROR: {}",
                         at.file, at.line, column, at.file, at.line, column, function.name, unlocated_message, unlocated_message
                     ));
                 }
             }
-            return Err(format!("{prefix}ERROR: {}", self.format_rule_error(&e, canonical, &mut c)));
+            return Err(format!(
+                "{prefix}ERROR: {}",
+                self.format_rule_error(&e, canonical, &mut c)
+            ));
         }
         if let Ok(ret) = &r {
-            self.report_reproducible_form(canonical, &def.name, &key, &defs, &attr_struct, ret, &reproducible_flag, ctx_repo, (&repo, &pkg));
+            self.report_reproducible_form(
+                canonical,
+                &def.name,
+                &key,
+                &defs,
+                &attr_struct,
+                ret,
+                &reproducible_flag,
+                ctx_repo,
+                (&repo, &pkg),
+            );
         }
         if !dir.exists() {
             return Err(format!("fetching {canonical}: java.io.IOException: {canonical} must create a directory\nERROR: {canonical} must create a directory"));
@@ -569,17 +785,35 @@ impl Rt {
     }
 
     /// Evaluates a module extension without failing if imported repos were not generated (used by `mod tidy`).
-    pub fn eval_extension_raw(self: &Arc<Self>, id: &ExtensionId) -> Result<ExtensionResult, String> {
+    pub fn eval_extension_raw(
+        self: &Arc<Self>,
+        id: &ExtensionId,
+    ) -> Result<ExtensionResult, String> {
         self.eval_extension_opt(id, false)
     }
 
-    fn eval_extension_opt(self: &Arc<Self>, id: &ExtensionId, verify_imports: bool) -> Result<ExtensionResult, String> {
+    fn eval_extension_opt(
+        self: &Arc<Self>,
+        id: &ExtensionId,
+        verify_imports: bool,
+    ) -> Result<ExtensionResult, String> {
         if let Some(r) = self.state.lock().unwrap().ext_results.get(id) {
             return Ok(r.clone());
         }
         let res = self.resolution.clone();
         let usages = res.usages_of(id);
-        let result = if id.is_innate() { self.eval_innate(id, &usages)? } else { self.eval_regular(id, &usages)? };
+        self.state.lock().unwrap().evaluating_exts.push(id.clone());
+        let r = if id.is_innate() {
+            self.eval_innate(id, &usages)
+        } else {
+            self.eval_regular(id, &usages)
+        };
+        self.state
+            .lock()
+            .unwrap()
+            .evaluating_exts
+            .retain(|x| x != id);
+        let result = r?;
         // Verify imports exist if requested.
         if verify_imports {
             for (mk, u) in &usages {
@@ -587,7 +821,8 @@ impl Rt {
                     if !result.generated.iter().any(|(n, _)| *n == exported) {
                         let (_, _, file) = parse_bzl_label(&id.bzl_file);
                         let _ = file;
-                        let names: Vec<&str> = result.generated.iter().map(|(n, _)| n.as_str()).collect();
+                        let names: Vec<&str> =
+                            result.generated.iter().map(|(n, _)| n.as_str()).collect();
                         let (r, p, f) = parse_bzl_label(&id.bzl_file);
                         let ext_id = format!("@@{r}//{p}:{f}%{}", id.name);
                         return Err(format!(
@@ -599,15 +834,27 @@ impl Rt {
                 }
             }
         }
-        self.state.lock().unwrap().ext_results.insert(id.clone(), result.clone());
+        self.state
+            .lock()
+            .unwrap()
+            .ext_results
+            .insert(id.clone(), result.clone());
         Ok(result)
     }
 
-    fn eval_innate(self: &Arc<Self>, id: &ExtensionId, usages: &[(&ModuleKey, &ExtensionUsage)]) -> Result<ExtensionResult, String> {
+    fn eval_innate(
+        self: &Arc<Self>,
+        id: &ExtensionId,
+        usages: &[(&ModuleKey, &ExtensionUsage)],
+    ) -> Result<ExtensionResult, String> {
         let mut out = ExtensionResult::default();
         let (bzl, rule) = id.name.split_once(' ').ok_or("bad innate extension name")?;
         for (mk, u) in usages {
-            let owner = self.resolution.canonical_name_of(mk).cloned().unwrap_or_default();
+            let owner = self
+                .resolution
+                .canonical_name_of(mk)
+                .cloned()
+                .unwrap_or_default();
             let (r, p, n) = self.resolve_label(bzl, &owner, "")?;
             let spec_bzl = if r == "bazel_tools" || bzl.starts_with("@bazel_tools") {
                 format!("@bazel_tools//{p}:{n}")
@@ -623,8 +870,14 @@ impl Rt {
             }
             let rule_def = if let Err(e) = self.eval_bzl_fresh(&key, &r, &p, &n) {
                 if let Some(body) = e.strip_prefix(crate::rt::NESTED_STATIC_FAILURE_MARK) {
-                    if let Some((msgs, trailer)) = body.split_once(crate::rt::NESTED_STATIC_TRAILER_MARK) {
-                        let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
+                    if let Some((msgs, trailer)) =
+                        body.split_once(crate::rt::NESTED_STATIC_TRAILER_MARK)
+                    {
+                        let shown = if r.is_empty() {
+                            format!("//{p}:{n}")
+                        } else {
+                            key.clone()
+                        };
                         return Err(format!(
                             "ERROR: {msgs}\nERROR: error loading '{shown}' for repo rules, requested by {}: {trailer}",
                             u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
@@ -632,26 +885,48 @@ impl Rt {
                     }
                 }
                 if let Some(msgs) = e.strip_prefix(crate::rt::STATIC_FAILURE_MARK) {
-                    let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
+                    let shown = if r.is_empty() {
+                        format!("//{p}:{n}")
+                    } else {
+                        key.clone()
+                    };
                     return Err(format!(
                         "ERROR: {msgs}\nERROR: error loading '{shown}' for repo rules, requested by {}: compilation of module '{n}' failed",
                         u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
                     ));
                 }
                 if e.contains("no such file") {
-                    let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
+                    let shown = if r.is_empty() {
+                        format!("//{p}:{n}")
+                    } else {
+                        key.clone()
+                    };
                     let detail = split_location_prefix(&e)
                         .map(|(at, msg)| format!("at {at}: {msg}"))
                         .unwrap_or_else(|| format!("cannot load '{shown}': no such file"));
                     return Err(format!(
                         "error loading '{shown}' for repo rules, requested by {}: {detail}",
-                        u.tags.first().map(|t| t.location.clone()).unwrap_or_default(),
+                        u.tags
+                            .first()
+                            .map(|t| t.location.clone())
+                            .unwrap_or_default(),
                     ));
                 }
                 if let Some((at, msg)) = split_location_prefix(&e) {
                     if msg.starts_with("There is already a built-in attribute") {
-                        let src = std::fs::read_to_string(&at.file).ok().and_then(|t| t.lines().nth(at.line.saturating_sub(1)).map(|l| l.trim().to_string())).unwrap_or_default();
-                        let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
+                        let src = std::fs::read_to_string(&at.file)
+                            .ok()
+                            .and_then(|t| {
+                                t.lines()
+                                    .nth(at.line.saturating_sub(1))
+                                    .map(|l| l.trim().to_string())
+                            })
+                            .unwrap_or_default();
+                        let shown = if r.is_empty() {
+                            format!("//{p}:{n}")
+                        } else {
+                            key.clone()
+                        };
                         return Err(format!(
                             "ERROR: Traceback (most recent call last):\n\tFile \"{}\", line {}, column {}, in <toplevel>\n\t\t{src}\nError in repository_rule: {msg}\nERROR: error loading '{shown}' for repo rules, requested by {}: initialization of module '{n}' failed",
                             at.file, at.line, at.column,
@@ -664,7 +939,11 @@ impl Rt {
                     } else {
                         format!("ERROR: {at}: {body}")
                     };
-                    let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
+                    let shown = if r.is_empty() {
+                        format!("//{p}:{n}")
+                    } else {
+                        key.clone()
+                    };
                     return Err(format!(
                         "{body}\nERROR: error loading '{shown}' for repo rules, requested by {}: initialization of module '{n}' failed",
                         u.tags.first().map(|t| t.location.clone()).unwrap_or_default()
@@ -673,14 +952,28 @@ impl Rt {
                 None
             } else if let Ok(c) = self.eval_bzl_fresh(&key, &r, &p, &n) {
                 match c.globals.get(rule) {
-                    Some(Value::Host(k, id_str)) if k == "repository_rule" => {
-                        self.state.lock().unwrap().rule_defs.get(id_str.parse::<usize>().unwrap_or(usize::MAX)).cloned()
-                    }
+                    Some(Value::Host(k, id_str)) if k == "repository_rule" => self
+                        .state
+                        .lock()
+                        .unwrap()
+                        .rule_defs
+                        .get(id_str.parse::<usize>().unwrap_or(usize::MAX))
+                        .cloned(),
                     _ => {
                         // `InnateRunnableExtension`: the .bzl must export the repository rule.
-                        let shown = if r.is_empty() { format!("//{p}:{n}") } else { key.clone() };
-                        let mut exported: Vec<&str> =
-                            c.globals.iter().filter(|(_, v)| matches!(v, Value::Host(k, _) if k == "repository_rule")).map(|(n, _)| n.as_str()).collect();
+                        let shown = if r.is_empty() {
+                            format!("//{p}:{n}")
+                        } else {
+                            key.clone()
+                        };
+                        let mut exported: Vec<&str> = c
+                            .globals
+                            .iter()
+                            .filter(
+                                |(_, v)| matches!(v, Value::Host(k, _) if k == "repository_rule"),
+                            )
+                            .map(|(n, _)| n.as_str())
+                            .collect();
                         exported.sort();
                         return Err(format!(
                             "ERROR: {shown} does not export a repository_rule called {rule}, yet its use is requested at {}{}",
@@ -697,30 +990,70 @@ impl Rt {
                     continue;
                 }
                 if let Some(def) = &rule_def {
-                    let kw: BTreeMap<String, Value> = t.attrs.iter().map(|(k, v)| (k.clone(), v.to_value())).collect();
-                    if let Err(e) = crate::ctx::validate_repo_rule_call(&def.name, &def.attrs, &kw, &t.attrs.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>())
-                        .and_then(|_| crate::ctx::check_repo_rule_labels(self, &def.name, &def.attrs, &kw, Some(&owner)))
-                    {
-                        let (file, rest) = t.location.split_once(':').unwrap_or((&t.location, "1:1"));
+                    let kw: BTreeMap<String, Value> = t
+                        .attrs
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.to_value()))
+                        .collect();
+                    if let Err(e) = crate::ctx::validate_repo_rule_call(
+                        &def.name,
+                        &def.attrs,
+                        &kw,
+                        &t.attrs.iter().map(|(k, _)| k.clone()).collect::<Vec<_>>(),
+                    )
+                    .and_then(|_| {
+                        crate::ctx::check_repo_rule_labels(
+                            self,
+                            &def.name,
+                            &def.attrs,
+                            &kw,
+                            Some(&owner),
+                        )
+                    }) {
+                        let (file, rest) =
+                            t.location.split_once(':').unwrap_or((&t.location, "1:1"));
                         let (line, col) = rest.split_once(':').unwrap_or((rest, "1"));
                         let src = line
                             .parse::<usize>()
                             .ok()
-                            .and_then(|l| std::fs::read_to_string(file).ok().and_then(|t| t.lines().nth(l.saturating_sub(1)).map(|x| x.trim().to_string())))
+                            .and_then(|l| {
+                                std::fs::read_to_string(file).ok().and_then(|t| {
+                                    t.lines()
+                                        .nth(l.saturating_sub(1))
+                                        .map(|x| x.trim().to_string())
+                                })
+                            })
                             .map(|x| format!("\t\t{x}\n"))
                             .unwrap_or_default();
                         let tb = format!("Traceback (most recent call last):\n\tFile \"{file}\", line {line}, column {col}, in <toplevel>\n{src}Error: {}", e.0);
                         return Err(format!("{}: {tb}\nERROR: {tb}", t.location));
                     }
                 }
-                let name = t.attrs.iter().find(|(k, _)| k == "name").and_then(|(_, v)| v.as_str()).unwrap_or("").to_string();
-                out.generated.push((name, RepoSpec { bzl_file: spec_bzl.clone(), rule_name: rule.to_string(), attrs: t.attrs.clone() }));
+                let name = t
+                    .attrs
+                    .iter()
+                    .find(|(k, _)| k == "name")
+                    .and_then(|(_, v)| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                out.generated.push((
+                    name,
+                    RepoSpec {
+                        bzl_file: spec_bzl.clone(),
+                        rule_name: rule.to_string(),
+                        attrs: t.attrs.clone(),
+                    },
+                ));
             }
         }
         Ok(out)
     }
 
-    fn eval_regular(self: &Arc<Self>, id: &ExtensionId, usages: &[(&ModuleKey, &ExtensionUsage)]) -> Result<ExtensionResult, String> {
+    fn eval_regular(
+        self: &Arc<Self>,
+        id: &ExtensionId,
+        usages: &[(&ModuleKey, &ExtensionUsage)],
+    ) -> Result<ExtensionResult, String> {
         let (repo, pkg, file) = parse_bzl_label(&id.bzl_file);
         let key = format!("@@{repo}//{pkg}:{file}");
         if !(file.ends_with(".bzl") || file.ends_with(".scl")) {
@@ -765,13 +1098,27 @@ impl Rt {
             }
         })?;
         let def = match c.globals.get(&id.name) {
-            Some(Value::Host(k, i)) if k == "module_extension" => self.state.lock().unwrap().ext_defs[i.parse::<usize>().unwrap_or(0)].clone(),
+            Some(Value::Host(k, i)) if k == "module_extension" => {
+                self.state.lock().unwrap().ext_defs[i.parse::<usize>().unwrap_or(0)].clone()
+            }
             _ => {
                 // `RegularRunnableExtension.load`: a missing or non-extension global is the same failure.
-                let shown = if repo.is_empty() { format!("//{pkg}:{file}") } else { key.clone() };
-                let loc = usages.first().and_then(|(_, u)| u.proxies.first()).map(|p| p.location.clone()).unwrap_or_default();
-                let mut exported: Vec<&str> =
-                    c.globals.iter().filter(|(_, v)| matches!(v, Value::Host(k, _) if k == "module_extension")).map(|(n, _)| n.as_str()).collect();
+                let shown = if repo.is_empty() {
+                    format!("//{pkg}:{file}")
+                } else {
+                    key.clone()
+                };
+                let loc = usages
+                    .first()
+                    .and_then(|(_, u)| u.proxies.first())
+                    .map(|p| p.location.clone())
+                    .unwrap_or_default();
+                let mut exported: Vec<&str> = c
+                    .globals
+                    .iter()
+                    .filter(|(_, v)| matches!(v, Value::Host(k, _) if k == "module_extension"))
+                    .map(|(n, _)| n.as_str())
+                    .collect();
                 exported.sort();
                 return Err(format!(
                     "ERROR: {shown} does not export a module extension called {}, yet its use is requested at {loc}{}",
@@ -786,27 +1133,43 @@ impl Rt {
         let mut root_has_non_dev = false;
         let mut ordered: Vec<(&ModuleKey, &ExtensionUsage)> = usages.to_vec();
         ordered.sort_by_key(|(k, _)| {
-            self.resolution.dep_graph.keys.iter().position(|m| m == *k).unwrap_or(usize::MAX)
+            self.resolution
+                .dep_graph
+                .keys
+                .iter()
+                .position(|m| m == *k)
+                .unwrap_or(usize::MAX)
         });
         for (module_idx, (mk, u)) in ordered.iter().enumerate() {
             let m = self.resolution.dep_graph.get(mk).ok_or("module missing")?;
-            let owner = self.resolution.canonical_name_of(mk).cloned().unwrap_or_default();
+            let owner = self
+                .resolution
+                .canonical_name_of(mk)
+                .cloned()
+                .unwrap_or_default();
             let mut by_class: BTreeMap<String, Vec<Value>> = BTreeMap::new();
             for (cname, _) in &def.tag_classes {
                 by_class.insert(cname.clone(), vec![]);
             }
             for (tag_idx, t) in u.tags.iter().enumerate() {
-                let Some((_, cdefs)) = def.tag_classes.iter().find(|(n, _)| *n == t.tag_name) else {
-                    let names: Vec<&str> = def.tag_classes.iter().map(|(n, _)| n.as_str()).collect();
+                let Some((_, cdefs)) = def.tag_classes.iter().find(|(n, _)| *n == t.tag_name)
+                else {
+                    let names: Vec<&str> =
+                        def.tag_classes.iter().map(|(n, _)| n.as_str()).collect();
                     let _ = mk;
                     return Err(format!(
                         "The module extension defined at {} does not have a tag class named {}, but its use is attempted at {}{}",
                         def.location, t.tag_name, t.location, crate::ctxargs::did_you_mean(&t.tag_name, &names)
                     ));
                 };
-                let kw: BTreeMap<String, Value> = t.attrs.iter().map(|(k, v)| (k.clone(), v.to_value())).collect();
+                let kw: BTreeMap<String, Value> = t
+                    .attrs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.to_value()))
+                    .collect();
                 let order: Vec<String> = t.attrs.iter().map(|(k, _)| k.clone()).collect();
-                if let Err(e) = crate::ctx::validate_repo_rule_call(&t.tag_name, cdefs, &kw, &order) {
+                if let Err(e) = crate::ctx::validate_repo_rule_call(&t.tag_name, cdefs, &kw, &order)
+                {
                     // `TagClass` attribute errors read "in 't' tag, ..." and carry a location-less traceback.
                     let msg = {
                         // `TagClass` errors never mention the repo rule name (tags may carry a `name` attribute).
@@ -821,7 +1184,13 @@ impl Rt {
                     let src = line
                         .parse::<usize>()
                         .ok()
-                        .and_then(|l| std::fs::read_to_string(file).ok().and_then(|x| x.lines().nth(l.saturating_sub(1)).map(|y| format!("\t\t{}\n", y.trim()))))
+                        .and_then(|l| {
+                            std::fs::read_to_string(file).ok().and_then(|x| {
+                                x.lines()
+                                    .nth(l.saturating_sub(1))
+                                    .map(|y| format!("\t\t{}\n", y.trim()))
+                            })
+                        })
                         .unwrap_or_default();
                     return Err(format!(
                         "ERROR: Traceback (most recent call last):\n\tFile \"{file}\", line {line}, column {col}, in <toplevel>\n{src}Error: {msg}"
@@ -833,9 +1202,17 @@ impl Rt {
                 fields.insert("_dev_dependency".into(), Value::Bool(t.dev_dependency));
                 fields.insert(
                     "_sort_key".into(),
-                    Value::Tuple(vec![Value::Int((module_idx as i64).into()), Value::Int((tag_idx as i64).into())]),
+                    Value::Tuple(vec![
+                        Value::Int((module_idx as i64).into()),
+                        Value::Int((tag_idx as i64).into()),
+                    ]),
                 );
-                by_class.entry(t.tag_name.clone()).or_default().push(Value::Struct(Arc::new(zel_starlark::StructValue::new(fields))));
+                by_class
+                    .entry(t.tag_name.clone())
+                    .or_default()
+                    .push(Value::Struct(Arc::new(zel_starlark::StructValue::new(
+                        fields,
+                    ))));
                 if mk.is_root() && !t.dev_dependency {
                     root_has_non_dev = true;
                 }
@@ -843,7 +1220,12 @@ impl Rt {
             if mk.is_root() && u.proxies.iter().any(|p| !p.dev_dependency) {
                 root_has_non_dev = true;
             }
-            let tags_struct = struct_value(by_class.iter().map(|(k, v)| (k.as_str(), list_value(v.clone()))).collect());
+            let tags_struct = struct_value(
+                by_class
+                    .iter()
+                    .map(|(k, v)| (k.as_str(), list_value(v.clone())))
+                    .collect(),
+            );
             modules.push(crate::rt::opaque_struct_value(
                 vec![
                     ("name", str_value(&m.name)),
@@ -860,12 +1242,20 @@ impl Rt {
         let factors = eval_factors(&def);
         let usages_digest = {
             let root_mapping = self.resolution.repo_mapping(&ModuleKey::root());
-            let root_repo_name = self.resolution.dep_graph.get(&ModuleKey::root()).map(|m| m.repo_name.clone()).unwrap_or_default();
+            let root_repo_name = self
+                .resolution
+                .dep_graph
+                .get(&ModuleKey::root())
+                .map(|m| m.repo_name.clone())
+                .unwrap_or_default();
             let mut repo_overrides: Vec<(String, String)> = vec![];
             for (mk, u) in &ordered {
                 if mk.is_root() {
                     for (local, spec) in &u.repo_overrides {
-                        let canonical = root_mapping.get(&spec.overriding_repo_name).cloned().unwrap_or_default();
+                        let canonical = root_mapping
+                            .get(&spec.overriding_repo_name)
+                            .cloned()
+                            .unwrap_or_default();
                         repo_overrides.push((local.clone(), canonical));
                     }
                 }
@@ -873,28 +1263,50 @@ impl Rt {
             let abridged_modules = ordered
                 .iter()
                 .filter_map(|(mk, _)| {
-                    self.resolution.dep_graph.get(mk).map(|m| crate::usages_digest::AbridgedModule {
-                        name: m.name.clone(),
-                        version: m.version.to_string(),
-                        key: mk.to_string(),
+                    self.resolution.dep_graph.get(mk).map(|m| {
+                        crate::usages_digest::AbridgedModule {
+                            name: m.name.clone(),
+                            version: m.version.to_string(),
+                            key: mk.to_string(),
+                        }
                     })
                 })
                 .collect();
             crate::usages_digest::usages_digest(&crate::usages_digest::UsagesDigestInput {
                 usages: ordered.iter().map(|(a, b)| (*a, *b)).collect(),
-                unique_name: self.resolution.extension_unique_names.get(id).map(|s| s.as_str()).unwrap_or(""),
+                unique_name: self
+                    .resolution
+                    .extension_unique_names
+                    .get(id)
+                    .map(|s| s.as_str())
+                    .unwrap_or(""),
                 root_repo_name: &root_repo_name,
                 abridged_modules,
                 repo_overrides,
             })
         };
         let bzl_digest = self.bzl_transitive_digest(&key);
-        let mode = self.lock.lock().unwrap().mode.unwrap_or(crate::lockfile::LockfileMode::Off);
+        let mode = self
+            .lock
+            .lock()
+            .unwrap()
+            .mode
+            .unwrap_or(crate::lockfile::LockfileMode::Off);
         if mode != crate::lockfile::LockfileMode::Off {
             let existing = {
                 let l = self.lock.lock().unwrap();
-                l.workspace.module_extensions.get(&lock_key).and_then(|m| m.get(&factors)).cloned()
-                    .or_else(|| l.hidden.module_extensions.get(&lock_key).and_then(|m| m.get(&factors)).cloned())
+                l.workspace
+                    .module_extensions
+                    .get(&lock_key)
+                    .and_then(|m| m.get(&factors))
+                    .cloned()
+                    .or_else(|| {
+                        l.hidden
+                            .module_extensions
+                            .get(&lock_key)
+                            .and_then(|m| m.get(&factors))
+                            .cloned()
+                    })
             };
             if let Some(le) = existing {
                 let mut diffs: Vec<String> = vec![];
@@ -902,13 +1314,26 @@ impl Rt {
                     diffs.push(format!("the implementation of the extension '{ext_display}' or one of its transitive .bzl files has changed"));
                 }
                 if le.usages_digest != usages_digest {
-                    diffs.push(format!("the usages of the extension '{ext_display}' have changed"));
+                    diffs.push(format!(
+                        "the usages of the extension '{ext_display}' have changed"
+                    ));
                 }
-                if let Some(r) = crate::lockfile::recorded_inputs_outdated(&le.recorded_inputs, &self.opts.client_env, &self.opts.workspace_root, &self.external_dir()) {
-                    diffs.push(format!("an input to the extension '{ext_display}' changed: {r}"));
+                if let Some(r) = crate::lockfile::recorded_inputs_outdated(
+                    &le.recorded_inputs,
+                    &self.opts.client_env,
+                    &self.opts.workspace_root,
+                    &self.external_dir(),
+                ) {
+                    diffs.push(format!(
+                        "an input to the extension '{ext_display}' changed: {r}"
+                    ));
                 }
                 if diffs.is_empty() {
-                    self.lock.lock().unwrap().used.push((lock_key.clone(), factors.clone(), le.clone()));
+                    self.lock.lock().unwrap().used.push((
+                        lock_key.clone(),
+                        factors.clone(),
+                        le.clone(),
+                    ));
                     return Ok(crate::lockfile::result_from_lock(&le));
                 }
                 if mode == crate::lockfile::LockfileMode::Error && !le.reproducible() {
@@ -919,11 +1344,21 @@ impl Rt {
                 }
             }
         }
-        let unique = self.resolution.extension_unique_names.get(id).cloned().unwrap_or_default();
+        let unique = self
+            .resolution
+            .extension_unique_names
+            .get(id)
+            .cloned()
+            .unwrap_or_default();
         let dir = self.opts.output_base.join("modextwd").join(&unique);
         let facts_value = {
             let l = self.lock.lock().unwrap();
-            let stored_ver = l.workspace.facts_versions.get(&lock_key).copied().unwrap_or(0);
+            let stored_ver = l
+                .workspace
+                .facts_versions
+                .get(&lock_key)
+                .copied()
+                .unwrap_or(0);
             if stored_ver == def.facts_version as i64 {
                 if let Some(f) = l.workspace.facts.get(&lock_key) {
                     crate::ctx::facts_value(f)
@@ -933,6 +1368,11 @@ impl Rt {
             } else {
                 crate::ctx::facts_value(&crate::json::Json::Obj(vec![]))
             }
+        };
+        let (def_repo, def_pkg, _) = if def.bzl_file.is_empty() {
+            (repo.clone(), pkg.clone(), file.clone())
+        } else {
+            parse_bzl_label(&def.bzl_file)
         };
         let data = CtxData {
             kind: CtxKind::Module,
@@ -945,8 +1385,8 @@ impl Rt {
             env_seen: Arc::new(Mutex::new(BTreeMap::new())),
             file_inputs: Arc::new(Mutex::new(BTreeMap::new())),
             rec: Arc::new(Mutex::new(Vec::new())),
-            label_repo: repo.clone(),
-            label_pkg: pkg.clone(),
+            label_repo: def_repo.clone(),
+            label_pkg: def_pkg.clone(),
             reproducible: Arc::new(Mutex::new(false)),
             facts: facts_value,
             is_isolated: id.isolation_key.is_some(),
@@ -960,13 +1400,19 @@ impl Rt {
             let mut envs: Vec<&String> = def.environ.iter().collect();
             envs.sort();
             for e in envs {
-                data.record(format!("ENV:{}", crate::ctx::escape_input(e)), self.opts.client_env.get(e).cloned());
+                data.record(
+                    format!("ENV:{}", crate::ctx::escape_input(e)),
+                    self.opts.client_env.get(e).cloned(),
+                );
             }
         }
         // The repo mapping entries used while loading the extension's .bzl files.
         let mut static_mappings = self.recorded_repo_mapping_entries(&key);
         // Labels in tag attributes resolved through the using module's repo mapping.
-        for e in crate::rt::RECORD_TAG_MAPPINGS.with(|g| g.borrow_mut().take()).unwrap_or_default() {
+        for e in crate::rt::RECORD_TAG_MAPPINGS
+            .with(|g| g.borrow_mut().take())
+            .unwrap_or_default()
+        {
             if !static_mappings.contains(&e) {
                 static_mappings.push(e);
             }
@@ -977,12 +1423,28 @@ impl Rt {
             }
         }
         for (src, apparent, canon) in static_mappings {
-            data.record(format!("REPO_MAPPING:{}", crate::ctx::escape_input(&format!("{src},{apparent}"))), Some(canon));
+            data.record(
+                format!(
+                    "REPO_MAPPING:{}",
+                    crate::ctx::escape_input(&format!("{src},{apparent}"))
+                ),
+                Some(canon),
+            );
         }
         let idx = self.register_ctx(data);
         self.state.lock().unwrap().collectors.push(vec![]);
-        let r = c.call_value(def.implementation.clone(), vec![Value::Host("module_ctx".into(), idx.to_string())], BTreeMap::new());
-        let generated = self.state.lock().unwrap().collectors.pop().unwrap_or_default();
+        let r = c.call_value(
+            def.implementation.clone(),
+            vec![Value::Host("module_ctx".into(), idx.to_string())],
+            BTreeMap::new(),
+        );
+        let deferred = self
+            .state
+            .lock()
+            .unwrap()
+            .collectors
+            .pop()
+            .unwrap_or_default();
         self.drop_ctx(idx);
         // `shouldDeleteWorkingDirectoryOnClose`: the extension's working directory is ephemeral.
         let _ = remove_any(&dir);
@@ -1000,7 +1462,10 @@ impl Rt {
                 if msg.starts_with("in call to '") && msg.contains("' repo rule with name '") {
                     let stack = c.thread.format_stack_trace_at(&at);
                     let body = format!("{stack}Error: {msg}");
-                    let plain = body.split_once('\n').map(|(_, r)| r.to_string()).unwrap_or_default();
+                    let plain = body
+                        .split_once('\n')
+                        .map(|(_, r)| r.to_string())
+                        .unwrap_or_default();
                     return format!("{body}\nERROR: Traceback (most recent call last):\n{plain}");
                 }
                 let who = match c.builtin_error.take() {
@@ -1010,7 +1475,11 @@ impl Rt {
                 format!("{}{who}: {msg}", c.thread.format_stack_trace_at(&at))
             } else {
                 // No position in the message: report at the innermost known call position.
-                let at = if es.contains("has no field or method") { c.attr_loc.clone() } else { c.cur_call_loc.clone() };
+                let at = if es.contains("has no field or method") {
+                    c.attr_loc.clone()
+                } else {
+                    c.cur_call_loc.clone()
+                };
                 let who = match c.builtin_error.take() {
                     Some((f, m)) if m == es => format!("Error in {f}"),
                     _ => "Error".to_string(),
@@ -1019,44 +1488,139 @@ impl Rt {
             };
             format!("{located}\nERROR: error evaluating module extension {ext_label}")
         })?;
-        if !matches!(ret, Value::None) && !matches!(ret, Value::Host(ref k, _) if k == "extension_metadata") {
+        if !matches!(ret, Value::None)
+            && !matches!(ret, Value::Host(ref k, _) if k == "extension_metadata")
+        {
             return Err(format!(
                 "expected module extension {ext_label} to return None or extension_metadata, got {}",
                 ret.type_name()
             ));
         }
-        let mut out = ExtensionResult { generated, ..Default::default() };
+        // `ModuleExtensionEvalStarlarkThreadContext.createRepos()`: convert deferred label strings
+        // using the defining .bzl's repo mapping, then all generated names, then root overrides.
+        let mut full_mapping = self.repo_mapping_of(&def_repo);
+        for d in &deferred {
+            full_mapping.insert(d.name.clone(), format!("{unique}+{}", d.name));
+        }
+        if let Some(ov) = self.resolution.repo_overrides.get(id) {
+            for (exported, canon) in ov {
+                full_mapping.insert(exported.clone(), canon.clone());
+            }
+        }
+        let conv_label = |s: &str| -> Result<String, String> {
+            let norm;
+            let s = if !s.starts_with('@') && !s.starts_with("//") && !s.starts_with(':') {
+                norm = format!(":{s}");
+                norm.as_str()
+            } else {
+                s
+            };
+            let (r, p, n) =
+                self.resolve_label_with_mapping(s, &def_repo, &def_pkg, Some(&full_mapping))?;
+            Ok(format!("@@{r}//{p}:{n}"))
+        };
+        let mut generated = Vec::with_capacity(deferred.len());
+        for d in deferred {
+            let mut attrs = Vec::with_capacity(d.kw.len());
+            for (k, v) in d.kw {
+                let kind = d
+                    .attr_defs
+                    .iter()
+                    .find(|(n, _)| n == &k)
+                    .map(|(_, def)| def.kind.as_str())
+                    .unwrap_or("");
+                let converted = match (kind, v) {
+                    ("label" | "output", AttrVal::Str(s)) => AttrVal::Label(conv_label(&s)?),
+                    ("label_list" | "output_list", AttrVal::List(l)) => AttrVal::List(
+                        l.into_iter()
+                            .map(|x| match x {
+                                AttrVal::Str(s) => conv_label(&s).map(AttrVal::Label),
+                                other => Ok(other),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                    ("string_keyed_label_dict", AttrVal::Dict(entries)) => AttrVal::Dict(
+                        entries
+                            .into_iter()
+                            .map(|(ek, ev)| match ev {
+                                AttrVal::Str(s) => conv_label(&s).map(|l| (ek, AttrVal::Label(l))),
+                                other => Ok((ek, other)),
+                            })
+                            .collect::<Result<Vec<_>, _>>()?,
+                    ),
+                    ("label_keyed_string_dict", AttrVal::Dict(entries)) => AttrVal::Dict(
+                        entries
+                            .into_iter()
+                            .map(|(ek, ev)| {
+                                let nk = if ek.starts_with("@@") {
+                                    ek
+                                } else {
+                                    conv_label(&ek)?
+                                };
+                                Ok((nk, ev))
+                            })
+                            .collect::<Result<Vec<_>, String>>()?,
+                    ),
+                    ("label_list_dict", AttrVal::Dict(entries)) => AttrVal::Dict(
+                        entries
+                            .into_iter()
+                            .map(|(ek, ev)| match ev {
+                                AttrVal::List(l) => {
+                                    let nl = l
+                                        .into_iter()
+                                        .map(|x| match x {
+                                            AttrVal::Str(s) => conv_label(&s).map(AttrVal::Label),
+                                            other => Ok(other),
+                                        })
+                                        .collect::<Result<Vec<_>, _>>()?;
+                                    Ok((ek, AttrVal::List(nl)))
+                                }
+                                other => Ok((ek, other)),
+                            })
+                            .collect::<Result<Vec<_>, String>>()?,
+                    ),
+                    (_, other) => other,
+                };
+                attrs.push((k, converted));
+            }
+            generated.push((
+                d.name,
+                RepoSpec {
+                    bzl_file: d.bzl_file,
+                    rule_name: d.rule_name,
+                    attrs,
+                },
+            ));
+        }
+        let mut out = ExtensionResult {
+            generated,
+            ..Default::default()
+        };
         if let Value::Host(k, s) = ret {
             if k == "extension_metadata" {
                 let parts: Vec<&str> = s.split('|').collect();
-                let parse_list = |p: &str| if p == "-" { None } else { Some(p.split(',').filter(|x| !x.is_empty()).map(String::from).collect::<Vec<_>>()) };
+                let parse_list = |p: &str| {
+                    if p == "-" {
+                        None
+                    } else {
+                        Some(
+                            p.split(',')
+                                .filter(|x| !x.is_empty())
+                                .map(String::from)
+                                .collect::<Vec<_>>(),
+                        )
+                    }
+                };
                 let ua = parts.first().copied().unwrap_or("NO").to_string();
-                let facts_json = parts.get(4).and_then(|p| if *p == "-" { None } else { crate::json::Json::parse(p).ok() });
+                let facts_json = parts.get(4).and_then(|p| {
+                    if *p == "-" {
+                        None
+                    } else {
+                        crate::json::Json::parse(p).ok()
+                    }
+                });
                 let explicit_deps = parts.get(2).and_then(|p| parse_list(p));
                 let explicit_dev_deps = parts.get(3).and_then(|p| parse_list(p));
-                let all_names: HashSet<&str> = out.generated.iter().map(|(n, _)| n.as_str()).collect();
-                if let Some(explicit) = &explicit_deps {
-                    let invalid: Vec<&str> = explicit.iter().map(|s| s.as_str()).filter(|n| !all_names.contains(n)).collect();
-                    if !invalid.is_empty() {
-                        return Err(format!(
-                            "root_module_direct_deps contained the following repositories not generated by the extension: {}\nERROR: error evaluating module extension {} in {}",
-                            invalid.join(", "),
-                            id.name,
-                            if repo.is_empty() { format!("//{pkg}:{file}") } else { format!("@@{repo}//{pkg}:{file}") }
-                        ));
-                    }
-                }
-                if let Some(explicit_dev) = &explicit_dev_deps {
-                    let invalid: Vec<&str> = explicit_dev.iter().map(|s| s.as_str()).filter(|n| !all_names.contains(n)).collect();
-                    if !invalid.is_empty() {
-                        return Err(format!(
-                            "root_module_direct_dev_deps contained the following repositories not generated by the extension: {}\nERROR: error evaluating module extension {} in {}",
-                            invalid.join(", "),
-                            id.name,
-                            if repo.is_empty() { format!("//{pkg}:{file}") } else { format!("@@{repo}//{pkg}:{file}") }
-                        ));
-                    }
-                }
                 out.metadata = Some(ExtensionMetadata {
                     use_all_repos: ua != "NO",
                     use_all: ua,
@@ -1069,46 +1633,79 @@ impl Rt {
         }
         if let Some(meta) = &out.metadata {
             if let Some((_root_key, root_usage)) = usages.iter().find(|(k, _)| k.is_root()) {
-                let all_repos: BTreeSet<String> = out.generated.iter().map(|(n, _)| n.clone()).collect();
+                let all_repos: BTreeSet<String> =
+                    out.generated.iter().map(|(n, _)| n.clone()).collect();
                 let fixup_bzl = match id.bzl_file.strip_prefix("@@//") {
                     // The usage's label is normalized with the root module's repo name.
                     Some(rest) => {
-                        let rn = self.resolution.dep_graph.get(&ModuleKey::root()).map(|m| m.repo_name.clone()).unwrap_or_default();
+                        let rn = self
+                            .resolution
+                            .dep_graph
+                            .get(&ModuleKey::root())
+                            .map(|m| m.repo_name.clone())
+                            .unwrap_or_default();
                         format!("@{rn}//{rest}")
                     }
                     None => id.bzl_file.clone(),
                 };
-                match crate::tidy::fixup_for(&id.name, &fixup_bzl, root_usage, Some(meta), &all_repos) {
+                match crate::tidy::fixup_for(
+                    &id.name,
+                    &fixup_bzl,
+                    root_usage,
+                    Some(meta),
+                    &all_repos,
+                ) {
                     Ok(Some(fixup)) => self.info(format!("WARNING: {}", fixup.warning)),
                     Ok(None) => {}
                     Err(e) => {
-                        let shown = id.bzl_file.strip_prefix("@@//").map(|r| format!("//{r}")).unwrap_or_else(|| id.bzl_file.clone());
-                        return Err(format!("ERROR: {e}\nERROR: error evaluating module extension {} in {shown}", id.name));
+                        let shown = id
+                            .bzl_file
+                            .strip_prefix("@@//")
+                            .map(|r| format!("//{r}"))
+                            .unwrap_or_else(|| id.bzl_file.clone());
+                        return Err(format!(
+                            "ERROR: {e}\nERROR: error evaluating module extension {} in {shown}",
+                            id.name
+                        ));
                     }
                 }
             }
         }
         out.env_variables = env_seen.lock().unwrap().clone();
         for e in &def.environ {
-            out.env_variables.entry(e.clone()).or_insert_with(|| self.opts.client_env.get(e).cloned());
+            out.env_variables
+                .entry(e.clone())
+                .or_insert_with(|| self.opts.client_env.get(e).cloned());
         }
         out.recorded_file_inputs = file_inputs.lock().unwrap().clone();
         let reproducible = out.metadata.as_ref().is_some_and(|m| m.reproducible);
         if mode == crate::lockfile::LockfileMode::Error && !reproducible {
             return Err(format!(
                 "The module extension '{ext_display}'{} does not exist in the lockfile",
-                if factors == "general" { String::new() } else { format!(" for platform {factors}") }
+                if factors == "general" {
+                    String::new()
+                } else {
+                    format!(" for platform {factors}")
+                }
             ));
         }
         if mode != crate::lockfile::LockfileMode::Off {
-            let inputs: Vec<String> = rec.lock().unwrap().iter().map(|(i, v)| crate::ctx::format_recorded(i, v.as_deref())).collect();
+            let inputs: Vec<String> = rec
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|(i, v)| crate::ctx::format_recorded(i, v.as_deref()))
+                .collect();
             // `SingleExtensionEvalFunction`: a recorded apparent name that is not visible makes the lockfile entry invalid.
             let invisible: Vec<String> = rec
                 .lock()
                 .unwrap()
                 .iter()
                 .filter(|(i, v)| i.starts_with("REPO_MAPPING:") && v.is_none())
-                .filter_map(|(i, _)| i.strip_prefix("REPO_MAPPING:").and_then(crate::lockfile::unescape_input))
+                .filter_map(|(i, _)| {
+                    i.strip_prefix("REPO_MAPPING:")
+                        .and_then(crate::lockfile::unescape_input)
+                })
                 .filter_map(|i| i.rsplit_once(',').map(|(_, a)| format!("@{a}")))
                 .collect();
             if !invisible.is_empty() {
@@ -1122,16 +1719,31 @@ impl Rt {
                 usages_digest,
                 recorded_inputs: inputs,
                 generated_repo_specs: out.generated.clone(),
-                metadata: out.metadata.as_ref().and_then(crate::lockfile::metadata_to_lock),
+                metadata: out
+                    .metadata
+                    .as_ref()
+                    .and_then(crate::lockfile::metadata_to_lock),
             };
-            self.lock.lock().unwrap().used.push((lock_key.clone(), factors, le));
-            if def.facts_version > 0 || out.metadata.as_ref().and_then(|m| m.facts.as_ref()).is_some() {
+            self.lock
+                .lock()
+                .unwrap()
+                .used
+                .push((lock_key.clone(), factors, le));
+            if def.facts_version > 0
+                || out
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.facts.as_ref())
+                    .is_some()
+            {
                 let mut l = self.lock.lock().unwrap();
                 if let Some(facts) = out.metadata.as_ref().and_then(|m| m.facts.clone()) {
                     l.workspace.facts.insert(lock_key.clone(), facts);
                 }
                 if def.facts_version > 0 {
-                    l.workspace.facts_versions.insert(lock_key, def.facts_version as i64);
+                    l.workspace
+                        .facts_versions
+                        .insert(lock_key, def.facts_version as i64);
                 }
             }
         }
@@ -1140,13 +1752,22 @@ impl Rt {
 
     /// Fetches every repository of the resolved graph (module repos, then extension repos).
     pub fn all_repo_names(self: &Arc<Self>) -> Result<Vec<String>, String> {
-        let mut names: Vec<String> = self.resolution.canonical_repo_names.keys.iter().filter(|c| !c.is_empty()).cloned().collect();
+        let mut names: Vec<String> = self
+            .resolution
+            .canonical_repo_names
+            .keys
+            .iter()
+            .filter(|c| !c.is_empty())
+            .cloned()
+            .collect();
         for id in self.resolution.extension_ids() {
-            let r = match self.eval_extension_raw(&id) {
-                Ok(res) => res,
-                Err(e) => return Err(e),
-            };
-            let unique = self.resolution.extension_unique_names.get(&id).cloned().unwrap_or_default();
+            let r = self.eval_extension_raw(&id)?;
+            let unique = self
+                .resolution
+                .extension_unique_names
+                .get(&id)
+                .cloned()
+                .unwrap_or_default();
             for (n, _) in r.generated {
                 names.push(format!("{unique}+{n}"));
             }
@@ -1158,7 +1779,16 @@ impl Rt {
 fn eval_factors(def: &ExtensionDef) -> String {
     let mut parts = vec![];
     if def.os_dependent {
-        parts.push(format!("os:{}", if cfg!(target_os = "macos") { "osx" } else if cfg!(target_os = "windows") { "windows" } else { "linux" }));
+        parts.push(format!(
+            "os:{}",
+            if cfg!(target_os = "macos") {
+                "osx"
+            } else if cfg!(target_os = "windows") {
+                "windows"
+            } else {
+                "linux"
+            }
+        ));
     }
     if def.arch_dependent {
         let (_, arch) = java_os_name_and_arch();
@@ -1173,7 +1803,17 @@ fn eval_factors(def: &ExtensionDef) -> String {
 
 pub fn remove_any(p: &Path) -> std::io::Result<()> {
     match p.symlink_metadata() {
-        Ok(m) if m.file_type().is_symlink() || m.is_file() => std::fs::remove_file(p),
+        Ok(m) if m.file_type().is_symlink() => {
+            #[cfg(windows)]
+            {
+                std::fs::remove_file(p).or_else(|_| std::fs::remove_dir(p))
+            }
+            #[cfg(not(windows))]
+            {
+                std::fs::remove_file(p)
+            }
+        }
+        Ok(m) if m.is_file() => std::fs::remove_file(p),
         Ok(_) => std::fs::remove_dir_all(p),
         Err(_) => Ok(()),
     }
@@ -1187,9 +1827,9 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
         let to = dst.join(e.file_name());
         let ft = e.file_type().map_err(|e| e.to_string())?;
         if ft.is_symlink() {
-            let t = std::fs::read_link(&from).map_err(|e| e.to_string())?;
+            let _t = std::fs::read_link(&from).map_err(|e| e.to_string())?;
             #[cfg(unix)]
-            std::os::unix::fs::symlink(t, &to).map_err(|e| e.to_string())?;
+            std::os::unix::fs::symlink(_t, &to).map_err(|e| e.to_string())?;
         } else if ft.is_dir() {
             copy_tree(&from, &to)?;
         } else {
@@ -1197,258 +1837,6 @@ pub fn copy_tree(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::hash::{base64_encode, sha256};
-    use crate::registry::testutil::*;
-    use crate::resolve::{resolve, CheckMode, ResolveOptions};
-
-    fn make_tgz(dir: &Path, name: &str, files: &[(&str, &str)]) -> PathBuf {
-        let src = dir.join(format!("{name}-src"));
-        for (p, c) in files {
-            write(&src, &format!("{name}-1.0/{p}"), c);
-        }
-        let out = dir.join(format!("{name}.tar.gz"));
-        let st = std::process::Command::new("tar")
-            .args(["czf", out.to_str().unwrap(), "-C", src.to_str().unwrap(), &format!("{name}-1.0")])
-            .status()
-            .unwrap();
-        assert!(st.success());
-        out
-    }
-
-    fn integrity(p: &Path) -> String {
-        format!("sha256-{}", base64_encode(&sha256(&std::fs::read(p).unwrap())))
-    }
-
-    struct Env {
-        rt: Arc<Rt>,
-        ws: PathBuf,
-        ob: PathBuf,
-    }
-
-    fn setup(name: &str, root_module: &str, mods: &[(&str, &str, &[(&str, &str)])]) -> Env {
-        let base = tmpdir(name);
-        let reg = base.join("registry");
-        for (n, v, files) in mods {
-            let tgz = make_tgz(&base, n, files);
-            let mb = files.iter().find(|(p, _)| *p == "MODULE.bazel").map(|(_, c)| *c).unwrap_or("");
-            add_module(
-                &reg,
-                n,
-                v,
-                mb,
-                &format!(
-                    r#"{{"url":"file://{}","integrity":"{}","strip_prefix":"{n}-1.0"}}"#,
-                    tgz.display(),
-                    integrity(&tgz)
-                ),
-            );
-        }
-        let ws = base.join("ws");
-        write(&ws, "MODULE.bazel", root_module);
-        let mut o = ResolveOptions::new(&ws);
-        o.registries = vec![format!("file://{}", reg.display())];
-        o.check_direct_dependencies = CheckMode::Off;
-        let res = resolve(&o).unwrap_or_else(|e| panic!("{e}"));
-        let ob = base.join("ob");
-        let mut env = std::env::vars().collect::<BTreeMap<_, _>>();
-        env.insert("ZEL_TEST_VAR".into(), "hello".into());
-        let opts = ExternalOptions { output_base: ob.clone(), workspace_root: ws.clone(), client_env: env, ..Default::default() };
-        Env { rt: Rt::new(opts, Arc::new(res)), ws, ob }
-    }
-
-    #[test]
-    fn fetches_registry_module_from_archive() {
-        let e = setup(
-            "fetch1",
-            "module(name='root')\nbazel_dep(name='foo', version='1.0')\n",
-            &[("foo", "1.0", &[("MODULE.bazel", "module(name='foo', version='1.0')\n"), ("BUILD.bazel", "# foo\n"), ("pkg/a.txt", "A")])],
-        );
-        let dir = e.rt.fetch_repo("foo+").unwrap();
-        assert_eq!(dir, e.ob.join("external/foo+"));
-        assert_eq!(std::fs::read_to_string(dir.join("pkg/a.txt")).unwrap(), "A");
-        assert!(std::fs::read_to_string(dir.join("MODULE.bazel")).unwrap().contains("foo"));
-        assert!(e.ob.join("external/@foo+.marker").exists());
-        // Second fetch is a no-op (marker up to date).
-        std::fs::write(dir.join("pkg/a.txt"), "CHANGED").unwrap();
-        let rt2 = Rt::new(e.rt.opts.clone(), e.rt.resolution.clone());
-        rt2.fetch_repo("foo+").unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("pkg/a.txt")).unwrap(), "CHANGED");
-        // --force refetches.
-        let mut o = e.rt.opts.clone();
-        o.force = true;
-        Rt::new(o, e.rt.resolution.clone()).fetch_repo("foo+").unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("pkg/a.txt")).unwrap(), "A");
-    }
-
-    #[test]
-    fn module_extension_and_repository_rule() {
-        let ext = r##"
-def _my_repo_impl(rctx):
-    rctx.file("BUILD.bazel", "# generated " + rctx.attr.greeting + "\n")
-    rctx.file("data.txt", "name=" + rctx.name + " os=" + rctx.os.name)
-    res = rctx.execute(["echo", "from-exec"])
-    rctx.file("exec.txt", res.stdout.strip() + ":" + str(res.return_code))
-    p = rctx.path("sub/dir")
-    rctx.file(p.get_child("x.txt"), "x", executable = False)
-    rctx.file("env.txt", rctx.getenv("ZEL_TEST_VAR", "none"))
-    rctx.file("read.txt", rctx.read("data.txt") + "!")
-
-my_repo = repository_rule(
-    implementation = _my_repo_impl,
-    attrs = {"greeting": attr.string(default = "hi")},
-)
-
-_cfg = tag_class(attrs = {"name": attr.string(mandatory = True), "greeting": attr.string()})
-
-def _ext_impl(mctx):
-    for mod in mctx.modules:
-        for cfg in mod.tags.cfg:
-            my_repo(name = cfg.name, greeting = cfg.greeting or "default")
-    return mctx.extension_metadata(reproducible = True) if hasattr(mctx, "extension_metadata") else None
-
-my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg})
-"##;
-        let e = setup(
-            "fetch2",
-            "module(name='root')\nbazel_dep(name='foo', version='1.0')\next = use_extension('@foo//:ext.bzl', 'my_ext')\next.cfg(name='gen1', greeting='yo')\next.cfg(name='gen2')\nuse_repo(ext, 'gen1', 'gen2')\n",
-            &[("foo", "1.0", &[("MODULE.bazel", "module(name='foo', version='1.0')\n"), ("ext.bzl", ext), ("BUILD.bazel", "")])],
-        );
-        let m = e.rt.resolution.repo_mapping(&ModuleKey::root());
-        assert_eq!(m["gen1"], "foo++my_ext+gen1");
-        let dir = e.rt.fetch_repo("foo++my_ext+gen1").unwrap();
-        assert_eq!(std::fs::read_to_string(dir.join("BUILD.bazel")).unwrap(), "# generated yo\n");
-        assert_eq!(std::fs::read_to_string(dir.join("data.txt")).unwrap(), format!("name=foo++my_ext+gen1 os={}", crate::ctx::host_os_name()));
-        assert_eq!(std::fs::read_to_string(dir.join("exec.txt")).unwrap(), "from-exec:0");
-        assert_eq!(std::fs::read_to_string(dir.join("sub/dir/x.txt")).unwrap(), "x");
-        assert_eq!(std::fs::read_to_string(dir.join("env.txt")).unwrap(), "hello");
-        assert!(std::fs::read_to_string(dir.join("read.txt")).unwrap().ends_with("!"));
-        let d2 = e.rt.fetch_repo("foo++my_ext+gen2").unwrap();
-        assert_eq!(std::fs::read_to_string(d2.join("BUILD.bazel")).unwrap(), "# generated default\n");
-        let _ = e.ws;
-    }
-
-    #[test]
-    fn use_repo_rule_http_archive_and_local_repository() {
-        let base = tmpdir("fetch3");
-        let tgz = make_tgz(&base, "arch", &[("hello.txt", "hi"), ("BUILD.bazel", "# arch\n")]);
-        let ws = base.join("ws");
-        write(&ws, "localpkg/f.txt", "L");
-        write(&ws, "localpkg/REPO.bazel", "");
-        write(
-            &ws,
-            "MODULE.bazel",
-            &format!(
-                "module(name='root')\nhttp_archive = use_repo_rule('@bazel_tools//tools/build_defs/repo:http.bzl', 'http_archive')\nhttp_archive(name='arch', urls=['file://{}'], integrity='{}', strip_prefix='arch-1.0', build_file_content='# overridden\\n')\nlocal_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'local_repository')\nlocal_repository(name='loc', path='localpkg')\n",
-                tgz.display(),
-                integrity(&tgz)
-            ),
-        );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
-        let res = resolve(&o).unwrap_or_else(|e| panic!("{e}"));
-        let m = res.repo_mapping(&ModuleKey::root());
-        assert_eq!(m["arch"], "+http_archive+arch");
-        let rt = Rt::new(
-            ExternalOptions { output_base: base.join("ob"), workspace_root: ws.clone(), client_env: std::env::vars().collect(), ..Default::default() },
-            Arc::new(res),
-        );
-        let d = rt.fetch_repo("+http_archive+arch").unwrap();
-        assert_eq!(std::fs::read_to_string(d.join("hello.txt")).unwrap(), "hi");
-        assert_eq!(std::fs::read_to_string(d.join("BUILD.bazel")).unwrap(), "# overridden\n");
-        let l = rt.fetch_repo("+local_repository+loc").unwrap();
-        assert_eq!(std::fs::read_to_string(l.join("f.txt")).unwrap(), "L");
-        assert!(l.symlink_metadata().unwrap().file_type().is_symlink());
-    }
-
-    #[test]
-    fn override_repository_and_bad_checksum() {
-        let base = tmpdir("fetch4");
-        let tgz = make_tgz(&base, "arch", &[("hello.txt", "hi")]);
-        let ws = base.join("ws");
-        write(
-            &ws,
-            "MODULE.bazel",
-            &format!(
-                "module(name='root')\nhttp_archive = use_repo_rule('@bazel_tools//tools/build_defs/repo:http.bzl', 'http_archive')\nhttp_archive(name='arch', urls=['file://{}'], sha256='{}', strip_prefix='arch-1.0')\n",
-                tgz.display(),
-                "0".repeat(64)
-            ),
-        );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
-        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
-        let mut opts = ExternalOptions { output_base: base.join("ob"), workspace_root: ws.clone(), client_env: std::env::vars().collect(), ..Default::default() };
-        let rt = Rt::new(opts.clone(), res.clone());
-        let e = rt.fetch_repo("+http_archive+arch").unwrap_err();
-        assert!(e.contains("Checksum was") && e.contains("but wanted"), "{e}");
-        assert!(!base.join("ob/external/+http_archive+arch").exists());
-        // --override_repository points at a local directory.
-        write(&base, "mine/x.txt", "mine");
-        write(&base, "mine/REPO.bazel", "");
-        opts.override_repository.insert("arch".into(), base.join("mine"));
-        let rt = Rt::new(opts, res);
-        let d = rt.fetch_repo("+http_archive+arch").unwrap();
-        assert_eq!(std::fs::read_to_string(d.join("x.txt")).unwrap(), "mine");
-    }
-
-    #[test]
-    fn rctx_download_extract_patch_and_template() {
-        let base = tmpdir("fetch5");
-        let tgz = make_tgz(&base, "pkg", &[("tool.txt", "hello\n"), ("tmpl.in", "v=@V@\n")]);
-        let sha = crate::hash::sha256_hex(&std::fs::read(&tgz).unwrap());
-        let ws = base.join("ws");
-        write(&ws, "p.patch", "--- a/tool.txt\n+++ b/tool.txt\n@@ -1 +1 @@\n-hello\n+patched\n");
-        write(
-            &ws,
-            "defs.bzl",
-            "def _impl(rctx):\n    rctx.download_and_extract(url = rctx.attr.url, sha256 = rctx.attr.sha, strip_prefix = 'pkg-1.0')\n    rctx.patch(rctx.attr.patch, strip = 1)\n    rctx.template('out.txt', 'tmpl.in', {'@V@': '42'})\n    rctx.symlink('tool.txt', 'link.txt')\n    rctx.rename('out.txt', 'moved.txt')\n    rctx.file('gone.txt', 'x')\n    if not rctx.delete('gone.txt'):\n        fail('delete failed')\n    if rctx.which('definitely-not-a-program') != None:\n        fail('which')\n    r = rctx.download(url = rctx.attr.url, output = 'dl.bin', sha256 = rctx.attr.sha)\n    rctx.file('sha.txt', r.sha256)\n\nmy_rule = repository_rule(implementation = _impl, attrs = {'url': attr.string(), 'sha': attr.string(), 'patch': attr.label()})\n",
-        );
-        write(&ws, "BUILD.bazel", "");
-        write(
-            &ws,
-            "MODULE.bazel",
-            &format!(
-                "module(name='root')\nmy_rule = use_repo_rule('//:defs.bzl', 'my_rule')\nmy_rule(name='r', url='file://{}', sha='{sha}', patch='//:p.patch')\n",
-                tgz.display()
-            ),
-        );
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
-        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
-        let rt = Rt::new(
-            ExternalOptions { output_base: base.join("ob"), workspace_root: ws.clone(), client_env: std::env::vars().collect(), ..Default::default() },
-            res,
-        );
-        let d = rt.fetch_repo("+my_rule+r").unwrap_or_else(|e| panic!("{e}"));
-        assert_eq!(std::fs::read_to_string(d.join("tool.txt")).unwrap(), "patched\n");
-        assert_eq!(std::fs::read_to_string(d.join("moved.txt")).unwrap(), "v=42\n");
-        assert_eq!(std::fs::read_to_string(d.join("link.txt")).unwrap(), "patched\n");
-        assert!(!d.join("gone.txt").exists() && !d.join("out.txt").exists());
-        assert_eq!(std::fs::read_to_string(d.join("sha.txt")).unwrap(), sha);
-        assert!(d.join("dl.bin").exists());
-    }
-
-    #[test]
-    fn rctx_write_outside_repo_dir_fails() {
-        let base = tmpdir("fetch6");
-        let ws = base.join("ws");
-        write(&ws, "BUILD.bazel", "");
-        write(&ws, "defs.bzl", "def _impl(rctx):\n    rctx.file('/tmp/zel-should-not-exist-xyz', 'x')\n\nbad = repository_rule(implementation = _impl)\n");
-        write(&ws, "MODULE.bazel", "module(name='root')\nbad = use_repo_rule('//:defs.bzl', 'bad')\nbad(name='b')\n");
-        let mut o = ResolveOptions::new(&ws);
-        o.check_direct_dependencies = CheckMode::Off;
-        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
-        let rt = Rt::new(ExternalOptions { output_base: base.join("ob"), workspace_root: ws.clone(), client_env: std::env::vars().collect(), ..Default::default() }, res);
-        let e = rt.fetch_repo("+bad+b").unwrap_err();
-        assert!(e.contains("Cannot write outside of the repository directory"), "{e}");
-        assert!(!Path::new("/tmp/zel-should-not-exist-xyz").exists());
-        assert!(!base.join("ob/external/+bad+b").exists());
-    }
 }
 
 /// Splits a located Starlark error `"{loc}: Traceback (most recent call last):\n...Error in f: msg"` and frames it
@@ -1484,7 +1872,9 @@ pub(crate) fn frame_traceback_error(e: &str, canonical: &str) -> Option<String> 
 }
 
 /// Splits `"file:line:col: message"` into its location and message.
-pub(crate) fn split_location_prefix(e: &str) -> Option<(zel_starlark::syntax::location::Location, String)> {
+pub(crate) fn split_location_prefix(
+    e: &str,
+) -> Option<(zel_starlark::syntax::location::Location, String)> {
     let (head, msg) = e.split_once(": ")?;
     if head.contains('\n') || head.contains(' ') && !head.contains('/') {
         return None;
@@ -1493,62 +1883,71 @@ pub(crate) fn split_location_prefix(e: &str) -> Option<(zel_starlark::syntax::lo
     let col: usize = it.next()?.parse().ok()?;
     let line: usize = it.next()?.parse().ok()?;
     let file = it.next()?;
-    let mut at = zel_starlark::syntax::location::Location::default();
-    at.file = file.to_string();
-    at.line = line;
-    at.column = col;
+    let at = zel_starlark::syntax::location::Location {
+        file: file.to_string(),
+        line,
+        column: col,
+    };
     Some((at, msg.to_string()))
 }
 
 impl Rt {
     /// Formats a failed repository-rule implementation the way Bazel reports it (see
     /// `RepositoryFetchFunction`): location, traceback and the bare message.
-    fn format_rule_error(&self, e: &zel_starlark::StarlarkError, canonical: &str, c: &mut zel_starlark::EvalContext) -> String {
-            let builtin_error = c.builtin_error.take();
-            let mut located = if e.0.contains("Traceback (most recent call last)") {
-                e.0.clone()
-            } else if let Some((at, msg)) = split_location_prefix(&e.0) {
-                let who = match &builtin_error {
-                    Some((f, m)) if m == &msg => format!("Error in {f}"),
-                    _ => "Error".to_string(),
-                };
-                format!("{}{who}: {msg}", c.thread.format_stack_trace_at(&at))
-            } else {
-                e.0.clone()
+    fn format_rule_error(
+        &self,
+        e: &zel_starlark::StarlarkError,
+        canonical: &str,
+        c: &mut zel_starlark::EvalContext,
+    ) -> String {
+        let builtin_error = c.builtin_error.take();
+        let mut located = if e.0.contains("Traceback (most recent call last)") {
+            e.0.clone()
+        } else if let Some((at, msg)) = split_location_prefix(&e.0) {
+            let who = match &builtin_error {
+                Some((f, m)) if m == &msg => format!("Error in {f}"),
+                _ => "Error".to_string(),
             };
-            if let Some((function, message)) = &builtin_error {
-                located = located.replacen(&format!("Error: {message}"), &format!("Error in {function}: {message}"), 1);
-            }
-            if let Some(f) = frame_traceback_error(&located, canonical) {
-                return f;
-            }
-            let loc_prefix = if let Some(idx) = e.0.find(": ") {
-                let candidate = &e.0[..idx];
-                if candidate.contains(':') && !candidate.contains('\n') {
-                    candidate
-                } else {
-                    ""
-                }
+            format!("{}{who}: {msg}", c.thread.format_stack_trace_at(&at))
+        } else {
+            e.0.clone()
+        };
+        if let Some((function, message)) = &builtin_error {
+            located = located.replacen(
+                &format!("Error: {message}"),
+                &format!("Error in {function}: {message}"),
+                1,
+            );
+        }
+        if let Some(f) = frame_traceback_error(&located, canonical) {
+            return f;
+        }
+        let loc_prefix = if let Some(idx) = e.0.find(": ") {
+            let candidate = &e.0[..idx];
+            if candidate.contains(':') && !candidate.contains('\n') {
+                candidate
             } else {
                 ""
-            };
-            let rest = if let Some((_, fail_msg)) = e.0.rsplit_once("Error in fail: ") {
-                fail_msg.trim()
-            } else if let Some((_, err_msg)) = e.0.rsplit_once("Error in ") {
-                err_msg.trim()
-            } else if !loc_prefix.is_empty() {
-                e.0[loc_prefix.len() + 2..].trim()
-            } else {
-                e.0.trim()
-            };
-            let formatted = if loc_prefix.is_empty() {
-                format!("An error occurred during the fetch of repository '{canonical}':\nERROR: {rest}")
-            } else {
-                format!("{loc_prefix}: An error occurred during the fetch of repository '{canonical}':\nERROR: {rest}")
-            };
-            return formatted;
-
-        unreachable!()
+            }
+        } else {
+            ""
+        };
+        let rest = if let Some((_, fail_msg)) = e.0.rsplit_once("Error in fail: ") {
+            fail_msg.trim()
+        } else if let Some((_, err_msg)) = e.0.rsplit_once("Error in ") {
+            err_msg.trim()
+        } else if !loc_prefix.is_empty() {
+            e.0[loc_prefix.len() + 2..].trim()
+        } else {
+            e.0.trim()
+        };
+        if loc_prefix.is_empty() {
+            format!(
+                "An error occurred during the fetch of repository '{canonical}':\nERROR: {rest}"
+            )
+        } else {
+            format!("{loc_prefix}: An error occurred during the fetch of repository '{canonical}':\nERROR: {rest}")
+        }
     }
 }
 
@@ -1569,22 +1968,48 @@ impl Rt {
         def_ctx: (&str, &str),
     ) {
         let entries: Vec<(String, Value)> = match ret {
-            Value::Dict(d) => d.lock().unwrap().entries.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
-            Value::Struct(sv) if sv.fields.contains_key("attrs_for_reproducibility") && !*reproducible.lock().unwrap() => match sv.fields.get("attrs_for_reproducibility") {
-                Some(Value::Dict(d)) => d.lock().unwrap().entries.iter().map(|(k, v)| (k.to_string(), v.clone())).collect(),
-                _ => vec![],
-            },
+            Value::Dict(d) => d
+                .lock()
+                .unwrap()
+                .entries
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+            Value::Struct(sv)
+                if sv.fields.contains_key("attrs_for_reproducibility")
+                    && !*reproducible.lock().unwrap() =>
+            {
+                match sv.fields.get("attrs_for_reproducibility") {
+                    Some(Value::Dict(d)) => d
+                        .lock()
+                        .unwrap()
+                        .entries
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.clone()))
+                        .collect(),
+                    _ => vec![],
+                }
+            }
             _ => return,
         };
-        let Value::Struct(cur) = attr_struct else { return };
-        let Ok(Value::Struct(defaults)) = build_attr_struct(self, defs, &[], ctx_repo, "", def_ctx) else { return };
+        let Value::Struct(cur) = attr_struct else {
+            return;
+        };
+        let Ok(Value::Struct(defaults)) = build_attr_struct(self, defs, &[], ctx_repo, "", def_ctx)
+        else {
+            return;
+        };
         let mut modified: Vec<(String, Option<Value>)> = vec![];
         for (name, curv) in &cur.fields {
             if name == "name" || name.starts_with('_') {
                 continue;
             }
             let defv = defaults.fields.get(name).cloned().unwrap_or(Value::None);
-            let newv = entries.iter().find(|(k, _)| k == name).map(|(_, v)| v.clone()).unwrap_or_else(|| defv.clone());
+            let newv = entries
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+                .unwrap_or_else(|| defv.clone());
             if &newv == curv {
                 continue;
             }
@@ -1593,23 +2018,42 @@ impl Rt {
         if modified.is_empty() {
             return;
         }
-        let changed: Vec<String> = modified.iter().filter_map(|(k, v)| v.as_ref().map(|v| format!("{k} = {}", v.repr()))).collect();
-        let dropped: Vec<String> = modified.iter().filter(|(_, v)| v.is_none()).map(|(k, _)| k.clone()).collect();
-        let who = format!("Repo '{canonical}' indicated that a canonical reproducible form can be obtained by");
+        let changed: Vec<String> = modified
+            .iter()
+            .filter_map(|(k, v)| v.as_ref().map(|v| format!("{k} = {}", v.repr())))
+            .collect();
+        let dropped: Vec<String> = modified
+            .iter()
+            .filter(|(_, v)| v.is_none())
+            .map(|(k, _)| k.clone())
+            .collect();
+        let who = format!(
+            "Repo '{canonical}' indicated that a canonical reproducible form can be obtained by"
+        );
         let msg = if changed.is_empty() {
             format!("{who} dropping arguments [{}]", dropped.join(", "))
         } else if dropped.is_empty() {
             format!("{who} modifying arguments {}", changed.join(", "))
         } else {
-            format!("{who} modifying arguments {} and dropping [{}]", changed.join(", "), dropped.join(", "))
+            format!(
+                "{who} modifying arguments {} and dropping [{}]",
+                changed.join(", "),
+                dropped.join(", ")
+            )
         };
         self.info(format!("DEBUG: {msg}"));
-        self.info(format!("DEBUG: Repo {canonical} defined by rule {rule} in {key}"));
+        self.info(format!(
+            "DEBUG: Repo {canonical} defined by rule {rule} in {key}"
+        ));
     }
 }
 
 /// `RepositoryUtils.replantSymlinks(repoDir, workspace, externalRoot, EMPTY, replantSymlinksIntoMainRepo = false)`.
-fn replant_symlinks_relative(repo_dir: &Path, workspace: &Path, external_root: &Path) -> Result<(), String> {
+fn replant_symlinks_relative(
+    repo_dir: &Path,
+    workspace: &Path,
+    external_root: &Path,
+) -> Result<(), String> {
     fn walk(d: &Path, out: &mut Vec<PathBuf>) {
         let Ok(rd) = std::fs::read_dir(d) else { return };
         for e in rd.flatten() {
@@ -1625,30 +2069,49 @@ fn replant_symlinks_relative(repo_dir: &Path, workspace: &Path, external_root: &
     let canon_dir;
     let canon_ext;
     let (repo_dir, external_root) = {
-        canon_dir = match (repo_dir.parent().and_then(|p| std::fs::canonicalize(p).ok()), repo_dir.file_name()) {
+        canon_dir = match (
+            repo_dir
+                .parent()
+                .and_then(|p| crate::canonical_no_unc(p).ok()),
+            repo_dir.file_name(),
+        ) {
             (Some(p), Some(n)) => p.join(n),
             _ => repo_dir.to_path_buf(),
         };
-        canon_ext = std::fs::canonicalize(external_root).unwrap_or_else(|_| external_root.to_path_buf());
+        canon_ext =
+            crate::canonical_no_unc(external_root).unwrap_or_else(|_| external_root.to_path_buf());
         (canon_dir.as_path(), canon_ext.as_path())
     };
     let mut links = vec![];
     walk(repo_dir, &mut links);
     let repo_parent = repo_dir.parent().unwrap_or(repo_dir);
     for link in links {
-        let Ok(target) = std::fs::read_link(&link) else { continue };
-        if target.starts_with(workspace) || !target.is_absolute() || !target.starts_with(external_root) {
+        let Ok(target) = std::fs::read_link(&link) else {
+            continue;
+        };
+        if target.starts_with(workspace)
+            || !target.is_absolute()
+            || !target.starts_with(external_root)
+        {
             continue;
         }
         let new_target = if let Ok(rel) = target.strip_prefix(repo_dir) {
-            let depth = link.strip_prefix(repo_dir).map(|r| r.components().count()).unwrap_or(1).saturating_sub(1);
+            let depth = link
+                .strip_prefix(repo_dir)
+                .map(|r| r.components().count())
+                .unwrap_or(1)
+                .saturating_sub(1);
             let mut t = PathBuf::new();
             for _ in 0..depth {
                 t.push("..");
             }
             t.join(rel)
         } else {
-            let depth = link.strip_prefix(repo_parent).map(|r| r.components().count()).unwrap_or(1).saturating_sub(1);
+            let depth = link
+                .strip_prefix(repo_parent)
+                .map(|r| r.components().count())
+                .unwrap_or(1)
+                .saturating_sub(1);
             let mut t = PathBuf::new();
             for _ in 0..depth {
                 t.push("..");
@@ -1657,9 +2120,650 @@ fn replant_symlinks_relative(repo_dir: &Path, workspace: &Path, external_root: &
         };
         let _ = std::fs::remove_file(&link);
         #[cfg(unix)]
-        std::os::unix::fs::symlink(&new_target, &link).map_err(|e| format!("{}: {e}", link.display()))?;
+        std::os::unix::fs::symlink(&new_target, &link)
+            .map_err(|e| format!("{}: {e}", link.display()))?;
         #[cfg(not(unix))]
         let _ = new_target;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hash::{base64_encode, sha256};
+    use crate::registry::testutil::*;
+    use crate::resolve::{resolve, CheckMode, ResolveOptions};
+
+    fn make_tgz(dir: &Path, name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let src = dir.join(format!("{name}-src"));
+        for (p, c) in files {
+            write(&src, &format!("{name}-1.0/{p}"), c);
+        }
+        let out = dir.join(format!("{name}.tar.gz"));
+        let st = std::process::Command::new("tar")
+            .args([
+                "czf",
+                out.to_str().unwrap(),
+                "-C",
+                src.to_str().unwrap(),
+                &format!("{name}-1.0"),
+            ])
+            .status()
+            .unwrap();
+        assert!(st.success());
+        out
+    }
+
+    fn integrity(p: &Path) -> String {
+        format!(
+            "sha256-{}",
+            base64_encode(&sha256(&std::fs::read(p).unwrap()))
+        )
+    }
+
+    struct Env {
+        rt: Arc<Rt>,
+        ws: PathBuf,
+        ob: PathBuf,
+    }
+
+    fn file_url(p: &Path) -> String {
+        let s = p.to_string_lossy().replace('\\', "/");
+        if s.starts_with('/') {
+            format!("file://{s}")
+        } else {
+            format!("file:///{s}")
+        }
+    }
+
+    #[allow(clippy::type_complexity)]
+    fn setup(name: &str, root_module: &str, mods: &[(&str, &str, &[(&str, &str)])]) -> Env {
+        let base = tmpdir(name);
+        let reg = base.join("registry");
+        for (n, v, files) in mods {
+            let tgz = make_tgz(&base, n, files);
+            let mb = files
+                .iter()
+                .find(|(p, _)| *p == "MODULE.bazel")
+                .map(|(_, c)| *c)
+                .unwrap_or("");
+            add_module(
+                &reg,
+                n,
+                v,
+                mb,
+                &format!(
+                    r#"{{"url":"{}","integrity":"{}","strip_prefix":"{n}-1.0"}}"#,
+                    file_url(&tgz),
+                    integrity(&tgz)
+                ),
+            );
+        }
+        let ws = base.join("ws");
+        write(&ws, "MODULE.bazel", root_module);
+        let mut o = ResolveOptions::new(&ws);
+        o.registries = vec![file_url(&reg)];
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = resolve(&o).unwrap_or_else(|e| panic!("{e}"));
+        let ob = base.join("ob");
+        let mut env = std::env::vars().collect::<BTreeMap<_, _>>();
+        env.insert("ZEL_TEST_VAR".into(), "hello".into());
+        let opts = ExternalOptions {
+            output_base: ob.clone(),
+            workspace_root: ws.clone(),
+            client_env: env,
+            ..Default::default()
+        };
+        Env {
+            rt: Rt::new(opts, Arc::new(res)),
+            ws,
+            ob,
+        }
+    }
+
+    #[test]
+    fn fetches_registry_module_from_archive() {
+        let e = setup(
+            "fetch1",
+            "module(name='root')\nbazel_dep(name='foo', version='1.0')\n",
+            &[(
+                "foo",
+                "1.0",
+                &[
+                    ("MODULE.bazel", "module(name='foo', version='1.0')\n"),
+                    ("BUILD.bazel", "# foo\n"),
+                    ("pkg/a.txt", "A"),
+                ],
+            )],
+        );
+        let dir = e.rt.fetch_repo("foo+").unwrap();
+        assert_eq!(dir, e.ob.join("external/foo+"));
+        assert_eq!(std::fs::read_to_string(dir.join("pkg/a.txt")).unwrap(), "A");
+        assert!(std::fs::read_to_string(dir.join("MODULE.bazel"))
+            .unwrap()
+            .contains("foo"));
+        assert!(e.ob.join("external/@foo+.marker").exists());
+        // Second fetch is a no-op (marker up to date).
+        std::fs::write(dir.join("pkg/a.txt"), "CHANGED").unwrap();
+        let rt2 = Rt::new(e.rt.opts.clone(), e.rt.resolution.clone());
+        rt2.fetch_repo("foo+").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("pkg/a.txt")).unwrap(),
+            "CHANGED"
+        );
+        // --force refetches.
+        let mut o = e.rt.opts.clone();
+        o.force = true;
+        Rt::new(o, e.rt.resolution.clone())
+            .fetch_repo("foo+")
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(dir.join("pkg/a.txt")).unwrap(), "A");
+    }
+
+    #[test]
+    fn module_extension_and_repository_rule() {
+        let ext = r##"
+def _my_repo_impl(rctx):
+    rctx.file("BUILD.bazel", "# generated " + rctx.attr.greeting + "\n")
+    rctx.file("data.txt", "name=" + rctx.name + " os=" + rctx.os.name)
+    res = rctx.execute(["cmd", "/C", "echo", "from-exec"] if rctx.os.name.startswith("windows") else ["echo", "from-exec"])
+    rctx.file("exec.txt", res.stdout.strip() + ":" + str(res.return_code))
+    p = rctx.path("sub/dir")
+    rctx.file(p.get_child("x.txt"), "x", executable = False)
+    rctx.file("env.txt", rctx.getenv("ZEL_TEST_VAR", "none"))
+    rctx.file("read.txt", rctx.read("data.txt") + "!")
+
+my_repo = repository_rule(
+    implementation = _my_repo_impl,
+    attrs = {"greeting": attr.string(default = "hi")},
+)
+
+_cfg = tag_class(attrs = {"name": attr.string(mandatory = True), "greeting": attr.string()})
+
+def _ext_impl(mctx):
+    for mod in mctx.modules:
+        for cfg in mod.tags.cfg:
+            my_repo(name = cfg.name, greeting = cfg.greeting or "default")
+    return mctx.extension_metadata(reproducible = True) if hasattr(mctx, "extension_metadata") else None
+
+my_ext = module_extension(implementation = _ext_impl, tag_classes = {"cfg": _cfg})
+"##;
+        let e = setup(
+            "fetch2",
+            "module(name='root')\nbazel_dep(name='foo', version='1.0')\next = use_extension('@foo//:ext.bzl', 'my_ext')\next.cfg(name='gen1', greeting='yo')\next.cfg(name='gen2')\nuse_repo(ext, 'gen1', 'gen2')\n",
+            &[("foo", "1.0", &[("MODULE.bazel", "module(name='foo', version='1.0')\n"), ("ext.bzl", ext), ("BUILD.bazel", "")])],
+        );
+        let m = e.rt.resolution.repo_mapping(&ModuleKey::root());
+        assert_eq!(m["gen1"], "foo++my_ext+gen1");
+        let dir = e.rt.fetch_repo("foo++my_ext+gen1").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(dir.join("BUILD.bazel")).unwrap(),
+            "# generated yo\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("data.txt")).unwrap(),
+            format!("name=foo++my_ext+gen1 os={}", crate::ctx::host_os_name())
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("exec.txt")).unwrap(),
+            "from-exec:0"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("sub/dir/x.txt")).unwrap(),
+            "x"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("env.txt")).unwrap(),
+            "hello"
+        );
+        assert!(std::fs::read_to_string(dir.join("read.txt"))
+            .unwrap()
+            .ends_with("!"));
+        let d2 = e.rt.fetch_repo("foo++my_ext+gen2").unwrap();
+        assert_eq!(
+            std::fs::read_to_string(d2.join("BUILD.bazel")).unwrap(),
+            "# generated default\n"
+        );
+        let _ = e.ws;
+    }
+
+    #[test]
+    fn use_repo_rule_http_archive_and_local_repository() {
+        let base = tmpdir("fetch3");
+        let tgz = make_tgz(
+            &base,
+            "arch",
+            &[("hello.txt", "hi"), ("BUILD.bazel", "# arch\n")],
+        );
+        let ws = base.join("ws");
+        write(&ws, "localpkg/f.txt", "L");
+        write(&ws, "localpkg/REPO.bazel", "");
+        let tgz_url = {
+            let p = tgz.to_string_lossy().replace('\\', "/");
+            if p.starts_with('/') {
+                format!("file://{p}")
+            } else {
+                format!("file:///{p}")
+            }
+        };
+        write(
+            &ws,
+            "MODULE.bazel",
+            &format!(
+                "module(name='root')\nhttp_archive = use_repo_rule('@bazel_tools//tools/build_defs/repo:http.bzl', 'http_archive')\nhttp_archive(name='arch', urls=['{}'], integrity='{}', strip_prefix='arch-1.0', build_file_content='# overridden\\n')\nlocal_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'local_repository')\nlocal_repository(name='loc', path='localpkg')\n",
+                tgz_url,
+                integrity(&tgz)
+            ),
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = resolve(&o).unwrap_or_else(|e| panic!("{e}"));
+        let m = res.repo_mapping(&ModuleKey::root());
+        assert_eq!(m["arch"], "+http_archive+arch");
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            Arc::new(res),
+        );
+        let d = rt.fetch_repo("+http_archive+arch").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("hello.txt")).unwrap(), "hi");
+        assert_eq!(
+            std::fs::read_to_string(d.join("BUILD.bazel")).unwrap(),
+            "# overridden\n"
+        );
+        let l = rt.fetch_repo("+local_repository+loc").unwrap();
+        assert_eq!(std::fs::read_to_string(l.join("f.txt")).unwrap(), "L");
+        #[cfg(unix)]
+        assert!(l.symlink_metadata().unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn override_repository_and_bad_checksum() {
+        let base = tmpdir("fetch4");
+        let tgz = make_tgz(&base, "arch", &[("hello.txt", "hi")]);
+        let ws = base.join("ws");
+        write(
+            &ws,
+            "MODULE.bazel",
+            &format!(
+                "module(name='root')\nhttp_archive = use_repo_rule('@bazel_tools//tools/build_defs/repo:http.bzl', 'http_archive')\nhttp_archive(name='arch', urls=['{}'], sha256='{}', strip_prefix='arch-1.0')\n",
+                file_url(&tgz),
+                "0".repeat(64)
+            ),
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let mut opts = ExternalOptions {
+            output_base: base.join("ob"),
+            workspace_root: ws.clone(),
+            client_env: std::env::vars().collect(),
+            ..Default::default()
+        };
+        let rt = Rt::new(opts.clone(), res.clone());
+        let e = rt.fetch_repo("+http_archive+arch").unwrap_err();
+        assert!(
+            e.contains("Checksum was") && e.contains("but wanted"),
+            "{e}"
+        );
+        assert!(!base.join("ob/external/+http_archive+arch").exists());
+        // --override_repository points at a local directory.
+        write(&base, "mine/x.txt", "mine");
+        write(&base, "mine/REPO.bazel", "");
+        opts.override_repository
+            .insert("arch".into(), base.join("mine"));
+        let rt = Rt::new(opts, res);
+        let d = rt.fetch_repo("+http_archive+arch").unwrap();
+        assert_eq!(std::fs::read_to_string(d.join("x.txt")).unwrap(), "mine");
+    }
+
+    #[test]
+    fn rctx_download_extract_patch_and_template() {
+        let base = tmpdir("fetch5");
+        let tgz = make_tgz(
+            &base,
+            "pkg",
+            &[("tool.txt", "hello\n"), ("tmpl.in", "v=@V@\n")],
+        );
+        let sha = crate::hash::sha256_hex(&std::fs::read(&tgz).unwrap());
+        let ws = base.join("ws");
+        write(
+            &ws,
+            "p.patch",
+            "--- a/tool.txt\n+++ b/tool.txt\n@@ -1 +1 @@\n-hello\n+patched\n",
+        );
+        write(
+            &ws,
+            "defs.bzl",
+            "def _impl(rctx):\n    rctx.download_and_extract(url = rctx.attr.url, sha256 = rctx.attr.sha, strip_prefix = 'pkg-1.0')\n    rctx.patch(rctx.attr.patch, strip = 1)\n    rctx.template('out.txt', 'tmpl.in', {'@V@': '42'})\n    rctx.symlink('tool.txt', 'link.txt')\n    rctx.rename('out.txt', 'moved.txt')\n    rctx.file('gone.txt', 'x')\n    if not rctx.delete('gone.txt'):\n        fail('delete failed')\n    if rctx.which('definitely-not-a-program') != None:\n        fail('which')\n    r = rctx.download(url = rctx.attr.url, output = 'dl.bin', sha256 = rctx.attr.sha)\n    rctx.file('sha.txt', r.sha256)\n\nmy_rule = repository_rule(implementation = _impl, attrs = {'url': attr.string(), 'sha': attr.string(), 'patch': attr.label()})\n",
+        );
+        write(&ws, "BUILD.bazel", "");
+        write(
+            &ws,
+            "MODULE.bazel",
+            &format!(
+                "module(name='root')\nmy_rule = use_repo_rule('//:defs.bzl', 'my_rule')\nmy_rule(name='r', url='{}', sha='{sha}', patch='//:p.patch')\n",
+                file_url(&tgz)
+            ),
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res,
+        );
+        let d = rt
+            .fetch_repo("+my_rule+r")
+            .unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            std::fs::read_to_string(d.join("tool.txt")).unwrap(),
+            "patched\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join("moved.txt")).unwrap(),
+            "v=42\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(d.join("link.txt")).unwrap(),
+            "patched\n"
+        );
+        assert!(!d.join("gone.txt").exists() && !d.join("out.txt").exists());
+        assert_eq!(std::fs::read_to_string(d.join("sha.txt")).unwrap(), sha);
+        assert!(d.join("dl.bin").exists());
+    }
+
+    #[test]
+    fn rctx_write_outside_repo_dir_fails() {
+        let base = tmpdir("fetch6");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(&ws, "defs.bzl", "def _impl(rctx):\n    rctx.file('/tmp/zel-should-not-exist-xyz', 'x')\n\nbad = repository_rule(implementation = _impl)\n");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbad = use_repo_rule('//:defs.bzl', 'bad')\nbad(name='b')\n",
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res,
+        );
+        let e = rt.fetch_repo("+bad+b").unwrap_err();
+        assert!(
+            e.contains("Cannot write outside of the repository directory"),
+            "{e}"
+        );
+        assert!(!Path::new("/tmp/zel-should-not-exist-xyz").exists());
+        assert!(!base.join("ob/external/+bad+b").exists());
+    }
+
+    #[test]
+    fn extension_deferred_labels_helper_tag_class_and_non_root_metadata() {
+        let base = tmpdir("ext_deferred_labels");
+        let reg = base.join("registry");
+        let tgz = make_tgz(
+            &base,
+            "depmod",
+            &[
+                ("MODULE.bazel", "module(name='depmod', version='1.0')\next = use_extension('//:ext.bzl', 'my_ext')\nuse_repo(ext, 'first')\n"),
+                ("BUILD.bazel", ""),
+                ("pkg/BUILD.bazel", "exports_files(['local.txt'])\n"),
+                ("pkg/local.txt", "hello"),
+                (
+                    "pkg/ext.bzl",
+                    r#"
+def _r_impl(rctx):
+    rctx.file("BUILD.bazel", "exports_files(['out.txt'])\n")
+    rctx.file("out.txt", "%s|%s" % (rctx.attr.sibling, rctx.attr.rel))
+
+my_repo = repository_rule(
+    implementation = _r_impl,
+    attrs = {"sibling": attr.label(), "rel": attr.label()},
+)
+
+def _ext_impl(mctx):
+    # First repo references second repo created *later* in the same implementation,
+    # plus a package-relative label ':local.txt' in the .bzl's package ('pkg').
+    my_repo(name = "first", sibling = "@second//:out.txt", rel = ":local.txt")
+    my_repo(name = "second", sibling = "@first//:out.txt", rel = "//pkg:local.txt")
+    # Non-root usage: invalid root_module_direct_deps must NOT fail extension eval when root does not use it.
+    return extension_metadata(root_module_direct_deps = ["not_generated"], root_module_direct_dev_deps = [])
+
+def _make_ext():
+    return module_extension(
+        implementation = _ext_impl,
+        tag_classes = {"t": tag_class({"x": attr.string()})},
+    )
+
+my_ext = _make_ext()
+"#,
+                ),
+                ("ext.bzl", "load('//pkg:ext.bzl', _e = 'my_ext')\nmy_ext = _e\n"),
+            ],
+        );
+        add_module(
+            &reg,
+            "depmod",
+            "1.0",
+            "module(name='depmod', version='1.0')\next = use_extension('//:ext.bzl', 'my_ext')\nuse_repo(ext, 'first')\n",
+            &format!(r#"{{"url":"{}","integrity":"{}","strip_prefix":"depmod-1.0"}}"#, file_url(&tgz), integrity(&tgz)),
+        );
+        let ws = base.join("ws");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nbazel_dep(name='depmod', version='1.0')\n",
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.registries = vec![file_url(&reg)];
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res,
+        );
+        // Repo mapping lookup on 'depmod++my_ext+first' evaluates the extension and sees unimported 'second'!
+        let mapping = rt.repo_mapping_of("depmod++my_ext+first");
+        assert_eq!(
+            mapping.get("second").map(String::as_str),
+            Some("depmod++my_ext+second")
+        );
+        assert!(
+            !mapping.contains_key(""),
+            "non-root extension mapping must not map empty repo name"
+        );
+        assert!(rt
+            .repo_mapping_ordered_of("no_such_canonical_repo")
+            .is_empty());
+
+        let first_dir = rt.fetch_repo("depmod++my_ext+first").unwrap();
+        let out = std::fs::read_to_string(first_dir.join("out.txt")).unwrap();
+        assert_eq!(
+            out,
+            "@@depmod++my_ext+second//:out.txt|@@depmod+//pkg:local.txt"
+        );
+    }
+
+    #[test]
+    fn tag_class_and_module_extension_validation() {
+        let base = tmpdir("ext_val");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(&ws, "bad_tc.bzl", "bad = tag_class(attrs = 'not_a_dict')\n");
+        write(&ws, "bad_tc_val.bzl", "bad = tag_class({'x': 123})\n");
+        write(&ws, "bad_tc_kw.bzl", "bad = tag_class({}, extra = 1)\n");
+        write(
+            &ws,
+            "bad_me.bzl",
+            "def _r(rctx):\n    module_extension(implementation = lambda m: None)\n    rctx.file('BUILD.bazel', '')\nbad_r = repository_rule(implementation = _r)\n",
+        );
+        write(&ws, "MODULE.bazel", "module(name='root')\nbad_r = use_repo_rule('//:bad_me.bzl', 'bad_r')\nbad_r(name='x')\n");
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let rt = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob"),
+                workspace_root: ws.clone(),
+                client_env: std::env::vars().collect(),
+                ..Default::default()
+            },
+            res,
+        );
+        assert!(rt
+            .load_bzl("//:bad_tc.bzl", "", "")
+            .unwrap_err()
+            .contains("want 'dict'"));
+        assert!(rt
+            .load_bzl("//:bad_tc_val.bzl", "", "")
+            .unwrap_err()
+            .contains("attrs must be created with attr.*()"));
+        assert!(rt
+            .load_bzl("//:bad_tc_kw.bzl", "", "")
+            .unwrap_err()
+            .contains("unexpected keyword argument 'extra'"));
+        assert!(rt
+            .fetch_repo("+bad_r+x")
+            .unwrap_err()
+            .contains("initializing a .bzl file"));
+    }
+
+    #[test]
+    fn local_repository_and_new_local_repository_refetch_when_fetching_enabled() {
+        let base = tmpdir("local_refetch");
+        let ws = base.join("ws");
+        let local_src = ws.join("local_src");
+        write(&local_src, "a.txt", "one");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nnew_local_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'new_local_repository')\nnew_local_repository(name='nlr', path='local_src', build_file_content='# v1\\n')\n",
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let opts = ExternalOptions {
+            output_base: base.join("ob"),
+            workspace_root: ws.clone(),
+            client_env: std::env::vars().collect(),
+            ..Default::default()
+        };
+        let rt1 = Rt::new(opts.clone(), res.clone());
+        let dir1 = rt1.fetch_repo("+new_local_repository+nlr").unwrap();
+        assert!(dir1.join("a.txt").exists());
+        assert!(!dir1.join("b.txt").exists());
+
+        // Add b.txt and remove a.txt in source directory; a new Rt session (fetching enabled) must refetch!
+        std::fs::remove_file(local_src.join("a.txt")).unwrap();
+        write(&local_src, "b.txt", "two");
+        let rt2 = Rt::new(opts, res);
+        let dir2 = rt2.fetch_repo("+new_local_repository+nlr").unwrap();
+        assert!(
+            !dir2.join("a.txt").exists(),
+            "stale child symlink must be gone after refetch"
+        );
+        assert!(
+            dir2.join("b.txt").exists(),
+            "new child symlink must appear after refetch"
+        );
+
+        // `local_repository` also refetches when fetching is enabled (even if source directory disappears).
+        let base2 = tmpdir("local_repo_refetch");
+        let ws2 = base2.join("ws");
+        let loc_dir = ws2.join("loc_pkg");
+        write(&loc_dir, "REPO.bazel", "");
+        write(&loc_dir, "BUILD.bazel", "");
+        write(
+            &ws2,
+            "MODULE.bazel",
+            "module(name='root')\nlocal_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'local_repository')\nlocal_repository(name='lr', path='loc_pkg')\n",
+        );
+        let mut o2 = ResolveOptions::new(&ws2);
+        o2.check_direct_dependencies = CheckMode::Off;
+        let res2 = Arc::new(resolve(&o2).unwrap_or_else(|e| panic!("{e}")));
+        let opts2 = ExternalOptions {
+            output_base: base2.join("ob"),
+            workspace_root: ws2.clone(),
+            client_env: std::env::vars().collect(),
+            ..Default::default()
+        };
+        let lrt1 = Rt::new(opts2.clone(), res2.clone());
+        let ldir = lrt1.fetch_repo("+local_repository+lr").unwrap();
+        assert!(ldir.join("BUILD.bazel").exists());
+        std::fs::remove_dir_all(&loc_dir).unwrap();
+        let lrt2 = Rt::new(opts2, res2);
+        assert!(
+            lrt2.fetch_repo("+local_repository+lr").is_err(),
+            "local_repository must refetch and fail when source disappears"
+        );
+    }
+
+    #[test]
+    fn bazel_tools_and_local_repo_reuse_markers_when_unchanged() {
+        let base = tmpdir("local_marker_reuse");
+        let ws = base.join("ws");
+        let local_src = ws.join("local_src");
+        write(&local_src, "a.txt", "one");
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name='root')\nnew_local_repository = use_repo_rule('@bazel_tools//tools/build_defs/repo:local.bzl', 'new_local_repository')\nnew_local_repository(name='nlr', path='local_src', build_file_content='# v1\\n')\n",
+        );
+        let mut o = ResolveOptions::new(&ws);
+        o.check_direct_dependencies = CheckMode::Off;
+        let res = Arc::new(resolve(&o).unwrap_or_else(|e| panic!("{e}")));
+        let opts = ExternalOptions {
+            output_base: base.join("ob"),
+            workspace_root: ws.clone(),
+            client_env: std::env::vars().collect(),
+            ..Default::default()
+        };
+
+        let rt1 = Rt::new(opts.clone(), res.clone());
+        let bt1 = rt1.fetch_repo("bazel_tools").unwrap();
+        let nlr1 = rt1.fetch_repo("+new_local_repository+nlr").unwrap();
+        assert!(base.join("ob/external/@bazel_tools.marker").exists());
+
+        // Plant a sentinel file inside both repos; a second Rt session with unchanged inputs must
+        // hit the marker cache and preserve the existing materialized directories.
+        let bt_sentinel = bt1.join(".zel_marker_sentinel");
+        let nlr_sentinel = nlr1.join(".zel_marker_sentinel");
+        std::fs::write(&bt_sentinel, "kept").unwrap();
+        std::fs::write(&nlr_sentinel, "kept").unwrap();
+
+        let rt2 = Rt::new(opts, res);
+        let bt2 = rt2.fetch_repo("bazel_tools").unwrap();
+        let nlr2 = rt2.fetch_repo("+new_local_repository+nlr").unwrap();
+        assert!(
+            bt2.join(".zel_marker_sentinel").exists(),
+            "bazel_tools should reuse cached materialization when marker matches"
+        );
+        assert!(
+            nlr2.join(".zel_marker_sentinel").exists(),
+            "new_local_repository should reuse cached materialization when watched inputs are unchanged"
+        );
+    }
 }

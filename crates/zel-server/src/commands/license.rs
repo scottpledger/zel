@@ -14,7 +14,6 @@
 
 //! `license` (`LicenseCommand`) and `canonicalize-flags` (`CanonicalizeCommand`).
 
-use super::COMMANDS;
 use crate::{writeln_bytes, BlazeRuntime};
 use zel_options::invocation_policy::{
     AllowValues, DisallowValues, FlagPolicy, InvocationPolicy, PolicyOperation, ReplacementValue,
@@ -43,27 +42,24 @@ fn single_flag_policy_text(f: &FlagPolicy) -> String {
     for c in &f.commands {
         o.push_str(&format!("commands: {}\n", quote(c)));
     }
-    match &f.operation {
-        Some(PolicyOperation::SetValue(s)) => {
-            o.push_str("set_value {\n");
-            for v in &s.flag_values {
-                o.push_str(&format!("  flag_value: {}\n", quote(v)));
-            }
-            match s.behavior {
-                SetValueBehavior::Undefined if s.behavior_set => o.push_str("  behavior: UNDEFINED\n"),
-                SetValueBehavior::Undefined => {}
-                SetValueBehavior::AllowOverrides => o.push_str("  behavior: ALLOW_OVERRIDES\n"),
-                SetValueBehavior::Append => o.push_str("  behavior: APPEND\n"),
-                SetValueBehavior::FinalValueIgnoreOverrides => {
-                    o.push_str("  behavior: FINAL_VALUE_IGNORE_OVERRIDES\n")
-                }
-                SetValueBehavior::FinalValueThrowOnOverride => {
-                    o.push_str("  behavior: FINAL_VALUE_THROW_ON_OVERRIDE\n")
-                }
-            }
-            o.push('}');
+    if let Some(PolicyOperation::SetValue(s)) = &f.operation {
+        o.push_str("set_value {\n");
+        for v in &s.flag_values {
+            o.push_str(&format!("  flag_value: {}\n", quote(v)));
         }
-        _ => {}
+        match s.behavior {
+            SetValueBehavior::Undefined if s.behavior_set => o.push_str("  behavior: UNDEFINED\n"),
+            SetValueBehavior::Undefined => {}
+            SetValueBehavior::AllowOverrides => o.push_str("  behavior: ALLOW_OVERRIDES\n"),
+            SetValueBehavior::Append => o.push_str("  behavior: APPEND\n"),
+            SetValueBehavior::FinalValueIgnoreOverrides => {
+                o.push_str("  behavior: FINAL_VALUE_IGNORE_OVERRIDES\n")
+            }
+            SetValueBehavior::FinalValueThrowOnOverride => {
+                o.push_str("  behavior: FINAL_VALUE_THROW_ON_OVERRIDE\n")
+            }
+        }
+        o.push('}');
     }
     o
 }
@@ -88,8 +84,12 @@ fn policy_text(p: &InvocationPolicy) -> String {
                     SetValueBehavior::Undefined => None,
                     SetValueBehavior::AllowOverrides => Some("ALLOW_OVERRIDES"),
                     SetValueBehavior::Append => Some("APPEND"),
-                    SetValueBehavior::FinalValueIgnoreOverrides => Some("FINAL_VALUE_IGNORE_OVERRIDES"),
-                    SetValueBehavior::FinalValueThrowOnOverride => Some("FINAL_VALUE_THROW_ON_OVERRIDE"),
+                    SetValueBehavior::FinalValueIgnoreOverrides => {
+                        Some("FINAL_VALUE_IGNORE_OVERRIDES")
+                    }
+                    SetValueBehavior::FinalValueThrowOnOverride => {
+                        Some("FINAL_VALUE_THROW_ON_OVERRIDE")
+                    }
                 };
                 if let Some(b) = b {
                     o.push_str(&format!("    behavior: {b}\n"));
@@ -97,7 +97,10 @@ fn policy_text(p: &InvocationPolicy) -> String {
                 o.push_str("  }\n");
             }
             Some(PolicyOperation::UseDefault(_)) => o.push_str("  use_default {\n  }\n"),
-            Some(PolicyOperation::DisallowValues(DisallowValues { disallowed_values, replacement })) => {
+            Some(PolicyOperation::DisallowValues(DisallowValues {
+                disallowed_values,
+                replacement,
+            })) => {
                 o.push_str("  disallow_values {\n");
                 for v in disallowed_values {
                     o.push_str(&format!("    disallowed_values: {}\n", quote(v)));
@@ -105,7 +108,10 @@ fn policy_text(p: &InvocationPolicy) -> String {
                 push_replacement(&mut o, replacement, "new_value", "use_default");
                 o.push_str("  }\n");
             }
-            Some(PolicyOperation::AllowValues(AllowValues { allowed_values, replacement })) => {
+            Some(PolicyOperation::AllowValues(AllowValues {
+                allowed_values,
+                replacement,
+            })) => {
                 o.push_str("  allow_values {\n");
                 for v in allowed_values {
                     o.push_str(&format!("    allowed_values: {}\n", quote(v)));
@@ -143,12 +149,18 @@ fn policy_for_command(p: &InvocationPolicy, command: &str) -> InvocationPolicy {
         if f.flag_name != "config" && !defs.iter().any(|d| d.name == f.flag_name) {
             continue;
         }
-        match flag_policies.iter_mut().find(|e| e.flag_name == f.flag_name) {
+        match flag_policies
+            .iter_mut()
+            .find(|e| e.flag_name == f.flag_name)
+        {
             Some(e) => *e = f.clone(),
             None => flag_policies.push(f.clone()),
         }
     }
-    InvocationPolicy { flag_policies, config_policies: p.config_policies.clone() }
+    InvocationPolicy {
+        flag_policies,
+        config_policies: p.config_policies.clone(),
+    }
 }
 
 fn walk_license_files(dir: &std::path::Path, file_names: &[&str], stdout: &mut Vec<u8>) {
@@ -192,9 +204,14 @@ impl BlazeRuntime {
                 ));
             }
             // Flags this command does not know are ignored (forward compatibility).
-            let Some(def) = defs.iter().find(|d| d.name == fp.flag_name) else { continue };
+            let Some(def) = defs.iter().find(|d| d.name == fp.flag_name) else {
+                continue;
+            };
             let Some(op) = &fp.operation else {
-                return Err(format!("Flag policy for flag '{}' does not have an operation", fp.flag_name));
+                return Err(format!(
+                    "Flag policy for flag '{}' does not have an operation",
+                    fp.flag_name
+                ));
             };
             if let PolicyOperation::SetValue(sv) = op {
                 if sv.flag_values.is_empty() {
@@ -225,9 +242,16 @@ impl BlazeRuntime {
     /// `applyUseDefaultOperation`): ALLOW_OVERRIDES keeps a user-set flag, FINAL_VALUE_IGNORE_OVERRIDES
     /// replaces it, APPEND adds values, FINAL_VALUE_THROW_ON_OVERRIDE rejects a user-set flag.
     /// Allow/Disallow-values filtering is not applied.
-    fn enforce_flag_policies(&self, p: &InvocationPolicy, command: &str, args: &[String]) -> Result<Vec<String>, String> {
+    fn enforce_flag_policies(
+        &self,
+        p: &InvocationPolicy,
+        command: &str,
+        args: &[String],
+    ) -> Result<Vec<String>, String> {
         let defs = super::help::command_options(command);
-        let Some(sep) = args.iter().position(|a| a == "--") else { return Ok(args.to_vec()) };
+        let Some(sep) = args.iter().position(|a| a == "--") else {
+            return Ok(args.to_vec());
+        };
         let mut head: Vec<String> = args[..=sep].to_vec();
         let mut opts: Vec<String> = args[sep + 1..].to_vec();
         let mut effective: Vec<&FlagPolicy> = Vec::new();
@@ -236,20 +260,27 @@ impl BlazeRuntime {
             effective.push(fp);
         }
         for fp in effective {
-            let Some(def) = defs.iter().find(|d| d.name == fp.flag_name) else { continue };
+            let Some(def) = defs.iter().find(|d| d.name == fp.flag_name) else {
+                continue;
+            };
             let names_flag = |a: &str| {
                 let n = a.trim_start_matches('-');
                 let n = n.split('=').next().unwrap_or(n);
-                (a.starts_with("--") && (n == def.name || (def.uses_boolean_syntax() && n.strip_prefix("no") == Some(def.name))))
-                    || (!a.starts_with("--") && a.starts_with('-') && def.abbrev.is_some_and(|c| n.chars().next() == Some(c)))
+                (a.starts_with("--")
+                    && (n == def.name
+                        || (def.uses_boolean_syntax() && n.strip_prefix("no") == Some(def.name))))
+                    || (!a.starts_with("--")
+                        && a.starts_with('-')
+                        && def.abbrev.is_some_and(|c| n.starts_with(c)))
             };
             let user_set = opts.iter().any(|a| names_flag(a));
-            let mut remove = |opts: &mut Vec<String>| {
+            let remove = |opts: &mut Vec<String>| {
                 let mut i = 0;
                 while i < opts.len() {
                     if names_flag(&opts[i]) {
                         // `--flag value` / `-c value` two-token form.
-                        let two = !opts[i].contains('=') && def.requires_value() && i + 1 < opts.len();
+                        let two =
+                            !opts[i].contains('=') && def.requires_value() && i + 1 < opts.len();
                         opts.drain(i..i + if two { 2 } else { 1 });
                     } else {
                         i += 1;
@@ -284,7 +315,12 @@ impl BlazeRuntime {
     }
 
     /// `LicenseCommand.exec`.
-    pub(crate) fn cmd_license(&self, args: &[String], stdout: &mut Vec<u8>, stderr: &mut Vec<u8>) -> ExitCode {
+    pub(crate) fn cmd_license(
+        &self,
+        args: &[String],
+        stdout: &mut Vec<u8>,
+        stderr: &mut Vec<u8>,
+    ) -> ExitCode {
         let _parsed = match zel_options::ParsedCommandOptions::parse_for_command("license", args) {
             Ok(p) => p,
             Err(e) => {
@@ -293,7 +329,10 @@ impl BlazeRuntime {
             }
         };
 
-        writeln_bytes(stdout, "Licenses of all components included in this binary:\n");
+        writeln_bytes(
+            stdout,
+            "Licenses of all components included in this binary:\n",
+        );
         writeln_bytes(stdout, LICENSE_TEXT);
 
         const JAVA_LICENSE_FILES: &[&str] = &[
@@ -302,8 +341,14 @@ impl BlazeRuntime {
             "LICENSE",
             "THIRD_PARTY_README",
         ];
-        let bundled_jdk = self.dirs.install_base.get_relative_str("embedded_tools/jdk");
-        let bundled_jre = self.dirs.install_base.get_relative_str("embedded_tools/jre");
+        let bundled_jdk = self
+            .dirs
+            .install_base
+            .get_relative_str("embedded_tools/jdk");
+        let bundled_jre = self
+            .dirs
+            .install_base
+            .get_relative_str("embedded_tools/jre");
         for (dir_name, bundled_dir) in [("JDK", bundled_jdk), ("JRE", bundled_jre)] {
             let p = std::path::Path::new(bundled_dir.path_string());
             if p.exists() {
@@ -330,8 +375,14 @@ impl BlazeRuntime {
         // `BlazeOptionHandler.partitionCommandLineArgs`: every `--rc_source[=]` / `--default_override[=]`
         // (also after `--`) is consumed as an rc source before option parsing.
         // The consumed rc sources are still converted (`OptionOverrideConverter` for `--default_override`).
-        for a in args.iter().filter(|a| a.starts_with("--rc_source=") || a.starts_with("--default_override=")) {
-            if let Err(e) = zel_options::ParsedCommandOptions::parse_for_command("canonicalize-flags", std::slice::from_ref(a)) {
+        for a in args
+            .iter()
+            .filter(|a| a.starts_with("--rc_source=") || a.starts_with("--default_override="))
+        {
+            if let Err(e) = zel_options::ParsedCommandOptions::parse_for_command(
+                "canonicalize-flags",
+                std::slice::from_ref(a),
+            ) {
                 writeln_bytes(stderr, &e.format_bazel_error());
                 return ExitCode::COMMAND_LINE_ERROR;
             }
@@ -354,9 +405,27 @@ impl BlazeRuntime {
             }
         }
         const BAZEL_COMMAND_ORDER: &[&str] = &[
-            "mobile-install", "fetch", "mod", "vendor", "build", "canonicalize-flags", "clean",
-            "coverage", "dump", "help", "info", "print_action", "query", "run", "shutdown",
-            "test", "version", "aquery", "cquery", "config", "license",
+            "mobile-install",
+            "fetch",
+            "mod",
+            "vendor",
+            "build",
+            "canonicalize-flags",
+            "clean",
+            "coverage",
+            "dump",
+            "help",
+            "info",
+            "print_action",
+            "query",
+            "run",
+            "shutdown",
+            "test",
+            "version",
+            "aquery",
+            "cquery",
+            "config",
+            "license",
         ];
         if !BAZEL_COMMAND_ORDER.contains(&for_command.as_str()) {
             writeln_bytes(
@@ -368,18 +437,21 @@ impl BlazeRuntime {
             );
             return ExitCode::COMMAND_LINE_ERROR;
         }
-        if !policy_arg.is_empty() {
-            if let Err(_) = InvocationPolicy::parse(&policy_arg) {
-                writeln_bytes(stderr, &format!("ERROR: Malformed value of --invocation_policy: {policy_arg}"));
-                return ExitCode::COMMAND_LINE_ERROR;
-            }
+        if !policy_arg.is_empty() && InvocationPolicy::parse(&policy_arg).is_err() {
+            writeln_bytes(
+                stderr,
+                &format!("ERROR: Malformed value of --invocation_policy: {policy_arg}"),
+            );
+            return ExitCode::COMMAND_LINE_ERROR;
         }
         // `InvocationPolicyEnforcer.enforce` runs for every canonicalization: structurally invalid
         // policies of the effective policy set (last one per flag, applicable to the command)
         // are errors even when the flag itself is not touched.
         if !policy_arg.is_empty() {
             if let Ok(p) = InvocationPolicy::parse(&policy_arg) {
-                if let Err(msg) = self.validate_flag_policies(&policy_for_command(&p, &for_command), &for_command) {
+                if let Err(msg) =
+                    self.validate_flag_policies(&policy_for_command(&p, &for_command), &for_command)
+                {
                     writeln_bytes(stderr, &format!("ERROR: {msg}"));
                     return ExitCode::COMMAND_LINE_ERROR;
                 }
@@ -411,40 +483,44 @@ impl BlazeRuntime {
                 }
             };
         }
+        let mut validated_starlark_flags: Option<Vec<String>> = None;
         if let Some(pos) = args.iter().position(|a| a == "--") {
-            for a in &args[pos + 1..] {
-                // Only `--//pkg:flag` / `--@repo//pkg:flag` are Starlark flags (loaded as targets); a
-                // bare `//pkg:target` is residue, reported by the option parser.
-                if !a.starts_with("--") {
-                    continue;
-                }
-                let stripped = a.trim_start_matches('-');
-                if stripped.starts_with("//") || stripped.starts_with('@') {
-                    let opt_name = stripped.split('=').next().unwrap_or(stripped);
-                    let (pkg, _name) = if let Some(rel) = opt_name.strip_prefix("//") {
-                        rel.split_once(':').unwrap_or((rel, ""))
-                    } else if let Some((_, rest)) = opt_name.split_once("//") {
-                        rest.split_once(':').unwrap_or((rest, ""))
-                    } else {
-                        ("", "")
-                    };
-                    let ws = std::path::Path::new(self.dirs.workspace_dir.path_string());
-                    let pkg_dir = ws.join(pkg);
-                    if !pkg_dir.join("BUILD").exists() && !pkg_dir.join("BUILD.bazel").exists() {
-                        writeln_bytes(stderr, "WARNING: Target pattern parsing failed.");
-                        writeln_bytes(
-                            stderr,
-                            &format!(
-                                "ERROR: Skipping '{opt_name}': no such package '{pkg}': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - {pkg}"
-                            ),
-                        );
-                        writeln_bytes(
-                            stderr,
-                            &format!(
-                                "ERROR: Error loading option {opt_name}: no such package '{pkg}': BUILD file not found in any of the following directories. Add a BUILD file to a directory to mark it as a package.\n - {pkg}"
-                            ),
-                        );
-                        return ExitCode::COMMAND_LINE_ERROR;
+            let after_dash = &args[pos + 1..];
+            if let Ok(parsed_after) = zel_options::ParsedCommandOptions::parse_for_command_no_edit(
+                &for_command,
+                after_dash,
+            ) {
+                if !parsed_after.raw_starlark_args.is_empty() && self.in_workspace() {
+                    let include_defaults = args[..pos]
+                        .iter()
+                        .rev()
+                        .find_map(|a| {
+                            if a == "--experimental_include_default_values"
+                                || a == "--experimental_include_default_values=true"
+                            {
+                                Some(true)
+                            } else if a == "--noexperimental_include_default_values"
+                                || a == "--experimental_include_default_values=false"
+                            {
+                                Some(false)
+                            } else {
+                                None
+                            }
+                        })
+                        .unwrap_or(true);
+                    let loader = self.make_loader(&parsed_after);
+                    let rel = self.command_relative_dir(&parsed_after);
+                    match self.parse_and_validate_starlark_options(
+                        &parsed_after,
+                        &loader,
+                        &rel,
+                        include_defaults,
+                    ) {
+                        Ok(v) => validated_starlark_flags = Some(v.canonical_flags),
+                        Err(msg) => {
+                            writeln_bytes(stderr, &format!("ERROR: {msg}"));
+                            return ExitCode::COMMAND_LINE_ERROR;
+                        }
                     }
                 }
             }
@@ -454,7 +530,11 @@ impl BlazeRuntime {
             args
         } else {
             match InvocationPolicy::parse(&policy_arg) {
-                Ok(p) => match self.enforce_flag_policies(&policy_for_command(&p, &for_command), &for_command, args) {
+                Ok(p) => match self.enforce_flag_policies(
+                    &policy_for_command(&p, &for_command),
+                    &for_command,
+                    args,
+                ) {
                     Ok(a) => {
                         enforced_args = a;
                         &enforced_args[..]
@@ -470,7 +550,20 @@ impl BlazeRuntime {
         match zel_options::canonicalize_flags(args) {
             Ok(flags) => {
                 for flag in &flags {
+                    if validated_starlark_flags.is_some()
+                        && (flag.starts_with("--//")
+                            || flag.starts_with("--@")
+                            || flag.starts_with("--no//")
+                            || flag.starts_with("--no@"))
+                    {
+                        continue;
+                    }
                     writeln_bytes(stdout, flag);
+                }
+                if let Some(sf) = validated_starlark_flags {
+                    for flag in &sf {
+                        writeln_bytes(stdout, flag);
+                    }
                 }
                 ExitCode::SUCCESS
             }

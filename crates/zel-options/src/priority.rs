@@ -97,7 +97,9 @@ impl OptionPriority {
 
     pub fn get_child_priority(&mut self) -> Result<Self, OptionsParsingError> {
         if self.already_expanded {
-            return Err(OptionsParsingError::new("Tried to expand option too many times"));
+            return Err(OptionsParsingError::new(
+                "Tried to expand option too many times",
+            ));
         }
         self.already_expanded = true;
         let mut child_indices = self.indices.clone();

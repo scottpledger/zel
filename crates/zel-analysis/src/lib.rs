@@ -22,16 +22,16 @@ use zel_cmdline::Label;
 use zel_util::Fingerprint;
 use zel_vfs::PathFragment;
 
+pub mod action;
+pub mod args;
 pub mod build_options;
 mod build_options_table;
 pub mod fragments;
-pub mod action;
-pub mod nested_set;
-pub mod args;
 pub mod location;
+pub mod nested_set;
 pub mod objects;
-pub mod runfiles;
 pub mod repo_mapping;
+pub mod runfiles;
 pub mod select;
 pub mod starlark_rule;
 pub mod transition;
@@ -95,8 +95,11 @@ pub struct NativeSetting {
 
 /// Options that are explicit in the output directory name and therefore excluded from the
 /// `ST-<hash>` (`OutputPathMnemonicComputer`).
-pub const EXPLICIT_IN_OUTPUT_PATH: &[&str] =
-    &["//command_line_option:cpu", "//command_line_option:compilation_mode", "//command_line_option:platform_suffix"];
+pub const EXPLICIT_IN_OUTPUT_PATH: &[&str] = &[
+    "//command_line_option:cpu",
+    "//command_line_option:compilation_mode",
+    "//command_line_option:platform_suffix",
+];
 
 fn varint_len_prefixed(s: &str, out: &mut Vec<u8>) {
     let mut n = s.len();
@@ -133,7 +136,12 @@ impl BuildConfigurationKey {
     fn platform_in_output_dir(&self) -> bool {
         self.native
             .get("experimental_platform_in_output_dir")
-            .map(|setting| !matches!(setting.value.display().to_ascii_uppercase().as_str(), "NO" | "FALSE" | "0"))
+            .map(|setting| {
+                !matches!(
+                    setting.value.display().to_ascii_uppercase().as_str(),
+                    "NO" | "FALSE" | "0"
+                )
+            })
             .unwrap_or(true)
     }
 
@@ -158,15 +166,52 @@ impl BuildConfigurationKey {
         }
     }
 
+    /// Returns the string rendering of option `name` from `options`, `native`, or the default in
+    /// `build_options_table`.
+    pub fn option_str(&self, name: &str) -> Option<String> {
+        if let Some(v) = self.options.get(name) {
+            return Some(v.clone());
+        }
+        if let Some(n) = self.native.get(name) {
+            return match &n.value {
+                build_options::ConfigValue::Null => None,
+                other => Some(other.display()),
+            };
+        }
+        build_options::find_option(name)
+            .map(|(_, o)| o.default)
+            .filter(|d| *d != "null")
+            .map(str::to_string)
+    }
+
+    /// Reads a boolean option (`options` / `native` / default).
+    pub fn bool_option(&self, name: &str, default: bool) -> bool {
+        let val = self.option_str(name);
+        match val.as_deref().map(str::to_ascii_lowercase).as_deref() {
+            Some("true" | "1" | "yes" | "t" | "y") => true,
+            Some("false" | "0" | "no" | "f" | "n") => false,
+            _ => default,
+        }
+    }
+
     /// The configuration's action environment (`BuildConfigurationValue.getActionEnvironment`):
     /// `--host_action_env` replaces `--action_env` in exec configurations.
     pub fn action_environment(&self) -> zel_util::action_env::ActionEnvironment {
         self.env.action_environment(self.is_exec)
     }
 
-    /// `BuildConfigurationValue.getTestActionEnvironment` (`--test_env`).
+    /// `BuildConfigurationValue.getTestActionEnvironment` (`--test_env`): empty when test
+    /// options have been trimmed (`!keep_test && !keep_test_exec` or `core_only`).
     pub fn test_action_environment(&self) -> zel_util::action_env::ActionEnvironment {
-        self.env.test_environment()
+        let trimmed = self.core_only
+            || (!self.keep_test
+                && !self.keep_test_exec
+                && self.bool_option("trim_test_configuration", true));
+        if trimmed {
+            zel_util::action_env::ActionEnvironment::EMPTY
+        } else {
+            self.env.test_environment()
+        }
     }
 
     /// The exec configuration for the default execution platform (`@platforms//host:host`).
@@ -196,17 +241,20 @@ impl BuildConfigurationKey {
         let mut untrimmed = base.clone();
         untrimmed.keep_test_exec = true;
         let mut java = base;
-        java.post_exec.insert("java_runtime_version".to_string(), "remotejdk_25".to_string());
-        java.transition_changes
-            .insert("//command_line_option:java_runtime_version".to_string(), "remotejdk_25".to_string());
+        java.post_exec.insert(
+            "java_runtime_version".to_string(),
+            "remotejdk_25".to_string(),
+        );
+        java.transition_changes.insert(
+            "//command_line_option:java_runtime_version".to_string(),
+            "remotejdk_25".to_string(),
+        );
         vec![untrimmed, java]
     }
 
     pub fn to_core_only(&self) -> Self {
-        let mut out = self.clone();
+        let mut out = Self::target(build_options::auto_host_cpu(), "fastbuild");
         out.core_only = true;
-        out.is_exec = false;
-        out.keep_test = false;
         out
     }
 
@@ -266,9 +314,18 @@ impl BuildConfigurationKey {
         let entries: Vec<String> = self
             .transition_changes
             .iter()
-            .map(|(k, v)| if v == NULL_VALUE { format!("{k}@null") } else { format!("{k}={v}") })
+            .map(|(k, v)| {
+                if v == NULL_VALUE {
+                    format!("{k}@null")
+                } else {
+                    format!("{k}={v}")
+                }
+            })
             .collect();
-        format!("{base}-{}", transition_directory_name_fragment(entries.iter().map(String::as_str)))
+        format!(
+            "{base}-{}",
+            transition_directory_name_fragment(entries.iter().map(String::as_str))
+        )
     }
 
     /// The mnemonic `bazel config` lists: the base mnemonic plus `ST-<hash>` of the transition changes,
@@ -283,14 +340,26 @@ impl BuildConfigurationKey {
             .transition_changes
             .iter()
             .filter(|(k, _)| {
-                !(platform_in_output_dir && self.is_exec && k.as_str() == "//command_line_option:platforms")
+                !(platform_in_output_dir
+                    && self.is_exec
+                    && k.as_str() == "//command_line_option:platforms")
             })
-            .map(|(k, v)| if v == NULL_VALUE { format!("{k}@null") } else { format!("{k}={v}") })
+            .map(|(k, v)| {
+                if v == NULL_VALUE {
+                    format!("{k}@null")
+                } else {
+                    format!("{k}={v}")
+                }
+            })
             .collect();
         if entries.is_empty() {
             return self.base_mnemonic();
         }
-        format!("{}-{}", self.base_mnemonic(), transition_directory_name_fragment(entries.iter().map(String::as_str)))
+        format!(
+            "{}-{}",
+            self.base_mnemonic(),
+            transition_directory_name_fragment(entries.iter().map(String::as_str))
+        )
     }
 
     /// `BuildConfigurationValue.getMnemonic()` without the `ST-<hash>` suffix: what `config`
@@ -299,13 +368,28 @@ impl BuildConfigurationKey {
         if self.core_only {
             return "fastbuild-noconfig".to_string();
         }
+        let mode_setting = self
+            .native
+            .get("experimental_platform_in_output_dir")
+            .map(|n| n.value.display().to_ascii_uppercase())
+            .unwrap_or_else(|| "AUTO".to_string());
         // The exec configuration of a non-default execution platform is named after that platform
-        // (`OutputPathMnemonicComputer` uses the platform name instead of the CPU when the platform
-        // differs from the default host platform).
-        let cpu_part = if self.is_exec {
+        // when `--experimental_platform_in_output_dir` is `auto` or `yes`.
+        // When `yes`, target configurations also use the platform short name when `--platforms` is set.
+        let cpu_part = if self.is_exec && self.platform_in_output_dir() {
             self.platforms
                 .first()
-                .filter(|p| !matches!(p.as_str(), "@@platforms//host:host" | "@platforms//host:host"))
+                .filter(|p| {
+                    !matches!(
+                        p.as_str(),
+                        "@@platforms//host:host" | "@platforms//host:host"
+                    )
+                })
+                .map(|p| p.rsplit([':', '/']).next().unwrap_or(p).to_string())
+                .unwrap_or_else(|| self.cpu.clone())
+        } else if !self.is_exec && matches!(mode_setting.as_str(), "YES" | "TRUE" | "1") {
+            self.platforms
+                .first()
                 .map(|p| p.rsplit([':', '/']).next().unwrap_or(p).to_string())
                 .unwrap_or_else(|| self.cpu.clone())
         } else {
@@ -314,8 +398,17 @@ impl BuildConfigurationKey {
         let mut base = format!("{}-{}", cpu_part, self.compilation_mode);
         if self.is_exec {
             base.push_str("-exec");
-            if self.native.get("experimental_exec_configuration_distinguisher").map(|n| n.value.display().to_ascii_uppercase()) == Some("LEGACY".to_string()) {
-                let plat = self.platforms.first().map(String::as_str).unwrap_or("@@platforms//host:host");
+            if self
+                .native
+                .get("experimental_exec_configuration_distinguisher")
+                .map(|n| n.value.display().to_ascii_uppercase())
+                == Some("LEGACY".to_string())
+            {
+                let plat = self
+                    .platforms
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("@@platforms//host:host");
                 let mut h: i32 = 0;
                 for u in plat.encode_utf16() {
                     h = h.wrapping_mul(31).wrapping_add(u as i32);
@@ -325,11 +418,20 @@ impl BuildConfigurationKey {
                 base.push_str("-ST-d57f47055a04");
             }
         } else {
-            if let Some(tag) = self.native.get("cc_output_directory_tag").map(|n| n.value.display()).filter(|s| !s.is_empty()) {
+            if let Some(tag) = self
+                .native
+                .get("cc_output_directory_tag")
+                .map(|n| n.value.display())
+                .filter(|s| !s.is_empty())
+            {
                 base.push('-');
                 base.push_str(&tag);
             }
-            if let Some(sfx) = self.options.get("platform_suffix").filter(|s| !s.is_empty()) {
+            if let Some(sfx) = self
+                .options
+                .get("platform_suffix")
+                .filter(|s| !s.is_empty())
+            {
                 base.push('-');
                 base.push_str(sfx);
             }
@@ -349,18 +451,27 @@ impl BuildConfigurationKey {
         }
         // `PlatformOptions.platforms` defaults to `--host_platform` when it is not set explicitly.
         if !self.native.contains_key("platforms") {
-            if let Some(h) = self.native.get("host_platform").map(|n| n.value.display()).filter(|h| !h.is_empty()) {
+            if let Some(h) = self
+                .native
+                .get("host_platform")
+                .map(|n| n.value.display())
+                .filter(|h| !h.is_empty())
+            {
                 o.set("platforms", ConfigValue::List(vec![h]));
             }
         }
         o.set("cpu", ConfigValue::Scalar(self.cpu.clone()));
-        o.set("compilation_mode", ConfigValue::Scalar(self.compilation_mode.clone()));
+        o.set(
+            "compilation_mode",
+            ConfigValue::Scalar(self.compilation_mode.clone()),
+        );
         // `--define`: command-line order with later values replacing earlier ones in place
         // (`FragmentOptions.normalizeEntries`), or the transition-written map.
-        let from_native: Option<Vec<String>> = self.native.get("define").and_then(|n| match &n.value {
-            ConfigValue::List(l) => Some(l.clone()),
-            _ => None,
-        });
+        let from_native: Option<Vec<String>> =
+            self.native.get("define").and_then(|n| match &n.value {
+                ConfigValue::List(l) => Some(l.clone()),
+                _ => None,
+            });
         let defines: Vec<String> = match from_native {
             Some(l) => {
                 let mut m: Vec<(String, String)> = Vec::new();
@@ -375,10 +486,17 @@ impl BuildConfigurationKey {
                 if as_map == self.user_defines {
                     m.into_iter().map(|(k, v)| format!("{k}={v}")).collect()
                 } else {
-                    self.user_defines.iter().map(|(k, v)| format!("{k}={v}")).collect()
+                    self.user_defines
+                        .iter()
+                        .map(|(k, v)| format!("{k}={v}"))
+                        .collect()
                 }
             }
-            None => self.user_defines.iter().map(|(k, v)| format!("{k}={v}")).collect(),
+            None => self
+                .user_defines
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect(),
         };
         o.set("define", ConfigValue::List(defines));
         if !self.platforms.is_empty() {
@@ -390,26 +508,49 @@ impl BuildConfigurationKey {
                 continue;
             }
             if let Some((_, opt)) = find_option(name) {
-                let raws: Vec<String> = if opt.java_type.starts_with("List<") || opt.java_type.starts_with("ImmutableList<") {
-                    raw.split(',').filter(|p| !p.is_empty()).map(str::to_string).collect()
+                let raws: Vec<String> = if opt.java_type.starts_with("List<")
+                    || opt.java_type.starts_with("ImmutableList<")
+                {
+                    raw.split(',')
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_string)
+                        .collect()
                 } else {
                     vec![raw.clone()]
                 };
-                if let Ok(v) = build_options::convert_raws(opt, &raws, &build_options::canonical_label_default, host_cpu) {
+                if let Ok(v) = build_options::convert_raws(
+                    opt,
+                    &raws,
+                    &build_options::canonical_label_default,
+                    host_cpu,
+                ) {
                     o.set(name, v);
                 }
             }
         }
         for (k, v) in &self.transition_changes {
-            let Some(name) = k.strip_prefix("//command_line_option:") else { continue };
+            let Some(name) = k.strip_prefix("//command_line_option:") else {
+                continue;
+            };
             if let Some((_, opt)) = find_option(name) {
                 if v == NULL_VALUE {
-                    let is_list = opt.java_type.starts_with("List<") || opt.java_type.starts_with("ImmutableList<");
-                    o.set(name, if is_list { ConfigValue::List(vec![]) } else { ConfigValue::Null });
+                    let is_list = opt.java_type.starts_with("List<")
+                        || opt.java_type.starts_with("ImmutableList<");
+                    o.set(
+                        name,
+                        if is_list {
+                            ConfigValue::List(vec![])
+                        } else {
+                            ConfigValue::Null
+                        },
+                    );
                 } else if let Some(inner) = v.strip_prefix('[').and_then(|x| x.strip_suffix(']')) {
                     // Java `List.toString` rendering.
-                    let items: Vec<String> =
-                        if inner.is_empty() { vec![] } else { inner.split(", ").map(str::to_string).collect() };
+                    let items: Vec<String> = if inner.is_empty() {
+                        vec![]
+                    } else {
+                        inner.split(", ").map(str::to_string).collect()
+                    };
                     o.set(name, ConfigValue::List(items));
                 } else {
                     o.set(name, ConfigValue::Scalar(v.clone()));
@@ -418,7 +559,10 @@ impl BuildConfigurationKey {
         }
         for (k, v) in &self.flag_values {
             // `Label.toString()`: the main repository prints as `//pkg:name`.
-            let label = k.strip_prefix("@@").filter(|r| r.starts_with("//")).unwrap_or(k);
+            let label = k
+                .strip_prefix("@@")
+                .filter(|r| r.starts_with("//"))
+                .unwrap_or(k);
             let rendered = match self.flag_types.get(k) {
                 Some(ty) => starlark_rule::render_flag_value(ty, v),
                 None => v.clone(),
@@ -427,7 +571,11 @@ impl BuildConfigurationKey {
         }
         o.normalize();
         if self.is_exec {
-            let platform = self.platforms.first().cloned().unwrap_or_else(|| "@@platforms//host:host".to_string());
+            let platform = self
+                .platforms
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "@@platforms//host:host".to_string());
             let mut e = o.exec(&platform);
             for (name, v) in &self.post_exec {
                 e.set(name, ConfigValue::Scalar(v.clone()));
@@ -445,7 +593,8 @@ impl BuildConfigurationKey {
         }
         let o = self.untrimmed_build_options();
         // `TestTrimmingTransition` is a no-op with `--notrim_test_configuration`.
-        let trim = o.get("trim_test_configuration").map(|v| v.display()) != Some("false".to_string());
+        let trim =
+            o.get("trim_test_configuration").map(|v| v.display()) != Some("false".to_string());
         if !trim || (self.keep_test && !self.is_exec) || self.keep_test_exec {
             o
         } else {
@@ -465,13 +614,40 @@ impl BuildConfigurationKey {
         record_configuration(&full, self);
         hash
     }
+
+    /// Global `--features` (or `--host_features` in an exec configuration).
+    pub fn global_features(&self) -> Vec<String> {
+        let bo = self.build_options();
+        if let Some(build_options::ConfigValue::List(l)) = bo.get("features") {
+            if !l.is_empty() {
+                return l.clone();
+            }
+        }
+        let key = if self.is_exec {
+            "host_features"
+        } else {
+            "features"
+        };
+        self.options
+            .get(key)
+            .or_else(|| self.options.get("features"))
+            .map(|s| {
+                s.split(',')
+                    .filter(|x| !x.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
 }
 
 static CONFIGURATION_REGISTRY: std::sync::Mutex<BTreeMap<String, BuildConfigurationKey>> =
     std::sync::Mutex::new(BTreeMap::new());
 
 fn record_configuration(hash: &str, key: &BuildConfigurationKey) {
-    let mut reg = CONFIGURATION_REGISTRY.lock().unwrap_or_else(|e| e.into_inner());
+    let mut reg = CONFIGURATION_REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
     if !reg.contains_key(hash) {
         reg.insert(hash.to_string(), key.clone());
     }
@@ -480,7 +656,10 @@ fn record_configuration(hash: &str, key: &BuildConfigurationKey) {
 /// Every configuration whose hash was computed in this process, by `short_hash()` (what
 /// `bazel config` lists, restricted by the caller to those still present in Skyframe).
 pub fn registered_configurations() -> BTreeMap<String, BuildConfigurationKey> {
-    CONFIGURATION_REGISTRY.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    CONFIGURATION_REGISTRY
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
 }
 
 /// Forgets every recorded configuration. Called when the analysis cache is discarded (the options affecting
@@ -551,7 +730,11 @@ impl Artifact {
             if root_relative_path.path_string().starts_with(&repo_prefix) {
                 root_relative_path.clone()
             } else {
-                PathFragment::create(&format!("external/{}/{}", owner_label.repository().name(), root_relative_path))
+                PathFragment::create(&format!(
+                    "external/{}/{}",
+                    owner_label.repository().name(),
+                    root_relative_path
+                ))
             }
         };
         Self {
@@ -671,7 +854,58 @@ impl Artifact {
         if self.is_source {
             String::new()
         } else {
-            ep.strip_suffix(rel).unwrap_or(ep).trim_end_matches('/').to_string()
+            ep.strip_suffix(rel)
+                .unwrap_or(ep)
+                .trim_end_matches('/')
+                .to_string()
+        }
+    }
+
+    /// `Artifact.equalsWithoutOwner`: compares exec path, root, and special-artifact flags,
+    /// ignoring `owner_label`.
+    pub fn equals_without_owner(&self, other: &Self) -> bool {
+        self.is_source == other.is_source
+            && self.is_tree_artifact == other.is_tree_artifact
+            && self.is_unresolved_symlink == other.is_unresolved_symlink
+            && self.root == other.root
+            && self.exec_path == other.exec_path
+    }
+
+    /// `Artifact.isDirectory`: true for tree artifacts.
+    pub fn is_directory(&self) -> bool {
+        self.is_tree_artifact
+    }
+
+    /// `Artifact.isRunfilesTree`: true when this artifact represents a `.runfiles` tree directory.
+    pub fn is_runfiles_tree(&self) -> bool {
+        self.is_tree_artifact && self.exec_path.base_name().ends_with(".runfiles")
+    }
+
+    /// `Artifact.valueIsShareable`: true for standard artifacts.
+    pub fn value_is_shareable(&self) -> bool {
+        true
+    }
+}
+
+/// Ownerless wrapper around [`Artifact`] (`Actions.OwnerlessArtifactWrapper` /
+/// `MapBasedActionGraph` key): equality and ordering ignore `owner_label`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct OwnerlessArtifactWrapper {
+    pub is_source: bool,
+    pub is_tree_artifact: bool,
+    pub is_unresolved_symlink: bool,
+    pub root: ArtifactRoot,
+    pub exec_path: PathFragment,
+}
+
+impl From<&Artifact> for OwnerlessArtifactWrapper {
+    fn from(a: &Artifact) -> Self {
+        Self {
+            is_source: a.is_source,
+            is_tree_artifact: a.is_tree_artifact,
+            is_unresolved_symlink: a.is_unresolved_symlink,
+            root: a.root,
+            exec_path: a.exec_path.clone(),
         }
     }
 }
@@ -735,6 +969,8 @@ pub enum ActionAnalysisMetadata {
         inputs: Vec<Artifact>,
         outputs: Vec<Artifact>,
         execution_info: BTreeMap<String, String>,
+        /// Tool inputs of the spawn (`Action.getTools` / `Spawn.getToolFiles`).
+        tools: Vec<Artifact>,
         /// Reduced-classpath data of a `JavaCompileAction` (`--experimental_java_classpath=bazel`).
         java_compile: Option<Box<JavaCompileSpec>>,
     },
@@ -783,6 +1019,13 @@ impl ActionAnalysisMetadata {
             Self::SpawnAction { inputs, .. } => inputs.clone(),
             Self::TemplateExpansionAction { template, .. } => vec![template.clone()],
             Self::FileWriteAction { .. } | Self::SymlinkAction { .. } => Vec::new(),
+        }
+    }
+
+    pub fn tools(&self) -> &[Artifact] {
+        match self {
+            Self::SpawnAction { tools, .. } => tools.as_slice(),
+            _ => &[],
         }
     }
 
@@ -860,9 +1103,14 @@ impl ActionAnalysisMetadata {
                 }
             }
         }
-        if let Self::SpawnAction { java_compile: Some(jc), .. } = self {
+        if let Self::SpawnAction {
+            java_compile: Some(jc),
+            ..
+        } = self
+        {
             // `JavaCompileAction.computeKey`: the classpath mode and the (ordered) full classpath.
-            fp.add_str(&jc.classpath_mode).add_strings(jc.transitive_inputs.iter());
+            fp.add_str(&jc.classpath_mode)
+                .add_strings(jc.transitive_inputs.iter());
         }
         fp.hex_digest_and_reset()
     }
@@ -879,9 +1127,21 @@ impl ActionAnalysisMetadata {
             Self::SpawnAction {
                 progress_message, ..
             } => progress_message.clone(),
-            Self::FileWriteAction { output, is_executable, .. } => {
+            Self::FileWriteAction {
+                output,
+                is_executable,
+                ..
+            } => {
                 // `AbstractFileWriteAction.getProgressMessage`
-                format!("{} {}", if *is_executable { "Writing script" } else { "Writing file" }, output.exec_path)
+                format!(
+                    "{} {}",
+                    if *is_executable {
+                        "Writing script"
+                    } else {
+                        "Writing file"
+                    },
+                    output.exec_path
+                )
             }
             Self::SymlinkAction { output, .. } => {
                 format!("Symlinking {}", output.exec_path)
@@ -968,6 +1228,36 @@ pub struct ConfiguredTarget {
     pub instrumented_files: Option<InstrumentedFiles>,
     /// Name of the aspect that decorated this configured target (e.g. `//pkg:defs.bzl%asp`).
     pub aspect_name: Option<String>,
+    /// `AliasProvider`: chain of alias labels from head (outermost alias) to tail (alias
+    /// pointing to the real non-alias target). Empty for non-alias targets.
+    pub alias_chain: Vec<Label>,
+    /// Real target's label at the end of an alias chain (`None` for non-alias targets).
+    pub actual_label: Option<Label>,
+    /// Real target's rule class at the end of an alias chain (`None` for non-alias targets).
+    pub actual_rule_class: Option<String>,
+    /// Real target's `testonly` flag when reached through an alias.
+    pub actual_testonly: Option<bool>,
+    /// `LateBoundAliasProvider`: true for late-bound alias rules (`label_flag`, `label_setting`,
+    /// `cc_libc_top_alias`, etc.), even when they resolve to empty.
+    pub is_late_bound_alias: bool,
+    /// `VisibilityProvider.isCreatedInSymbolicMacro`: whether this target was created inside a
+    /// symbolic macro.
+    pub created_in_symbolic_macro: bool,
+    /// Analysis-time rule warnings emitted while configuring this target.
+    pub warnings: Vec<String>,
+    /// For `alias` targets: the chain of aliased target labels ending at the final non-alias target.
+    pub alias_targets: Vec<Label>,
+    /// Non-`None` when this target is incompatible with the target platform (`target_compatible_with`).
+    pub incompatible: Option<IncompatiblePlatform>,
+}
+
+/// Reason a configured target is incompatible with its target platform (`IncompatiblePlatformProvider`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IncompatiblePlatform {
+    pub target_platform: Label,
+    pub constraints: Vec<Label>,
+    /// Dependency chain from this target down to the first incompatible target (empty if directly incompatible).
+    pub dependency_chain: Vec<Label>,
 }
 
 /// `RunEnvironmentInfo`: fixed variables plus names inherited from the client environment.
@@ -1008,7 +1298,72 @@ impl ConfiguredTarget {
             run_environment: None,
             instrumented_files: None,
             aspect_name: None,
+            alias_chain: Vec::new(),
+            actual_label: None,
+            actual_rule_class: None,
+            actual_testonly: None,
+            is_late_bound_alias: false,
+            created_in_symbolic_macro: false,
+            warnings: Vec::new(),
+            alias_targets: Vec::new(),
+            incompatible: None,
         }
+    }
+
+    /// `AliasProvider.getDependencyLabel`: head of the alias chain, or `self.label`.
+    pub fn dependency_label(&self) -> &Label {
+        self.alias_chain.first().unwrap_or(&self.label)
+    }
+
+    /// The underlying non-alias target's label (or `self.label` if not an alias).
+    pub fn actual_target_label(&self) -> &Label {
+        self.actual_label.as_ref().unwrap_or(&self.label)
+    }
+
+    /// The underlying non-alias target's rule class (or `self.rule_class` if not an alias).
+    pub fn actual_rule_class_name(&self) -> &str {
+        self.actual_rule_class
+            .as_deref()
+            .unwrap_or(&self.rule_class)
+    }
+
+    /// `AliasProvider.getDependencyLabels`: at most `[chain_head, actual_label]`.
+    pub fn dependency_labels(&self) -> Vec<Label> {
+        if let Some(head) = self.alias_chain.first() {
+            vec![head.clone(), self.actual_target_label().clone()]
+        } else {
+            vec![self.label.clone()]
+        }
+    }
+
+    /// `AliasProvider.isAlias`.
+    pub fn is_alias(&self) -> bool {
+        !self.alias_chain.is_empty()
+    }
+
+    /// `AliasProvider.describeTargetWithAliases`.
+    pub fn describe_with_aliases(&self, with_kind: bool) -> String {
+        let kind = if with_kind {
+            format!("{} rule", self.actual_rule_class_name())
+        } else {
+            "target".to_string()
+        };
+        if self.alias_chain.is_empty() {
+            return format!("{kind} '{}'", self.label.canonical_form());
+        }
+        let mut s = format!(
+            "alias '{}' referring to {kind} '{}'",
+            self.alias_chain[0].canonical_form(),
+            self.actual_target_label().canonical_form()
+        );
+        if self.alias_chain.len() > 1 {
+            let mid: Vec<String> = self.alias_chain[1..]
+                .iter()
+                .map(|l| l.canonical_form())
+                .collect();
+            s.push_str(&format!(" through '{}'", mid.join("' -> '")));
+        }
+        s
     }
 }
 

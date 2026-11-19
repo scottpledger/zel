@@ -81,7 +81,13 @@ fn huff_table() -> &'static HuffTable {
             codes[s as usize] = next[l];
             next[l] += 1;
         }
-        HuffTable { codes, first_code, first_index, count, sorted_syms }
+        HuffTable {
+            codes,
+            first_code,
+            first_index,
+            count,
+            sorted_syms,
+        }
     })
 }
 
@@ -120,7 +126,9 @@ pub fn huffman_decode(data: &[u8]) -> Result<Vec<u8>, String> {
             if len > 30 {
                 return Err("invalid huffman code".into());
             }
-            if t.count[len] > 0 && code >= t.first_code[len] && code - t.first_code[len] < t.count[len]
+            if t.count[len] > 0
+                && code >= t.first_code[len]
+                && code - t.first_code[len] < t.count[len]
             {
                 let sym = t.sorted_syms[t.first_index[len] + (code - t.first_code[len]) as usize];
                 if sym == 256 {
@@ -259,7 +267,11 @@ fn decode_string(buf: &[u8], pos: &mut usize) -> Result<String, String> {
     }
     let raw = &buf[*pos..*pos + len];
     *pos += len;
-    let bytes = if huff { huffman_decode(raw)? } else { raw.to_vec() };
+    let bytes = if huff {
+        huffman_decode(raw)?
+    } else {
+        raw.to_vec()
+    };
     // Header values may legally carry arbitrary octets; keep them lossless-ish.
     Ok(String::from_utf8(bytes.clone())
         .unwrap_or_else(|_| bytes.iter().map(|&b| b as char).collect()))
@@ -274,7 +286,11 @@ struct DynTable {
 
 impl DynTable {
     fn new(max_size: usize) -> Self {
-        Self { entries: VecDeque::new(), size: 0, max_size }
+        Self {
+            entries: VecDeque::new(),
+            size: 0,
+            max_size,
+        }
     }
     fn entry_size(h: &Header) -> usize {
         h.0.len() + h.1.len() + 32
@@ -306,7 +322,10 @@ fn lookup(dt: &DynTable, index: usize) -> Result<Header, String> {
         let (n, v) = STATIC_TABLE[index - 1];
         return Ok((n.to_string(), v.to_string()));
     }
-    dt.entries.get(index - 62).cloned().ok_or_else(|| format!("hpack index {index} out of range"))
+    dt.entries
+        .get(index - 62)
+        .cloned()
+        .ok_or_else(|| format!("hpack index {index} out of range"))
 }
 
 /// HPACK decoder (one per connection direction; header blocks must be decoded in order).
@@ -319,7 +338,10 @@ pub struct Decoder {
 
 impl Decoder {
     pub fn new(max_table_size: usize) -> Self {
-        Self { table: DynTable::new(max_table_size), max_allowed: max_table_size }
+        Self {
+            table: DynTable::new(max_table_size),
+            max_allowed: max_table_size,
+        }
     }
 
     pub fn decode(&mut self, buf: &[u8]) -> Result<Vec<Header>, String> {
@@ -372,7 +394,10 @@ pub struct Encoder {
 
 impl Encoder {
     pub fn new() -> Self {
-        Self { table: DynTable::new(4096), pending_size_update: None }
+        Self {
+            table: DynTable::new(4096),
+            pending_size_update: None,
+        }
     }
 
     /// Applies the peer's SETTINGS_HEADER_TABLE_SIZE.
@@ -390,7 +415,8 @@ impl Encoder {
             encode_int(n, 5, 0x20, &mut out);
         }
         for h in headers {
-            let sensitive = h.0 == "authorization" || h.0 == "cookie" || h.0 == "proxy-authorization";
+            let sensitive =
+                h.0 == "authorization" || h.0 == "cookie" || h.0 == "proxy-authorization";
             let mut full = None;
             let mut name_idx = None;
             for (i, (n, v)) in STATIC_TABLE.iter().enumerate() {
@@ -421,8 +447,11 @@ impl Encoder {
                 encode_int(i, 7, 0x80, &mut out);
                 continue;
             }
-            let (prefix, flags, index_it) =
-                if sensitive { (4u8, 0x10u8, false) } else { (6u8, 0x40u8, true) };
+            let (prefix, flags, index_it) = if sensitive {
+                (4u8, 0x10u8, false)
+            } else {
+                (6u8, 0x40u8, true)
+            };
             match name_idx {
                 Some(i) => encode_int(i, prefix, flags, &mut out),
                 None => {
@@ -451,7 +480,9 @@ mod tests {
 
     fn unhex(s: &str) -> Vec<u8> {
         let s: String = s.split_whitespace().collect();
-        (0..s.len() / 2).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap()).collect()
+        (0..s.len() / 2)
+            .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).unwrap())
+            .collect()
     }
 
     #[test]
@@ -479,12 +510,19 @@ mod tests {
             ("custom-key", "25a8 49e9 5ba9 7d7f"),
             ("custom-value", "25a8 49e9 5bb8 e8b4 bf"),
             ("302", "6402"),
-            ("Mon, 21 Oct 2013 20:13:21 GMT", "d07a be94 1054 d444 a820 0595 040b 8166 e082 a62d 1bff"),
+            (
+                "Mon, 21 Oct 2013 20:13:21 GMT",
+                "d07a be94 1054 d444 a820 0595 040b 8166 e082 a62d 1bff",
+            ),
         ];
         for (plain, hex) in cases {
             let enc = unhex(hex);
             assert_eq!(huffman_encode(plain.as_bytes()), enc, "encode {plain}");
-            assert_eq!(huffman_decode(&enc).unwrap(), plain.as_bytes(), "decode {plain}");
+            assert_eq!(
+                huffman_decode(&enc).unwrap(),
+                plain.as_bytes(),
+                "decode {plain}"
+            );
         }
         assert_eq!(
             huffman_decode(&unhex("9d29 ad17 1863 c78f 0b97 c8e9 ae82 ae43 d3")).unwrap(),
@@ -501,7 +539,9 @@ mod tests {
     #[test]
     fn rfc_c3_requests_without_huffman() {
         let mut d = Decoder::new(4096);
-        let h = d.decode(&unhex("8286 8441 0f77 7777 2e65 7861 6d70 6c65 2e63 6f6d")).unwrap();
+        let h = d
+            .decode(&unhex("8286 8441 0f77 7777 2e65 7861 6d70 6c65 2e63 6f6d"))
+            .unwrap();
         assert_eq!(
             h,
             vec![
@@ -511,7 +551,9 @@ mod tests {
                 (":authority".into(), "www.example.com".into()),
             ]
         );
-        let h = d.decode(&unhex("8286 84be 5808 6e6f 2d63 6163 6865")).unwrap();
+        let h = d
+            .decode(&unhex("8286 84be 5808 6e6f 2d63 6163 6865"))
+            .unwrap();
         assert_eq!(h[3], (":authority".into(), "www.example.com".into()));
         assert_eq!(h[4], ("cache-control".into(), "no-cache".into()));
     }
@@ -519,12 +561,16 @@ mod tests {
     #[test]
     fn rfc_c4_requests_with_huffman_and_dynamic_table() {
         let mut d = Decoder::new(4096);
-        let h = d.decode(&unhex("8286 8441 8cf1 e3c2 e5f2 3a6b a0ab 90f4 ff")).unwrap();
+        let h = d
+            .decode(&unhex("8286 8441 8cf1 e3c2 e5f2 3a6b a0ab 90f4 ff"))
+            .unwrap();
         assert_eq!(h[3], (":authority".into(), "www.example.com".into()));
         let h = d.decode(&unhex("8286 84be 5886 a8eb 1064 9cbf")).unwrap();
         assert_eq!(h[4], ("cache-control".into(), "no-cache".into()));
         let h = d
-            .decode(&unhex("8287 85bf 4088 25a8 49e9 5ba9 7d7f 8925 a849 e95b b8e8 b4bf"))
+            .decode(&unhex(
+                "8287 85bf 4088 25a8 49e9 5ba9 7d7f 8925 a849 e95b b8e8 b4bf",
+            ))
             .unwrap();
         assert_eq!(h[4], ("custom-key".into(), "custom-value".into()));
     }
@@ -553,7 +599,11 @@ mod tests {
         let hs: Vec<Header> = vec![
             (":method".into(), "POST".into()),
             (":scheme".into(), "http".into()),
-            (":path".into(), "/build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs".into()),
+            (
+                ":path".into(),
+                "/build.bazel.remote.execution.v2.ContentAddressableStorage/FindMissingBlobs"
+                    .into(),
+            ),
             (":authority".into(), "localhost:8980".into()),
             ("content-type".into(), "application/grpc".into()),
             ("te".into(), "trailers".into()),
@@ -566,7 +616,10 @@ mod tests {
         }
         let first = Encoder::new().encode(&hs).len();
         let second = e.encode(&hs).len();
-        assert!(second < first, "dynamic table should shrink repeat requests");
+        assert!(
+            second < first,
+            "dynamic table should shrink repeat requests"
+        );
     }
 
     #[test]

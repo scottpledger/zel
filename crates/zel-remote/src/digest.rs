@@ -46,7 +46,10 @@ impl DigestFn {
     }
 
     pub fn digest(&self, data: &[u8]) -> Digest {
-        Digest { hash: self.hash(data), size_bytes: data.len() as i64 }
+        Digest {
+            hash: self.hash(data),
+            size_bytes: data.len() as i64,
+        }
     }
 
     /// Expected hex length.
@@ -94,16 +97,24 @@ mod tests {
     #[test]
     fn sha256_empty_digest() {
         let d = DigestFn::Sha256.digest(b"");
-        assert_eq!(d.hash, "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            d.hash,
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
         assert_eq!(d.size_bytes, 0);
-        assert_eq!(DigestFn::Md5.digest(b"").hash, "d41d8cd98f00b204e9800998ecf8427e");
+        assert_eq!(
+            DigestFn::Md5.digest(b"").hash,
+            "d41d8cd98f00b204e9800998ecf8427e"
+        );
     }
 
     #[test]
     fn parse_digest_function() {
         assert_eq!(DigestFn::parse("sha256").unwrap(), DigestFn::Sha256);
         assert_eq!(DigestFn::parse("MD5").unwrap(), DigestFn::Md5);
-        assert!(DigestFn::parse("blake3").unwrap_err().contains("not supported"));
+        assert!(DigestFn::parse("blake3")
+            .unwrap_err()
+            .contains("not supported"));
         assert!(DigestFn::parse("nope").is_err());
     }
 }

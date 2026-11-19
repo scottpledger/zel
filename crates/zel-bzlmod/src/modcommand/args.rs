@@ -21,7 +21,14 @@ fn push_unique(v: &mut Vec<ModuleKey>, k: ModuleKey) {
 
 /// `[a, b, c]` rendering of a list (Java `ImmutableSet/List.toString()`).
 pub fn list_string<T: fmt::Display>(items: &[T]) -> String {
-    format!("[{}]", items.iter().map(|i| i.to_string()).collect::<Vec<_>>().join(", "))
+    format!(
+        "[{}]",
+        items
+            .iter()
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 /// The apparent -> canonical repo mapping of the base module (with its context repo).
@@ -73,9 +80,14 @@ fn validate_canonical_repo_name(name: &str) -> Result<(), String> {
         return Ok(());
     }
     if name == "." || name == ".." {
-        return Err(format!("invalid repository name '{name}': repo names are not allowed to be '{name}'"));
+        return Err(format!(
+            "invalid repository name '{name}': repo names are not allowed to be '{name}'"
+        ));
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+')) {
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '+'))
+    {
         return Err(format!(
             "invalid repository name '{name}': repo names may contain only A-Z, a-z, 0-9, '-', '_', '.' and '+'"
         ));
@@ -86,7 +98,9 @@ fn validate_canonical_repo_name(name: &str) -> Result<(), String> {
 fn validate_user_provided_repo_name(name: &str) -> Result<(), String> {
     let mut chars = name.chars();
     let ok = match chars.next() {
-        Some(c) if c.is_ascii_alphanumeric() => chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_')),
+        Some(c) if c.is_ascii_alphanumeric() => {
+            chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_'))
+        }
         _ => false,
     };
     if ok {
@@ -105,25 +119,33 @@ impl ModuleArg {
             return Ok(ModuleArg::SpecificVersionOfModule(ModuleKey::root()));
         }
         if let Some(name) = input.strip_prefix("@@") {
-            validate_canonical_repo_name(name).map_err(|e| format!("invalid argument '{input}': {e}"))?;
+            validate_canonical_repo_name(name)
+                .map_err(|e| format!("invalid argument '{input}': {e}"))?;
             return Ok(ModuleArg::CanonicalRepoName(name.to_string()));
         }
         if let Some(name) = input.strip_prefix('@') {
-            validate_user_provided_repo_name(name).map_err(|e| format!("invalid argument '{input}': {e}"))?;
+            validate_user_provided_repo_name(name)
+                .map_err(|e| format!("invalid argument '{input}': {e}"))?;
             return Ok(ModuleArg::ApparentRepoName(name.to_string()));
         }
         if let Some(at) = input.find('@') {
             let module_name = &input[..at];
             let version_str = &input[at + 1..];
             if version_str.is_empty() {
-                return Err(format!("invalid argument '{input}': use _ for the empty version"));
+                return Err(format!(
+                    "invalid argument '{input}': use _ for the empty version"
+                ));
             }
             let version = if version_str == "_" {
                 Version::empty()
             } else {
-                Version::parse(version_str).map_err(|e| format!("invalid argument '{input}': {e}"))?
+                Version::parse(version_str)
+                    .map_err(|e| format!("invalid argument '{input}': {e}"))?
             };
-            return Ok(ModuleArg::SpecificVersionOfModule(ModuleKey::new(module_name, version)));
+            return Ok(ModuleArg::SpecificVersionOfModule(ModuleKey::new(
+                module_name,
+                version,
+            )));
         }
         Ok(ModuleArg::AllVersionsOfModule(input.to_string()))
     }
@@ -151,7 +173,9 @@ impl ModuleArg {
                 throw_if_nonexistent(insp, key, include_unused, warn_unused)?;
                 Ok(vec![key.clone()])
             }
-            ModuleArg::AllVersionsOfModule(name) => resolve_all_versions(insp, name, include_unused, warn_unused),
+            ModuleArg::AllVersionsOfModule(name) => {
+                resolve_all_versions(insp, name, include_unused, warn_unused)
+            }
             ModuleArg::ApparentRepoName(name) => {
                 let mut out = vec![];
                 if let Some((_, k)) = base_deps.iter().find(|(n, _)| n == name) {
@@ -170,7 +194,10 @@ impl ModuleArg {
                 Ok(out)
             }
             ModuleArg::CanonicalRepoName(name) => {
-                let m = insp.dep_graph.values().find(|m| insp.canonical_name(&m.key) == Some(name.as_str()));
+                let m = insp
+                    .dep_graph
+                    .values()
+                    .find(|m| insp.canonical_name(&m.key) == Some(name.as_str()));
                 if let Some(m) = m {
                     if !include_unused && warn_unused && !m.is_used() {
                         return Err(invalid(format!(
@@ -198,13 +225,21 @@ impl ModuleArg {
         match self {
             ModuleArg::SpecificVersionOfModule(key) => {
                 throw_if_nonexistent(insp, key, false, false)?;
-                Ok(vec![(key.to_string(), insp.canonical_name(key).unwrap_or("").to_string())])
+                Ok(vec![(
+                    key.to_string(),
+                    insp.canonical_name(key).unwrap_or("").to_string(),
+                )])
             }
             ModuleArg::AllVersionsOfModule(name) => {
                 let keys = resolve_all_versions(insp, name, false, false)?;
                 Ok(keys
                     .iter()
-                    .map(|k| (k.to_string(), insp.canonical_name(k).unwrap_or("").to_string()))
+                    .map(|k| {
+                        (
+                            k.to_string(),
+                            insp.canonical_name(k).unwrap_or("").to_string(),
+                        )
+                    })
                     .collect())
             }
             ModuleArg::ApparentRepoName(name) => match mapping.entries.get(name) {
@@ -223,7 +258,10 @@ impl ModuleArg {
 fn split_non_empty(input: &str) -> Result<Vec<&str>, String> {
     let parts: Vec<&str> = input.split(',').collect();
     if parts.iter().any(|p| p.is_empty()) {
-        return Err(format!("Empty values are not allowed as part of this comma-separated list of options"));
+        return Err(
+            "Empty values are not allowed as part of this comma-separated list of options"
+                .to_string(),
+        );
     }
     Ok(parts)
 }
@@ -244,11 +282,16 @@ fn throw_if_nonexistent(
     }
     if m.is_none() || (!include_unused && !m.map(|m| m.is_used()).unwrap_or(false)) {
         let Some(existing) = insp.modules_index.get(&key.name) else {
-            return Err(invalid(format!("Module {} does not exist in the dependency graph.", key.name)));
+            return Err(invalid(format!(
+                "Module {} does not exist in the dependency graph.",
+                key.name
+            )));
         };
         let filtered: Vec<&ModuleKey> = existing
             .iter()
-            .filter(|k| include_unused || insp.dep_graph.get(*k).map(|m| m.is_used()).unwrap_or(false))
+            .filter(|k| {
+                include_unused || insp.dep_graph.get(*k).map(|m| m.is_used()).unwrap_or(false)
+            })
             .collect();
         return Err(invalid(format!(
             "Module version {key} does not exist, available versions: {}.",
@@ -265,7 +308,9 @@ fn resolve_all_versions(
     warn_unused: bool,
 ) -> Result<Vec<ModuleKey>, ModError> {
     let Some(existing) = insp.modules_index.get(name) else {
-        return Err(invalid(format!("Module {name} does not exist in the dependency graph.")));
+        return Err(invalid(format!(
+            "Module {name} does not exist in the dependency graph."
+        )));
     };
     let filtered: Vec<ModuleKey> = existing
         .iter()
@@ -278,7 +323,9 @@ fn resolve_all_versions(
                 "Module {name} is unused as a result of module resolution. Use the --include_unused flag to include it."
             )));
         }
-        return Err(invalid(format!("Module {name} does not exist in the dependency graph.")));
+        return Err(invalid(format!(
+            "Module {name} does not exist in the dependency graph."
+        )));
     }
     Ok(filtered)
 }
@@ -293,7 +340,11 @@ pub struct ExtensionArg {
 
 impl fmt::Display for ExtensionArg {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}{}%{}", self.module_arg, self.repo_relative_bzl_label, self.extension_name)
+        write!(
+            f,
+            "{}{}%{}",
+            self.module_arg, self.repo_relative_bzl_label, self.extension_name
+        )
     }
 }
 
@@ -331,7 +382,13 @@ impl ExtensionArg {
         base_deps: &[(String, ModuleKey)],
         base_unused_deps: &[(String, ModuleKey)],
     ) -> Result<ExtensionId, ModError> {
-        let ref_modules = self.module_arg.resolve_to_module_keys(insp, base_deps, base_unused_deps, false, false)?;
+        let ref_modules = self.module_arg.resolve_to_module_keys(
+            insp,
+            base_deps,
+            base_unused_deps,
+            false,
+            false,
+        )?;
         if ref_modules.len() != 1 {
             return Err(invalid(format!(
                 "Module {}, as part of the extension specifier, should represent exactly one module version. Choose one of: {}.",
@@ -341,8 +398,12 @@ impl ExtensionArg {
         }
         let key = &ref_modules[0];
         let repo = insp.canonical_name(key).unwrap_or("");
-        let label = parse_repo_relative_label(&self.repo_relative_bzl_label)
-            .map_err(|e| invalid(format!("bad label format in {}: {e}", self.repo_relative_bzl_label)))?;
+        let label = parse_repo_relative_label(&self.repo_relative_bzl_label).map_err(|e| {
+            invalid(format!(
+                "bad label format in {}: {e}",
+                self.repo_relative_bzl_label
+            ))
+        })?;
         Ok(ExtensionId {
             bzl_file: format!("@@{repo}{label}"),
             name: self.extension_name.clone(),
@@ -354,7 +415,9 @@ impl ExtensionArg {
 /// Parses `//pkg:name` (or `//pkg`) into its normalized `//pkg:name` form.
 fn parse_repo_relative_label(label: &str) -> Result<String, String> {
     let Some(rest) = label.strip_prefix("//") else {
-        return Err(format!("invalid label '{label}': absolute label must begin with '@' or '//'"));
+        return Err(format!(
+            "invalid label '{label}': absolute label must begin with '@' or '//'"
+        ));
     };
     let (pkg, name) = match rest.split_once(':') {
         Some((p, n)) => (p, n.to_string()),
@@ -372,22 +435,49 @@ mod tests {
 
     #[test]
     fn parse_module_args() {
-        assert_eq!(ModuleArg::parse("<ROOT>").unwrap(), ModuleArg::SpecificVersionOfModule(ModuleKey::root()));
-        assert_eq!(ModuleArg::parse("foo").unwrap(), ModuleArg::AllVersionsOfModule("foo".into()));
-        assert_eq!(ModuleArg::parse("@foo").unwrap(), ModuleArg::ApparentRepoName("foo".into()));
-        assert_eq!(ModuleArg::parse("@@foo+").unwrap(), ModuleArg::CanonicalRepoName("foo+".into()));
-        assert_eq!(ModuleArg::parse("@@").unwrap(), ModuleArg::CanonicalRepoName("".into()));
+        assert_eq!(
+            ModuleArg::parse("<ROOT>").unwrap(),
+            ModuleArg::SpecificVersionOfModule(ModuleKey::root())
+        );
+        assert_eq!(
+            ModuleArg::parse("foo").unwrap(),
+            ModuleArg::AllVersionsOfModule("foo".into())
+        );
+        assert_eq!(
+            ModuleArg::parse("@foo").unwrap(),
+            ModuleArg::ApparentRepoName("foo".into())
+        );
+        assert_eq!(
+            ModuleArg::parse("@@foo+").unwrap(),
+            ModuleArg::CanonicalRepoName("foo+".into())
+        );
+        assert_eq!(
+            ModuleArg::parse("@@").unwrap(),
+            ModuleArg::CanonicalRepoName("".into())
+        );
         let k = ModuleKey::new("foo", Version::parse("1.2").unwrap());
-        assert_eq!(ModuleArg::parse("foo@1.2").unwrap(), ModuleArg::SpecificVersionOfModule(k));
+        assert_eq!(
+            ModuleArg::parse("foo@1.2").unwrap(),
+            ModuleArg::SpecificVersionOfModule(k)
+        );
         let e = ModuleKey::new("foo", Version::empty());
-        assert_eq!(ModuleArg::parse("foo@_").unwrap(), ModuleArg::SpecificVersionOfModule(e));
+        assert_eq!(
+            ModuleArg::parse("foo@_").unwrap(),
+            ModuleArg::SpecificVersionOfModule(e)
+        );
         assert_eq!(
             ModuleArg::parse("foo@").unwrap_err(),
             "invalid argument 'foo@': use _ for the empty version"
         );
-        assert!(ModuleArg::parse("@a+b").unwrap_err().starts_with("invalid argument '@a+b': invalid user-provided repo name 'a+b'"));
-        assert!(ModuleArg::parse("@@a b").unwrap_err().contains("invalid repository name 'a b'"));
-        assert!(ModuleArg::parse("foo@1..2").unwrap_err().starts_with("invalid argument 'foo@1..2': "));
+        assert!(ModuleArg::parse("@a+b")
+            .unwrap_err()
+            .starts_with("invalid argument '@a+b': invalid user-provided repo name 'a+b'"));
+        assert!(ModuleArg::parse("@@a b")
+            .unwrap_err()
+            .contains("invalid repository name 'a b'"));
+        assert!(ModuleArg::parse("foo@1..2")
+            .unwrap_err()
+            .starts_with("invalid argument 'foo@1..2': "));
     }
 
     #[test]
@@ -407,20 +497,38 @@ mod tests {
     #[test]
     fn parse_extension_args() {
         let a = ExtensionArg::parse("@rules_java//java:extensions.bzl%toolchains").unwrap();
-        assert_eq!(a.module_arg, ModuleArg::ApparentRepoName("rules_java".into()));
+        assert_eq!(
+            a.module_arg,
+            ModuleArg::ApparentRepoName("rules_java".into())
+        );
         assert_eq!(a.repo_relative_bzl_label, "//java:extensions.bzl");
         assert_eq!(a.extension_name, "toolchains");
         assert_eq!(a.to_string(), "@rules_java//java:extensions.bzl%toolchains");
         let b = ExtensionArg::parse("rules_java@6.1.1//java:extensions.bzl%toolchains").unwrap();
-        assert_eq!(b.to_string(), "rules_java@6.1.1//java:extensions.bzl%toolchains");
-        assert_eq!(ExtensionArg::parse("foo").unwrap_err(), "Invalid argument foo: missing .bzl label");
-        assert_eq!(ExtensionArg::parse("foo//x.bzl").unwrap_err(), "Invalid argument foo//x.bzl: missing extension name");
-        assert_eq!(ExtensionArg::parse("a%b/c").unwrap_err(), "Invalid argument a%b/c: missing extension name");
+        assert_eq!(
+            b.to_string(),
+            "rules_java@6.1.1//java:extensions.bzl%toolchains"
+        );
+        assert_eq!(
+            ExtensionArg::parse("foo").unwrap_err(),
+            "Invalid argument foo: missing .bzl label"
+        );
+        assert_eq!(
+            ExtensionArg::parse("foo//x.bzl").unwrap_err(),
+            "Invalid argument foo//x.bzl: missing extension name"
+        );
+        assert_eq!(
+            ExtensionArg::parse("a%b/c").unwrap_err(),
+            "Invalid argument a%b/c: missing extension name"
+        );
     }
 
     #[test]
     fn repo_relative_label() {
-        assert_eq!(parse_repo_relative_label("//a/b:c.bzl").unwrap(), "//a/b:c.bzl");
+        assert_eq!(
+            parse_repo_relative_label("//a/b:c.bzl").unwrap(),
+            "//a/b:c.bzl"
+        );
         assert_eq!(parse_repo_relative_label("//a/b").unwrap(), "//a/b:b");
         assert!(parse_repo_relative_label("/a").is_err());
     }

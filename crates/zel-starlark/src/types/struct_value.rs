@@ -29,11 +29,21 @@ pub struct StructValue {
 
 impl StructValue {
     pub fn new(fields: BTreeMap<String, Value>) -> Self {
-        Self { fields, is_attr: false, is_native: false, opaque_class: None }
+        Self {
+            fields,
+            is_attr: false,
+            is_native: false,
+            opaque_class: None,
+        }
     }
 
     pub fn new_native(fields: BTreeMap<String, Value>) -> Self {
-        Self { fields, is_attr: false, is_native: true, opaque_class: None }
+        Self {
+            fields,
+            is_attr: false,
+            is_native: true,
+            opaque_class: None,
+        }
     }
 
     /// The `attr` of a `repository_ctx`: an opaque `RepoDefinition` for Bazel.
@@ -42,22 +52,47 @@ impl StructValue {
             fields,
             is_attr: true,
             is_native: false,
-            opaque_class: Some("com.google.devtools.build.lib.bazel.repository.RepoDefinition".to_string()),
+            opaque_class: Some(
+                "com.google.devtools.build.lib.bazel.repository.RepoDefinition".to_string(),
+            ),
         }
     }
 
     /// A struct-like value that Bazel represents as an opaque object of the given Java class.
     pub fn new_opaque(fields: BTreeMap<String, Value>, class: &str) -> Self {
-        Self { fields, is_attr: false, is_native: false, opaque_class: Some(class.to_string()) }
+        Self {
+            fields,
+            is_attr: false,
+            is_native: false,
+            opaque_class: Some(class.to_string()),
+        }
     }
 
     /// `repr`/`str` of this struct (`struct(a = "x")`, with strings quoted like Bazel does).
     pub fn repr(&self) -> String {
+        let mut out = String::new();
+        let mut stack = Vec::new();
+        self.repr_into(&mut out, &mut stack);
+        out
+    }
+
+    pub fn repr_into(&self, out: &mut String, stack: &mut Vec<usize>) {
         if let Some(c) = &self.opaque_class {
-            return format!("<unknown object {c}>");
+            out.push_str("<unknown object ");
+            out.push_str(c);
+            out.push('>');
+            return;
         }
-        let fields: Vec<String> = self.fields.iter().map(|(k, v)| format!("{k} = {}", v.repr())).collect();
-        format!("struct({})", fields.join(", "))
+        out.push_str("struct(");
+        for (i, (k, v)) in self.fields.iter().enumerate() {
+            if i > 0 {
+                out.push_str(", ");
+            }
+            out.push_str(k);
+            out.push_str(" = ");
+            v.repr_into(out, stack);
+        }
+        out.push(')');
     }
 
     pub fn get(&self, attr: &str) -> Result<Value, StarlarkError> {
@@ -70,15 +105,14 @@ impl StructValue {
             Err(StarlarkError(format!(
                 "no native function or rule '{attr}'\nAvailable attributes: {available}"
             )))
-        } else if self.opaque_class.as_deref() == Some("com.google.devtools.build.lib.bazel.repository.starlark.StarlarkOS") {
-            Err(StarlarkError(format!("'repository_os' value has no field or method '{attr}'")))
+        } else if self.opaque_class.as_deref()
+            == Some("com.google.devtools.build.lib.bazel.repository.starlark.StarlarkOS")
+        {
+            Err(StarlarkError(format!(
+                "'repository_os' value has no field or method '{attr}'"
+            )))
         } else {
-            let available = self
-                .fields
-                .keys()
-                .cloned()
-                .collect::<Vec<_>>()
-                .join(", ");
+            let available = self.fields.keys().cloned().collect::<Vec<_>>().join(", ");
             Err(StarlarkError(format!(
                 "'struct' value has no field or method '{attr}'\nAvailable attributes: {available}"
             )))

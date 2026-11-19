@@ -33,7 +33,9 @@ pub fn repo_hash(canonical_name: &str) -> i32 {
 /// `Label.hashCode`: `31 * (31 + name.hashCode()) + packageIdentifier.hashCode()`.
 pub fn label_hash(repo_canonical: &str, package: &str, name: &str) -> i32 {
     let pkg = hash_objects2(repo_hash(repo_canonical), string_hash(package));
-    31i32.wrapping_mul(31i32.wrapping_add(string_hash(name))).wrapping_add(pkg)
+    31i32
+        .wrapping_mul(31i32.wrapping_add(string_hash(name)))
+        .wrapping_add(pkg)
 }
 
 /// `BuildConfigurationKey.hashCode` = `BuildOptions.hashCode` = `31 + checksum().hashCode()`.
@@ -42,7 +44,12 @@ pub fn config_key_hash(full_checksum: &str) -> i32 {
 }
 
 /// `ConfiguredTargetKey.computeHashCode`.
-pub fn ct_key_hash(label: i32, config: Option<i32>, exec_platform: Option<i32>, apply_rule_transition: bool) -> i32 {
+pub fn ct_key_hash(
+    label: i32,
+    config: Option<i32>,
+    exec_platform: Option<i32>,
+    apply_rule_transition: bool,
+) -> i32 {
     let h = hash_objects3(label, config.unwrap_or(0), exec_platform.unwrap_or(0));
     if apply_rule_transition {
         h
@@ -96,7 +103,11 @@ pub fn chm_order(entries: &[(i32, usize)], parallelism: usize) -> Vec<usize> {
                     }
                 }
                 let tail: Vec<Entry> = bin[last_run..].to_vec();
-                let (mut ln, mut hn) = if run_bit == 0 { (tail, Vec::new()) } else { (Vec::new(), tail) };
+                let (mut ln, mut hn) = if run_bit == 0 {
+                    (tail, Vec::new())
+                } else {
+                    (Vec::new(), tail)
+                };
                 for p in &bin[..last_run] {
                     if (p.hash as usize) & n == 0 {
                         ln.insert(0, *p);
@@ -139,7 +150,9 @@ pub fn hashmap_order_cap(entries: &[(i32, usize)], init_cap: usize) -> Vec<usize
 }
 
 pub fn parallelism() -> usize {
-    std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1)
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
 }
 
 #[cfg(test)]

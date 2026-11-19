@@ -40,7 +40,8 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 fn cpath(p: &Path) -> io::Result<CString> {
-    CString::new(p.as_os_str().as_bytes()).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
+    CString::new(p.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains NUL"))
 }
 
 fn errno() -> io::Error {
@@ -176,10 +177,20 @@ pub mod posix {
     pub fn utimensat(p: &Path, mtime_ns: Option<i128>) -> io::Result<()> {
         let t = match mtime_ns {
             None => std::time::SystemTime::now(),
-            Some(ns) if ns >= 0 => std::time::UNIX_EPOCH + std::time::Duration::new((ns / 1_000_000_000) as u64, (ns % 1_000_000_000) as u32),
+            Some(ns) if ns >= 0 => {
+                std::time::UNIX_EPOCH
+                    + std::time::Duration::new(
+                        (ns / 1_000_000_000) as u64,
+                        (ns % 1_000_000_000) as u32,
+                    )
+            }
             Some(ns) => std::time::UNIX_EPOCH - std::time::Duration::from_nanos((-ns) as u64),
         };
-        std::fs::File::options().write(true).open(p).or_else(|_| std::fs::File::open(p))?.set_modified(t)
+        std::fs::File::options()
+            .write(true)
+            .open(p)
+            .or_else(|_| std::fs::File::open(p))?
+            .set_modified(t)
     }
 
     /// `mkdir`; returns `Ok(false)` when the directory already exists (like the native call).
@@ -195,7 +206,11 @@ pub mod posix {
     pub fn mkfifo(p: &Path, mode: u32) -> io::Result<()> {
         let c = cpath(p)?;
         // SAFETY: `c` is a valid NUL-terminated path.
-        if unsafe { super::mkfifo(c.as_ptr(), mode) } == 0 { Ok(()) } else { Err(errno()) }
+        if unsafe { super::mkfifo(c.as_ptr(), mode) } == 0 {
+            Ok(())
+        } else {
+            Err(errno())
+        }
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -241,30 +256,71 @@ pub mod posix {
 
     #[cfg(target_os = "macos")]
     extern "C" {
-        fn getxattr(path: *const c_char, name: *const c_char, value: *mut c_void, size: usize, position: u32, options: c_int) -> isize;
+        fn getxattr(
+            path: *const c_char,
+            name: *const c_char,
+            value: *mut c_void,
+            size: usize,
+            position: u32,
+            options: c_int,
+        ) -> isize;
     }
     #[cfg(not(target_os = "macos"))]
     extern "C" {
-        fn getxattr(path: *const c_char, name: *const c_char, value: *mut c_void, size: usize) -> isize;
-        fn lgetxattr(path: *const c_char, name: *const c_char, value: *mut c_void, size: usize) -> isize;
+        fn getxattr(
+            path: *const c_char,
+            name: *const c_char,
+            value: *mut c_void,
+            size: usize,
+        ) -> isize;
+        fn lgetxattr(
+            path: *const c_char,
+            name: *const c_char,
+            value: *mut c_void,
+            size: usize,
+        ) -> isize;
     }
 
     /// `getxattr`/`lgetxattr`: `Ok(None)` when the attribute does not exist.
-    pub fn getxattr_value(p: &Path, name: &str, follow_symlinks: bool) -> io::Result<Option<Vec<u8>>> {
+    pub fn getxattr_value(
+        p: &Path,
+        name: &str,
+        follow_symlinks: bool,
+    ) -> io::Result<Option<Vec<u8>>> {
         let c = cpath(p)?;
-        let n = CString::new(name).map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad xattr name"))?;
+        let n = CString::new(name)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "bad xattr name"))?;
         let mut buf = vec![0u8; 4096];
         loop {
             #[cfg(target_os = "macos")]
             // SAFETY: valid C strings and a writable buffer of `buf.len()` bytes.
-            let r = unsafe { getxattr(c.as_ptr(), n.as_ptr(), buf.as_mut_ptr() as *mut c_void, buf.len(), 0, if follow_symlinks { 0 } else { 0x0001 }) };
+            let r = unsafe {
+                getxattr(
+                    c.as_ptr(),
+                    n.as_ptr(),
+                    buf.as_mut_ptr() as *mut c_void,
+                    buf.len(),
+                    0,
+                    if follow_symlinks { 0 } else { 0x0001 },
+                )
+            };
             #[cfg(not(target_os = "macos"))]
             // SAFETY: valid C strings and a writable buffer of `buf.len()` bytes.
             let r = unsafe {
                 if follow_symlinks {
-                    getxattr(c.as_ptr(), n.as_ptr(), buf.as_mut_ptr() as *mut c_void, buf.len())
+                    getxattr(
+                        c.as_ptr(),
+                        n.as_ptr(),
+                        buf.as_mut_ptr() as *mut c_void,
+                        buf.len(),
+                    )
                 } else {
-                    lgetxattr(c.as_ptr(), n.as_ptr(), buf.as_mut_ptr() as *mut c_void, buf.len())
+                    lgetxattr(
+                        c.as_ptr(),
+                        n.as_ptr(),
+                        buf.as_mut_ptr() as *mut c_void,
+                        buf.len(),
+                    )
                 }
             };
             if r >= 0 {
@@ -306,12 +362,20 @@ pub mod process {
 
     pub fn terminate(pid: u32) -> io::Result<()> {
         // SAFETY: plain kill(2).
-        if unsafe { kill(pid as c_int, 15) } == 0 { Ok(()) } else { Err(errno()) }
+        if unsafe { kill(pid as c_int, 15) } == 0 {
+            Ok(())
+        } else {
+            Err(errno())
+        }
     }
 
     pub fn kill_hard(pid: u32) -> io::Result<()> {
         // SAFETY: plain kill(2).
-        if unsafe { kill(pid as c_int, 9) } == 0 { Ok(()) } else { Err(errno()) }
+        if unsafe { kill(pid as c_int, 9) } == 0 {
+            Ok(())
+        } else {
+            Err(errno())
+        }
     }
 
     pub fn nice() -> i32 {
@@ -321,7 +385,11 @@ pub mod process {
 
     pub fn set_nice(n: i32) -> io::Result<()> {
         // SAFETY: as above.
-        if unsafe { setpriority(0, 0, n) } == 0 { Ok(()) } else { Err(errno()) }
+        if unsafe { setpriority(0, 0, n) } == 0 {
+            Ok(())
+        } else {
+            Err(errno())
+        }
     }
 
     /// `(user_cpu, system_cpu, max_rss_bytes)` of this process.
@@ -331,14 +399,24 @@ pub mod process {
         unsafe { getrusage(0, &mut ru) };
         let d = |t: TimeVal| std::time::Duration::new(t.sec as u64, (t.usec as u32) * 1000);
         // macOS reports bytes, Linux kilobytes.
-        let rss = if cfg!(target_os = "macos") { ru.maxrss as u64 } else { ru.maxrss as u64 * 1024 };
+        let rss = if cfg!(target_os = "macos") {
+            ru.maxrss as u64
+        } else {
+            ru.maxrss as u64 * 1024
+        };
         (d(ru.utime), d(ru.stime), rss)
     }
 
     pub fn cpu_count() -> usize {
         // SAFETY: sysconf(_SC_NPROCESSORS_ONLN).
         let n = unsafe { sysconf(if cfg!(target_os = "macos") { 58 } else { 84 }) };
-        if n > 0 { n as usize } else { std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) }
+        if n > 0 {
+            n as usize
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        }
     }
 }
 
@@ -356,7 +434,13 @@ pub mod system {
 
     #[cfg(target_os = "macos")]
     extern "C" {
-        fn sysctlbyname(name: *const c_char, oldp: *mut c_void, oldlenp: *mut usize, newp: *mut c_void, newlen: usize) -> c_int;
+        fn sysctlbyname(
+            name: *const c_char,
+            oldp: *mut c_void,
+            oldlenp: *mut usize,
+            newp: *mut c_void,
+            newlen: usize,
+        ) -> c_int;
     }
 
     #[cfg(target_os = "macos")]
@@ -365,7 +449,15 @@ pub mod system {
         let mut v: u64 = 0;
         let mut len = std::mem::size_of::<u64>();
         // SAFETY: `v`/`len` describe a valid 8-byte output buffer; we accept 4-byte results too.
-        let r = unsafe { sysctlbyname(c.as_ptr(), &mut v as *mut u64 as *mut c_void, &mut len, std::ptr::null_mut(), 0) };
+        let r = unsafe {
+            sysctlbyname(
+                c.as_ptr(),
+                &mut v as *mut u64 as *mut c_void,
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
         if r != 0 {
             return None;
         }
@@ -389,7 +481,9 @@ pub mod system {
                 .ok()
                 .and_then(|s| {
                     let line = s.lines().find(|l| l.starts_with("some"))?;
-                    let v = line.split_whitespace().find_map(|w| w.strip_prefix("avg10="))?;
+                    let v = line
+                        .split_whitespace()
+                        .find_map(|w| w.strip_prefix("avg10="))?;
                     v.parse::<f64>().ok()
                 })
                 .unwrap_or(0.0);
@@ -413,7 +507,11 @@ pub mod system {
         {
             let s = std::fs::read_to_string("/proc/meminfo").ok()?;
             let l = s.lines().find(|l| l.starts_with("MemTotal:"))?;
-            l.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kb| kb * 1024)
+            l.split_whitespace()
+                .nth(1)?
+                .parse::<u64>()
+                .ok()
+                .map(|kb| kb * 1024)
         }
     }
 
@@ -434,6 +532,7 @@ pub mod system {
             return Err(errno());
         }
         let bs = if s.frsize != 0 { s.frsize } else { s.bsize };
+        #[allow(clippy::unnecessary_cast)]
         Ok((s.bavail as u64 * bs, s.blocks as u64 * bs))
     }
 
@@ -447,20 +546,31 @@ pub mod system {
         {
             let s = std::fs::read_to_string("/proc/cpuinfo").ok()?;
             let l = s.lines().find(|l| l.starts_with("cpu MHz"))?;
-            l.split(':').nth(1)?.trim().parse::<f64>().ok().map(|m| m as u64)
+            l.split(':')
+                .nth(1)?
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .map(|m| m as u64)
         }
     }
 
     /// Per-interface `(name, bytes_received, bytes_sent)` (Linux: `/proc/net/dev`). Returns an
     /// empty list where the OS offers no cheap source (macOS needs `sysctl NET_RT_IFLIST2`).
     pub fn net_io_counters() -> Vec<(String, u64, u64)> {
-        let Ok(s) = std::fs::read_to_string("/proc/net/dev") else { return Vec::new() };
+        let Ok(s) = std::fs::read_to_string("/proc/net/dev") else {
+            return Vec::new();
+        };
         s.lines()
             .skip(2)
             .filter_map(|l| {
                 let (name, rest) = l.split_once(':')?;
                 let f: Vec<&str> = rest.split_whitespace().collect();
-                Some((name.trim().to_string(), f.first()?.parse().ok()?, f.get(8)?.parse().ok()?))
+                Some((
+                    name.trim().to_string(),
+                    f.first()?.parse().ok()?,
+                    f.get(8)?.parse().ok()?,
+                ))
             })
             .collect()
     }
@@ -503,7 +613,14 @@ pub mod watch {
 
         extern "C" {
             pub fn kqueue() -> c_int;
-            pub fn kevent(kq: c_int, changelist: *const KEvent, nchanges: c_int, eventlist: *mut KEvent, nevents: c_int, timeout: *const TimeSpec) -> c_int;
+            pub fn kevent(
+                kq: c_int,
+                changelist: *const KEvent,
+                nchanges: c_int,
+                eventlist: *mut KEvent,
+                nevents: c_int,
+                timeout: *const TimeSpec,
+            ) -> c_int;
             pub fn open(path: *const c_char, flags: c_int, ...) -> c_int;
             pub fn close(fd: c_int) -> c_int;
         }
@@ -536,7 +653,8 @@ pub mod watch {
             pub revents: i16,
         }
         pub const IN_NONBLOCK: c_int = 0o4000;
-        pub const IN_ALL: u32 = 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800; // MODIFY|ATTRIB|CLOSE_WRITE|MOVED_FROM|MOVED_TO|CREATE|DELETE|DELETE_SELF|MOVE_SELF
+        pub const IN_ALL: u32 = 0x2 | 0x4 | 0x8 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400 | 0x800;
+        // MODIFY|ATTRIB|CLOSE_WRITE|MOVED_FROM|MOVED_TO|CREATE|DELETE|DELETE_SELF|MOVE_SELF
     }
 
     /// Snapshot-diffing watcher: the OS only says "something changed in X"; the watcher then
@@ -555,12 +673,23 @@ pub mod watch {
     type Snap = BTreeMap<std::path::PathBuf, (u64, u64, i128)>;
 
     fn scan(root: &Path, ignore: &BTreeSet<String>, out: &mut Snap) {
-        let Ok(rd) = std::fs::read_dir(root) else { return };
+        let Ok(rd) = std::fs::read_dir(root) else {
+            return;
+        };
         for e in rd.flatten() {
             let p = e.path();
-            let Ok(m) = std::fs::symlink_metadata(&p) else { continue };
+            let Ok(m) = std::fs::symlink_metadata(&p) else {
+                continue;
+            };
             use std::os::unix::fs::MetadataExt;
-            out.insert(p.clone(), (m.ino(), m.size(), m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128));
+            out.insert(
+                p.clone(),
+                (
+                    m.ino(),
+                    m.size(),
+                    m.mtime() as i128 * 1_000_000_000 + m.mtime_nsec() as i128,
+                ),
+            );
             if m.is_dir() && !ignore.contains(&e.file_name().to_string_lossy().into_owned()) {
                 scan(&p, ignore, out);
             }
@@ -604,7 +733,11 @@ pub mod watch {
             let paths: Vec<std::path::PathBuf> = w
                 .snapshot
                 .keys()
-                .filter(|p| std::fs::symlink_metadata(p).map(|m| !m.file_type().is_symlink()).unwrap_or(false))
+                .filter(|p| {
+                    std::fs::symlink_metadata(p)
+                        .map(|m| !m.file_type().is_symlink())
+                        .unwrap_or(false)
+                })
                 .cloned()
                 .collect();
             for d in paths {
@@ -626,9 +759,17 @@ pub mod watch {
             if fd < 0 {
                 return Err(errno());
             }
-            let ev = imp::KEvent { ident: fd as usize, filter: imp::EVFILT_VNODE, flags: imp::EV_ADD | imp::EV_ENABLE | imp::EV_CLEAR, fflags: imp::NOTE_ALL, data: 0, udata: std::ptr::null_mut() };
+            let ev = imp::KEvent {
+                ident: fd as usize,
+                filter: imp::EVFILT_VNODE,
+                flags: imp::EV_ADD | imp::EV_ENABLE | imp::EV_CLEAR,
+                fflags: imp::NOTE_ALL,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            };
             // SAFETY: a single valid changelist entry; no events requested.
-            let r = unsafe { imp::kevent(self.fd, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+            let r =
+                unsafe { imp::kevent(self.fd, &ev, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
             if r < 0 {
                 // SAFETY: closing the fd we just opened.
                 unsafe { imp::close(fd) };
@@ -678,8 +819,18 @@ pub mod watch {
 
         #[cfg(any(target_os = "macos", target_os = "freebsd"))]
         fn wait_os(&self, timeout: Duration) -> bool {
-            let ts = imp::TimeSpec { sec: timeout.as_secs() as i64, nsec: timeout.subsec_nanos() as i64 };
-            let mut out = [imp::KEvent { ident: 0, filter: 0, flags: 0, fflags: 0, data: 0, udata: std::ptr::null_mut() }; 16];
+            let ts = imp::TimeSpec {
+                sec: timeout.as_secs() as i64,
+                nsec: timeout.subsec_nanos() as i64,
+            };
+            let mut out = [imp::KEvent {
+                ident: 0,
+                filter: 0,
+                flags: 0,
+                fflags: 0,
+                data: 0,
+                udata: std::ptr::null_mut(),
+            }; 16];
             // SAFETY: `out` has room for 16 events and `ts` is a valid timeout.
             let n = unsafe { imp::kevent(self.fd, std::ptr::null(), 0, out.as_mut_ptr(), 16, &ts) };
             n > 0
@@ -687,13 +838,25 @@ pub mod watch {
 
         #[cfg(target_os = "linux")]
         fn wait_os(&self, timeout: Duration) -> bool {
-            let mut p = imp::PollFd { fd: self.fd, events: 1, revents: 0 };
+            let mut p = imp::PollFd {
+                fd: self.fd,
+                events: 1,
+                revents: 0,
+            };
             // SAFETY: one valid pollfd.
-            let n = unsafe { imp::poll(&mut p, 1, timeout.as_millis().min(i32::MAX as u128) as c_int) };
+            let n = unsafe {
+                imp::poll(
+                    &mut p,
+                    1,
+                    timeout.as_millis().min(i32::MAX as u128) as c_int,
+                )
+            };
             if n > 0 {
                 let mut buf = [0u8; 4096];
                 // SAFETY: draining the inotify fd into a local buffer.
-                while unsafe { imp::read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len()) } > 0 {}
+                while unsafe { imp::read(self.fd, buf.as_mut_ptr() as *mut c_void, buf.len()) } > 0
+                {
+                }
                 true
             } else {
                 false
@@ -719,7 +882,7 @@ pub mod watch {
             // Register newly created directories so their contents are watched too.
             let new_dirs: Vec<std::path::PathBuf> = changes
                 .iter()
-                .filter(|(p, k)| *k == ChangeKind::Created)
+                .filter(|(_p, k)| *k == ChangeKind::Created)
                 .map(|(p, _)| p.clone())
                 .collect();
             self.snapshot = now;
@@ -777,7 +940,10 @@ mod tests {
         let ents = posix::readdir(&d).unwrap();
         assert!(ents.contains(&("sub".to_string(), posix::DirentType::Directory)));
         assert!(ents.contains(&("l".to_string(), posix::DirentType::Symlink)));
-        assert_eq!(posix::getxattr_value(&d.join("f"), "user.zel.none", true).unwrap(), None);
+        assert_eq!(
+            posix::getxattr_value(&d.join("f"), "user.zel.none", true).unwrap(),
+            None
+        );
         std::fs::create_dir_all(d.join("sub/a/b")).unwrap();
         std::fs::write(d.join("sub/a/b/x"), b"1").unwrap();
         posix::delete_trees_below(&d.join("sub")).unwrap();
@@ -809,22 +975,37 @@ mod tests {
         assert!(w.poll(Duration::from_millis(50)).is_empty());
         std::fs::write(d.join("a/two"), b"2").unwrap();
         let ch = w.poll(Duration::from_secs(5));
-        assert!(ch.contains(&(d.join("a/two"), watch::ChangeKind::Created)), "{ch:?}");
+        assert!(
+            ch.contains(&(d.join("a/two"), watch::ChangeKind::Created)),
+            "{ch:?}"
+        );
         std::fs::write(d.join("a/one"), b"changed!").unwrap();
         let ch = w.poll(Duration::from_secs(5));
-        assert!(ch.contains(&(d.join("a/one"), watch::ChangeKind::Modified)), "{ch:?}");
+        assert!(
+            ch.contains(&(d.join("a/one"), watch::ChangeKind::Modified)),
+            "{ch:?}"
+        );
         // New directories are watched recursively.
         std::fs::create_dir_all(d.join("n")).unwrap();
         let _ = w.poll(Duration::from_secs(5));
         std::fs::write(d.join("n/deep"), b"x").unwrap();
         let ch = w.poll(Duration::from_secs(5));
-        assert!(ch.contains(&(d.join("n/deep"), watch::ChangeKind::Created)), "{ch:?}");
+        assert!(
+            ch.contains(&(d.join("n/deep"), watch::ChangeKind::Created)),
+            "{ch:?}"
+        );
         std::fs::remove_file(d.join("a/two")).unwrap();
         let ch = w.poll(Duration::from_secs(5));
-        assert!(ch.contains(&(d.join("a/two"), watch::ChangeKind::Deleted)), "{ch:?}");
+        assert!(
+            ch.contains(&(d.join("a/two"), watch::ChangeKind::Deleted)),
+            "{ch:?}"
+        );
         // Ignored directories produce nothing.
         std::fs::write(d.join(".git/HEAD"), b"x").unwrap();
-        assert!(w.poll(Duration::from_millis(300)).iter().all(|(p, _)| !p.starts_with(d.join(".git/HEAD"))));
+        assert!(w
+            .poll(Duration::from_millis(300))
+            .iter()
+            .all(|(p, _)| !p.starts_with(d.join(".git/HEAD"))));
         drop(w);
         let _ = std::fs::remove_dir_all(&d);
     }

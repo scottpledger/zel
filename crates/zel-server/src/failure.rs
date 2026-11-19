@@ -25,11 +25,18 @@ pub(crate) fn category_for_exit(preferred: &[&str], exit: i32) -> Option<Categor
     let fd = reg.message("failure_details.FailureDetail")?;
     let try_cat = |name: &str| -> Option<Category> {
         let f = fd.field_by_name(name)?;
-        let zel_proto::schema::FieldType::Message(sub) = &f.ty else { return None };
+        let zel_proto::schema::FieldType::Message(sub) = &f.ty else {
+            return None;
+        };
         let cf = reg.message(sub)?.field_by_number(1)?;
-        let zel_proto::schema::FieldType::Enum(en) = &cf.ty else { return None };
+        let zel_proto::schema::FieldType::Enum(en) = &cf.ty else {
+            return None;
+        };
         let e = reg.enum_desc(en)?;
-        let (code_name, _) = e.values.iter().find(|(_, n)| e.exit_code_of(*n) == Some(exit))?;
+        let (code_name, _) = e
+            .values
+            .iter()
+            .find(|(_, n)| e.exit_code_of(*n) == Some(exit))?;
         Category::named(name, code_name)
     };
     preferred
@@ -62,9 +69,13 @@ pub(crate) fn default_for(code: ExitCode, command: &str, stderr: &[u8]) -> Optio
                 named("package_loading", "PACKAGE_MISSING")
             } else if text.contains("no such target") {
                 named("package_loading", "TARGET_MISSING")
-            } else if text.contains("Traceback (most recent call last)") && !text.contains(" rule //") {
+            } else if text.contains("Traceback (most recent call last)")
+                && !text.contains(" rule //")
+            {
                 named("package_loading", "STARLARK_EVAL_ERROR")
-            } else if text.contains(" rule //") || text.contains("errors encountered while analyzing") {
+            } else if text.contains(" rule //")
+                || text.contains("errors encountered while analyzing")
+            {
                 named("analysis", "CONFIGURED_VALUE_CREATION_FAILED")
             } else if text.to_ascii_lowercase().contains("cycle") {
                 named("analysis", "CYCLE")
@@ -100,10 +111,22 @@ mod tests {
     #[test]
     fn detail_exit_code_matches_process_exit_code() {
         let cases: &[(ExitCode, &str)] = &[
-            (ExitCode::BUILD_FAILURE, "ERROR: x: Executing genrule //p:bad failed: (Exit 3)"),
-            (ExitCode::BUILD_FAILURE, "ERROR: no such package 'p': BUILD file not found"),
-            (ExitCode::BUILD_FAILURE, "ERROR: Skipping '//:x': no such target"),
-            (ExitCode::BUILD_FAILURE, "ERROR: /w/BUILD:1:1: in my_rule rule //:t: boom"),
+            (
+                ExitCode::BUILD_FAILURE,
+                "ERROR: x: Executing genrule //p:bad failed: (Exit 3)",
+            ),
+            (
+                ExitCode::BUILD_FAILURE,
+                "ERROR: no such package 'p': BUILD file not found",
+            ),
+            (
+                ExitCode::BUILD_FAILURE,
+                "ERROR: Skipping '//:x': no such target",
+            ),
+            (
+                ExitCode::BUILD_FAILURE,
+                "ERROR: /w/BUILD:1:1: in my_rule rule //:t: boom",
+            ),
             (ExitCode::BUILD_FAILURE, "something else entirely"),
             (ExitCode::COMMAND_LINE_ERROR, "ERROR: bad flag"),
             (ExitCode::TESTS_FAILED, ""),
@@ -119,13 +142,23 @@ mod tests {
             (ExitCode::EXTERNAL_DEPS_ERROR, ""),
         ];
         for (code, err) in cases {
-            let fd = default_for(*code, "build", err.as_bytes()).unwrap_or_else(|| panic!("no detail for {code}"));
-            assert_eq!(fd.exit_code(), Some(code.numeric_exit_code()), "{code}: {fd:?}");
+            let fd = default_for(*code, "build", err.as_bytes())
+                .unwrap_or_else(|| panic!("no detail for {code}"));
+            assert_eq!(
+                fd.exit_code(),
+                Some(code.numeric_exit_code()),
+                "{code}: {fd:?}"
+            );
             let d = DetailedExitCode::of_detail(fd).unwrap();
             assert_eq!(d.exit_code.numeric_exit_code(), code.numeric_exit_code());
         }
         assert!(default_for(ExitCode::SUCCESS, "build", b"").is_none());
-        let fd = default_for(ExitCode::BUILD_FAILURE, "build", b"INFO: x\nERROR: the message\n").unwrap();
+        let fd = default_for(
+            ExitCode::BUILD_FAILURE,
+            "build",
+            b"INFO: x\nERROR: the message\n",
+        )
+        .unwrap();
         assert_eq!(fd.message, "the message");
     }
 }

@@ -18,23 +18,38 @@ static COUNTER: AtomicUsize = AtomicUsize::new(0);
 static CASES: AtomicUsize = AtomicUsize::new(0);
 
 fn full() -> bool {
-    std::env::var("ZEL_CODEC_FULL").map(|v| v == "1").unwrap_or(false)
+    std::env::var("ZEL_CODEC_FULL")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 fn tmp() -> PathBuf {
-    let p = std::env::temp_dir().join(format!("zel-codec-test-{}-{}", std::process::id(), COUNTER.fetch_add(1, Ordering::SeqCst)));
+    let p = std::env::temp_dir().join(format!(
+        "zel-codec-test-{}-{}",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::SeqCst)
+    ));
     let _ = fs::remove_dir_all(&p);
     fs::create_dir_all(&p).unwrap();
     p
 }
 
 fn have(tool: &str) -> bool {
-    Command::new(tool).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok()
+    Command::new(tool)
+        .arg("--help")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
 }
 
 fn find_7z() -> Option<&'static str> {
     ["7zz", "7z", "7za"].into_iter().find(|t| {
-        Command::new(t).stdout(Stdio::null()).stderr(Stdio::null()).status().is_ok()
+        Command::new(t)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
     })
 }
 
@@ -47,7 +62,11 @@ fn run_filter(tool: &str, args: &[&str], input: &Path) -> Option<Vec<u8>> {
         .stderr(Stdio::null())
         .output()
         .ok()?;
-    if out.status.success() { Some(out.stdout) } else { None }
+    if out.status.success() {
+        Some(out.stdout)
+    } else {
+        None
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -81,7 +100,11 @@ fn gen_random(n: usize, r: &mut Rng) -> Vec<u8> {
 
 fn gen_text(n: usize, r: &mut Rng) -> Vec<u8> {
     let vocab: Vec<Vec<u8>> = (0..3000)
-        .map(|_| (0..1 + r.below(10)).map(|_| b'a' + r.below(26) as u8).collect())
+        .map(|_| {
+            (0..1 + r.below(10))
+                .map(|_| b'a' + r.below(26) as u8)
+                .collect()
+        })
         .collect();
     let mut v = Vec::with_capacity(n + 16);
     while v.len() < n {
@@ -148,14 +171,35 @@ fn gen_code(n: usize, r: &mut Rng) -> Vec<u8> {
                 let rel = (r.below(1 << 20) as i32 - (1 << 19)) as u32;
                 v.extend_from_slice(&rel.to_le_bytes());
             }
-            1 => v.extend_from_slice(&[r.below(256) as u8, r.below(256) as u8, r.below(256) as u8, 0xEB]), // ARM BL
-            2 => v.extend_from_slice(&[0x48 | r.below(4) as u8, r.below(256) as u8, r.below(256) as u8, (r.below(64) as u8) << 2 | 1]), // PPC
-            3 => v.extend_from_slice(&[0x40, r.below(64) as u8, r.below(256) as u8, r.below(256) as u8]), // SPARC
-            4 => v.extend_from_slice(&[r.below(256) as u8, 0xF0 | r.below(8) as u8, r.below(256) as u8, 0xF8 | r.below(8) as u8]), // thumb
+            1 => v.extend_from_slice(&[
+                r.below(256) as u8,
+                r.below(256) as u8,
+                r.below(256) as u8,
+                0xEB,
+            ]), // ARM BL
+            2 => v.extend_from_slice(&[
+                0x48 | r.below(4) as u8,
+                r.below(256) as u8,
+                r.below(256) as u8,
+                ((r.below(64) as u8) << 2) | 1,
+            ]), // PPC
+            3 => v.extend_from_slice(&[
+                0x40,
+                r.below(64) as u8,
+                r.below(256) as u8,
+                r.below(256) as u8,
+            ]), // SPARC
+            4 => v.extend_from_slice(&[
+                r.below(256) as u8,
+                0xF0 | r.below(8) as u8,
+                r.below(256) as u8,
+                0xF8 | r.below(8) as u8,
+            ]), // thumb
             5 => {
                 let mut b = [0u8; 16];
                 r.fill(&mut b);
-                b[0] = (b[0] & 0xE0) | [0x10, 0x11, 0x12, 0x16, 0x17, 0x18, 0x1C, 0x1D][r.below(8) as usize];
+                b[0] = (b[0] & 0xE0)
+                    | [0x10, 0x11, 0x12, 0x16, 0x17, 0x18, 0x1C, 0x1D][r.below(8) as usize];
                 v.extend_from_slice(&b);
             }
             _ => {
@@ -184,7 +228,9 @@ fn gen_binary(n: usize, r: &mut Rng) -> Vec<u8> {
 }
 
 fn kinds() -> &'static [&'static str] {
-    &["random", "text", "mixed", "zeros", "repeats", "code", "binary"]
+    &[
+        "random", "text", "mixed", "zeros", "repeats", "code", "binary",
+    ]
 }
 
 fn gen(kind: &str, n: usize, seed: u64) -> Vec<u8> {
@@ -225,7 +271,13 @@ fn guarded<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static
     }
 }
 
-fn check(name: &str, compressed: Vec<u8>, expect: &[u8], dec: fn(&[u8]) -> Result<Vec<u8>, String>, failures: &mut Vec<String>) {
+fn check(
+    name: &str,
+    compressed: Vec<u8>,
+    expect: &[u8],
+    dec: fn(&[u8]) -> Result<Vec<u8>, String>,
+    failures: &mut Vec<String>,
+) {
     CASES.fetch_add(1, Ordering::Relaxed);
     let label = name.to_string();
     let exp_len = expect.len();
@@ -233,8 +285,15 @@ fn check(name: &str, compressed: Vec<u8>, expect: &[u8], dec: fn(&[u8]) -> Resul
     match res {
         Ok(out) => {
             if out != expect {
-                let first = out.iter().zip(expect).position(|(a, b)| a != b).unwrap_or(out.len().min(exp_len));
-                failures.push(format!("{name}: output differs (got {} bytes, want {exp_len}, first diff at {first})", out.len()));
+                let first = out
+                    .iter()
+                    .zip(expect)
+                    .position(|(a, b)| a != b)
+                    .unwrap_or(out.len().min(exp_len));
+                failures.push(format!(
+                    "{name}: output differs (got {} bytes, want {exp_len}, first diff at {first})",
+                    out.len()
+                ));
             }
         }
         Err(e) => failures.push(format!("{name}: decode error: {e}")),
@@ -283,7 +342,15 @@ fn xz_flag_sets(size: usize) -> Vec<Vec<&'static str>> {
         vec!["-T4", "--block-size=1MiB"],
     ];
     if size <= 5_000_000 {
-        v.extend([vec!["-1"], vec!["-9"], vec!["-9e"], vec!["-e"], vec!["-T0", "-9"], vec!["--lzma2=preset=6,nice=273,mf=bt4,depth=1000"], vec!["--lzma2=preset=6,mode=fast"]]);
+        v.extend([
+            vec!["-1"],
+            vec!["-9"],
+            vec!["-9e"],
+            vec!["-e"],
+            vec!["-T0", "-9"],
+            vec!["--lzma2=preset=6,nice=273,mf=bt4,depth=1000"],
+            vec!["--lzma2=preset=6,mode=fast"],
+        ]);
     } else if size <= 20_000_000 {
         v.extend([vec!["-9"], vec!["-1"], vec!["-T4"]]);
     }
@@ -318,8 +385,16 @@ fn xz_matrix() {
                 let f: Vec<&str> = flags.clone();
                 let mut args = vec!["-c", "-z"];
                 args.extend(f.iter());
-                let Some(comp) = run_filter("xz", &args, &inp) else { continue };
-                check(&format!("xz {kind} {n} {flags:?}"), comp, &data, xz_decompress, &mut failures);
+                let Some(comp) = run_filter("xz", &args, &inp) else {
+                    continue;
+                };
+                check(
+                    &format!("xz {kind} {n} {flags:?}"),
+                    comp,
+                    &data,
+                    xz_decompress,
+                    &mut failures,
+                );
             }
             // concatenated streams (+ stream padding) and a .tar.xz-like single big block
             if n <= 1_500_000 {
@@ -333,9 +408,21 @@ fn xz_matrix() {
                 // decompressConcatenated, only the FIRST stream is decoded; whatever follows its footer
                 // (a second stream, stream padding) is never looked at. `want` (both) is therefore not expected.
                 let _ = &want;
-                check(&format!("xz concat {kind} {n}"), cat.clone(), &data, xz_decompress, &mut failures);
+                check(
+                    &format!("xz concat {kind} {n}"),
+                    cat.clone(),
+                    &data,
+                    xz_decompress,
+                    &mut failures,
+                );
                 cat.extend_from_slice(&[0u8; 8]);
-                check(&format!("xz concat+padding {kind} {n}"), cat, &data, xz_decompress, &mut failures);
+                check(
+                    &format!("xz concat+padding {kind} {n}"),
+                    cat,
+                    &data,
+                    xz_decompress,
+                    &mut failures,
+                );
             }
         }
         report(&format!("xz size {n}"), std::mem::take(&mut failures));
@@ -367,7 +454,13 @@ fn zstd_flag_sets(size: usize) -> Vec<Vec<&'static str>> {
         vec!["--zstd=ldmHashLog=20,minmatch=64", "--long"],
     ];
     if size <= 5_000_000 {
-        v.extend([vec!["-15"], vec!["-19"], vec!["--ultra", "-22"], vec!["--ultra", "-20", "--zstd=wlog=24"], vec!["-12", "--zstd=targetLength=999"]]);
+        v.extend([
+            vec!["-15"],
+            vec!["-19"],
+            vec!["--ultra", "-22"],
+            vec!["--ultra", "-20", "--zstd=wlog=24"],
+            vec!["-12", "--zstd=targetLength=999"],
+        ]);
     } else if size <= 20_000_000 {
         v.extend([vec!["-19"], vec!["-15"]]);
     }
@@ -407,16 +500,34 @@ fn zstd_matrix() {
                 let mut args = vec!["-c", "-q"];
                 args.extend(flags.iter());
                 // from stdin: no content size in the frame header
-                let Some(comp) = run_filter("zstd", &args, &inp) else { continue };
-                check(&format!("zstd {kind} {n} {flags:?} (stdin)"), comp, &data, zstd_decompress, &mut failures);
+                let Some(comp) = run_filter("zstd", &args, &inp) else {
+                    continue;
+                };
+                check(
+                    &format!("zstd {kind} {n} {flags:?} (stdin)"),
+                    comp,
+                    &data,
+                    zstd_decompress,
+                    &mut failures,
+                );
                 // from file: frame content size present (single-segment for small inputs)
                 if i % 4 == 0 {
                     let mut a2: Vec<&str> = args.clone();
                     let ip = inp.to_str().unwrap().to_string();
                     a2.push(&ip);
-                    if let Ok(o) = Command::new("zstd").args(&a2).stderr(Stdio::null()).output() {
+                    if let Ok(o) = Command::new("zstd")
+                        .args(&a2)
+                        .stderr(Stdio::null())
+                        .output()
+                    {
                         if o.status.success() {
-                            check(&format!("zstd {kind} {n} {flags:?} (file)"), o.stdout, &data, zstd_decompress, &mut failures);
+                            check(
+                                &format!("zstd {kind} {n} {flags:?} (file)"),
+                                o.stdout,
+                                &data,
+                                zstd_decompress,
+                                &mut failures,
+                            );
                         }
                     }
                 }
@@ -429,13 +540,25 @@ fn zstd_matrix() {
                 want.extend_from_slice(&data);
                 let mut cat = a.clone();
                 cat.extend_from_slice(&b);
-                check(&format!("zstd 2 frames {kind} {n}"), cat, &want, zstd_decompress, &mut failures);
+                check(
+                    &format!("zstd 2 frames {kind} {n}"),
+                    cat,
+                    &want,
+                    zstd_decompress,
+                    &mut failures,
+                );
                 let mut sk = skippable(b"hello skippable", 3);
                 sk.extend_from_slice(&a);
                 sk.extend(skippable(&[], 0));
                 sk.extend_from_slice(&b);
                 sk.extend(skippable(&vec![7u8; 100_000], 15));
-                check(&format!("zstd skippable {kind} {n}"), sk, &want, zstd_decompress, &mut failures);
+                check(
+                    &format!("zstd skippable {kind} {n}"),
+                    sk,
+                    &want,
+                    zstd_decompress,
+                    &mut failures,
+                );
             }
         }
         report(&format!("zstd size {n}"), std::mem::take(&mut failures));
@@ -480,15 +603,26 @@ fn bzip2_matrix() {
             let inp = dir.join("in.bin");
             fs::write(&inp, &data).unwrap();
             for lvl in ["-1", "-5", "-9"] {
-                let Some(comp) = run_filter("bzip2", &["-c", lvl], &inp) else { continue };
-                check(&format!("bzip2 {kind} {n} {lvl}"), comp.clone(), &data, bunzip2, &mut failures);
+                let Some(comp) = run_filter("bzip2", &["-c", lvl], &inp) else {
+                    continue;
+                };
+                check(
+                    &format!("bzip2 {kind} {n} {lvl}"),
+                    comp.clone(),
+                    &data,
+                    bunzip2,
+                    &mut failures,
+                );
                 // Bazel emulation (codecs/bz2.rs): bytes after a stream that do not start another "BZh"
                 // stream are an error ("Garbage after a valid BZip2 stream"), unlike the bzip2 tool.
                 let mut g = comp.clone();
                 g.extend_from_slice(b"garbage after stream");
                 match bunzip2(&g) {
                     Err(e) if e.starts_with("Garbage after") => {}
-                    other => failures.push(format!("bzip2 trailing garbage {kind} {n} {lvl}: expected Garbage error, got {:?}", other.map(|v| v.len()))),
+                    other => failures.push(format!(
+                        "bzip2 trailing garbage {kind} {n} {lvl}: expected Garbage error, got {:?}",
+                        other.map(|v| v.len())
+                    )),
                 }
             }
             // two independent streams, and one stream cut in the middle of the data
@@ -500,7 +634,13 @@ fn bzip2_matrix() {
                 fs::write(&p2, &data[half..]).unwrap();
                 let mut cat = run_filter("bzip2", &["-c", "-9"], &p1).unwrap();
                 cat.extend(run_filter("bzip2", &["-c", "-1"], &p2).unwrap());
-                check(&format!("bzip2 multistream {kind} {n}"), cat, &data, bunzip2, &mut failures);
+                check(
+                    &format!("bzip2 multistream {kind} {n}"),
+                    cat,
+                    &data,
+                    bunzip2,
+                    &mut failures,
+                );
             }
         }
     }
@@ -519,17 +659,43 @@ fn corruption_fuzz() {
     let data = gen("mixed", 400_000, 7);
     let inp = dir.join("in.bin");
     fs::write(&inp, &data).unwrap();
-    let mut streams: Vec<(&str, Vec<u8>, fn(&[u8]) -> Result<Vec<u8>, String>)> = Vec::new();
+    type CodecStream<'a> = (&'a str, Vec<u8>, fn(&[u8]) -> Result<Vec<u8>, String>);
+    let mut streams: Vec<CodecStream<'_>> = Vec::new();
     if have("xz") {
-        streams.push(("xz-crc64", run_filter("xz", &["-c", "-3", "--check=crc64"], &inp).unwrap(), xz_decompress));
-        streams.push(("xz-multi", run_filter("xz", &["-c", "-3", "--block-size=50000", "--check=sha256"], &inp).unwrap(), xz_decompress));
+        streams.push((
+            "xz-crc64",
+            run_filter("xz", &["-c", "-3", "--check=crc64"], &inp).unwrap(),
+            xz_decompress,
+        ));
+        streams.push((
+            "xz-multi",
+            run_filter(
+                "xz",
+                &["-c", "-3", "--block-size=50000", "--check=sha256"],
+                &inp,
+            )
+            .unwrap(),
+            xz_decompress,
+        ));
     }
     if have("zstd") {
-        streams.push(("zstd", run_filter("zstd", &["-c", "-q", "-3"], &inp).unwrap(), zstd_decompress));
-        streams.push(("zstd-19", run_filter("zstd", &["-c", "-q", "-19"], &inp).unwrap(), zstd_decompress));
+        streams.push((
+            "zstd",
+            run_filter("zstd", &["-c", "-q", "-3"], &inp).unwrap(),
+            zstd_decompress,
+        ));
+        streams.push((
+            "zstd-19",
+            run_filter("zstd", &["-c", "-q", "-19"], &inp).unwrap(),
+            zstd_decompress,
+        ));
     }
     if have("bzip2") {
-        streams.push(("bzip2", run_filter("bzip2", &["-c", "-3"], &inp).unwrap(), bunzip2));
+        streams.push((
+            "bzip2",
+            run_filter("bzip2", &["-c", "-3"], &inp).unwrap(),
+            bunzip2,
+        ));
     }
     let iterations = if full() { 600 } else { 120 };
     let mut accepted_wrong = Vec::new();
@@ -563,10 +729,13 @@ fn corruption_fuzz() {
             let res = guarded(&label, move || dec(&b2));
             if let Ok(out) = res {
                 if out != data && mode != 1 {
-                    accepted_wrong.push(format!("{label}: accepted corrupt input with wrong output"));
+                    accepted_wrong
+                        .push(format!("{label}: accepted corrupt input with wrong output"));
                 }
                 if out != data && mode == 1 {
-                    accepted_wrong.push(format!("{label}: accepted truncated input with wrong output"));
+                    accepted_wrong.push(format!(
+                        "{label}: accepted truncated input with wrong output"
+                    ));
                 }
             }
         }
@@ -576,7 +745,10 @@ fn corruption_fuzz() {
         for a in accepted_wrong.iter().take(40) {
             eprintln!("FAIL {a}");
         }
-        panic!("{} corrupt inputs were silently accepted", accepted_wrong.len());
+        panic!(
+            "{} corrupt inputs were silently accepted",
+            accepted_wrong.len()
+        );
     }
 }
 
@@ -597,7 +769,10 @@ fn opts() -> zel_bzlmod::archive::ExtractOptions {
 
 fn read_tree(root: &Path) -> Vec<(String, Option<Vec<u8>>)> {
     fn walk(base: &Path, dir: &Path, out: &mut Vec<(String, Option<Vec<u8>>)>) {
-        let mut ents: Vec<_> = fs::read_dir(dir).unwrap().map(|e| e.unwrap().path()).collect();
+        let mut ents: Vec<_> = fs::read_dir(dir)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
         ents.sort();
         for p in ents {
             let rel = p.strip_prefix(base).unwrap().to_string_lossy().to_string();
@@ -621,12 +796,24 @@ fn make_tree(root: &Path, seed: u64, big: bool) {
     fs::write(root.join("empty.txt"), b"").unwrap();
     fs::write(root.join("e1"), b"x").unwrap();
     fs::write(root.join("sub/deep/f"), gen("text", 5000, seed)).unwrap();
-    fs::write(root.join("mixed.bin"), gen("mixed", if big { 3_000_000 } else { 400_000 }, seed)).unwrap();
+    fs::write(
+        root.join("mixed.bin"),
+        gen("mixed", if big { 3_000_000 } else { 400_000 }, seed),
+    )
+    .unwrap();
     fs::write(root.join("code.bin"), gen("code", 200_000, seed)).unwrap();
-    fs::write(root.join("r1m"), gen("random", if big { 1_500_000 } else { 100_000 }, seed)).unwrap();
+    fs::write(
+        root.join("r1m"),
+        gen("random", if big { 1_500_000 } else { 100_000 }, seed),
+    )
+    .unwrap();
     fs::write(root.join("sub/zeros"), gen("zeros", 300_000, seed)).unwrap();
     for i in 0..40 {
-        fs::write(root.join(format!("sub/small{i}.txt")), gen("text", 10 + i * 37, seed + i as u64)).unwrap();
+        fs::write(
+            root.join(format!("sub/small{i}.txt")),
+            gen("text", 10 + i * 37, seed + i as u64),
+        )
+        .unwrap();
     }
 }
 
@@ -677,8 +864,18 @@ fn sevenz_matrix() {
     for (name, args, must) in methods {
         let arc = dir.join(format!("{name}.7z"));
         let mut cmd = Command::new(sz);
-        cmd.current_dir(&src).arg("a").arg("-bd").arg("-y").args(&args).arg(&arc).arg(".");
-        let o = cmd.stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+        cmd.current_dir(&src)
+            .arg("a")
+            .arg("-bd")
+            .arg("-y")
+            .args(&args)
+            .arg(&arc)
+            .arg(".");
+        let o = cmd
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .unwrap();
         if !o.success() {
             eprintln!("note: 7z could not create {name} archive; skipping");
             continue;
@@ -706,7 +903,14 @@ fn sevenz_matrix() {
     }
     // corruption: every bit flip must be detected (CRC32 of headers, folders and files)
     let arc = dir.join("lzma2-corrupt.7z");
-    let _ = Command::new(sz).current_dir(&src).args(["a", "-bd", "-y", "-m0=bzip2", "-mx=1"]).arg(&arc).arg(".").stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = Command::new(sz)
+        .current_dir(&src)
+        .args(["a", "-bd", "-y", "-m0=bzip2", "-mx=1"])
+        .arg(&arc)
+        .arg(".")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
     if let Ok(good) = fs::read(&arc) {
         let mut r = Rng(99);
         let iters = if full() { 300 } else { 60 };
@@ -752,10 +956,18 @@ fn big_stream_performance() {
     let inp = dir.join("in.bin");
     fs::write(&inp, &data).unwrap();
     for (tool, args, dec) in [
-        ("xz", vec!["-c", "-T4", "-3"], xz_decompress as fn(&[u8]) -> Result<Vec<u8>, String>),
+        (
+            "xz",
+            vec!["-c", "-T4", "-3"],
+            xz_decompress as fn(&[u8]) -> Result<Vec<u8>, String>,
+        ),
         ("xz", vec!["-c", "-6"], xz_decompress),
         ("zstd", vec!["-c", "-q", "-3"], zstd_decompress),
-        ("zstd", vec!["-c", "-q", "--long=27", "-12"], zstd_decompress),
+        (
+            "zstd",
+            vec!["-c", "-q", "--long=27", "-12"],
+            zstd_decompress,
+        ),
         ("bzip2", vec!["-c", "-9"], bunzip2),
     ] {
         if !have(tool) {
@@ -765,7 +977,12 @@ fn big_stream_performance() {
         let t = Instant::now();
         let out = dec(&comp).unwrap();
         let el = t.elapsed();
-        eprintln!("perf {tool} {args:?}: {} -> {} bytes in {:?}", comp.len(), out.len(), el);
+        eprintln!(
+            "perf {tool} {args:?}: {} -> {} bytes in {:?}",
+            comp.len(),
+            out.len(),
+            el
+        );
         assert_eq!(out, data, "{tool} {args:?}");
         assert!(el < Duration::from_secs(120), "{tool} too slow: {el:?}");
     }

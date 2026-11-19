@@ -117,7 +117,10 @@ impl StartupOptions {
             }
             Os::Windows => {
                 if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
-                    PathFragment::create(&format!("{}/bazel/_bazel_{user}", local_app_data.to_string_lossy()))
+                    PathFragment::create(&format!(
+                        "{}/bazel/_bazel_{user}",
+                        local_app_data.to_string_lossy()
+                    ))
                 } else if let Some(h) = home {
                     PathFragment::create(&format!("{h}/AppData/Local/bazel/_bazel_{user}"))
                 } else {
@@ -195,10 +198,7 @@ impl StartupOptions {
         let (flag_name, flag_val) = parse_startup_flag_token(flag);
 
         let Some(def) = startup_map.get(flag_name.as_str()) else {
-            return Err(OptionsParsingError::unknown_startup_option(
-                flag,
-                "bazel",
-            ));
+            return Err(OptionsParsingError::unknown_startup_option(flag, "bazel"));
         };
 
         // Convert value according to schema
@@ -211,8 +211,7 @@ impl StartupOptions {
                     ""
                 } else {
                     return Err(OptionsParsingError::startup_option_missing_value(
-                        flag,
-                        "bazel",
+                        flag, "bazel",
                     ));
                 }
             }
@@ -390,11 +389,12 @@ pub fn split_command_line(
                     vec!["--startup_version".to_string()],
                 ));
             } else {
-                let prod = if startup.product_name.is_empty() { "bazel" } else { &startup.product_name };
-                return Err(OptionsParsingError::unknown_startup_option(
-                    arg,
-                    prod,
-                ));
+                let prod = if startup.product_name.is_empty() {
+                    "bazel"
+                } else {
+                    &startup.product_name
+                };
+                return Err(OptionsParsingError::unknown_startup_option(arg, prod));
             }
         }
 
@@ -403,10 +403,15 @@ pub fn split_command_line(
         if let Some((f, _)) = arg.split_once('=') {
             let naked = f.strip_prefix("--").unwrap_or(f);
             let is_nullary = |n: &str| startup_map.get(n).is_some_and(|d| !d.requires_value());
-            let nullary_negated = naked
-                .strip_prefix("no")
-                .is_some_and(|rest| startup_map.get(rest).is_some_and(|d| d.uses_boolean_syntax()));
-            if f.starts_with("--") && naked != "block_for_lock" && (is_nullary(naked) || nullary_negated) {
+            let nullary_negated = naked.strip_prefix("no").is_some_and(|rest| {
+                startup_map
+                    .get(rest)
+                    .is_some_and(|d| d.uses_boolean_syntax())
+            });
+            if f.starts_with("--")
+                && naked != "block_for_lock"
+                && (is_nullary(naked) || nullary_negated)
+            {
                 return Err(OptionsParsingError::new(format!(
                     "In argument '{arg}': option '{f}' does not take a value."
                 )));
@@ -416,14 +421,12 @@ pub fn split_command_line(
         let (flag_name, inline_val) = parse_startup_flag_token(arg);
 
         let Some(def) = startup_map.get(flag_name.as_str()) else {
-            return Err(OptionsParsingError::unknown_startup_option(
-                arg,
-                "bazel",
-            ));
+            return Err(OptionsParsingError::unknown_startup_option(arg, "bazel"));
         };
 
         if inline_val.is_some() || !def.requires_value() {
-            if let Err(e) = startup.apply_flag_with_priority(arg, "command line", priority.clone()) {
+            if let Err(e) = startup.apply_flag_with_priority(arg, "command line", priority.clone())
+            {
                 if !e.message.starts_with("Invalid argument to") {
                     return Err(e);
                 }
@@ -435,12 +438,13 @@ pub fn split_command_line(
             // Unary option with next arg value: e.g. `--output_base /tmp/ob`
             if i + 1 >= args.len() {
                 return Err(OptionsParsingError::startup_option_missing_value(
-                    arg,
-                    "bazel",
+                    arg, "bazel",
                 ));
             }
             let combined = format!("{}={}", arg, args[i + 1]);
-            if let Err(e) = startup.apply_flag_with_priority(&combined, "command line", priority.clone()) {
+            if let Err(e) =
+                startup.apply_flag_with_priority(&combined, "command line", priority.clone())
+            {
                 if !e.message.starts_with("Invalid argument to") {
                     return Err(e);
                 }
@@ -469,17 +473,17 @@ fn safe_strto32(value: &str) -> Option<i32> {
 fn startup_range_error(name: &str, value: &str) -> Option<String> {
     let n = safe_strto32(value);
     match name {
-        "io_nice_level" if n.map_or(true, |n| n > 7) => {
+        "io_nice_level" if n.is_none_or(|n| n > 7) => {
             Some(format!("Invalid argument to --io_nice_level: '{value}'. Must not exceed 7."))
         }
-        "max_idle_secs" if n.map_or(true, |n| n < 0) => Some(format!("Invalid argument to --max_idle_secs: '{value}'.")),
-        "connect_timeout_secs" if n.map_or(true, |n| !(1..=3600).contains(&n)) => Some(format!(
+        "max_idle_secs" if n.is_none_or(|n| n < 0) => Some(format!("Invalid argument to --max_idle_secs: '{value}'.")),
+        "connect_timeout_secs" if n.is_none_or(|n| !(1..=3600).contains(&n)) => Some(format!(
             "Invalid argument to --connect_timeout_secs: '{value}'.\nMust be an integer between 1 and 3600.\n"
         )),
-        "local_startup_timeout_secs" if n.map_or(true, |n| n < 1) => Some(format!(
+        "local_startup_timeout_secs" if n.is_none_or(|n| n < 1) => Some(format!(
             "Invalid argument to --local_startup_timeout_secs: '{value}'.\nMust be a positive integer.\n"
         )),
-        "command_port" if n.map_or(true, |n| !(0..=65535).contains(&n)) => Some(format!(
+        "command_port" if n.is_none_or(|n| !(0..=65535).contains(&n)) => Some(format!(
             "Invalid argument to --command_port: '{value}'.\nMust be a valid port number or 0.\n"
         )),
         _ => None,
@@ -513,6 +517,8 @@ mod tests {
     fn test_unknown_startup_flag() {
         let args = vec!["--unknown_startup_xyz".to_string(), "build".to_string()];
         let err = split_command_line(&args).unwrap_err();
-        assert!(err.message.contains("Unknown startup option: '--unknown_startup_xyz'"));
+        assert!(err
+            .message
+            .contains("Unknown startup option: '--unknown_startup_xyz'"));
     }
 }

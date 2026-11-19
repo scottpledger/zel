@@ -39,7 +39,11 @@ pub fn crc32(data: &[u8]) -> u32 {
         for (i, e) in t.iter_mut().enumerate() {
             let mut c = i as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xEDB8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xEDB8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
             *e = c;
         }
@@ -99,14 +103,18 @@ fn write_lit(w: &mut BitWriter, sym: u32) {
 
 /// Raw DEFLATE stream using LZ77 + fixed Huffman coding.
 pub fn deflate(data: &[u8]) -> Vec<u8> {
-    let mut w = BitWriter { out: Vec::with_capacity(data.len() / 3 + 16), acc: 0, n: 0 };
+    let mut w = BitWriter {
+        out: Vec::with_capacity(data.len() / 3 + 16),
+        acc: 0,
+        n: 0,
+    };
     w.bits(1, 1); // BFINAL
     w.bits(1, 2); // fixed Huffman
     const HBITS: usize = 15;
     let mut head = vec![usize::MAX; 1 << HBITS];
     let mut prev = vec![usize::MAX; data.len()];
     let hash = |i: usize| -> usize {
-        let v = (data[i] as u32) << 16 | (data[i + 1] as u32) << 8 | data[i + 2] as u32;
+        let v = ((data[i] as u32) << 16) | ((data[i + 1] as u32) << 8) | (data[i + 2] as u32);
         (v.wrapping_mul(0x9E37_79B1) >> (32 - HBITS as u32)) as usize
     };
     let mut i = 0;
@@ -137,12 +145,24 @@ pub fn deflate(data: &[u8]) -> Vec<u8> {
             head[h] = i;
         }
         if best_len >= 3 {
-            let li = LEN_BASE.iter().rposition(|&b| b as usize <= best_len).unwrap();
+            let li = LEN_BASE
+                .iter()
+                .rposition(|&b| b as usize <= best_len)
+                .unwrap();
             write_lit(&mut w, 257 + li as u32);
-            w.bits((best_len - LEN_BASE[li] as usize) as u32, LEN_EXTRA[li] as u32);
-            let di = DIST_BASE.iter().rposition(|&b| b as usize <= best_dist).unwrap();
+            w.bits(
+                (best_len - LEN_BASE[li] as usize) as u32,
+                LEN_EXTRA[li] as u32,
+            );
+            let di = DIST_BASE
+                .iter()
+                .rposition(|&b| b as usize <= best_dist)
+                .unwrap();
             w.code(di as u32, 5);
-            w.bits((best_dist - DIST_BASE[di] as usize) as u32, DIST_EXTRA[di] as u32);
+            w.bits(
+                (best_dist - DIST_BASE[di] as usize) as u32,
+                DIST_EXTRA[di] as u32,
+            );
             // Insert skipped positions into the hash chains.
             for k in 1..best_len {
                 let p = i + k;
@@ -178,15 +198,22 @@ struct BitReader<'a> {
     n: u32,
 }
 
-impl<'a> BitReader<'a> {
+impl BitReader<'_> {
     fn bits(&mut self, count: u32) -> Result<u32, String> {
         while self.n < count {
-            let b = *self.data.get(self.pos).ok_or("unexpected end of deflate stream")?;
+            let b = *self
+                .data
+                .get(self.pos)
+                .ok_or("unexpected end of deflate stream")?;
             self.pos += 1;
             self.acc |= (b as u32) << self.n;
             self.n += 8;
         }
-        let v = if count == 32 { self.acc } else { self.acc & ((1u32 << count) - 1) };
+        let v = if count == 32 {
+            self.acc
+        } else {
+            self.acc & ((1u32 << count) - 1)
+        };
         self.acc = if count == 32 { 0 } else { self.acc >> count };
         self.n -= count;
         Ok(v)
@@ -243,7 +270,12 @@ impl Huffman {
 
 /// Inflates a raw DEFLATE stream; returns the data and the number of input bytes consumed.
 pub fn inflate(data: &[u8]) -> Result<(Vec<u8>, usize), String> {
-    let mut r = BitReader { data, pos: 0, acc: 0, n: 0 };
+    let mut r = BitReader {
+        data,
+        pos: 0,
+        acc: 0,
+        n: 0,
+    };
     let mut out: Vec<u8> = Vec::new();
     loop {
         let last = r.bits(1)? == 1;
@@ -277,7 +309,9 @@ pub fn inflate(data: &[u8]) -> Result<(Vec<u8>, usize), String> {
                     let hlit = r.bits(5)? as usize + 257;
                     let hdist = r.bits(5)? as usize + 1;
                     let hclen = r.bits(4)? as usize + 4;
-                    const ORDER: [usize; 19] = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+                    const ORDER: [usize; 19] = [
+                        16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+                    ];
                     let mut cl = [0u8; 19];
                     for &o in ORDER.iter().take(hclen) {
                         cl[o] = r.bits(3)? as u8;
@@ -309,7 +343,10 @@ pub fn inflate(data: &[u8]) -> Result<(Vec<u8>, usize), String> {
                         }
                     }
                     lengths.truncate(hlit + hdist);
-                    (Huffman::new(&lengths[..hlit]), Huffman::new(&lengths[hlit..]))
+                    (
+                        Huffman::new(&lengths[..hlit]),
+                        Huffman::new(&lengths[hlit..]),
+                    )
                 };
                 loop {
                     let sym = lit.decode(&mut r)? as usize;
@@ -323,7 +360,8 @@ pub fn inflate(data: &[u8]) -> Result<(Vec<u8>, usize), String> {
                             if ds >= 30 {
                                 return Err("bad distance symbol".into());
                             }
-                            let d = DIST_BASE[ds] as usize + r.bits(DIST_EXTRA[ds] as u32)? as usize;
+                            let d =
+                                DIST_BASE[ds] as usize + r.bits(DIST_EXTRA[ds] as u32)? as usize;
                             if d > out.len() {
                                 return Err("distance too far back".into());
                             }
@@ -394,7 +432,14 @@ mod tests {
     fn roundtrip_various() {
         let mut big = Vec::new();
         for i in 0..5000 {
-            big.extend_from_slice(format!("{{\"name\":\"event {}\",\"ph\":\"X\",\"ts\":{}}},\n", i % 37, i * 13).as_bytes());
+            big.extend_from_slice(
+                format!(
+                    "{{\"name\":\"event {}\",\"ph\":\"X\",\"ts\":{}}},\n",
+                    i % 37,
+                    i * 13
+                )
+                .as_bytes(),
+            );
         }
         let cases: Vec<Vec<u8>> = vec![
             vec![],
@@ -408,7 +453,12 @@ mod tests {
             assert_eq!(gunzip(&z).unwrap(), c);
         }
         let z = gzip(&big);
-        assert!(z.len() * 4 < big.len(), "poor ratio {} -> {}", big.len(), z.len());
+        assert!(
+            z.len() * 4 < big.len(),
+            "poor ratio {} -> {}",
+            big.len(),
+            z.len()
+        );
     }
 
     #[test]
@@ -422,9 +472,17 @@ mod tests {
     fn interoperates_with_system_gzip_when_available() {
         use std::io::Write;
         use std::process::{Command, Stdio};
-        let data: Vec<u8> = (0..20000).map(|i| (i * 7 % 251) as u8).chain(b"hello hello hello".iter().copied()).collect();
+        let data: Vec<u8> = (0..20000)
+            .map(|i| (i * 7 % 251) as u8)
+            .chain(b"hello hello hello".iter().copied())
+            .collect();
         // Our output must be readable by gzip -d.
-        let Ok(mut child) = Command::new("gzip").arg("-dc").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() else {
+        let Ok(mut child) = Command::new("gzip")
+            .arg("-dc")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+        else {
             return;
         };
         let z = gzip(&data);
@@ -432,7 +490,12 @@ mod tests {
         let out = child.wait_with_output().unwrap();
         assert_eq!(out.stdout, data);
         // And we must read gzip -9's dynamic-Huffman output.
-        let Ok(mut c2) = Command::new("gzip").arg("-9c").stdin(Stdio::piped()).stdout(Stdio::piped()).spawn() else {
+        let Ok(mut c2) = Command::new("gzip")
+            .arg("-9c")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+        else {
             return;
         };
         let mut stdin = c2.stdin.take().unwrap();

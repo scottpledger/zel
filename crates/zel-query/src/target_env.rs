@@ -23,7 +23,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::rc::Rc;
 use std::sync::Arc;
-use zel_cmdline::{Label, PackageIdentifier, RepositoryMapping, RepositoryName};
+use zel_cmdline::{Label, PackageIdentifier, RepositoryName};
 use zel_packages::attr::{AttrType, AttrValue, SelectPart};
 use zel_packages::pkg_spec::{PackageGroupContents, PackageSpec};
 use zel_packages::{Package, PatternResolver, RuleInstance, Target};
@@ -171,21 +171,93 @@ const COMMON_ORDER: &[&str] = &[
 fn native_attr_order(rule_class: &str) -> &'static [&'static str] {
     match rule_class {
         "genrule" => &[
-            "srcs", "outs", "cmd", "cmd_bash", "cmd_ps", "cmd_bat", "tools", "exec_tools", "executable", "local",
-            "message", "output_licenses", "output_to_bindir", "stamp",
+            "srcs",
+            "outs",
+            "cmd",
+            "cmd_bash",
+            "cmd_ps",
+            "cmd_bat",
+            "tools",
+            "exec_tools",
+            "executable",
+            "local",
+            "message",
+            "output_licenses",
+            "output_to_bindir",
+            "stamp",
         ],
         "filegroup" => &["srcs", "data", "output_group", "path"],
         "alias" => &["actual"],
         "test_suite" => &["tests"],
-        "config_setting" => &["values", "define_values", "flag_values", "constraint_values"],
-        "cc_library" => &[
-            "srcs", "hdrs", "textual_hdrs", "deps", "data", "copts", "defines", "includes", "linkopts", "alwayslink",
+        "config_setting" => &[
+            "values",
+            "define_values",
+            "flag_values",
+            "constraint_values",
         ],
-        "cc_binary" => &["srcs", "deps", "data", "copts", "defines", "includes", "linkopts", "linkstatic"],
-        "cc_test" => &["srcs", "deps", "data", "copts", "defines", "includes", "linkopts", "linkstatic", "args", "env"],
-        "java_library" => &["srcs", "deps", "data", "resources", "exports", "runtime_deps", "javacopts"],
-        "java_binary" => &["srcs", "deps", "data", "main_class", "resources", "runtime_deps", "jvm_flags", "args"],
-        "java_test" => &["srcs", "deps", "data", "test_class", "resources", "runtime_deps", "jvm_flags", "args"],
+        "cc_library" => &[
+            "srcs",
+            "hdrs",
+            "textual_hdrs",
+            "deps",
+            "data",
+            "copts",
+            "defines",
+            "includes",
+            "linkopts",
+            "alwayslink",
+        ],
+        "cc_binary" => &[
+            "srcs",
+            "deps",
+            "data",
+            "copts",
+            "defines",
+            "includes",
+            "linkopts",
+            "linkstatic",
+        ],
+        "cc_test" => &[
+            "srcs",
+            "deps",
+            "data",
+            "copts",
+            "defines",
+            "includes",
+            "linkopts",
+            "linkstatic",
+            "args",
+            "env",
+        ],
+        "java_library" => &[
+            "srcs",
+            "deps",
+            "data",
+            "resources",
+            "exports",
+            "runtime_deps",
+            "javacopts",
+        ],
+        "java_binary" => &[
+            "srcs",
+            "deps",
+            "data",
+            "main_class",
+            "resources",
+            "runtime_deps",
+            "jvm_flags",
+            "args",
+        ],
+        "java_test" => &[
+            "srcs",
+            "deps",
+            "data",
+            "test_class",
+            "resources",
+            "runtime_deps",
+            "jvm_flags",
+            "args",
+        ],
         "py_library" => &["srcs", "deps", "data", "imports"],
         "py_binary" => &["srcs", "deps", "data", "main", "imports", "args"],
         "py_test" => &["srcs", "deps", "data", "main", "imports", "args"],
@@ -210,6 +282,7 @@ fn disc_for(_name: &str, ty: AttrType) -> i32 {
         AttrType::IntList => disc::INTEGER_LIST,
         AttrType::StringKeyedLabelDict => disc::LABEL_DICT_UNARY,
         AttrType::LabelKeyedStringDict => disc::LABEL_KEYED_STRING_DICT,
+        AttrType::LabelListDict => 12,
     }
 }
 
@@ -227,13 +300,16 @@ fn type_of_value(v: &AttrValue) -> AttrType {
         AttrValue::LabelList(_) => AttrType::LabelList,
         AttrValue::LabelKeyedStrDict(_) => AttrType::LabelKeyedStringDict,
         AttrValue::StrKeyedLabelDict(_) => AttrType::StringKeyedLabelDict,
+        AttrValue::LabelListDict(_) => AttrType::LabelListDict,
         AttrValue::Output(_) => AttrType::Output,
         AttrValue::OutputList(_) => AttrType::OutputList,
         AttrValue::Select(parts) => parts
             .iter()
             .find_map(|p| match p {
                 SelectPart::Plain(v) => Some(type_of_value(v)),
-                SelectPart::Select { entries, .. } => entries.first().map(|(_, v)| type_of_value(v)),
+                SelectPart::Select { entries, .. } => {
+                    entries.first().map(|(_, v)| type_of_value(v))
+                }
             })
             .unwrap_or(AttrType::StringList),
     }
@@ -244,18 +320,21 @@ fn type_of_value(v: &AttrValue) -> AttrType {
 pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
     let rc = rule.extra.rule_class.as_ref();
     let mut names: Vec<String> = vec!["name".to_string()];
-    let schema_has = |n: &str| rc.map(|rc| rc.attr_or_implicit(n).is_some()).unwrap_or(false);
+    let schema_has = |n: &str| {
+        rc.map(|rc| rc.attr_or_implicit(n).is_some())
+            .unwrap_or(false)
+    };
     if let Some(rc) = rc {
         if !rc.attr_order.is_empty() {
-        for n in &rc.attr_order {
-            if n != "name"
-                && n != "$whitelist_external_network"
-                && !names.contains(n)
-                && (rc.attr_or_implicit(n).is_some() || rule.extra.attr_values.contains_key(n))
-            {
-                names.push(n.clone());
+            for n in &rc.attr_order {
+                if n != "name"
+                    && n != "$whitelist_external_network"
+                    && !names.contains(n)
+                    && (rc.attr_or_implicit(n).is_some() || rule.extra.attr_values.contains_key(n))
+                {
+                    names.push(n.clone());
+                }
             }
-        }
         } else {
             for c in COMMON_ORDER {
                 if schema_has(c) || rule.extra.attr_values.contains_key(*c) {
@@ -309,7 +388,9 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
             // `compatible_with`/`restricted_to`/`features` stay at the schema default (the
             // package values live in `PackageArgs`).
             match n.as_str() {
-                "testonly" | "deprecation" | "package_metadata" | "licenses" => (rule.extra.attr_values[&n].clone(), false),
+                "testonly" | "deprecation" | "package_metadata" | "licenses" => {
+                    (rule.extra.attr_values[&n].clone(), false)
+                }
                 _ => match schema {
                     Some(a) => (a.default_value(), false),
                     None => continue,
@@ -333,7 +414,9 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
                     }
                 }
             }
-            if let Some(AttrValue::LabelList(existing)) = rule.extra.attr_values.get("$config_dependencies") {
+            if let Some(AttrValue::LabelList(existing)) =
+                rule.extra.attr_values.get("$config_dependencies")
+            {
                 for l in existing {
                     if !conds.contains(l) {
                         conds.push(l.clone());
@@ -344,12 +427,24 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
         } else if let Some(v) = rule.extra.attr_values.get(&n) {
             (v.clone(), true)
         } else if n == "generator_name" && rule.extra.generator_name.is_some() {
-            (AttrValue::Str(rule.extra.generator_name.clone().unwrap_or_default()), true)
+            (
+                AttrValue::Str(rule.extra.generator_name.clone().unwrap_or_default()),
+                true,
+            )
         } else if n == "generator_function" && rule.extra.generator_function.is_some() {
-            (AttrValue::Str(rule.extra.generator_function.clone().unwrap_or_default()), true)
+            (
+                AttrValue::Str(rule.extra.generator_function.clone().unwrap_or_default()),
+                true,
+            )
         } else if n == "generator_location" && rule.extra.generator_location.is_some() {
-            (AttrValue::Str(rule.extra.generator_location.clone().unwrap_or_default()), true)
-        } else if n == "timeout" && schema.is_some() && rule.extra.attr_values.get("size").is_some() | schema.is_some() {
+            (
+                AttrValue::Str(rule.extra.generator_location.clone().unwrap_or_default()),
+                true,
+            )
+        } else if n == "timeout"
+            && schema.is_some()
+            && rule.extra.attr_values.contains_key("size") | schema.is_some()
+        {
             // `timeout` defaults according to `size` (`TestSize.getDefaultTimeout`).
             let size = match rule.extra.attr_values.get("size") {
                 Some(AttrValue::Str(s)) => s.clone(),
@@ -379,7 +474,9 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
         } else {
             continue;
         };
-        let ty = schema.map(|a| a.ty).unwrap_or_else(|| type_of_value(&value));
+        let ty = schema
+            .map(|a| a.ty)
+            .unwrap_or_else(|| type_of_value(&value));
         // Generated rule definitions (`rule_defs_gen`) carry Bazel's exact flags; hand-typed
         // classes fall back to the name-based approximation.
         let nodep = match schema {
@@ -397,17 +494,25 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
             && schema.map(|a| a.default.is_none()).unwrap_or(false);
         let nodep_set = schema.and_then(|a| a.nodep_set).unwrap_or(matches!(
             ty,
-            AttrType::String | AttrType::Label | AttrType::Output | AttrType::StringList | AttrType::LabelList
-                | AttrType::StringKeyedLabelDict | AttrType::LabelKeyedStringDict | AttrType::OutputList
+            AttrType::String
+                | AttrType::Label
+                | AttrType::Output
+                | AttrType::StringList
+                | AttrType::LabelList
+                | AttrType::StringKeyedLabelDict
+                | AttrType::LabelKeyedStringDict
+                | AttrType::OutputList
         ));
         out.push(AttrEntry {
             nodep_set,
             null_default,
             disc,
             configurable: schema.map(|a| a.configurable).unwrap_or(true) && n != "name",
-            tool: schema.map(|a| a.tool_dep.unwrap_or(a.cfg_exec)).unwrap_or(false),
+            tool: schema
+                .map(|a| a.tool_dep.unwrap_or(a.cfg_exec))
+                .unwrap_or(false),
             name: if let Some(rest) = n.strip_prefix('_') {
-                if schema.map_or(false, |a| a.late_bound.is_some()) {
+                if schema.is_some_and(|a| a.late_bound.is_some()) {
                     format!(":{rest}")
                 } else {
                     format!("${rest}")
@@ -427,7 +532,13 @@ pub fn rule_attributes(rule: &RuleInstance) -> Vec<AttrEntry> {
 /// Java `toString` of an attribute value (as `attr()` matches against).
 pub fn java_string(v: &AttrValue) -> Option<String> {
     fn list<T: ToString>(l: &[T]) -> String {
-        format!("[{}]", l.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(", "))
+        format!(
+            "[{}]",
+            l.iter()
+                .map(|x| x.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
     Some(match v {
         AttrValue::Int(i) => i.to_string(),
@@ -442,28 +553,196 @@ pub fn java_string(v: &AttrValue) -> Option<String> {
         AttrValue::IntList(l) => list(l),
         AttrValue::StrDict(d) => format!(
             "{{{}}}",
-            d.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")
+            d.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         AttrValue::StrListDict(d) => format!(
             "{{{}}}",
-            d.iter().map(|(k, v)| format!("{k}={}", list(v))).collect::<Vec<_>>().join(", ")
+            d.iter()
+                .map(|(k, v)| format!("{k}={}", list(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         AttrValue::Label(l) | AttrValue::Output(l) => l.as_ref()?.to_string(),
         AttrValue::LabelList(l) | AttrValue::OutputList(l) => list(l),
         AttrValue::LabelKeyedStrDict(d) => format!(
             "{{{}}}",
-            d.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")
+            d.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         AttrValue::StrKeyedLabelDict(d) => format!(
             "{{{}}}",
-            d.iter().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>().join(", ")
+            d.iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        AttrValue::LabelListDict(d) => format!(
+            "{{{}}}",
+            d.iter()
+                .map(|(k, v)| format!("{k}={}", list(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
         AttrValue::Select(_) => return None,
     })
 }
 
+/// `AggregatingAttributeMapper.visitAttribute` (`getAllValues`): enumerates all possible
+/// combinations of `select()` branches, specializing identical key sets and concatenating parts
+/// according to attribute type.
+pub fn visit_attribute_values(v: &AttrValue) -> Vec<AttrValue> {
+    fn is_null_branch(v: &AttrValue) -> bool {
+        matches!(v, AttrValue::Label(None) | AttrValue::Output(None))
+    }
+    let AttrValue::Select(parts) = v else {
+        return vec![v.clone()];
+    };
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    if parts.len() == 1 {
+        return match &parts[0] {
+            SelectPart::Plain(val) => {
+                if is_null_branch(val) {
+                    Vec::new()
+                } else {
+                    vec![val.clone()]
+                }
+            }
+            SelectPart::Select { entries, .. } => entries
+                .iter()
+                .filter_map(|(_, val)| {
+                    if is_null_branch(val) {
+                        None
+                    } else {
+                        Some(val.clone())
+                    }
+                })
+                .collect(),
+        };
+    }
+
+    #[derive(Clone)]
+    enum Part {
+        Plain(AttrValue),
+        Select(Vec<(Label, AttrValue)>, BTreeSet<Label>),
+    }
+
+    let norm_parts: Vec<Part> = parts
+        .iter()
+        .map(|p| match p {
+            SelectPart::Plain(v) => Part::Plain(v.clone()),
+            SelectPart::Select { entries, .. } => {
+                let keys: BTreeSet<Label> = entries.iter().map(|(k, _)| k.clone()).collect();
+                Part::Select(entries.clone(), keys)
+            }
+        })
+        .collect();
+
+    fn dfs(
+        parts: &[Part],
+        offset: usize,
+        bound_key: Option<&Label>,
+        prev_keys: Option<&BTreeSet<Label>>,
+        value_so_far: Option<AttrValue>,
+        bound_map: &mut HashMap<BTreeSet<Label>, (Label, usize)>,
+        out: &mut Vec<AttrValue>,
+    ) {
+        if offset >= parts.len() {
+            if let Some(v) = value_so_far {
+                if !is_null_branch(&v) {
+                    out.push(v);
+                }
+            }
+            return;
+        }
+        let combine = |acc: Option<AttrValue>, rhs: &AttrValue| -> Option<AttrValue> {
+            match acc {
+                None => Some(rhs.clone()),
+                Some(a) => concat_values(&[a, rhs.clone()]),
+            }
+        };
+        match &parts[offset] {
+            Part::Plain(val) => {
+                let next_val = combine(value_so_far, val);
+                dfs(parts, offset + 1, None, None, next_val, bound_map, out);
+            }
+            Part::Select(entries, keys) => {
+                if offset > 0 {
+                    if let Some((bkey, boff)) = bound_map.get(keys).cloned() {
+                        if boff < offset - 1 {
+                            if let Some((_, val)) = entries.iter().find(|(k, _)| *k == bkey) {
+                                let next_val = combine(value_so_far, val);
+                                dfs(
+                                    parts,
+                                    offset + 1,
+                                    Some(&bkey),
+                                    Some(keys),
+                                    next_val,
+                                    bound_map,
+                                    out,
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    if let (Some(pk), Some(bk)) = (prev_keys, bound_key) {
+                        if pk == keys {
+                            if let Some((_, val)) = entries.iter().find(|(k, _)| *k == *bk) {
+                                let next_val = combine(value_so_far, val);
+                                dfs(
+                                    parts,
+                                    offset + 1,
+                                    Some(bk),
+                                    Some(keys),
+                                    next_val,
+                                    bound_map,
+                                    out,
+                                );
+                                return;
+                            }
+                        }
+                    }
+                }
+                let prev_entry = bound_map.get(keys).cloned();
+                for (k, val) in entries {
+                    bound_map.insert(keys.clone(), (k.clone(), offset));
+                    let next_val = combine(value_so_far.clone(), val);
+                    dfs(
+                        parts,
+                        offset + 1,
+                        Some(k),
+                        Some(keys),
+                        next_val,
+                        bound_map,
+                        out,
+                    );
+                }
+                match prev_entry {
+                    Some(e) => {
+                        bound_map.insert(keys.clone(), e);
+                    }
+                    None => {
+                        bound_map.remove(keys);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out = Vec::new();
+    let mut bound_map = HashMap::new();
+    dfs(&norm_parts, 0, None, None, None, &mut bound_map, &mut out);
+    out
+}
+
 /// `PossibleAttributeValues`-style enumeration: every value the attribute can take (one per
-/// `select()` branch combination, approximated as the concatenation of per-part alternatives).
+/// `select()` branch combination, with list-typed selects collapsed to a single superset).
 pub fn possible_values(v: &AttrValue) -> Vec<AttrValue> {
     match v {
         AttrValue::Select(parts) => {
@@ -478,14 +757,19 @@ pub fn possible_values(v: &AttrValue) -> Vec<AttrValue> {
                 .unwrap_or(AttrValue::StrList(Vec::new()));
             let is_list = matches!(
                 first,
-                AttrValue::StrList(_) | AttrValue::LabelList(_) | AttrValue::OutputList(_) | AttrValue::IntList(_)
+                AttrValue::StrList(_)
+                    | AttrValue::LabelList(_)
+                    | AttrValue::OutputList(_)
+                    | AttrValue::IntList(_)
             );
             if is_list {
                 let mut all: Vec<AttrValue> = Vec::new();
                 for p in parts {
                     match p {
                         SelectPart::Plain(v) => all.push(v.clone()),
-                        SelectPart::Select { entries, .. } => all.extend(entries.iter().map(|(_, v)| v.clone())),
+                        SelectPart::Select { entries, .. } => {
+                            all.extend(entries.iter().map(|(_, v)| v.clone()))
+                        }
                     }
                 }
                 return concat_values(&all)
@@ -504,28 +788,10 @@ pub fn possible_values(v: &AttrValue) -> Vec<AttrValue> {
                     .into_iter()
                     .collect();
             }
-            let mut combos: Vec<Vec<AttrValue>> = vec![Vec::new()];
-            for p in parts {
-                let alts: Vec<AttrValue> = match p {
-                    SelectPart::Plain(v) => vec![v.clone()],
-                    SelectPart::Select { entries, .. } => entries.iter().map(|(_, v)| v.clone()).collect(),
-                };
-                let mut next = Vec::new();
-                for c in &combos {
-                    for a in &alts {
-                        let mut c2 = c.clone();
-                        c2.push(a.clone());
-                        next.push(c2);
-                    }
-                }
-                combos = next;
-            }
             let mut out = Vec::new();
-            for c in combos {
-                if let Some(v) = concat_values(&c) {
-                    if !out.contains(&v) {
-                        out.push(v);
-                    }
+            for val in visit_attribute_values(v) {
+                if !out.contains(&val) {
+                    out.push(val);
                 }
             }
             out
@@ -539,6 +805,10 @@ fn concat_values(vs: &[AttrValue]) -> Option<AttrValue> {
     let mut acc = it.next()?.clone();
     for v in it {
         acc = match (acc, v) {
+            (AttrValue::Str(a), AttrValue::Str(b)) => AttrValue::Str(format!("{a}{b}")),
+            (AttrValue::Int(a), AttrValue::Int(b)) => {
+                AttrValue::Int((a as i32).wrapping_add(*b as i32) as i64)
+            }
             (AttrValue::StrList(mut a), AttrValue::StrList(b)) => {
                 a.extend(b.iter().cloned());
                 AttrValue::StrList(a)
@@ -566,6 +836,10 @@ fn concat_values(vs: &[AttrValue]) -> Option<AttrValue> {
             (AttrValue::LabelKeyedStrDict(mut a), AttrValue::LabelKeyedStrDict(b)) => {
                 a.extend(b.iter().cloned());
                 AttrValue::LabelKeyedStrDict(a)
+            }
+            (AttrValue::StrKeyedLabelDict(mut a), AttrValue::StrKeyedLabelDict(b)) => {
+                a.extend(b.iter().cloned());
+                AttrValue::StrKeyedLabelDict(a)
             }
             (_, b) => b.clone(),
         };
@@ -603,7 +877,10 @@ pub fn rule_outputs(pkg: &Package, rule: &Label) -> Vec<Label> {
         .targets
         .values()
         .filter_map(|t| match t {
-            Target::OutputFile { label, generating_rule } if generating_rule == rule => Some(label.clone()),
+            Target::OutputFile {
+                label,
+                generating_rule,
+            } if generating_rule == rule => Some(label.clone()),
             _ => None,
         })
         .collect();
@@ -617,7 +894,12 @@ pub fn rule_deps(rule: &RuleInstance, implicit: bool, tool: bool) -> Vec<(Label,
     rule_deps_ext(rule, implicit, tool, true)
 }
 
-pub fn rule_deps_ext(rule: &RuleInstance, implicit: bool, tool: bool, nodep: bool) -> Vec<(Label, String)> {
+pub fn rule_deps_ext(
+    rule: &RuleInstance,
+    implicit: bool,
+    tool: bool,
+    nodep: bool,
+) -> Vec<(Label, String)> {
     let mut out: Vec<(Label, String)> = Vec::new();
     for a in rule_attributes(rule) {
         if matches!(a.ty, AttrType::Output | AttrType::OutputList) {
@@ -663,17 +945,28 @@ pub fn rule_deps_ext(rule: &RuleInstance, implicit: bool, tool: bool, nodep: boo
 /// `RuleClass.getToolchainTypes()` of a Starlark rule (`rule(toolchains = [...])`).
 pub fn rule_class_toolchain_types(rule: &RuleInstance) -> Vec<Label> {
     use zel_starlark::Value;
-    let Some(spec) = rule.extra.rule_class.as_ref().and_then(|rc| rc.starlark.as_ref()) else { return Vec::new() };
-    let Some(v) = spec.kwargs.get("toolchains") else { return Vec::new() };
+    let Some(spec) = rule
+        .extra
+        .rule_class
+        .as_ref()
+        .and_then(|rc| rc.starlark.as_ref())
+    else {
+        return Vec::new();
+    };
+    let Some(v) = spec.kwargs.get("toolchains") else {
+        return Vec::new();
+    };
     zel_starlark::eval::builtins::value_to_sequence(v)
         .unwrap_or_default()
         .into_iter()
         .filter_map(|x| match &x {
-            Value::Struct(s) if s.fields.contains_key("_toolchain_type") => match s.fields.get("name") {
-                Some(Value::Label(l)) => Some(l.clone()),
-                Some(Value::String(n)) => Label::parse_canonical(n).ok(),
-                _ => None,
-            },
+            Value::Struct(s) if s.fields.contains_key("_toolchain_type") => {
+                match s.fields.get("name") {
+                    Some(Value::Label(l)) => Some(l.clone()),
+                    Some(Value::String(n)) => Label::parse_canonical(n).ok(),
+                    _ => None,
+                }
+            }
             Value::Label(l) => Some(l.clone()),
             Value::String(s) => Label::parse_canonical(s).ok(),
             _ => None,
@@ -683,7 +976,9 @@ pub fn rule_class_toolchain_types(rule: &RuleInstance) -> Vec<Label> {
 
 pub fn aspect_deps(rule: &RuleInstance, tool: bool, nodep: bool) -> Vec<(Label, String)> {
     let mut out = Vec::new();
-    let Some(rc) = &rule.extra.rule_class else { return out };
+    let Some(rc) = &rule.extra.rule_class else {
+        return out;
+    };
     for attr in rc.attrs.values() {
         for asp_v in &attr.aspects {
             if let Some(asp_def) = zel_packages::aspect::aspect_of(asp_v) {
@@ -691,7 +986,10 @@ pub fn aspect_deps(rule: &RuleInstance, tool: bool, nodep: bool) -> Vec<(Label, 
                     if !tool && asp_attr.cfg_exec {
                         continue;
                     }
-                    let is_nodep = matches!(asp_attr.name.as_str(), "visibility" | "deprecation" | "licenses");
+                    let is_nodep = matches!(
+                        asp_attr.name.as_str(),
+                        "visibility" | "deprecation" | "licenses"
+                    );
                     if !nodep && is_nodep {
                         continue;
                     }
@@ -727,6 +1025,34 @@ pub fn rule_deps_with_aspect_opt(
     out
 }
 
+/// `TestTargetUtils.sortTagsBySense` / `TestsFunction.sortTagsBySense`: splits tags into
+/// required (`+foo` or `foo`, ignoring `manual` unless `+manual`) and excluded (`-foo`).
+pub(crate) fn sort_tags_by_sense(tags: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut required = Vec::new();
+    let mut excluded = Vec::new();
+    for t in tags {
+        if let Some(rest) = t.strip_prefix('-') {
+            excluded.push(rest.to_string());
+        } else if let Some(rest) = t.strip_prefix('+') {
+            required.push(rest.to_string());
+        } else if t == "manual" {
+            continue;
+        } else {
+            required.push(t.clone());
+        }
+    }
+    (required, excluded)
+}
+
+pub(crate) fn test_matches_filters(
+    test_tags: &[String],
+    required: &[String],
+    excluded: &[String],
+) -> bool {
+    !test_tags.iter().any(|t| excluded.contains(t))
+        && required.iter().all(|r| test_tags.contains(r))
+}
+
 /// Whether the rule is a test rule (`TargetUtils.isTestRule`).
 pub fn is_test_rule(rule: &RuleInstance) -> bool {
     match &rule.extra.rule_class {
@@ -741,13 +1067,22 @@ pub fn is_test_suite(rule: &RuleInstance) -> bool {
 
 /// `TargetUtils.isExecutableNonTestRule`.
 pub fn is_executable_non_test(rule: &RuleInstance) -> bool {
-    let exec = rule.executable || rule.extra.rule_class.as_ref().map(|rc| rc.is_executable).unwrap_or(false);
+    let exec = rule.executable
+        || rule
+            .extra
+            .rule_class
+            .as_ref()
+            .map(|rc| rc.is_executable)
+            .unwrap_or(false);
     exec && !is_test_rule(rule)
 }
 
 /// Root of the source tree a package lives in (workspace root or external repo root).
 pub fn package_root(pkg: &Package) -> PathFragment {
-    let mut dir = pkg.build_file.parent_directory().unwrap_or_else(PathFragment::empty);
+    let mut dir = pkg
+        .build_file
+        .parent_directory()
+        .unwrap_or_else(PathFragment::empty);
     for _ in 0..pkg.id.package_fragment().segments().len() {
         dir = dir.parent_directory().unwrap_or_else(PathFragment::empty);
     }
@@ -777,9 +1112,16 @@ pub fn fake_load_target_location(ref_pkg: &Package, relative: bool) -> String {
 pub fn target_location(info: &TInfo, relative: bool) -> String {
     let pkg = &info.pkg;
     let loc = match &info.target {
-        Target::Rule(r) => r.extra.location.clone().unwrap_or_else(|| format!("{}:1:1", pkg.build_file)),
+        Target::Rule(r) => r
+            .extra
+            .location
+            .clone()
+            .unwrap_or_else(|| format!("{}:1:1", pkg.build_file)),
         Target::InputFile { label } => {
-            let dir = pkg.build_file.parent_directory().unwrap_or_else(PathFragment::empty);
+            let dir = pkg
+                .build_file
+                .parent_directory()
+                .unwrap_or_else(PathFragment::empty);
             format!("{}:1:1", dir.get_relative_str(label.name()))
         }
         t => pkg
@@ -801,9 +1143,13 @@ pub fn target_location(info: &TInfo, relative: bool) -> String {
 /// Parses all `load()` statements of a `.bzl` source into canonical label strings.
 fn parse_loads(path: &str, src: &str) -> Vec<String> {
     let mut lexer = zel_starlark::Lexer::new(path, src);
-    let Ok(tokens) = lexer.lex_all() else { return Vec::new() };
+    let Ok(tokens) = lexer.lex_all() else {
+        return Vec::new();
+    };
     let mut parser = zel_starlark::Parser::new(tokens);
-    let Ok(stmts) = parser.parse_module() else { return Vec::new() };
+    let Ok(stmts) = parser.parse_module() else {
+        return Vec::new();
+    };
     stmts
         .into_iter()
         .filter_map(|s| match s {
@@ -862,8 +1208,15 @@ impl<'a> TargetEnv<'a> {
         }
     }
 
+    #[allow(dead_code)]
     fn fs_exists(&self, p: &PathFragment) -> bool {
-        self.resolver.loader().config().lookup.fs.stat(p, true).is_ok()
+        self.resolver
+            .loader()
+            .config()
+            .lookup
+            .fs
+            .stat(p, true)
+            .is_ok()
     }
 
     /// `Package.getTarget` including the implicit BUILD-file target.
@@ -874,15 +1227,28 @@ impl<'a> TargetEnv<'a> {
                 None => Err(self.missing_message(label)),
             };
         }
-        let pkg = self.resolver.package(label.package_identifier()).map_err(|e| e.message)?;
+        let pkg = self
+            .resolver
+            .package(label.package_identifier())
+            .map_err(|e| e.message)?;
         let fs = self.resolver.loader().config().lookup.fs.clone();
         let r = match pkg.get_target(label.name(), fs.as_ref()) {
             Ok(t) => Ok(t.clone()),
             Err(e) => {
-                if label.name() == pkg.build_file.base_name() || label.name().ends_with(".bzl") {
-                    Ok(Target::InputFile { label: label.clone() })
-                } else if Self::assumed_input_file(&pkg, label) && self.resolver.loader().config().lookup.label_crossing_subpackage_error(label).is_none() {
-                    Ok(Target::InputFile { label: label.clone() })
+                if label.name() == pkg.build_file.base_name()
+                    || label.name().ends_with(".bzl")
+                    || (Self::assumed_input_file(&pkg, label)
+                        && self
+                            .resolver
+                            .loader()
+                            .config()
+                            .lookup
+                            .label_crossing_subpackage_error(label)
+                            .is_none())
+                {
+                    Ok(Target::InputFile {
+                        label: label.clone(),
+                    })
                 } else {
                     Err(e)
                 }
@@ -891,7 +1257,9 @@ impl<'a> TargetEnv<'a> {
         match r {
             Ok(t) => {
                 let info = Rc::new(TInfo { target: t, pkg });
-                self.cache.borrow_mut().insert(label.clone(), Some(info.clone()));
+                self.cache
+                    .borrow_mut()
+                    .insert(label.clone(), Some(info.clone()));
                 Ok(info)
             }
             Err(e) => Err(e),
@@ -949,7 +1317,13 @@ impl<'a> TargetEnv<'a> {
             }
             let info = self.info(&g).ok()?;
             if let Target::PackageGroup { packages, .. } = &info.target {
-                let mapping = RepositoryMapping::always_fallback();
+                let mapping = self
+                    .resolver
+                    .loader()
+                    .config()
+                    .lookup
+                    .resolver
+                    .mapping(g.repository());
                 for p in packages {
                     if let Ok(spec) = PackageSpec::parse(&mapping, g.repository(), p) {
                         out.specs.push(spec);
@@ -983,11 +1357,15 @@ impl<'a> TargetEnv<'a> {
                         d
                     }
                 }),
-            Target::OutputFile { generating_rule, .. } => match self.info(generating_rule) {
+            Target::OutputFile {
+                generating_rule, ..
+            } => match self.info(generating_rule) {
                 Ok(i) => self.visibility_labels(&i),
                 Err(_) => Vec::new(),
             },
-            Target::PackageGroup { .. } | Target::EnvironmentGroup { .. } => vec![Label::parse_canonical("//visibility:public").unwrap()],
+            Target::PackageGroup { .. } | Target::EnvironmentGroup { .. } => {
+                vec![Label::parse_canonical("//visibility:public").unwrap()]
+            }
         }
     }
 
@@ -996,7 +1374,12 @@ impl<'a> TargetEnv<'a> {
     }
 
     /// Whether package `from_pkg` is allowed by the visibility labels (owned by `owner`).
-    fn spec_contains(&self, vis: &[Label], owner: &PackageIdentifier, from: &PackageIdentifier) -> bool {
+    fn spec_contains(
+        &self,
+        vis: &[Label],
+        owner: &PackageIdentifier,
+        from: &PackageIdentifier,
+    ) -> bool {
         if owner == from {
             return true;
         }
@@ -1017,7 +1400,9 @@ impl<'a> TargetEnv<'a> {
                 }
             } else if n == "__subpackages__" {
                 if l.repository() == from.repository()
-                    && from.package_fragment().starts_with(l.package_identifier().package_fragment())
+                    && from
+                        .package_fragment()
+                        .starts_with(l.package_identifier().package_fragment())
                 {
                     return true;
                 }
@@ -1048,13 +1433,19 @@ impl<'a> TargetEnv<'a> {
     }
 
     fn resolve_load_label(&self, raw: &str, pkg: &PackageIdentifier) -> Option<Label> {
-        if raw.starts_with(':') {
-            return Label::create(pkg.clone(), &raw[1..]).ok();
+        if let Some(rest) = raw.strip_prefix(':') {
+            return Label::create(pkg.clone(), rest).ok();
         }
         if !raw.starts_with('/') && !raw.starts_with('@') {
             return Label::create(pkg.clone(), raw).ok();
         }
-        let mapping = self.resolver.loader().config().lookup.resolver.mapping(pkg.repository());
+        let mapping = self
+            .resolver
+            .loader()
+            .config()
+            .lookup
+            .resolver
+            .mapping(pkg.repository());
         Label::parse_with_repo_mapping(raw, &mapping).ok()
     }
 
@@ -1062,7 +1453,10 @@ impl<'a> TargetEnv<'a> {
     fn bzl_path(&self, l: &Label) -> Option<PathFragment> {
         let lookup = &self.resolver.loader().config().lookup;
         let root = lookup.resolver.repo_root(l.repository())?;
-        Some(root.get_relative(l.package_identifier().package_fragment()).get_relative_str(l.name()))
+        Some(
+            root.get_relative(l.package_identifier().package_fragment())
+                .get_relative_str(l.name()),
+        )
     }
 
     fn bzl_direct_loads(&self, l: &Label) -> Vec<Label> {
@@ -1125,10 +1519,22 @@ impl<'a> TargetEnv<'a> {
     /// because the pattern resolver only knows declared targets.
     fn resolve_one(&self, pattern: &str) -> (Vec<Node>, Vec<String>) {
         if pattern.starts_with("@@") {
-            let repo = pattern.trim_start_matches("@@").split("//").next().unwrap_or("");
+            let repo = pattern
+                .trim_start_matches("@@")
+                .split("//")
+                .next()
+                .unwrap_or("");
             if !repo.is_empty() {
                 let name = RepositoryName::create_unvalidated(repo);
-                if self.resolver.loader().config().lookup.resolver.repo_root(&name).is_none() {
+                if self
+                    .resolver
+                    .loader()
+                    .config()
+                    .lookup
+                    .resolver
+                    .repo_root(&name)
+                    .is_none()
+                {
                     return (
                         Vec::new(),
                         vec![format!("\0Target parsing failed due to unexpected exception: Repository '@@{repo}' is not defined")],
@@ -1138,27 +1544,45 @@ impl<'a> TargetEnv<'a> {
         }
         // `//dir/...`: packages with errors are reported (`package contains errors: <pkg>`) but do
         // not fail the pattern: the targets of all other packages stay in the result.
-        if let Ok(zel_cmdline::TargetPattern::TargetsBelowDirectory { directory, include_files }) =
-            zel_cmdline::TargetPattern::parse_with(
-                pattern,
-                &self.resolver.relative_dir,
-                &RepositoryName::main(),
-                &self.resolver.main_mapping,
-            )
-        {
+        if let Ok(zel_cmdline::TargetPattern::TargetsBelowDirectory {
+            directory,
+            include_files,
+        }) = zel_cmdline::TargetPattern::parse_with(
+            pattern,
+            &self.resolver.relative_dir,
+            &RepositoryName::main(),
+            &self.resolver.main_mapping,
+        ) {
             let mut pkgs = Vec::new();
             if let Err(m) = self.resolver.find_packages_below(&directory, &mut pkgs) {
-                if self.toplevel == pattern && pattern.starts_with("@@") && pattern.ends_with("//...") {
-                    let repo = pattern.trim_start_matches("@@").split("//").next().unwrap_or("");
+                if self.toplevel == pattern
+                    && pattern.starts_with("@@")
+                    && pattern.ends_with("//...")
+                {
+                    let repo = pattern
+                        .trim_start_matches("@@")
+                        .split("//")
+                        .next()
+                        .unwrap_or("");
                     return (
                         Vec::new(),
                         vec![format!("\0Target parsing failed due to unexpected exception: Repository '@@{repo}' is not defined")],
                     );
                 }
-                if self.toplevel == pattern && pattern.starts_with('@') && !pattern.starts_with("@@") && pattern.ends_with("//...") {
+                if self.toplevel == pattern
+                    && pattern.starts_with('@')
+                    && !pattern.starts_with("@@")
+                    && pattern.ends_with("//...")
+                {
                     if let Some(rest) = m.strip_prefix("no such package '@@[unknown repo '") {
                         let apparent = rest.split('\'').next().unwrap_or("");
-                        if apparent == pattern.trim_start_matches('@').split("//").next().unwrap_or("") {
+                        if apparent
+                            == pattern
+                                .trim_start_matches('@')
+                                .split("//")
+                                .next()
+                                .unwrap_or("")
+                        {
                             let silent = if self.opts.keep_going { "" } else { "\0" };
                             return (
                                 Vec::new(),
@@ -1202,7 +1626,10 @@ impl<'a> TargetEnv<'a> {
                     self.pending_events.borrow_mut().extend(evs);
                     return (
                         Vec::new(),
-                        vec![format!("error loading package under directory '{}': {m}", directory.package_fragment())],
+                        vec![format!(
+                            "error loading package under directory '{}': {m}",
+                            directory.package_fragment()
+                        )],
                     );
                 }
             }
@@ -1221,10 +1648,18 @@ impl<'a> TargetEnv<'a> {
                                 .unwrap_or_default();
                             if self.pkg_error_reported.borrow_mut().insert(frag.clone()) {
                                 let mut pe = self.pending_events.borrow_mut();
-                                pe.push(zel_packages::PackageEvent::error(None, format!("package contains errors: {frag}")));
-                                pe.push(zel_packages::PackageEvent::error(None, format!("package contains errors: {frag}: {first}")));
+                                pe.push(zel_packages::PackageEvent::error(
+                                    None,
+                                    format!("package contains errors: {frag}"),
+                                ));
+                                pe.push(zel_packages::PackageEvent::error(
+                                    None,
+                                    format!("package contains errors: {frag}: {first}"),
+                                ));
                             }
-                            let msg = format!("error loading package '{frag}': Package '{frag}' contains errors");
+                            let msg = format!(
+                                "error loading package '{frag}': Package '{frag}' contains errors"
+                            );
                             errors.push(if self.toplevel == pattern && directory.package_fragment().is_empty() {
                                 format!("\0Error evaluating '{pattern}': {msg}")
                             } else {
@@ -1234,7 +1669,9 @@ impl<'a> TargetEnv<'a> {
                         nodes.extend(
                             zel_packages::PatternResolver::rules_or_all(&pkg, include_files)
                                 .iter()
-                                .filter(|t| !(self.filter_manual_on_wildcards && t.has_tag("manual")))
+                                .filter(|t| {
+                                    !(self.filter_manual_on_wildcards && t.has_tag("manual"))
+                                })
                                 .map(|t| node(t.label())),
                         );
                     }
@@ -1243,7 +1680,9 @@ impl<'a> TargetEnv<'a> {
             }
             return (nodes, errors);
         }
-        let outcome = self.resolver.resolve_patterns_filtered(&[pattern.to_string()], self.filter_manual_on_wildcards);
+        let outcome = self
+            .resolver
+            .resolve_patterns_filtered(&[pattern.to_string()], self.filter_manual_on_wildcards);
         {
             let mut pe = self.pending_events.borrow_mut();
             for ev in &outcome.events {
@@ -1261,10 +1700,16 @@ impl<'a> TargetEnv<'a> {
                 // fails the evaluation with an empty message (`describe` omits the colon).
                 // The package's declared targets stay usable.
                 Some(pe) => {
-                    self.pending_events.borrow_mut().push(zel_packages::PackageEvent::error(
-                        None,
-                        format!("package contains errors: {}: {}", pe.package.package_fragment(), pe.first_error),
-                    ));
+                    self.pending_events
+                        .borrow_mut()
+                        .push(zel_packages::PackageEvent::error(
+                            None,
+                            format!(
+                                "package contains errors: {}: {}",
+                                pe.package.package_fragment(),
+                                pe.first_error
+                            ),
+                        ));
                     if let Ok(pkg) = self.resolver.package(&pe.package) {
                         nodes.extend(
                             zel_packages::PatternResolver::rules_or_all(&pkg, pe.include_files)
@@ -1279,7 +1724,11 @@ impl<'a> TargetEnv<'a> {
         }
         for error in &mut errors {
             if pattern.starts_with("@@") && error.contains("@@[unknown repo '") {
-                let repo = pattern.trim_start_matches("@@").split("//").next().unwrap_or("");
+                let repo = pattern
+                    .trim_start_matches("@@")
+                    .split("//")
+                    .next()
+                    .unwrap_or("");
                 *error = format!("\0Target parsing failed due to unexpected exception: Repository '@@{repo}' is not defined");
                 continue;
             }
@@ -1332,7 +1781,7 @@ fn node(l: &Label) -> Node {
     Node::new(l.clone())
 }
 
-impl<'a> QueryEnv for TargetEnv<'a> {
+impl QueryEnv for TargetEnv<'_> {
     fn functions(&self) -> Vec<FuncSpec> {
         let mut f = parse::DEFAULT_FUNCTIONS.to_vec();
         if self.opts.sky {
@@ -1368,7 +1817,11 @@ impl<'a> QueryEnv for TargetEnv<'a> {
                 for e in errors.iter().filter(|e| !silent(e)) {
                     diag.report(format!("Skipping '{p}': {e}"));
                 }
-                let keep = if errors.iter().any(|e| silent(e)) { nodes } else { Vec::new() };
+                let keep = if errors.iter().any(|e| silent(e)) {
+                    nodes
+                } else {
+                    Vec::new()
+                };
                 self.preloaded.borrow_mut().insert(p.clone(), keep);
             } else {
                 self.preloaded.borrow_mut().insert(p.clone(), nodes);
@@ -1377,7 +1830,12 @@ impl<'a> QueryEnv for TargetEnv<'a> {
         Ok(())
     }
 
-    fn resolve_pattern(&mut self, expr: &Expr, pattern: &str, diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
+    fn resolve_pattern(
+        &mut self,
+        expr: &Expr,
+        pattern: &str,
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
         if let Some(n) = self.preloaded.borrow().get(pattern) {
             self.pattern_nodes.borrow_mut().extend(n.iter().cloned());
             return Ok(n.clone());
@@ -1400,18 +1858,30 @@ impl<'a> QueryEnv for TargetEnv<'a> {
                 diag.report(e.to_string());
             }
         }
-        self.pattern_nodes.borrow_mut().extend(nodes.iter().cloned());
+        self.pattern_nodes
+            .borrow_mut()
+            .extend(nodes.iter().cloned());
         Ok(nodes)
     }
 
     fn location_prefix(&mut self, n: &Node) -> String {
         match self.info_of(n).as_deref().map(|i| &i.target) {
-            Some(Target::Rule(r)) => r.extra.location.clone().map(|x| format!("{x}: ")).unwrap_or_default(),
+            Some(Target::Rule(r)) => r
+                .extra
+                .location
+                .clone()
+                .map(|x| format!("{x}: "))
+                .unwrap_or_default(),
             _ => String::new(),
         }
     }
 
-    fn direct_deps(&mut self, expr: &Expr, n: &Node, diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
+    fn direct_deps(
+        &mut self,
+        expr: &Expr,
+        n: &Node,
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
         let info = match self.info(&n.label) {
             Ok(i) => i,
             Err(_) => return Ok(Vec::new()),
@@ -1419,11 +1889,19 @@ impl<'a> QueryEnv for TargetEnv<'a> {
         let mut raw: Vec<(Label, Option<Label>)> = Vec::new();
         match &info.target {
             Target::Rule(r) => {
-                for (l, _) in rule_deps_with_aspect_opt(r, self.opts.implicit_deps, self.opts.tool_deps, self.opts.nodep_deps, &self.opts.aspect_deps) {
+                for (l, _) in rule_deps_with_aspect_opt(
+                    r,
+                    self.opts.implicit_deps,
+                    self.opts.tool_deps,
+                    self.opts.nodep_deps,
+                    &self.opts.aspect_deps,
+                ) {
                     raw.push((l, Some(r.label.clone())));
                 }
             }
-            Target::OutputFile { generating_rule, .. } => raw.push((generating_rule.clone(), None)),
+            Target::OutputFile {
+                generating_rule, ..
+            } => raw.push((generating_rule.clone(), None)),
             Target::InputFile { label } => {
                 if self.opts.nodep_deps {
                     for l in visibility_group_labels(&self.visibility_labels(&info)) {
@@ -1447,7 +1925,12 @@ impl<'a> QueryEnv for TargetEnv<'a> {
                 Ok(_) => out.push(node(&l)),
                 Err(msg) => {
                     let loc = match &info.target {
-                        Target::Rule(r) => r.extra.location.clone().map(|x| format!("{x}: ")).unwrap_or_default(),
+                        Target::Rule(r) => r
+                            .extra
+                            .location
+                            .clone()
+                            .map(|x| format!("{x}: "))
+                            .unwrap_or_default(),
                         _ => String::new(),
                     };
                     let _ = referrer;
@@ -1465,7 +1948,12 @@ impl<'a> QueryEnv for TargetEnv<'a> {
         Ok(out)
     }
 
-    fn universe_roots(&mut self, _expr: &Expr, patterns: &[String], diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
+    fn universe_roots(
+        &mut self,
+        _expr: &Expr,
+        patterns: &[String],
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
         let pats = self.universe_patterns(patterns);
         let mut roots = Vec::new();
         if pats.is_empty() {
@@ -1475,22 +1963,23 @@ impl<'a> QueryEnv for TargetEnv<'a> {
             let (nodes, errors) = self.resolve_one(p);
             if let Some(err) = errors.first() {
                 if !diag.keep_going {
-                    let is_syntax = match zel_cmdline::SignedTargetPattern::parse_with(
+                    let is_syntax = zel_cmdline::SignedTargetPattern::parse_with(
                         p,
                         &self.resolver.relative_dir,
                         &RepositoryName::main(),
                         &self.resolver.main_mapping,
-                    ) {
-                        Err(_) => true,
-                        Ok(_) => false,
-                    };
+                    )
+                    .is_err();
                     if is_syntax {
                         diag.report(format!("Skipping '{p}': {err}"));
                         diag.report(format!("Skipping '{p}': {err}"));
                     } else {
                         diag.report(format!("Skipping '{p}': {err}"));
                     }
-                    let mut qe = QueryError::raw(format!("Evaluation of query \"{}\" failed due to BUILD file errors", self.toplevel));
+                    let qe = QueryError::raw(format!(
+                        "Evaluation of query \"{}\" failed due to BUILD file errors",
+                        self.toplevel
+                    ));
                     return Err(qe);
                 }
             }
@@ -1511,7 +2000,10 @@ impl<'a> QueryEnv for TargetEnv<'a> {
     }
 
     fn is_rule(&mut self, n: &Node) -> bool {
-        matches!(self.info_of(n).as_deref().map(|i| &i.target), Some(Target::Rule(_)))
+        matches!(
+            self.info_of(n).as_deref().map(|i| &i.target),
+            Some(Target::Rule(_))
+        )
     }
 
     fn is_test_rule(&mut self, n: &Node) -> bool {
@@ -1540,22 +2032,58 @@ impl<'a> QueryEnv for TargetEnv<'a> {
     }
 
     fn attr_strings(&mut self, n: &Node, attr: &str) -> Vec<String> {
-        let Some(info) = self.info_of(n) else { return Vec::new() };
-        let Target::Rule(r) = &info.target else { return Vec::new() };
+        let Some(info) = self.info_of(n) else {
+            return Vec::new();
+        };
+        let Target::Rule(r) = &info.target else {
+            return Vec::new();
+        };
         let Some(a) = rule_attributes(r).into_iter().find(|a| a.name == attr) else {
             return Vec::new();
         };
-        possible_values(&a.value).iter().filter_map(java_string).collect()
+        if a.null_default {
+            return Vec::new();
+        }
+        visit_attribute_values(&a.value)
+            .iter()
+            .filter_map(java_string)
+            .collect()
+    }
+
+    fn string_attr(&mut self, n: &Node, attr: &str) -> String {
+        let Some(info) = self.info_of(n) else {
+            return String::new();
+        };
+        let Target::Rule(r) = &info.target else {
+            return String::new();
+        };
+        if let Some(AttrValue::Str(s)) = r.attr_or_default(attr) {
+            return s;
+        }
+        if attr == "size" && is_test_rule(r) {
+            return "medium".to_string();
+        }
+        String::new()
     }
 
     fn string_list_attr(&mut self, n: &Node, attr: &str) -> Vec<String> {
-        let Some(info) = self.info_of(n) else { return Vec::new() };
-        let Target::Rule(r) = &info.target else { return Vec::new() };
+        let Some(info) = self.info_of(n) else {
+            return Vec::new();
+        };
+        let Target::Rule(r) = &info.target else {
+            return Vec::new();
+        };
         match r.attr_or_default(attr) {
             Some(AttrValue::StrList(l)) => l,
             Some(v @ AttrValue::Select(_)) => possible_values(&v)
                 .into_iter()
-                .flat_map(|v| if let AttrValue::StrList(l) = v { l } else { Vec::new() })
+                .flat_map(|v| {
+                    if let AttrValue::StrList(l) = v {
+                        l
+                    } else {
+                        Vec::new()
+                    }
+                })
                 .collect(),
             _ => Vec::new(),
         }
@@ -1570,11 +2098,61 @@ impl<'a> QueryEnv for TargetEnv<'a> {
         diag: &mut Diag,
     ) -> Result<Vec<Node>, QueryError> {
         *self.digraph_no_edges.borrow_mut() = true;
-        let Some(info) = self.info_of(n) else { return Ok(Vec::new()) };
-        let Target::Rule(r) = &info.target else { return Ok(Vec::new()) };
+        let Some(info) = self.info_of(n) else {
+            return Ok(Vec::new());
+        };
+        let Target::Rule(r) = &info.target else {
+            return Ok(Vec::new());
+        };
+        if attr == "$implicit_tests" && is_test_suite(r) {
+            let explicit_empty = match r.attr_or_default("tests") {
+                None => true,
+                Some(AttrValue::LabelList(l)) => l.is_empty(),
+                _ => false,
+            };
+            if !explicit_empty {
+                return Ok(Vec::new());
+            }
+            let suite_tags = match r.attr_or_default("tags") {
+                Some(AttrValue::StrList(t)) => t,
+                _ => Vec::new(),
+            };
+            let (required, excluded) = sort_tags_by_sense(&suite_tags);
+            let mut labels: Vec<Label> = info
+                .pkg
+                .targets
+                .values()
+                .filter_map(|t| match t {
+                    Target::Rule(x) if is_test_rule(x) => {
+                        let mut ttags = match x.attr_or_default("tags") {
+                            Some(AttrValue::StrList(t)) => t,
+                            _ => Vec::new(),
+                        };
+                        if ttags.iter().any(|s| s == "manual") {
+                            return None;
+                        }
+                        let size = match x.attr_or_default("size") {
+                            Some(AttrValue::Str(s)) if !s.is_empty() => s,
+                            _ => "medium".to_string(),
+                        };
+                        ttags.push(size);
+                        if test_matches_filters(&ttags, &required, &excluded) {
+                            Some(x.label.clone())
+                        } else {
+                            None
+                        }
+                    }
+                    _ => None,
+                })
+                .collect();
+            labels.sort_by(crate::engine::label_cmp);
+            return Ok(labels.into_iter().map(|l| node(&l)).collect());
+        }
         let entries = rule_attributes(r);
-        let Some(a) = entries.iter().find(|a| a.name == attr) else { return Ok(Vec::new()) };
-        let mut labels = if a.name == "visibility" {
+        let Some(a) = entries.iter().find(|a| a.name == attr) else {
+            return Ok(Vec::new());
+        };
+        let labels = if a.name == "visibility" {
             visibility_group_labels(&a.value.labels())
         } else {
             // `labels()` does not include the condition keys of `select()`s.
@@ -1604,25 +2182,6 @@ impl<'a> QueryEnv for TargetEnv<'a> {
                 v => no_keys(v),
             }
         };
-        if attr == "tests" && is_test_suite(r) && labels.is_empty() {
-            // `$implicit_tests`: all non-manual test rules of the package.
-            labels = info
-                .pkg
-                .targets
-                .values()
-                .filter_map(|t| match t {
-                    Target::Rule(x) if is_test_rule(x) => {
-                        let manual = matches!(x.attr_or_default("tags"), Some(AttrValue::StrList(t)) if t.iter().any(|s| s == "manual"));
-                        if manual {
-                            None
-                        } else {
-                            Some(x.label.clone())
-                        }
-                    }
-                    _ => None,
-                })
-                .collect();
-        }
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for l in labels {
@@ -1638,13 +2197,10 @@ impl<'a> QueryEnv for TargetEnv<'a> {
     }
 
     fn siblings(&mut self, n: &Node, _diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
-        let Some(info) = self.info_of(n) else { return Ok(Vec::new()) };
-        let mut out: Vec<Node> = info
-            .pkg
-            .targets
-            .values()
-            .map(|t| node(t.label()))
-            .collect();
+        let Some(info) = self.info_of(n) else {
+            return Ok(Vec::new());
+        };
+        let mut out: Vec<Node> = info.pkg.targets.values().map(|t| node(t.label())).collect();
         let bf = Self::build_file_label(&info.pkg);
         if !out.iter().any(|x| x.label == bf) {
             out.push(node(&bf));
@@ -1652,15 +2208,28 @@ impl<'a> QueryEnv for TargetEnv<'a> {
         Ok(out)
     }
 
-    fn visible(&mut self, _expr: &Expr, to: &Node, from: &Node, _diag: &mut Diag) -> Result<bool, QueryError> {
-        let Some(info) = self.info_of(from) else { return Ok(false) };
+    fn visible(
+        &mut self,
+        _expr: &Expr,
+        to: &Node,
+        from: &Node,
+        _diag: &mut Diag,
+    ) -> Result<bool, QueryError> {
+        let Some(info) = self.info_of(from) else {
+            return Ok(false);
+        };
         let vis = self.visibility_labels(&info);
         let owner = Self::label_package_id(&from.label);
         let to_pkg = Self::label_package_id(&to.label);
         Ok(self.spec_contains(&vis, &owner, &to_pkg))
     }
 
-    fn buildfiles(&mut self, _expr: &Expr, set: &NodeSet, _diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
+    fn buildfiles(
+        &mut self,
+        _expr: &Expr,
+        set: &NodeSet,
+        _diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
         let mut out = Vec::new();
         let mut pkgs: Vec<Arc<Package>> = Vec::new();
         for n in set.iter() {
@@ -1688,14 +2257,20 @@ impl<'a> QueryEnv for TargetEnv<'a> {
                 }
             }
             for l in self.transitive_bzl_loads(&p) {
-                self.fake_load_targets.borrow_mut().entry(l.clone()).or_insert_with(|| p.clone());
+                self.fake_load_targets
+                    .borrow_mut()
+                    .entry(l.clone())
+                    .or_insert_with(|| p.clone());
                 let ln = node(&l);
                 if !out.contains(&ln) {
                     out.push(ln);
                 }
                 if let Ok(bzl_pkg) = self.resolver.package(l.package_identifier()) {
                     let bfl_lbl = Self::build_file_label(&bzl_pkg);
-                    self.fake_load_targets.borrow_mut().entry(bfl_lbl.clone()).or_insert_with(|| p.clone());
+                    self.fake_load_targets
+                        .borrow_mut()
+                        .entry(bfl_lbl.clone())
+                        .or_insert_with(|| p.clone());
                     let bfl = node(&bfl_lbl);
                     if !out.contains(&bfl) {
                         out.push(bfl);
@@ -1706,14 +2281,22 @@ impl<'a> QueryEnv for TargetEnv<'a> {
         Ok(out)
     }
 
-    fn loadfiles(&mut self, _expr: &Expr, set: &NodeSet, _diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
+    fn loadfiles(
+        &mut self,
+        _expr: &Expr,
+        set: &NodeSet,
+        _diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
         let mut out = Vec::new();
         let mut seen_pkgs = HashSet::new();
         for n in set.iter() {
             if let Some(info) = self.info_of(n) {
                 if seen_pkgs.insert(info.pkg.id.clone()) {
                     for l in self.transitive_bzl_loads(&info.pkg) {
-                        self.fake_load_targets.borrow_mut().entry(l.clone()).or_insert_with(|| info.pkg.clone());
+                        self.fake_load_targets
+                            .borrow_mut()
+                            .entry(l.clone())
+                            .or_insert_with(|| info.pkg.clone());
                         out.push(node(&l));
                     }
                 }
@@ -1722,18 +2305,26 @@ impl<'a> QueryEnv for TargetEnv<'a> {
         Ok(out)
     }
 
-    fn rbuildfiles(&mut self, expr: &Expr, words: &[String], diag: &mut Diag) -> Result<Vec<Node>, QueryError> {
+    fn rbuildfiles(
+        &mut self,
+        expr: &Expr,
+        words: &[String],
+        diag: &mut Diag,
+    ) -> Result<Vec<Node>, QueryError> {
         // Resolve each word to a file path / label.
         let mut files: Vec<Label> = Vec::new();
         for w in words {
-            if let Ok(pat) = zel_cmdline::TargetPattern::parse(w, &PathFragment::empty()) {
-                if let zel_cmdline::TargetPattern::SingleTarget(l) = pat {
-                    files.push(l);
-                    continue;
-                }
+            if let Ok(zel_cmdline::TargetPattern::SingleTarget(l)) =
+                zel_cmdline::TargetPattern::parse(w, &PathFragment::empty())
+            {
+                files.push(l);
+                continue;
             }
             let frag = PathFragment::create(w);
-            let id = PackageIdentifier::create(RepositoryName::main(), frag.parent_directory().unwrap_or_else(PathFragment::empty));
+            let id = PackageIdentifier::create(
+                RepositoryName::main(),
+                frag.parent_directory().unwrap_or_else(PathFragment::empty),
+            );
             if let Ok(id) = id {
                 if let Ok(l) = Label::create(id, frag.base_name()) {
                     files.push(l);
@@ -1772,6 +2363,47 @@ impl<'a> QueryEnv for TargetEnv<'a> {
 
     fn strict_universe(&self) -> bool {
         self.opts.sky
+    }
+
+    fn is_sky_query(&self) -> bool {
+        self.opts.sky
+    }
+
+    fn unfiltered_direct_deps(&mut self, n: &Node) -> Option<Vec<Node>> {
+        let info = match self.info(&n.label) {
+            Ok(i) => i,
+            Err(_) => return Some(Vec::new()),
+        };
+        let mut raw: Vec<Label> = Vec::new();
+        match &info.target {
+            Target::Rule(r) => {
+                for (l, _) in rule_deps_with_aspect_opt(r, true, true, true, &self.opts.aspect_deps)
+                {
+                    raw.push(l);
+                }
+            }
+            Target::OutputFile {
+                generating_rule, ..
+            } => raw.push(generating_rule.clone()),
+            Target::InputFile { .. } => {
+                for l in visibility_group_labels(&self.visibility_labels(&info)) {
+                    raw.push(l);
+                }
+            }
+            Target::PackageGroup { label, .. } => {
+                if let Some(incl) = info.pkg.group_includes.get(label.name()) {
+                    raw.extend(incl.iter().cloned());
+                }
+            }
+            Target::EnvironmentGroup { .. } => {}
+        }
+        let mut out = Vec::new();
+        for l in raw {
+            if self.info(&l).is_ok() {
+                out.push(node(&l));
+            }
+        }
+        Some(out)
     }
 
     fn output_format_hint(&self) -> &str {

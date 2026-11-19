@@ -93,7 +93,9 @@ impl<'a> Rd<'a> {
     }
     fn bit_vector(&mut self, n: usize) -> Result<Vec<bool>, String> {
         let bytes = self.bytes((n + 7) / 8)?;
-        Ok((0..n).map(|i| bytes[i / 8] & (0x80 >> (i % 8)) != 0).collect())
+        Ok((0..n)
+            .map(|i| bytes[i / 8] & (0x80 >> (i % 8)) != 0)
+            .collect())
     }
     fn optional_bit_vector(&mut self, n: usize) -> Result<Vec<bool>, String> {
         let all = self.u8()?;
@@ -188,7 +190,9 @@ fn read_streams_info(r: &mut Rd) -> Result<StreamsInfo, String> {
                         K_CRC => {
                             r.digests(n)?;
                         }
-                        other => return Err(format!("7z unexpected pack info property 0x{other:02x}")),
+                        other => {
+                            return Err(format!("7z unexpected pack info property 0x{other:02x}"))
+                        }
                     }
                 }
                 if si.pack_sizes.len() != n {
@@ -244,7 +248,11 @@ fn read_unpack_info(r: &mut Rd, si: &mut StreamsInfo) -> Result<(), String> {
             for &b in r.bytes(idsize)? {
                 id = (id << 8) | b as u64;
             }
-            let (nin, nout) = if flags & 0x10 != 0 { (r.count()?, r.count()?) } else { (1, 1) };
+            let (nin, nout) = if flags & 0x10 != 0 {
+                (r.count()?, r.count()?)
+            } else {
+                (1, 1)
+            };
             if nin > 32 || nout > 32 || nout == 0 {
                 return Err("7z coder has invalid stream counts".into());
             }
@@ -254,7 +262,12 @@ fn read_unpack_info(r: &mut Rd, si: &mut StreamsInfo) -> Result<(), String> {
             } else {
                 Vec::new()
             };
-            f.coders.push(Coder { id, nin, nout, props });
+            f.coders.push(Coder {
+                id,
+                nin,
+                nout,
+                props,
+            });
         }
         let (tin, tout) = (f.total_in(), f.total_out());
         if tout == 0 {
@@ -274,7 +287,9 @@ fn read_unpack_info(r: &mut Rd, si: &mut StreamsInfo) -> Result<(), String> {
         }
         let npacked = tin - nbp;
         if npacked == 1 {
-            let idx = (0..tin).find(|i| !f.bind_pairs.iter().any(|b| b.0 == *i)).ok_or("7z folder has no packed stream")?;
+            let idx = (0..tin)
+                .find(|i| !f.bind_pairs.iter().any(|b| b.0 == *i))
+                .ok_or("7z folder has no packed stream")?;
             f.packed.push(idx);
         } else {
             for _ in 0..npacked {
@@ -394,6 +409,7 @@ struct FileRec {
     has_stream: bool,
     is_dir: bool,
     anti: bool,
+    #[allow(dead_code)]
     attrs: Option<u32>,
 }
 
@@ -466,7 +482,12 @@ fn read_files_info(r: &mut Rd) -> Result<Vec<FileRec>, String> {
     let mut recs = Vec::with_capacity(n);
     let mut empty_idx = 0usize;
     for i in 0..n {
-        let mut rec = FileRec { name: names[i].clone(), has_stream: !empty_stream[i], attrs: attrs[i], ..Default::default() };
+        let mut rec = FileRec {
+            name: names[i].clone(),
+            has_stream: !empty_stream[i],
+            attrs: attrs[i],
+            ..Default::default()
+        };
         if empty_stream[i] {
             let is_empty_file = empty_file.get(empty_idx).copied().unwrap_or(false);
             rec.is_dir = !is_empty_file;
@@ -514,7 +535,11 @@ fn run_coder(c: &Coder, mut inputs: Vec<Vec<u8>>, out_size: u64) -> Result<Vec<u
         return Ok(b);
     }
     if inputs.len() != 1 {
-        return Err(format!("7z coder 0x{:x} with {} inputs is not supported", c.id, inputs.len()));
+        return Err(format!(
+            "7z coder 0x{:x} with {} inputs is not supported",
+            c.id,
+            inputs.len()
+        ));
     }
     let input = inputs.pop().unwrap();
     let out = match c.id {
@@ -562,7 +587,12 @@ fn run_coder(c: &Coder, mut inputs: Vec<Vec<u8>>, out_size: u64) -> Result<Vec<u
         other => return Err(format!("Unsupported 7z coder method 0x{other:x}")),
     };
     if out.len() != out_size {
-        return Err(format!("7z coder 0x{:x} produced {} bytes, expected {}", c.id, out.len(), out_size));
+        return Err(format!(
+            "7z coder 0x{:x} produced {} bytes, expected {}",
+            c.id,
+            out.len(),
+            out_size
+        ));
     }
     Ok(out)
 }
@@ -573,7 +603,7 @@ struct FolderCtx<'a> {
     depth: usize,
 }
 
-impl<'a> FolderCtx<'a> {
+impl FolderCtx<'_> {
     fn get_out(&mut self, out_idx: usize) -> Result<Vec<u8>, String> {
         self.depth += 1;
         if self.depth > 64 {
@@ -601,7 +631,12 @@ impl<'a> FolderCtx<'a> {
                 let o = bp.1;
                 inputs.push(self.get_out(o)?);
             } else {
-                let pi = self.f.packed.iter().position(|p| *p == gi).ok_or("7z coder input is not connected")?;
+                let pi = self
+                    .f
+                    .packed
+                    .iter()
+                    .position(|p| *p == gi)
+                    .ok_or("7z coder input is not connected")?;
                 inputs.push(self.packs[pi].to_vec());
             }
         }
@@ -646,7 +681,12 @@ fn fix_first_pack(si: &mut StreamsInfo) {
     }
 }
 
-pub fn extract_7z(raw: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions) -> Result<(), String> {
+pub fn extract_7z(
+    raw: &[u8],
+    archive: &Path,
+    root: &Path,
+    opts: &ExtractOptions,
+) -> Result<(), String> {
     let err = |m: String| format!("{}: {}", archive.display(), m);
     // commons-compress SevenZFile.readHeaders
     if raw.len() < 12 {
@@ -656,7 +696,10 @@ pub fn extract_7z(raw: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions
         return Err(err("Bad 7z signature".into()));
     }
     if raw[6] != 0 {
-        return Err(err(format!("Unsupported 7z version ({},{})", raw[6] as i8, raw[7] as i8)));
+        return Err(err(format!(
+            "Unsupported 7z version ({},{})",
+            raw[6] as i8, raw[7] as i8
+        )));
     }
     let start_crc = u32::from_le_bytes(raw[8..12].try_into().unwrap());
     if start_crc == 0 {
@@ -691,10 +734,16 @@ pub fn extract_7z(raw: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions
     let (recs, data, entries_info) = if nh_size == 0 {
         (Vec::new(), Vec::new(), Vec::new())
     } else {
-        let start = 32u64.checked_add(nh_off).ok_or_else(|| err("bad 7z header offset".into()))?;
-        let end = start.checked_add(nh_size).ok_or_else(|| err("bad 7z header size".into()))?;
+        let start = 32u64
+            .checked_add(nh_off)
+            .ok_or_else(|| err("bad 7z header offset".into()))?;
+        let end = start
+            .checked_add(nh_size)
+            .ok_or_else(|| err("bad 7z header size".into()))?;
         if end > raw.len() as u64 {
-            return Err(err("7z archive truncated (header beyond end of file)".into()));
+            return Err(err(
+                "7z archive truncated (header beyond end of file)".into()
+            ));
         }
         let mut header: Vec<u8> = raw[start as usize..end as usize].to_vec();
         if crc32(&header) != nh_crc {
@@ -703,42 +752,42 @@ pub fn extract_7z(raw: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions
         let mut rounds = 0;
         loop {
             let mut r = Rd::new(&header);
-            match r.u8().map_err(&err)? {
+            match r.u8().map_err(err)? {
                 K_ENCODED_HEADER => {
                     rounds += 1;
                     if rounds > 4 {
                         return Err(err("7z header is nested too deeply".into()));
                     }
-                    let mut si = read_streams_info(&mut r).map_err(&err)?;
+                    let mut si = read_streams_info(&mut r).map_err(err)?;
                     fix_first_pack(&mut si);
                     if si.folders.is_empty() {
                         return Err(err("7z encoded header has no folder".into()));
                     }
-                    header = decode_folder(raw, &si, 0).map_err(&err)?;
+                    header = decode_folder(raw, &si, 0).map_err(err)?;
                 }
                 K_HEADER => break,
                 other => return Err(err(format!("unexpected 7z header id 0x{other:02x}"))),
             }
         }
         let mut r = Rd::new(&header);
-        r.u8().map_err(&err)?;
+        r.u8().map_err(err)?;
         let mut si = StreamsInfo::default();
         let mut recs = Vec::new();
         loop {
-            match r.u8().map_err(&err)? {
+            match r.u8().map_err(err)? {
                 K_END => break,
                 K_ARCHIVE_PROPERTIES => loop {
-                    if r.u8().map_err(&err)? == K_END {
+                    if r.u8().map_err(err)? == K_END {
                         break;
                     }
-                    let n = r.number().map_err(&err)? as usize;
-                    r.bytes(n).map_err(&err)?;
+                    let n = r.number().map_err(err)? as usize;
+                    r.bytes(n).map_err(err)?;
                 },
                 K_ADDITIONAL_STREAMS_INFO => {
-                    read_streams_info(&mut r).map_err(&err)?;
+                    read_streams_info(&mut r).map_err(err)?;
                 }
-                K_MAIN_STREAMS_INFO => si = read_streams_info(&mut r).map_err(&err)?,
-                K_FILES_INFO => recs = read_files_info(&mut r).map_err(&err)?,
+                K_MAIN_STREAMS_INFO => si = read_streams_info(&mut r).map_err(err)?,
+                K_FILES_INFO => recs = read_files_info(&mut r).map_err(err)?,
                 other => return Err(err(format!("unexpected 7z header property 0x{other:02x}"))),
             }
         }
@@ -751,10 +800,10 @@ pub fn extract_7z(raw: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions
             if f.sub_sizes.is_empty() {
                 continue;
             }
-            let buf = decode_folder(raw, &si, fi).map_err(&err)?;
+            let buf = decode_folder(raw, &si, fi).map_err(err)?;
             let mut off = 0usize;
             for (k, sz) in f.sub_sizes.iter().enumerate() {
-                let sz = to_usize(*sz).map_err(&err)?;
+                let sz = to_usize(*sz).map_err(err)?;
                 if off + sz > buf.len() {
                     return Err(err("7z substream exceeds folder data".into()));
                 }
@@ -765,7 +814,9 @@ pub fn extract_7z(raw: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions
         }
         let with_stream = recs.iter().filter(|r| r.has_stream).count();
         if with_stream != spans.len() {
-            return Err(err("7z archive is inconsistent (file/stream count mismatch)".into()));
+            return Err(err(
+                "7z archive is inconsistent (file/stream count mismatch)".into(),
+            ));
         }
         (recs, data, spans)
     };
@@ -776,13 +827,22 @@ pub fn extract_7z(raw: &[u8], archive: &Path, root: &Path, opts: &ExtractOptions
         if rec.anti {
             continue;
         }
-        let mut e = SevenZEntry { name: rec.name.clone(), is_dir: rec.is_dir, mode: None, start: 0, len: 0 };
+        let mut e = SevenZEntry {
+            name: rec.name.clone(),
+            is_dir: rec.is_dir,
+            mode: None,
+            start: 0,
+            len: 0,
+        };
         if rec.has_stream {
             let (s, l, c) = entries_info[si_idx];
             si_idx += 1;
             if let Some(c) = c {
                 if crc32(&data[s..s + l]) != c {
-                    return Err(err(format!("7z CRC mismatch for entry {} (archive is corrupt)", rec.name)));
+                    return Err(err(format!(
+                        "7z CRC mismatch for entry {} (archive is corrupt)",
+                        rec.name
+                    )));
                 }
             }
             e.start = s;

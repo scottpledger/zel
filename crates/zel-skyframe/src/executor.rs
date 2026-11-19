@@ -25,9 +25,9 @@ use crate::diff::{apply_diff, default_awareness, DiffAwareness, ModifiedFileSet}
 use crate::engine::{EvaluationOptions, EvaluationResult, InMemoryMemoizingEvaluator};
 use crate::recording_fs::RecordingFileSystem;
 use crate::{
-    DirectoryListingStateFunction, Environment, FileStateFunction, PackageFunction, PackageLoadContext,
-    PackageLoadFunction, PackageLoadValue, PackageLookupFunction, SkyFunction, SkyFunctionError,
-    SkyFunctionName, SkyKey, SkyValue, StringSkyValue, LOADING_OPTIONS_KEY,
+    DirectoryListingStateFunction, Environment, FileStateFunction, PackageFunction,
+    PackageLoadContext, PackageLoadFunction, PackageLoadValue, PackageLookupFunction, SkyFunction,
+    SkyFunctionError, SkyFunctionName, SkyKey, SkyValue, StringSkyValue, LOADING_OPTIONS_KEY,
 };
 use std::any::Any;
 use std::sync::atomic::Ordering;
@@ -56,6 +56,10 @@ pub struct SkyframeExecutor {
     pkg_ctx: Arc<PackageLoadContext>,
     diff: Mutex<Arc<dyn DiffAwareness>>,
     last_loading_options: Mutex<Option<String>>,
+    track_incremental_state: std::sync::atomic::AtomicBool,
+    analysis_cache_discarded: std::sync::atomic::AtomicBool,
+    package_load_keep_going: std::sync::atomic::AtomicBool,
+    package_load_threads: std::sync::atomic::AtomicUsize,
 }
 
 impl SkyframeExecutor {
@@ -83,13 +87,31 @@ impl SkyframeExecutor {
         let mut evaluator = InMemoryMemoizingEvaluator::new();
         let pkg_ctx = Arc::new(PackageLoadContext::default());
         evaluator
-            .register_function(SkyFunctionName::FILE_STATE, Arc::new(FileStateFunction::new(Arc::clone(&raw_fs))))
+            .register_function(
+                SkyFunctionName::FILE_STATE,
+                Arc::new(FileStateFunction::new(Arc::clone(&raw_fs))),
+            )
+            .register_function(SkyFunctionName::FILE, Arc::new(crate::FileFunction))
             .register_function(
                 SkyFunctionName::DIRECTORY_LISTING,
-                Arc::new(DirectoryListingStateFunction { fs: Arc::clone(&raw_fs) }),
+                Arc::new(DirectoryListingStateFunction {
+                    fs: Arc::clone(&raw_fs),
+                }),
             )
-            .register_function(SkyFunctionName::PACKAGE_LOOKUP, Arc::new(PackageLookupFunction { workspace_root, repo_resolver: repo_resolver.clone() }))
-            .register_function(SkyFunctionName::PACKAGE, Arc::new(PackageFunction::with_resolver(Arc::clone(&raw_fs), repo_resolver)))
+            .register_function(
+                SkyFunctionName::PACKAGE_LOOKUP,
+                Arc::new(PackageLookupFunction {
+                    workspace_root,
+                    repo_resolver: repo_resolver.clone(),
+                }),
+            )
+            .register_function(
+                SkyFunctionName::PACKAGE,
+                Arc::new(PackageFunction::with_resolver(
+                    Arc::clone(&raw_fs),
+                    repo_resolver,
+                )),
+            )
             .register_function(
                 SkyFunctionName::PACKAGE_LOAD,
                 Arc::new(PackageLoadFunction::new(Arc::clone(&pkg_ctx))),
@@ -104,6 +126,10 @@ impl SkyframeExecutor {
             pkg_ctx,
             diff: Mutex::new(default_awareness()),
             last_loading_options: Mutex::new(None),
+            track_incremental_state: std::sync::atomic::AtomicBool::new(true),
+            analysis_cache_discarded: std::sync::atomic::AtomicBool::new(false),
+            package_load_keep_going: std::sync::atomic::AtomicBool::new(true),
+            package_load_threads: std::sync::atomic::AtomicUsize::new(4),
         })
     }
 
@@ -129,10 +155,40 @@ impl SkyframeExecutor {
         *self.diff.lock().unwrap() = d;
     }
 
+    /// `--notrack_incremental_state` (or `--batch && --discard_analysis_cache`): disables
+    /// incremental state tracking across invocations. When disabled, `sync()` clears the graph.
+    pub fn set_track_incremental_state(&self, track: bool) {
+        let prev = self.track_incremental_state.swap(track, Ordering::SeqCst);
+        if !track && prev {
+            self.evaluator.clear();
+        }
+    }
+
+    pub fn is_tracking_incremental_state(&self) -> bool {
+        self.track_incremental_state.load(Ordering::SeqCst)
+    }
+
+    /// Configures `keep_going` and thread count for `PackageCache::load`.
+    pub fn set_package_load_options(&self, keep_going: bool, threads: usize) {
+        self.package_load_keep_going
+            .store(keep_going, Ordering::SeqCst);
+        self.package_load_threads
+            .store(threads.max(1), Ordering::SeqCst);
+    }
+
     /// Per-command synchronization: injects the loading options and invalidates whatever changed
     /// on disk since the last command.
     pub fn sync(&self, loading_options: &str) -> SyncReport {
         let mut report = SyncReport::default();
+        if !self.track_incremental_state.load(Ordering::SeqCst) {
+            self.evaluator.clear();
+            *self.last_loading_options.lock().unwrap() = None;
+        } else if self.analysis_cache_discarded.swap(false, Ordering::SeqCst) {
+            self.evaluator.delete_functions(&[
+                SkyFunctionName::CONFIGURED_TARGET,
+                SkyFunctionName::ACTION_EXECUTION,
+            ]);
+        }
         {
             let mut last = self.last_loading_options.lock().unwrap();
             report.loading_options_changed = last.as_deref() != Some(loading_options);
@@ -159,12 +215,23 @@ impl SkyframeExecutor {
 
     /// The `PackageCache` hook to install in `LoaderConfig::package_cache`.
     pub fn package_cache(self: &Arc<Self>) -> Arc<dyn PackageCache> {
-        Arc::new(SkyframePackageCache { exec: Arc::clone(self) })
+        Arc::new(SkyframePackageCache {
+            exec: Arc::clone(self),
+        })
     }
 
     /// `--discard_analysis_cache`: drops analysis and action-execution nodes.
     pub fn discard_analysis_cache(&self) -> usize {
-        self.evaluator.delete_functions(&[SkyFunctionName::CONFIGURED_TARGET, SkyFunctionName::ACTION_EXECUTION])
+        self.analysis_cache_discarded.store(true, Ordering::SeqCst);
+        if !self.track_incremental_state.load(Ordering::SeqCst) {
+            let n = self.evaluator.node_count();
+            self.evaluator.clear();
+            return n;
+        }
+        self.evaluator.delete_functions(&[
+            SkyFunctionName::CONFIGURED_TARGET,
+            SkyFunctionName::ACTION_EXECUTION,
+        ])
     }
 
     pub fn evaluate(&self, roots: &[SkyKey], opts: &EvaluationOptions) -> EvaluationResult {
@@ -177,11 +244,22 @@ struct SkyframePackageCache {
 }
 
 impl PackageCache for SkyframePackageCache {
-    fn load(&self, loader: &Arc<PackageLoader>, id: &PackageIdentifier) -> Result<Package, PackageLoadError> {
+    fn load(
+        &self,
+        loader: &Arc<PackageLoader>,
+        id: &PackageIdentifier,
+    ) -> Result<Package, PackageLoadError> {
         *self.exec.pkg_ctx.loader.lock().unwrap() = Some(Arc::downgrade(loader));
         let key = SkyKey::PackageLoad(id.clone());
-        let opts = EvaluationOptions { keep_going: true, threads: 4, cancel: None };
-        let res = self.exec.evaluator.evaluate_with(std::slice::from_ref(&key), &opts);
+        let opts = EvaluationOptions {
+            keep_going: self.exec.package_load_keep_going.load(Ordering::SeqCst),
+            threads: self.exec.package_load_threads.load(Ordering::SeqCst),
+            cancel: None,
+        };
+        let res = self
+            .exec
+            .evaluator
+            .evaluate_with(std::slice::from_ref(&key), &opts);
         match res.get::<PackageLoadValue>(&key) {
             Some(v) => v.0.clone(),
             None => {
@@ -190,7 +268,10 @@ impl PackageCache for SkyframePackageCache {
                     .get(&key)
                     .map(|e| e.message.clone())
                     .unwrap_or_else(|| "package loading did not complete".to_string());
-                Err(PackageLoadError { message: msg, events: Vec::new() })
+                Err(PackageLoadError {
+                    message: msg,
+                    events: Vec::new(),
+                })
             }
         }
     }
@@ -198,12 +279,24 @@ impl PackageCache for SkyframePackageCache {
 
 /// Hash of the inputs that influence package loading but are not file reads of the loader
 /// itself: the caller's option strings plus the content of the workspace/module root files.
-pub fn loading_signature(fs: &dyn FileSystem, workspace_root: &PathFragment, extra: &[String]) -> String {
+pub fn loading_signature(
+    fs: &dyn FileSystem,
+    workspace_root: &PathFragment,
+    extra: &[String],
+) -> String {
     let mut h = zel_util::Fingerprint::new();
     for e in extra {
         h.add_str(e);
     }
-    for f in ["MODULE.bazel", "MODULE.bazel.lock", "WORKSPACE", "WORKSPACE.bazel", "WORKSPACE.bzlmod", "REPO.bazel", ".bazelignore"] {
+    for f in [
+        "MODULE.bazel",
+        "MODULE.bazel.lock",
+        "WORKSPACE",
+        "WORKSPACE.bazel",
+        "WORKSPACE.bzlmod",
+        "REPO.bazel",
+        ".bazelignore",
+    ] {
         let p = workspace_root.get_relative_str(f);
         match fs.read_file(&p) {
             Ok(b) => {
@@ -264,19 +357,34 @@ impl SkyFunction for ActionExecutionFunction {
         env: &mut Environment<'_>,
     ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
         let SkyKey::ActionExecution(id) = key else {
-            return Err(SkyFunctionError::persistent("Expected ActionExecution SkyKey"));
+            return Err(SkyFunctionError::persistent(
+                "Expected ActionExecution SkyKey",
+            ));
         };
         let inputs = self
             .runner
             .inputs(id)
             .ok_or_else(|| SkyFunctionError::persistent(format!("unknown action {id}")))?;
-        let mut keys: Vec<SkyKey> = inputs.sources.iter().cloned().map(SkyKey::FileState).collect();
-        keys.extend(inputs.generated.iter().cloned().map(SkyKey::ActionExecution));
+        let mut keys: Vec<SkyKey> = inputs
+            .sources
+            .iter()
+            .cloned()
+            .map(SkyKey::FileState)
+            .collect();
+        keys.extend(
+            inputs
+                .generated
+                .iter()
+                .cloned()
+                .map(SkyKey::ActionExecution),
+        );
         env.get_values(&keys);
         if env.values_missing() {
             return Ok(None);
         }
         let digest = self.runner.run(id).map_err(SkyFunctionError::persistent)?;
-        Ok(Some(Arc::new(ActionExecutionValue { output_digest: digest })))
+        Ok(Some(Arc::new(ActionExecutionValue {
+            output_digest: digest,
+        })))
     }
 }

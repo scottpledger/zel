@@ -52,3 +52,29 @@ zel-skyframe = { path = "crates/zel-skyframe" }
 zel-server = { path = "crates/zel-server" }
 zel-client = { path = "crates/zel-client" }
 zel-ffi-bridge = { path = "crates/zel-ffi-bridge" }
+
+# Optimize pure-Rust codecs, hashing, Starlark, Bzlmod, package loading, and analysis in dev/test
+# builds while preserving debug assertions and overflow checks from `profile.dev`.
+[profile.dev.package.zel-util]
+opt-level = 2
+
+[profile.dev.package.zel-starlark]
+opt-level = 2
+
+[profile.dev.package.zel-bzlmod]
+opt-level = 2
+
+[profile.dev.package.zel-packages]
+opt-level = 2
+
+[profile.dev.package.zel-analysis]
+opt-level = 2
+
+[profile.dev.package.zel-rules]
+opt-level = 2
+
+[profile.dev.package.zel-skyframe]
+opt-level = 2
+
+[profile.dev.package.zel-exec]
+opt-level = 2

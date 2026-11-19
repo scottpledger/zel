@@ -13,14 +13,31 @@
 // limitations under the License.
 
 use crate::types::list::StarlarkError;
+use crate::types::mutability::Mutability;
 use crate::types::value::Value;
+use std::sync::Arc;
 
 /// Insertion-ordered set supporting any hashable elements.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone)]
 pub struct StarlarkSet {
     pub elements: Vec<Value>,
     pub frozen: bool,
     pub iter_count: usize,
+    pub mutability: Arc<Mutability>,
+}
+
+impl PartialEq for StarlarkSet {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.issubset(other)
+    }
+}
+
+impl Eq for StarlarkSet {}
+
+impl Default for StarlarkSet {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl StarlarkSet {
@@ -29,20 +46,43 @@ impl StarlarkSet {
             elements: Vec::new(),
             frozen: false,
             iter_count: 0,
+            mutability: Mutability::create(),
+        }
+    }
+
+    pub fn new_in(mutability: Arc<Mutability>) -> Self {
+        Self {
+            elements: Vec::new(),
+            frozen: false,
+            iter_count: 0,
+            mutability,
         }
     }
 
     pub fn from_elements(elements: Vec<Value>) -> Result<Self, StarlarkError> {
-        let mut set = Self::new();
+        Self::from_elements_in(elements, Mutability::create())
+    }
+
+    pub fn from_elements_in(
+        elements: Vec<Value>,
+        mutability: Arc<Mutability>,
+    ) -> Result<Self, StarlarkError> {
+        let mut set = Self::new_in(mutability);
         for elem in elements {
             set.add(elem)?;
         }
         Ok(set)
     }
 
+    pub fn is_frozen(&self) -> bool {
+        self.frozen || self.mutability.is_frozen()
+    }
+
     pub fn check_mutable(&self) -> Result<(), StarlarkError> {
-        if self.frozen {
-            return Err(StarlarkError("trying to mutate a frozen set value".to_string()));
+        if self.is_frozen() {
+            return Err(StarlarkError(
+                "trying to mutate a frozen set value".to_string(),
+            ));
         }
         if self.iter_count > 0 {
             return Err(StarlarkError(
@@ -53,12 +93,29 @@ impl StarlarkSet {
     }
 
     pub fn freeze(&mut self) {
-        if !self.frozen {
+        if !self.is_frozen() {
             self.frozen = true;
             for elem in &self.elements {
                 elem.freeze();
             }
         }
+    }
+
+    pub fn unsafe_shallow_freeze(&mut self) -> Result<(), StarlarkError> {
+        if self.is_frozen() {
+            return Err(StarlarkError(
+                "cannot call unsafeShallowFreeze() on an object whose Mutability is already frozen"
+                    .to_string(),
+            ));
+        }
+        if !self.mutability.allows_unsafe_shallow_freeze() {
+            return Err(StarlarkError(
+                "cannot call unsafeShallowFreeze() on an object whose Mutability does not allow it"
+                    .to_string(),
+            ));
+        }
+        self.mutability = Mutability::immutable();
+        Ok(())
     }
 
     pub fn len(&self) -> usize {
@@ -76,7 +133,10 @@ impl StarlarkSet {
     pub fn add(&mut self, item: Value) -> Result<(), StarlarkError> {
         self.check_mutable()?;
         if !item.is_hashable() {
-            return Err(StarlarkError(format!("unhashable type: '{}'", item.type_name())));
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                item.type_name()
+            )));
         }
         if !self.contains(&item) {
             self.elements.push(item);
@@ -128,9 +188,16 @@ impl StarlarkSet {
     }
 
     pub fn union(&self, other: &Self) -> Self {
-        let mut res = self.clone();
-        res.frozen = false;
-        res.iter_count = 0;
+        self.union_in(other, Mutability::create())
+    }
+
+    pub fn union_in(&self, other: &Self, mutability: Arc<Mutability>) -> Self {
+        let mut res = Self::new_in(mutability);
+        for elem in &self.elements {
+            if !res.contains(elem) {
+                res.elements.push(elem.clone());
+            }
+        }
         for elem in &other.elements {
             if !res.contains(elem) {
                 res.elements.push(elem.clone());

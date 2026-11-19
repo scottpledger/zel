@@ -50,7 +50,9 @@ pub struct Msg {
 
 impl PartialEq for Msg {
     fn eq(&self, o: &Self) -> bool {
-        self.desc.full_name == o.desc.full_name && self.fields == o.fields && self.unknown == o.unknown
+        self.desc.full_name == o.desc.full_name
+            && self.fields == o.fields
+            && self.unknown == o.unknown
     }
 }
 
@@ -123,7 +125,11 @@ impl Msg {
 
     pub fn set_uint(&mut self, name: &str, v: u64) -> &mut Self {
         let f = self.field(name);
-        let val = if f.ty.is_unsigned() { Value::UInt(v) } else { Value::Int(v as i64) };
+        let val = if f.ty.is_unsigned() {
+            Value::UInt(v)
+        } else {
+            Value::Int(v as i64)
+        };
         self.put(f, val);
         self
     }
@@ -136,7 +142,11 @@ impl Msg {
 
     pub fn set_double(&mut self, name: &str, v: f64) -> &mut Self {
         let f = self.field(name);
-        let val = if f.ty == FieldType::Float { Value::Float(v as f32) } else { Value::Double(v) };
+        let val = if f.ty == FieldType::Float {
+            Value::Float(v as f32)
+        } else {
+            Value::Double(v)
+        };
         self.put(f, val);
         self
     }
@@ -383,9 +393,10 @@ impl Msg {
                 let v = decode_value(&f.ty, wt, buf, &mut pos)?;
                 if f.is_repeated() {
                     self.fields.entry(f.number).or_default().push(v);
-                } else if let (Value::Msg(new), Some(Value::Msg(old))) =
-                    (&v, self.fields.get_mut(&f.number).and_then(|l| l.first_mut()))
-                {
+                } else if let (Value::Msg(new), Some(Value::Msg(old))) = (
+                    &v,
+                    self.fields.get_mut(&f.number).and_then(|l| l.first_mut()),
+                ) {
                     // Singular message fields merge.
                     let mut merged = old.clone();
                     merged.merge_from(&new.encode_to_vec())?;
@@ -596,7 +607,11 @@ fn json_float(f: f64, is32: bool, out: &mut String) {
     if f.is_nan() {
         out.push_str("\"NaN\"");
     } else if f.is_infinite() {
-        out.push_str(if f > 0.0 { "\"Infinity\"" } else { "\"-Infinity\"" });
+        out.push_str(if f > 0.0 {
+            "\"Infinity\""
+        } else {
+            "\"-Infinity\""
+        });
     } else if is32 {
         out.push_str(&fmt_java_float32(f as f32));
     } else {
@@ -830,7 +845,12 @@ fn encode_field_value(f: &FieldDesc, v: &Value, buf: &mut Vec<u8>) {
     encode_scalar_value(&f.ty, v, buf);
 }
 
-fn decode_value(ty: &FieldType, wt: u32, buf: &[u8], pos: &mut usize) -> Result<Value, DecodeError> {
+fn decode_value(
+    ty: &FieldType,
+    wt: u32,
+    buf: &[u8],
+    pos: &mut usize,
+) -> Result<Value, DecodeError> {
     let need = |n: usize, pos: &usize| -> Result<(), DecodeError> {
         if *pos + n > buf.len() {
             Err(DecodeError("unexpected EOF".into()))
@@ -906,11 +926,21 @@ pub fn base64_encode(data: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for c in data.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let n = ((c[0] as u32) << 16)
+            | ((*c.get(1).unwrap_or(&0) as u32) << 8)
+            | (*c.get(2).unwrap_or(&0) as u32);
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -978,10 +1008,16 @@ mod tests {
         m.set_msg("interrupted", i);
         let bytes = m.encode_to_vec();
         // field 1 string, field 2 (interrupted) message { code=1 }
-        assert_eq!(bytes, vec![0x0a, 4, b'b', b'o', b'o', b'm', 0xaa, 0x06, 2, 0x08, 28]);
+        assert_eq!(
+            bytes,
+            vec![0x0a, 4, b'b', b'o', b'o', b'm', 0xaa, 0x06, 2, 0x08, 28]
+        );
         let d = Msg::decode("failure_details.FailureDetail", &bytes).unwrap();
         assert_eq!(d, m);
-        assert_eq!(m.to_json(), r#"{"message":"boom","interrupted":{"code":"INTERRUPTED"}}"#);
+        assert_eq!(
+            m.to_json(),
+            r#"{"message":"boom","interrupted":{"code":"INTERRUPTED"}}"#
+        );
         assert_eq!(
             m.to_text(),
             "message: \"boom\"\ninterrupted {\n  code: INTERRUPTED\n}\n"
@@ -991,10 +1027,16 @@ mod tests {
     #[test]
     fn timestamp_and_int64_json() {
         assert_eq!(format_timestamp(0, 0), "1970-01-01T00:00:00Z");
-        assert_eq!(format_timestamp(1_700_000_000, 123_000_000), "2023-11-14T22:13:20.123Z");
+        assert_eq!(
+            format_timestamp(1_700_000_000, 123_000_000),
+            "2023-11-14T22:13:20.123Z"
+        );
         assert_eq!(format_duration(1, 500_000_000), "1.500s");
         let mut m = Msg::new("build_event_stream.BuildEventId");
-        m.set_msg("started", Msg::new("build_event_stream.BuildEventId.BuildStartedId"));
+        m.set_msg(
+            "started",
+            Msg::new("build_event_stream.BuildEventId.BuildStartedId"),
+        );
         assert_eq!(m.to_json(), r#"{"started":{}}"#);
     }
 

@@ -1,5 +1,6 @@
 //! Coverage: Bazel's `collect_coverage.sh` (verbatim) driven through `test-setup.sh`, the LCOV
 //! merger (merge / filter / manifest / ordering) and `test.cache_status` round trips.
+#![cfg(unix)]
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -18,7 +19,12 @@ fn merger(dir: &Path) -> PathBuf {
     m
 }
 
-fn lcov(sf: &str, da: &[(u32, u32)], fn_: &[(&str, u32, u32)], br: &[(u32, u32, u32, &str)]) -> String {
+fn lcov(
+    sf: &str,
+    da: &[(u32, u32)],
+    fn_: &[(&str, u32, u32)],
+    br: &[(u32, u32, u32, &str)],
+) -> String {
     let mut s = format!("SF:{sf}\n");
     for (n, l, _) in fn_ {
         s.push_str(&format!("FN:{l},{n}\n"));
@@ -38,7 +44,11 @@ fn lcov(sf: &str, da: &[(u32, u32)], fn_: &[(&str, u32, u32)], br: &[(u32, u32, 
 
 fn run_merger(m: &Path, args: &[String]) -> (i32, String, String) {
     let o = std::process::Command::new(m).args(args).output().unwrap();
-    (o.status.code().unwrap_or(-1), String::from_utf8_lossy(&o.stdout).into(), String::from_utf8_lossy(&o.stderr).into())
+    (
+        o.status.code().unwrap_or(-1),
+        String::from_utf8_lossy(&o.stdout).into(),
+        String::from_utf8_lossy(&o.stderr).into(),
+    )
 }
 
 #[test]
@@ -49,18 +59,33 @@ fn lcov_merger_merges_sums_sorts_and_prints_in_lcov_printer_order() {
     std::fs::create_dir_all(&cd).unwrap();
     std::fs::write(
         cd.join("a.dat"),
-        lcov("pkg/b.c", &[(1, 1), (2, 0)], &[("f", 1, 1)], &[(2, 0, 0, "1"), (2, 0, 1, "-")])
-            + &lcov("pkg/a.c", &[(10, 2)], &[], &[]),
+        lcov(
+            "pkg/b.c",
+            &[(1, 1), (2, 0)],
+            &[("f", 1, 1)],
+            &[(2, 0, 0, "1"), (2, 0, 1, "-")],
+        ) + &lcov("pkg/a.c", &[(10, 2)], &[], &[]),
     )
     .unwrap();
     std::fs::write(
         d.join("covdir/b.dat"),
-        lcov("pkg/b.c", &[(1, 3), (2, 5), (4, 0)], &[("f", 1, 2), ("g", 7, 0)], &[(2, 0, 0, "2"), (2, 0, 1, "4")]),
+        lcov(
+            "pkg/b.c",
+            &[(1, 3), (2, 5), (4, 0)],
+            &[("f", 1, 2), ("g", 7, 0)],
+            &[(2, 0, 0, "2"), (2, 0, 1, "4")],
+        ),
     )
     .unwrap();
     std::fs::write(d.join("covdir/ignored.txt"), "SF:nope\nend_of_record\n").unwrap();
     let out = d.join("out.dat");
-    let (code, _, _) = run_merger(&m, &[format!("--coverage_dir={}", d.join("covdir").display()), format!("--output_file={}", out.display())]);
+    let (code, _, _) = run_merger(
+        &m,
+        &[
+            format!("--coverage_dir={}", d.join("covdir").display()),
+            format!("--output_file={}", out.display()),
+        ],
+    );
     assert_eq!(code, 0);
     let got = std::fs::read_to_string(&out).unwrap();
     let want = "SF:pkg/a.c\nFNF:0\nFNH:0\nDA:10,2\nLH:1\nLF:1\nend_of_record\n\
@@ -75,7 +100,13 @@ fn lcov_merger_filters_manifest_replace_and_empty_cases() {
     let m = merger(&d.join("tools"));
     let rep = d.join("reports.txt");
     let t1 = d.join("t1.dat");
-    std::fs::write(&t1, lcov("pkg/keep.c", &[(1, 1)], &[], &[]) + &lcov("/usr/include/x.h", &[(1, 1)], &[], &[]) + &lcov("pkg/gen.c", &[(3, 1)], &[], &[])).unwrap();
+    std::fs::write(
+        &t1,
+        lcov("pkg/keep.c", &[(1, 1)], &[], &[])
+            + &lcov("/usr/include/x.h", &[(1, 1)], &[], &[])
+            + &lcov("pkg/gen.c", &[(3, 1)], &[], &[]),
+    )
+    .unwrap();
     std::fs::write(&rep, format!("{}\n", t1.display())).unwrap();
     let manifest = d.join("manifest");
     std::fs::write(&manifest, "pkg/keep.c\npkg/real.c\npkg/skip.gcno\n").unwrap();
@@ -94,15 +125,36 @@ fn lcov_merger_filters_manifest_replace_and_empty_cases() {
     );
     assert_eq!(code, 0);
     let got = std::fs::read_to_string(&out).unwrap();
-    assert!(got.contains("SF:pkg/keep.c") && got.contains("SF:pkg/real.c"), "{got}");
-    assert!(!got.contains("/usr/include") && !got.contains("gen.c"), "{got}");
+    assert!(
+        got.contains("SF:pkg/keep.c") && got.contains("SF:pkg/real.c"),
+        "{got}"
+    );
+    assert!(
+        !got.contains("/usr/include") && !got.contains("gen.c"),
+        "{got}"
+    );
     // filter must match the whole path (Pattern.matches)
     let out2 = d.join("o2.dat");
-    run_merger(&m, &[format!("--reports_file={}", rep.display()), format!("--output_file={}", out2.display()), "--filter_sources=pkg/k".into()]);
-    assert!(std::fs::read_to_string(&out2).unwrap().contains("SF:pkg/keep.c"));
+    run_merger(
+        &m,
+        &[
+            format!("--reports_file={}", rep.display()),
+            format!("--output_file={}", out2.display()),
+            "--filter_sources=pkg/k".into(),
+        ],
+    );
+    assert!(std::fs::read_to_string(&out2)
+        .unwrap()
+        .contains("SF:pkg/keep.c"));
     // No coverage: empty output file, exit 0, warning on stderr.
     let out3 = d.join("o3.dat");
-    let (code, _, err) = run_merger(&m, &[format!("--coverage_dir={}", d.join("empty").display()), format!("--output_file={}", out3.display())]);
+    let (code, _, err) = run_merger(
+        &m,
+        &[
+            format!("--coverage_dir={}", d.join("empty").display()),
+            format!("--output_file={}", out3.display()),
+        ],
+    );
     assert_eq!(code, 0);
     assert!(err.contains("There was no coverage found."));
     assert_eq!(std::fs::read_to_string(&out3).unwrap(), "");
@@ -182,17 +234,27 @@ printf 'SF:pkg/lib.c\nDA:2,4\nDA:3,1\nend_of_record\n' > "$COVERAGE_DIR/t2.dat"
 "#;
     let spec = coverage_spec(&d, body, 0);
     let r = run_test(&spec).unwrap();
-    assert!(r.status.is_passed(), "{}", String::from_utf8_lossy(&std::fs::read(&r.log_path).unwrap()));
+    assert!(
+        r.status.is_passed(),
+        "{}",
+        String::from_utf8_lossy(&std::fs::read(&r.log_path).unwrap())
+    );
     assert!(r.has_coverage);
     let cov = std::fs::read_to_string(spec.test_log_dir.join("coverage.dat")).unwrap();
-    assert_eq!(cov, "SF:pkg/lib.c\nFNF:0\nFNH:0\nDA:1,1\nDA:2,4\nDA:3,1\nLH:3\nLF:3\nend_of_record\n");
+    assert_eq!(
+        cov,
+        "SF:pkg/lib.c\nFNF:0\nFNH:0\nDA:1,1\nDA:2,4\nDA:3,1\nLH:3\nLF:3\nend_of_record\n"
+    );
     // Failing tests do not collect coverage ("Coverage runner: Not collecting coverage").
     let d2 = tmp("fail");
     let spec = coverage_spec(&d2, "echo nope; exit 3\n", 0);
     let r = run_test(&spec).unwrap();
     assert!(!r.status.is_passed());
     let log = std::fs::read_to_string(&r.log_path).unwrap();
-    assert!(log.contains("Coverage runner: Not collecting coverage for failed test."), "{log}");
+    assert!(
+        log.contains("Coverage runner: Not collecting coverage for failed test."),
+        "{log}"
+    );
 }
 
 #[test]
@@ -206,7 +268,10 @@ printf "SF:pkg/lib.c\nDA:$((TEST_SHARD_INDEX+1)),1\nend_of_record\n" > "$COVERAG
     let r = run_test(&spec).unwrap();
     assert!(r.status.is_passed());
     let cov = std::fs::read_to_string(spec.test_log_dir.join("coverage.dat")).unwrap();
-    assert!(cov.contains("DA:1,1\nDA:2,1\nDA:3,1\n") && cov.contains("LF:3"), "{cov}");
+    assert!(
+        cov.contains("DA:1,1\nDA:2,1\nDA:3,1\n") && cov.contains("LF:3"),
+        "{cov}"
+    );
 }
 
 #[test]
@@ -235,7 +300,11 @@ exit 0
     assert_eq!(data.status, Some(1));
     assert_eq!(data.exit_code, Some(0));
     assert_eq!(data.has_coverage, Some(false));
-    assert!(data.passed_log.as_deref().unwrap().ends_with("testlogs/pkg/t/test.log"));
+    assert!(data
+        .passed_log
+        .as_deref()
+        .unwrap()
+        .ends_with("testlogs/pkg/t/test.log"));
     assert_eq!(data.test_times.len(), 1);
     assert_eq!(data.test_times, data.test_process_times);
     assert!(data.start_time_millis_epoch.unwrap() > 1_600_000_000_000);

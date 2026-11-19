@@ -28,10 +28,12 @@ use zel_packages::Target;
 use zel_starlark::{Depset, DepsetOrder, EvalContext, HostFn, StarlarkDict, StarlarkError, Value};
 use zel_vfs::PathFragment;
 
-const PRELUDE: &str = "def providers(target):\n    return target.providers_dict\n\ndef build_options(target):\n    return target.build_options_dict\n\n";
+const PRELUDE: &str = "def providers(target):\n    return target._zel_providers_dict\n\ndef build_options(target):\n    return target._zel_build_options_dict\n\n";
 
 fn dict(entries: Vec<(Value, Value)>) -> Value {
-    Value::Dict(Arc::new(Mutex::new(StarlarkDict::from_entries(entries).unwrap_or_default())))
+    Value::Dict(Arc::new(Mutex::new(
+        StarlarkDict::from_entries(entries).unwrap_or_default(),
+    )))
 }
 
 fn list(items: Vec<Value>) -> Value {
@@ -45,9 +47,14 @@ fn host_obj(repr_str: impl Into<String>) -> Value {
 struct NodeTargetData {
     label: Label,
     is_rule: bool,
-    is_alias: bool,
+    is_pkg_group: bool,
     target_value: Value,
     files: Vec<Value>,
+    data_runfiles: Value,
+    default_runfiles: Value,
+    files_to_run: Value,
+    output_groups: Value,
+    actions: Option<Vec<Value>>,
     providers_ordered: Vec<(String, Value)>,
     providers: BTreeMap<String, Value>,
     opts: Option<Vec<(Value, Value)>>,
@@ -170,11 +177,16 @@ fn build_options_entries(cfg: &zel_analysis::BuildConfigurationKey) -> Vec<(Valu
     let bo = cfg.build_options();
     let mut entries = Vec::new();
     for (cls, opts) in CONFIG_OPTION_CLASSES {
-        let Some(fmap) = bo.fragments.get(*cls) else { continue };
+        let Some(fmap) = bo.fragments.get(*cls) else {
+            continue;
+        };
         for opt in *opts {
             if let Some(val) = fmap.get(opt.name) {
                 if let Some(sv) = config_option_to_starlark(opt, val) {
-                    entries.push((Value::String(format!("//command_line_option:{}", opt.name)), sv));
+                    entries.push((
+                        Value::String(format!("//command_line_option:{}", opt.name)),
+                        sv,
+                    ));
                 }
             }
         }
@@ -191,7 +203,10 @@ fn build_options_entries(cfg: &zel_analysis::BuildConfigurationKey) -> Vec<(Valu
             let items: Vec<Value> = if inner.trim().is_empty() {
                 vec![]
             } else {
-                inner.split(", ").map(|s| Value::String(s.to_string())).collect()
+                inner
+                    .split(", ")
+                    .map(|s| Value::String(s.to_string()))
+                    .collect()
             };
             list(items)
         } else {
@@ -209,7 +224,10 @@ pub(crate) fn validate_options(popts: &PostOpts) -> Result<(String, &'static str
     }
     let (source, prefix, is_expr) = if !popts.starlark_file.is_empty() {
         if popts.starlark_file_source.is_empty() {
-            return Err(format!("invalid --starlark:file: failed to read {}", popts.starlark_file));
+            return Err(format!(
+                "invalid --starlark:file: failed to read {}",
+                popts.starlark_file
+            ));
         }
         (
             format!("{PRELUDE}{}", popts.starlark_file_source),
@@ -222,7 +240,10 @@ pub(crate) fn validate_options(popts: &PostOpts) -> Result<(String, &'static str
         } else {
             popts.starlark_expr.as_str()
         };
-        let parse_errs = zel_starlark::syntax::bazel_syntax::parse_errors("--starlark:expr", &format!("{expr}\n"));
+        let parse_errs = zel_starlark::syntax::bazel_syntax::parse_errors(
+            "--starlark:expr",
+            &format!("{expr}\n"),
+        );
         if let Some(first) = parse_errs.first() {
             return Err(format!("invalid --starlark:expr: {}", first.message));
         }
@@ -254,225 +275,487 @@ pub(crate) fn validate_options(popts: &PostOpts) -> Result<(String, &'static str
     Ok((source, prefix, is_expr))
 }
 
-pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Result<Vec<u8>, String> {
+pub(crate) fn run(
+    env: &mut PostEnv<'_>,
+    nodes: &[Node],
+    popts: &PostOpts,
+) -> Result<Vec<u8>, String> {
     let (source, prefix, is_expr) = validate_options(popts)?;
 
     let mut node_data_list = Vec::new();
     let mut by_host_id: BTreeMap<String, usize> = BTreeMap::new();
+    let mut all_actions: Vec<zel_analysis::Action> = Vec::new();
 
     for n in nodes {
         let info = env.info_of(&n.label);
         let mut providers_ordered: Vec<(String, Value)> = Vec::new();
         let mut files: Vec<Value> = Vec::new();
         let mut is_rule = false;
-        let mut is_alias = false;
+        let mut is_pkg_group = false;
         let mut target_label = n.label.clone();
+        let mut actions_vals: Option<Vec<Value>> = None;
+        let default_runfiles_obj =
+            host_obj("<unknown object com.google.devtools.build.lib.analysis.Runfiles>");
+        let mut data_runfiles_val = default_runfiles_obj.clone();
+        let mut default_runfiles_val = default_runfiles_obj.clone();
+        let mut files_to_run_val =
+            host_obj("<unknown object com.google.devtools.build.lib.analysis.FilesToRunProvider>");
+        let mut output_groups_val = Value::None;
 
-        let ct_arc = if let (Some(info), Some(cfg_key)) = (&info, &n.cfg) {
+        let ct_arc = if n.aspect.is_some() {
+            is_pkg_group = true;
+            let ckey = env
+                .node_config_key(n)
+                .cloned()
+                .unwrap_or_else(|| env.top.clone());
+            Arc::new(ConfiguredTarget::new(
+                n.label.clone(),
+                ckey,
+                "aspect".into(),
+            ))
+        } else if let (Some(info), Some(_cfg_key)) = (&info, &n.cfg) {
             match &info.target {
                 Target::Rule(r) => {
                     is_rule = true;
-                    // For an `alias` target, `target.label` in Starlark returns `actual.getLabel()` (one-hop),
-                    // while `providers(target)` returns the actual endpoint's providers.
-                    if r.rule_class == "alias" {
-                        is_alias = true;
-                        if let Some(zel_packages::attr::AttrValue::Label(Some(act))) = r.attr_or_default("actual") {
-                            target_label = act;
+                    // Follow alias chains to the terminal actual target (`AliasConfiguredTarget.getActual`).
+                    let mut cur_label = n.label.clone();
+                    let mut cur_rule = r.clone();
+                    for _ in 0..32 {
+                        if cur_rule.rule_class != "alias" {
+                            break;
                         }
-                    }
-                    if let Some(ct) = env.analyzed(n).map_err(|e| e.message)? {
-                        let actual_rule = env.info_of(&target_label).and_then(|ti| match &ti.target {
-                            Target::Rule(ar) => Some(ar.clone()),
-                            _ => None,
-                        });
-                        let eff_rule = actual_rule.as_ref().unwrap_or(r);
-                        let is_native = eff_rule
-                            .extra
-                            .rule_class
-                            .as_ref()
-                            .map(|rc| !rc.is_starlark)
-                            .unwrap_or(true);
-                        let runfiles_obj = host_obj("<unknown object com.google.devtools.build.lib.analysis.Runfiles>");
-                        let single_exec = is_native
-                            && eff_rule.rule_class == "filegroup"
-                            && ct.default_info.files.len() == 1;
-                        let files_to_run_obj = if single_exec {
-                            host_obj("<unknown object com.google.devtools.build.lib.analysis.FilesToRunProvider$SingleExecutableFilesToRunProvider>")
-                        } else {
-                            host_obj("<unknown object com.google.devtools.build.lib.analysis.FilesToRunProvider>")
-                        };
-                        let file_provider_obj = host_obj("<unknown object com.google.devtools.build.lib.analysis.FileProvider>");
-                        let mut files_for_depset = Vec::new();
-                        for a in &ct.default_info.files {
-                            let fv = zel_analysis::objects::file_value(a);
-                            files.push(fv.clone());
-                            files_for_depset.push(fv);
-                        }
-                        let ds_val = Value::Depset(Arc::new(Depset::new(DepsetOrder::Default, files_for_depset, Vec::new()).unwrap()));
-                        let empty_ds = Value::Depset(Arc::new(Depset::new(DepsetOrder::Default, vec![], Vec::new()).unwrap()));
-
-                        // Starlark providers declared on the target (registered in RuleConfiguredTargetBuilder
-                        // before FileProvider / FilesToRunProvider).
-                        for (k, v) in &ct.providers {
-                            if !matches!(
-                                k.as_str(),
-                                "DefaultInfo"
-                                    | "OutputGroupInfo"
-                                    | "FileProvider"
-                                    | "FilesToRunProvider"
-                                    | "PlatformInfo"
-                                    | "ConstraintValueInfo"
-                                    | "ConstraintSettingInfo"
-                                    | "ConfigMatchingProvider"
-                                    | "BuildSettingProvider"
-                            ) {
-                                providers_ordered.push((k.clone(), v.clone()));
-                            }
-                        }
-
-                        // Native genrule / filegroup provide InstrumentedFilesInfo before FileProvider.
-                        if is_native && matches!(eff_rule.rule_class.as_str(), "genrule" | "filegroup") {
-                            let mut if_fields = BTreeMap::new();
-                            if_fields.insert("instrumented_files".into(), empty_ds.clone());
-                            if_fields.insert("metadata_files".into(), empty_ds.clone());
-                            providers_ordered.push((
-                                "InstrumentedFilesInfo".into(),
-                                Value::Struct(Arc::new(zel_starlark::StructValue {
-                                    fields: if_fields,
-                                    is_attr: false,
-                                    is_native: false,
-                                    opaque_class: None,
-                                })),
-                            ));
-                        }
-                        providers_ordered.push(("FileProvider".into(), file_provider_obj));
-                        providers_ordered.push(("FilesToRunProvider".into(), files_to_run_obj.clone()));
-
-                        // Built-in native providers (PlatformInfo, ConstraintValueInfo, ConstraintSettingInfo).
-                        if let Some(Value::ProviderInstance { fields, .. }) = ct.providers.get("PlatformInfo") {
-                            let pl = match fields.get("label") {
-                                Some(Value::Label(l)) => l.canonical_form(),
-                                _ => target_label.canonical_form(),
-                            };
-                            let mut cvals: Vec<String> = Vec::new();
-                            if let Some(Value::Dict(d)) = fields.get("constraints") {
-                                for (_, v) in d.lock().unwrap().items() {
-                                    if let Value::Label(vl) = v {
-                                        cvals.push(vl.canonical_form());
-                                    }
+                        if let Some(zel_packages::attr::AttrValue::Label(Some(act))) =
+                            cur_rule.attr_or_default("actual")
+                        {
+                            cur_label = act;
+                            if let Some(ti) = env.info_of(&cur_label) {
+                                if let Target::Rule(ar) = &ti.target {
+                                    cur_rule = ar.clone();
+                                    continue;
                                 }
                             }
-                            providers_ordered.push((
-                                "PlatformInfo".into(),
-                                host_obj(format!("PlatformInfo({pl}, constraints=<[{}]>)", cvals.join(", "))),
-                            ));
                         }
-                        if let Some(Value::ProviderInstance { fields, .. }) = ct.providers.get("ConstraintValueInfo") {
-                            let sl = match fields.get("constraint") {
-                                Some(Value::ProviderInstance { fields: sf, .. }) => match sf.get("label") {
-                                    Some(Value::Label(l)) => l.canonical_form(),
-                                    _ => String::new(),
-                                },
-                                _ => String::new(),
-                            };
-                            let vl = match fields.get("label") {
-                                Some(Value::Label(l)) => l.canonical_form(),
-                                _ => target_label.canonical_form(),
-                            };
-                            providers_ordered.push((
-                                "ConstraintValueInfo".into(),
-                                host_obj(format!("ConstraintValueInfo(setting={sl}, {vl})")),
-                            ));
-                        }
-                        if let Some(Value::ProviderInstance { fields, .. }) = ct.providers.get("ConstraintSettingInfo") {
-                            let sl = match fields.get("label") {
-                                Some(Value::Label(l)) => l.canonical_form(),
-                                _ => target_label.canonical_form(),
-                            };
-                            providers_ordered.push((
-                                "ConstraintSettingInfo".into(),
-                                host_obj(format!("ConstraintSettingInfo({sl})")),
-                            ));
-                        }
-
-                        let mut og_fields = BTreeMap::new();
-                        og_fields.insert("_hidden_top_level_INTERNAL_".into(), empty_ds);
-                        for (g, gfiles) in &ct.output_groups.groups {
-                            if g != "default" && g != "compilation_outputs" {
-                                let gvals: Vec<Value> = gfiles.iter().map(zel_analysis::objects::file_value).collect();
-                                og_fields.insert(
-                                    g.clone(),
-                                    Value::Depset(Arc::new(Depset::new(DepsetOrder::Default, gvals, Vec::new()).unwrap())),
+                        break;
+                    }
+                    target_label = cur_label.clone();
+                    let terminal_target = env.info_of(&target_label).map(|ti| ti.target.clone());
+                    if let Some(ct) = env.analyzed(n).map_err(|e| e.message)? {
+                        match terminal_target {
+                            Some(Target::InputFile { label: flbl }) => {
+                                is_rule = false;
+                                let rel = flbl
+                                    .package_identifier()
+                                    .package_fragment()
+                                    .get_relative_str(flbl.name());
+                                let art = zel_analysis::Artifact::source(rel, flbl.clone());
+                                let fv = zel_analysis::objects::file_value(&art);
+                                files.push(fv.clone());
+                                let ds_val = Value::Depset(Arc::new(
+                                    Depset::new(DepsetOrder::Default, vec![fv], Vec::new())
+                                        .unwrap(),
+                                ));
+                                let vis_lbl = {
+                                    let c = flbl.canonical_form();
+                                    c.strip_prefix("@@//")
+                                        .map(|r| format!("//{r}"))
+                                        .unwrap_or(c)
+                                };
+                                let vis_repr = format!("<input file target {vis_lbl}>");
+                                let ftr_obj = host_obj(
+                                    "<unknown object com.google.devtools.build.lib.analysis.FilesToRunProvider$SingleExecutableFilesToRunProvider>",
                                 );
+                                files_to_run_val = ftr_obj.clone();
+                                providers_ordered
+                                    .push(("VisibilityProvider".into(), host_obj(vis_repr)));
+                                providers_ordered.push(("FileProvider".into(), host_obj("<unknown object com.google.devtools.build.lib.analysis.FileProvider>")));
+                                providers_ordered
+                                    .push(("FilesToRunProvider".into(), ftr_obj.clone()));
+                                let mut def_fields = BTreeMap::new();
+                                def_fields
+                                    .insert("data_runfiles".into(), default_runfiles_obj.clone());
+                                def_fields.insert(
+                                    "default_runfiles".into(),
+                                    default_runfiles_obj.clone(),
+                                );
+                                def_fields.insert("files".into(), ds_val);
+                                def_fields.insert("files_to_run".into(), ftr_obj);
+                                providers_ordered.push((
+                                    "DefaultInfo".into(),
+                                    Value::Struct(Arc::new(zel_starlark::StructValue {
+                                        fields: def_fields,
+                                        is_attr: false,
+                                        is_native: false,
+                                        opaque_class: None,
+                                    })),
+                                ));
+                                let ckey = env
+                                    .node_config_key(n)
+                                    .cloned()
+                                    .unwrap_or_else(|| env.top.clone());
+                                Arc::new(ConfiguredTarget::new(flbl, ckey, "source file".into()))
+                            }
+                            _ => {
+                                let eff_rule = match &terminal_target {
+                                    Some(Target::Rule(ar)) => ar,
+                                    _ => r,
+                                };
+                                let is_native = eff_rule
+                                    .extra
+                                    .rule_class
+                                    .as_ref()
+                                    .map(|rc| !rc.is_starlark)
+                                    .unwrap_or(true);
+                                let runfiles_obj = default_runfiles_obj.clone();
+                                let single_exec = is_native
+                                    && eff_rule.rule_class == "filegroup"
+                                    && ct.default_info.files.len() == 1;
+                                let files_to_run_obj = if single_exec {
+                                    host_obj("<unknown object com.google.devtools.build.lib.analysis.FilesToRunProvider$SingleExecutableFilesToRunProvider>")
+                                } else {
+                                    host_obj("<unknown object com.google.devtools.build.lib.analysis.FilesToRunProvider>")
+                                };
+                                files_to_run_val = files_to_run_obj.clone();
+                                let file_provider_obj = host_obj("<unknown object com.google.devtools.build.lib.analysis.FileProvider>");
+                                let mut files_for_depset = Vec::new();
+                                for a in &ct.default_info.files {
+                                    let fv = zel_analysis::objects::file_value(a);
+                                    files.push(fv.clone());
+                                    files_for_depset.push(fv);
+                                }
+                                let ds_val = Value::Depset(Arc::new(
+                                    Depset::new(DepsetOrder::Default, files_for_depset, Vec::new())
+                                        .unwrap(),
+                                ));
+                                let empty_ds = Value::Depset(Arc::new(
+                                    Depset::new(DepsetOrder::Default, vec![], Vec::new()).unwrap(),
+                                ));
+
+                                let mut act_hosts = Vec::with_capacity(ct.typed_actions.len());
+                                for act in &ct.typed_actions {
+                                    let aid = all_actions.len();
+                                    all_actions.push(act.clone());
+                                    act_hosts.push(Value::Host("action".into(), aid.to_string()));
+                                }
+                                actions_vals = Some(act_hosts);
+
+                                // Starlark providers declared on the target (registered in RuleConfiguredTargetBuilder
+                                // before FileProvider / FilesToRunProvider).
+                                for (k, v) in &ct.providers {
+                                    if !matches!(
+                                        k.as_str(),
+                                        "DefaultInfo"
+                                            | "OutputGroupInfo"
+                                            | "FileProvider"
+                                            | "FilesToRunProvider"
+                                            | "PlatformInfo"
+                                            | "ConstraintValueInfo"
+                                            | "ConstraintSettingInfo"
+                                            | "ConfigMatchingProvider"
+                                            | "BuildSettingProvider"
+                                    ) {
+                                        providers_ordered.push((k.clone(), v.clone()));
+                                    }
+                                }
+
+                                // Native genrule / filegroup provide InstrumentedFilesInfo before FileProvider.
+                                if is_native
+                                    && matches!(
+                                        eff_rule.rule_class.as_str(),
+                                        "genrule" | "filegroup"
+                                    )
+                                {
+                                    let mut if_fields = BTreeMap::new();
+                                    if_fields.insert("instrumented_files".into(), empty_ds.clone());
+                                    if_fields.insert("metadata_files".into(), empty_ds.clone());
+                                    providers_ordered.push((
+                                        "InstrumentedFilesInfo".into(),
+                                        Value::Struct(Arc::new(zel_starlark::StructValue {
+                                            fields: if_fields,
+                                            is_attr: false,
+                                            is_native: false,
+                                            opaque_class: None,
+                                        })),
+                                    ));
+                                }
+                                providers_ordered.push(("FileProvider".into(), file_provider_obj));
+                                providers_ordered
+                                    .push(("FilesToRunProvider".into(), files_to_run_obj.clone()));
+
+                                // Built-in native providers (PlatformInfo, ConstraintValueInfo, ConstraintSettingInfo).
+                                if let Some(Value::ProviderInstance { fields, .. }) =
+                                    ct.providers.get("PlatformInfo")
+                                {
+                                    let pl = match fields.get("label") {
+                                        Some(Value::Label(l)) => l.canonical_form(),
+                                        _ => target_label.canonical_form(),
+                                    };
+                                    let mut cvals: Vec<String> = Vec::new();
+                                    if let Some(Value::Dict(d)) = fields.get("constraints") {
+                                        for (_, v) in d.lock().unwrap().items() {
+                                            if let Value::Label(vl) = v {
+                                                cvals.push(vl.canonical_form());
+                                            }
+                                        }
+                                    }
+                                    providers_ordered.push((
+                                        "PlatformInfo".into(),
+                                        host_obj(format!(
+                                            "PlatformInfo({pl}, constraints=<[{}]>)",
+                                            cvals.join(", ")
+                                        )),
+                                    ));
+                                }
+                                if let Some(Value::ProviderInstance { fields, .. }) =
+                                    ct.providers.get("ConstraintValueInfo")
+                                {
+                                    let sl = match fields.get("constraint") {
+                                        Some(Value::ProviderInstance { fields: sf, .. }) => {
+                                            match sf.get("label") {
+                                                Some(Value::Label(l)) => l.canonical_form(),
+                                                _ => String::new(),
+                                            }
+                                        }
+                                        _ => String::new(),
+                                    };
+                                    let vl = match fields.get("label") {
+                                        Some(Value::Label(l)) => l.canonical_form(),
+                                        _ => target_label.canonical_form(),
+                                    };
+                                    providers_ordered.push((
+                                        "ConstraintValueInfo".into(),
+                                        host_obj(format!(
+                                            "ConstraintValueInfo(setting={sl}, {vl})"
+                                        )),
+                                    ));
+                                }
+                                if let Some(Value::ProviderInstance { fields, .. }) =
+                                    ct.providers.get("ConstraintSettingInfo")
+                                {
+                                    let sl = match fields.get("label") {
+                                        Some(Value::Label(l)) => l.canonical_form(),
+                                        _ => target_label.canonical_form(),
+                                    };
+                                    providers_ordered.push((
+                                        "ConstraintSettingInfo".into(),
+                                        host_obj(format!("ConstraintSettingInfo({sl})")),
+                                    ));
+                                }
+
+                                let mut og_fields = BTreeMap::new();
+                                og_fields.insert("_hidden_top_level_INTERNAL_".into(), empty_ds);
+                                for (g, gfiles) in &ct.output_groups.groups {
+                                    if g != "default" && g != "compilation_outputs" {
+                                        let gvals: Vec<Value> = gfiles
+                                            .iter()
+                                            .map(zel_analysis::objects::file_value)
+                                            .collect();
+                                        og_fields.insert(
+                                            g.clone(),
+                                            Value::Depset(Arc::new(
+                                                Depset::new(
+                                                    DepsetOrder::Default,
+                                                    gvals,
+                                                    Vec::new(),
+                                                )
+                                                .unwrap(),
+                                            )),
+                                        );
+                                    }
+                                }
+                                let og_struct =
+                                    Value::Struct(Arc::new(zel_starlark::StructValue {
+                                        fields: og_fields,
+                                        is_attr: false,
+                                        is_native: false,
+                                        opaque_class: None,
+                                    }));
+                                output_groups_val = og_struct.clone();
+                                providers_ordered.push(("OutputGroupInfo".into(), og_struct));
+                                let mut def_fields = BTreeMap::new();
+                                def_fields.insert("data_runfiles".into(), runfiles_obj.clone());
+                                def_fields.insert("default_runfiles".into(), runfiles_obj.clone());
+                                def_fields.insert("files".into(), ds_val);
+                                def_fields.insert("files_to_run".into(), files_to_run_obj);
+                                data_runfiles_val = runfiles_obj.clone();
+                                default_runfiles_val = runfiles_obj;
+                                providers_ordered.push((
+                                    "DefaultInfo".into(),
+                                    Value::Struct(Arc::new(zel_starlark::StructValue {
+                                        fields: def_fields,
+                                        is_attr: false,
+                                        is_native: false,
+                                        opaque_class: None,
+                                    })),
+                                ));
+                                ct
                             }
                         }
-                        providers_ordered.push((
-                            "OutputGroupInfo".into(),
-                            Value::Struct(Arc::new(zel_starlark::StructValue {
-                                fields: og_fields,
-                                is_attr: false,
-                                is_native: false,
-                                opaque_class: None,
-                            })),
-                        ));
-                        let mut def_fields = BTreeMap::new();
-                        def_fields.insert("data_runfiles".into(), runfiles_obj.clone());
-                        def_fields.insert("default_runfiles".into(), runfiles_obj);
-                        def_fields.insert("files".into(), ds_val);
-                        def_fields.insert("files_to_run".into(), files_to_run_obj);
-                        providers_ordered.push((
-                            "DefaultInfo".into(),
-                            Value::Struct(Arc::new(zel_starlark::StructValue {
-                                fields: def_fields,
-                                is_attr: false,
-                                is_native: false,
-                                opaque_class: None,
-                            })),
-                        ));
-                        ct
                     } else {
-                        let ckey = env.config_key(cfg_key).cloned().unwrap_or_default();
+                        let ckey = env.node_config_key(n).cloned().unwrap_or_default();
                         Arc::new(ConfiguredTarget::new(n.label.clone(), ckey, "rule".into()))
                     }
                 }
                 Target::OutputFile { .. } => {
-                    is_rule = true;
-                    if let Some(ct) = env.analyzed(n).map_err(|e| e.message)? {
-                        for a in &ct.default_info.files {
-                            files.push(zel_analysis::objects::file_value(a));
+                    let ckey = env.node_config_key(n).cloned().unwrap_or_default();
+                    let gen_ct = env.analyzed(n).map_err(|e| e.message)?;
+                    let matched_art = gen_ct.as_ref().and_then(|ct| {
+                        ct.default_info
+                            .files
+                            .iter()
+                            .find(|a| {
+                                a.owner_label == n.label
+                                    || a.root_relative_path.path_string().ends_with(n.label.name())
+                            })
+                            .cloned()
+                    });
+                    let out_art = matched_art.unwrap_or_else(|| {
+                        let rel = n
+                            .label
+                            .package_identifier()
+                            .package_fragment()
+                            .get_relative_str(n.label.name());
+                        zel_analysis::Artifact::derived_in_root(
+                            &ckey.mnemonic(),
+                            zel_analysis::ArtifactRoot::Bin,
+                            rel,
+                            n.label.clone(),
+                        )
+                    });
+                    let fv = zel_analysis::objects::file_value(&out_art);
+                    files.push(fv.clone());
+                    let ds_val = Value::Depset(Arc::new(
+                        Depset::new(DepsetOrder::Default, vec![fv], Vec::new()).unwrap(),
+                    ));
+                    let empty_ds = Value::Depset(Arc::new(
+                        Depset::new(DepsetOrder::Default, vec![], Vec::new()).unwrap(),
+                    ));
+                    let vis_lbl = {
+                        let c = n.label.canonical_form();
+                        c.strip_prefix("@@//")
+                            .map(|r| format!("//{r}"))
+                            .unwrap_or(c)
+                    };
+                    let vis_repr = format!("<output file target {vis_lbl}>");
+                    let files_to_run_obj = host_obj(
+                        "<unknown object com.google.devtools.build.lib.analysis.FilesToRunProvider$SingleExecutableFilesToRunProvider>",
+                    );
+                    files_to_run_val = files_to_run_obj.clone();
+                    let file_provider_obj = host_obj(
+                        "<unknown object com.google.devtools.build.lib.analysis.FileProvider>",
+                    );
+                    providers_ordered.push(("VisibilityProvider".into(), host_obj(vis_repr)));
+                    providers_ordered.push(("FileProvider".into(), file_provider_obj));
+                    providers_ordered.push(("FilesToRunProvider".into(), files_to_run_obj.clone()));
+                    let mut def_fields = BTreeMap::new();
+                    def_fields.insert("data_runfiles".into(), default_runfiles_obj.clone());
+                    def_fields.insert("default_runfiles".into(), default_runfiles_obj.clone());
+                    def_fields.insert("files".into(), ds_val);
+                    def_fields.insert("files_to_run".into(), files_to_run_obj);
+                    providers_ordered.push((
+                        "DefaultInfo".into(),
+                        Value::Struct(Arc::new(zel_starlark::StructValue {
+                            fields: def_fields,
+                            is_attr: false,
+                            is_native: false,
+                            opaque_class: None,
+                        })),
+                    ));
+                    // `OutputFileConfiguredTarget.getProvidersDictForQuery` extras:
+                    // InstrumentedFilesInfo, validation OutputGroupInfo, RequiredConfigFragmentsProvider.
+                    let inst_val = gen_ct
+                        .as_ref()
+                        .and_then(|ct| ct.providers.get("InstrumentedFilesInfo").cloned())
+                        .unwrap_or_else(|| {
+                            let mut if_fields = BTreeMap::new();
+                            if_fields.insert("instrumented_files".into(), empty_ds.clone());
+                            if_fields.insert("metadata_files".into(), empty_ds.clone());
+                            Value::Struct(Arc::new(zel_starlark::StructValue {
+                                fields: if_fields,
+                                is_attr: false,
+                                is_native: false,
+                                opaque_class: None,
+                            }))
+                        });
+                    providers_ordered.push(("InstrumentedFilesInfo".into(), inst_val));
+                    if let Some(ct) = &gen_ct {
+                        if let Some(val_files) = ct.output_groups.groups.get("_validation") {
+                            if !val_files.is_empty() {
+                                let gvals: Vec<Value> = val_files
+                                    .iter()
+                                    .map(zel_analysis::objects::file_value)
+                                    .collect();
+                                let mut og_fields = BTreeMap::new();
+                                og_fields.insert(
+                                    "_validation".into(),
+                                    Value::Depset(Arc::new(
+                                        Depset::new(DepsetOrder::Default, gvals, Vec::new())
+                                            .unwrap(),
+                                    )),
+                                );
+                                let og_struct =
+                                    Value::Struct(Arc::new(zel_starlark::StructValue {
+                                        fields: og_fields,
+                                        is_attr: false,
+                                        is_native: false,
+                                        opaque_class: None,
+                                    }));
+                                output_groups_val = og_struct.clone();
+                                providers_ordered.push(("OutputGroupInfo".into(), og_struct));
+                            }
                         }
-                        ct
-                    } else {
-                        let ckey = env.config_key(cfg_key).cloned().unwrap_or_default();
-                        Arc::new(ConfiguredTarget::new(n.label.clone(), ckey, "generated file".into()))
+                        if let Some(rcf) = ct.providers.get("RequiredConfigFragmentsProvider") {
+                            providers_ordered
+                                .push(("RequiredConfigFragmentsProvider".into(), rcf.clone()));
+                        }
                     }
+                    Arc::new(ConfiguredTarget::new(
+                        n.label.clone(),
+                        ckey,
+                        "generated file".into(),
+                    ))
                 }
                 _ => {
-                    let ckey = env.config_key(cfg_key).cloned().unwrap_or_default();
-                    Arc::new(ConfiguredTarget::new(n.label.clone(), ckey, "source file".into()))
+                    is_pkg_group = true;
+                    let ckey = env.node_config_key(n).cloned().unwrap_or_default();
+                    Arc::new(ConfiguredTarget::new(
+                        n.label.clone(),
+                        ckey,
+                        "source file".into(),
+                    ))
                 }
             }
         } else {
-            let is_pkg_group = matches!(
+            is_pkg_group = matches!(
                 info.as_ref().map(|i| &i.target),
                 Some(Target::PackageGroup { .. } | Target::EnvironmentGroup { .. })
             );
             if !is_pkg_group {
-                let rel = n.label.package_identifier().package_fragment().get_relative_str(n.label.name());
+                let rel = n
+                    .label
+                    .package_identifier()
+                    .package_fragment()
+                    .get_relative_str(n.label.name());
                 let art = zel_analysis::Artifact::source(rel, n.label.clone());
                 let fv = zel_analysis::objects::file_value(&art);
                 files.push(fv.clone());
-                let ds_val = Value::Depset(Arc::new(Depset::new(DepsetOrder::Default, vec![fv], Vec::new()).unwrap()));
+                let ds_val = Value::Depset(Arc::new(
+                    Depset::new(DepsetOrder::Default, vec![fv], Vec::new()).unwrap(),
+                ));
                 let vis_lbl = {
                     let c = n.label.canonical_form();
-                    c.strip_prefix("@@//").map(|r| format!("//{r}")).unwrap_or(c)
+                    c.strip_prefix("@@//")
+                        .map(|r| format!("//{r}"))
+                        .unwrap_or(c)
                 };
                 let vis_repr = format!("<input file target {vis_lbl}>");
-                let runfiles_obj = host_obj("<unknown object com.google.devtools.build.lib.analysis.Runfiles>");
+                let runfiles_obj = default_runfiles_obj.clone();
                 let files_to_run_obj = host_obj(
                     "<unknown object com.google.devtools.build.lib.analysis.FilesToRunProvider$SingleExecutableFilesToRunProvider>",
                 );
-                let file_provider_obj = host_obj("<unknown object com.google.devtools.build.lib.analysis.FileProvider>");
+                files_to_run_val = files_to_run_obj.clone();
+                let file_provider_obj = host_obj(
+                    "<unknown object com.google.devtools.build.lib.analysis.FileProvider>",
+                );
                 providers_ordered.push(("VisibilityProvider".into(), host_obj(vis_repr)));
                 providers_ordered.push(("FileProvider".into(), file_provider_obj));
                 providers_ordered.push(("FilesToRunProvider".into(), files_to_run_obj.clone()));
@@ -492,7 +775,11 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
                 ));
             }
             let ckey = env.top.clone();
-            Arc::new(ConfiguredTarget::new(n.label.clone(), ckey, "source file".into()))
+            Arc::new(ConfiguredTarget::new(
+                n.label.clone(),
+                ckey,
+                "source file".into(),
+            ))
         };
 
         let mut providers: BTreeMap<String, Value> = BTreeMap::new();
@@ -505,7 +792,7 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
             by_host_id.insert(hid.clone(), node_data_list.len());
         }
 
-        let opts = if let Some(cfg) = n.cfg.as_ref().and_then(|c| env.config_key(c)).cloned() {
+        let opts = if let Some(cfg) = env.node_config_key(n).cloned() {
             let adjusted = env.adjust_key(&target_label, &cfg);
             Some(build_options_entries(&adjusted))
         } else {
@@ -515,9 +802,14 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
         node_data_list.push(NodeTargetData {
             label: target_label,
             is_rule,
-            is_alias,
+            is_pkg_group,
             target_value: tv,
             files,
+            data_runfiles: data_runfiles_val,
+            default_runfiles: default_runfiles_val,
+            files_to_run: files_to_run_val,
+            output_groups: output_groups_val,
+            actions: actions_vals,
             providers_ordered,
             providers,
             opts,
@@ -528,9 +820,13 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
     let nd = Arc::clone(&node_data);
     let host_map = Arc::new(by_host_id);
     let hm = Arc::clone(&host_map);
+    let actions_arc = Arc::new(all_actions);
+    let disable_default_provider_fields = popts.incompatible_disable_target_default_provider_fields;
 
     let host_fn: HostFn = Arc::new(move |_ctx, op, args, _kw| {
-        let first = args.first().ok_or_else(|| StarlarkError("missing host object".into()))?;
+        let first = args
+            .first()
+            .ok_or_else(|| StarlarkError("missing host object".into()))?;
         if let Value::Host(kind, id_str) = first {
             if kind == "file" {
                 let art = zel_analysis::objects::artifact_of(first)
@@ -555,10 +851,96 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
                                 .unwrap_or_default()
                                 .to_string(),
                         )),
-                        other => Err(StarlarkError(format!("'File' object has no field or method '{other}'"))),
+                        other => Err(StarlarkError(format!(
+                            "'File' object has no field or method '{other}'"
+                        ))),
                     };
                 }
                 return Err(StarlarkError(format!("unknown file operation '{op}'")));
+            }
+            if kind == "action" {
+                let aidx: usize = id_str
+                    .parse()
+                    .map_err(|_| StarlarkError("invalid action id".into()))?;
+                let act = actions_arc
+                    .get(aidx)
+                    .ok_or_else(|| StarlarkError("invalid action id".into()))?;
+                if let Some(attr) = op.strip_prefix("attr:action.") {
+                    return match attr {
+                        "mnemonic" => Ok(Value::String(act.mnemonic.clone())),
+                        "inputs" => {
+                            let vals: Vec<Value> = act
+                                .inputs
+                                .iter()
+                                .map(zel_analysis::objects::file_value)
+                                .collect();
+                            Ok(Value::Depset(Arc::new(
+                                Depset::new(DepsetOrder::Default, vals, Vec::new())
+                                    .map_err(|e| StarlarkError(e.0))?,
+                            )))
+                        }
+                        "outputs" => {
+                            let vals: Vec<Value> = act
+                                .outputs
+                                .iter()
+                                .map(zel_analysis::objects::file_value)
+                                .collect();
+                            Ok(Value::Depset(Arc::new(
+                                Depset::new(DepsetOrder::Default, vals, Vec::new())
+                                    .map_err(|e| StarlarkError(e.0))?,
+                            )))
+                        }
+                        "argv" => match &act.kind {
+                            zel_analysis::ActionKind::Spawn { .. } => Ok(list(
+                                act.all_arguments().into_iter().map(Value::String).collect(),
+                            )),
+                            _ => Ok(Value::None),
+                        },
+                        "content" => match &act.kind {
+                            zel_analysis::ActionKind::FileWrite { content, .. } => {
+                                Ok(Value::String(
+                                    String::from_utf8_lossy(&content.render()).to_string(),
+                                ))
+                            }
+                            _ => Ok(Value::None),
+                        },
+                        "env" => {
+                            let env_map = match &act.action_env {
+                                Some(ae) => ae.fixed_env(),
+                                None => &act.env,
+                            };
+                            Ok(dict(
+                                env_map
+                                    .iter()
+                                    .map(|(k, v)| {
+                                        (Value::String(k.clone()), Value::String(v.clone()))
+                                    })
+                                    .collect(),
+                            ))
+                        }
+                        "substitutions" => match &act.kind {
+                            zel_analysis::ActionKind::TemplateExpand {
+                                substitutions,
+                                computed_substitutions,
+                                ..
+                            } => {
+                                let entries: Vec<(Value, Value)> = substitutions
+                                    .iter()
+                                    .chain(computed_substitutions.iter())
+                                    .map(|(k, v)| {
+                                        (Value::String(k.clone()), Value::String(v.clone()))
+                                    })
+                                    .collect();
+                                Ok(dict(entries))
+                            }
+                            _ => Ok(Value::None),
+                        },
+                        other => Err(StarlarkError(format!(
+                            "'Action' object has no field or method '{other}'"
+                        ))),
+                    };
+                }
+                return Err(StarlarkError(format!("unknown action operation '{op}'")));
             }
             let idx = hm
                 .get(id_str)
@@ -567,13 +949,45 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
                 .ok_or_else(|| StarlarkError("invalid target id".into()))?;
             let data = &nd[idx];
             if let Some(attr) = op.strip_prefix("attr:target.") {
+                if disable_default_provider_fields
+                    && matches!(
+                        attr,
+                        "files"
+                            | "data_runfiles"
+                            | "default_runfiles"
+                            | "files_to_run"
+                            | "output_groups"
+                    )
+                {
+                    return Err(StarlarkError(
+                        "Accessing the default provider in this manner is deprecated and will be removed soon. \
+                         It may be temporarily re-enabled by setting \
+                         --incompatible_disable_target_default_provider_fields=false. See \
+                         https://github.com/bazelbuild/bazel/issues/20183 for details."
+                            .into(),
+                    ));
+                }
                 match attr {
                     "label" => Ok(Value::Label(data.label.clone())),
-                    "files" => Ok(Value::Depset(Arc::new(
-                        Depset::new(DepsetOrder::Default, data.files.clone(), Vec::new())
-                            .map_err(|e| StarlarkError(e.0))?,
-                    ))),
-                    "providers_dict" => {
+                    "actions" => Ok(match &data.actions {
+                        Some(acts) => list(acts.clone()),
+                        None => Value::None,
+                    }),
+                    "files" => {
+                        if data.is_pkg_group {
+                            Ok(Value::None)
+                        } else {
+                            Ok(Value::Depset(Arc::new(
+                                Depset::new(DepsetOrder::Default, data.files.clone(), Vec::new())
+                                    .map_err(|e| StarlarkError(e.0))?,
+                            )))
+                        }
+                    }
+                    "data_runfiles" => Ok(if data.is_pkg_group { Value::None } else { data.data_runfiles.clone() }),
+                    "default_runfiles" => Ok(if data.is_pkg_group { Value::None } else { data.default_runfiles.clone() }),
+                    "files_to_run" => Ok(if data.is_pkg_group { Value::None } else { data.files_to_run.clone() }),
+                    "output_groups" => Ok(data.output_groups.clone()),
+                    "_zel_providers_dict" => {
                         if data.providers_ordered.is_empty() && !data.is_rule {
                             return Ok(Value::None);
                         }
@@ -584,31 +998,34 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
                             .collect();
                         Ok(dict(p_entries))
                     }
-                    "build_options_dict" => Ok(match &data.opts {
+                    "_zel_build_options_dict" => Ok(match &data.opts {
                         Some(o) => dict(o.clone()),
                         None => Value::None,
                     }),
-                    other => {
-                        if let Some(v) = data.providers.get(other) {
-                            Ok(v.clone())
-                        } else if data.is_alias {
-                            Err(StarlarkError(format!(
-                                "'Target' value has no field or method '{other}'"
-                            )))
-                        } else {
-                            Err(StarlarkError(
-                                "Accessing providers via the field syntax on structs is deprecated and removed.".into(),
-                            ))
-                        }
-                    }
+                    _ => Err(StarlarkError(
+                        "Accessing providers via the field syntax on structs is deprecated and removed.".into(),
+                    )),
                 }
             } else if op == "index:target" {
-                let key = args.get(1).ok_or_else(|| StarlarkError("index expects key".into()))?;
+                let key = args
+                    .get(1)
+                    .ok_or_else(|| StarlarkError("index expects key".into()))?;
                 let name = match key {
-                    Value::String(s) => s.as_str(),
-                    Value::Provider { name } => name.as_str(),
-                    Value::Host(_, id) => id.as_str(),
-                    other => other.as_str().unwrap_or(""),
+                    Value::Provider { name } => {
+                        if name == "Provider" {
+                            return Err(StarlarkError(format!(
+                                "{} only supports indexing by exported providers. Assign the provider a name in a top-level assignment statement.",
+                                data.target_value.repr()
+                            )));
+                        }
+                        name.as_str()
+                    }
+                    other => {
+                        return Err(StarlarkError(format!(
+                            "Type Target only supports indexing by object constructors, got {} instead",
+                            other.type_name()
+                        )));
+                    }
                 };
                 if let Some(v) = data.providers.get(name) {
                     Ok(v.clone())
@@ -619,18 +1036,38 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
                 {
                     Ok(v.clone())
                 } else {
-                    Err(StarlarkError(format!("provider '{name}' not found on target '{}'", data.label)))
+                    Err(StarlarkError(format!(
+                        "{} doesn't contain declared provider '{}'",
+                        data.target_value.repr(),
+                        name
+                    )))
                 }
             } else if op == "contains:target" {
-                let key = args.get(1).ok_or_else(|| StarlarkError("contains expects key".into()))?;
+                let key = args
+                    .get(1)
+                    .ok_or_else(|| StarlarkError("contains expects key".into()))?;
                 let name = match key {
-                    Value::String(s) => s.as_str(),
-                    Value::Provider { name } => name.as_str(),
-                    Value::Host(_, id) => id.as_str(),
-                    other => other.as_str().unwrap_or(""),
+                    Value::Provider { name } => {
+                        if name == "Provider" {
+                            return Err(StarlarkError(format!(
+                                "{} only supports querying by exported providers. Assign the provider a name in a top-level assignment statement.",
+                                data.target_value.repr()
+                            )));
+                        }
+                        name.as_str()
+                    }
+                    other => {
+                        return Err(StarlarkError(format!(
+                            "Type Target only supports querying by object constructors, got {} instead",
+                            other.type_name()
+                        )));
+                    }
                 };
                 let found = data.providers.contains_key(name)
-                    || data.providers.keys().any(|k| k.ends_with(&format!("%{name}")));
+                    || data
+                        .providers
+                        .keys()
+                        .any(|k| k.ends_with(&format!("%{name}")));
                 Ok(Value::Bool(found))
             } else {
                 Err(StarlarkError(format!("unknown host operation '{op}'")))
@@ -675,7 +1112,10 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
                 };
                 let (file_loc, err_line) = if is_expr {
                     let (col, msg_out) = if cleaned == "type 'NoneType' has no method 'keys'" {
-                        (72, "'NoneType' value has no field or method 'keys'".to_string())
+                        (
+                            72,
+                            "'NoneType' value has no field or method 'keys'".to_string(),
+                        )
                     } else {
                         (35, cleaned.to_string())
                     };
@@ -699,7 +1139,9 @@ pub(crate) fn run(env: &mut PostEnv<'_>, nodes: &[Node], popts: &PostOpts) -> Re
                 };
                 let disp_lbl = {
                     let c = n.label.canonical_form();
-                    c.strip_prefix("@@//").map(|r| format!("//{r}")).unwrap_or(c)
+                    c.strip_prefix("@@//")
+                        .map(|r| format!("//{r}"))
+                        .unwrap_or(c)
                 };
                 env.tenv.report_event(zel_packages::PackageEvent::error(
                     None,

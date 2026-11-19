@@ -12,7 +12,10 @@ use std::sync::{Arc, Mutex};
 const T: SkyFunctionName = SkyFunctionName("TEST");
 
 fn key(s: &str) -> SkyKey {
-    SkyKey::Custom { function_name: T, argument: s.to_string() }
+    SkyKey::Custom {
+        function_name: T,
+        argument: s.to_string(),
+    }
 }
 
 fn name_of(k: &SkyKey) -> String {
@@ -70,7 +73,12 @@ impl World {
         self.defs.lock().unwrap().insert(k, d);
     }
     fn calls_for(&self, k: &str) -> usize {
-        self.calls.lock().unwrap().iter().filter(|c| *c == k).count()
+        self.calls
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|c| *c == k)
+            .count()
     }
     fn clear_calls(&self) {
         self.calls.lock().unwrap().clear();
@@ -84,10 +92,21 @@ fn num(v: Option<Arc<dyn SkyValue>>) -> i64 {
 }
 
 impl SkyFunction for TestFn {
-    fn compute(&self, k: &SkyKey, env: &mut Environment<'_>) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+    fn compute(
+        &self,
+        k: &SkyKey,
+        env: &mut Environment<'_>,
+    ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
         let name = name_of(k);
         self.0.calls.lock().unwrap().push(name.clone());
-        let def = self.0.defs.lock().unwrap().get(name.as_str()).cloned().unwrap_or_else(|| panic!("no def {name}"));
+        let def = self
+            .0
+            .defs
+            .lock()
+            .unwrap()
+            .get(name.as_str())
+            .cloned()
+            .unwrap_or_else(|| panic!("no def {name}"));
         let val = match def {
             Def::Leaf(v) => v,
             Def::Sum(deps) => {
@@ -109,7 +128,9 @@ impl SkyFunction for TestFn {
                 sum
             }
             Def::Parity(d) => {
-                let Some(v) = env.get_value(&key(d)) else { return Ok(None) };
+                let Some(v) = env.get_value(&key(d)) else {
+                    return Ok(None);
+                };
                 num(Some(v)) % 2
             }
             Def::Fail(m) => return Err(SkyFunctionError::persistent(m)),
@@ -134,9 +155,13 @@ impl SkyFunction for TestFn {
             }
             Def::Panic => panic!("kaboom"),
             Def::Branch(cond, then, other) => {
-                let Some(c) = env.get_value(&key(cond)) else { return Ok(None) };
+                let Some(c) = env.get_value(&key(cond)) else {
+                    return Ok(None);
+                };
                 let pick = if num(Some(c)) > 0 { then } else { other };
-                let Some(v) = env.get_value(&key(pick)) else { return Ok(None) };
+                let Some(v) = env.get_value(&key(pick)) else {
+                    return Ok(None);
+                };
                 num(Some(v))
             }
         };
@@ -155,7 +180,9 @@ fn evaluator(w: &Arc<World>) -> InMemoryMemoizingEvaluator {
 }
 
 fn val(r: &EvaluationResult, k: &str) -> i64 {
-    r.get::<Num>(&key(k)).unwrap_or_else(|| panic!("no value for {k}: {:?}", r.errors)).0
+    r.get::<Num>(&key(k))
+        .unwrap_or_else(|| panic!("no value for {k}: {:?}", r.errors))
+        .0
 }
 
 fn names(keys: &[SkyKey]) -> Vec<String> {
@@ -176,7 +203,14 @@ fn evaluates_a_dag_with_batches_and_sequential_restarts() {
     ]);
     let e = evaluator(&w);
     // One worker makes the schedule deterministic: `seq` runs before its leaves exist.
-    let r = e.evaluate_with(&[key("top")], &EvaluationOptions { keep_going: true, threads: 1, cancel: None });
+    let r = e.evaluate_with(
+        &[key("top")],
+        &EvaluationOptions {
+            keep_going: true,
+            threads: 1,
+            cancel: None,
+        },
+    );
     assert!(!r.has_error());
     assert_eq!(val(&r, "top"), 12);
     // Every leaf computed once; restarts only re-run the dependent functions.
@@ -245,7 +279,11 @@ fn change_pruning_stops_propagation() {
     assert_eq!(val(&r, "top2"), 0);
     assert_eq!(w.calls_for("leaf"), 1);
     assert_eq!(w.calls_for("parity"), 1);
-    assert_eq!(w.calls_for("top"), 0, "parity unchanged => top verified clean, not rebuilt");
+    assert_eq!(
+        w.calls_for("top"),
+        0,
+        "parity unchanged => top verified clean, not rebuilt"
+    );
     assert_eq!(w.calls_for("top2"), 0);
     assert_eq!(names(&r.stats.cleaned), ["top", "top2"]);
     assert!(names(&r.stats.pruned).contains(&"parity".to_string()));
@@ -261,7 +299,11 @@ fn change_pruning_stops_propagation() {
 
 #[test]
 fn dirty_node_with_identical_result_is_verified_not_recomputed_downstream() {
-    let w = World::new(vec![("a", Def::Leaf(1)), ("mid", Def::Sum(vec!["a"])), ("top", Def::Sum(vec!["mid"]))]);
+    let w = World::new(vec![
+        ("a", Def::Leaf(1)),
+        ("mid", Def::Sum(vec!["a"])),
+        ("top", Def::Sum(vec!["mid"])),
+    ]);
     let e = evaluator(&w);
     e.evaluate(&[key("top")]);
     w.clear_calls();
@@ -283,7 +325,10 @@ fn dependency_set_changes_update_reverse_deps() {
     ]);
     let e = evaluator(&w);
     assert_eq!(val(&e.evaluate(&[key("top")]), "top"), 100);
-    assert!(e.reverse_deps(&key("y")).is_empty(), "y was never requested");
+    assert!(
+        e.reverse_deps(&key("y")).is_empty(),
+        "y was never requested"
+    );
     w.set("sel", Def::Leaf(0));
     e.invalidate(&[key("sel")]);
     assert_eq!(val(&e.evaluate(&[key("top")]), "top"), 200);
@@ -302,9 +347,15 @@ fn inject_precomputed_dirties_dependents_only_on_change() {
     let mut e = InMemoryMemoizingEvaluator::new();
     struct UsesInjected(Arc<AtomicUsize>);
     impl SkyFunction for UsesInjected {
-        fn compute(&self, _k: &SkyKey, env: &mut Environment<'_>) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        fn compute(
+            &self,
+            _k: &SkyKey,
+            env: &mut Environment<'_>,
+        ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            let Some(v) = env.get_value(&SkyKey::Precomputed("opt".into())) else { return Ok(None) };
+            let Some(v) = env.get_value(&SkyKey::Precomputed("opt".into())) else {
+                return Ok(None);
+            };
             Ok(Some(Arc::new(Num(num(Some(v)) * 2))))
         }
     }
@@ -315,7 +366,11 @@ fn inject_precomputed_dirties_dependents_only_on_change() {
     let c0 = calls.load(Ordering::SeqCst);
     e.inject_precomputed(SkyKey::Precomputed("opt".into()), Arc::new(Num(21)));
     e.evaluate(&[key("top")]);
-    assert_eq!(calls.load(Ordering::SeqCst), c0, "same value: nothing dirtied");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        c0,
+        "same value: nothing dirtied"
+    );
     e.inject_precomputed(SkyKey::Precomputed("opt".into()), Arc::new(Num(5)));
     assert_eq!(val(&e.evaluate(&[key("top")]), "top"), 10);
     assert!(calls.load(Ordering::SeqCst) > c0);
@@ -332,7 +387,10 @@ fn keep_going_collects_all_errors_and_independent_values() {
     let e = evaluator(&w);
     let r = e.evaluate_with(
         &[key("bad_parent"), key("good_root")],
-        &EvaluationOptions { keep_going: true, ..Default::default() },
+        &EvaluationOptions {
+            keep_going: true,
+            ..Default::default()
+        },
     );
     assert!(r.has_error());
     assert_eq!(val(&r, "good_root"), 1);
@@ -347,8 +405,13 @@ fn keep_going_collects_all_errors_and_independent_values() {
 #[test]
 fn without_keep_going_the_first_error_aborts() {
     // A long chain of independent slow-ish work after the failure must not all run.
-    let mut defs: Vec<(&'static str, Def)> = vec![("bad", Def::Fail("early failure")), ("root_bad", Def::Sum(vec!["bad"]))];
-    let leaked: Vec<&'static str> = (0..50).map(|i| &*Box::leak(format!("n{i}").into_boxed_str())).collect();
+    let mut defs: Vec<(&'static str, Def)> = vec![
+        ("bad", Def::Fail("early failure")),
+        ("root_bad", Def::Sum(vec!["bad"])),
+    ];
+    let leaked: Vec<&'static str> = (0..50)
+        .map(|i| &*Box::leak(format!("n{i}").into_boxed_str()))
+        .collect();
     for n in &leaked {
         defs.push((n, Def::Leaf(1)));
     }
@@ -357,11 +420,18 @@ fn without_keep_going_the_first_error_aborts() {
     let e = evaluator(&w);
     let r = e.evaluate_with(
         &[key("root_bad"), key("root_ok")],
-        &EvaluationOptions { keep_going: false, threads: 1, cancel: None },
+        &EvaluationOptions {
+            keep_going: false,
+            threads: 1,
+            cancel: None,
+        },
     );
     assert!(r.aborted);
     assert_eq!(r.errors[&key("root_bad")].message, "early failure");
-    assert!(r.get::<Num>(&key("root_ok")).is_none(), "second root abandoned");
+    assert!(
+        r.get::<Num>(&key("root_ok")).is_none(),
+        "second root abandoned"
+    );
 }
 
 #[test]
@@ -378,7 +448,10 @@ fn errors_bubble_unless_the_parent_handles_them() {
     let r = e.evaluate(&[key("above_tolerant"), key("above_strict")]);
     assert_eq!(val(&r, "above_tolerant"), 4, "5 - 1");
     assert!(r.errors.contains_key(&key("above_strict")));
-    assert_eq!(r.error_infos[&key("above_strict")].root_causes, vec![key("bad")]);
+    assert_eq!(
+        r.error_infos[&key("above_strict")].root_causes,
+        vec![key("bad")]
+    );
 }
 
 #[test]
@@ -395,7 +468,11 @@ fn persistent_errors_are_cached_transient_errors_retried() {
     assert_eq!(w.transient_fail_count.load(Ordering::SeqCst), 1);
     let r = e.evaluate(&[key("top_p"), key("top_t")]);
     assert_eq!(w.calls_for("p"), 1, "persistent error memoized");
-    assert_eq!(w.transient_fail_count.load(Ordering::SeqCst), 2, "transient error re-evaluated");
+    assert_eq!(
+        w.transient_fail_count.load(Ordering::SeqCst),
+        2,
+        "transient error re-evaluated"
+    );
     assert!(r.errors.contains_key(&key("top_t")));
     // Once the transient failure heals, the whole chain recovers.
     w.set("t", Def::Leaf(9));
@@ -405,7 +482,10 @@ fn persistent_errors_are_cached_transient_errors_retried() {
 
 #[test]
 fn fixing_a_failed_dependency_rebuilds_failed_parents() {
-    let w = World::new(vec![("bad", Def::Fail("broken")), ("top", Def::Sum(vec!["bad"]))]);
+    let w = World::new(vec![
+        ("bad", Def::Fail("broken")),
+        ("top", Def::Sum(vec!["bad"])),
+    ]);
     let e = evaluator(&w);
     assert!(e.evaluate(&[key("top")]).has_error());
     w.set("bad", Def::Leaf(3));
@@ -418,7 +498,11 @@ fn panics_become_errors() {
     let w = World::new(vec![("p", Def::Panic), ("top", Def::Sum(vec!["p"]))]);
     let e = evaluator(&w);
     let r = e.evaluate(&[key("top")]);
-    assert!(r.errors[&key("p")].message.contains("kaboom"), "{:?}", r.errors);
+    assert!(
+        r.errors[&key("p")].message.contains("kaboom"),
+        "{:?}",
+        r.errors
+    );
     assert!(r.errors.contains_key(&key("top")));
 }
 
@@ -426,7 +510,9 @@ fn panics_become_errors() {
 fn unregistered_function_is_an_error() {
     let e = InMemoryMemoizingEvaluator::new();
     let r = e.evaluate(&[key("x")]);
-    assert!(r.errors[&key("x")].message.contains("No SkyFunction registered"));
+    assert!(r.errors[&key("x")]
+        .message
+        .contains("No SkyFunction registered"));
 }
 
 fn pretty(k: &SkyKey) -> String {
@@ -448,12 +534,25 @@ fn cycle_detection_reports_path_and_cycle() {
     let (root, info) = &r.root_cycles[0];
     assert_eq!(root, &key("top"));
     assert_eq!(names(&info.path_to_cycle), ["a", "top"]);
-    assert_eq!(info.path_to_cycle[0], key("top"), "path starts at the top-level key");
+    assert_eq!(
+        info.path_to_cycle[0],
+        key("top"),
+        "path starts at the top-level key"
+    );
     assert_eq!(info.cycle, vec![key("b"), key("c")]);
     assert_eq!(r.cycles[0].first(), Some(&key("top")));
-    assert_eq!(r.cycles[0].last(), Some(&key("b")), "closed cycle repeats its entry");
+    assert_eq!(
+        r.cycles[0].last(),
+        Some(&key("b")),
+        "closed cycle repeats its entry"
+    );
     let mut rep = CyclesReporter::new();
-    let msg = rep.report(&key("top"), info, &pretty, &|k| (format!("/ws/BUILD:{}", name_of(k)), format!("rule {}", pretty(k))));
+    let msg = rep.report(&key("top"), info, &pretty, &|k| {
+        (
+            format!("/ws/BUILD:{}", name_of(k)),
+            format!("rule {}", pretty(k)),
+        )
+    });
     assert_eq!(
         msg,
         "ERROR: /ws/BUILD:b: in rule //t:b: cycle in dependency graph:\n    //t:top\n    //t:a\n.-> //t:b\n|   //t:c\n`-- //t:b"
@@ -475,7 +574,11 @@ fn self_edge_and_shared_cycle_between_roots() {
     ]);
     let e = evaluator(&w);
     let r = e.evaluate(&[key("self"), key("r1"), key("r2")]);
-    let selfc = r.root_cycles.iter().find(|(k, _)| *k == key("self")).unwrap();
+    let selfc = r
+        .root_cycles
+        .iter()
+        .find(|(k, _)| *k == key("self"))
+        .unwrap();
     assert_eq!(selfc.1.cycle, vec![key("self")]);
     let mut rep = CyclesReporter::new();
     let d = |k: &SkyKey| ("loc".to_string(), pretty(k));
@@ -486,8 +589,13 @@ fn self_edge_and_shared_cycle_between_roots() {
         texts.push(rep.report(root, info, &pretty, &d));
     }
     assert_eq!(texts.len(), 2);
-    assert!(texts.iter().any(|t| t.contains("already-reported")), "{texts:?}");
-    assert!(texts.iter().any(|t| t.contains("cycle in dependency graph:\n")));
+    assert!(
+        texts.iter().any(|t| t.contains("already-reported")),
+        "{texts:?}"
+    );
+    assert!(texts
+        .iter()
+        .any(|t| t.contains("cycle in dependency graph:\n")));
 }
 
 #[test]
@@ -520,7 +628,11 @@ fn large_layered_graph_evaluates_in_parallel_and_updates_incrementally() {
     }
     for l in 1..layers {
         for i in 0..width {
-            let deps = vec![names_v[l - 1][i], names_v[l - 1][(i + 1) % width], names_v[l - 1][(i + 2) % width]];
+            let deps = vec![
+                names_v[l - 1][i],
+                names_v[l - 1][(i + 1) % width],
+                names_v[l - 1][(i + 2) % width],
+            ];
             defs.push((names_v[l][i], Def::Sum(deps)));
         }
     }
@@ -528,41 +640,70 @@ fn large_layered_graph_evaluates_in_parallel_and_updates_incrementally() {
     defs.push((root, Def::Sum(names_v[layers - 1].clone())));
     let w = World::new(defs);
     let e = evaluator(&w);
-    let r = e.evaluate_with(&[key(root)], &EvaluationOptions { keep_going: true, threads: 8, cancel: None });
+    let r = e.evaluate_with(
+        &[key(root)],
+        &EvaluationOptions {
+            keep_going: true,
+            threads: 8,
+            cancel: None,
+        },
+    );
     assert!(!r.has_error(), "{:?}", r.errors);
     assert_eq!(val(&r, root), 25 * 3i64.pow(14));
     let total = (layers * width) + 1;
     assert_eq!(e.node_count(), total);
-    for l in 0..layers {
-        for i in 0..width {
-            assert_eq!(w.calls_for(names_v[l][i]) >= 1, true);
+    for row in names_v.iter().take(layers) {
+        for &k in row {
+            assert!(w.calls_for(k) >= 1);
         }
     }
     // Incremental: tweak one leaf; only its cone is recomputed.
     w.clear_calls();
     w.set(names_v[0][0], Def::Leaf(2));
     e.invalidate(&[key(names_v[0][0])]);
-    let r2 = e.evaluate_with(&[key(root)], &EvaluationOptions { keep_going: true, threads: 8, cancel: None });
+    let r2 = e.evaluate_with(
+        &[key(root)],
+        &EvaluationOptions {
+            keep_going: true,
+            threads: 8,
+            cancel: None,
+        },
+    );
     assert!(r2.stats.evaluated.len() < total);
     assert!(!r2.stats.evaluated.is_empty());
-    assert_eq!(w.calls_for(names_v[0][5]), 0, "untouched leaf not recomputed");
+    assert_eq!(
+        w.calls_for(names_v[0][5]),
+        0,
+        "untouched leaf not recomputed"
+    );
 }
 
 #[test]
 fn smaller_parallel_graph_has_exact_values() {
     let mut defs: Vec<(&'static str, Def)> = vec![];
-    let leaves: Vec<&'static str> = (0..200).map(|i| &*Box::leak(format!("leaf{i}").into_boxed_str())).collect();
+    let leaves: Vec<&'static str> = (0..200)
+        .map(|i| &*Box::leak(format!("leaf{i}").into_boxed_str()))
+        .collect();
     for (i, l) in leaves.iter().enumerate() {
         defs.push((l, Def::Leaf(i as i64)));
     }
-    let mids: Vec<&'static str> = (0..20).map(|i| &*Box::leak(format!("mid{i}").into_boxed_str())).collect();
+    let mids: Vec<&'static str> = (0..20)
+        .map(|i| &*Box::leak(format!("mid{i}").into_boxed_str()))
+        .collect();
     for (i, m) in mids.iter().enumerate() {
         defs.push((m, Def::Sum(leaves[i * 10..(i + 1) * 10].to_vec())));
     }
     defs.push(("total", Def::Sum(mids.clone())));
     let w = World::new(defs);
     let e = evaluator(&w);
-    let r = e.evaluate_with(&[key("total")], &EvaluationOptions { keep_going: true, threads: 16, cancel: None });
+    let r = e.evaluate_with(
+        &[key("total")],
+        &EvaluationOptions {
+            keep_going: true,
+            threads: 16,
+            cancel: None,
+        },
+    );
     assert_eq!(val(&r, "total"), (0..200).sum::<i64>());
     assert_eq!(r.stats.evaluated.len(), 221);
 }
@@ -573,13 +714,22 @@ fn delete_functions_rebuilds_dependents() {
     let mut e = InMemoryMemoizingEvaluator::new();
     struct F(&'static str, Arc<AtomicUsize>);
     impl SkyFunction for F {
-        fn compute(&self, k: &SkyKey, env: &mut Environment<'_>) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        fn compute(
+            &self,
+            k: &SkyKey,
+            env: &mut Environment<'_>,
+        ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
             self.1.fetch_add(1, Ordering::SeqCst);
             if self.0 == "leaf" {
                 return Ok(Some(Arc::new(Num(1))));
             }
-            let dep = SkyKey::Custom { function_name: SkyFunctionName("OTHER"), argument: format!("dep-of-{}", name_of(k)) };
-            let Some(v) = env.get_value(&dep) else { return Ok(None) };
+            let dep = SkyKey::Custom {
+                function_name: SkyFunctionName("OTHER"),
+                argument: format!("dep-of-{}", name_of(k)),
+            };
+            let Some(v) = env.get_value(&dep) else {
+                return Ok(None);
+            };
             Ok(Some(Arc::new(Num(num(Some(v)) + 1))))
         }
     }
@@ -591,15 +741,27 @@ fn delete_functions_rebuilds_dependents() {
     assert_eq!(e.delete_functions(&[OTHER]), 1);
     assert!(!e.is_clean(&key("x")));
     assert_eq!(val(&e.evaluate(&[key("x")]), "x"), 2);
-    assert_eq!(leaf_calls.load(Ordering::SeqCst), 2, "deleted node recomputed");
-    assert_eq!(top_calls.load(Ordering::SeqCst), 4, "2 calls (restart) per evaluation");
+    assert_eq!(
+        leaf_calls.load(Ordering::SeqCst),
+        2,
+        "deleted node recomputed"
+    );
+    assert_eq!(
+        top_calls.load(Ordering::SeqCst),
+        4,
+        "2 calls (restart) per evaluation"
+    );
 }
 
 #[test]
 fn cancellation_stops_evaluation() {
     struct Slow;
     impl SkyFunction for Slow {
-        fn compute(&self, _k: &SkyKey, _env: &mut Environment<'_>) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+        fn compute(
+            &self,
+            _k: &SkyKey,
+            _env: &mut Environment<'_>,
+        ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
             std::thread::sleep(std::time::Duration::from_millis(30));
             Ok(Some(Arc::new(Num(1))))
         }
@@ -613,8 +775,152 @@ fn cancellation_stops_evaluation() {
         std::thread::sleep(std::time::Duration::from_millis(60));
         c2.store(true, Ordering::SeqCst);
     });
-    let r = e.evaluate_with(&roots, &EvaluationOptions { keep_going: true, threads: 2, cancel: Some(cancel) });
+    let r = e.evaluate_with(
+        &roots,
+        &EvaluationOptions {
+            keep_going: true,
+            threads: 2,
+            cancel: Some(cancel),
+        },
+    );
     h.join().unwrap();
     assert!(r.aborted);
     assert!(r.values.len() < 200);
+}
+
+#[test]
+fn nokeep_going_short_circuits_cached_error_and_child_errors() {
+    let w = World::new(vec![
+        ("bad", Def::Fail("cached fail")),
+        ("parent_bad", Def::Sum(vec!["bad"])),
+        ("ok", Def::Leaf(42)),
+    ]);
+    let e = evaluator(&w);
+    // Populate `bad` in cache.
+    let r0 = e.evaluate_with(
+        &[key("bad")],
+        &EvaluationOptions {
+            keep_going: true,
+            threads: 1,
+            cancel: None,
+        },
+    );
+    assert!(r0.has_error());
+    w.clear_calls();
+
+    // Cached root error short-circuits remaining roots when keep_going is false.
+    let r1 = e.evaluate_with(
+        &[key("bad"), key("ok")],
+        &EvaluationOptions {
+            keep_going: false,
+            threads: 1,
+            cancel: None,
+        },
+    );
+    assert!(r1.aborted);
+    assert!(r1.errors.contains_key(&key("bad")));
+    assert!(
+        r1.get::<Num>(&key("ok")).is_none(),
+        "ok should not be evaluated"
+    );
+    assert_eq!(w.calls_for("ok"), 0);
+
+    // Child cached error aborts when keep_going is false.
+    let r2 = e.evaluate_with(
+        &[key("parent_bad"), key("ok")],
+        &EvaluationOptions {
+            keep_going: false,
+            threads: 1,
+            cancel: None,
+        },
+    );
+    assert!(r2.aborted);
+    assert!(r2.errors.contains_key(&key("parent_bad")));
+    assert_eq!(w.calls_for("ok"), 0);
+}
+
+#[test]
+fn nokeep_going_cycle_does_not_commit_and_aborts() {
+    let w = World::new(vec![
+        ("top", Def::Sum(vec!["a"])),
+        ("a", Def::Sum(vec!["b"])),
+        ("b", Def::Sum(vec!["a"])),
+        ("other", Def::Sum(vec!["x"])),
+        ("x", Def::Sum(vec!["x"])),
+    ]);
+    let e = evaluator(&w);
+    let r = e.evaluate_with(
+        &[key("top"), key("other")],
+        &EvaluationOptions {
+            keep_going: false,
+            threads: 1,
+            cancel: None,
+        },
+    );
+    assert!(r.aborted);
+    assert_eq!(r.root_cycles.len(), 1, "only first root cycle reported");
+    assert_eq!(r.root_cycles[0].0, key("top"));
+    assert!(
+        !e.is_clean(&key("a")),
+        "cycle nodes not committed in nokeep_going mode"
+    );
+    assert!(!e.is_clean(&key("b")));
+}
+
+#[test]
+fn catastrophic_error_aborts_keep_going() {
+    struct CatastrophicFn;
+    impl SkyFunction for CatastrophicFn {
+        fn compute(
+            &self,
+            k: &SkyKey,
+            _env: &mut Environment<'_>,
+        ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+            if name_of(k) == "boom" {
+                Err(SkyFunctionError::catastrophic_transient("disk error"))
+            } else {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+                Ok(Some(Arc::new(Num(1))))
+            }
+        }
+    }
+    let mut e = InMemoryMemoizingEvaluator::new();
+    e.register_function(T, Arc::new(CatastrophicFn));
+    let mut roots = vec![key("boom")];
+    for i in 0..30 {
+        roots.push(key(&format!("slow{i}")));
+    }
+    let r = e.evaluate_with(
+        &roots,
+        &EvaluationOptions {
+            keep_going: true,
+            threads: 1,
+            cancel: None,
+        },
+    );
+    assert!(r.aborted);
+    assert!(r.catastrophic);
+    assert!(r.errors.contains_key(&key("boom")));
+    assert!(r.values.len() < 30);
+}
+
+#[test]
+fn mark_dirty_and_rewind_semantics() {
+    let w = World::new(vec![("a", Def::Leaf(10)), ("top", Def::Sum(vec!["a"]))]);
+    let e = evaluator(&w);
+    assert_eq!(val(&e.evaluate(&[key("top")]), "top"), 10);
+    w.clear_calls();
+
+    // `mark_dirty` starts in CHECK_DEPENDENCIES, so if dep did not change, node is cleaned without rebuild.
+    e.mark_dirty(&[key("top")]);
+    let r = e.evaluate(&[key("top")]);
+    assert_eq!(val(&r, "top"), 10);
+    assert_eq!(w.calls_for("top"), 0);
+    assert!(r.stats.cleaned.contains(&key("top")));
+
+    // `rewind` forces rebuild even when no dep changed.
+    e.rewind(&[key("top")]);
+    let r2 = e.evaluate(&[key("top")]);
+    assert_eq!(val(&r2, "top"), 10);
+    assert_eq!(w.calls_for("top"), 1);
 }

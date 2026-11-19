@@ -49,7 +49,11 @@ fn lab(s: &str) -> Label {
 pub fn host_platform(platforms_repo: &str) -> Arc<ConfiguredTarget> {
     let r = platforms_repo.trim_start_matches('@');
     let label = lab(&format!("@{r}//host:host"));
-    let mut ct = ConfiguredTarget::new(label.clone(), BuildConfigurationKey::target("host", "fastbuild"), "platform".into());
+    let mut ct = ConfiguredTarget::new(
+        label.clone(),
+        BuildConfigurationKey::target("host", "fastbuild"),
+        "platform".into(),
+    );
     ct.default_info = DefaultInfo::default();
     ct.providers.insert(
         "PlatformInfo".into(),
@@ -60,8 +64,14 @@ pub fn host_platform(platforms_repo: &str) -> Arc<ConfiguredTarget> {
                 (
                     "constraints",
                     mk_dict(vec![
-                        (Value::Label(lab(&format!("@{r}//os:os"))), Value::Label(lab(&format!("@{r}//os:{}", host_os_name())))),
-                        (Value::Label(lab(&format!("@{r}//cpu:cpu"))), Value::Label(lab(&format!("@{r}//cpu:{}", host_cpu_name())))),
+                        (
+                            Value::Label(lab(&format!("@{r}//os:os"))),
+                            Value::Label(lab(&format!("@{r}//os:{}", host_os_name()))),
+                        ),
+                        (
+                            Value::Label(lab(&format!("@{r}//cpu:cpu"))),
+                            Value::Label(lab(&format!("@{r}//cpu:{}", host_cpu_name()))),
+                        ),
                     ]),
                 ),
                 ("exec_properties", mk_dict(vec![])),
@@ -164,7 +174,8 @@ fn platform_constraints(p: &ConfiguredTarget) -> BTreeMap<String, Label> {
 /// Whether platform `p` has constraint value `cv` (`PlatformInfo.constraints.has`):
 /// an explicit value for the setting, or the setting's default.
 pub fn platform_has_value(p: &ConfiguredTarget, cv: &ConfiguredTarget) -> bool {
-    let Some(Value::ProviderInstance { fields, .. }) = cv.providers.get("ConstraintValueInfo") else {
+    let Some(Value::ProviderInstance { fields, .. }) = cv.providers.get("ConstraintValueInfo")
+    else {
         return false;
     };
     // The value's own label (an alias to a constraint_value reports the aliased target's).
@@ -212,15 +223,318 @@ fn list_labels(v: Option<&Value>) -> Vec<Label> {
         Some(l) => zel_starlark::eval::builtins::value_to_sequence(l)
             .unwrap_or_default()
             .into_iter()
-            .filter_map(|x| if let Value::Label(l) = x { Some(l) } else { None })
+            .filter_map(|x| {
+                if let Value::Label(l) = x {
+                    Some(l)
+                } else {
+                    None
+                }
+            })
             .collect(),
         None => vec![],
     }
 }
 
+/// Resolves a `toolchain_type` label through static `alias` chains to its canonical
+/// `ToolchainTypeInfo.type_label`, memoized on `acfg`.
+fn resolve_toolchain_type_label(
+    raw_ty: &Label,
+    core_cfg: &BuildConfigurationKey,
+    resolver: &Arc<dyn DepResolver>,
+    acfg: &crate::AnalysisConfig,
+) -> Label {
+    if let Some(cached) = acfg.cached_toolchain_type(raw_ty) {
+        return cached;
+    }
+    let mut cur = raw_ty.clone();
+    let mut visited = std::collections::HashSet::new();
+    let mut static_resolved = None;
+    for _ in 0..16 {
+        if !visited.insert(cur.clone()) {
+            break;
+        }
+        match resolver.rule_instance(&cur) {
+            Ok(Some(r)) => match r.rule_class.as_str() {
+                "toolchain_type" => {
+                    static_resolved = Some(cur);
+                    break;
+                }
+                "alias" => match r.attr_or_default("actual") {
+                    Some(zel_packages::AttrValue::Label(Some(next))) => {
+                        cur = next;
+                        continue;
+                    }
+                    _ => break,
+                },
+                _ => break,
+            },
+            _ => break,
+        }
+    }
+    if let Some(resolved) = static_resolved {
+        acfg.cache_toolchain_type(raw_ty.clone(), resolved.clone());
+        return resolved;
+    }
+    resolver
+        .configured_target(raw_ty, core_cfg)
+        .ok()
+        .and_then(|tt| match tt.providers.get("ToolchainTypeInfo") {
+            Some(Value::ProviderInstance { fields: tf, .. }) => match tf.get("type_label") {
+                Some(Value::Label(rl)) => Some(rl.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .unwrap_or_else(|| raw_ty.clone())
+}
+
+fn raw_toolchain_type_of(label: &Label, resolver: &Arc<dyn DepResolver>) -> Option<Label> {
+    let r = resolver.rule_instance(label).ok()??;
+    if r.rule_class != "toolchain" {
+        return None;
+    }
+    match r.attr_or_default("toolchain_type") {
+        Some(zel_packages::AttrValue::Label(Some(tl))) => Some(tl),
+        _ => None,
+    }
+}
+
+fn satisfies(p: &ConfiguredTarget, cvs: &[Arc<ConfiguredTarget>]) -> bool {
+    cvs.iter().all(|cv| platform_has_value(p, cv))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_toolchain_candidate(
+    tc: &crate::RegisteredToolchain,
+    wanted_ty: &Label,
+    ep: &ConfiguredTarget,
+    target: &ConfiguredTarget,
+    cfg: &BuildConfigurationKey,
+    core_cfg: &BuildConfigurationKey,
+    resolver: &Arc<dyn DepResolver>,
+    acfg: &crate::AnalysisConfig,
+) -> Result<Option<Label>, String> {
+    if let Some(raw_ty) = &tc.raw_toolchain_type {
+        let resolved_ty = resolve_toolchain_type_label(raw_ty, core_cfg, resolver, acfg);
+        if resolved_ty != *wanted_ty {
+            return Ok(None);
+        }
+    }
+    let ct = resolver.configured_target(&tc.label, cfg)?;
+    let Some(Value::ProviderInstance { fields: f, .. }) = ct.providers.get("DeclaredToolchainInfo")
+    else {
+        return Ok(None);
+    };
+    let raw_ty = match f.get("toolchain_type") {
+        Some(Value::Label(tl)) => tl,
+        _ => return Ok(None),
+    };
+    let resolved_ty = resolve_toolchain_type_label(raw_ty, core_cfg, resolver, acfg);
+    if resolved_ty != *wanted_ty {
+        return Ok(None);
+    }
+    let use_target_exec = matches!(
+        f.get("use_target_platform_constraints"),
+        Some(Value::Bool(true))
+    );
+    let exec_ok = if use_target_exec {
+        let target_c = platform_constraints(target);
+        let ep_c = platform_constraints(ep);
+        target_c.iter().all(|(k, v)| ep_c.get(k) == Some(v))
+    } else {
+        let exec_cv: Vec<Arc<ConfiguredTarget>> = list_labels(f.get("exec_compatible_with"))
+            .iter()
+            .map(|l| resolver.configured_target(l, cfg))
+            .collect::<Result<_, _>>()?;
+        satisfies(ep, &exec_cv)
+    };
+    if !exec_ok {
+        return Ok(None);
+    }
+    let target_cv: Vec<Arc<ConfiguredTarget>> = list_labels(f.get("target_compatible_with"))
+        .iter()
+        .map(|l| resolver.configured_target(l, cfg))
+        .collect::<Result<_, _>>()?;
+    if !satisfies(target, &target_cv) {
+        return Ok(None);
+    }
+    for s in list_labels(f.get("target_settings")) {
+        let st = resolver.configured_target(&s, cfg)?;
+        let matched = st
+            .providers
+            .get("ConfigMatchingProvider")
+            .and_then(zel_analysis::select::matching_info)
+            .map(|(m, _)| m)
+            .unwrap_or(false);
+        if !matched {
+            return Ok(None);
+        }
+    }
+    Ok(match f.get("toolchain") {
+        Some(Value::Label(imp)) => Some(imp.clone()),
+        _ => None,
+    })
+}
+
+/// Resolves toolchains for a target using incremental, memoized pattern expansion and
+/// `toolchain_type` pre-filtering so unrelated registered toolchains (and their external repos)
+/// are not analyzed or fetched when earlier registrations already satisfy the requested types.
+pub(crate) fn resolve_toolchains_lazy(
+    owner: &Label,
+    types: &[ToolchainTypeRequest],
+    exec_compatible_with: &[Label],
+    cfg: &BuildConfigurationKey,
+    extra_exec_platforms: &[Label],
+    resolver: &Arc<dyn DepResolver>,
+    acfg: &crate::AnalysisConfig,
+) -> Result<ResolvedToolchains, String> {
+    let target = target_platform(cfg, resolver, acfg)?.expect("platform");
+    let mut exec_platforms: Vec<Arc<ConfiguredTarget>> = Vec::new();
+    for l in extra_exec_platforms.iter() {
+        let ep = resolver.configured_target(l, cfg)?;
+        if !ep.providers.contains_key("PlatformInfo") {
+            return Err(format!(
+                "Target {} was referenced as a platform, but does not provide PlatformInfo",
+                l.canonical_form()
+            ));
+        }
+        exec_platforms.push(ep);
+    }
+    exec_platforms.push(configured_host_platform(cfg, resolver, acfg)?);
+
+    let ecw: Vec<Arc<ConfiguredTarget>> = exec_compatible_with
+        .iter()
+        .map(|l| resolver.configured_target(l, cfg))
+        .collect::<Result<_, _>>()?;
+
+    if types.is_empty() {
+        for ep in &exec_platforms {
+            if satisfies(ep, &ecw) {
+                return Ok(ResolvedToolchains {
+                    execution_platform: ep.clone(),
+                    toolchains: BTreeMap::new(),
+                });
+            }
+        }
+        return Err(format!(
+            "While resolving toolchains for target {}: No execution platforms are compatible with the target's exec_compatible_with constraints",
+            owner.canonical_form()
+        ));
+    }
+
+    // Validate CLI `--extra_toolchains` and main-repository `register_toolchains` patterns
+    // upfront so malformed registrations fail immediately regardless of match order.
+    for (idx, pat) in acfg.toolchain_patterns.iter().enumerate() {
+        if acfg.is_eager_toolchain_pattern(idx, pat) {
+            acfg.expand_toolchain_pattern(pat)?;
+        }
+    }
+
+    let core_cfg = cfg.to_core_only();
+    let explicit_candidates: Vec<crate::RegisteredToolchain> = acfg
+        .registered_toolchains
+        .iter()
+        .map(|l| crate::RegisteredToolchain {
+            label: l.clone(),
+            raw_toolchain_type: raw_toolchain_type_of(l, resolver),
+        })
+        .collect();
+
+    let mut missing_for_all: Vec<Label> = Vec::new();
+    for ep in &exec_platforms {
+        if !satisfies(ep, &ecw) {
+            continue;
+        }
+        let mut chosen: BTreeMap<String, Option<Label>> = BTreeMap::new();
+        let mut missing: Vec<Label> = Vec::new();
+        for t in types {
+            let mut found: Option<Label> = None;
+            let mut seen = std::collections::HashSet::new();
+            for tc in &explicit_candidates {
+                if !seen.insert(tc.label.clone()) {
+                    continue;
+                }
+                if let Some(imp) = check_toolchain_candidate(
+                    tc,
+                    &t.toolchain_type,
+                    ep,
+                    &target,
+                    cfg,
+                    &core_cfg,
+                    resolver,
+                    acfg,
+                )? {
+                    found = Some(imp);
+                    break;
+                }
+            }
+            if found.is_none() {
+                for pat in &acfg.toolchain_patterns {
+                    let expanded = acfg.expand_toolchain_pattern(pat)?;
+                    for tc in &expanded {
+                        if !seen.insert(tc.label.clone()) {
+                            continue;
+                        }
+                        if let Some(imp) = check_toolchain_candidate(
+                            tc,
+                            &t.toolchain_type,
+                            ep,
+                            &target,
+                            cfg,
+                            &core_cfg,
+                            resolver,
+                            acfg,
+                        )? {
+                            found = Some(imp);
+                            break;
+                        }
+                    }
+                    if found.is_some() {
+                        break;
+                    }
+                }
+            }
+            if found.is_none() && t.mandatory {
+                missing.push(t.toolchain_type.clone());
+            }
+            chosen.insert(t.toolchain_type.canonical_form(), found);
+        }
+        if missing.is_empty() {
+            return Ok(ResolvedToolchains {
+                execution_platform: ep.clone(),
+                toolchains: chosen,
+            });
+        }
+        if missing_for_all.is_empty() {
+            missing_for_all = missing;
+        }
+    }
+    if missing_for_all.is_empty() {
+        return Err(format!(
+            "While resolving toolchains for target {}: No execution platforms are compatible with the target's exec_compatible_with constraints",
+            owner.canonical_form()
+        ));
+    }
+    let tp_label = match target.providers.get("PlatformInfo") {
+        Some(Value::ProviderInstance { fields, .. }) => match fields.get("label") {
+            Some(Value::Label(l)) => l.canonical_form(),
+            _ => String::new(),
+        },
+        _ => String::new(),
+    };
+    Err(format!(
+        "While resolving toolchains for target {}: No matching toolchains found for target platform {}:\n{}\nTo debug, rerun with --toolchain_resolution_debug='{}'\n",
+        owner.canonical_form(),
+        tp_label,
+        missing_for_all.iter().map(|t| format!("  {}", t.canonical_form())).collect::<Vec<_>>().join("\n"),
+        missing_for_all.iter().map(|t| t.canonical_form()).collect::<Vec<_>>().join("|")
+    ))
+}
+
 /// Resolves toolchains for a target: picks the first execution platform (extra execution
 /// platforms in order, then the host platform) that satisfies `exec_compatible_with` and has a
 /// matching registered toolchain for every mandatory type.
+#[allow(clippy::too_many_arguments)]
 pub fn resolve_toolchains(
     owner: &Label,
     types: &[ToolchainTypeRequest],
@@ -245,21 +559,19 @@ pub fn resolve_toolchains(
     }
     exec_platforms.push(configured_host_platform(cfg, resolver, acfg)?);
 
-    // Load registered toolchains once.
-    let mut declared: Vec<(Arc<ConfiguredTarget>, BTreeMap<String, Value>)> = Vec::new();
-    for l in registered_toolchains {
-        let ct = resolver.configured_target(l, cfg)?;
-        if let Some(Value::ProviderInstance { fields, .. }) = ct.providers.get("DeclaredToolchainInfo") {
-            let f = fields.clone();
-            declared.push((ct.clone(), f));
-        }
-    }
+    let core_cfg = cfg.to_core_only();
+    let candidates: Vec<crate::RegisteredToolchain> = registered_toolchains
+        .iter()
+        .map(|l| crate::RegisteredToolchain {
+            label: l.clone(),
+            raw_toolchain_type: raw_toolchain_type_of(l, resolver),
+        })
+        .collect();
     let ecw: Vec<Arc<ConfiguredTarget>> = exec_compatible_with
         .iter()
         .map(|l| resolver.configured_target(l, cfg))
         .collect::<Result<_, _>>()?;
 
-    let satisfies = |p: &ConfiguredTarget, cvs: &[Arc<ConfiguredTarget>]| cvs.iter().all(|cv| platform_has_value(p, cv));
     let mut missing_for_all: Vec<Label> = Vec::new();
     'platform: for ep in &exec_platforms {
         if !satisfies(ep, &ecw) {
@@ -269,42 +581,18 @@ pub fn resolve_toolchains(
         let mut missing: Vec<Label> = Vec::new();
         for t in types {
             let mut found: Option<Label> = None;
-            for (_, f) in &declared {
-                let ty = match f.get("toolchain_type") {
-                    Some(Value::Label(l)) => l.clone(),
-                    _ => continue,
-                };
-                if ty != t.toolchain_type {
-                    continue;
-                }
-                let exec_cv: Vec<Arc<ConfiguredTarget>> = list_labels(f.get("exec_compatible_with"))
-                    .iter()
-                    .map(|l| resolver.configured_target(l, cfg))
-                    .collect::<Result<_, _>>()?;
-                let target_cv: Vec<Arc<ConfiguredTarget>> = list_labels(f.get("target_compatible_with"))
-                    .iter()
-                    .map(|l| resolver.configured_target(l, cfg))
-                    .collect::<Result<_, _>>()?;
-                if !satisfies(ep, &exec_cv) || !satisfies(&target, &target_cv) {
-                    continue;
-                }
-                let mut settings_ok = true;
-                for s in list_labels(f.get("target_settings")) {
-                    let st = resolver.configured_target(&s, cfg)?;
-                    match st.providers.get("ConfigMatchingProvider") {
-                        Some(p) => {
-                            if !zel_analysis::select::matching_info(p).map(|(m, _)| m).unwrap_or(false) {
-                                settings_ok = false;
-                            }
-                        }
-                        None => settings_ok = false,
-                    }
-                }
-                if !settings_ok {
-                    continue;
-                }
-                if let Some(Value::Label(imp)) = f.get("toolchain") {
-                    found = Some(imp.clone());
+            for tc in &candidates {
+                if let Some(imp) = check_toolchain_candidate(
+                    tc,
+                    &t.toolchain_type,
+                    ep,
+                    &target,
+                    cfg,
+                    &core_cfg,
+                    resolver,
+                    acfg,
+                )? {
+                    found = Some(imp);
                     break;
                 }
             }
@@ -314,7 +602,10 @@ pub fn resolve_toolchains(
             chosen.insert(t.toolchain_type.canonical_form(), found);
         }
         if missing.is_empty() {
-            return Ok(ResolvedToolchains { execution_platform: ep.clone(), toolchains: chosen });
+            return Ok(ResolvedToolchains {
+                execution_platform: ep.clone(),
+                toolchains: chosen,
+            });
         }
         if missing_for_all.is_empty() {
             missing_for_all = missing;

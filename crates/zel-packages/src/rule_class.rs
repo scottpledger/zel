@@ -42,6 +42,8 @@ pub struct RuleClass {
     pub open: bool,
     /// Implicit output templates (`"%{name}.txt"`), keyed by the Starlark `outputs` dict key.
     pub implicit_outputs: Vec<(String, String)>,
+    /// Starlark `outputs = fn` callback, if any (`StarlarkImplicitOutputsFunctionWithCallback`).
+    pub outputs_fn: Option<Value>,
     pub is_starlark: bool,
     /// `rule(..., build_setting = ...)`.
     pub build_setting: bool,
@@ -87,7 +89,9 @@ fn ll() -> AttrType {
 
 fn common_attrs() -> Vec<Attribute> {
     vec![
-        Attribute::new("name", AttrType::String).mandatory().nonconfigurable(),
+        Attribute::new("name", AttrType::String)
+            .mandatory()
+            .nonconfigurable(),
         Attribute::new("visibility", AttrType::LabelList).nonconfigurable(),
         Attribute::new("tags", sl()).nonconfigurable(),
         Attribute::new("deprecation", AttrType::String).nonconfigurable(),
@@ -110,6 +114,7 @@ fn common_attrs() -> Vec<Attribute> {
     ]
 }
 
+#[allow(dead_code)]
 fn test_attrs() -> Vec<Attribute> {
     vec![
         Attribute::new("size", AttrType::String)
@@ -127,6 +132,7 @@ fn test_attrs() -> Vec<Attribute> {
     ]
 }
 
+#[allow(dead_code)]
 fn binary_attrs() -> Vec<Attribute> {
     vec![
         Attribute::new("args", sl()),
@@ -157,6 +163,7 @@ impl Builder {
                 is_executable: false,
                 open: false,
                 implicit_outputs: Vec::new(),
+                outputs_fn: None,
                 is_starlark: false,
                 build_setting: false,
                 starlark: None,
@@ -179,15 +186,18 @@ impl Builder {
         }
         self
     }
+    #[allow(dead_code)]
     fn test(mut self) -> Self {
         self.rc.is_test = true;
         self.rc.is_executable = true;
         self.attrs(test_attrs())
     }
+    #[allow(dead_code)]
     fn binary(mut self) -> Self {
         self.rc.is_executable = true;
         self.attrs(binary_attrs())
     }
+    #[allow(dead_code)]
     fn open(mut self) -> Self {
         self.rc.open = true;
         self
@@ -196,7 +206,6 @@ impl Builder {
         Arc::new(self.rc)
     }
 }
-
 
 /// The `AttrType` zel uses for a Bazel attribute discriminator name.
 fn attr_type_of(proto: &str, nodep: bool) -> AttrType {
@@ -216,7 +225,8 @@ fn attr_type_of(proto: &str, nodep: bool) -> AttrType {
         "OUTPUT" => AttrType::Output,
         "OUTPUT_LIST" => AttrType::OutputList,
         "STRING_DICT" => AttrType::StringDict,
-        "STRING_LIST_DICT" | "LABEL_LIST_DICT" => AttrType::StringListDict,
+        "STRING_LIST_DICT" => AttrType::StringListDict,
+        "LABEL_LIST_DICT" => AttrType::LabelListDict,
         "LABEL_KEYED_STRING_DICT" => AttrType::LabelKeyedStringDict,
         "LABEL_DICT_UNARY" => AttrType::StringKeyedLabelDict,
         "INTEGER_LIST" => AttrType::IntList,
@@ -237,11 +247,17 @@ fn gen_default(d: &D, ty: AttrType) -> Option<AttrValue> {
         (D::Bool(b), AttrType::Bool) => AttrValue::Bool(*b),
         (D::Tristate(t), AttrType::Tristate) => AttrValue::Tristate(*t),
         (D::Label(s), AttrType::Label) => AttrValue::Label(parse_gen_label(s)),
-        (D::List(l), AttrType::StringList) => AttrValue::StrList(l.iter().map(|s| s.to_string()).collect()),
-        (D::List(l), AttrType::LabelList) => AttrValue::LabelList(l.iter().filter_map(|s| parse_gen_label(s)).collect()),
-        (D::Dict(d), AttrType::StringDict) => {
-            AttrValue::StrDict(d.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect())
+        (D::List(l), AttrType::StringList) => {
+            AttrValue::StrList(l.iter().map(|s| s.to_string()).collect())
         }
+        (D::List(l), AttrType::LabelList) => {
+            AttrValue::LabelList(l.iter().filter_map(|s| parse_gen_label(s)).collect())
+        }
+        (D::Dict(d), AttrType::StringDict) => AttrValue::StrDict(
+            d.iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        ),
         // `License.NONE` is the default of `licenses`; zel stores the license types as strings.
         (D::License(_), _) => return None,
         _ => return None,
@@ -265,9 +281,16 @@ fn apply_gen(rc: &mut RuleClass, defs: &[GenAttr], user: Vec<Attribute>) {
     if let Some(n) = old.remove("name").or_else(|| user_by_name.remove("name")) {
         rc.attrs.insert("name".to_string(), n);
     } else {
-        rc.attrs.insert("name".to_string(), Attribute::new("name", AttrType::String).mandatory().nonconfigurable());
+        rc.attrs.insert(
+            "name".to_string(),
+            Attribute::new("name", AttrType::String)
+                .mandatory()
+                .nonconfigurable(),
+        );
     }
-    let mut place_user = |rc: &mut RuleClass, order: &mut Vec<String>, user_by_name: &mut BTreeMap<String, Attribute>| {
+    let place_user = |rc: &mut RuleClass,
+                      order: &mut Vec<String>,
+                      user_by_name: &mut BTreeMap<String, Attribute>| {
         for n in &user_order {
             if let Some(a) = user_by_name.remove(n) {
                 order.push(n.clone());
@@ -301,7 +324,7 @@ fn apply_gen(rc: &mut RuleClass, defs: &[GenAttr], user: Vec<Attribute>) {
             a.ty = want;
             a.default = None;
         }
-        a.configurable = g.configurable && (user_defined && a.configurable || !user_defined);
+        a.configurable = g.configurable && (!user_defined || a.configurable);
         a.nodep = g.nodep;
         a.nodep_set = Some(g.nodep_set);
         a.tool_dep = Some(g.tool);
@@ -359,12 +382,19 @@ pub fn native_rule_classes() -> BTreeMap<String, Arc<RuleClass>> {
             .build(),
     );
     let genrule_setup = Label::parse_canonical("@bazel_tools//tools/genrule:genrule-setup.sh")
-        .unwrap_or_else(|_| Label::parse_canonical("@@bazel_tools//tools/genrule:genrule-setup.sh").unwrap());
+        .unwrap_or_else(|_| {
+            Label::parse_canonical("@@bazel_tools//tools/genrule:genrule-setup.sh").unwrap()
+        });
     v.push(
         Builder::new("genrule")
             .attr(a("srcs", ll()))
             .attr(a("tools", ll()).cfg_exec())
-            .attr(a("outs", AttrType::OutputList).mandatory().non_empty().nonconfigurable())
+            .attr(
+                a("outs", AttrType::OutputList)
+                    .mandatory()
+                    .non_empty()
+                    .nonconfigurable(),
+            )
             .attr(a("cmd", AttrType::String))
             .attr(a("cmd_bash", AttrType::String))
             .attr(a("cmd_ps", AttrType::String))
@@ -376,7 +406,21 @@ pub fn native_rule_classes() -> BTreeMap<String, Arc<RuleClass>> {
             .attr(a("output_licenses", sl()).nonconfigurable())
             .attr(a("output_to_bindir", AttrType::Bool).nonconfigurable())
             .attr(a("stamp", AttrType::Bool).nonconfigurable())
-            .attr(Attribute::new("$genrule_setup", AttrType::Label).default(AttrValue::Label(Some(genrule_setup))).cfg_exec())
+            .attr({
+                let mut tc = Attribute::new("toolchains", ll()).nonconfigurable();
+                tc.allowed_files = crate::attr::FileTypes::NoFiles;
+                tc.files_unspecified = true;
+                tc.providers = vec![
+                    vec!["TemplateVariableInfo".into()],
+                    vec!["ToolchainTypeInfo".into()],
+                ];
+                tc
+            })
+            .attr(
+                Attribute::new("$genrule_setup", AttrType::Label)
+                    .default(AttrValue::Label(Some(genrule_setup)))
+                    .cfg_exec(),
+            )
             .build(),
     );
     v.push(
@@ -400,36 +444,73 @@ pub fn native_rule_classes() -> BTreeMap<String, Arc<RuleClass>> {
     );
     v.push(
         Builder::new("genquery")
-            .attr(a("expression", AttrType::String).mandatory().nonconfigurable())
+            .attr(
+                a("expression", AttrType::String)
+                    .mandatory()
+                    .nonconfigurable(),
+            )
             .attr(a("scope", ll()).mandatory().non_empty().nonconfigurable())
-            .attr(a("strict", AttrType::Bool).default(AttrValue::Bool(true)).nonconfigurable())
+            .attr(
+                a("strict", AttrType::Bool)
+                    .default(AttrValue::Bool(true))
+                    .nonconfigurable(),
+            )
             .attr(a("opts", sl()).nonconfigurable())
             .attr(a("compressed_output", AttrType::Bool).nonconfigurable())
             .build(),
     );
     // Platforms & toolchains.
-    v.push(Builder::new("constraint_setting")
-        .attr(a("default_constraint_value", AttrType::Label).nonconfigurable()).build());
-    v.push(Builder::new("constraint_value")
-        .attr(a("constraint_setting", AttrType::Label).mandatory().nonconfigurable()).build());
-    v.push(Builder::new("platform")
-        .attr(a("constraint_values", ll()).nonconfigurable())
-        .attr(a("parents", ll()).nonconfigurable())
-        .attr(a("remote_execution_properties", AttrType::String).nonconfigurable())
-        .attr(a("exec_properties", AttrType::StringDict).nonconfigurable())
-        .attr(a("flags", sl()).nonconfigurable()).build());
-    v.push(Builder::new("toolchain_type").attr(a("no_match_error", AttrType::String).nonconfigurable()).build());
-    v.push(Builder::new("toolchain")
-        .attr(a("toolchain_type", AttrType::Label).mandatory().nonconfigurable())
-        .attr(a("toolchain", AttrType::Label).mandatory())
-        .attr(a("exec_compatible_with", ll()).nonconfigurable())
-        .attr(a("target_compatible_with", ll()).nonconfigurable())
-        .attr(a("target_settings", ll()))
-        .attr(a("use_target_platform_constraints", AttrType::Bool).nonconfigurable()).build());
+    v.push(
+        Builder::new("constraint_setting")
+            .attr(a("default_constraint_value", AttrType::Label).nonconfigurable())
+            .build(),
+    );
+    v.push(
+        Builder::new("constraint_value")
+            .attr(
+                a("constraint_setting", AttrType::Label)
+                    .mandatory()
+                    .nonconfigurable(),
+            )
+            .build(),
+    );
+    v.push(
+        Builder::new("platform")
+            .attr(a("constraint_values", ll()).nonconfigurable())
+            .attr(a("parents", ll()).nonconfigurable())
+            .attr(a("remote_execution_properties", AttrType::String).nonconfigurable())
+            .attr(a("exec_properties", AttrType::StringDict).nonconfigurable())
+            .attr(a("flags", sl()).nonconfigurable())
+            .build(),
+    );
+    v.push(
+        Builder::new("toolchain_type")
+            .attr(a("no_match_error", AttrType::String).nonconfigurable())
+            .build(),
+    );
+    v.push(
+        Builder::new("toolchain")
+            .attr(
+                a("toolchain_type", AttrType::Label)
+                    .mandatory()
+                    .nonconfigurable(),
+            )
+            .attr(a("toolchain", AttrType::Label).mandatory())
+            .attr(a("exec_compatible_with", ll()).nonconfigurable())
+            .attr(a("target_compatible_with", ll()).nonconfigurable())
+            .attr(a("target_settings", ll()))
+            .attr(a("use_target_platform_constraints", AttrType::Bool).nonconfigurable())
+            .build(),
+    );
     v.push(Builder::new("environment").build());
     // Native rule classes of `GenericRules`/`JavaRules` that only have a generated schema
     // (`rule_defs_gen`, derived from the Java rule definitions by `scripts/gen_rule_defs.py`).
-    for native in ["extra_action", "action_listener", "starlark_doc_extract", "cc_toolchain_alias"] {
+    for native in [
+        "extra_action",
+        "action_listener",
+        "starlark_doc_extract",
+        "cc_toolchain_alias",
+    ] {
         let mut b = Builder::new(native);
         if native == "starlark_doc_extract" {
             // `StarlarkDocExtractRule`: `fromFunctions(BINARYPROTO_OUT, TEXTPROTO_OUT)`.
@@ -452,10 +533,16 @@ pub fn native_rule_classes() -> BTreeMap<String, Arc<RuleClass>> {
     // @rules_cc, @rules_java, @rules_python and @protobuf (loaded via `load()`).
 
     // Build settings.
-    v.push(Builder::new("label_flag")
-        .attr(a("build_setting_default", AttrType::Label).nonconfigurable()).build());
-    v.push(Builder::new("label_setting")
-        .attr(a("build_setting_default", AttrType::Label).nonconfigurable()).build());
+    v.push(
+        Builder::new("label_flag")
+            .attr(a("build_setting_default", AttrType::Label).nonconfigurable())
+            .build(),
+    );
+    v.push(
+        Builder::new("label_setting")
+            .attr(a("build_setting_default", AttrType::Label).nonconfigurable())
+            .build(),
+    );
 
     v.into_iter()
         .map(|rc| {
@@ -467,14 +554,22 @@ pub fn native_rule_classes() -> BTreeMap<String, Arc<RuleClass>> {
                         a.order_independent = true;
                     }
                 }
-            } else {
-                if let Some(defs) = generated_defs(&rc.name) {
-                    apply_gen(&mut rc, defs, Vec::new());
-                }
+            } else if let Some(defs) = generated_defs(&rc.name) {
+                apply_gen(&mut rc, defs, Vec::new());
             }
             (rc.name.clone(), Arc::new(rc))
         })
         .collect()
+}
+
+/// Checks `RuleClass.RULE_NAME_PATTERN` (`[A-Za-z_][A-Za-z0-9_]*`).
+pub fn is_valid_rule_class_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first.is_ascii_alphabetic() || first == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 /// Builds a rule class for a Starlark-defined `rule()`.
@@ -510,6 +605,19 @@ pub fn starlark_rule_class(
         }
         None => b = b.attrs(user_attrs),
     }
+    if test {
+        if let Some(to) = b.rc.attrs.get_mut("testonly") {
+            to.default = Some(AttrValue::Bool(true));
+            to.configurable = false;
+        }
+    }
+    if build_setting {
+        for n in ["build_setting_default", "help"] {
+            if let Some(a) = b.rc.attrs.get_mut(n) {
+                a.configurable = false;
+            }
+        }
+    }
     b.rc.implicit_outputs = implicit_outputs;
     b.rc.is_starlark = true;
     b.rc.build_setting = build_setting;
@@ -527,8 +635,22 @@ mod tests {
         assert!(g.attr("name").unwrap().mandatory);
         assert!(g.attr("outs").unwrap().mandatory);
         assert!(g.attr("visibility").is_some());
+        let tc = g.attr("toolchains").unwrap();
+        assert!(!tc.configurable);
+        assert!(matches!(tc.allowed_files, crate::attr::FileTypes::NoFiles));
+        assert_eq!(
+            tc.providers,
+            vec![
+                vec!["TemplateVariableInfo".to_string()],
+                vec!["ToolchainTypeInfo".to_string()],
+            ]
+        );
         assert!(!g.open);
         // Bazel 9 has no native `sh_*` rules.
-        assert!(!rcs.contains_key("sh_binary") && !rcs.contains_key("sh_test") && !rcs.contains_key("sh_library"));
+        assert!(
+            !rcs.contains_key("sh_binary")
+                && !rcs.contains_key("sh_test")
+                && !rcs.contains_key("sh_library")
+        );
     }
 }
