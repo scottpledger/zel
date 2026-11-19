@@ -2839,10 +2839,16 @@ my_ext = _make_ext()
         assert!(!rt1.is_configure_repo(android_canon).unwrap());
         let adir1 = rt1.fetch_repo(android_canon).unwrap();
         assert!(adir1.join("BUILD").exists());
+        let android_spec = rt1.repo_spec_for(android_canon).unwrap().unwrap();
+        let android_fp = rt1.predeclared_input_hash(android_canon, &android_spec);
         assert!(
-            !adir1.is_symlink(),
+            crate::repo_contents_cache::RepoContentsCache::new(&rcc)
+                .get_candidate_repos(&android_fp)
+                .is_empty(),
             "local = True repo must not be moved into repo_contents_cache"
         );
+        #[cfg(unix)]
+        assert!(!adir1.is_symlink());
         std::fs::write(adir1.join(".sentinel"), "1").unwrap();
 
         let rt2 = Rt::new(opts, res);
@@ -2938,7 +2944,7 @@ my_ext = _make_ext()
         let rcc = base.join("rcc");
         let opts = ExternalOptions {
             output_base: base.join("ob"),
-            workspace_root: ws,
+            workspace_root: ws.clone(),
             repo_contents_cache: Some(rcc.clone()),
             ..Default::default()
         };
@@ -2959,12 +2965,48 @@ my_ext = _make_ext()
         );
 
         // `sha512_arch` has matching SHA-512 `remote_file_integrity`, so `http_archive` returns
-        // `reproducible = True` and moves the fetched repo into `repo_contents_cache`.
+        // `reproducible = True` and stores the fetched repo in `repo_contents_cache` (symlinked on
+        // Unix, copied back on Windows).
         let ha_canon = root_map.get("sha512_arch").unwrap().as_str();
         let ha_dir = rt.fetch_repo(ha_canon).unwrap();
-        assert!(
-            ha_dir.is_symlink(),
+        assert_eq!(
+            std::fs::read(ha_dir.join("extra.bin")).unwrap(),
+            b"non-ascii-ok"
+        );
+        let ha_spec = rt.repo_spec_for(ha_canon).unwrap().unwrap();
+        let ha_fp = rt.predeclared_input_hash(ha_canon, &ha_spec);
+        let candidates =
+            crate::repo_contents_cache::RepoContentsCache::new(&rcc).get_candidate_repos(&ha_fp);
+        assert_eq!(
+            candidates.len(),
+            1,
             "http_archive with matching SHA-512 remote_file_integrity must stay reproducible and enter repo_contents_cache"
+        );
+        assert_eq!(
+            std::fs::read(candidates[0].contents_dir.join("extra.bin")).unwrap(),
+            b"non-ascii-ok"
+        );
+        #[cfg(unix)]
+        assert!(ha_dir.is_symlink());
+
+        // Remove source files and fetch into a fresh output_base with downloads disabled to prove
+        // the repo_contents_cache entry satisfies subsequent fetches cross-platform.
+        std::fs::remove_file(&payload).unwrap();
+        std::fs::remove_file(&archive_path).unwrap();
+        let rt_cached = Rt::new(
+            ExternalOptions {
+                output_base: base.join("ob2"),
+                workspace_root: ws,
+                repo_contents_cache: Some(rcc),
+                disable_download: true,
+                ..Default::default()
+            },
+            res,
+        );
+        let ha_cached_dir = rt_cached.fetch_repo(ha_canon).unwrap();
+        assert_eq!(
+            std::fs::read(ha_cached_dir.join("extra.bin")).unwrap(),
+            b"non-ascii-ok"
         );
         let _ = std::fs::remove_dir_all(&base);
     }
