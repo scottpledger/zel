@@ -515,9 +515,11 @@ impl ToolchainFeatures {
         }
         let mut patterns: HashMap<String, (String, String)> = HashMap::new();
         for p in artifact_name_patterns {
-            check_type(&p, "artifact_name_pattern")?;
-            let Some(cat) = opt_str(field(&p, "category_name")) else {
-                return err("Invalid toolchain configuration: artifact_name_pattern missing category_name");
+            check_type(p, "artifact_name_pattern")?;
+            let Some(cat) = opt_str(field(p, "category_name")) else {
+                return err(
+                    "Invalid toolchain configuration: artifact_name_pattern missing category_name",
+                );
             };
             let cat_upper = cat.to_ascii_uppercase();
             let Some((def_prefix, allowed_exts)) = artifact_category_spec(&cat_upper) else {
@@ -526,8 +528,8 @@ impl ToolchainFeatures {
             if cat != cat_upper.to_ascii_lowercase() {
                 return err(format!("Artifact category {cat} is not recognized"));
             }
-            let prefix = opt_str(field(&p, "prefix")).unwrap_or_default();
-            let extension = opt_str(field(&p, "extension")).unwrap_or_default();
+            let prefix = opt_str(field(p, "prefix")).unwrap_or_default();
+            let extension = opt_str(field(p, "extension")).unwrap_or_default();
             if !allowed_exts.contains(&extension.as_str()) {
                 let formatted_exts: Vec<String> =
                     allowed_exts.iter().map(|e| format!("'{e}'")).collect();
@@ -1474,9 +1476,12 @@ mod tests {
             ("prefix", Value::String("lib".into())),
             ("extension", Value::String(".dylib".into())),
         ]);
-        let tf = ToolchainFeatures::new_with_os(&[], &[], &[valid_pat], "", Some("DARWIN"), &|_| None).unwrap();
+        let tf =
+            ToolchainFeatures::new_with_os(&[], &[], &[valid_pat], "", Some("DARWIN"), &|_| None)
+                .unwrap();
         assert_eq!(
-            tf.artifact_name_for_category("dynamic_library", "dir//foo").unwrap(),
+            tf.artifact_name_for_category("dynamic_library", "dir//foo")
+                .unwrap(),
             "dir/libfoo.dylib"
         );
 
@@ -1488,22 +1493,36 @@ mod tests {
         let e = ToolchainFeatures::new_with_os(&[], &[], &[bad_ext], "", Some("LINUX"), &|_| None)
             .err()
             .unwrap();
-        assert!(e.0.contains("Unrecognized file extension '.bad'"), "{}", e.0);
+        assert!(
+            e.0.contains("Unrecognized file extension '.bad'"),
+            "{}",
+            e.0
+        );
 
         let bad_os = ToolchainFeatures::new_with_os(&[], &[], &[], "", Some("SOLARIS"), &|_| None)
             .err()
             .unwrap();
         assert!(bad_os.0.contains("SOLARIS"), "{}", bad_os.0);
 
-        let win_tool = mk_struct(vec![("path", Value::String(r"C:\msvc\bin\..\cl.exe".into()))]);
+        let win_tool = mk_struct(vec![(
+            "path",
+            Value::String(r"C:\msvc\bin\..\cl.exe".into()),
+        )]);
         let win_ac = mk_struct(vec![
             ("action_name", Value::String("c-compile".into())),
             ("enabled", Value::Bool(true)),
             ("tools", mk_list(vec![win_tool])),
         ]);
         let wtf = Arc::new(
-            ToolchainFeatures::new_with_os(&[], &[win_ac], &[], "crosstool", Some("WINDOWS"), &|_| None)
-                .unwrap(),
+            ToolchainFeatures::new_with_os(
+                &[],
+                &[win_ac],
+                &[],
+                "crosstool",
+                Some("WINDOWS"),
+                &|_| None,
+            )
+            .unwrap(),
         );
         let wfc = wtf.configure(&[]).unwrap();
         assert_eq!(
@@ -1539,7 +1558,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             buckets,
-            vec![("unfiltered_compile_flags".to_string(), vec!["-DPIC=1".to_string()])]
+            vec![(
+                "unfiltered_compile_flags".to_string(),
+                vec!["-DPIC=1".to_string()]
+            )]
         );
     }
 }

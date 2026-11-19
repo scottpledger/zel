@@ -992,7 +992,11 @@ pub fn rule_class_toolchain_types(rule: &RuleInstance) -> Vec<Label> {
                 if s.fields.contains_key("toolchain_type")
                     || s.fields.contains_key("_toolchain_type") =>
             {
-                match s.fields.get("toolchain_type").or_else(|| s.fields.get("name")) {
+                match s
+                    .fields
+                    .get("toolchain_type")
+                    .or_else(|| s.fields.get("name"))
+                {
                     Some(Value::Label(l)) => Some(l.clone()),
                     Some(Value::String(n)) => Label::parse_canonical(n).ok(),
                     _ => None,

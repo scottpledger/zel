@@ -187,7 +187,7 @@ impl PackageLoader {
                 if is_exec_tr && pkg.repository().name() != "_builtins" {
                     return Err(herr(
                         ctx,
-                        "exec_transition() can only be used in @_builtins".to_string(),
+                        "exec_transition() can only be used in @_builtins",
                     ));
                 }
                 check_kwargs(name, &kw, &["implementation", "inputs", "outputs"])
@@ -310,6 +310,125 @@ impl PackageLoader {
                 f.insert("_config_feature_flag_transition".into(), Value::Bool(true));
                 f.insert("_transition".into(), Value::Bool(true));
                 return Ok(Value::Struct(Arc::new(StructValue::new(f))));
+            }
+            "testing.analysis_test" => {
+                let Some(st) = state else {
+                    return Err(herr(
+                        ctx,
+                        "analysis_test can only be called in a BUILD thread",
+                    ));
+                };
+                check_kwargs(
+                    "analysis_test",
+                    &kw,
+                    &[
+                        "name",
+                        "implementation",
+                        "attrs",
+                        "fragments",
+                        "toolchains",
+                        "attr_values",
+                    ],
+                )
+                .map_err(|e| herr(ctx, e))?;
+                let raw_name = arg(&pos, &kw, 0, "name").cloned().ok_or_else(|| {
+                    herr(
+                        ctx,
+                        "analysis_test() missing 1 required argument: name",
+                    )
+                })?;
+                let Value::String(target_name) = raw_name else {
+                    return Err(herr(
+                        ctx,
+                        type_mismatch("name", &raw_name, "string", "analysis_test"),
+                    ));
+                };
+                let valid_name = !target_name.is_empty()
+                    && target_name
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && target_name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid_name {
+                    return Err(herr(
+                        ctx,
+                        format!(
+                            "'name' must be a valid Starlark identifier matching '[A-Za-z_][A-Za-z0-9_]*', got '{target_name}'"
+                        ),
+                    ));
+                }
+                let imp = arg(&pos, &kw, 1, "implementation").cloned().ok_or_else(|| {
+                    herr(
+                        ctx,
+                        "analysis_test() missing 1 required argument: implementation",
+                    )
+                })?;
+                let mut inst_kw: BTreeMap<String, Value> = BTreeMap::new();
+                if let Some(av) = kw.get("attr_values").or_else(|| pos.get(5)) {
+                    let Value::Dict(d) = av else {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch("attr_values", av, "dict", "analysis_test"),
+                        ));
+                    };
+                    for (k, v) in d.lock().unwrap().items() {
+                        let Value::String(ks) = k else {
+                            return Err(herr(ctx, "attr_values keys must be strings"));
+                        };
+                        if ks == "name" {
+                            return Err(herr(
+                                ctx,
+                                "'name' cannot be set or overridden in 'attr_values'",
+                            ));
+                        }
+                        inst_kw.insert(ks, v);
+                    }
+                }
+                let mut rule_kw: BTreeMap<String, Value> = BTreeMap::new();
+                rule_kw.insert("implementation".into(), imp);
+                rule_kw.insert("test".into(), Value::Bool(true));
+                rule_kw.insert("analysis_test".into(), Value::Bool(true));
+                for (i, k) in [(2usize, "attrs"), (3, "fragments"), (4, "toolchains")] {
+                    if let Some(v) = arg(&pos, &kw, i, k) {
+                        rule_kw.insert(k.to_string(), v.clone());
+                    }
+                }
+                let Value::Host(_, id) = self.define_rule(ctx, owner, Vec::new(), rule_kw)? else {
+                    return Err(herr(ctx, "internal error creating analysis_test rule"));
+                };
+                let idx: usize = id.parse().unwrap_or(usize::MAX);
+                let rc_name = format!("{target_name}_test");
+                let rc_arc = {
+                    let mut reg = self.registry.lock().unwrap();
+                    let r = reg
+                        .rules
+                        .get_mut(idx)
+                        .ok_or_else(|| herr(ctx, "internal error looking up analysis_test rule"))?;
+                    r.name = Some(rc_name.clone());
+                    let mut rc = crate::rule_class::starlark_rule_class(
+                        &rc_name,
+                        r.attrs.clone(),
+                        r.executable,
+                        r.test,
+                        r.outputs.clone(),
+                        r.build_setting,
+                    );
+                    rc.outputs_fn = r.outputs_fn.clone();
+                    rc.starlark = Some(Arc::new(crate::rule_class::StarlarkRuleSpec {
+                        implementation: r.implementation.clone(),
+                        kwargs: r.kwargs.clone(),
+                        defined_in: format!("{}//BUILD", owner.canonical_form()),
+                        definition_digest: String::new(),
+                        definition_stack: r.definition_stack.clone(),
+                    }));
+                    let arc = Arc::new(rc);
+                    r.class = Some(arc.clone());
+                    arc
+                };
+                inst_kw.insert("name".into(), Value::String(target_name));
+                return self.instantiate_rule(ctx, st, &rc_arc, &[], inst_kw);
             }
             "analysis_test_transition" => {
                 let settings = arg(&pos, &kw, 0, "settings").cloned().ok_or_else(|| {
@@ -1599,7 +1718,11 @@ impl PackageLoader {
         // `ComputedDefault`s over `PackageArgs`, so query output omits them.
         let mut pkg_default_attrs: Vec<String> = Vec::new();
         let mut own_features: Option<AttrValue> = None;
-        if !rc.is_test && rc.attr("testonly").is_some() && !values.contains_key("testonly") {
+        if !rc.is_test
+            && rc.name != "test_suite"
+            && rc.attr("testonly").is_some()
+            && !values.contains_key("testonly")
+        {
             if let Some(t) = s.args.default_testonly {
                 values.insert("testonly".into(), AttrValue::Bool(t));
                 pkg_default_attrs.push("testonly".into());

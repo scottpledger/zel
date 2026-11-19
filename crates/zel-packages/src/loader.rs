@@ -579,6 +579,20 @@ impl PackageLoader {
         self.bzl_cache.lock().unwrap().clear();
     }
 
+    /// Canonical repository names of all `.bzl` modules loaded so far (excluding `@_builtins`).
+    pub fn loaded_bzl_repos(&self) -> Vec<String> {
+        let mut repos = std::collections::BTreeSet::new();
+        for k in self.bzl_cache.lock().unwrap().keys() {
+            if let Ok(lbl) = Label::parse_canonical(k) {
+                let r = lbl.package_identifier().repository().name().to_string();
+                if r != "_builtins" {
+                    repos.insert(r);
+                }
+            }
+        }
+        repos.into_iter().collect()
+    }
+
     fn fs(&self) -> &dyn FileSystem {
         self.cfg.lookup.fs.as_ref()
     }
@@ -989,6 +1003,31 @@ impl PackageLoader {
             ctx.globals
                 .entry(n.to_string())
                 .or_insert_with(|| Value::BuiltinFunction(n.to_string()));
+        }
+        let host = |n: &str| Value::BuiltinFunction(format!("host:{n}"));
+        ctx.globals.entry("testing".into()).or_insert_with(|| {
+            mk_struct(vec![
+                ("ExecutionInfo", provider("ExecutionInfo")),
+                ("TestEnvironment", provider("TestEnvironment")),
+                ("analysis_test", host("testing.analysis_test")),
+            ])
+        });
+        ctx.globals
+            .entry("coverage_common".into())
+            .or_insert_with(|| {
+                mk_struct(vec![(
+                    "instrumented_files_info",
+                    host("coverage_common.instrumented_files_info"),
+                )])
+            });
+        for p in [
+            "InstrumentedFilesInfo",
+            "AnalysisFailureInfo",
+            "AnalysisTestResultInfo",
+        ] {
+            ctx.globals
+                .entry(p.to_string())
+                .or_insert_with(|| provider(p));
         }
     }
 

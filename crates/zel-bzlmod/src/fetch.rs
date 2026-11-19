@@ -84,12 +84,25 @@ pub fn marker_is_current(
     ws: &Path,
     external: &Path,
 ) -> bool {
+    marker_is_current_with_lookup(content, fp, env, ws, external, None)
+}
+
+#[allow(clippy::type_complexity)]
+pub fn marker_is_current_with_lookup(
+    content: &str,
+    fp: &str,
+    env: &BTreeMap<String, String>,
+    ws: &Path,
+    external: &Path,
+    lookup: Option<&dyn Fn(&str) -> Option<BTreeMap<String, String>>>,
+) -> bool {
     let mut lines = content.split('\n').filter(|l| !l.is_empty());
     if lines.next() != Some(fp) {
         return false;
     }
     let rest: Vec<String> = lines.map(String::from).collect();
-    crate::lockfile::recorded_inputs_outdated(&rest, env, ws, external).is_none()
+    crate::lockfile::recorded_inputs_outdated_with_lookup(&rest, env, ws, external, lookup)
+        .is_none()
 }
 
 impl Rt {
@@ -421,13 +434,15 @@ impl Rt {
         let can_use_cached =
             !self.opts.force && !force_configure && (!is_local || self.opts.nofetch);
         let fp = self.predeclared_input_hash(canonical, &spec);
+        let lookup = |src: &str| self.try_repo_mapping_of(src);
         let marker_ok = |m: &str| {
-            marker_is_current(
+            marker_is_current_with_lookup(
                 m,
                 &fp,
                 &self.opts.client_env,
                 &self.opts.workspace_root,
                 &self.external_dir(),
+                Some(&lookup),
             )
         };
         if can_use_cached && dir.exists() {
@@ -1413,11 +1428,13 @@ impl Rt {
                         "the usages of the extension '{ext_display}' have changed"
                     ));
                 }
-                if let Some(r) = crate::lockfile::recorded_inputs_outdated(
+                let lookup = |src: &str| self.try_repo_mapping_of(src);
+                if let Some(r) = crate::lockfile::recorded_inputs_outdated_with_lookup(
                     &le.recorded_inputs,
                     &self.opts.client_env,
                     &self.opts.workspace_root,
                     &self.external_dir(),
+                    Some(&lookup),
                 ) {
                     diffs.push(format!(
                         "an input to the extension '{ext_display}' changed: {r}"

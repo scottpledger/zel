@@ -697,11 +697,7 @@ fn set_setting_with_spec(
     } else {
         render_java(&def_val, false)?
     };
-    let new_rendered = if spec.allow_multiple || spec.ty == "string_list" || spec.ty == "string_set" {
-        crate::starlark_rule::render_flag_value(&spec.ty, &raw_new)
-    } else {
-        crate::starlark_rule::render_flag_value(&spec.ty, &raw_new)
-    };
+    let new_rendered = crate::starlark_rule::render_flag_value(&spec.ty, &raw_new);
     let before_val = setting_value_with_spec(cfg, key, Some(spec));
     let before_java = if cfg.flag_values.contains_key(resolved) {
         if let Value::Set(s) = &before_val {

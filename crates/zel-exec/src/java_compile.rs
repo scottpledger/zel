@@ -432,18 +432,27 @@ pub fn create_full_output_deps(
                             inner_out.extend_from_slice(&payload[itag_start..j]);
                         }
                         (_, 1) => {
-                            let iend = j.checked_add(8).filter(|e| *e <= payload.len()).ok_or("truncated fixed64")?;
+                            let iend = j
+                                .checked_add(8)
+                                .filter(|e| *e <= payload.len())
+                                .ok_or("truncated fixed64")?;
                             inner_out.extend_from_slice(&payload[itag_start..iend]);
                             j = iend;
                         }
                         (_, 2) => {
                             let ilen = varint(payload, &mut j)? as usize;
-                            let iend = j.checked_add(ilen).filter(|e| *e <= payload.len()).ok_or("truncated field")?;
+                            let iend = j
+                                .checked_add(ilen)
+                                .filter(|e| *e <= payload.len())
+                                .ok_or("truncated field")?;
                             inner_out.extend_from_slice(&payload[itag_start..iend]);
                             j = iend;
                         }
                         (_, 5) => {
-                            let iend = j.checked_add(4).filter(|e| *e <= payload.len()).ok_or("truncated fixed32")?;
+                            let iend = j
+                                .checked_add(4)
+                                .filter(|e| *e <= payload.len())
+                                .ok_or("truncated fixed32")?;
                             inner_out.extend_from_slice(&payload[itag_start..iend]);
                             j = iend;
                         }
@@ -459,18 +468,27 @@ pub fn create_full_output_deps(
                 out.extend_from_slice(&bytes[tag_start..i]);
             }
             (_, 1) => {
-                let end = i.checked_add(8).filter(|e| *e <= bytes.len()).ok_or("truncated fixed64")?;
+                let end = i
+                    .checked_add(8)
+                    .filter(|e| *e <= bytes.len())
+                    .ok_or("truncated fixed64")?;
                 out.extend_from_slice(&bytes[tag_start..end]);
                 i = end;
             }
             (_, 2) => {
                 let len = varint(bytes, &mut i)? as usize;
-                let end = i.checked_add(len).filter(|e| *e <= bytes.len()).ok_or("truncated field")?;
+                let end = i
+                    .checked_add(len)
+                    .filter(|e| *e <= bytes.len())
+                    .ok_or("truncated field")?;
                 out.extend_from_slice(&bytes[tag_start..end]);
                 i = end;
             }
             (_, 5) => {
-                let end = i.checked_add(4).filter(|e| *e <= bytes.len()).ok_or("truncated fixed32")?;
+                let end = i
+                    .checked_add(4)
+                    .filter(|e| *e <= bytes.len())
+                    .ok_or("truncated fixed32")?;
                 out.extend_from_slice(&bytes[tag_start..end]);
                 i = end;
             }

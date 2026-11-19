@@ -1700,6 +1700,10 @@ pub struct ConfiguredTarget {
     pub actual: Option<std::sync::Arc<ConfiguredTarget>>,
     /// Non-`None` when this target is incompatible with the target platform (`target_compatible_with`).
     pub incompatible: Option<IncompatiblePlatform>,
+    /// Execution group selected for the `TestRunner` action of a test target (`ExecutionInfo.exec_group`).
+    pub test_exec_group: Option<String>,
+    /// Execution platform resolved for `test_exec_group` on a test target.
+    pub test_execution_platform: Option<String>,
 }
 
 /// Reason a configured target is incompatible with its target platform (`IncompatiblePlatformProvider`).
@@ -1759,6 +1763,8 @@ impl ConfiguredTarget {
             alias_targets: Vec::new(),
             actual: None,
             incompatible: None,
+            test_exec_group: None,
+            test_execution_platform: None,
         }
     }
 
@@ -1886,7 +1892,9 @@ fn constraint_setting_label(v: &zel_starlark::Value) -> Option<Label> {
         zel_starlark::Value::ProviderInstance {
             provider_name,
             fields,
-        } if provider_name == "ConstraintSettingInfo" || provider_name.ends_with("%ConstraintSettingInfo") => {
+        } if provider_name == "ConstraintSettingInfo"
+            || provider_name.ends_with("%ConstraintSettingInfo") =>
+        {
             match fields.get("label") {
                 Some(zel_starlark::Value::Label(l)) => Some(l.clone()),
                 _ => None,
@@ -1901,7 +1909,9 @@ fn constraint_value_label(v: &zel_starlark::Value) -> Option<Label> {
         zel_starlark::Value::ProviderInstance {
             provider_name,
             fields,
-        } if provider_name == "ConstraintValueInfo" || provider_name.ends_with("%ConstraintValueInfo") => {
+        } if provider_name == "ConstraintValueInfo"
+            || provider_name.ends_with("%ConstraintValueInfo") =>
+        {
             match fields.get("label") {
                 Some(zel_starlark::Value::Label(l)) => Some(l.clone()),
                 _ => None,
@@ -1972,7 +1982,10 @@ fn cc_lookup_explicit(
     setting_canon: &str,
 ) -> Option<zel_starlark::Value> {
     for (s, v) in &cc.entries {
-        if constraint_setting_label(s).as_ref().map(Label::canonical_form).as_deref()
+        if constraint_setting_label(s)
+            .as_ref()
+            .map(Label::canonical_form)
+            .as_deref()
             == Some(setting_canon)
         {
             return Some(v.clone());

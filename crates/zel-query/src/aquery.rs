@@ -371,6 +371,12 @@ fn executable_actions(
         tr.outputs.push(out_art("test.outputs", true));
         tr.use_default_shell_env = true;
         tr.apply_configuration_env(cfg);
+        if let Some(grp) = &ct.test_exec_group {
+            tr.exec_group = Some(grp.clone());
+        }
+        if let Some(plat) = &ct.test_execution_platform {
+            tr.exec_platform = Some(plat.clone());
+        }
         // `TestTargetProperties`: the `testing.ExecutionInfo` provider's requirements.
         if let Some(zel_starlark::Value::ProviderInstance { fields, .. }) =
             ct.providers.get("ExecutionInfo")

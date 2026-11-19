@@ -284,7 +284,12 @@ fn compute_transitive_headers(
         }
     }
     for dep in deps {
-        dfs(dep, &mut visited_ids, &largest_dep.transitive_headers, &mut out);
+        dfs(
+            dep,
+            &mut visited_ids,
+            &largest_dep.transitive_headers,
+            &mut out,
+        );
     }
     out.extend(largest_dep.transitive_headers.iter().cloned());
     out
@@ -309,7 +314,9 @@ pub fn header_info_attr(attr: &str, pos: &[Value]) -> Result<Value, StarlarkErro
         "modular_private_headers" => Ok(frozen_list_value(hi.modular_private_headers.clone())),
         "textual_headers" => Ok(frozen_list_value(hi.textual_headers.clone())),
         "separate_module_headers" => Ok(frozen_list_value(hi.separate_module_headers.clone())),
-        other => err(format!("'HeaderInfo' value has no field or method '{other}'")),
+        other => err(format!(
+            "'HeaderInfo' value has no field or method '{other}'"
+        )),
     }
 }
 
@@ -537,7 +544,7 @@ pub fn call(name: &str, pos: Vec<Value>, kw: Kwargs) -> Result<Value, StarlarkEr
             Ok(variables_from_dict(None, &vars)?)
         }
         "combine_cc_toolchain_variables" => {
-            if !kw.is_empty() && !(kw.len() == 1 && kw.contains_key("parent")) {
+            if kw.keys().any(|k| k != "parent") {
                 return err("combine_cc_toolchain_variables: unexpected keyword argument");
             }
             let parent_val = kwarg(&pos, &kw, 0, "parent").ok_or_else(|| {
@@ -700,12 +707,18 @@ mod tests {
         );
         kw.insert(
             "modular_private_headers".into(),
-            list(vec![Value::String("priv.inc".into()), Value::String("p.h".into())]),
+            list(vec![
+                Value::String("priv.inc".into()),
+                Value::String("p.h".into()),
+            ]),
         );
         let base = call("create_header_info", vec![], kw).unwrap();
         let bd = get_header_info(&base).unwrap();
         assert_eq!(bd.modular_public_headers, vec![Value::String("a.h".into())]);
-        assert_eq!(bd.modular_private_headers, vec![Value::String("p.h".into())]);
+        assert_eq!(
+            bd.modular_private_headers,
+            vec![Value::String("p.h".into())]
+        );
         assert_eq!(
             bd.textual_headers,
             vec![

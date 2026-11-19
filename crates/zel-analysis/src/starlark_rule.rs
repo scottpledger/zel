@@ -77,6 +77,11 @@ pub trait DepResolver: Send + Sync {
         Vec::new()
     }
 
+    /// Canonical repository names of all transitively loaded packages and `.bzl` modules.
+    fn loaded_package_repos(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The loaded rule instance behind `label` (`None` for files, package groups, ...).
     /// Needed to apply aspects (`ctx.rule`).
     fn rule_instance(&self, _label: &Label) -> Result<Option<RuleInstance>, String> {
@@ -341,11 +346,13 @@ impl CtxState {
     /// Repo-mapping manifest entries for `runfiles` of this target (`RepoMappingManifestAction`).
     pub fn repo_mapping_for(&self, rf: &Runfiles) -> Vec<(String, String, String)> {
         let resolver = self.inputs.resolver.clone();
-        crate::repo_mapping::repo_mapping_entries(
+        let extra_sources = self.inputs.resolver.loaded_package_repos();
+        crate::repo_mapping::repo_mapping_entries_with_sources(
             &move |r: &str| resolver.repo_mapping_entries(r),
             &self.inputs.workspace_name,
             rf,
             self.label.package_identifier().repository().name(),
+            &extra_sources,
             self.inputs.compact_repo_mapping,
         )
     }

@@ -348,16 +348,26 @@ pub fn apple_multi_arch_platform(
         apple_cpus_for_platform(&o, &ptype)?[0].clone()
     };
     let target_cpu = if ptype == "macos" {
-        format!("darwin_{}", raw_cpu.strip_prefix("darwin_").unwrap_or(&raw_cpu))
+        format!(
+            "darwin_{}",
+            raw_cpu.strip_prefix("darwin_").unwrap_or(&raw_cpu)
+        )
     } else {
         let prefix = format!("{ptype}_");
-        format!("{ptype}_{}", raw_cpu.strip_prefix(&prefix).unwrap_or(&raw_cpu))
+        format!(
+            "{ptype}_{}",
+            raw_cpu.strip_prefix(&prefix).unwrap_or(&raw_cpu)
+        )
     };
     apple_platform_for_target_cpu(&target_cpu)
 }
 
 /// Validates and normalizes a `StrictDepsMode` option (`ERROR`, `OFF`, `WARN`, `STRICT`, `DEFAULT`).
-pub fn strict_deps_mode_upper(cfg: &BuildConfigurationKey, option: &str, default: &str) -> Result<String, String> {
+pub fn strict_deps_mode_upper(
+    cfg: &BuildConfigurationKey,
+    option: &str,
+    default: &str,
+) -> Result<String, String> {
     let o = Opts::new(cfg);
     let raw = o.s(option, default);
     let upper = raw.to_ascii_uppercase();
@@ -466,7 +476,10 @@ pub fn detokenize_java_options(opts: &[String]) -> String {
             if !t.is_empty()
                 && t.bytes().all(|b| {
                     b.is_ascii_alphanumeric()
-                        || matches!(b, b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'+' | b',' | b'@')
+                        || matches!(
+                            b,
+                            b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'+' | b',' | b'@'
+                        )
                 })
             {
                 t.clone()
@@ -503,8 +516,11 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                 );
             }
             copts.extend(raw_copts.iter().cloned().map(Value::String));
-            let mut linkopts: Vec<Value> =
-                o.list_unsplit("linkopt").into_iter().map(Value::String).collect();
+            let mut linkopts: Vec<Value> = o
+                .list_unsplit("linkopt")
+                .into_iter()
+                .map(Value::String)
+                .collect();
             if omitfp {
                 linkopts.push(sv("-Wl,--eh-frame-hdr"));
             }
@@ -853,17 +869,24 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                 }),
             ),
         ]),
-        "py" => mk_struct(vec![
-            ("default_python_version", sv("PY3")),
-            (
-                "build_python_zip",
-                Value::Bool(o.b("build_python_zip", cfg_is_windows())),
-            ),
-            (
-                "default_to_explicit_init_py",
-                Value::Bool(o.b("incompatible_default_to_explicit_init_py", false)),
-            ),
-        ]),
+        "py" => {
+            let build_zip = match o.raw("build_python_zip") {
+                Some(v) => match v.trim().to_ascii_lowercase().as_str() {
+                    "true" | "yes" | "1" => true,
+                    "false" | "no" | "0" => false,
+                    _ => cfg_is_windows(),
+                },
+                None => cfg_is_windows(),
+            };
+            mk_struct(vec![
+                ("default_python_version", sv("PY3")),
+                ("build_python_zip", Value::Bool(build_zip)),
+                (
+                    "default_to_explicit_init_py",
+                    Value::Bool(o.b("incompatible_default_to_explicit_init_py", false)),
+                ),
+            ])
+        }
         "proto" => {
             let hdr_suffixes: Vec<Value> = if o.has_explicit("cc_proto_library_header_suffixes") {
                 let mut v: Vec<String> = o
@@ -998,10 +1021,7 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                 f("ios_simulator_device", o.opt_s("ios_simulator_device")),
                 f("ios_simulator_version", o.dotted("ios_simulator_version")),
                 f("run_memleaks", Value::Bool(o.b("ios_memleaks", false))),
-                f(
-                    "signing_certificate_name",
-                    o.opt_s("ios_signing_cert_name"),
-                ),
+                f("signing_certificate_name", o.opt_s("ios_signing_cert_name")),
                 f(
                     "uses_device_debug_entitlements",
                     Value::Bool(o.b("device_debug_entitlements", true) && mode != "opt"),
@@ -1150,9 +1170,8 @@ pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey)
         ("proto", "proto_toolchain_for_cc") => {
             opt("proto_toolchain_for_cc").or_else(|| tools("tools/proto:cc_toolchain"))
         }
-        ("proto", "proto_toolchain_for_j2objc") => {
-            opt("proto_toolchain_for_j2objc").or_else(|| tools("tools/j2objc:j2objc_proto_toolchain"))
-        }
+        ("proto", "proto_toolchain_for_j2objc") => opt("proto_toolchain_for_j2objc")
+            .or_else(|| tools("tools/j2objc:j2objc_proto_toolchain")),
         ("cpp", "crosstool_top") => {
             if o.has_explicit("crosstool_top")
                 || !o.b("incompatible_enable_cc_toolchain_resolution", true)
@@ -1181,6 +1200,7 @@ pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey)
             }
         }
         ("java", "launcher") => opt("java_launcher"),
+        ("py", "native_rules_allowlist") => opt("python_native_rules_allowlist"),
         ("coverage", "output_generator") => {
             if o.b("collect_code_coverage", false) {
                 tools("tools/test:lcov_merger")
@@ -1253,8 +1273,10 @@ mod tests {
             late_bound_label("apple", "xcode_config_label", &cfg).unwrap(),
             Label::parse_canonical("@@bazel_tools//tools/cpp:host_xcodes").unwrap()
         );
-        let mut core_cfg = BuildConfigurationKey::default();
-        core_cfg.core_only = true;
+        let core_cfg = BuildConfigurationKey {
+            core_only: true,
+            ..Default::default()
+        };
         assert_eq!(
             late_bound_label("apple", "xcode_config_label", &core_cfg).unwrap(),
             Label::parse_canonical("@@bazel_tools//tools/objc:host_xcodes").unwrap()
@@ -1302,8 +1324,10 @@ mod tests {
 
     #[test]
     fn objc_fragment_copts_and_simulator_fields() {
-        let mut cfg = BuildConfigurationKey::default();
-        cfg.compilation_mode = "fastbuild".into();
+        let mut cfg = BuildConfigurationKey {
+            compilation_mode: "fastbuild".into(),
+            ..Default::default()
+        };
         set_scalar(&mut cfg, "ios_simulator_device", "iPhone 15");
         set_scalar(&mut cfg, "ios_simulator_version", "17.2");
         set_scalar(&mut cfg, "ios_memleaks", "true");
@@ -1312,7 +1336,10 @@ mod tests {
             struct_field(&objc, "copts_for_current_compilation_mode"),
             &mk_list(vec![sv("-O0"), sv("-DDEBUG=1")])
         );
-        assert_eq!(struct_field(&objc, "ios_simulator_device"), &sv("iPhone 15"));
+        assert_eq!(
+            struct_field(&objc, "ios_simulator_device"),
+            &sv("iPhone 15")
+        );
         assert_eq!(
             struct_field(&objc, "ios_simulator_version"),
             &Value::Host("dotted_version".into(), "17.2".into())
@@ -1338,10 +1365,7 @@ mod tests {
             "protocopt".into(),
             crate::NativeSetting {
                 raw: "--foo=a,b,".into(),
-                value: crate::build_options::ConfigValue::List(vec![
-                    "--foo=a,b".into(),
-                    "".into(),
-                ]),
+                value: crate::build_options::ConfigValue::List(vec!["--foo=a,b".into(), "".into()]),
             },
         );
         set_scalar(&mut cfg, "strict_proto_deps", "strict");
@@ -1468,6 +1492,35 @@ mod tests {
         assert_eq!(
             late_bound_label("java", "launcher", &cfg),
             Some(Label::parse_canonical("@@//tools/jdk:custom_launcher").unwrap())
+        );
+    }
+
+    #[test]
+    fn py_fragment_build_python_zip_tristate_and_explicit_init_py() {
+        let mut cfg = BuildConfigurationKey::default();
+        set_scalar(&mut cfg, "build_python_zip", "yes");
+        set_scalar(&mut cfg, "incompatible_default_to_explicit_init_py", "true");
+        set_scalar(
+            &mut cfg,
+            "python_native_rules_allowlist",
+            "//tools/py:allowlist",
+        );
+        let py = fragment_checked("py", &cfg).unwrap().unwrap();
+        assert_eq!(struct_field(&py, "build_python_zip"), &Value::Bool(true));
+        assert_eq!(
+            struct_field(&py, "default_to_explicit_init_py"),
+            &Value::Bool(true)
+        );
+        assert_eq!(
+            late_bound_label("py", "native_rules_allowlist", &cfg),
+            Some(Label::parse_canonical("@@//tools/py:allowlist").unwrap())
+        );
+
+        set_scalar(&mut cfg, "build_python_zip", "no");
+        let py_no = fragment_checked("py", &cfg).unwrap().unwrap();
+        assert_eq!(
+            struct_field(&py_no, "build_python_zip"),
+            &Value::Bool(false)
         );
     }
 }

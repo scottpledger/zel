@@ -149,6 +149,7 @@ fn actual_option_scalar(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn match_starlark_flag_entry(
     n: &Nctx,
     attr_name: &str,
@@ -450,8 +451,7 @@ pub(crate) fn config_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
                     "values:{canonical}={}",
                     option_value_to_string(&converted)
                 ));
-                if d.allow_multiple
-                    || matches!(converted, zel_options::types::OptionValue::List(_))
+                if d.allow_multiple || matches!(converted, zel_options::types::OptionValue::List(_))
                 {
                     let act_list = actual_option_list(n.cfg, &bo, canonical);
                     match &converted {
@@ -1015,8 +1015,11 @@ pub(crate) fn toolchain(n: &Nctx) -> Result<ConfiguredTarget, String> {
     let tt_ct = n.resolver.configured_target(&ty, &core_cfg)?;
     n.resolver
         .check_dependency(n.rule, "toolchain_type", &tt_ct)?;
-    let Some(tt_info @ Value::ProviderInstance { fields: tt_fields, .. }) =
-        tt_ct.providers.get("ToolchainTypeInfo")
+    let Some(
+        tt_info @ Value::ProviderInstance {
+            fields: tt_fields, ..
+        },
+    ) = tt_ct.providers.get("ToolchainTypeInfo")
     else {
         return Err(format!(
             "{}: attribute 'toolchain_type': '{}' does not have mandatory providers: 'ToolchainTypeInfo'",
@@ -1028,7 +1031,10 @@ pub(crate) fn toolchain(n: &Nctx) -> Result<ConfiguredTarget, String> {
         Some(Value::Label(l)) => l.clone(),
         _ => ty.clone(),
     };
-    let check_constraints = |attr_key: &str, desc: &str, labels: &[Label]| -> Result<Vec<Value>, String> {
+    let check_constraints = |attr_key: &str,
+                             desc: &str,
+                             labels: &[Label]|
+     -> Result<Vec<Value>, String> {
         let mut seen: BTreeMap<String, Label> = BTreeMap::new();
         let mut resolved_out = Vec::with_capacity(labels.len());
         for raw in labels {
@@ -1072,8 +1078,16 @@ pub(crate) fn toolchain(n: &Nctx) -> Result<ConfiguredTarget, String> {
         }
         Ok(resolved_out)
     };
-    let exec_cv_list = check_constraints("exec_compatible_with", "execution constraints", &exec_labels)?;
-    let target_cv_list = check_constraints("target_compatible_with", "target constraints", &target_labels)?;
+    let exec_cv_list = check_constraints(
+        "exec_compatible_with",
+        "execution constraints",
+        &exec_labels,
+    )?;
+    let target_cv_list = check_constraints(
+        "target_compatible_with",
+        "target constraints",
+        &target_labels,
+    )?;
     let target_setting_labels = n.labels("target_settings")?;
     for ts in &target_setting_labels {
         let ts_ct = n.resolver.configured_target(ts, n.cfg)?;

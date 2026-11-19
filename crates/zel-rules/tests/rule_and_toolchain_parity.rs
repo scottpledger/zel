@@ -1089,7 +1089,9 @@ fn config_feature_flag_platform_flags_flag_alias_transition_and_fragments() {
         zel_analysis::fragments::late_bound_label("java", "launcher", &base_cfg),
         Some(Label::parse_canonical("@@//tools:custom_launcher").unwrap())
     );
-    let Value::Struct(apple_frag) = zel_analysis::fragments::fragment("apple", &base_cfg).unwrap()
+    let Value::Struct(apple_frag) = zel_analysis::fragments::fragment("apple", &base_cfg)
+        .unwrap()
+        .unwrap()
     else {
         panic!("expected apple struct");
     };
@@ -1097,7 +1099,8 @@ fn config_feature_flag_platform_flags_flag_alias_transition_and_fragments() {
         apple_frag
             .fields
             .get("ios_sdk_version_flag")
-            .and_then(|v| v.as_str()),
+            .map(|v| v.to_string())
+            .as_deref(),
         Some("17.2")
     );
 
@@ -1478,5 +1481,216 @@ no_files_rule(name = "bad_src", deps = [":src.cc"])
     assert!(
         invis_err.contains("Visibility error") && invis_err.contains("//tc:private_type"),
         "got: {invis_err}"
+    );
+}
+
+#[test]
+fn filegroup_missing_output_group_and_genrule_escapes_script_spill_and_stamp() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(&fs, &root, "a.txt", "a");
+    write(&fs, &root, "b.txt", "b");
+    let big_echo = "x".repeat(70_000);
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        &format!(
+            r#"
+filegroup(name = "base", srcs = ["a.txt"])
+filegroup(name = "missing_og", srcs = [":base"], output_group = "nonexistent_group")
+
+genrule(
+    name = "escaped_dollar",
+    srcs = ["a.txt", "b.txt"],
+    outs = ["esc.out"],
+    cmd = "echo $$(<) $$< > $@",
+    stamp = 1,
+    tags = ["requires-darwin", "block-network", "cpu:4", "disable-remote"],
+)
+
+genrule(
+    name = "spilled_script",
+    outs = ["spilled.out"],
+    cmd = "echo {big_echo} > $@",
+)
+"#
+        ),
+    );
+    let r = resolver_for(fs, root);
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+    // Missing output_group on filegroup yields empty files rather than failing analysis.
+    let fg = r
+        .analyze(&Label::parse_canonical("//:missing_og").unwrap(), &cfg)
+        .unwrap();
+    assert!(fg.default_info.files.is_empty());
+
+    // Escaped `$$(<)` and `$$<` with 2 srcs succeeds, stamps status files, and uses /bin/bash for requires-darwin.
+    let esc = r
+        .analyze(&Label::parse_canonical("//:escaped_dollar").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(esc.typed_actions.len(), 1);
+    let act = &esc.typed_actions[0];
+    assert!(act
+        .inputs
+        .iter()
+        .any(|i| i.exec_path.path_string() == "bazel-out/stable-status.txt"));
+    assert!(act
+        .inputs
+        .iter()
+        .any(|i| i.exec_path.path_string() == "bazel-out/volatile-status.txt"));
+    assert_eq!(
+        act.execution_requirements.get("cpu").map(String::as_str),
+        Some("4")
+    );
+    assert!(act.execution_requirements.contains_key("block-network"));
+    assert!(act.execution_requirements.contains_key("disable-remote"));
+    let zel_analysis::ActionKind::Spawn { executable, .. } = &act.kind else {
+        panic!("expected Spawn");
+    };
+    assert_eq!(executable, "/bin/bash");
+
+    // Commands > 64KB spill to `.genrule_script.sh` via a FileWrite action.
+    let spilled = r
+        .analyze(&Label::parse_canonical("//:spilled_script").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(spilled.typed_actions.len(), 2);
+    assert_eq!(spilled.typed_actions[0].mnemonic, "FileWrite");
+    assert!(spilled.typed_actions[0].outputs[0]
+        .exec_path
+        .path_string()
+        .ends_with("spilled_script.genrule_script.sh"));
+}
+
+#[test]
+fn analysis_test_in_build_thread_and_test_suite_semantics() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(
+        &fs,
+        &root,
+        "defs.bzl",
+        r##"
+def check_impl(ctx):
+    return [AnalysisTestResultInfo(success = True, message = "ok")]
+
+def _tok_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(exe, "#!/bin/sh\nexit 0\n", is_executable = True)
+    rf = ctx.runfiles(files = [exe])
+    return [
+        DefaultInfo(executable = exe, runfiles = rf),
+        testing.ExecutionInfo({"requires-network": ""}, exec_group = "custom_grp"),
+        testing.TestEnvironment({"MY_VAR": "1"}, inherited_environment = ["HOME"]),
+    ]
+
+custom_exec_test = rule(
+    implementation = _tok_impl,
+    test = True,
+    exec_groups = {"custom_grp": exec_group()},
+)
+"##,
+    );
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        r#"
+package(default_testonly = False)
+load(":defs.bzl", "check_impl", "custom_exec_test")
+
+testing.analysis_test(
+    name = "inline_check",
+    implementation = check_impl,
+)
+
+custom_exec_test(
+    name = "t_fast",
+    tags = ["fast"],
+)
+
+custom_exec_test(
+    name = "t_slow",
+    tags = ["slow"],
+)
+
+alias(
+    name = "alias_fast",
+    actual = ":t_fast",
+)
+
+test_suite(
+    name = "fast_suite",
+    tests = [":alias_fast", ":t_slow"],
+    tags = ["fast", "-slow", "manual"],
+)
+
+test_suite(
+    name = "implicit_suite",
+    tags = ["fast"],
+)
+"#,
+    );
+    let r = resolver_for(fs, root);
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+    let at = r
+        .analyze(&Label::parse_canonical("//:inline_check").unwrap(), &cfg)
+        .unwrap();
+    assert!(at.is_test);
+    assert_eq!(at.rule_class, "inline_check_test");
+
+    let t_fast = r
+        .analyze(&Label::parse_canonical("//:t_fast").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(t_fast.test_exec_group.as_deref(), Some("custom_grp"));
+    assert_eq!(
+        t_fast
+            .run_environment
+            .as_ref()
+            .and_then(|re| re.environment.get("MY_VAR"))
+            .map(String::as_str),
+        Some("1")
+    );
+
+    let suite = r
+        .analyze(&Label::parse_canonical("//:fast_suite").unwrap(), &cfg)
+        .unwrap();
+    // test_suite is testonly by default even when package(default_testonly = False), is_test = false,
+    // and omits compilation_outputs.
+    assert!(suite.testonly);
+    assert!(!suite.is_test);
+    assert!(!suite
+        .output_groups
+        .groups
+        .contains_key("compilation_outputs"));
+    let Value::ProviderInstance { fields, .. } = &suite.providers["TransitiveTestsInfo"] else {
+        panic!("expected TransitiveTestsInfo");
+    };
+    let Value::List(tests_list) = &fields["tests"] else {
+        panic!("expected tests list");
+    };
+    assert_eq!(
+        tests_list.lock().unwrap().elements,
+        vec![Value::Label(Label::parse_canonical("//:t_fast").unwrap())]
+    );
+
+    let imp_suite = r
+        .analyze(&Label::parse_canonical("//:implicit_suite").unwrap(), &cfg)
+        .unwrap();
+    let Value::ProviderInstance {
+        fields: imp_fields, ..
+    } = &imp_suite.providers["TransitiveTestsInfo"]
+    else {
+        panic!("expected TransitiveTestsInfo");
+    };
+    let Value::List(imp_list) = &imp_fields["tests"] else {
+        panic!("expected tests list");
+    };
+    assert_eq!(
+        imp_list.lock().unwrap().elements,
+        vec![Value::Label(Label::parse_canonical("//:t_fast").unwrap())]
+>>>>>>> 1638190f (Align genrule, filegroup, Python builtins, testing, test_suite, and repo recorded inputs with Bazel 9.3.2)
     );
 }

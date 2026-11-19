@@ -29,6 +29,9 @@ pub struct Runfiles {
     pub symlinks: BTreeMap<String, Artifact>,
     pub root_symlinks: BTreeMap<String, Artifact>,
     pub empty_filenames: Vec<String>,
+    /// Legacy Python `__init__.py` empty-files supplier (`GetInitPyFiles`): propagated across
+    /// `merge` and evaluated over the final manifest entries (after obscuring-symlink filtering).
+    pub generate_init_py_files: bool,
     pub suppress_init: bool,
     /// `Runfiles.ConflictPolicy`: true = ERROR (when symlinks were explicitly supplied without
     /// `skip_conflict_checking`), false = WARN.
@@ -114,6 +117,7 @@ impl Runfiles {
     pub fn merge(&self, other: &Runfiles) -> Runfiles {
         let mut out = self.clone();
         out.conflict_policy_error |= other.conflict_policy_error;
+        out.generate_init_py_files |= other.generate_init_py_files;
         if other.is_empty() {
             out.nested = self.nested_set();
             out.suppress_init |= other.suppress_init;
@@ -163,6 +167,35 @@ impl Runfiles {
         filter_obscuring_symlinks(&mut working);
         for e in &self.empty_filenames {
             working.insert(e.clone(), String::new());
+        }
+        if self.generate_init_py_files && !self.suppress_init {
+            let py_paths: Vec<String> = working
+                .keys()
+                .filter(|p| p.ends_with(".py") || p.ends_with(".so") || p.ends_with(".pyc"))
+                .cloned()
+                .collect();
+            let mut extra = Vec::new();
+            for p in &py_paths {
+                let mut cur = p.as_str();
+                while let Some((dir, _)) = cur.rsplit_once('/') {
+                    cur = dir;
+                    if cur.is_empty() || cur == ".." {
+                        break;
+                    }
+                    let seg = cur.rsplit('/').next().unwrap_or(cur);
+                    if seg == "__pycache__" {
+                        continue;
+                    }
+                    let init_py = format!("{cur}/__init__.py");
+                    let init_pyc = format!("{cur}/__init__.pyc");
+                    if !working.contains_key(&init_py) && !working.contains_key(&init_pyc) {
+                        extra.push(init_py);
+                    }
+                }
+            }
+            for init in extra {
+                working.entry(init).or_default();
+            }
         }
 
         let mut final_map = BTreeMap::new();
@@ -287,6 +320,65 @@ mod tests {
         let ext_entries = r_ext.manifest_entries("_main");
         assert_eq!(
             ext_entries.get("_main/.runfile").map(String::as_str),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn generated_init_py_supplier_propagates_across_merge_and_respects_pycache() {
+        let base_art = Artifact::source(
+            PathFragment::create("pkg/a.py"),
+            Label::parse_canonical("//pkg:a.py").unwrap(),
+        );
+        let later_art = Artifact::source(
+            PathFragment::create("later/sub/b.py"),
+            Label::parse_canonical("//later/sub:b.py").unwrap(),
+        );
+        let cache_art = Artifact::source(
+            PathFragment::create("cache_pkg/__pycache__/c.pyc"),
+            Label::parse_canonical("//cache_pkg:c.pyc").unwrap(),
+        );
+        let not_cache_art = Artifact::source(
+            PathFragment::create("my__pycache__/d.py"),
+            Label::parse_canonical("//my__pycache__:d.py").unwrap(),
+        );
+        let r_base = Runfiles {
+            artifacts: vec![base_art],
+            generate_init_py_files: true,
+            ..Default::default()
+        };
+        let r_later = Runfiles {
+            artifacts: vec![later_art, cache_art, not_cache_art],
+            ..Default::default()
+        };
+        let merged = r_base.merge(&r_later);
+        assert!(merged.generate_init_py_files);
+        let entries = merged.manifest_entries("_main");
+        assert_eq!(
+            entries.get("_main/pkg/__init__.py").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            entries.get("_main/later/__init__.py").map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            entries
+                .get("_main/later/sub/__init__.py")
+                .map(String::as_str),
+            Some("")
+        );
+        assert_eq!(
+            entries
+                .get("_main/cache_pkg/__init__.py")
+                .map(String::as_str),
+            Some("")
+        );
+        assert!(!entries.contains_key("_main/cache_pkg/__pycache__/__init__.py"));
+        assert_eq!(
+            entries
+                .get("_main/my__pycache__/__init__.py")
+                .map(String::as_str),
             Some("")
         );
     }

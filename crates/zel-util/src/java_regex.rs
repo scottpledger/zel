@@ -65,8 +65,12 @@ enum Pred {
     NotDigit,
     Word,
     NotWord,
+    UniWord,
+    NotUniWord,
     Space,
     NotSpace,
+    NotUniDigit,
+    NotUniSpace,
     HSpace,
     NotHSpace,
     VSpace,
@@ -106,8 +110,12 @@ fn pred_matches(p: Pred, c: char) -> bool {
         NotDigit => !c.is_ascii_digit(),
         Word => c.is_ascii_alphanumeric() || c == '_',
         NotWord => !(c.is_ascii_alphanumeric() || c == '_'),
+        UniWord => c.is_alphanumeric() || c == '_',
+        NotUniWord => !(c.is_alphanumeric() || c == '_'),
         Space => matches!(c, ' ' | '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r'),
         NotSpace => !matches!(c, ' ' | '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r'),
+        NotUniDigit => !pred_matches(UniDigit, c),
+        NotUniSpace => !pred_matches(UniSpace, c),
         HSpace => matches!(
             c,
             ' ' | '\t' | '\u{A0}' | '\u{1680}' | '\u{180e}' | '\u{2000}'
@@ -224,8 +232,8 @@ enum Node {
     InputStart,
     InputEnd,
     InputEndZ,
-    WordB,
-    NotWordB,
+    WordB(bool),
+    NotWordB(bool),
     Concat(Vec<Node>),
     Alt(Vec<Node>),
     Group(Box<Node>, usize),
@@ -268,6 +276,7 @@ struct Flags {
     comments: bool,
     unix_lines: bool,
     literal: bool,
+    unicode_char_class: bool,
 }
 
 struct Parser<'a> {
@@ -557,7 +566,8 @@ impl Parser<'_> {
                             'm' => f.multiline = on,
                             'x' => f.comments = on,
                             'd' => f.unix_lines = on,
-                            'u' | 'U' => {}
+                            'u' => {}
+                            'U' => f.unicode_char_class = on,
                             ')' => {
                                 // Applies to the rest of the enclosing group.
                                 self.flags = f;
@@ -609,13 +619,14 @@ impl Parser<'_> {
             return self.err("Unexpected internal error", self.pos.saturating_sub(0));
         };
         self.pos += 1;
+        let u = self.flags.unicode_char_class;
         Ok(match c {
-            'd' => Esc::Pred(Pred::Digit),
-            'D' => Esc::Pred(Pred::NotDigit),
-            'w' => Esc::Pred(Pred::Word),
-            'W' => Esc::Pred(Pred::NotWord),
-            's' => Esc::Pred(Pred::Space),
-            'S' => Esc::Pred(Pred::NotSpace),
+            'd' => Esc::Pred(if u { Pred::UniDigit } else { Pred::Digit }),
+            'D' => Esc::Pred(if u { Pred::NotUniDigit } else { Pred::NotDigit }),
+            'w' => Esc::Pred(if u { Pred::UniWord } else { Pred::Word }),
+            'W' => Esc::Pred(if u { Pred::NotUniWord } else { Pred::NotWord }),
+            's' => Esc::Pred(if u { Pred::UniSpace } else { Pred::Space }),
+            'S' => Esc::Pred(if u { Pred::NotUniSpace } else { Pred::NotSpace }),
             'h' => Esc::Pred(Pred::HSpace),
             'H' => Esc::Pred(Pred::NotHSpace),
             'v' => Esc::Pred(Pred::VSpace),
@@ -791,8 +802,8 @@ impl Parser<'_> {
                 'z' => Node::InputEnd,
                 'Z' => Node::InputEndZ,
                 'G' => Node::InputStart,
-                'b' => Node::WordB,
-                'B' => Node::NotWordB,
+                'b' => Node::WordB(self.flags.unicode_char_class),
+                'B' => Node::NotWordB(self.flags.unicode_char_class),
                 'R' => Node::Alt(vec![
                     Node::Concat(vec![Node::Char('\r', false), Node::Char('\n', false)]),
                     Node::Class(ClassNode::Pred(Pred::VSpace), false),
@@ -992,6 +1003,7 @@ impl Regex {
                 comments: false,
                 unix_lines: false,
                 literal: false,
+                unicode_char_class: false,
             },
             named: Vec::new(),
         };
@@ -1143,11 +1155,18 @@ impl Matcher<'_> {
                     || (pos + 2 == n && cs[pos] == '\r' && cs[pos + 1] == '\n');
                 ok && k(pos, caps)
             }
-            Node::WordB | Node::NotWordB => {
-                let before = pos > 0 && is_word(cs[pos - 1]);
-                let after = pos < cs.len() && is_word(cs[pos]);
+            Node::WordB(u) | Node::NotWordB(u) => {
+                let check = |c: char| {
+                    if *u {
+                        c.is_alphanumeric() || c == '_'
+                    } else {
+                        is_word(c)
+                    }
+                };
+                let before = pos > 0 && check(cs[pos - 1]);
+                let after = pos < cs.len() && check(cs[pos]);
                 let at = before != after;
-                if at == matches!(n, Node::WordB) {
+                if at == matches!(n, Node::WordB(_)) {
                     k(pos, caps)
                 } else {
                     false
@@ -1452,5 +1471,14 @@ mod tests {
         assert!(f("(?s)a.b", "a\nb"));
         assert!(!f("a.b", "a\nb"));
         assert!(f("a$", "a\n"));
+    }
+
+    #[test]
+    fn unicode_character_class_flag_switches_word_digit_and_boundary() {
+        assert!(!Regex::new("\\w+").unwrap().full_match("café_1"));
+        assert!(Regex::new("(?U)\\w+").unwrap().full_match("café_1"));
+        assert!(!Regex::new("(?U)(?-U)\\w+").unwrap().full_match("café_1"));
+        assert!(!Regex::new("\\d+").unwrap().full_match("٤٢"));
+        assert!(Regex::new("(?U)\\d+").unwrap().full_match("٤٢"));
     }
 }

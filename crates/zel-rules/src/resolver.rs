@@ -515,7 +515,12 @@ impl TargetResolver {
             return None;
         }
         let pkg = plat_ct.actual_target_label().package_identifier().clone();
-        let mapping = self.loader.config().lookup.resolver.mapping(pkg.repository());
+        let mapping = self
+            .loader
+            .config()
+            .lookup
+            .resolver
+            .mapping(pkg.repository());
         let mut out = cfg.clone();
         let mut changed = false;
         for raw_flag in flag_strs {
@@ -1475,6 +1480,17 @@ impl DepResolver for TargetResolver {
         m.entries()
             .map(|(a, c)| (a.clone(), c.name().to_string()))
             .collect()
+    }
+
+    fn loaded_package_repos(&self) -> Vec<String> {
+        let mut repos = std::collections::BTreeSet::new();
+        for pkg in self.packages.lock().unwrap().keys() {
+            repos.insert(pkg.repository().name().to_string());
+        }
+        for r in self.loader.loaded_bzl_repos() {
+            repos.insert(r);
+        }
+        repos.into_iter().collect()
     }
 
     fn rule_instance(&self, label: &Label) -> Result<Option<RuleInstance>, String> {

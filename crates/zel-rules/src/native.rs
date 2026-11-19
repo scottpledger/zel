@@ -189,7 +189,10 @@ fn finish(
     );
     let mut groups = BTreeMap::new();
     groups.insert("default".to_string(), files.clone());
-    if executable.is_some() || n.rule.is_binary_rule() || n.rule.is_test_rule() {
+    if executable.is_some()
+        || n.rule.is_binary_rule()
+        || (n.rule.is_test_rule() && n.rule.rule_class != "test_suite")
+    {
         groups.insert("compilation_outputs".to_string(), files);
     }
     ct.output_groups = OutputGroupInfo { groups };
@@ -209,7 +212,7 @@ fn finish(
     }
     ct.typed_actions = actions;
     ct.testonly = n.rule.testonly;
-    ct.is_test = n.rule.is_test_rule();
+    ct.is_test = n.rule.is_test_rule() && n.rule.rule_class != "test_suite";
     Ok(ct)
 }
 
@@ -227,7 +230,12 @@ pub(crate) fn filegroup(n: &Nctx) -> Result<ConfiguredTarget, String> {
     for s in &srcs {
         if group.is_empty() {
             files.extend(s.default_info.files.iter().cloned());
-        } else if let Some(g) = s.output_groups.groups.get(&group) {
+        } else if let Some(g) = s
+            .output_groups
+            .groups
+            .get(&group)
+            .or_else(|| s.get_actual().output_groups.groups.get(&group))
+        {
             files.extend(g.iter().cloned());
         }
     }
@@ -399,7 +407,27 @@ pub(crate) fn alias(n: &Nctx) -> Result<ConfiguredTarget, String> {
 pub(crate) fn test_suite(n: &Nctx) -> Result<ConfiguredTarget, String> {
     let mut vis_errors: Vec<String> = Vec::new();
     let mut data_rf = Runfiles::default();
-    for t in n.labels("tests")? {
+    let explicit_tests = n.labels("tests")?;
+    let test_labels = if explicit_tests.is_empty() {
+        n.labels("$implicit_tests").unwrap_or_default()
+    } else {
+        explicit_tests
+    };
+    let suite_tags = n.strings("tags")?;
+    let matches_suite_tags = |test_tags: &[String]| -> bool {
+        suite_tags
+            .iter()
+            .filter(|t| t.as_str() != "manual")
+            .all(|t| match t.strip_prefix('-') {
+                Some(ex) => !test_tags.iter().any(|x| x == ex),
+                None => {
+                    let req = t.strip_prefix('+').unwrap_or(t);
+                    test_tags.iter().any(|x| x == req)
+                }
+            })
+    };
+    let mut transitive_tests: Vec<Value> = Vec::new();
+    for t in test_labels {
         let ct = n.resolver.configured_target(&t, n.cfg)?;
         // Every invisible test is reported (`RuleContext.reportError` per prerequisite).
         if let Err(e) = n.resolver.check_dependency(n.rule, "tests", &ct) {
@@ -410,23 +438,60 @@ pub(crate) fn test_suite(n: &Nctx) -> Result<ConfiguredTarget, String> {
             });
             continue;
         }
-        let eff_rc = ct
+        let actual = ct.get_actual();
+        let eff_rc = actual
             .actual_rule_class
             .as_deref()
-            .unwrap_or(ct.rule_class.as_str());
-        if !ct.is_test && !eff_rc.ends_with("_test") && eff_rc != "test_suite" {
+            .unwrap_or(actual.rule_class.as_str());
+        let is_nested_suite =
+            eff_rc == "test_suite" || actual.providers.contains_key("TransitiveTestsInfo");
+        let is_test = actual.is_test || eff_rc.ends_with("_test");
+        if !is_test && !is_nested_suite {
             return Err(format!(
                 "in test_suite rule '{}': expecting a test or a test_suite rule but '{}' is not one.",
                 n.rule.label.canonical_form(),
                 t.canonical_form()
             ));
         }
-        data_rf = data_rf.merge(&target_runfiles(&ct, true));
+        if !is_nested_suite {
+            let mut dep_tags: Vec<String> = Vec::new();
+            if let Ok(Some(ri)) = n.resolver.rule_instance(&actual.label) {
+                dep_tags = ri.rule_tags();
+                if let Some(AttrValue::Str(sz)) = ri.attr_or_default("size") {
+                    if !sz.is_empty() && !dep_tags.contains(&sz) {
+                        dep_tags.push(sz);
+                    }
+                }
+            }
+            if !dep_tags.is_empty() && !matches_suite_tags(&dep_tags) {
+                continue;
+            }
+            transitive_tests.push(Value::Label(actual.label.clone()));
+        } else if let Some(Value::ProviderInstance { fields, .. }) =
+            actual.providers.get("TransitiveTestsInfo")
+        {
+            if let Some(Value::List(l)) = fields.get("tests") {
+                transitive_tests.extend(l.lock().unwrap().elements.iter().cloned());
+            }
+        }
+        let dep_rf = target_runfiles(&ct, true).merge(&Runfiles {
+            artifacts: ct.default_info.files.clone(),
+            ..Default::default()
+        });
+        data_rf = data_rf.merge(&dep_rf);
     }
     if !vis_errors.is_empty() {
         return Err(vis_errors.join("\n"));
     }
-    finish(n, vec![], Runfiles::default(), data_rf, None, vec![])
+    let mut out = finish(n, vec![], Runfiles::default(), data_rf, None, vec![])?;
+    out.providers.insert(
+        "TransitiveTestsInfo".to_string(),
+        provider_instance(
+            "TransitiveTestsInfo",
+            vec![("tests", mk_list(transitive_tests))],
+        ),
+    );
+    Ok(out)
 }
 
 pub(crate) fn label_flag(n: &Nctx) -> Result<ConfiguredTarget, String> {
@@ -528,7 +593,10 @@ pub(crate) fn java_plugins_flag_alias(n: &Nctx) -> Result<ConfiguredTarget, Stri
     }
     let bo = n.cfg.build_options();
     let raw_plugins: Vec<String> = if let Some(s) = n.cfg.options.get("plugin") {
-        s.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect()
+        s.split(',')
+            .filter(|x| !x.is_empty())
+            .map(str::to_string)
+            .collect()
     } else {
         match bo.get("plugin") {
             Some(zel_analysis::build_options::ConfigValue::List(vs)) => vs
@@ -537,14 +605,16 @@ pub(crate) fn java_plugins_flag_alias(n: &Nctx) -> Result<ConfiguredTarget, Stri
                 .filter(|x| !x.is_empty())
                 .map(str::to_string)
                 .collect(),
-            Some(zel_analysis::build_options::ConfigValue::Scalar(s)) => {
-                s.split(',').filter(|x| !x.is_empty()).map(str::to_string).collect()
-            }
+            Some(zel_analysis::build_options::ConfigValue::Scalar(s)) => s
+                .split(',')
+                .filter(|x| !x.is_empty())
+                .map(str::to_string)
+                .collect(),
             _ => Vec::new(),
         }
     };
-    let root_pkg = zel_cmdline::PackageIdentifier::create_in_main_repo("")
-        .map_err(|e| e.to_string())?;
+    let root_pkg =
+        zel_cmdline::PackageIdentifier::create_in_main_repo("").map_err(|e| e.to_string())?;
     let main_entries: Vec<(String, zel_cmdline::RepositoryName)> = n
         .resolver
         .repo_mapping_entries("")
@@ -742,17 +812,7 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
     if n.boolean("executable")? && outs.len() != 1 {
         return Err(n.attr_err("executable", "if genrules produce executables, they are allowed only one output. If you need the executable=1 argument, then you should split this genrule into genrules producing single outputs"));
     }
-    let cmd_attr = if n.explicit("cmd_bash") {
-        "cmd_bash"
-    } else if n.explicit("cmd") {
-        "cmd"
-    } else {
-        return Err(n.attr_err(
-            "cmd",
-            "missing value for `cmd` attribute, you can also set `cmd_ps` or `cmd_bat` on Windows and `cmd_bash` on other platforms.",
-        ));
-    };
-    let base_cmd = n.string(cmd_attr)?;
+    let ecw = n.labels("exec_compatible_with")?;
 
     // srcs (target configuration), tools (exec configuration), toolchains (target configuration).
     let srcs = n.deps("srcs", false)?;
@@ -792,24 +852,100 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
             toolchain_tools.push(ct.clone());
         }
     }
-    let ecw = n.labels("exec_compatible_with")?;
     let mut selected_exec_platform = n.acfg.default_exec_platform();
+    let mut resolved_exec_plat: Option<String> = None;
     if !tc_types.is_empty() || !ecw.is_empty() {
-        let tc = crate::resolve_ctx_toolchains(
-            &n.rule.label,
-            &tc_types,
-            &ecw,
-            n.cfg,
-            n.acfg,
-            n.resolver,
-        )?;
-        for d in &tc.deps {
-            n.resolver.check_dependency(n.rule, "$toolchains", d)?;
+        if let Ok(tc) =
+            crate::resolve_ctx_toolchains(&n.rule.label, &tc_types, &ecw, n.cfg, n.acfg, n.resolver)
+        {
+            for d in &tc.deps {
+                n.resolver.check_dependency(n.rule, "$toolchains", d)?;
+            }
+            tc_make_vars.extend(tc.make_variables);
+            toolchain_tools.extend(tc.resolved_targets);
+            selected_exec_platform = tc.exec_platform.clone();
+            resolved_exec_plat = Some(tc.exec_platform);
+        } else if !tc_types.is_empty() {
+            let tc = crate::resolve_ctx_toolchains(
+                &n.rule.label,
+                &tc_types,
+                &ecw,
+                n.cfg,
+                n.acfg,
+                n.resolver,
+            )?;
+            for d in &tc.deps {
+                n.resolver.check_dependency(n.rule, "$toolchains", d)?;
+            }
+            tc_make_vars.extend(tc.make_variables);
+            toolchain_tools.extend(tc.resolved_targets);
+            selected_exec_platform = tc.exec_platform.clone();
+            resolved_exec_plat = Some(tc.exec_platform);
         }
-        selected_exec_platform = tc.exec_platform;
-        tc_make_vars.extend(tc.make_variables);
-        toolchain_tools.extend(tc.resolved_targets);
     }
+    let exec_is_windows = {
+        let mut is_win = ecw.iter().any(|l| l.name() == "windows");
+        if !is_win {
+            let plat_lbl = resolved_exec_plat
+                .as_deref()
+                .and_then(|s| Label::parse_canonical(s).ok())
+                .or_else(|| {
+                    n.acfg
+                        .all_execution_platforms()
+                        .ok()
+                        .and_then(|v| v.into_iter().next())
+                });
+            if let Some(pl) = plat_lbl {
+                if pl.name().to_ascii_lowercase().contains("windows") {
+                    is_win = true;
+                } else if let Ok(pct) = n.resolver.configured_target(&pl, &n.cfg.to_core_only()) {
+                    if let Ok(win_cv) = Label::parse_canonical("@platforms//os:windows")
+                        .or_else(|_| Label::parse_canonical("@@platforms+//os:windows"))
+                    {
+                        if let Ok(cv_ct) =
+                            n.resolver.configured_target(&win_cv, &n.cfg.to_core_only())
+                        {
+                            if crate::toolchain::platform_has_value(&pct, &cv_ct) {
+                                is_win = true;
+                            }
+                        }
+                    }
+                }
+            } else {
+                is_win = cfg!(windows);
+            }
+        }
+        is_win
+    };
+    let non_empty_explicit = |attr: &str| -> Result<bool, String> {
+        Ok(n.explicit(attr) && !n.string(attr)?.is_empty())
+    };
+    let cmd_attr = if exec_is_windows {
+        if non_empty_explicit("cmd_ps")? {
+            "cmd_ps"
+        } else if non_empty_explicit("cmd_bat")? {
+            "cmd_bat"
+        } else if non_empty_explicit("cmd_bash")? {
+            "cmd_bash"
+        } else if n.explicit("cmd") {
+            "cmd"
+        } else {
+            return Err(n.attr_err(
+                "cmd",
+                "missing value for `cmd` attribute, you can also set `cmd_ps` or `cmd_bat` on Windows and `cmd_bash` on other platforms.",
+            ));
+        }
+    } else if non_empty_explicit("cmd_bash")? {
+        "cmd_bash"
+    } else if n.explicit("cmd") {
+        "cmd"
+    } else {
+        return Err(n.attr_err(
+            "cmd",
+            "missing value for `cmd` attribute, you can also set `cmd_ps` or `cmd_bat` on Windows and `cmd_bash` on other platforms.",
+        ));
+    };
+    let base_cmd = n.string(cmd_attr)?;
 
     let exec_cfg = n.cfg.to_exec_for(&selected_exec_platform);
     let deps_in_exec = |attr_name: &str| -> Result<Vec<Arc<ConfiguredTarget>>, String> {
@@ -933,29 +1069,50 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
     } else {
         format!("{repo_bin_dir}/{}", pkg.path_string())
     };
+    let is_cmd_bat = cmd_attr == "cmd_bat";
+    let norm_make_path = |s: String| -> String {
+        if is_cmd_bat {
+            s.replace('/', "\\")
+        } else {
+            s
+        }
+    };
+    let singleton_err: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
     let lookup = |name: &str| -> Option<String> {
         match name {
-            "SRCS" => Some(
+            "SRCS" => Some(norm_make_path(
                 resolved_srcs
                     .iter()
                     .map(|a| a.exec_path.path_string().to_string())
                     .collect::<Vec<_>>()
                     .join(" "),
-            ),
-            "OUTS" => Some(
+            )),
+            "OUTS" => Some(norm_make_path(
                 outs.iter()
                     .map(|a| a.exec_path.path_string().to_string())
                     .collect::<Vec<_>>()
                     .join(" "),
-            ),
-            "<" => singleton(&resolved_srcs, "$<", "input file")
-                .ok()
-                .or(Some(String::new())),
-            "@" => singleton(&outs, "$@", "output file")
-                .ok()
-                .or(Some(String::new())),
-            "RULEDIR" => Some(rule_dir.clone()),
-            "@D" => Some(if outs.len() == 1 {
+            )),
+            "<" => match singleton(&resolved_srcs, "$<", "input file") {
+                Ok(p) => Some(norm_make_path(p)),
+                Err(e) => {
+                    if singleton_err.borrow().is_none() {
+                        *singleton_err.borrow_mut() = Some(e);
+                    }
+                    Some(String::new())
+                }
+            },
+            "@" => match singleton(&outs, "$@", "output file") {
+                Ok(p) => Some(norm_make_path(p)),
+                Err(e) => {
+                    if singleton_err.borrow().is_none() {
+                        *singleton_err.borrow_mut() = Some(e);
+                    }
+                    Some(String::new())
+                }
+            },
+            "RULEDIR" => Some(norm_make_path(rule_dir.clone())),
+            "@D" => Some(norm_make_path(if outs.len() == 1 {
                 outs[0]
                     .exec_path
                     .parent_directory()
@@ -963,7 +1120,7 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
                     .unwrap_or_default()
             } else {
                 rule_dir.clone()
-            }),
+            })),
             other => n
                 .cfg
                 .user_defines
@@ -971,27 +1128,18 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
                 .cloned()
                 .or_else(|| tc_make_vars.get(other).cloned())
                 .or_else(|| match other {
-                    "BINDIR" | "GENDIR" => Some(bin_dir.clone()),
+                    "BINDIR" | "GENDIR" => Some(norm_make_path(bin_dir.clone())),
                     "COMPILATION_MODE" => Some(n.cfg.compilation_mode.clone()),
                     "TARGET_CPU" => Some(n.cfg.cpu.clone()),
                     _ => None,
                 }),
         }
     };
-    // `$<` / `$@` must report Bazel's singleton errors when used.
-    for (var, arts, what) in [
-        ("$<", &resolved_srcs, "input file"),
-        ("$@", &outs, "output file"),
-    ] {
-        let marker = var;
-        let used = located.replace("$$", "").contains(marker)
-            || (var == "$<" && located.replace("$$", "").contains("$(<)"))
-            || (var == "$@" && located.replace("$$", "").contains("$(@)"));
-        if used {
-            singleton(arts, var, what).map_err(|e| n.attr_err(cmd_attr, &e))?;
-        }
+    let expanded_cmd =
+        expand_make_variables(&located, &lookup).map_err(|e| n.attr_err(cmd_attr, &e))?;
+    if let Some(e) = singleton_err.into_inner() {
+        return Err(n.attr_err(cmd_attr, &e));
     }
-    let command = expand_make_variables(&located, &lookup).map_err(|e| n.attr_err(cmd_attr, &e))?;
     let setup_label = Label::parse_canonical("@bazel_tools//tools/genrule:genrule-setup.sh")
         .unwrap_or_else(|_| {
             Label::parse_canonical("@@bazel_tools//tools/genrule:genrule-setup.sh").unwrap()
@@ -1001,8 +1149,6 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
         setup_label.clone(),
         sibling_layout,
     );
-    // Genrule environment setup (`GenRuleBase.java`): `source <$genrule_setup execPath>; ...`
-    let command = format!("source {}; {command}", setup_art.exec_path);
 
     let message = n.string("message")?;
     let mut exec_info = BTreeMap::new();
@@ -1016,57 +1162,182 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
         .map(|v| v != "false")
         .unwrap_or(true);
     if allow_tags {
-        for t in n.strings("tags")? {
-            if t.starts_with("requires-")
-                || t.starts_with("cpu:")
+        for t in n.rule.rule_tags() {
+            if let Some(cpu) = t.strip_prefix("cpu:") {
+                exec_info.insert("cpu".to_string(), cpu.to_string());
+            } else if t.starts_with("block-")
+                || t.starts_with("requires-")
+                || t.starts_with("no-")
+                || t.starts_with("supports-")
+                || t.starts_with("disable-")
                 || t.starts_with("resources:")
-                || matches!(
-                    t.as_str(),
-                    "no-sandbox"
-                        | "no-cache"
-                        | "no-remote"
-                        | "no-remote-cache"
-                        | "no-remote-exec"
-                        | "no-local"
-                        | "local"
-                        | "block-network"
-                        | "supports-workers"
-                        | "supports-multiplex-workers"
-                        | "supports-graceful-termination"
-                        | "supports-path-mapping"
-                )
+                || t == "local"
             {
                 exec_info.entry(t).or_insert_with(String::new);
             }
         }
     }
+    zel_analysis::action::apply_modify_execution_info_to_map(n.cfg, "Genrule", &mut exec_info);
+
+    let mut extra_actions: Vec<Action> = Vec::new();
+    let mut inputs = resolved_srcs.clone();
+    let pkg_prefix = if pkg.path_string().is_empty() {
+        String::new()
+    } else {
+        format!("{}/", pkg.path_string())
+    };
+    let make_script_artifact = |ext: &str,
+                                content: String,
+                                is_executable: bool,
+                                extra_actions: &mut Vec<Action>|
+     -> Artifact {
+        let script_rel = PathFragment::create(&format!(
+            "{}{}.genrule_script.{ext}",
+            pkg_prefix,
+            label.name()
+        ));
+        let art = Artifact::derived_in_root_with_layout(
+            &n.cfg.mnemonic(),
+            ArtifactRoot::Bin,
+            script_rel,
+            label.clone(),
+            sibling_layout,
+        );
+        let mut wa = Action::new(
+            label.clone(),
+            "FileWrite",
+            ActionKind::FileWrite {
+                content: FileContent::Literal(content),
+                is_executable,
+            },
+        );
+        wa.outputs.push(art.clone());
+        wa.owner_kind = "genrule".to_string();
+        wa.owner_config = n.cfg.short_hash();
+        extra_actions.push(wa);
+        art
+    };
+
+    let (spawn_exe, spawn_args, spawn_shell_cmd, needs_bash_setup) = match cmd_attr {
+        "cmd_ps" => {
+            if expanded_cmd.len() > 32767 {
+                let script = make_script_artifact(
+                    "ps1",
+                    format!("{expanded_cmd}\r\n"),
+                    false,
+                    &mut extra_actions,
+                );
+                let sp = script.exec_path.path_string().to_string();
+                inputs.push(script);
+                (
+                    "powershell.exe".to_string(),
+                    vec!["-File".to_string(), sp],
+                    None,
+                    false,
+                )
+            } else {
+                (
+                    "powershell.exe".to_string(),
+                    vec!["-Command".to_string(), expanded_cmd.clone()],
+                    None,
+                    false,
+                )
+            }
+        }
+        "cmd_bat" => {
+            if expanded_cmd.len() > 8191 {
+                let script = make_script_artifact(
+                    "bat",
+                    format!("{expanded_cmd}\r\n"),
+                    false,
+                    &mut extra_actions,
+                );
+                let sp = script.exec_path.path_string().to_string();
+                inputs.push(script);
+                (
+                    "cmd.exe".to_string(),
+                    vec![
+                        "/S".to_string(),
+                        "/E:ON".to_string(),
+                        "/V:ON".to_string(),
+                        "/D".to_string(),
+                        "/C".to_string(),
+                        sp,
+                    ],
+                    None,
+                    false,
+                )
+            } else {
+                (
+                    "cmd.exe".to_string(),
+                    vec![
+                        "/S".to_string(),
+                        "/E:ON".to_string(),
+                        "/V:ON".to_string(),
+                        "/D".to_string(),
+                        "/C".to_string(),
+                        expanded_cmd.clone(),
+                    ],
+                    None,
+                    false,
+                )
+            }
+        }
+        _ => {
+            let shell = if exec_info.contains_key("requires-darwin") {
+                "/bin/bash".to_string()
+            } else {
+                n.acfg
+                    .shell_executable
+                    .clone()
+                    .unwrap_or_else(|| "/bin/bash".to_string())
+            };
+            let command = format!("source {}; {expanded_cmd}", setup_art.exec_path);
+            if command.len() > 65536 {
+                let script = make_script_artifact(
+                    "sh",
+                    format!("#!{shell}\n{command}\n"),
+                    true,
+                    &mut extra_actions,
+                );
+                let sp = script.exec_path.path_string().to_string();
+                inputs.push(script);
+                (shell, vec![sp], None, true)
+            } else {
+                (
+                    shell,
+                    vec!["-c".to_string(), command.clone()],
+                    Some(command),
+                    true,
+                )
+            }
+        }
+    };
+
     let mut action = Action::new(
         label.clone(),
         "Genrule",
         ActionKind::Spawn {
-            executable: n
-                .acfg
-                .shell_executable
-                .clone()
-                .unwrap_or_else(|| "/bin/bash".to_string()),
+            executable: spawn_exe,
             arguments: vec![CommandLineArgs {
-                args: vec!["-c".to_string(), command.clone()],
+                args: spawn_args,
                 param_file: None,
             }],
-            shell_command: Some(command),
+            shell_command: spawn_shell_cmd,
         },
     );
     if !message.is_empty() {
         action.progress_message = Some(format!("{message} {label}"));
     }
     action.execution_requirements = exec_info;
-    if let Ok(setup_ct) = n.resolver.configured_target(&setup_label, n.cfg) {
-        let _ = n
-            .resolver
-            .check_dependency(n.rule, "$genrule_setup", &setup_ct);
+    if needs_bash_setup {
+        if let Ok(setup_ct) = n.resolver.configured_target(&setup_label, n.cfg) {
+            let _ = n
+                .resolver
+                .check_dependency(n.rule, "$genrule_setup", &setup_ct);
+        }
+        inputs.push(setup_art);
     }
-    let mut inputs = resolved_srcs.clone();
-    inputs.push(setup_art);
     inputs.extend(dedup(tool_inputs.clone()));
     let should_stamp = match n.value("stamp")? {
         Some(AttrValue::Bool(b)) => b,
@@ -1098,6 +1369,10 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
     action.exec_platform = Some(selected_exec_platform);
     action.use_default_shell_env = true;
     action.owner_config = n.cfg.short_hash();
+    if let Some(ep) = resolved_exec_plat {
+        action.exec_platform = Some(ep);
+    }
+    extra_actions.push(action);
 
     let executable = if n.boolean("executable")? && outs.len() == 1 {
         Some(outs[0].clone())
@@ -1114,7 +1389,7 @@ pub(crate) fn genrule(n: &Nctx) -> Result<ConfiguredTarget, String> {
         Runfiles::default(),
         data_rf,
         executable,
-        vec![action],
+        extra_actions,
     )
 }
 

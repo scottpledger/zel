@@ -220,7 +220,16 @@ mod tests {
                 .is_lt()
         );
 
-        for bad in ["", "1.", ".1", "1..2", "2:3", "1.-1", "2147483648", "1beta2147483648"] {
+        for bad in [
+            "",
+            "1.",
+            ".1",
+            "1..2",
+            "2:3",
+            "1.-1",
+            "2147483648",
+            "1beta2147483648",
+        ] {
             assert!(
                 call(
                     "apple_common.dotted_version",
@@ -231,6 +240,11 @@ mod tests {
                 "expected error for '{bad}'"
             );
         }
-        assert!(call("apple_common.dotted_version", vec![Value::None], BTreeMap::new()).is_err());
+        assert!(call(
+            "apple_common.dotted_version",
+            vec![Value::None],
+            BTreeMap::new()
+        )
+        .is_err());
     }
 }

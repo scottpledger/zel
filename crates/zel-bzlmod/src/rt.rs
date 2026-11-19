@@ -350,6 +350,56 @@ impl Rt {
             .collect()
     }
 
+    /// Non-recursively looks up the repo mapping of `canonical` if `canonical` is a known module
+    /// or already-evaluated extension repository (`None` if `canonical` no longer exists).
+    pub fn try_repo_mapping_of(&self, canonical: &str) -> Option<BTreeMap<String, String>> {
+        let res = &self.resolution;
+        if canonical.is_empty() || canonical == "bazel_tools" {
+            return Some(
+                res.repo_mapping_ordered(&ModuleKey::root())
+                    .into_iter()
+                    .collect(),
+            );
+        }
+        if let Some(k) = res.canonical_repo_names.get(&canonical.to_string()) {
+            return Some(res.repo_mapping_ordered(k).into_iter().collect());
+        }
+        for (id, mk, _) in &res.extension_usages {
+            let Some(unique) = res.extension_unique_names.get(id) else {
+                continue;
+            };
+            if let Some(sub) = canonical.strip_prefix(&format!("{unique}+")) {
+                let st = self.state.lock().unwrap();
+                if let Some(r) = st.ext_results.get(id) {
+                    if !r.generated.iter().any(|(n, _)| n == sub) {
+                        return None;
+                    }
+                    let host_repo = id.bzl_repo();
+                    let mut m: BTreeMap<String, String> = if host_repo.is_empty() && id.is_innate()
+                    {
+                        res.repo_mapping_ordered(mk).into_iter().collect()
+                    } else if let Some(k) = res.canonical_repo_names.get(&host_repo) {
+                        res.repo_mapping_ordered(k).into_iter().collect()
+                    } else {
+                        res.repo_mapping_ordered(&ModuleKey::root())
+                            .into_iter()
+                            .collect()
+                    };
+                    for (n, _) in &r.generated {
+                        m.insert(n.clone(), format!("{unique}+{n}"));
+                    }
+                    if let Some(ov) = res.repo_overrides.get(id) {
+                        for (exported, canon) in ov {
+                            m.insert(exported.clone(), canon.clone());
+                        }
+                    }
+                    return Some(m);
+                }
+            }
+        }
+        None
+    }
+
     /// The repo mapping in `ImmutableMap` insertion order (module repos: extension imports, own
     /// names, then deps; extension-generated repos: the host repo's mapping plus siblings).
     pub fn repo_mapping_ordered_of(&self, canonical: &str) -> Vec<(String, String)> {

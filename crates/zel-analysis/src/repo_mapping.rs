@@ -18,10 +18,37 @@ pub fn repo_mapping_entries(
     own_repo: &str,
     compact: bool,
 ) -> Vec<(String, String, String)> {
-    // Canonical repos appearing in runfiles paths (main repo = "").
+    repo_mapping_entries_with_sources(mapping_of, workspace_name, runfiles, own_repo, &[], compact)
+}
+
+/// Like [`repo_mapping_entries`], additionally seeding source repositories from transitively
+/// loaded packages and `.bzl` modules (`RepoMappingManifestAction`).
+pub fn repo_mapping_entries_with_sources(
+    mapping_of: &dyn Fn(&str) -> Vec<(String, String)>,
+    workspace_name: &str,
+    runfiles: &Runfiles,
+    own_repo: &str,
+    extra_sources: &[String],
+    compact: bool,
+) -> Vec<(String, String, String)> {
+    // Canonical repos appearing in runfiles paths or artifact owners (main repo = "").
     let mut in_paths: BTreeSet<String> = BTreeSet::new();
-    if !runfiles.symlinks.is_empty() {
+    if !runfiles.symlinks.is_empty()
+        || !runfiles.empty_filenames.is_empty()
+        || runfiles.generate_init_py_files
+    {
         in_paths.insert(String::new());
+    }
+    for (_, owner_repo) in runfiles.nested_set().to_vec() {
+        in_paths.insert(owner_repo);
+    }
+    for a in runfiles
+        .artifacts
+        .iter()
+        .chain(runfiles.symlinks.values())
+        .chain(runfiles.root_symlinks.values())
+    {
+        in_paths.insert(a.owner_label.repository().name().to_string());
     }
     for k in runfiles.manifest_entries(workspace_name).keys() {
         let seg = k.split('/').next().unwrap_or("");
@@ -33,6 +60,9 @@ pub fn repo_mapping_entries(
     }
     let mut sources: BTreeSet<String> = in_paths.clone();
     sources.insert(own_repo.to_string());
+    for r in extra_sources {
+        sources.insert(r.clone());
+    }
     if own_repo == "bazel_tools" {
         sources.insert("platforms".to_string());
         sources.insert("rules_shell+".to_string());

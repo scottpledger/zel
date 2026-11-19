@@ -30,6 +30,8 @@ struct ProviderDef {
     /// Allowed fields (schema), or `None` for a schemaless provider.
     fields: Option<Vec<String>>,
     init: Option<Value>,
+    /// True only for builtin pre-registered providers (`ProtoInfo`, `ProtoLangToolchainInfo`).
+    pre_registered: bool,
 }
 
 static REGISTRY: Mutex<Vec<ProviderDef>> = Mutex::new(Vec::new());
@@ -112,6 +114,7 @@ pub fn define_provider(
         key: None,
         fields,
         init: init.clone(),
+        pre_registered: false,
     });
     let id = (reg.len() - 1).to_string();
     let sym = Value::Host("provider".to_string(), id.clone());
@@ -141,6 +144,7 @@ pub fn exported_builtin_provider(key: &str, fields: Option<&[&str]>) -> Value {
         key: Some(key.to_string()),
         fields: fields.map(|fs| fs.iter().map(|s| (*s).to_string()).collect()),
         init: None,
+        pre_registered: true,
     });
     let id = (reg.len() - 1).to_string();
     Value::Host("provider".to_string(), id)
@@ -190,7 +194,7 @@ pub fn export_provider(idx: usize, name: &str, bzl_label: &str) -> Option<Value>
     let existing_idx = reg
         .iter()
         .enumerate()
-        .find(|(i, d)| *i != idx && d.key.as_deref() == Some(full_key.as_str()))
+        .find(|(i, d)| *i != idx && d.pre_registered && d.key.as_deref() == Some(full_key.as_str()))
         .map(|(i, _)| i);
     let (new_fields, new_init) = match reg.get_mut(idx) {
         Some(d) => {

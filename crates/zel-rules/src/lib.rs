@@ -342,7 +342,11 @@ fn toolchain_requests(v: Option<&Value>) -> Vec<ToolchainTypeRequest> {
                 if s.fields.contains_key("toolchain_type")
                     || s.fields.contains_key("_toolchain_type") =>
             {
-                let l = match s.fields.get("toolchain_type").or_else(|| s.fields.get("name")) {
+                let l = match s
+                    .fields
+                    .get("toolchain_type")
+                    .or_else(|| s.fields.get("name"))
+                {
                     Some(Value::Label(l)) => l.clone(),
                     Some(Value::String(n)) => Label::parse_canonical(n).ok()?,
                     _ => return None,

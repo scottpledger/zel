@@ -702,10 +702,13 @@ pub fn analyze_starlark_rule(
     let pkg_dir = label.package_identifier().package_fragment().clone();
     let output_to_genfiles = spec.kwargs.get("output_to_genfiles").map(|v| v.is_truthy()).unwrap_or(false);
     let out_root = if output_to_genfiles { ArtifactRoot::Genfiles } else { ArtifactRoot::Bin };
-    let exec_groups: BTreeSet<String> = match spec.kwargs.get("exec_groups") {
+    let mut exec_groups: BTreeSet<String> = match spec.kwargs.get("exec_groups") {
         Some(Value::Dict(d)) => d.lock().unwrap().items().into_iter().filter_map(|(k, _)| k.as_str().map(str::to_string)).collect(),
         _ => BTreeSet::new(),
     };
+    if rc.is_test {
+        exec_groups.insert("test".to_string());
+    }
 
     // 1. Attributes.
     if rc.is_test {
@@ -1093,6 +1096,24 @@ fn finish_target(
         st.register(a).map_err(|e| e.0)?;
         analysis_test_exe = Some(exe);
     }
+    let mut test_exec_group: Option<String> = None;
+    let mut test_execution_platform: Option<String> = None;
+    if rc.is_test {
+        let grp = match declared.get("ExecutionInfo") {
+            Some(Value::ProviderInstance { fields, .. }) => match fields.get("exec_group") {
+                Some(Value::String(g)) => g.clone(),
+                _ => "test".to_string(),
+            },
+            _ => "test".to_string(),
+        };
+        if !st.exec_groups.contains(&grp) {
+            return Err(format!(
+                "Tried to set exec_group to '{grp}' which is not a valid exec_group."
+            ));
+        }
+        test_execution_platform = st.inputs.exec_group_platforms.get(&grp).cloned();
+        test_exec_group = Some(grp);
+    }
     if !st.rule_errors.lock().unwrap().is_empty() {
         return Err(st.rule_errors.lock().unwrap().join("\n"));
     }
@@ -1448,6 +1469,8 @@ fn finish_target(
     ct.instrumented_files = instrumented;
     ct.testonly = rule.testonly;
     ct.is_test = rc.is_test;
+    ct.test_exec_group = test_exec_group;
+    ct.test_execution_platform = test_execution_platform;
     ct.warnings = rule_warnings;
     Ok(ct)
 }

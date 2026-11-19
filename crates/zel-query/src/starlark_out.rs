@@ -529,7 +529,8 @@ pub(crate) fn run(
                                     };
                                     let mut cvals: Vec<String> = Vec::new();
                                     if let Some(c) = fields.get("constraints") {
-                                        for vl in zel_analysis::platform_constraint_value_labels(c) {
+                                        for vl in zel_analysis::platform_constraint_value_labels(c)
+                                        {
                                             cvals.push(vl.canonical_form());
                                         }
                                     }

@@ -61,6 +61,7 @@ impl SkyFunctionName {
     pub const PACKAGE_ERROR_MESSAGE: Self = Self("PACKAGE_ERROR_MESSAGE");
     pub const CONFIGURED_TARGET: Self = Self("CONFIGURED_TARGET");
     pub const ACTION_EXECUTION: Self = Self("ACTION_EXECUTION");
+    pub const REPOSITORY_DIRECTORY: Self = Self("REPOSITORY_DIRECTORY");
     pub const PRECOMPUTED: Self = Self("PRECOMPUTED");
 
     pub fn hermeticity(&self) -> FunctionHermeticity {
@@ -98,6 +99,8 @@ pub enum SkyKey {
         config_hash: String,
     },
     Precomputed(String),
+    /// Fetch/materialization of an external repository directory (`RepositoryDirectoryValue`).
+    RepositoryDirectory(zel_cmdline::RepositoryName),
     /// Execution of one action, identified by its primary output exec path.
     ActionExecution(String),
     Custom {
@@ -120,6 +123,7 @@ impl SkyKey {
             Self::PackageError(_) => SkyFunctionName::PACKAGE_ERROR,
             Self::PackageErrorMessage(_) => SkyFunctionName::PACKAGE_ERROR_MESSAGE,
             Self::ConfiguredTarget { .. } => SkyFunctionName::CONFIGURED_TARGET,
+            Self::RepositoryDirectory(_) => SkyFunctionName::REPOSITORY_DIRECTORY,
             Self::Precomputed(_) => SkyFunctionName::PRECOMPUTED,
             Self::Custom { function_name, .. } => *function_name,
         }
@@ -141,6 +145,7 @@ impl SkyKey {
             | Self::PackageErrorMessage(pkg) => pkg.to_string(),
             Self::ConfiguredTarget { label, config_hash } => format!("{label}@{config_hash}"),
             Self::Precomputed(name) => name.clone(),
+            Self::RepositoryDirectory(repo) => format!("@@{}", repo.name()),
             Self::Custom { argument, .. } => argument.clone(),
         };
         format!("{}:{}", self.function_name(), raw_arg.replace('\n', "_"))
@@ -168,6 +173,9 @@ impl fmt::Display for SkyKey {
                 write!(f, "CONFIGURED_TARGET:[{label}@{config_hash}]")
             }
             Self::Precomputed(name) => write!(f, "PRECOMPUTED:[{name}]"),
+            Self::RepositoryDirectory(repo) => {
+                write!(f, "REPOSITORY_DIRECTORY:[@@{}]", repo.name())
+            }
             Self::Custom {
                 function_name,
                 argument,
@@ -199,6 +207,40 @@ impl<T: fmt::Debug + Send + Sync + 'static> SkyValue for NotComparableSkyValue<T
     fn eq_value(&self, _other: &dyn SkyValue) -> bool {
         false
     }
+    fn is_not_comparable(&self) -> bool {
+        true
+    }
+}
+
+/// `RepositoryDirectoryValue`: result of fetching or materializing an external repository.
+/// Implements `NotComparableSkyValue` semantics (`eq_value` always returns `false`) so any
+/// re-evaluated repository directory unconditionally marks downstream Skyframe dependents dirty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepositoryDirectoryValue {
+    Success {
+        path: PathFragment,
+        exclude_from_vendoring: bool,
+    },
+    Failure {
+        error_msg: String,
+    },
+}
+
+impl RepositoryDirectoryValue {
+    pub fn is_repository_exists(&self) -> bool {
+        matches!(self, Self::Success { .. })
+    }
+}
+
+impl SkyValue for RepositoryDirectoryValue {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn eq_value(&self, _other: &dyn SkyValue) -> bool {
+        false
+    }
+
     fn is_not_comparable(&self) -> bool {
         true
     }

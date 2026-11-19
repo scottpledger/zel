@@ -822,19 +822,17 @@ fn java_register_ext(
 /// `JavaConfiguration.getReduceJavaClasspath` (`--experimental_java_classpath`, default `bazel`):
 /// `OFF`, `JAVABUILDER`, `BAZEL` or `BAZEL_NO_FALLBACK`.
 fn java_classpath_mode(st: &Arc<CtxState>) -> String {
-    let raw = match crate::fragments::Opts::new(&st.cfg).b("java_deps", true) {
-        _ => st
-            .cfg
-            .options
-            .get("experimental_java_classpath")
-            .cloned()
-            .or_else(|| match st.cfg.build_options().get("experimental_java_classpath") {
-                Some(crate::build_options::ConfigValue::Scalar(s)) => Some(s.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| "bazel".to_string())
-            .to_ascii_uppercase(),
-    };
+    let raw = st
+        .cfg
+        .options
+        .get("experimental_java_classpath")
+        .cloned()
+        .or_else(|| match st.cfg.build_options().get("experimental_java_classpath") {
+            Some(crate::build_options::ConfigValue::Scalar(s)) => Some(s.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "bazel".to_string())
+        .to_ascii_uppercase();
     if matches!(raw.as_str(), "OFF" | "JAVABUILDER" | "BAZEL" | "BAZEL_NO_FALLBACK") {
         raw
     } else {

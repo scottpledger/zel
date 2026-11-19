@@ -562,13 +562,21 @@ pub fn native_rule_classes() -> BTreeMap<String, Arc<RuleClass>> {
     v.push(
         Builder::new("label_flag")
             .build_setting(true)
-            .attr(a("build_setting_default", AttrType::Label).mandatory().nonconfigurable())
+            .attr(
+                a("build_setting_default", AttrType::Label)
+                    .mandatory()
+                    .nonconfigurable(),
+            )
             .build(),
     );
     v.push(
         Builder::new("label_setting")
             .build_setting(false)
-            .attr(a("build_setting_default", AttrType::Label).mandatory().nonconfigurable())
+            .attr(
+                a("build_setting_default", AttrType::Label)
+                    .mandatory()
+                    .nonconfigurable(),
+            )
             .build(),
     );
 

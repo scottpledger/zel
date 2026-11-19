@@ -1032,7 +1032,10 @@ pub fn parse_dotted_version(raw: &str) -> Result<Vec<(i32, String, i32)>, String
     if out.is_empty() {
         return Err(illegal());
     }
-    while out.last().is_some_and(|c| c.0 == 0 && c.1.is_empty() && c.2 == 0) {
+    while out
+        .last()
+        .is_some_and(|c| c.0 == 0 && c.1.is_empty() && c.2 == 0)
+    {
         out.pop();
     }
     Ok(out)
