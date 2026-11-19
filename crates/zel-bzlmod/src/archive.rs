@@ -2987,7 +2987,14 @@ mod tests {
         );
         tar_add(&mut t, "ignored_name", b'0', b"global-1", 0o644, "");
         // Clear global path with empty value `path=\n`, then use Solaris/STAR 'X' local extended header.
-        tar_add(&mut t, "pax_global_header", b'g', &pax_rec("path", ""), 0o644, "");
+        tar_add(
+            &mut t,
+            "pax_global_header",
+            b'g',
+            &pax_rec("path", ""),
+            0o644,
+            "",
+        );
         tar_add(
             &mut t,
             "PaxHeader",
@@ -2999,7 +3006,14 @@ mod tests {
         tar_add(&mut t, "placeholder", b'0', b"hard-body", 0o644, "");
         // Hardlink linkname in tar is archive-root-relative ("pkg/sub/target.txt"), so strip_prefix="pkg"
         // resolves it against stripped entry paths without double-stripping linkname!
-        tar_add(&mut t, "pkg/hardlink.txt", b'1', b"", 0o644, "pkg/sub/target.txt");
+        tar_add(
+            &mut t,
+            "pkg/hardlink.txt",
+            b'1',
+            b"",
+            0o644,
+            "pkg/sub/target.txt",
+        );
         #[cfg(unix)]
         tar_add(&mut t, "pkg/abs_sym", b'2', b"", 0o777, "/usr/bin/env");
         tar_end(&mut t);

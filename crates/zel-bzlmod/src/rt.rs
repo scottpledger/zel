@@ -1147,7 +1147,7 @@ impl Rt {
                         pos.len()
                     ));
                 }
-                if pos.first().is_some() && kw.contains_key("root_module_direct_deps") {
+                if !pos.is_empty() && kw.contains_key("root_module_direct_deps") {
                     return err(
                         "extension_metadata() got multiple values for parameter 'root_module_direct_deps'",
                     );

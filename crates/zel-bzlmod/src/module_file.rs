@@ -2404,7 +2404,7 @@ flag_alias(name = "my_flag", starlark_flag = ":f")
         assert_eq!(r.module.extension_usages[1].repo_overrides.len(), 2);
         let inj = r.module.extension_usages[1]
             .repo_overrides
-            .get(&"injected_one".to_string())
+            .get("injected_one")
             .unwrap();
         assert_eq!(inj.overriding_repo_name, "r");
         assert!(!inj.must_exist);

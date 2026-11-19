@@ -603,13 +603,7 @@ pub fn blake3(data: &[u8]) -> [u8; 32] {
 
     fn chunk_last_node(chunk: &[u8], chunk_counter: u64) -> ([u32; 8], [u32; 16], u64, u32, u32) {
         if chunk.is_empty() {
-            return (
-                IV,
-                [0u32; 16],
-                chunk_counter,
-                0,
-                CHUNK_START | CHUNK_END,
-            );
+            return (IV, [0u32; 16], chunk_counter, 0, CHUNK_START | CHUNK_END);
         }
         let mut cv = IV;
         let blocks: Vec<&[u8]> = chunk.chunks(64).collect();

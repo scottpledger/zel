@@ -527,10 +527,7 @@ impl Rt {
                     } else if vdir.is_dir() && !self.opts.force && !force_configure {
                         let vmarker = v.join(format!("@{canonical}.marker"));
                         let marker_content = std::fs::read_to_string(&vmarker).ok();
-                        let up_to_date = marker_content
-                            .as_deref()
-                            .map(&marker_ok)
-                            .unwrap_or(false);
+                        let up_to_date = marker_content.as_deref().is_some_and(marker_ok);
                         if up_to_date || self.opts.disable_download || self.opts.nofetch {
                             if !up_to_date && self.opts.nofetch {
                                 self.info(format!(
@@ -1052,7 +1049,10 @@ impl Rt {
         usages: &[(&ModuleKey, &ExtensionUsage)],
     ) -> Result<ExtensionResult, String> {
         let mut out = ExtensionResult::default();
-        let (bzl, rule) = id.name.rsplit_once(' ').ok_or("bad innate extension name")?;
+        let (bzl, rule) = id
+            .name
+            .rsplit_once(' ')
+            .ok_or("bad innate extension name")?;
         let mut seen_names: BTreeMap<String, String> = BTreeMap::new();
         for (mk, u) in usages {
             let owner = self
@@ -1248,10 +1248,8 @@ impl Rt {
                     .attrs
                     .iter()
                     .filter(|(k, v)| {
-                        !matches!(
-                            k.as_str(),
-                            "name" | "tags" | "deprecation" | "visibility"
-                        ) && !matches!(v, AttrVal::None)
+                        !matches!(k.as_str(), "name" | "tags" | "deprecation" | "visibility")
+                            && !matches!(v, AttrVal::None)
                     })
                     .cloned()
                     .collect();
@@ -1394,7 +1392,9 @@ impl Rt {
                     .collect();
                 let order: Vec<String> = t.attrs.iter().map(|(k, _)| k.clone()).collect();
                 if let Err(e) = crate::ctx::validate_tag_call(&t.tag_name, cdefs, &kw, &order)
-                    .and_then(|_| crate::ctx::check_tag_labels(self, &t.tag_name, cdefs, &kw, &owner))
+                    .and_then(|_| {
+                        crate::ctx::check_tag_labels(self, &t.tag_name, cdefs, &kw, &owner)
+                    })
                 {
                     let msg = e.0;
                     let (file, rest) = t.location.split_once(':').unwrap_or((&t.location, "1:1"));
@@ -1830,7 +1830,9 @@ impl Rt {
                                 conv_label(&ek)?
                             };
                             if !seen_keys.insert(nk.clone()) {
-                                return Err(format!("Label key '{nk}' appears more than once in dict"));
+                                return Err(format!(
+                                    "Label key '{nk}' appears more than once in dict"
+                                ));
                             }
                             out_entries.push((nk, ev));
                         }
@@ -3579,7 +3581,8 @@ inspect_repo(name = "via_use_repo_rule")
         );
 
         // Marker must contain `DIRTREE:` watch; modifying a nested file must trigger refetch.
-        let marker = std::fs::read_to_string(base.join("ob/external/@+ext+short_name.marker")).unwrap();
+        let marker =
+            std::fs::read_to_string(base.join("ob/external/@+ext+short_name.marker")).unwrap();
         assert!(
             marker.contains("DIRTREE:"),
             "watch_tree must record DIRTREE input in marker: {marker}"

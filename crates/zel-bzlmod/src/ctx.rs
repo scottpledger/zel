@@ -1630,11 +1630,9 @@ fn dispatch_object_inner(
             | "report_progress" => Ok(Value::BuiltinFunction(format!(
                 "host:method:{kind}.{member}"
             ))),
-            "load_wasm" | "execute_wasm" if rt.opts.experimental_repository_ctx_execute_wasm => {
-                Ok(Value::BuiltinFunction(format!(
-                    "host:method:{kind}.{member}"
-                )))
-            }
+            "load_wasm" | "execute_wasm" if rt.opts.experimental_repository_ctx_execute_wasm => Ok(
+                Value::BuiltinFunction(format!("host:method:{kind}.{member}")),
+            ),
             "watch" => Ok(Value::BuiltinFunction(format!(
                 "host:method:{kind}.{member}"
             ))),

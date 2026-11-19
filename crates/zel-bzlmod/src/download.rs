@@ -1503,8 +1503,7 @@ impl Downloader {
             if code == 7 {
                 return Err(fe("Connection refused".to_string(), true));
             }
-            let unrecoverable_5xx =
-                stderr.contains("error: 501") || stderr.contains("error: 505");
+            let unrecoverable_5xx = stderr.contains("error: 501") || stderr.contains("error: 505");
             let retryable = (!unrecoverable_5xx && stderr.contains("error: 5"))
                 || stderr.contains("error: 403")
                 || stderr.contains("error: 408")
@@ -1631,7 +1630,12 @@ impl Downloader {
                     hdrs.push((k.trim().to_ascii_lowercase(), v.trim().to_string()));
                 }
             }
-            let get = |k: &str| hdrs.iter().rev().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+            let get = |k: &str| {
+                hdrs.iter()
+                    .rev()
+                    .find(|(n, _)| n == k)
+                    .map(|(_, v)| v.clone())
+            };
             if matches!(code, 301 | 302 | 303 | 307 | 308) {
                 let loc = get("location").ok_or_else(|| {
                     fe(format!("Redirect {} without Location header", code), false)
@@ -1711,8 +1715,7 @@ impl Downloader {
                 r.read_to_end(&mut body)
                     .map_err(|e| fe(format!("Error reading body: {}", e), true))?;
             }
-            let is_gzip_ce = get("content-encoding")
-                .is_some_and(|v| v == "gzip" || v == "x-gzip");
+            let is_gzip_ce = get("content-encoding").is_some_and(|v| v == "gzip" || v == "x-gzip");
             let orig_path = Url::parse(orig_url)
                 .map(|u| u.path().to_string())
                 .unwrap_or_default();
@@ -2779,7 +2782,11 @@ mod tests {
         let gz_tar = make_gz(b"hello");
         let gz_tar_clone = gz_tar.clone();
         let (port_gz, _) = serve(2, move |path, _| {
-            let enc = if path.ends_with(".tar.gz") { "gzip" } else { "x-gzip" };
+            let enc = if path.ends_with(".tar.gz") {
+                "gzip"
+            } else {
+                "x-gzip"
+            };
             let mut resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Encoding: {enc}\r\nContent-Length: {}\r\n\r\n",
                 gz_tar_clone.len()
@@ -2889,7 +2896,10 @@ mod tests {
             proxy_req.starts_with("GET http://upstream.example.invalid:8080/item.bin HTTP/1.1"),
             "{proxy_req}"
         );
-        assert!(proxy_req.contains("Proxy-Authorization: Basic "), "{proxy_req}");
+        assert!(
+            proxy_req.contains("Proxy-Authorization: Basic "),
+            "{proxy_req}"
+        );
     }
 }
 
