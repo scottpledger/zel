@@ -523,15 +523,20 @@ impl ExecRuntime {
                 let Some(remote) = &self.remote else {
                     return Err("remote strategy is not available".into());
                 };
+                let allow_local = hooks.lock_outputs.is_none();
                 let fallback = LocalKindRunner {
                     rt: self,
                     kind: self.registry.remote_local_fallback(),
-                    hooks: Default::default(),
+                    hooks: if allow_local {
+                        hooks.clone()
+                    } else {
+                        Default::default()
+                    },
                 };
                 let mode = ExecMode {
                     allow_remote_exec: true,
                     fallback: Some(&fallback),
-                    allow_local: hooks.lock_outputs.is_none(),
+                    allow_local,
                     hooks: hooks.clone(),
                 };
                 Ok(remote.exec_ext(spawn, execroot, fs, &mode))

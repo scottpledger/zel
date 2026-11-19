@@ -2017,6 +2017,14 @@ impl RemoteSpawnRunner {
                                         ));
                                     }
                                 };
+                            if let Some(cb) = &mode.hooks.stream_out {
+                                if !stdout.is_empty() {
+                                    cb(&stdout);
+                                }
+                                if !stderr.is_empty() {
+                                    cb(&stderr);
+                                }
+                            }
                             if is_remote_hit {
                                 self.stats.remote_cache_hits.fetch_add(1, Ordering::SeqCst);
                             } else {
@@ -2155,6 +2163,14 @@ impl RemoteSpawnRunner {
                                             ));
                                         }
                                     };
+                                if let Some(cb) = &mode.hooks.stream_out {
+                                    if !stdout.is_empty() {
+                                        cb(&stdout);
+                                    }
+                                    if !stderr.is_empty() {
+                                        cb(&stderr);
+                                    }
+                                }
                                 if cached {
                                     self.stats.remote_cache_hits.fetch_add(1, Ordering::SeqCst);
                                 } else {

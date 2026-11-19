@@ -1458,3 +1458,92 @@ fn tree_symlink_to_external_lazy_artifact_stays_consistent_across_partial_and_fu
         "action cache must remain UpToDate once external symlink targets are materialized"
     );
 }
+
+#[test]
+fn remote_strategy_forwards_stream_out_hook_across_exec_cache_hit_and_local_fallback() {
+    let root = tmp("remote-stream-hook");
+    let server = FakeReapiServer::new();
+    server.set_executor(|ctx| {
+        if ctx
+            .command
+            .arguments
+            .iter()
+            .any(|a| a.contains("FALLBACK_ME"))
+        {
+            return Err(zel_remote::grpc::GrpcStatus::new(14, "transient outage"));
+        }
+        let out = ctx.server.put_blob(b"payload");
+        Ok(ActionResult {
+            output_files: vec![OutputFile {
+                path: "out/r.txt".into(),
+                digest: Some(out),
+                ..Default::default()
+            }],
+            stdout_raw: b"from-remote\n".to_vec(),
+            ..Default::default()
+        })
+    });
+    let so = StrategyOptions {
+        spawn_strategy: vec!["remote".into()],
+        remote_local_fallback_strategy: "standalone".into(),
+        ..Default::default()
+    };
+    let rt = runtime(
+        &root,
+        &server,
+        true,
+        &[
+            "--remote_download_outputs=all",
+            "--remote_local_fallback=true",
+        ],
+        so,
+        DynamicOptions::default(),
+    );
+
+    let capture = |sp: &Spawn| -> (zel_sandbox::SpawnResult, String) {
+        let buf = Arc::new(std::sync::Mutex::new(Vec::<u8>::new()));
+        let buf_cb = buf.clone();
+        let hooks = zel_sandbox::ExecHooks {
+            stream_out: Some(Arc::new(move |chunk: &[u8]| {
+                buf_cb.lock().unwrap().extend_from_slice(chunk);
+            })),
+            ..Default::default()
+        };
+        let res = rt
+            .execute_with_hooks(
+                sp,
+                "Testing //t:t",
+                &execroot(&root),
+                &LocalFileSystem::default(),
+                &Reporter::new(),
+                &hooks,
+            )
+            .unwrap()
+            .unwrap();
+        let s = String::from_utf8_lossy(&buf.lock().unwrap()).into_owned();
+        (res, s)
+    };
+
+    // 1. Remote execution forwards `stdout` to `stream_out`.
+    let sp_remote = spawn("echo local > out/r.txt", &[], &["out/r.txt"], &[]);
+    let (r1, s1) = capture(&sp_remote);
+    assert_eq!(r1.runner_name, "remote");
+    assert_eq!(s1, "from-remote\n");
+
+    // 2. Subsequent remote cache hit also forwards cached `stdout` to `stream_out`.
+    let (r2, s2) = capture(&sp_remote);
+    assert_eq!(r2.runner_name, "remote cache hit");
+    assert_eq!(s2, "from-remote\n");
+
+    // 3. Transient remote outage under `--spawn_strategy=remote --remote_local_fallback=true`
+    //    falls back to `LocalKindRunner` and forwards live `stream_out` from local execution.
+    let sp_fallback = spawn(
+        "echo FALLBACK_ME && mkdir -p out && echo ok > out/s.txt",
+        &[],
+        &["out/s.txt"],
+        &[],
+    );
+    let (r3, s3) = capture(&sp_fallback);
+    assert_eq!(r3.status, SpawnStatus::Success);
+    assert_eq!(s3, "FALLBACK_ME\n");
+}

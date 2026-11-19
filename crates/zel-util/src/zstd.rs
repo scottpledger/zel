@@ -1178,28 +1178,28 @@ pub fn compress(data: &[u8]) -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 pub fn xxh64(data: &[u8], seed: u64) -> u64 {
-    let p1 = 0x9E3779B185EBCA87u64;
-    let p2 = 0xC2B2AE3D27D4EB4Fu64;
-    let p3 = 0x165667B19E3779F9u64;
-    let p4 = 0x85EBCA77C2B2AE63u64;
-    let p5 = 0x27D4EB2F165667C5u64;
+    let prime1 = 0x9E3779B185EBCA87u64;
+    let prime2 = 0xC2B2AE3D27D4EB4Fu64;
+    let prime3 = 0x165667B19E3779F9u64;
+    let prime4 = 0x85EBCA77C2B2AE63u64;
+    let prime5 = 0x27D4EB2F165667C5u64;
 
     let round = |acc: u64, val: u64| {
-        acc.wrapping_add(val.wrapping_mul(p2))
+        acc.wrapping_add(val.wrapping_mul(prime2))
             .rotate_left(31)
-            .wrapping_mul(p1)
+            .wrapping_mul(prime1)
     };
     let merge_round = |acc: u64, val: u64| {
         let v = round(0, val);
-        (acc ^ v).wrapping_mul(p1).wrapping_add(p4)
+        (acc ^ v).wrapping_mul(prime1).wrapping_add(prime4)
     };
 
     let len = data.len();
     let mut h64 = if len >= 32 {
-        let mut v1 = seed.wrapping_add(p1).wrapping_add(p2);
-        let mut v2 = seed.wrapping_add(p2);
+        let mut v1 = seed.wrapping_add(prime1).wrapping_add(prime2);
+        let mut v2 = seed.wrapping_add(prime2);
         let mut v3 = seed;
-        let mut v4 = seed.wrapping_sub(p1);
+        let mut v4 = seed.wrapping_sub(prime1);
 
         for chunk in data[..len - len % 32].chunks_exact(32) {
             let u0 = u64::from_le_bytes(chunk[0..8].try_into().unwrap());
@@ -1224,7 +1224,7 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
         h = merge_round(h, v4);
         h
     } else {
-        seed.wrapping_add(p5)
+        seed.wrapping_add(prime5)
     };
 
     h64 = h64.wrapping_add(len as u64);
@@ -1233,29 +1233,32 @@ pub fn xxh64(data: &[u8], seed: u64) -> u64 {
     while i + 8 <= len {
         let u = u64::from_le_bytes(data[i..i + 8].try_into().unwrap());
         let k1 = round(0, u);
-        h64 = (h64 ^ k1).rotate_left(27).wrapping_mul(p1).wrapping_add(p4);
+        h64 = (h64 ^ k1)
+            .rotate_left(27)
+            .wrapping_mul(prime1)
+            .wrapping_add(prime4);
         i += 8;
     }
     if i + 4 <= len {
         let u = u32::from_le_bytes(data[i..i + 4].try_into().unwrap()) as u64;
-        h64 = (h64 ^ (u.wrapping_mul(p1)))
+        h64 = (h64 ^ (u.wrapping_mul(prime1)))
             .rotate_left(23)
-            .wrapping_mul(p2)
-            .wrapping_add(p3);
+            .wrapping_mul(prime2)
+            .wrapping_add(prime3);
         i += 4;
     }
     while i < len {
         let u = data[i] as u64;
-        h64 = (h64 ^ (u.wrapping_mul(p5)))
+        h64 = (h64 ^ (u.wrapping_mul(prime5)))
             .rotate_left(11)
-            .wrapping_mul(p1);
+            .wrapping_mul(prime1);
         i += 1;
     }
 
     h64 ^= h64 >> 33;
-    h64 = h64.wrapping_mul(p2);
+    h64 = h64.wrapping_mul(prime2);
     h64 ^= h64 >> 29;
-    h64 = h64.wrapping_mul(p3);
+    h64 = h64.wrapping_mul(prime3);
     h64 ^= h64 >> 32;
 
     h64
