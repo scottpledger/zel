@@ -28,6 +28,7 @@ pub mod digest;
 pub mod file_cache;
 pub mod input_expander;
 pub mod java_compile;
+pub mod junit_runner;
 pub mod layout;
 pub mod resources;
 pub mod runfiles_tree;

@@ -465,7 +465,7 @@ fn test_runner_key(
         args,
         test_filter: native("test_filter").unwrap_or_default(),
         fail_fast: native("test_runner_fail_fast")
-            .map(|v| v == "true")
+            .map(|v| v == "true" || v == "1")
             .unwrap_or(false),
         run_under: cfg.options.get("run_under").cloned().unwrap_or_default(),
         coverage_env: Default::default(),

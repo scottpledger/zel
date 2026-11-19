@@ -285,11 +285,40 @@ enum Tok {
 }
 
 fn unescape(s: &str) -> String {
-    s.replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&quot;", "\"")
-        .replace("&apos;", "'")
-        .replace("&amp;", "&")
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(amp) = rest.find('&') {
+        out.push_str(&rest[..amp]);
+        let after = &rest[amp + 1..];
+        if let Some(semi) = after.find(';') {
+            let entity = &after[..semi];
+            let decoded = match entity {
+                "lt" => Some('<'),
+                "gt" => Some('>'),
+                "quot" => Some('"'),
+                "apos" => Some('\''),
+                "amp" => Some('&'),
+                _ if entity.starts_with("#x") || entity.starts_with("#X") => {
+                    u32::from_str_radix(&entity[2..], 16)
+                        .ok()
+                        .and_then(char::from_u32)
+                }
+                _ if entity.starts_with('#') => {
+                    entity[1..].parse::<u32>().ok().and_then(char::from_u32)
+                }
+                _ => None,
+            };
+            if let Some(ch) = decoded {
+                out.push(ch);
+                rest = &after[semi + 1..];
+                continue;
+            }
+        }
+        out.push('&');
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 fn find_tag_end(xml: &str, start_after_lt: usize) -> Result<usize, String> {
@@ -700,5 +729,13 @@ mod tests {
             parse_test_xml("<testsuite name=\"a\"><testcase time=\"abc\"/></testsuite>").is_err()
         );
         assert!(parse_test_xml("<testsuite><testcase></testsuite>").is_err());
+    }
+
+    #[test]
+    fn xml_unescape_handles_numeric_entities_and_single_pass_amp() {
+        let xml = "<testsuite name=\"s&#x9;1\" time=\"0\"><testcase name=\"a&#10;b&#xD;c&apos;&amp;#x9;\" classname=\"C\" time=\"0\" status=\"run\"/></testsuite>";
+        let suite = parse_test_xml(xml).unwrap().unwrap();
+        assert_eq!(suite.name.as_deref(), Some("s\t1"));
+        assert_eq!(suite.child[0].name.as_deref(), Some("a\nb\rc'&#x9;"));
     }
 }

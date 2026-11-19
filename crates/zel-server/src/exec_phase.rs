@@ -2479,6 +2479,7 @@ pub(crate) fn run_tests(
                 }
             }),
             check_sharding_support: opt_bool(parsed, "incompatible_check_sharding_support", true),
+            test_runner_fail_fast: opt_bool(parsed, "test_runner_fail_fast", false),
         };
         let mut fp = zel_util::Fingerprint::new();
         fp.add_str(&label);
@@ -2491,6 +2492,7 @@ pub(crate) fn run_tests(
                 spec.shard_count,
                 spec.runs_per_test,
                 &spec.test_filter,
+                spec.test_runner_fail_fast,
                 spec.coverage,
                 &spec.run_under
             )
@@ -4090,6 +4092,7 @@ mod tests {
             kill_delay_ms: None,
             test_tmpdir: None,
             check_sharding_support: false,
+            test_runner_fail_fast: false,
         };
         let att = |run, shard, exit_code| AttemptResult {
             shard,
