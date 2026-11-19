@@ -359,9 +359,19 @@ pub fn serialize_event_with_options(
     }
 }
 
+fn has_windows_drive_prefix(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+}
+
 /// Decodes a `file://` URI back into a raw filesystem path.
 pub fn file_uri_to_local_path(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("file://")?;
+    let rest = if rest.len() >= 10 && rest[..10].eq_ignore_ascii_case("localhost/") {
+        &rest[9..]
+    } else {
+        rest
+    };
     let bytes = rest.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
@@ -379,7 +389,12 @@ pub fn file_uri_to_local_path(uri: &str) -> Option<String> {
         out.push(bytes[i]);
         i += 1;
     }
-    String::from_utf8(out).ok()
+    let decoded = String::from_utf8(out).ok()?;
+    if decoded.starts_with('/') && has_windows_drive_prefix(&decoded[1..]) {
+        Some(decoded[1..].to_string())
+    } else {
+        Some(decoded)
+    }
 }
 
 fn convert_file_msg(f: &Msg, path_conversion: bool, bytestream_prefix: Option<&str>) -> Msg {
@@ -2052,6 +2067,19 @@ pub fn file_uri(path: &str) -> String {
     if path.contains("://") {
         return path.to_string();
     }
+    let normalized;
+    let path = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
+        normalized = format!("//{}", unc.replace('\\', "/"));
+        normalized.as_str()
+    } else if let Some(verbatim) = path.strip_prefix(r"\\?\") {
+        normalized = verbatim.replace('\\', "/");
+        normalized.as_str()
+    } else if cfg!(windows) || has_windows_drive_prefix(path) {
+        normalized = path.replace('\\', "/");
+        normalized.as_str()
+    } else {
+        path
+    };
     let p = if path.starts_with('/') {
         path.to_string()
     } else {
@@ -3178,5 +3206,51 @@ mod tests {
         assert!(!missing_json.contains("\"uri\""), "{missing_json}");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn file_uri_windows_and_unix_roundtrip() {
+        // `PathConverter.FileUriPathConverter`: Windows drive paths use `/` separators in `file:///C:/...`.
+        assert_eq!(
+            file_uri(r"C:\Users\runner\out bin.txt"),
+            "file:///C:/Users/runner/out%20bin.txt"
+        );
+        assert_eq!(
+            file_uri("C:/Users/runner/out bin.txt"),
+            "file:///C:/Users/runner/out%20bin.txt"
+        );
+        assert_eq!(
+            file_uri(r"\\?\C:\Users\runner\out bin.txt"),
+            "file:///C:/Users/runner/out%20bin.txt"
+        );
+
+        // `file_uri_to_local_path` strips the leading `/` before a Windows drive prefix for both
+        // forward-slash and `%5C`-encoded URIs, as well as `file://localhost/...` authority URIs.
+        assert_eq!(
+            file_uri_to_local_path("file:///C:/Users/runner/out%20bin.txt").as_deref(),
+            Some("C:/Users/runner/out bin.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path("file:///C:%5CUsers%5Crunner%5Cout%20bin.txt").as_deref(),
+            Some(r"C:\Users\runner\out bin.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path("file://localhost/C:/Users/runner/out%20bin.txt").as_deref(),
+            Some("C:/Users/runner/out bin.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path("file://localhost/a%20b/c").as_deref(),
+            Some("/a b/c")
+        );
+
+        // On Unix, a backslash inside a `/...` path is a literal filename character (`%5C`).
+        #[cfg(not(windows))]
+        {
+            assert_eq!(file_uri(r"/tmp/a\b"), "file:///tmp/a%5Cb");
+            assert_eq!(
+                file_uri_to_local_path("file:///tmp/a%5Cb").as_deref(),
+                Some(r"/tmp/a\b")
+            );
+        }
     }
 }
