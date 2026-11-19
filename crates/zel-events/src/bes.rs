@@ -101,23 +101,157 @@ impl BesUploadError {
     }
 }
 
-/// Process-wide list of background BES upload handles deferred via
-/// `--bes_upload_mode=nowait_for_upload_complete` or `fully_async`.
-static BACKGROUND_UPLOADS: OnceLock<Mutex<Vec<JoinHandle<()>>>> = OnceLock::new();
+/// Default maximum duration Bazel waits at the start of a command for a previous invocation's
+/// background BES upload (`BuildEventServiceModule.getMaxWaitForPreviousInvocation` = 5s).
+pub const DEFAULT_PREVIOUS_UPLOAD_MAX_WAIT: Duration = Duration::from_secs(5);
 
-fn background_uploads() -> &'static Mutex<Vec<JoinHandle<()>>> {
+struct BackgroundUpload {
+    mode: BesUploadMode,
+    timeout: Option<Duration>,
+    started_close: Instant,
+    shared: Arc<Shared>,
+    done_rx: Option<mpsc::Receiver<Result<(), BesUploadError>>>,
+    worker: JoinHandle<()>,
+}
+
+/// Outcome of waiting on previous background BES uploads (`BuildEventServiceModule.waitForPreviousInvocation`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreviousUploadDrain {
+    pub had_any: bool,
+    pub waited: Duration,
+    pub warnings: Vec<String>,
+}
+
+/// Process-wide list of background BES uploads deferred via
+/// `--bes_upload_mode=nowait_for_upload_complete` or `fully_async`.
+static BACKGROUND_UPLOADS: OnceLock<Mutex<Vec<BackgroundUpload>>> = OnceLock::new();
+
+fn background_uploads() -> &'static Mutex<Vec<BackgroundUpload>> {
     BACKGROUND_UPLOADS.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn cancel_background_shared(shared: &Arc<Shared>) {
+    shared.cancelled.store(true, Ordering::SeqCst);
+    if let Some(b) = shared.active_bidi.lock().unwrap().take() {
+        b.cancel();
+    }
+    shared.cv.notify_all();
+}
+
+fn format_previous_upload_error(err: &BesUploadError) -> String {
+    if err.timed_out {
+        "The background upload of the Build Event Protocol for the previous invocation failed due to a network timeout. Ignoring the failure and starting a new invocation...".to_string()
+    } else {
+        format!(
+            "The background upload of the Build Event Protocol for the previous invocation failed with the following exception: '{}'. Ignoring the failure and starting a new invocation...",
+            err.message
+        )
+    }
+}
+
+/// Waits for background BES uploads started by previous commands, bounded by `max_wait`
+/// (`BuildEventServiceModule.waitForPreviousInvocation`). Previous upload failures or timeouts are
+/// reported in `warnings` rather than failing the new invocation.
+pub fn drain_previous_uploads_ext(is_shutdown: bool, max_wait: Duration) -> PreviousUploadDrain {
+    let uploads: Vec<BackgroundUpload> = std::mem::take(&mut *background_uploads().lock().unwrap());
+    if uploads.is_empty() {
+        return PreviousUploadDrain::default();
+    }
+    let started = Instant::now();
+    let overall_deadline = started + max_wait;
+    let mut warnings = Vec::new();
+
+    for mut u in uploads {
+        if u.mode == BesUploadMode::FullyAsync && !is_shutdown {
+            let mut timed_out_wait = false;
+            {
+                let mut q = u.shared.q.lock().unwrap();
+                while !q.half_closed && !q.finished {
+                    let now = Instant::now();
+                    if now >= overall_deadline {
+                        timed_out_wait = true;
+                        break;
+                    }
+                    let (nq, _) = u.shared.cv.wait_timeout(q, overall_deadline - now).unwrap();
+                    q = nq;
+                }
+            }
+            if timed_out_wait {
+                let ms = started.elapsed().as_millis();
+                warnings.push(format!(
+                    "The background upload of the Build Event Protocol for the previous invocation failed to complete in {}.{:03} seconds. Cancelling and starting a new invocation...",
+                    ms / 1000,
+                    ms % 1000
+                ));
+                cancel_background_shared(&u.shared);
+                let _ = u.worker.join();
+            } else if let Some(rx) = u.done_rx.take() {
+                match rx.try_recv() {
+                    Ok(Ok(())) | Err(mpsc::TryRecvError::Disconnected) => {
+                        let _ = u.worker.join();
+                    }
+                    Ok(Err(err)) => {
+                        warnings.push(format_previous_upload_error(&err));
+                        cancel_background_shared(&u.shared);
+                        let _ = u.worker.join();
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {
+                        // `BuildEventServiceModule.waitForPreviousInvocation`: `fully_async`
+                        // waits only on `halfCloseFuture` (unless shutting down) and is not
+                        // cancelled if half-close succeeded without error.
+                    }
+                }
+            }
+            continue;
+        }
+
+        let bes_dl = u.timeout.map(|t| u.started_close + t);
+        let eff_dl = match bes_dl {
+            Some(bdl) if bdl < overall_deadline => bdl,
+            _ => overall_deadline,
+        };
+        if let Some(rx) = u.done_rx.take() {
+            let rem = eff_dl.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(rem) {
+                Ok(Ok(())) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = u.worker.join();
+                }
+                Ok(Err(err)) => {
+                    warnings.push(format_previous_upload_error(&err));
+                    cancel_background_shared(&u.shared);
+                    let _ = u.worker.join();
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    if bes_dl.is_some_and(|bdl| bdl <= overall_deadline && Instant::now() >= bdl) {
+                        warnings.push(format_previous_upload_error(&BesUploadError::timeout()));
+                    } else {
+                        let ms = started.elapsed().as_millis();
+                        warnings.push(format!(
+                            "The background upload of the Build Event Protocol for the previous invocation failed to complete in {}.{:03} seconds. Cancelling and starting a new invocation...",
+                            ms / 1000,
+                            ms % 1000
+                        ));
+                    }
+                    cancel_background_shared(&u.shared);
+                    let _ = u.worker.join();
+                }
+            }
+        } else {
+            let _ = u.worker.join();
+        }
+    }
+
+    PreviousUploadDrain {
+        had_any: true,
+        waited: started.elapsed(),
+        warnings,
+    }
 }
 
 /// Waits for any background BES uploads started by previous commands. Returns `true` if at least
 /// one background upload was waited on.
 pub fn drain_previous_uploads() -> bool {
-    let handles: Vec<JoinHandle<()>> = std::mem::take(&mut *background_uploads().lock().unwrap());
-    let had_any = !handles.is_empty();
-    for h in handles {
-        let _ = h.join();
-    }
-    had_any
+    drain_previous_uploads_ext(false, DEFAULT_PREVIOUS_UPLOAD_MAX_WAIT).had_any
 }
 
 // ------------------------------------------------------------------ ByteStream artifact uploader
@@ -519,6 +653,8 @@ pub struct BesConfig {
     pub credential_helpers: Vec<String>,
     pub credential_helper_timeout: Duration,
     pub credential_helper_cache_duration: Duration,
+    pub netrc: Option<String>,
+    pub client_env: std::collections::BTreeMap<String, String>,
 }
 
 impl BesConfig {
@@ -565,6 +701,8 @@ impl BesConfig {
             credential_helper_cache_duration: o
                 .credential_helper_cache_duration
                 .unwrap_or(Duration::from_secs(1800)),
+            netrc: o.netrc.clone(),
+            client_env: Default::default(),
         })
     }
 
@@ -664,7 +802,18 @@ impl BesConfig {
         } else {
             None
         };
-        let netrc = NetrcCredentialsProvider::from_env();
+        let netrc = if let Some(path) = &self.netrc {
+            Some(NetrcCredentialsProvider::from_file(Path::new(path))?)
+        } else if self.client_env.contains_key("NETRC")
+            || self.client_env.contains_key("HOME")
+            || self.client_env.contains_key("USERPROFILE")
+        {
+            NetrcCredentialsProvider::from_client_env(&self.client_env)
+                .ok()
+                .flatten()
+        } else {
+            NetrcCredentialsProvider::from_env()
+        };
         if helper.is_none() && google.is_none() && netrc.is_none() {
             return Ok(None);
         }
@@ -1054,6 +1203,8 @@ fn run_bidi_stream(
         *shared.active_bidi.lock().unwrap() = Some(bidi.clone());
 
         // Spawn concurrent writer for this stream attempt starting at `start_acked`.
+        let attempt_done = Arc::new(AtomicBool::new(false));
+        let send_done = attempt_done.clone();
         let send_bidi = bidi.clone();
         let send_shared = shared.clone();
         let writer = std::thread::spawn(move || -> Result<i64, GrpcStatus> {
@@ -1063,12 +1214,18 @@ fn run_bidi_stream(
                     send_bidi.cancel();
                     return Err(GrpcStatus::new(code::CANCELLED, "BES upload cancelled"));
                 }
+                if send_done.load(Ordering::SeqCst) {
+                    return Ok(idx as i64);
+                }
                 let next_msg = {
                     let mut q = send_shared.q.lock().unwrap();
                     loop {
                         if send_shared.cancelled.load(Ordering::SeqCst) {
                             send_bidi.cancel();
                             return Err(GrpcStatus::new(code::CANCELLED, "BES upload cancelled"));
+                        }
+                        if send_done.load(Ordering::SeqCst) {
+                            return Ok(idx as i64);
                         }
                         if idx < q.requests.len() {
                             let bytes = q.requests[idx].clone();
@@ -1132,7 +1289,12 @@ fn run_bidi_stream(
         });
 
         *shared.active_bidi.lock().unwrap() = None;
-        // Wake writer if server closed early.
+        // Signal per-attempt completion under `shared.q` before `notify_all` so an idle writer
+        // blocked in `cv.wait` wakes immediately without waiting for another BEP event or `close()`.
+        {
+            let _q = shared.q.lock().unwrap();
+            attempt_done.store(true, Ordering::SeqCst);
+        }
         shared.cv.notify_all();
         let writer_res = writer.join().unwrap_or(Ok(0));
 
@@ -1239,15 +1401,24 @@ impl BuildEventTransport for BesTransport {
 
         match self.cfg.upload_mode {
             BesUploadMode::NoWaitForUploadComplete => {
+                let done_rx = self.done_rx.lock().unwrap().take();
                 if let Some(h) = self.worker.lock().unwrap().take() {
-                    background_uploads().lock().unwrap().push(h);
+                    background_uploads().lock().unwrap().push(BackgroundUpload {
+                        mode: BesUploadMode::NoWaitForUploadComplete,
+                        timeout: self.cfg.timeout,
+                        started_close: Instant::now(),
+                        shared: self.shared.clone(),
+                        done_rx,
+                        worker: h,
+                    });
                 }
                 return Ok(());
             }
             BesUploadMode::FullyAsync => {
                 // Wait only for half-close or worker termination (bounded by timeout if set),
-                // then detach worker.
-                let deadline = self.cfg.timeout.map(|t| Instant::now() + t);
+                // then detach worker for `drain_previous_uploads_ext`.
+                let close_started = Instant::now();
+                let deadline = self.cfg.timeout.map(|t| close_started + t);
                 let mut q = self.shared.q.lock().unwrap();
                 while !q.half_closed && !q.finished {
                     if let Some(dl) = deadline {
@@ -1262,8 +1433,16 @@ impl BuildEventTransport for BesTransport {
                     }
                 }
                 drop(q);
+                let done_rx = self.done_rx.lock().unwrap().take();
                 if let Some(h) = self.worker.lock().unwrap().take() {
-                    background_uploads().lock().unwrap().push(h);
+                    background_uploads().lock().unwrap().push(BackgroundUpload {
+                        mode: BesUploadMode::FullyAsync,
+                        timeout: self.cfg.timeout,
+                        started_close: close_started,
+                        shared: self.shared.clone(),
+                        done_rx,
+                        worker: h,
+                    });
                 }
                 return Ok(());
             }
@@ -1308,12 +1487,30 @@ pub fn transport_from_options(
     invocation_id: &str,
     command: &str,
 ) -> Result<Option<(Arc<BesTransport>, BesConfig)>, String> {
+    transport_from_options_with_env(
+        o,
+        build_id,
+        invocation_id,
+        command,
+        &std::collections::BTreeMap::new(),
+    )
+}
+
+/// Builds a BES transport from options and the invoking command's `client_env` (`$NETRC`/`$HOME`).
+pub fn transport_from_options_with_env(
+    o: &crate::bep::BepOptions,
+    build_id: &str,
+    invocation_id: &str,
+    command: &str,
+    client_env: &std::collections::BTreeMap<String, String>,
+) -> Result<Option<(Arc<BesTransport>, BesConfig)>, String> {
     if let Some(err) = &o.bes_upload_mode_error {
         return Err(err.clone());
     }
-    let Some(cfg) = BesConfig::from_options(o, build_id, invocation_id, command) else {
+    let Some(mut cfg) = BesConfig::from_options(o, build_id, invocation_id, command) else {
         return Ok(None);
     };
+    cfg.client_env = client_env.clone();
     let ch = cfg.channel()?;
     let t = BesTransport::start(cfg.clone(), ch);
     Ok(Some((t, cfg)))
@@ -1772,6 +1969,8 @@ mod tests {
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
+    static ASYNC_TEST_LOCK: Mutex<()> = Mutex::new(());
+
     #[test]
     fn lifecycle_sequence_project_id_and_bep_special_files() {
         let srv = FakeBes::default();
@@ -1873,6 +2072,7 @@ mod tests {
 
     #[test]
     fn fully_async_close_never_hangs_on_lifecycle_or_open_stream_failure() {
+        let _guard = ASYNC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let run_case = |srv: FakeBes| {
             let channel = Arc::new(Channel::new(Arc::new(Conn2(srv)), 1, vec![]));
             let mut c = cfg();
@@ -1993,5 +2193,304 @@ mod tests {
             r"C:\Users\RUNNER~1\AppData\Local\Temp\zel-bes-up\out.bin",
             false
         ));
+    }
+
+    #[test]
+    fn bes_forwards_netrc_flag_and_client_env_credentials() {
+        let tmp = std::env::temp_dir().join(format!("zel-bes-netrc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let flag_netrc = tmp.join("flag.netrc");
+        let env_netrc = tmp.join("env.netrc");
+        std::fs::write(
+            &flag_netrc,
+            "machine bes.example login flaguser password flagpass\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &env_netrc,
+            "machine bes.example login envuser password envpass\n",
+        )
+        .unwrap();
+
+        let flag_path = flag_netrc.to_string_lossy().into_owned();
+        let opts = crate::bep::BepOptions::from_flags(
+            &|name| match name {
+                "bes_backend" => Some("grpc://bes.example:443".into()),
+                "netrc" => Some(flag_path.clone()),
+                _ => None,
+            },
+            &|_| Vec::new(),
+        );
+        let c = BesConfig::from_options(&opts, "b-1", "inv-1", "build").unwrap();
+        assert_eq!(c.netrc.as_deref(), Some(flag_path.as_str()));
+        let creds = c
+            .build_credentials()
+            .unwrap()
+            .expect("credentials from --netrc");
+        let hdrs = creds
+            .get_credentials("https://bes.example:443/google.devtools.build.v1.PublishBuildEvent")
+            .unwrap();
+        let expected_flag = format!("Basic {}", base64_encode(b"flaguser:flagpass"));
+        assert!(
+            hdrs.iter()
+                .any(|(k, v)| k == "authorization" && v == &expected_flag),
+            "unexpected headers: {hdrs:?}"
+        );
+
+        // Without `--netrc`, `client_env` (`NETRC`) is honored (`GoogleAuthUtils.newCredentialsFromNetrc`).
+        let mut c_env = BesConfig {
+            backend: "grpc://bes.example:443".into(),
+            ..Default::default()
+        };
+        c_env
+            .client_env
+            .insert("NETRC".into(), env_netrc.to_string_lossy().into_owned());
+        let creds_env = c_env
+            .build_credentials()
+            .unwrap()
+            .expect("credentials from client_env NETRC");
+        let hdrs_env = creds_env
+            .get_credentials("https://bes.example:443/google.devtools.build.v1.PublishBuildEvent")
+            .unwrap();
+        let expected_env = format!("Basic {}", base64_encode(b"envuser:envpass"));
+        assert!(
+            hdrs_env
+                .iter()
+                .any(|(k, v)| k == "authorization" && v == &expected_env),
+            "unexpected client_env headers: {hdrs_env:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn stream_retry_wakes_idle_writer_between_events_without_waiting_for_close() {
+        struct MidBuildFailConn {
+            attempts: Arc<Mutex<u32>>,
+            second_attempt_event_tx: Mutex<Option<mpsc::Sender<()>>>,
+        }
+
+        impl Connector for MidBuildFailConn {
+            fn connect(&self) -> io::Result<Transport> {
+                let (c, s) = memory_pair();
+                let attempts = self.attempts.clone();
+                let tx = self.second_attempt_event_tx.lock().unwrap().clone();
+                std::thread::spawn(move || {
+                    let Ok((_conn, rx)) = Conn::server_from(s, LocalSettings::default()) else {
+                        return;
+                    };
+                    while let Ok(st) = rx.recv() {
+                        let attempts = attempts.clone();
+                        let tx = tx.clone();
+                        std::thread::spawn(move || {
+                            let mut parser = MessageParser::default();
+                            let mut path = String::new();
+                            let ok_headers = [
+                                (":status".to_string(), "200".to_string()),
+                                ("content-type".to_string(), "application/grpc".to_string()),
+                            ];
+                            let mut stream_no = 0u32;
+                            let mut sent_hdrs = false;
+                            loop {
+                                match st.recv(None) {
+                                    Ok(Event::Headers(h)) => {
+                                        path = h
+                                            .iter()
+                                            .find(|kv| kv.0 == ":path")
+                                            .map(|kv| kv.1.clone())
+                                            .unwrap_or_default();
+                                        if path == PUBLISH_STREAM {
+                                            let mut g = attempts.lock().unwrap();
+                                            *g += 1;
+                                            stream_no = *g;
+                                        }
+                                    }
+                                    Ok(Event::Data(d)) => {
+                                        parser.push(&d);
+                                        while let Ok(Some(m)) = parser.next() {
+                                            if path == PUBLISH_STREAM {
+                                                if stream_no == 1 {
+                                                    // Close the stream with retriable UNAVAILABLE
+                                                    // while the client has NOT half-closed yet and
+                                                    // its writer thread is parked in `cv.wait`.
+                                                    let _ = st.send_headers(
+                                                        &[
+                                                            (
+                                                                ":status".to_string(),
+                                                                "200".to_string(),
+                                                            ),
+                                                            (
+                                                                "content-type".to_string(),
+                                                                "application/grpc".to_string(),
+                                                            ),
+                                                            (
+                                                                "grpc-status".to_string(),
+                                                                "14".to_string(),
+                                                            ),
+                                                            (
+                                                                "grpc-message".to_string(),
+                                                                "mid-build drop".to_string(),
+                                                            ),
+                                                        ],
+                                                        true,
+                                                    );
+                                                    return;
+                                                }
+                                                if !sent_hdrs {
+                                                    let _ = st.send_headers(&ok_headers, false);
+                                                    sent_hdrs = true;
+                                                }
+                                                if let Some(ref notify) = tx {
+                                                    let _ = notify.send(());
+                                                }
+                                                let r = Msg::decode(
+                                                    "google.devtools.build.v1.PublishBuildToolEventStreamRequest",
+                                                    &m,
+                                                )
+                                                .unwrap();
+                                                let o = r.get_msg("ordered_build_event").unwrap();
+                                                let mut resp = Msg::new(
+                                                    "google.devtools.build.v1.PublishBuildToolEventStreamResponse",
+                                                );
+                                                resp.set_int(
+                                                    "sequence_number",
+                                                    o.get_i64("sequence_number"),
+                                                );
+                                                if let Some(sid) = o.get_msg("stream_id") {
+                                                    resp.set_msg("stream_id", sid.clone());
+                                                }
+                                                let _ = st.send_data(
+                                                    &frame_message(&resp.encode_to_vec()),
+                                                    false,
+                                                    None,
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Ok(Event::End) => {
+                                        if path == PUBLISH_LIFECYCLE {
+                                            let _ = st.send_headers(&ok_headers, false);
+                                            let _ = st.send_data(&frame_message(&[]), false, None);
+                                            let _ = st.send_headers(
+                                                &[("grpc-status".to_string(), "0".to_string())],
+                                                true,
+                                            );
+                                        } else if sent_hdrs {
+                                            let _ = st.send_headers(
+                                                &[("grpc-status".to_string(), "0".to_string())],
+                                                true,
+                                            );
+                                        }
+                                        return;
+                                    }
+                                    _ => return,
+                                }
+                            }
+                        });
+                    }
+                });
+                Ok(c)
+            }
+            fn authority(&self) -> String {
+                "bes.local".into()
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let attempts = Arc::new(Mutex::new(0u32));
+        let conn = Arc::new(MidBuildFailConn {
+            attempts: attempts.clone(),
+            second_attempt_event_tx: Mutex::new(Some(tx)),
+        });
+        let channel = Arc::new(Channel::new(conn, 1, vec![]));
+        let mut c = cfg();
+        c.lifecycle_events = false;
+        let t = BesTransport::start(c, channel);
+
+        // Send a single mid-build event and do NOT call `close()` yet.
+        t.send(
+            &BepBuilder::build_started(
+                "inv-1",
+                0,
+                "9",
+                "",
+                "build",
+                "/w",
+                "/w",
+                1,
+                "h",
+                "u",
+                vec![ids::build_finished()],
+            )
+            .to_proto(false),
+        );
+
+        // Retry must wake the idle writer and re-send event 1 on stream attempt #2 before `close()`.
+        rx.recv_timeout(Duration::from_secs(2))
+            .expect("BES retry stalled waiting on idle writer between events");
+        assert!(
+            *attempts.lock().unwrap() >= 2,
+            "expected at least 2 stream attempts before close()"
+        );
+
+        t.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        t.close().expect("clean close after mid-build stream retry");
+    }
+
+    #[test]
+    fn drain_previous_uploads_surfaces_async_upload_errors_and_timeouts_as_warnings() {
+        let _guard = ASYNC_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = drain_previous_uploads_ext(true, Duration::from_millis(50));
+
+        // 1. `nowait_for_upload_complete` failing with PERMISSION_DENIED surfaces Bazel's warning
+        //    on the next command's drain without failing `close()`.
+        let srv_fail = FakeBes::default();
+        *srv_fail.fail_stream_perm_denied.lock().unwrap() = true;
+        let ch_fail = Arc::new(Channel::new(Arc::new(Conn2(srv_fail)), 1, vec![]));
+        let mut c_fail = cfg();
+        c_fail.upload_mode = BesUploadMode::NoWaitForUploadComplete;
+        let t_fail = BesTransport::start(c_fail, ch_fail);
+        t_fail.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        assert!(t_fail.close().is_ok());
+
+        let drained = drain_previous_uploads_ext(false, Duration::from_secs(3));
+        assert!(drained.had_any);
+        assert_eq!(drained.warnings.len(), 1, "{:?}", drained.warnings);
+        assert!(
+            drained.warnings[0].contains(
+                "The background upload of the Build Event Protocol for the previous invocation failed with the following exception:"
+            ) && drained.warnings[0].contains("Ignoring the failure and starting a new invocation..."),
+            "unexpected warning: {}",
+            drained.warnings[0]
+        );
+
+        // 2. `fully_async` failing during initial lifecycle RPC also records the failure for the
+        //    next command's drain.
+        let srv_async = FakeBes::default();
+        *srv_async.fail_lifecycle_perm_denied.lock().unwrap() = true;
+        let ch_async = Arc::new(Channel::new(Arc::new(Conn2(srv_async)), 1, vec![]));
+        let mut c_async = cfg();
+        c_async.upload_mode = BesUploadMode::FullyAsync;
+        c_async.timeout = None;
+        let t_async = BesTransport::start(c_async, ch_async);
+        t_async.send(&BepBuilder::build_finished("SUCCESS", 0, 1, None).to_proto(false));
+        assert!(t_async.close().is_ok());
+        // Give the detached worker a moment to send its error to `done_rx`.
+        std::thread::sleep(Duration::from_millis(30));
+
+        let drained_async = drain_previous_uploads_ext(false, Duration::from_secs(3));
+        assert!(drained_async.had_any);
+        assert_eq!(
+            drained_async.warnings.len(),
+            1,
+            "{:?}",
+            drained_async.warnings
+        );
+        assert!(
+            drained_async.warnings[0].contains("lifecycle denied"),
+            "unexpected warning: {}",
+            drained_async.warnings[0]
+        );
     }
 }

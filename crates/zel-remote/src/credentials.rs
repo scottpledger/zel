@@ -1464,6 +1464,40 @@ impl NetrcCredentialsProvider {
         Ok(entry)
     }
 
+    pub fn from_file(path: &Path) -> Result<Self, String> {
+        let bytes =
+            std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+        // ISO-8859-1 / Latin-1 decoding matching Bazel's NetrcParser.
+        let text: String = bytes.into_iter().map(|b| b as char).collect();
+        Self::parse(&text).map_err(|e| format!("Failed to parse {}: {e}", path.display()))
+    }
+
+    pub fn from_client_env(client_env: &BTreeMap<String, String>) -> Result<Option<Self>, String> {
+        let candidate = client_env
+            .get("NETRC")
+            .filter(|s| !s.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| {
+                client_env
+                    .get("HOME")
+                    .filter(|s| !s.is_empty())
+                    .map(|h| PathBuf::from(h).join(".netrc"))
+            })
+            .or_else(|| {
+                client_env
+                    .get("USERPROFILE")
+                    .filter(|s| !s.is_empty())
+                    .map(|h| PathBuf::from(h).join(".netrc"))
+            });
+        let Some(path) = candidate else {
+            return Ok(None);
+        };
+        if !path.is_file() {
+            return Ok(None);
+        }
+        Self::from_file(&path).map(Some)
+    }
+
     pub fn from_env() -> Option<Self> {
         let candidates = [
             std::env::var("NETRC")
@@ -1481,12 +1515,8 @@ impl NetrcCredentialsProvider {
         ];
         for path in candidates.into_iter().flatten() {
             if path.is_file() {
-                if let Ok(bytes) = std::fs::read(&path) {
-                    // ISO-8859-1 / Latin-1 decoding matching Bazel's NetrcParser.
-                    let text: String = bytes.into_iter().map(|b| b as char).collect();
-                    if let Ok(parsed) = Self::parse(&text) {
-                        return Some(parsed);
-                    }
+                if let Ok(parsed) = Self::from_file(&path) {
+                    return Some(parsed);
                 }
             }
         }

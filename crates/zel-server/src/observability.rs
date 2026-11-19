@@ -385,6 +385,7 @@ impl BuildObserver {
         command: &str,
         output_base: &str,
         fallback_invocation_id: Option<&str>,
+        client_env: &std::collections::BTreeMap<String, String>,
     ) -> Self {
         let get = |n: &str| {
             parsed.and_then(|p| {
@@ -423,11 +424,19 @@ impl BuildObserver {
             }
         }
 
-        // Wait for any deferred background BES uploads from a previous invocation.
-        if bes::drain_previous_uploads() {
-            reporter.handle(Event::info(
-                "Waited for background Build Event Protocol upload to complete.",
-            ));
+        // Wait for any deferred background BES uploads from a previous invocation
+        // (`BuildEventServiceModule.waitForPreviousInvocation`).
+        let prev = bes::drain_previous_uploads_ext(false, bes::DEFAULT_PREVIOUS_UPLOAD_MAX_WAIT);
+        if prev.warnings.is_empty() && prev.waited > std::time::Duration::from_millis(100) {
+            let ms = prev.waited.as_millis();
+            reporter.handle(Event::info(format!(
+                "Waited for the background upload of the Build Event Protocol for {}.{:03} seconds.",
+                ms / 1000,
+                ms % 1000
+            )));
+        }
+        for w in prev.warnings {
+            reporter.handle(Event::warning(None, w));
         }
 
         // Build Event Protocol.
@@ -508,8 +517,13 @@ impl BuildObserver {
                     }
                 }
             }
-            match bes::transport_from_options(&bep_opts, &build_request_id, &invocation_id, command)
-            {
+            match bes::transport_from_options_with_env(
+                &bep_opts,
+                &build_request_id,
+                &invocation_id,
+                command,
+                client_env,
+            ) {
                 Ok(Some((t, cfg))) => {
                     if let Some(u) = &artifact_uploader {
                         t.set_artifact_uploader(u.clone());
