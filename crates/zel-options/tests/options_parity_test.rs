@@ -1264,7 +1264,7 @@ fn test_comma_separated_list_converter_and_execution_info_modifier() {
     let parsed = ParsedCommandOptions::parse_for_command(
         "build",
         &[
-            "--extra_execution_platforms=p1,p2".to_string(),
+            "--extra_execution_platforms=plat_a,plat_b".to_string(),
             "--extra_toolchains=t1,t2".to_string(),
             "--extra_toolchains=t3".to_string(),
         ],
@@ -1273,8 +1273,8 @@ fn test_comma_separated_list_converter_and_execution_info_modifier() {
     assert_eq!(
         parsed.parsed_options["extra_execution_platforms"].value,
         OptionValue::List(vec![
-            OptionValue::String("p1".to_string()),
-            OptionValue::String("p2".to_string()),
+            OptionValue::String("plat_a".to_string()),
+            OptionValue::String("plat_b".to_string()),
         ])
     );
     assert_eq!(

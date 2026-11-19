@@ -859,11 +859,11 @@ fn provider_instance_add_display_and_select_type_checks() {
     f1.insert("a".to_string(), Value::Int(1.into()));
     let mut f2 = std::collections::BTreeMap::new();
     f2.insert("b".to_string(), Value::String("foo".into()));
-    let p1 = Value::ProviderInstance {
+    let inst_a = Value::ProviderInstance {
         provider_name: "%anonymous#1%struct".into(),
         fields: f1.clone(),
     };
-    let p2 = Value::ProviderInstance {
+    let inst_b = Value::ProviderInstance {
         provider_name: "%anonymous#1%struct".into(),
         fields: f2,
     };
@@ -871,15 +871,15 @@ fn provider_instance_add_display_and_select_type_checks() {
         provider_name: "%anonymous#2%other".into(),
         fields: f1,
     };
-    let merged = p1.add(&p2).unwrap();
+    let merged = inst_a.add(&inst_b).unwrap();
     assert_eq!(merged.to_string(), "struct(a = 1, b = \"foo\")");
     assert_eq!(merged.repr(), "struct(a = 1, b = \"foo\")");
-    assert!(p1
-        .add(&p1)
+    assert!(inst_a
+        .add(&inst_a)
         .unwrap_err()
         .0
         .contains("cannot add struct instances with common field 'a'"));
-    assert!(p1.add(&p_other).unwrap_err().0.contains(
+    assert!(inst_a.add(&p_other).unwrap_err().0.contains(
         "Cannot use '+' operator on instances of different providers (<no name> and <no name>)"
     ));
 

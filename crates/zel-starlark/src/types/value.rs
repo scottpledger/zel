@@ -348,15 +348,15 @@ impl Value {
             (Self::Struct(a), Self::Struct(b)) => Ok(Self::Struct(Arc::new(a.add(b)?))),
             (
                 Self::ProviderInstance {
-                    provider_name: p1,
+                    provider_name: prov_a,
                     fields: f1,
                 },
                 Self::ProviderInstance {
-                    provider_name: p2,
+                    provider_name: prov_b,
                     fields: f2,
                 },
             ) => {
-                if p1 != p2 {
+                if prov_a != prov_b {
                     fn printable(p: &str) -> &str {
                         if p.starts_with("%anonymous#") {
                             "<no name>"
@@ -366,8 +366,8 @@ impl Value {
                     }
                     return Err(StarlarkError(format!(
                         "Cannot use '+' operator on instances of different providers ({} and {})",
-                        printable(p1),
-                        printable(p2)
+                        printable(prov_a),
+                        printable(prov_b)
                     )));
                 }
                 let mut merged = f1.clone();
@@ -380,7 +380,7 @@ impl Value {
                     merged.insert(k.clone(), v.clone());
                 }
                 Ok(Self::ProviderInstance {
-                    provider_name: p1.clone(),
+                    provider_name: prov_a.clone(),
                     fields: merged,
                 })
             }
