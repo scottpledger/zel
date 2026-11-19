@@ -56,9 +56,15 @@ impl BlazeRuntime {
     /// The client's working directory relative to the workspace root (from `--client_cwd`).
     pub(crate) fn command_relative_dir(&self, parsed: &ParsedCommandOptions) -> PathFragment {
         match parsed.get_str("client_cwd") {
-            Some(cwd) if !cwd.is_empty() => PathFragment::create(cwd)
-                .relative_to(&self.dirs.workspace_dir)
-                .unwrap_or_else(|_| PathFragment::empty()),
+            Some(cwd) if !cwd.is_empty() => {
+                let pf = PathFragment::create(cwd);
+                if pf.is_absolute() {
+                    pf.relative_to(&self.dirs.workspace_dir)
+                        .unwrap_or_else(|_| PathFragment::empty())
+                } else {
+                    pf
+                }
+            }
             _ => PathFragment::empty(),
         }
     }
@@ -66,8 +72,25 @@ impl BlazeRuntime {
     /// The client's working directory as a host path (used to resolve `--target_pattern_file`).
     pub(crate) fn command_cwd(&self, parsed: &ParsedCommandOptions) -> std::path::PathBuf {
         match parsed.get_str("client_cwd") {
-            Some(cwd) if !cwd.is_empty() => std::path::PathBuf::from(cwd),
-            _ => std::path::PathBuf::from(self.dirs.workspace_dir.path_string()),
+            Some(cwd) if !cwd.is_empty() => {
+                let pf = PathFragment::create(cwd);
+                if pf.is_absolute() || !self.in_workspace() {
+                    std::path::PathBuf::from(pf.path_string())
+                } else {
+                    std::path::PathBuf::from(
+                        self.dirs.workspace_dir.get_relative(&pf).path_string(),
+                    )
+                }
+            }
+            _ => {
+                if self.in_workspace() {
+                    std::path::PathBuf::from(self.dirs.workspace_dir.path_string())
+                } else {
+                    std::env::current_dir().unwrap_or_else(|_| {
+                        std::path::PathBuf::from(self.dirs.workspace_dir.path_string())
+                    })
+                }
+            }
         }
     }
 

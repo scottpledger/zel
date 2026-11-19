@@ -372,38 +372,42 @@ impl BlazeRuntime {
         stdout: &mut Vec<u8>,
         stderr: &mut Vec<u8>,
     ) -> ExitCode {
-        // `BlazeOptionHandler.partitionCommandLineArgs`: every `--rc_source[=]` / `--default_override[=]`
-        // (also after `--`) is consumed as an rc source before option parsing.
-        // The consumed rc sources are still converted (`OptionOverrideConverter` for `--default_override`).
-        for a in args
-            .iter()
-            .filter(|a| a.starts_with("--rc_source=") || a.starts_with("--default_override="))
-        {
-            if let Err(e) = zel_options::ParsedCommandOptions::parse_for_command(
-                "canonicalize-flags",
-                std::slice::from_ref(a),
-            ) {
+        let mut rc_cfg = zel_options::BazelrcConfig::default();
+        let args_owned = match zel_options::rc::partition_rc_sources_and_apply(&mut rc_cfg, args) {
+            Ok(v) => v,
+            Err(e) => {
                 writeln_bytes(stderr, &e.format_bazel_error());
                 return ExitCode::COMMAND_LINE_ERROR;
             }
-        }
-        let args_owned = partition_rc_sources(args);
+        };
         let args: &[String] = &args_owned;
-        // `--for_command` is validated against the command map first.
-        let mut for_command = "build".to_string();
-        let mut policy_arg = String::new();
-        let mut canonicalize_policy = false;
-        for a in args.iter().take_while(|a| *a != "--") {
-            if let Some(v) = a.strip_prefix("--for_command=") {
-                for_command = v.to_string();
-            } else if let Some(v) = a.strip_prefix("--invocation_policy=") {
-                policy_arg = v.to_string();
-            } else if a == "--canonicalize_policy" || a == "--canonicalize_policy=true" {
-                canonicalize_policy = true;
-            } else if a == "--nocanonicalize_policy" || a == "--canonicalize_policy=false" {
-                canonicalize_policy = false;
+        let dash_pos = args.iter().position(|a| a == "--");
+        let before_dash = match dash_pos {
+            Some(pos) => &args[..pos],
+            None => args,
+        };
+        let parsed_cmd = match zel_options::ParsedCommandOptions::parse_for_command(
+            "canonicalize-flags",
+            before_dash,
+        ) {
+            Ok(p) => p,
+            Err(e) => {
+                writeln_bytes(stderr, &e.format_bazel_error());
+                return ExitCode::COMMAND_LINE_ERROR;
             }
-        }
+        };
+        let for_command = parsed_cmd
+            .get_str("for_command")
+            .unwrap_or("build")
+            .to_string();
+        let policy_arg = parsed_cmd
+            .get_str("invocation_policy")
+            .unwrap_or("")
+            .to_string();
+        let canonicalize_policy = parsed_cmd.get_bool("canonicalize_policy").unwrap_or(false);
+        let include_defaults = parsed_cmd
+            .get_bool("experimental_include_default_values")
+            .unwrap_or(true);
         const BAZEL_COMMAND_ORDER: &[&str] = &[
             "mobile-install",
             "fetch",
@@ -484,30 +488,16 @@ impl BlazeRuntime {
             };
         }
         let mut validated_starlark_flags: Option<Vec<String>> = None;
-        if let Some(pos) = args.iter().position(|a| a == "--") {
+        if let Some(pos) = dash_pos {
             let after_dash = &args[pos + 1..];
-            if let Ok(parsed_after) = zel_options::ParsedCommandOptions::parse_for_command_no_edit(
-                &for_command,
-                after_dash,
-            ) {
+            if let Ok(parsed_after) =
+                zel_options::ParsedCommandOptions::parse_for_command_no_edit_with_aliases(
+                    &for_command,
+                    after_dash,
+                    &parsed_cmd.flag_aliases,
+                )
+            {
                 if !parsed_after.raw_starlark_args.is_empty() && self.in_workspace() {
-                    let include_defaults = args[..pos]
-                        .iter()
-                        .rev()
-                        .find_map(|a| {
-                            if a == "--experimental_include_default_values"
-                                || a == "--experimental_include_default_values=true"
-                            {
-                                Some(true)
-                            } else if a == "--noexperimental_include_default_values"
-                                || a == "--experimental_include_default_values=false"
-                            {
-                                Some(false)
-                            } else {
-                                None
-                            }
-                        })
-                        .unwrap_or(true);
                     let loader = self.make_loader(&parsed_after);
                     let rel = self.command_relative_dir(&parsed_after);
                     match self.parse_and_validate_starlark_options(
@@ -573,22 +563,4 @@ impl BlazeRuntime {
             }
         }
     }
-}
-
-/// `BlazeOptionHandler.partitionCommandLineArgs`: the command line without `--rc_source[=]` and
-/// `--default_override[=]` (and the separate value following the bare forms).
-pub(crate) fn partition_rc_sources(cmd_line: &[String]) -> Vec<String> {
-    let mut remaining = Vec::with_capacity(cmd_line.len());
-    let mut it = cmd_line.iter();
-    while let Some(option) = it.next() {
-        if option.starts_with("--rc_source=") || option.starts_with("--default_override=") {
-            continue;
-        }
-        if option == "--rc_source" || option == "--default_override" {
-            it.next();
-            continue;
-        }
-        remaining.push(option.clone());
-    }
-    remaining
 }

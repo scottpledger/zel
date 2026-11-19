@@ -142,11 +142,35 @@ impl BlazeRuntime {
                 writeln_bytes(stdout, &format!("    id: \"{action_id}\""));
                 action_id += 1;
                 writeln_bytes(stdout, "    [blaze.SpawnInfo.spawn_info] {");
-                if let ActionAnalysisMetadata::SpawnAction { argv, .. } = act {
+                if let ActionAnalysisMetadata::SpawnAction { argv, env, .. } = act {
                     for arg in argv {
                         let escaped = arg.replace('\\', "\\\\").replace('"', "\\\"");
                         writeln_bytes(stdout, &format!("      argument: \"{escaped}\""));
                     }
+                    for (k, v) in env {
+                        let ek = k.replace('\\', "\\\\").replace('"', "\\\"");
+                        let ev = v.replace('\\', "\\\\").replace('"', "\\\"");
+                        writeln_bytes(stdout, "      variable {");
+                        writeln_bytes(stdout, &format!("        name: \"{ek}\""));
+                        writeln_bytes(stdout, &format!("        value: \"{ev}\""));
+                        writeln_bytes(stdout, "      }");
+                    }
+                }
+                for inp in act.inputs() {
+                    let p = inp
+                        .exec_path
+                        .path_string()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"");
+                    writeln_bytes(stdout, &format!("      input_file: \"{p}\""));
+                }
+                for outp in act.outputs() {
+                    let p = outp
+                        .exec_path
+                        .path_string()
+                        .replace('\\', "\\\\")
+                        .replace('"', "\\\"");
+                    writeln_bytes(stdout, &format!("      output_file: \"{p}\""));
                 }
                 writeln_bytes(stdout, "    }");
                 writeln_bytes(stdout, "  }");
@@ -154,12 +178,7 @@ impl BlazeRuntime {
             }
         }
         if printed_actions == 0 {
-            for ct in &analysis.configured {
-                writeln_bytes(
-                    stderr,
-                    &format!("ERROR: {} is not a supported target kind", ct.label),
-                );
-            }
+            writeln_bytes(stderr, "ERROR: no actions to print were found");
             return ExitCode::BUILD_FAILURE;
         }
         ExitCode::SUCCESS

@@ -431,12 +431,26 @@ fn run_locked(
             }
         }
         if cancel.load(Ordering::SeqCst) {
-            // `Cancel`: the spawns in flight were killed; give the command a moment to unwind and
-            // report its (interrupted) result like Bazel does, instead of answering right away while the
-            // command keeps holding the server lock.
+            // `Cancel`: spawns in flight were signalled; keep waiting for the command thread to
+            // unwind and release the command lock rather than returning early while the lock is
+            // still held. Log once if cancellation takes longer than 10s.
+            let newly_cancelled = cancelled_at.is_none();
             let since = *cancelled_at.get_or_insert_with(Instant::now);
-            if since.elapsed() > Duration::from_secs(10) {
-                return Ok((interrupted(d), false));
+            if !newly_cancelled && since.elapsed() > Duration::from_secs(10) {
+                let _ = zel_exec::layout::append_server_log(
+                    std::path::Path::new(d.rt.dirs.output_base.path_string()),
+                    d.rt.server_pid,
+                    zel_exec::layout::server_start_secs(),
+                    "W Cancelled command is still unwinding after 10s; waiting for command lock release.",
+                );
+                cancelled_at = Some(Instant::now());
+            }
+            // Still detect if the client itself disconnects while waiting for unwind.
+            match st.recv(Some(Instant::now())) {
+                Ok(Event::Reset(_)) => return Ok((interrupted(d), false)),
+                Err(e) if e.kind() == io::ErrorKind::TimedOut => {}
+                Err(_) => return Ok((interrupted(d), false)),
+                _ => {}
             }
             continue;
         }
@@ -521,6 +535,7 @@ pub fn serve_grpc(
     let pid_file = server_dir.get_relative_str("server.pid.txt");
     let mut last_mem_check = Instant::now();
     let mut idle_tasks_done = false;
+    let mut pid_file_lost = false;
     loop {
         match listener.accept() {
             Ok((s, _)) => {
@@ -570,17 +585,16 @@ pub fn serve_grpc(
             );
             break;
         }
-        // `--shutdown_on_low_sys_mem`: only when nothing is running and the server has been idle.
+        // `--shutdown_on_low_sys_mem`: only when `--max_idle_secs > 0`, nothing is running, and
+        // the server has been idle for at least 5 minutes (`IdleServerTasks` / Bazel behavior).
         if d.cfg.shutdown_on_low_sys_mem
+            && d.cfg.max_idle_secs > 0
             && *d.running.lock().unwrap() == 0
-            && d.last_activity.lock().unwrap().elapsed() >= Duration::from_secs(10)
+            && d.last_activity.lock().unwrap().elapsed() >= Duration::from_secs(300)
             && last_mem_check.elapsed() >= Duration::from_secs(5)
         {
             last_mem_check = Instant::now();
-            if crate::sys::free_memory_fraction()
-                .map(|f| f < 0.05)
-                .unwrap_or(false)
-            {
+            if crate::sys::is_low_sys_mem() {
                 let _ = zel_exec::layout::append_server_log(
                     std::path::Path::new(d.rt.dirs.output_base.path_string()),
                     d.rt.server_pid,
@@ -606,18 +620,22 @@ pub fn serve_grpc(
         }
         // If someone removed our pid file (e.g. `clean --expunge`), stop when no command is running.
         if *d.running.lock().unwrap() == 0 && !d.rt.fs.exists(&pid_file, true) {
+            pid_file_lost = true;
             break;
         }
     }
     crate::exec_phase::shutdown_worker_pools(d.rt.dirs.output_base.path_string());
-    if !d.rt.expunge_requested.load(Ordering::SeqCst)
+    if !pid_file_lost
+        && !d.rt.expunge_requested.load(Ordering::SeqCst)
         && !d.rt.skip_action_cache_save.load(Ordering::SeqCst)
     {
         if let Ok(cache) = d.rt.action_cache.lock() {
             let _ = cache.save_to_disk(d.rt.fs.as_ref(), &d.rt.dirs.action_cache_file());
         }
     }
-    crate::cleanup_server_status_files(d.rt.fs.as_ref(), &server_dir);
+    if !pid_file_lost && !d.rt.expunge_requested.load(Ordering::SeqCst) {
+        crate::cleanup_server_status_files(d.rt.fs.as_ref(), &server_dir);
+    }
     if d.rt.expunge_requested.load(Ordering::SeqCst) {
         let _ = std::fs::remove_dir_all(d.rt.dirs.output_base.path_string());
     }

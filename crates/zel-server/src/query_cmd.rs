@@ -215,12 +215,12 @@ impl BlazeRuntime {
             }
         };
         let cwd = self.command_cwd(&parsed);
-        let expr_str = match read_query(
-            &parsed,
-            &cwd,
-            cmd_kind,
-            cmd_kind == "aquery" && parsed.get_bool("skyframe_state").unwrap_or(false),
-        ) {
+        let allow_empty = cmd_kind == "aquery"
+            && (parsed.get_bool("skyframe_state").unwrap_or(false)
+                || parsed
+                    .get_str("universe_scope")
+                    .is_some_and(|s| !s.trim().is_empty()));
+        let expr_str = match read_query(&parsed, &cwd, cmd_kind, allow_empty) {
             Ok(q) => q,
             Err(_) => {
                 // `QueryEnvironmentBasedCommand` returns `BlazeCommandResult.failureDetail(..)`
@@ -234,17 +234,27 @@ impl BlazeRuntime {
                 let resolver = self.pattern_resolver(&parsed);
                 let opts = self.query_opts(&parsed);
                 let fmt = self.query_format_opts(&parsed, &resolver, "label");
-                let outcome = zel_query::run_query(&resolver, &expr_str, &opts, &fmt);
                 let output_file = parsed.get_str("output_file").filter(|s| !s.is_empty());
                 if let Some(out_path) = output_file {
-                    // `QueryRuntimeHelper.FileQueryRuntimeHelper.create`: the file is opened (not
-                    // created in missing directories) before the query is evaluated.
+                    // `QueryRuntimeHelper.FileQueryRuntimeHelper.create`: open/truncate the file
+                    // up front (failing immediately with exit 36 if the parent directory is
+                    // missing or unwritable) before running the query.
                     let file_path = cwd.join(out_path);
+                    if let Err(code) = open_query_output_file(&file_path, stderr) {
+                        return code;
+                    }
+                    let outcome = zel_query::run_query(&resolver, &expr_str, &opts, &fmt);
                     if let Err(code) = write_query_output_file(&file_path, &outcome.stdout, stderr)
                     {
                         return code;
                     }
-                } else if parsed
+                    for l in &outcome.stderr {
+                        writeln_bytes(stderr, l);
+                    }
+                    return exit_from_code(outcome.exit_code);
+                }
+                let outcome = zel_query::run_query(&resolver, &expr_str, &opts, &fmt);
+                if parsed
                     .get_bool("experimental_ui_debug_all_events")
                     .unwrap_or(false)
                 {
@@ -264,6 +274,20 @@ impl BlazeRuntime {
     }
 }
 
+pub(crate) fn open_query_output_file(
+    path: &std::path::Path,
+    stderr: &mut Vec<u8>,
+) -> Result<(), ExitCode> {
+    if std::fs::File::create(path).is_err() {
+        writeln_bytes(
+            stderr,
+            &format!("ERROR: Could not open query output file {}", path.display()),
+        );
+        return Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR);
+    }
+    Ok(())
+}
+
 /// Writes `--output_file` like `QueryRuntimeHelper.FileQueryRuntimeHelper`: failing to open the
 /// file is `ERROR: Could not open query output file <path>` with exit code 36
 /// (`QUERY_OUTPUT_WRITE_FAILURE`, a local environmental error).
@@ -275,7 +299,7 @@ pub(crate) fn write_query_output_file(
     use std::io::Write;
     match std::fs::File::create(path) {
         Ok(mut f) => {
-            if f.write_all(data).is_err() {
+            if f.write_all(data).is_err() || f.flush().is_err() {
                 writeln_bytes(
                     stderr,
                     &format!(

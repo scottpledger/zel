@@ -19,10 +19,10 @@ pub enum ConvenienceSymlinksMode {
 
 impl ConvenienceSymlinksMode {
     pub fn parse(v: &str) -> Option<Self> {
-        Some(match v {
-            "normal" | "true" | "1" => Self::Normal,
+        Some(match v.to_ascii_lowercase().as_str() {
+            "normal" | "true" | "1" | "yes" | "y" | "t" => Self::Normal,
             "clean" => Self::Clean,
-            "ignore" | "false" | "0" => Self::Ignore,
+            "ignore" | "false" | "0" | "no" | "n" | "f" => Self::Ignore,
             "log_only" => Self::LogOnly,
             _ => return None,
         })
@@ -48,17 +48,12 @@ pub fn convenience_links(req: &SymlinkRequest) -> Vec<(String, String)> {
         .symlink_prefix
         .map(|s| s.to_string())
         .unwrap_or_else(|| format!("{}-", req.product_name));
-    if prefix == "/" {
+    if prefix.starts_with('/') || prefix.split('/').any(|seg| seg == "..") {
         return Vec::new();
     }
-    // A prefix with a slash is relative to the workspace (or absolute).
     let base = |name: &str| -> String {
         let full = format!("{prefix}{name}");
-        if full.starts_with('/') {
-            full
-        } else {
-            format!("{}/{}", req.workspace_dir, full)
-        }
+        format!("{}/{}", req.workspace_dir, full)
     };
     let ws_name = Path::new(req.workspace_dir)
         .file_name()
@@ -78,6 +73,26 @@ pub fn convenience_links(req: &SymlinkRequest) -> Vec<(String, String)> {
         links.push((base("genfiles"), req.genfiles_dir.to_string()));
     }
     links
+}
+
+/// Returns `(workspace_relative_path, target, create)` entries for BEP
+/// `ConvenienceSymlinksIdentified`.
+pub fn bep_convenience_symlinks(req: &SymlinkRequest) -> Vec<(String, String, bool)> {
+    if req.mode == ConvenienceSymlinksMode::Ignore {
+        return Vec::new();
+    }
+    let create = req.mode != ConvenienceSymlinksMode::Clean;
+    let ws_prefix = format!("{}/", req.workspace_dir.trim_end_matches('/'));
+    convenience_links(req)
+        .into_iter()
+        .map(|(link, target)| {
+            let rel = link
+                .strip_prefix(&ws_prefix)
+                .unwrap_or(link.as_str())
+                .to_string();
+            (rel, target, create)
+        })
+        .collect()
 }
 
 /// Creates, refreshes or removes the convenience symlinks. Returns console messages
@@ -106,6 +121,7 @@ pub fn create_convenience_symlinks(req: &SymlinkRequest) -> Vec<String> {
             }
             continue;
         }
+        let _ = std::fs::create_dir_all(target);
         if let Ok(m) = &existing {
             if m.file_type().is_symlink() {
                 if std::fs::read_link(lp)

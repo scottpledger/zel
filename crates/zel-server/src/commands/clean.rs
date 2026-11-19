@@ -149,7 +149,11 @@ fn make_writable_tree(p: &Path) {
 impl BlazeRuntime {
     /// `OutputDirectoryLinksUtils.removeOutputDirectoryLinks`.
     fn remove_convenience_symlinks(&self, prefix: &str, stderr: &mut Vec<u8>) {
-        if prefix == "/" {
+        if prefix.starts_with('/')
+            || Path::new(prefix)
+                .components()
+                .any(|c| matches!(c, std::path::Component::ParentDir))
+        {
             return;
         }
         let ws = self.dirs.workspace_dir.path_string();
@@ -163,11 +167,7 @@ impl BlazeRuntime {
         let mut failures = Vec::new();
         for suffix in [ws_name.as_str(), "out", "bin", "testlogs", "genfiles"] {
             let name = format!("{prefix}{suffix}");
-            let link = if name.starts_with('/') {
-                PathBuf::from(&name)
-            } else {
-                Path::new(ws).join(&name)
-            };
+            let link = Path::new(ws).join(&name);
             match std::fs::symlink_metadata(&link) {
                 Ok(md) if md.file_type().is_symlink() => {
                     if let Err(e) = std::fs::remove_file(&link) {
@@ -179,9 +179,14 @@ impl BlazeRuntime {
         }
         // `removeDirectoryAndParents(workspace, prefix)`: a prefix naming a directory, e.g. `out/`.
         if prefix.contains('/') {
-            let mut dir = Path::new(prefix).parent().map(Path::to_path_buf);
+            let base = if prefix.ends_with('/') {
+                Some(PathBuf::from(prefix.trim_end_matches('/')))
+            } else {
+                Path::new(prefix).parent().map(Path::to_path_buf)
+            };
+            let mut dir = base;
             while let Some(d) = dir {
-                if d.as_os_str().is_empty() {
+                if d.as_os_str().is_empty() || d == Path::new(".") {
                     break;
                 }
                 if std::fs::remove_dir(Path::new(ws).join(&d)).is_err() {
@@ -260,14 +265,30 @@ impl BlazeRuntime {
 
         // `clearCaches` + `WorkerModule.beforeCommand`: shut down persistent workers and clear caches.
         crate::exec_phase::shutdown_worker_pools(self.dirs.output_base.path_string());
+        for cache_name in ["action_cache", "action_cache.bad", "action_cache.tmp"] {
+            let p = output_base.join(cache_name);
+            if let Ok(md) = std::fs::symlink_metadata(&p) {
+                let res = if md.is_dir() {
+                    make_writable_tree(&p);
+                    std::fs::remove_dir_all(&p)
+                } else {
+                    std::fs::remove_file(&p)
+                };
+                if let Err(e) = res {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        return fail(stderr, format!("{}: {e}", p.display()));
+                    }
+                }
+            }
+        }
         let _ = self.fs.delete(&self.dirs.action_cache_file());
         if let Ok(cache) = self.action_cache.lock() {
             cache.clear();
         }
 
         let symlink_prefix = match parsed.get_str("symlink_prefix") {
-            Some(p) if !p.is_empty() => p.to_string(),
-            _ => format!("{}-", product_name()),
+            Some(p) => p.to_string(),
+            None => format!("{}-", product_name()),
         };
 
         if expunge && !r#async {
@@ -313,7 +334,14 @@ impl BlazeRuntime {
         } else {
             self.skyframe.evaluator.clear();
             let execroot = output_base.join("execroot");
-            if r#async {
+            let is_symlink = std::fs::symlink_metadata(&execroot)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false);
+            if is_symlink {
+                if let Err(e) = std::fs::remove_file(&execroot) {
+                    return fail(stderr, format!("{}: {e}", execroot.display()));
+                }
+            } else if r#async {
                 if execroot.exists() {
                     match move_to_temp(&execroot) {
                         Ok(tmp) => {

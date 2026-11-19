@@ -367,8 +367,8 @@ pub fn resolve_profile_path(
         .map(|s| s.to_ascii_lowercase())
         .as_deref()
     {
-        Some("true") | Some("yes") | Some("1") => true,
-        Some("false") | Some("no") | Some("0") => false,
+        Some("true" | "yes" | "1" | "t" | "y") => true,
+        Some("false" | "no" | "0" | "f" | "n") => false,
         _ => profile_flag
             .map(|p| !p.is_empty())
             .unwrap_or(command_is_build_like),

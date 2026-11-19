@@ -415,9 +415,12 @@ impl ParsedCommandOptions {
                 .map(str::to_string)
             {
                 if !policy_val.is_empty() {
-                    if let Ok(policy) = InvocationPolicy::parse(&policy_val) {
-                        opts.apply_invocation_policy(&policy, command)?;
-                    }
+                    let policy = InvocationPolicy::parse(&policy_val).map_err(|_| {
+                        OptionsParsingError::new(format!(
+                            "Malformed value of --invocation_policy: {policy_val}"
+                        ))
+                    })?;
+                    opts.apply_invocation_policy(&policy, command)?;
                 }
             }
         }

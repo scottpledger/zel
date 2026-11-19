@@ -118,7 +118,8 @@ impl BlazeRuntime {
             } else {
                 label
             };
-            writeln_bytes(stdout, &format!("{} {version}", version_product_prefix()));
+            let prefix = super::explicit_product_name().unwrap_or_else(version_product_prefix);
+            writeln_bytes(stdout, &format!("{prefix} {version}"));
         } else {
             let summary: Vec<String> = build_data()
                 .into_iter()

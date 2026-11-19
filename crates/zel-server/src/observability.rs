@@ -51,6 +51,9 @@ pub(crate) struct BuildObserver {
     analysis_complete: std::sync::atomic::AtomicBool,
     bep_enabled: bool,
     bep_files: (Option<String>, Option<String>, Option<String>),
+    build_metadata: Vec<(String, String)>,
+    convenience_symlinks_bep_event: bool,
+    convenience_symlinks: std::sync::Mutex<Vec<(String, String, bool)>>,
 }
 
 fn uuid_like() -> String {
@@ -206,10 +209,11 @@ impl ActionListener for ActionObserver {
 }
 
 impl BuildObserver {
-    pub(crate) fn new(
+    pub(crate) fn new_with_fallback_invocation_id(
         parsed: Option<&ParsedCommandOptions>,
         command: &str,
         output_base: &str,
+        fallback_invocation_id: Option<&str>,
     ) -> Self {
         let get = |n: &str| parsed.and_then(|p| opt_last(p, n));
         let get_all = |n: &str| parsed.map(|p| opt_all(p, n)).unwrap_or_default();
@@ -232,10 +236,31 @@ impl BuildObserver {
         // Build Event Protocol.
         let bep_opts = BepOptions::from_flags(&get, &get_all);
         let bep_enabled = bep_opts.any_enabled();
-        let invocation_id = uuid_like();
+        let invocation_id = get("invocation_id")
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                fallback_invocation_id
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(uuid_like);
+        let build_request_id = get("build_request_id")
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(uuid_like);
+        let build_metadata: Vec<(String, String)> = get_all("build_metadata")
+            .into_iter()
+            .filter_map(|entry| {
+                let (k, v) = entry.split_once('=')?;
+                if k.is_empty() {
+                    return None;
+                }
+                Some((k.to_string(), v.to_string()))
+            })
+            .collect();
         let mut bes_t = None;
         if bep_enabled {
-            match bes::transport_from_options(&bep_opts, &uuid_like(), &invocation_id, command) {
+            match bes::transport_from_options(&bep_opts, &build_request_id, &invocation_id, command)
+            {
                 Ok(Some((t, cfg))) => {
                     if let Some(m) = cfg.streaming_message() {
                         reporter.handle(Event::info(m));
@@ -251,7 +276,7 @@ impl BuildObserver {
 
         // Profiler.
         let profile_flag = get("profile");
-        let is_build_like = matches!(command, "build" | "test" | "coverage" | "run");
+        let is_build_like = command == "query" || zel_options::command_analyzes(command);
         let profile_path = profiler::resolve_profile_path(
             profile_flag.as_deref(),
             get("generate_json_trace_profile").as_deref(),
@@ -335,7 +360,16 @@ impl BuildObserver {
                 bep_opts.binary_file.clone(),
                 bep_opts.text_file.clone(),
             ),
+            build_metadata,
+            convenience_symlinks_bep_event: parsed
+                .and_then(|p| p.get_bool("experimental_convenience_symlinks_bep_event"))
+                .unwrap_or(true),
+            convenience_symlinks: Default::default(),
         }
+    }
+
+    pub(crate) fn set_convenience_symlinks(&self, links: Vec<(String, String, bool)>) {
+        *self.convenience_symlinks.lock().unwrap() = links;
     }
 
     /// Errors found while configuring observability (bad flag values, unopenable files).
@@ -364,6 +398,11 @@ impl BuildObserver {
         let r = &self.reporter;
         let host = std::env::var("HOSTNAME").unwrap_or_default();
         let user = std::env::var("USER").unwrap_or_default();
+        let mut children = BepBuilder::started_children(patterns);
+        if !self.convenience_symlinks_bep_event {
+            let sym_id = ids::convenience_symlinks_identified();
+            children.retain(|c| c != &sym_id);
+        }
         r.post_bep_node(BepBuilder::build_started(
             &r.invocation_id(),
             zel_events::now_millis(),
@@ -375,9 +414,9 @@ impl BuildObserver {
             server_pid as i64,
             &host,
             &user,
-            BepBuilder::started_children(patterns),
+            children,
         ));
-        r.post_bep_node(BepBuilder::build_metadata(&[]));
+        r.post_bep_node(BepBuilder::build_metadata(&self.build_metadata));
         let mut full = vec![self.command.clone()];
         full.extend(args.iter().cloned());
         r.post_bep_node(BepBuilder::unstructured_command_line(&full));
@@ -832,7 +871,10 @@ impl BuildObserver {
                 "",
             );
             if analysis_ran {
-                r.post_bep_node(BepBuilder::convenience_symlinks(&[]));
+                if self.convenience_symlinks_bep_event {
+                    let links = self.convenience_symlinks.lock().unwrap().clone();
+                    r.post_bep_node(BepBuilder::convenience_symlinks(&links));
+                }
                 r.post_bep_node(BepBuilder::build_finished(
                     name,
                     num,

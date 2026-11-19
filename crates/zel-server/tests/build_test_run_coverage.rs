@@ -302,10 +302,10 @@ fn test_run_norun_flag() {
         "{}",
         res.err
     );
-    assert!(
-        res.exec.is_none(),
-        "exec_request should be None with --norun"
-    );
+    let exec = res
+        .exec
+        .expect("exec_request should be returned with should_exec=false under --norun");
+    assert!(!exec.should_exec);
 }
 
 #[test]
@@ -313,14 +313,24 @@ fn test_run_in_cwd() {
     let w = make_ws("run-in-cwd");
     w.write("pkg/BUILD", "sh_binary(name = 'b', srcs = ['b.sh'])\n");
     w.write("pkg/b.sh", "#!/bin/sh\nexit 0\n");
+    let sub = w.ws.join("sub");
+    std::fs::create_dir_all(&sub).unwrap();
 
-    let res = w.run(&["run", "--run_in_cwd", "--client_cwd=/custom/cwd", "//pkg:b"]);
+    let res = w.run(&[
+        "run",
+        "--run_in_cwd",
+        &format!("--client_cwd={}", sub.display()),
+        "//pkg:b",
+    ]);
     assert_eq!(res.code, 0, "{}", res.err);
     let req = res.exec.expect("should have exec_request");
     assert_eq!(
         String::from_utf8_lossy(&req.working_directory),
-        "/custom/cwd"
+        sub.to_string_lossy()
     );
+
+    let bad = w.run(&["run", "--run_in_cwd", "--client_cwd=/custom/cwd", "//pkg:b"]);
+    assert_eq!(bad.code, 2, "{}", bad.err);
 }
 
 #[test]

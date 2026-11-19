@@ -835,7 +835,7 @@ impl BlazeRuntime {
             }
         }
         let mut aspect_params: BTreeMap<String, String> = BTreeMap::new();
-        for kv in opt_list(parsed, "aspects_parameters") {
+        for kv in crate::exec_phase::opt_all(parsed, "aspects_parameters") {
             if let Some((k, v)) = kv.split_once('=') {
                 aspect_params.insert(k.to_string(), v.to_string());
             }
@@ -1815,16 +1815,59 @@ impl BlazeRuntime {
 
         for (canon, (rule, ty, is_multi, acc)) in accumulated {
             use zel_packages::attr::AttrValue;
+            let resolve_rule_label = |raw: &str| -> Option<String> {
+                let pkg_map = loader
+                    .config()
+                    .lookup
+                    .resolver
+                    .mapping(rule.label.repository());
+                if let Some(t) = raw.strip_prefix(':') {
+                    Label::create(rule.label.package_identifier().clone(), t)
+                        .ok()
+                        .map(|l| l.canonical_form())
+                } else if !raw.starts_with('@') && !raw.starts_with("//") && !raw.contains(':') {
+                    Label::create(rule.label.package_identifier().clone(), raw)
+                        .ok()
+                        .map(|l| l.canonical_form())
+                } else {
+                    Label::parse_with_repo_mapping(raw, &pkg_map)
+                        .ok()
+                        .map(|l| l.canonical_form())
+                }
+            };
+            let wrap_multi = |s: String| -> String {
+                if is_multi {
+                    format!("[{s}]")
+                } else {
+                    s
+                }
+            };
             let default_rendered = match rule.attr_or_default("build_setting_default") {
-                Some(AttrValue::Str(d)) => Some(d),
-                Some(AttrValue::Int(d)) => Some(d.to_string()),
-                Some(AttrValue::Bool(d)) => Some(if d {
+                Some(AttrValue::Str(d)) => {
+                    if ty == "label" {
+                        Some(wrap_multi(resolve_rule_label(&d).unwrap_or(d)))
+                    } else {
+                        Some(wrap_multi(d))
+                    }
+                }
+                Some(AttrValue::Int(d)) => Some(wrap_multi(d.to_string())),
+                Some(AttrValue::Bool(d)) => Some(wrap_multi(if d {
                     "true".to_string()
                 } else {
                     "false".to_string()
-                }),
-                Some(AttrValue::StrList(d)) => Some(format!("[{}]", d.join(", "))),
-                Some(AttrValue::Label(Some(l))) => Some(l.canonical_form()),
+                })),
+                Some(AttrValue::StrList(d)) => {
+                    if ty == "label" || ty == "label_list" {
+                        let resolved: Vec<String> = d
+                            .into_iter()
+                            .map(|item| resolve_rule_label(&item).unwrap_or(item))
+                            .collect();
+                        Some(format!("[{}]", resolved.join(", ")))
+                    } else {
+                        Some(format!("[{}]", d.join(", ")))
+                    }
+                }
+                Some(AttrValue::Label(Some(l))) => Some(wrap_multi(l.canonical_form())),
                 Some(AttrValue::LabelList(ls)) => Some(format!(
                     "[{}]",
                     ls.iter()

@@ -228,6 +228,9 @@ pub fn perform_exec_request(pending: &PendingExec) -> i32 {
         }
         return 0;
     }
+    if !req.should_exec {
+        return 0;
+    }
     if req.argv.is_empty() {
         eprintln!("ERROR: empty exec request");
         return ExitCode::BLAZE_INTERNAL_ERROR.numeric_exit_code();

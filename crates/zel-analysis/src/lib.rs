@@ -841,7 +841,11 @@ impl Artifact {
         if repo.is_main() {
             rel.to_string()
         } else {
-            let prefix = format!("external/{}/", repo.name());
+            let exact = format!("external/{}", repo.name());
+            if rel == exact {
+                return format!("../{}", repo.name());
+            }
+            let prefix = format!("{exact}/");
             let rel = rel.strip_prefix(prefix.as_str()).unwrap_or(rel);
             format!("../{}/{}", repo.name(), rel)
         }

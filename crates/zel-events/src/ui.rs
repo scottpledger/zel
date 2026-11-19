@@ -74,8 +74,8 @@ pub enum TriState {
 impl TriState {
     pub fn parse(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
-            "yes" | "true" | "1" => Some(Self::Yes),
-            "no" | "false" | "0" => Some(Self::No),
+            "yes" | "true" | "1" | "y" | "t" => Some(Self::Yes),
+            "no" | "false" | "0" | "n" | "f" => Some(Self::No),
             "auto" => Some(Self::Auto),
             _ => None,
         }
@@ -171,11 +171,14 @@ impl UiOptions {
         get_all: &dyn Fn(&str) -> Vec<String>,
     ) -> Result<Self, String> {
         let mut o = Self::default();
-        let b = |s: Option<String>, d: bool| match s.as_deref() {
-            Some("0") | Some("false") | Some("no") => false,
-            Some(_) => true,
-            None => d,
-        };
+        let b =
+            |s: Option<String>, d: bool| match s.as_deref().map(str::to_ascii_lowercase).as_deref()
+            {
+                Some("0" | "false" | "no" | "f" | "n") => false,
+                Some("1" | "true" | "yes" | "t" | "y") => true,
+                Some(_) => d,
+                None => d,
+            };
         o.show_progress = b(get("show_progress"), true);
         if let Some(v) = get("show_progress_rate_limit") {
             o.show_progress_rate_limit = v

@@ -536,3 +536,249 @@ fn aquery_skyframe_state_omits_var_ref() {
     );
     assert_ne!(r.code, 2, "{}", r.err);
 }
+
+#[test]
+fn canonicalize_flags_for_command_aliases_and_policy_bool() {
+    let w = make_ws("canon-flags");
+    w.write(
+        "p/defs.bzl",
+        "def _impl(ctx):\n    return []\nstr_flag = rule(implementation = _impl, build_setting = config.string(flag = True))\n",
+    );
+    w.write(
+        "p/BUILD",
+        "load(\":defs.bzl\", \"str_flag\")\nstr_flag(name = \"my_flag\", build_setting_default = \"d\")\n",
+    );
+    let r = w.run(&[
+        "canonicalize-flags",
+        "--for_command",
+        "test",
+        "--canonicalize_policy=false",
+        "--flag_alias=mf=//p:my_flag",
+        "--",
+        "--mf=val",
+        "--test_output=errors",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(
+        r.out.contains("--//p:my_flag=val") && r.out.contains("--test_output=errors"),
+        "out={} err={}",
+        r.out,
+        r.err
+    );
+
+    let r_pol = w.run(&[
+        "canonicalize-flags",
+        "--for_command",
+        "test",
+        "--canonicalize_policy=true",
+        "--invocation_policy=flag_policies { flag_name: 'test_output' set_value { flag_value: 'all' behavior: FINAL_VALUE_IGNORE_OVERRIDES } }",
+        "--",
+        "--test_output=errors",
+    ]);
+    assert_eq!(r_pol.code, 0, "{}", r_pol.err);
+    assert!(r_pol.out.contains("test_output"), "{}", r_pol.out);
+}
+
+#[test]
+fn info_client_env_make_env_and_unknown_key() {
+    let w = make_ws("info-parity");
+    let r = w.run(&[
+        "info",
+        "--action_env=KEEP_ME",
+        "--action_env=FIXED=1",
+        "--action_env=DROP_ME",
+        "--action_env==DROP_ME",
+        "--client_env=KEEP_ME=hello",
+        "--client_env=FIXED=ignored",
+        "--client_env=DROP_ME=bye",
+        "client-env",
+    ]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert!(r.out.contains("--action_env=KEEP_ME=hello"), "{}", r.out);
+    assert!(!r.out.contains("FIXED"), "{}", r.out);
+    assert!(!r.out.contains("DROP_ME"), "{}", r.out);
+
+    let m = w.run(&["info", "--show_make_env", "--define=CUSTOM_VAR=42"]);
+    assert_eq!(m.code, 0, "{}", m.err);
+    assert!(m.out.contains("CUSTOM_VAR: 42"), "{}", m.out);
+    assert!(
+        m.out.contains("execution_root:") && m.out.contains("/_main"),
+        "{}",
+        m.out
+    );
+
+    let bad = w.run(&["info", "definitely-unknown-info-key"]);
+    assert_eq!(bad.code, 2, "{}", bad.err);
+}
+
+#[cfg(unix)]
+#[test]
+fn config_json_case_insensitive_and_user_defined_defines() {
+    let w = make_ws("config-parity");
+    w.write(
+        "p/BUILD",
+        "genrule(name = \"g\", outs = [\"g.out\"], cmd = \"touch $@\")\n",
+    );
+    let b = w.run(&["build", "--define=FOO=bar", "//p:g"]);
+    assert_eq!(b.code, 0, "{}", b.err);
+
+    let c = w.run(&["config", "--dump_all", "--output=JSON"]);
+    assert_eq!(c.code, 0, "{}", c.err);
+    assert!(c.out.contains("user-defined"), "{}", c.out);
+    assert!(c.out.contains("--define:FOO"), "{}", c.out);
+}
+
+#[cfg(unix)]
+#[test]
+fn build_noanalyze_and_nobuild_convenience_symlinks_bep() {
+    let w = make_ws("build-phases");
+    w.write(
+        "p/BUILD",
+        "genrule(name = \"g\", outs = [\"g.out\"], cmd = \"echo hi > $@\")\n",
+    );
+
+    let na = w.run(&["build", "--noanalyze", "//p:g"]);
+    assert_eq!(na.code, 0, "{}", na.err);
+    assert!(!w.ws.join("bazel-bin/p/g.out").exists());
+
+    let bep_on = w.ws.join("bep-on.json");
+    let nb = w.run(&[
+        "build",
+        "--nobuild",
+        &format!("--build_event_json_file={}", bep_on.display()),
+        "//p:g",
+    ]);
+    assert_eq!(nb.code, 0, "{}", nb.err);
+    // `--nobuild` still creates convenience symlinks whose target directories exist (not dangling).
+    assert!(w.ws.join("bazel-bin").exists());
+    let bep_on_txt = std::fs::read_to_string(&bep_on).unwrap();
+    assert!(
+        bep_on_txt.contains("convenienceSymlinksIdentified") && bep_on_txt.contains("bazel-bin"),
+        "{bep_on_txt}"
+    );
+
+    let bep_off = w.ws.join("bep-off.json");
+    let nb2 = w.run(&[
+        "build",
+        "--nobuild",
+        "--noexperimental_convenience_symlinks_bep_event",
+        &format!("--build_event_json_file={}", bep_off.display()),
+        "//p:g",
+    ]);
+    assert_eq!(nb2.code, 0, "{}", nb2.err);
+    let bep_off_txt = std::fs::read_to_string(&bep_off).unwrap();
+    assert!(
+        !bep_off_txt.contains("convenienceSymlinksIdentified"),
+        "{bep_off_txt}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_norun_exec_request_and_script_path_equals_escaping() {
+    let w = make_ws("run-norun-parity");
+    w.write(
+        "p/BUILD",
+        "load(\"@rules_shell//shell:sh_binary.bzl\", \"sh_binary\")\nsh_binary(name = \"app\", srcs = [\"app.sh\"])\n",
+    );
+    w.write("p/app.sh", "#!/bin/sh\necho \"$@\"\n");
+
+    let nr = w.run(&[
+        "run",
+        "--norun",
+        "--invocation_id=11111111-2222-3333-4444-555555555555",
+        "//p:app",
+        "--",
+        "FOO=bar",
+    ]);
+    assert_eq!(nr.code, 0, "{}", nr.err);
+    let exec = nr
+        .exec
+        .expect("ExecRequest must be populated under --norun");
+    assert!(!exec.should_exec);
+    let build_id = exec
+        .environment_variable
+        .iter()
+        .find(|ev| ev.name == b"BUILD_ID")
+        .map(|ev| String::from_utf8_lossy(&ev.value).into_owned());
+    assert_eq!(
+        build_id.as_deref(),
+        Some("11111111-2222-3333-4444-555555555555")
+    );
+
+    let script = w.ws.join("run.sh");
+    let sp = w.run(&[
+        "run",
+        &format!("--script_path={}", script.display()),
+        "//p:app",
+        "--",
+        "FOO=bar",
+        "~tilde",
+    ]);
+    assert_eq!(sp.code, 0, "{}", sp.err);
+    let content = std::fs::read_to_string(&script).unwrap();
+    assert!(content.contains("'FOO=bar'"), "{content}");
+    assert!(content.contains("'~tilde'"), "{content}");
+}
+
+#[cfg(unix)]
+#[test]
+fn print_action_empty_match_and_query_diagnostics() {
+    let w = make_ws("diag-parity");
+    w.write(
+        "p/defs.bzl",
+        "def _impl(ctx):\n    out = ctx.actions.declare_file(ctx.label.name + \".out\")\n    ctx.actions.run_shell(outputs = [out], command = \"touch \" + out.path, mnemonic = \"MyCustomAction\")\n    return [DefaultInfo(files = depset([out]))]\ncustom_rule = rule(implementation = _impl)\n",
+    );
+    w.write(
+        "p/BUILD",
+        "load(\":defs.bzl\", \"custom_rule\")\ngenrule(name = \"g\", outs = [\"g.out\"], cmd = \"touch $@\")\ncustom_rule(name = \"c\")\n",
+    );
+
+    let pa = w.run(&[
+        "print_action",
+        "--print_action_mnemonics=NonExistentMnemonic",
+        "//p:c",
+    ]);
+    assert_ne!(pa.code, 0);
+    assert!(
+        pa.err.contains("no actions to print were found"),
+        "{}",
+        pa.err
+    );
+
+    let qf = w.run(&["query", "--output_file=missing_dir/out.txt", "//p:all"]);
+    assert_eq!(qf.code, 36, "{}", qf.err);
+
+    let aq_bad = w.run(&["aquery", "--skyframe_state", "deps("]);
+    assert_eq!(aq_bad.code, 2, "{}", aq_bad.err);
+    assert!(aq_bad.err.contains("Error while parsing"), "{}", aq_bad.err);
+
+    let aq_univ = w.run(&["aquery", "--universe_scope=//p:all"]);
+    assert_eq!(aq_univ.code, 0, "{}", aq_univ.err);
+    assert!(aq_univ.out.contains("Genrule"), "{}", aq_univ.out);
+}
+
+#[test]
+fn dispatch_validates_client_cwd_downloader_and_invocation_policy() {
+    let w = make_ws("dispatch-val");
+
+    let cwd_bad = w.run(&["info", "--client_cwd=.."]);
+    assert_eq!(cwd_bad.code, 2, "{}", cwd_bad.err);
+
+    let dl_bad = w.run(&["build", "--http_max_parallel_downloads=0"]);
+    assert_eq!(dl_bad.code, 2, "{}", dl_bad.err);
+
+    let req = RunRequest {
+        cookie: String::new(),
+        arg: vec![b"info".to_vec()],
+        block_for_lock: true,
+        client_description: "test".into(),
+        invocation_policy: "not_valid_proto {{{".into(),
+        startup_options: Vec::new(),
+        preemptible: false,
+        command_extensions: Vec::new(),
+        quiet: true,
+    };
+    let resp = w.rt.dispatch_command(&req, "");
+    assert_eq!(resp.exit_code, 2);
+}

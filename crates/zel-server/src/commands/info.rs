@@ -205,6 +205,46 @@ fn build_language_proto() -> Vec<u8> {
             varint(&mut a, disc);
             varint(&mut a, 3 << 3);
             varint(&mut a, attr.mandatory as u64);
+            if matches!(
+                attr.ty,
+                AttrType::StringList
+                    | AttrType::LabelList
+                    | AttrType::OutputList
+                    | AttrType::IntList
+                    | AttrType::StringDict
+                    | AttrType::StringListDict
+                    | AttrType::LabelKeyedStringDict
+                    | AttrType::StringKeyedLabelDict
+                    | AttrType::LabelListDict
+            ) {
+                varint(&mut a, 6 << 3);
+                varint(&mut a, (!attr.non_empty) as u64);
+            }
+            if attr.ty == AttrType::Label {
+                varint(&mut a, 7 << 3);
+                varint(&mut a, attr.allow_single_file as u64);
+                varint(&mut a, 10 << 3);
+                varint(&mut a, attr.executable as u64);
+            }
+            varint(&mut a, 11 << 3);
+            varint(&mut a, attr.configurable as u64);
+            if attr.nodep_set == Some(true)
+                || matches!(
+                    attr.ty,
+                    AttrType::Label
+                        | AttrType::LabelList
+                        | AttrType::LabelKeyedStringDict
+                        | AttrType::StringKeyedLabelDict
+                        | AttrType::LabelListDict
+                )
+            {
+                varint(&mut a, 12 << 3);
+                varint(&mut a, attr.nodep as u64);
+            }
+            if attr.tool_dep.unwrap_or(attr.cfg_exec) {
+                varint(&mut a, 13 << 3);
+                varint(&mut a, 1);
+            }
             field_bytes(&mut rule, 2, &a);
         }
         field_bytes(&mut out, 1, &rule);
@@ -222,9 +262,14 @@ impl BlazeRuntime {
         let desc: BTreeMap<String, String> = info_key_descriptions().into_iter().collect();
         let cpu = parsed
             .get_str("cpu")
+            .filter(|s| !s.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| Self::host_cpu().to_string());
         let mode = parsed.compilation_mode.clone();
+        let cfg_mnemonic = self
+            .build_config_key(parsed, &self.make_loader(parsed))
+            .map(|k| k.mnemonic())
+            .unwrap_or_else(|_| format!("{cpu}-{mode}"));
         let dirs = &self.dirs;
         let _ws = self.in_workspace();
         let pkg_path = {
@@ -257,15 +302,23 @@ impl BlazeRuntime {
         let host = zel_util::resource_converter::HostResources::detect_cached();
         let client_env = self.client_env();
         let mut client_env_text = String::new();
-        // `env.getAllowlistedActionEnv()` / `getAllowlistedTestEnv()`: variables named without a
-        // value in `--action_env=NAME` / `--test_env=NAME`.
+        // `env.getAllowlistedActionEnv()` / `getAllowlistedTestEnv()`: last-op-wins allowlist of
+        // variables named without a value (`NAME` adds; `NAME=val` or `=NAME` removes), sorted.
         for (flag, label) in [("action_env", "action_env"), ("test_env", "test_env")] {
             if let Some(d) = parsed.parsed_options.get(flag) {
+                let mut inherited = std::collections::BTreeSet::new();
                 for raw in &d.raw_values {
-                    if !raw.contains('=') && !raw.starts_with('-') {
-                        if let Some(v) = client_env.get(raw) {
-                            client_env_text.push_str(&format!("build --{label}={raw}={v}\n"));
-                        }
+                    if let Some(unset) = raw.strip_prefix('=') {
+                        inherited.remove(unset);
+                    } else if let Some((k, _)) = raw.split_once('=') {
+                        inherited.remove(k);
+                    } else if !raw.starts_with('-') && !raw.is_empty() {
+                        inherited.insert(raw.clone());
+                    }
+                }
+                for name in inherited {
+                    if let Some(v) = client_env.get(&name) {
+                        client_env_text.push_str(&format!("build --{label}={name}={v}\n"));
                     }
                 }
             }
@@ -280,44 +333,14 @@ impl BlazeRuntime {
             requires_workspace: requires_ws,
             value,
         };
-        let canonical_str = |p: &str| -> Option<String> {
-            let c = std::fs::canonicalize(p).ok()?;
-            let s = c.to_string_lossy();
-            #[cfg(windows)]
-            let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-            Some(s.to_string())
-        };
-        let real_base = canonical_str(dirs.output_base.path_string())
-            .unwrap_or_else(|| dirs.output_base.path_string().to_string());
-        let real_ws = canonical_str(dirs.workspace_dir.path_string())
-            .unwrap_or_else(|| dirs.workspace_dir.path_string().to_string());
-        let real_path = |pf: &zel_vfs::PathFragment| -> String {
-            let s = pf.path_string();
-            if let Some(c) = canonical_str(s) {
-                return c;
-            }
-            if let Some(rel) = s.strip_prefix(dirs.output_base.path_string()) {
-                return format!("{}{rel}", real_base);
-            }
-            if let Some(rel) = s.strip_prefix(dirs.workspace_dir.path_string()) {
-                return format!("{}{rel}", real_ws);
-            }
-            s.to_string()
-        };
-        let real_str = |s: &str| -> String {
-            if let Some(c) = canonical_str(s) {
-                return c;
-            }
-            if let Some(rel) = s.strip_prefix(dirs.output_base.path_string()) {
-                return format!("{}{rel}", real_base);
-            }
-            if let Some(rel) = s.strip_prefix(dirs.workspace_dir.path_string()) {
-                return format!("{}{rel}", real_ws);
-            }
-            s.to_string()
-        };
+        let logical_path = |pf: &zel_vfs::PathFragment| -> String { pf.path_string().to_string() };
         let embedded_jdk = dirs.install_base.get_relative_str("embedded_tools/jdk");
-        let java_home = real_path(&embedded_jdk);
+        let java_home = logical_path(&embedded_jdk);
+        let main_execroot = dirs.execroot_base().get_relative_str("_main");
+        let main_output_path = main_execroot.get_relative_str("bazel-out");
+        let cfg_out_dir = main_output_path.get_relative_str(&cfg_mnemonic);
+        let bin_dir = cfg_out_dir.get_relative_str("bin");
+        let testlogs_dir = cfg_out_dir.get_relative_str("testlogs");
 
         // `JavaRuntimeInfoItem` / `JavaVirtualMachineInfoItem` print `java.runtime.*` / `java.vm.*` properties.
         // Zel is a native executable without a JVM: the same templates are filled with the native runtime's own
@@ -377,51 +400,51 @@ impl BlazeRuntime {
                 "workspace",
                 false,
                 true,
-                text(real_path(&dirs.workspace_dir)),
+                text(logical_path(&dirs.workspace_dir)),
             ),
             mk(
                 "install_base",
                 false,
                 false,
-                text(real_path(&dirs.install_base)),
+                text(logical_path(&dirs.install_base)),
             ),
             mk("install_md5", true, false, text(install_md5)),
             mk(
                 "output_base",
                 false,
                 false,
-                text(real_path(&dirs.output_base)),
+                text(logical_path(&dirs.output_base)),
             ),
             mk(
                 "execution_root",
                 false,
                 true,
-                text(real_path(&dirs.execroot())),
+                text(logical_path(&main_execroot)),
             ),
             mk(
                 "output_path",
                 false,
-                true,
-                text(real_path(&dirs.output_path())),
+                false,
+                text(logical_path(&main_output_path)),
             ),
             mk("client-env", true, false, text(client_env_text)),
             mk(
                 &format!("{p}-bin"),
                 false,
                 true,
-                text(real_path(&dirs.bazel_bin(&cpu, &mode))),
+                text(logical_path(&bin_dir)),
             ),
             mk(
                 &format!("{p}-genfiles"),
                 false,
                 true,
-                text(real_path(&dirs.bazel_genfiles(&cpu, &mode))),
+                text(logical_path(&bin_dir)),
             ),
             mk(
                 &format!("{p}-testlogs"),
                 false,
                 true,
-                text(real_path(&dirs.bazel_testlogs(&cpu, &mode))),
+                text(logical_path(&testlogs_dir)),
             ),
             mk("release", false, false, text(crate::release_name())),
             mk(
@@ -430,7 +453,7 @@ impl BlazeRuntime {
                 false,
                 text(self.server_pid.to_string()),
             ),
-            mk("server_log", false, false, text(real_str(&server_log))),
+            mk("server_log", false, false, text(&server_log)),
             mk("package_path", false, true, text(pkg_path.clone())),
             mk(
                 "used-heap-size",
@@ -482,13 +505,13 @@ impl BlazeRuntime {
                 "command_log",
                 false,
                 false,
-                text(real_path(&dirs.command_log())),
+                text(logical_path(&dirs.command_log())),
             ),
             mk(
                 "repository_cache",
                 false,
                 false,
-                text(real_path(
+                text(logical_path(
                     &dirs.output_user_root.get_relative_str("cache/repos/v1"),
                 )),
             ),
@@ -506,20 +529,40 @@ impl BlazeRuntime {
     fn make_environment(&self, parsed: &ParsedCommandOptions) -> Vec<(String, String)> {
         let cpu = parsed
             .get_str("cpu")
+            .filter(|s| !s.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| Self::host_cpu().to_string());
         let mode = &parsed.compilation_mode;
+        let cfg_mnemonic = self
+            .build_config_key(parsed, &self.make_loader(parsed))
+            .map(|k| k.mnemonic())
+            .unwrap_or_else(|_| format!("{cpu}-{mode}"));
         let target_cpu = match cpu.as_str() {
             "darwin_arm64" => "aarch64",
             "darwin_x86_64" => "x86_64",
             other => other,
         };
-        vec![
-            ("BINDIR".into(), format!("bazel-out/{cpu}-{mode}/bin")),
-            ("COMPILATION_MODE".into(), mode.clone()),
-            ("GENDIR".into(), format!("bazel-out/{cpu}-{mode}/bin")),
-            ("TARGET_CPU".into(), target_cpu.to_string()),
-        ]
+        let mut map = BTreeMap::from([
+            (
+                "BINDIR".to_string(),
+                format!("bazel-out/{cfg_mnemonic}/bin"),
+            ),
+            ("COMPILATION_MODE".to_string(), mode.clone()),
+            (
+                "GENDIR".to_string(),
+                format!("bazel-out/{cfg_mnemonic}/bin"),
+            ),
+            ("TARGET_CPU".to_string(), target_cpu.to_string()),
+        ]);
+        if let Some(d) = parsed.parsed_options.get("define") {
+            for raw in &d.raw_values {
+                let (k, v) = raw.split_once('=').unwrap_or((raw.as_str(), ""));
+                if !k.is_empty() {
+                    map.insert(k.to_string(), v.to_string());
+                }
+            }
+        }
+        map.into_iter().collect()
     }
 
     /// `InfoCommand.exec`.
@@ -561,9 +604,13 @@ impl BlazeRuntime {
         }
         let print_keys = residue.len() != 1;
         let is_proto_output = args.iter().any(|a| {
-            a == "--info_output_type=response_proto" || a == "-info_output_type=response_proto"
-        }) || parsed.get_str("info_output_type") == Some("response_proto");
+            a.eq_ignore_ascii_case("--info_output_type=response_proto")
+                || a.eq_ignore_ascii_case("-info_output_type=response_proto")
+        }) || parsed
+            .get_str("info_output_type")
+            .is_some_and(|s| s.eq_ignore_ascii_case("response_proto"));
 
+        let (mut unknown, mut unsupported) = (Vec::<String>::new(), Vec::<String>::new());
         if is_proto_output {
             let mut info_items = Vec::new();
             if residue.is_empty() {
@@ -578,18 +625,49 @@ impl BlazeRuntime {
                 }
             } else {
                 for key in residue {
-                    if let Some(item) = items.get(key) {
-                        if in_ws || !item.requires_workspace {
-                            info_items.push(zel_proto::command_server::InfoItem {
-                                key: item.name.clone(),
-                                value: item.value.clone(),
-                            });
+                    match items.get(key) {
+                        Some(item) => {
+                            if !in_ws && item.requires_workspace {
+                                if !unsupported.contains(key) {
+                                    unsupported.push(key.clone());
+                                }
+                            } else {
+                                info_items.push(zel_proto::command_server::InfoItem {
+                                    key: item.name.clone(),
+                                    value: item.value.clone(),
+                                });
+                            }
+                        }
+                        None => {
+                            if !unknown.contains(key) {
+                                unknown.push(key.clone());
+                            }
                         }
                     }
                 }
             }
+            let client_cwd = parsed
+                .get_str("client_cwd")
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| self.dirs.workspace_dir.path_string());
+            let mut path_to_replace = vec![
+                zel_proto::command_server::PathToReplace {
+                    r#type: zel_proto::command_server::PathToReplaceType::OutputBase,
+                    value: self.dirs.output_base.path_string().as_bytes().to_vec(),
+                },
+                zel_proto::command_server::PathToReplace {
+                    r#type: zel_proto::command_server::PathToReplaceType::BuildWorkingDirectory,
+                    value: client_cwd.as_bytes().to_vec(),
+                },
+            ];
+            if in_ws {
+                path_to_replace.push(zel_proto::command_server::PathToReplace {
+                    r#type: zel_proto::command_server::PathToReplaceType::BuildWorkspaceDirectory,
+                    value: self.dirs.workspace_dir.path_string().as_bytes().to_vec(),
+                });
+            }
             let info_resp = zel_proto::command_server::InfoResponse {
-                path_to_replace: Vec::new(),
+                path_to_replace,
                 info_item: info_items,
                 print_keys,
             };
@@ -598,40 +676,38 @@ impl BlazeRuntime {
                 value: info_resp.encode_to_vec(),
             };
             extensions.push(any);
-            return ExitCode::SUCCESS;
-        }
-
-        let emit = |stdout: &mut Vec<u8>, item: &InfoItem| {
-            if print_keys {
-                stdout.extend_from_slice(item.name.as_bytes());
-                stdout.extend_from_slice(b": ");
-            }
-            stdout.extend_from_slice(&item.value);
-        };
-        if residue.is_empty() {
+        } else if residue.is_empty() {
             for item in items.values() {
                 if item.hidden || (!in_ws && item.requires_workspace) {
                     continue;
                 }
-                emit(stdout, item);
+                if print_keys {
+                    stdout.extend_from_slice(item.name.as_bytes());
+                    stdout.extend_from_slice(b": ");
+                }
+                stdout.extend_from_slice(&item.value);
             }
             return ExitCode::SUCCESS;
-        }
-        let (mut unknown, mut unsupported) = (Vec::<String>::new(), Vec::<String>::new());
-        for key in residue {
-            match items.get(key) {
-                Some(item) => {
-                    if !in_ws && item.requires_workspace {
-                        if !unsupported.contains(key) {
-                            unsupported.push(key.clone());
+        } else {
+            for key in residue {
+                match items.get(key) {
+                    Some(item) => {
+                        if !in_ws && item.requires_workspace {
+                            if !unsupported.contains(key) {
+                                unsupported.push(key.clone());
+                            }
+                            continue;
                         }
-                        continue;
+                        if print_keys {
+                            stdout.extend_from_slice(item.name.as_bytes());
+                            stdout.extend_from_slice(b": ");
+                        }
+                        stdout.extend_from_slice(&item.value);
                     }
-                    emit(stdout, item);
-                }
-                None => {
-                    if !unknown.contains(key) {
-                        unknown.push(key.clone());
+                    None => {
+                        if !unknown.contains(key) {
+                            unknown.push(key.clone());
+                        }
                     }
                 }
             }
