@@ -981,7 +981,10 @@ impl BlazeRuntime {
             {
                 writeln_bytes(stderr, &format!("INFO: Invocation ID: {}", pseudo_uuid()));
             }
-            if let Some(dc) = parsed.get_str("disk_cache").filter(|s| !s.is_empty()) {
+            if let Some(dc) = parsed
+                .get_str("disk_cache")
+                .filter(|s| !s.is_empty() && *s != ".")
+            {
                 let abs = if std::path::Path::new(dc).is_absolute() {
                     std::path::PathBuf::from(dc)
                 } else {

@@ -16,7 +16,7 @@
 //! Protocol stream (files and BES), and the JSON trace profiler. `lib.rs` wraps every
 //! build/test command in a [`BuildObserver`] so that all exit paths produce the same artifacts.
 
-use crate::exec_phase::opt_all;
+use crate::exec_phase::{opt_all, opt_last};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
@@ -163,6 +163,8 @@ pub(crate) struct BuildObserver {
     invocation_id: String,
     include_run_residue: bool,
     bes: Option<Arc<bes::BesTransport>>,
+    bes_streaming_msg: Option<String>,
+    artifact_uploader: Option<Arc<bes::ByteStreamBuildEventArtifactUploader>>,
     setup_errors: std::sync::Mutex<Vec<String>>,
     started: Instant,
     cpu_at_start: f64,
@@ -177,6 +179,7 @@ pub(crate) struct BuildObserver {
     /// status): released in order by `analysis_done`, or by `finish` if analysis never completed.
     late_nodes: std::sync::Mutex<std::collections::VecDeque<zel_events::bep::BuildEventNode>>,
     patterns: std::sync::Mutex<Vec<String>>,
+    working_dir: std::sync::Mutex<Option<String>>,
     analysis_complete: std::sync::atomic::AtomicBool,
     bep_enabled: bool,
     bep_opts: BepOptions,
@@ -420,6 +423,13 @@ impl BuildObserver {
             }
         }
 
+        // Wait for any deferred background BES uploads from a previous invocation.
+        if bes::drain_previous_uploads() {
+            reporter.handle(Event::info(
+                "Waited for background Build Event Protocol upload to complete.",
+            ));
+        }
+
         // Build Event Protocol.
         let bep_opts = BepOptions::from_flags(&get, &get_all);
         let bep_enabled = bep_opts.any_enabled();
@@ -448,12 +458,65 @@ impl BuildObserver {
             .and_then(|p| p.get_bool("experimental_run_bep_event_include_residue"))
             .unwrap_or(false);
         let mut bes_t = None;
+        let mut bes_streaming_msg = None;
+        let mut artifact_uploader: Option<Arc<bes::ByteStreamBuildEventArtifactUploader>> = None;
         if bep_enabled {
+            if let Some(p) = parsed {
+                let uses_remote = opt_last(p, "remote_cache").is_some_and(|v| !v.is_empty())
+                    || opt_last(p, "remote_executor").is_some_and(|v| !v.is_empty());
+                if uses_remote {
+                    if let Ok(ropts) =
+                        zel_remote::options::RemoteOptions::from_source(&BepRemoteSource(p))
+                    {
+                        let target = ropts
+                            .remote_cache
+                            .as_deref()
+                            .or(ropts.remote_executor.as_deref())
+                            .unwrap_or("");
+                        let authority = zel_remote::options::Endpoint::parse_cache(target)
+                            .ok()
+                            .map(|ep| match ep {
+                                zel_remote::options::Endpoint::Tcp { host, port, .. }
+                                | zel_remote::options::Endpoint::Http { host, port, .. } => {
+                                    format!("{host}:{port}")
+                                }
+                                zel_remote::options::Endpoint::Unix(u) => u,
+                            })
+                            .unwrap_or_default();
+                        let http_cache = ropts.build_http_cache().ok().flatten();
+                        let reapi = if http_cache.is_none() {
+                            ropts
+                                .build_client(&invocation_id)
+                                .ok()
+                                .flatten()
+                                .map(Arc::new)
+                        } else {
+                            None
+                        };
+                        if reapi.is_some() || http_cache.is_some() {
+                            artifact_uploader =
+                                Some(Arc::new(bes::ByteStreamBuildEventArtifactUploader::new(
+                                    reapi,
+                                    http_cache,
+                                    ropts.digest_fn,
+                                    ropts.build_event_upload_mode,
+                                    &authority,
+                                    &ropts.remote_instance_name,
+                                    ropts.bytestream_uri_prefix.as_deref(),
+                                )));
+                        }
+                    }
+                }
+            }
             match bes::transport_from_options(&bep_opts, &build_request_id, &invocation_id, command)
             {
                 Ok(Some((t, cfg))) => {
+                    if let Some(u) = &artifact_uploader {
+                        t.set_artifact_uploader(u.clone());
+                    }
                     if let Some(m) = cfg.streaming_message() {
-                        reporter.handle(Event::info(m));
+                        reporter.handle(Event::info(m.clone()));
+                        bes_streaming_msg = Some(m);
                     }
                     reporter.add_bep_transport(t.clone());
                     bes_t = Some(t);
@@ -561,6 +624,8 @@ impl BuildObserver {
             invocation_id,
             include_run_residue,
             bes: bes_t,
+            bes_streaming_msg,
+            artifact_uploader,
             setup_errors: std::sync::Mutex::new(setup_errors),
             started,
             cpu_at_start,
@@ -573,6 +638,7 @@ impl BuildObserver {
             stats: Default::default(),
             late_nodes: Default::default(),
             patterns: Default::default(),
+            working_dir: Default::default(),
             analysis_complete: Default::default(),
             bep_enabled,
             bep_opts,
@@ -612,6 +678,11 @@ impl BuildObserver {
         if !self.bep_enabled {
             return;
         }
+        *self.working_dir.lock().unwrap() = Some(if !working_dir.is_empty() {
+            working_dir.to_string()
+        } else {
+            workspace.to_string()
+        });
         let r = &self.reporter;
         let host = std::env::var("HOSTNAME").unwrap_or_default();
         let user = std::env::var("USER").unwrap_or_default();
@@ -1351,18 +1422,10 @@ impl BuildObserver {
                 b.set_success(num == 0);
             }
             r.finish_bep();
-            let ws_dir = self.workspace_dir.lock().unwrap().clone();
-            let resolve_bep_path = |raw: &str| -> String {
-                let p = std::path::Path::new(raw);
-                if p.is_absolute() || ws_dir.is_empty() {
-                    raw.to_string()
-                } else {
-                    std::path::Path::new(&ws_dir)
-                        .join(p)
-                        .to_string_lossy()
-                        .into_owned()
-                }
-            };
+            let base_dir = self.working_dir.lock().unwrap().clone().or_else(|| {
+                let ws = self.workspace_dir.lock().unwrap().clone();
+                (!ws.is_empty()).then_some(ws)
+            });
             let mut wrote_any_bep_file = false;
             let mut file_write_failed = false;
             for (path, fmt, conv) in [
@@ -1383,15 +1446,20 @@ impl BuildObserver {
                 ),
             ] {
                 if let Some(raw) = path {
-                    let resolved = resolve_bep_path(raw);
+                    let resolved = resolve_bep_file_path(raw, base_dir.as_deref());
                     let pf = PathFragment::create(&resolved);
-                    match r.force_write_bep_file_with_options(
-                        fs,
-                        &pf,
-                        fmt,
-                        conv,
-                        self.bep_opts.remote_bytestream_uri_prefix.as_deref(),
-                    ) {
+                    let write_res = if let Some(u) = &self.artifact_uploader {
+                        r.force_write_bep_file_with(fs, &pf, fmt, conv, Some(u.as_ref()))
+                    } else {
+                        r.force_write_bep_file_with_options(
+                            fs,
+                            &pf,
+                            fmt,
+                            conv,
+                            self.bep_opts.remote_bytestream_uri_prefix.as_deref(),
+                        )
+                    };
+                    match write_res {
                         Ok(()) => {
                             wrote_any_bep_file = wrote_any_bep_file || fs.exists(&pf, true);
                         }
@@ -1405,7 +1473,15 @@ impl BuildObserver {
                     }
                 }
             }
+            if let Some(u) = &self.artifact_uploader {
+                for w in u.take_warnings() {
+                    r.handle(Event::warning(None, w));
+                }
+            }
             let errs = s.close_errors();
+            if let Some(m) = &self.bes_streaming_msg {
+                r.handle(Event::info(m.clone()));
+            }
             if !errs.is_empty() || file_write_failed {
                 if self.bes.is_some() && !errs.is_empty() {
                     r.handle(Event::info(""));
@@ -1419,12 +1495,21 @@ impl BuildObserver {
                     };
                     r.handle(Event::error(None, msg));
                 }
-                if code == ExitCode::SUCCESS {
-                    code = if file_write_failed && errs.is_empty() {
-                        ExitCode::LOCAL_ENVIRONMENTAL_ERROR
-                    } else {
-                        ExitCode::TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR
-                    };
+                if !errs.is_empty() {
+                    let bes_err = self.bes.as_ref().and_then(|b| b.last_error());
+                    let timed_out = bes_err.as_ref().is_some_and(|e| e.timed_out);
+                    if timed_out {
+                        code = ExitCode::TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR;
+                    } else if code == ExitCode::SUCCESS {
+                        code = match bes_err.map(|e| e.kind) {
+                            Some(bes::BesErrorKind::Persistent) => {
+                                ExitCode::PERSISTENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR
+                            }
+                            _ => ExitCode::TRANSIENT_BUILD_EVENT_SERVICE_UPLOAD_ERROR,
+                        };
+                    }
+                } else if code == ExitCode::SUCCESS {
+                    code = ExitCode::LOCAL_ENVIRONMENTAL_ERROR;
                 }
             } else if code != ExitCode::LOCAL_ENVIRONMENTAL_ERROR && wrote_any_bep_file {
                 r.handle(Event::info(
@@ -1752,6 +1837,49 @@ fn split_exec_path(p: &str) -> (Vec<String>, String) {
     } else {
         (Vec::new(), p.to_string())
     }
+}
+
+struct BepRemoteSource<'a>(&'a ParsedCommandOptions);
+
+impl zel_remote::options::OptionSource for BepRemoteSource<'_> {
+    fn last(&self, name: &str) -> Option<String> {
+        if name == "digest_function" {
+            return Some(
+                zel_exec::digest::server_digest_function()
+                    .name()
+                    .replace('-', ""),
+            );
+        }
+        opt_last(self.0, name)
+    }
+    fn all(&self, name: &str) -> Vec<String> {
+        opt_all(self.0, name)
+    }
+}
+
+fn resolve_bep_file_path(raw: &str, working_dir: Option<&str>) -> String {
+    if raw == "~" {
+        if let Ok(home) = std::env::var("HOME") {
+            return home;
+        }
+    } else if let Some(rest) = raw.strip_prefix("~/") {
+        if let Ok(home) = std::env::var("HOME") {
+            return std::path::Path::new(&home)
+                .join(rest)
+                .to_string_lossy()
+                .into_owned();
+        }
+    }
+    if std::path::Path::new(raw).is_absolute() {
+        return raw.to_string();
+    }
+    if let Some(wd) = working_dir.filter(|s| !s.is_empty()) {
+        return std::path::Path::new(wd)
+            .join(raw)
+            .to_string_lossy()
+            .into_owned();
+    }
+    raw.to_string()
 }
 
 #[cfg(test)]

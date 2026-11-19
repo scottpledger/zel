@@ -730,12 +730,54 @@ impl Reporter {
         self.finish_bep();
         let mut out = Vec::new();
         for ev in self.bep_history() {
+            let ev = if !path_conversion {
+                bes::rewrite_bep_event(&ev, false, None)
+            } else {
+                ev
+            };
             out.extend(bep::serialize_event_with_options(
                 format,
                 &ev,
                 path_conversion,
                 bytestream_prefix,
             ));
+        }
+        if let Some(parent) = path.parent_directory() {
+            let _ = fs.create_directory_and_parents(&parent);
+        }
+        fs.write_file(path, &out)
+    }
+
+    /// Writes a BEP file applying `--build_event_*_file_path_conversion` and optional
+    /// [`bes::ByteStreamBuildEventArtifactUploader`].
+    pub fn force_write_bep_file_with(
+        &self,
+        fs: &dyn FileSystem,
+        path: &PathFragment,
+        format: bep::BepFormat,
+        path_conversion: bool,
+        uploader: Option<&bes::ByteStreamBuildEventArtifactUploader>,
+    ) -> io::Result<()> {
+        self.finish_bep();
+        let mut out = Vec::new();
+        for ev in self.bep_history() {
+            let transformed = if uploader.is_some() && path_conversion {
+                let normalized = bep::apply_file_path_conversion(&ev, true, None);
+                bes::rewrite_bep_event(&normalized, true, uploader)
+            } else if !path_conversion {
+                bes::rewrite_bep_event(&ev, false, None)
+            } else {
+                ev
+            };
+            out.extend(bep::serialize_event_with_options(
+                format,
+                &transformed,
+                path_conversion,
+                None,
+            ));
+        }
+        if let Some(parent) = path.parent_directory() {
+            let _ = fs.create_directory_and_parents(&parent);
         }
         fs.write_file(path, &out)
     }

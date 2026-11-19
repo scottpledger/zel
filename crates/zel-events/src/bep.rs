@@ -2154,7 +2154,7 @@ impl OutputGroupMode {
     }
 }
 
-/// Upload synchronization mode for BEP file/BES transports (`BuildEventStreamOptions.BesUploadMode`).
+/// Upload synchronization mode for BEP file transports (`BuildEventStreamOptions.BesUploadMode`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum BepUploadMode {
     #[default]
@@ -2170,6 +2170,28 @@ impl BepUploadMode {
             "nowait_for_upload_complete" => Some(Self::NowaitForUploadComplete),
             "fully_async" => Some(Self::FullyAsync),
             _ => None,
+        }
+    }
+}
+
+/// `--bes_upload_mode` (`BuildEventServiceOptions.BesUploadMode`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BesUploadMode {
+    #[default]
+    WaitForUploadComplete,
+    NoWaitForUploadComplete,
+    FullyAsync,
+}
+
+impl BesUploadMode {
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "" | "wait_for_upload_complete" => Ok(Self::WaitForUploadComplete),
+            "nowait_for_upload_complete" => Ok(Self::NoWaitForUploadComplete),
+            "fully_async" => Ok(Self::FullyAsync),
+            _ => Err(format!(
+                "Cannot convert '{s}' to BesUploadMode; value must be one of [wait_for_upload_complete, nowait_for_upload_complete, fully_async]"
+            )),
         }
     }
 }
@@ -2239,32 +2261,47 @@ pub struct BepOptions {
     pub json_upload_mode: BepUploadMode,
     pub binary_upload_mode: BepUploadMode,
     pub text_upload_mode: BepUploadMode,
-    pub bes_upload_mode: BepUploadMode,
     pub output_group_modes: Vec<(String, OutputGroupMode)>,
     pub publish_all_actions: bool,
     /// `--build_event_max_named_set_of_file_entries`; `None` when negative (unlimited).
     pub max_named_set_entries: Option<usize>,
     pub bes_backend: Option<String>,
+    pub bes_proxy: Option<String>,
     pub bes_results_url: Option<String>,
+    pub bes_timeout: Option<std::time::Duration>,
     pub bes_timeout_secs: Option<u64>,
+    pub bes_upload_mode: BesUploadMode,
+    pub bes_upload_mode_error: Option<String>,
     pub bes_headers: Vec<(String, String)>,
     pub bes_instance_name: String,
     pub bes_keywords: Vec<String>,
+    pub bes_system_keywords: Vec<String>,
     pub bes_lifecycle_events: bool,
+    pub bes_check_preceding_lifecycle_events: bool,
     pub project_id: Option<String>,
     /// Remote ByteStream URI prefix (`<authority>[/<instance>]`) used when
     /// `--build_event_*_file_path_conversion` is enabled (`ByteStreamBuildEventArtifactUploader`).
     pub remote_bytestream_uri_prefix: Option<String>,
+    // Auth & TLS options forwarded for BES channel setup.
+    pub tls_certificate: Option<String>,
+    pub tls_client_certificate: Option<String>,
+    pub tls_client_key: Option<String>,
+    pub tls_authority_override: Option<String>,
+    pub google_default_credentials: bool,
+    pub google_credentials: Option<String>,
+    pub google_auth_scopes: Vec<String>,
+    pub credential_helpers: Vec<String>,
+    pub credential_helper_timeout: Option<std::time::Duration>,
+    pub credential_helper_cache_duration: Option<std::time::Duration>,
+    pub netrc: Option<String>,
 }
 
-fn parse_bazel_bool(raw: Option<&str>, default: bool) -> bool {
-    let Some(s) = raw else {
-        return default;
-    };
-    match s.trim().to_ascii_lowercase().as_str() {
-        "0" | "false" | "f" | "no" | "n" => false,
-        "1" | "true" | "t" | "yes" | "y" => true,
-        _ => default,
+fn parse_bool_ci(val: Option<&str>, default: bool) -> bool {
+    match val.map(|s| s.trim().to_ascii_lowercase()).as_deref() {
+        Some("0" | "false" | "no" | "f" | "n") => false,
+        Some("1" | "true" | "yes" | "t" | "y") => true,
+        Some(_) => default,
+        None => default,
     }
 }
 
@@ -2282,11 +2319,11 @@ fn extract_remote_authority(endpoint: &str) -> Option<&str> {
 }
 
 fn compute_remote_bytestream_prefix(get: &dyn Fn(&str) -> Option<String>) -> Option<String> {
-    let respect_no_cache = parse_bazel_bool(
+    let respect_no_cache = parse_bool_ci(
         get("incompatible_remote_build_event_upload_respect_no_cache").as_deref(),
         false,
     );
-    let upload_local = parse_bazel_bool(get("remote_upload_local_results").as_deref(), true);
+    let upload_local = parse_bool_ci(get("remote_upload_local_results").as_deref(), true);
     if respect_no_cache && !upload_local {
         return None;
     }
@@ -2312,13 +2349,40 @@ fn compute_remote_bytestream_prefix(get: &dyn Fn(&str) -> Option<String>) -> Opt
     }
 }
 
+fn split_comma_keywords(raw_flags: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for raw in raw_flags {
+        if raw.is_empty() {
+            continue;
+        }
+        for piece in raw.split(',') {
+            out.push(piece.to_string());
+        }
+    }
+    out
+}
+
+fn collapse_headers_last_wins(raw: Vec<String>) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    for h in raw {
+        if let Some((k, v)) = h.split_once('=') {
+            if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == k) {
+                slot.1 = v.to_string();
+            } else {
+                out.push((k.to_string(), v.to_string()));
+            }
+        }
+    }
+    out
+}
+
 impl BepOptions {
     /// Builds from a lookup of the last value for each flag (`name` without dashes).
     pub fn from_flags(
         get: &dyn Fn(&str) -> Option<String>,
         get_all: &dyn Fn(&str) -> Vec<String>,
     ) -> Self {
-        let b = |n: &str, d: bool| parse_bazel_bool(get(n).as_deref(), d);
+        let b = |n: &str, d: bool| parse_bool_ci(get(n).as_deref(), d);
         let nonempty = |s: Option<String>| s.filter(|s| !s.is_empty());
         let max = get("build_event_max_named_set_of_file_entries")
             .and_then(|s| s.parse::<i64>().ok())
@@ -2343,6 +2407,16 @@ impl BepOptions {
                 .and_then(|s| BepUploadMode::parse(&s))
                 .unwrap_or_default()
         };
+        let (bes_upload_mode, bes_upload_mode_error) = match get("bes_upload_mode") {
+            Some(s) => match BesUploadMode::parse(&s) {
+                Ok(m) => (m, None),
+                Err(e) => (BesUploadMode::WaitForUploadComplete, Some(e)),
+            },
+            None => (BesUploadMode::WaitForUploadComplete, None),
+        };
+        let bes_timeout = get("bes_timeout")
+            .and_then(|s| parse_bes_duration(&s))
+            .filter(|d| !d.is_zero());
         Self {
             json_file: nonempty(get("build_event_json_file")),
             binary_file: nonempty(get("build_event_binary_file")),
@@ -2353,25 +2427,37 @@ impl BepOptions {
             json_upload_mode: upload_mode("build_event_json_file_upload_mode"),
             binary_upload_mode: upload_mode("build_event_binary_file_upload_mode"),
             text_upload_mode: upload_mode("build_event_text_file_upload_mode"),
-            bes_upload_mode: upload_mode("bes_upload_mode"),
             output_group_modes,
             publish_all_actions: b("build_event_publish_all_actions", false),
             max_named_set_entries: if max < 0 { None } else { Some(max as usize) },
             bes_backend: nonempty(get("bes_backend")),
+            bes_proxy: nonempty(get("bes_proxy")),
             bes_results_url: nonempty(get("bes_results_url")),
-            bes_timeout_secs: get("bes_timeout").and_then(|s| parse_duration_secs(&s)),
-            bes_headers: get_all("bes_header")
-                .into_iter()
-                .filter_map(|h| {
-                    h.split_once('=')
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                })
-                .collect(),
+            bes_timeout,
+            bes_timeout_secs: bes_timeout.map(|d| d.as_secs().max(1)),
+            bes_upload_mode,
+            bes_upload_mode_error,
+            bes_headers: collapse_headers_last_wins(get_all("bes_header")),
             bes_instance_name: get("bes_instance_name").unwrap_or_default(),
-            bes_keywords: get_all("bes_keywords"),
+            bes_keywords: split_comma_keywords(get_all("bes_keywords")),
+            bes_system_keywords: split_comma_keywords(get_all("bes_system_keywords")),
             bes_lifecycle_events: b("bes_lifecycle_events", true),
+            bes_check_preceding_lifecycle_events: b("bes_check_preceding_lifecycle_events", false),
             project_id: nonempty(get("project_id")),
             remote_bytestream_uri_prefix: compute_remote_bytestream_prefix(get),
+            tls_certificate: nonempty(get("tls_certificate")),
+            tls_client_certificate: nonempty(get("tls_client_certificate")),
+            tls_client_key: nonempty(get("tls_client_key")),
+            tls_authority_override: nonempty(get("tls_authority_override")),
+            google_default_credentials: b("google_default_credentials", false),
+            google_credentials: nonempty(get("google_credentials")),
+            google_auth_scopes: split_comma_keywords(get_all("google_auth_scopes")),
+            credential_helpers: get_all("credential_helper"),
+            credential_helper_timeout: get("credential_helper_timeout")
+                .and_then(|s| parse_bes_duration(&s)),
+            credential_helper_cache_duration: get("credential_helper_cache_duration")
+                .and_then(|s| parse_bes_duration(&s)),
+            netrc: nonempty(get("netrc")),
         }
     }
 
@@ -2419,26 +2505,45 @@ impl BepOptions {
     }
 }
 
+/// Parses Bazel duration syntax (`10s`, `5m`, `1h`, `2d`, `500ms`, `100us`, `1ns`) into an exact
+/// [`std::time::Duration`].
+pub fn parse_bes_duration(s: &str) -> Option<std::time::Duration> {
+    let s = s.trim();
+    if let Some(n) = s.strip_suffix("ns") {
+        let v: u64 = n.trim().parse().ok()?;
+        return Some(std::time::Duration::from_nanos(v));
+    }
+    if let Some(n) = s.strip_suffix("us") {
+        let v: u64 = n.trim().parse().ok()?;
+        return Some(std::time::Duration::from_micros(v));
+    }
+    if let Some(n) = s.strip_suffix("ms") {
+        let v: u64 = n.trim().parse().ok()?;
+        return Some(std::time::Duration::from_millis(v));
+    }
+    if let Some(n) = s.strip_suffix('s') {
+        let v: u64 = n.trim().parse().ok()?;
+        return Some(std::time::Duration::from_secs(v));
+    }
+    if let Some(n) = s.strip_suffix('m') {
+        let v: u64 = n.trim().parse().ok()?;
+        return Some(std::time::Duration::from_secs(v.checked_mul(60)?));
+    }
+    if let Some(n) = s.strip_suffix('h') {
+        let v: u64 = n.trim().parse().ok()?;
+        return Some(std::time::Duration::from_secs(v.checked_mul(3600)?));
+    }
+    if let Some(n) = s.strip_suffix('d') {
+        let v: u64 = n.trim().parse().ok()?;
+        return Some(std::time::Duration::from_secs(v.checked_mul(86_400)?));
+    }
+    let v: u64 = s.parse().ok()?;
+    Some(std::time::Duration::from_secs(v))
+}
+
 /// Parses Bazel duration syntax (`10s`, `5m`, `1h`, `2d`, `500ms`) into whole seconds.
 pub fn parse_duration_secs(s: &str) -> Option<u64> {
-    let s = s.trim();
-    let (num, mul) = if let Some(n) = s.strip_suffix("ms") {
-        (n, 0.001)
-    } else if let Some(n) = s.strip_suffix('s') {
-        (n, 1.0)
-    } else if let Some(n) = s.strip_suffix('m') {
-        (n, 60.0)
-    } else if let Some(n) = s.strip_suffix('h') {
-        (n, 3600.0)
-    } else if let Some(n) = s.strip_suffix('d') {
-        (n, 86400.0)
-    } else {
-        (s, 1.0)
-    };
-    num.trim()
-        .parse::<f64>()
-        .ok()
-        .map(|n| (n * mul).ceil() as u64)
+    parse_bes_duration(s).map(|d| if d.is_zero() { 0 } else { d.as_secs().max(1) })
 }
 
 #[cfg(test)]

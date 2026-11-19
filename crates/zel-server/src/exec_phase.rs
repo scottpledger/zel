@@ -578,32 +578,15 @@ pub(crate) fn build_runtime(
             Arc::new(LocalSpawnRunner),
         ) {
             Ok(runner) => Some(Arc::new(runner)),
-            Err(msg) if msg.contains("--remote_cache=http://") => {
-                let target = cfg.remote.remote_cache.clone().unwrap_or_default();
-                let auth = target
-                    .split("://")
-                    .last()
-                    .unwrap_or("")
-                    .split('/')
-                    .next()
-                    .unwrap_or("")
-                    .to_string();
-                let (host, port) = auth
-                    .rsplit_once(':')
-                    .map(|(h, p)| (h.to_string(), p.to_string()))
-                    .unwrap_or((auth.clone(), "80".to_string()));
-                match RemoteSpawnRunner::new(cfg.remote.clone(), None, Arc::new(LocalSpawnRunner)) {
-                    Ok(runner) => {
-                        runner.warn(format!(
-                            "Remote Cache: Connection refused: {host}/127.0.0.1:{port}"
-                        ));
-                        Some(Arc::new(runner))
-                    }
-                    Err(_) => None,
-                }
-            }
-            Err(msg) if msg.contains("connection failed") || msg.contains("UNAVAILABLE") => {
-                if cfg.remote.local_fallback && cfg.remote.remote_executor.is_some() {
+            Err(msg)
+                if msg.contains("connection failed")
+                    || msg.contains("UNAVAILABLE")
+                    || msg.contains("Connection refused") =>
+            {
+                let allow_fallback = cfg.remote.local_fallback
+                    && (cfg.remote.remote_executor.is_some()
+                        || cfg.remote.local_fallback_for_remote_cache);
+                if allow_fallback {
                     if let Ok(reg) = SpawnStrategyRegistry::build(
                         &StrategyOptions {
                             spawn_strategy: vec!["local".to_string()],
@@ -723,6 +706,14 @@ pub(crate) fn run_build_actions(
         .map_err(RuntimeError::Config)
         .and_then(|mut cfg| {
             cfg.remote.workspace = Some(PathBuf::from(workspace_dir.path_string()));
+            if let Some(dc) = &mut cfg.remote.disk_cache {
+                if !std::path::Path::new(dc).is_absolute() {
+                    *dc = std::path::Path::new(workspace_dir.path_string())
+                        .join(&*dc)
+                        .to_string_lossy()
+                        .into_owned();
+                }
+            }
             let quit = cfg.worker.quit_after_build;
             let jobs = cfg.jobs;
             build_runtime(cfg, execroot, client_env).map(|rt| (jobs, rt, quit))
@@ -922,7 +913,14 @@ pub(crate) fn run_build_actions(
                     continue;
                 }
                 let exe = ct.default_info.executable.iter();
-                for a in ct.default_info.files.iter().chain(exe) {
+                for a in ct
+                    .default_info
+                    .files
+                    .iter()
+                    .chain(exe)
+                    .chain(ct.default_info.default_runfiles.iter())
+                    .chain(ct.default_info.data_runfiles.iter())
+                {
                     if !a.is_source {
                         paths.push(a.exec_path.path_string().to_string());
                     }

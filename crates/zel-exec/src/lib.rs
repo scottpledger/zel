@@ -669,7 +669,11 @@ impl ExecRuntime {
             return Ok(Err(zel_sandbox::cancelled_error()));
         }
         let local = self.registry.dynamic_can_exec_local(spawn);
-        let remote = self.registry.dynamic_can_exec_remote(spawn);
+        let remote = if self.remote.as_ref().is_some_and(|r| r.is_scrubbed(spawn)) {
+            None
+        } else {
+            self.registry.dynamic_can_exec_remote(spawn)
+        };
         let (local, remote) = match (local, remote) {
             (None, None) => {
                 return Err(format!(
@@ -849,6 +853,9 @@ impl ExecRuntime {
             if let Some(w) = &self.worker {
                 w.pool.shutdown();
             }
+        }
+        if let Some(r) = &self.remote {
+            r.close();
         }
     }
 }
@@ -1455,6 +1462,12 @@ pub fn execute_action_with(
 
     let mut parts = action_key_parts(action);
     parts.action_execution_salt = opts.action_execution_salt.clone();
+    if let Some(rt) = &opts.runtime {
+        if let Some(remote) = &rt.remote {
+            parts.remote_cache_enabled = remote.has_cache();
+            parts.remote_default_exec_properties = remote.opts.default_exec_properties.clone();
+        }
+    }
     let action_key = action_cache.compute_action_key(&parts);
     // `ActionCacheChecker.computeEffectiveEnvironment`: the values of the inherited variables
     // that exist in the client environment.
@@ -1491,41 +1504,43 @@ pub fn execute_action_with(
         .filter(|a| a.is_source && !a.is_tree_artifact && !a.is_unresolved_symlink)
         .map(|a| (a.exec_path.path_string(), a))
         .collect();
-    let input_digest_of = |p: &str| -> Option<String> {
-        if constant_metadata_paths.contains(p) || p == "bazel-out/volatile-status.txt" {
-            let target = execroot.get_relative_str(p);
-            return fs
-                .exists(&target, true)
-                .then(|| "CONSTANT_METADATA".to_string());
-        }
-        if let Some(fc) = &opts.file_cache {
-            if let Some(src_art) = source_by_exec.get(p) {
-                match fc.get_artifact_metadata(src_art) {
-                    Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                    Err(file_cache::FileCacheError::Directory(_)) => {
-                        path_digest(digest, fs, &execroot.get_relative_str(p))
-                    }
-                    Err(_) => None,
-                }
-            } else if !p.starts_with("bazel-out/") {
-                match fc.get_input_metadata(&PathFragment::create(p)) {
-                    Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                    Err(file_cache::FileCacheError::Directory(_)) => {
-                        path_digest(digest, fs, &execroot.get_relative_str(p))
-                    }
-                    Err(_) => None,
-                }
-            } else {
-                path_digest(digest, fs, &execroot.get_relative_str(p))
-            }
-        } else {
-            path_digest(digest, fs, &execroot.get_relative_str(p))
-        }
-    };
     let md_digest_of = |discovered: &[String]| -> String {
         let mut all: Vec<(String, Option<String>)> = Vec::new();
         for p in declared_inputs.iter().chain(discovered.iter()) {
-            all.push((p.clone(), input_digest_of(p)));
+            let lookup_derived = || {
+                path_digest(digest, fs, &execroot.get_relative_str(p)).or_else(|| {
+                    opts.runtime
+                        .as_ref()
+                        .and_then(|rt| rt.remote.as_ref())
+                        .and_then(|r| r.pending_output_digest(p))
+                })
+            };
+            let d = if constant_metadata_paths.contains(p.as_str())
+                || p == "bazel-out/volatile-status.txt"
+            {
+                let target = execroot.get_relative_str(p);
+                fs.exists(&target, true)
+                    .then(|| "CONSTANT_METADATA".to_string())
+            } else if let Some(fc) = &opts.file_cache {
+                if let Some(src_art) = source_by_exec.get(p.as_str()) {
+                    match fc.get_artifact_metadata(src_art) {
+                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                        Err(file_cache::FileCacheError::Directory(_)) => lookup_derived(),
+                        Err(_) => None,
+                    }
+                } else if !p.starts_with("bazel-out/") {
+                    match fc.get_input_metadata(&PathFragment::create(p)) {
+                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                        Err(file_cache::FileCacheError::Directory(_)) => lookup_derived(),
+                        Err(_) => None,
+                    }
+                } else {
+                    lookup_derived()
+                }
+            } else {
+                lookup_derived()
+            };
+            all.push((p.clone(), d));
         }
         all.extend(tool_rf_entries.iter().cloned());
         all.sort();
@@ -1559,7 +1574,12 @@ pub fn execute_action_with(
                 .ok()
                 .map(|t| digest.hex(t.path_string().as_bytes()))
         } else {
-            path_digest(digest, fs, &p)
+            path_digest(digest, fs, &p).or_else(|| {
+                opts.runtime
+                    .as_ref()
+                    .and_then(|rt| rt.remote.as_ref())
+                    .and_then(|r| r.pending_output_digest(o.exec_path.path_string()))
+            })
         }
     };
     // Cache check (`ActionCacheChecker.mustExecute`): every output must exist and match the
@@ -2743,7 +2763,7 @@ pub fn execute_action_with(
             .runtime
             .as_ref()
             .and_then(|r| r.remote.as_ref())
-            .is_some_and(|r| r.is_pending_output(out_art.exec_path.path_string()));
+            .is_some_and(|r| r.is_remote_output_valid(out_art.exec_path.path_string()));
         if !pending
             && is_cc_compile
             && out_art.exec_path.path_string().ends_with(".gcno")
