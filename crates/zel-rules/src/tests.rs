@@ -4442,7 +4442,7 @@ fn starlark_actions_inspection_map_directory_and_shadowed_action() {
 def _id(x):
     return x
 
-def _expand_dir(template_ctx, *, input_directories, output_directories, additional_inputs, additional_outputs, additional_params):
+def _expand_dir(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
     in_exp = input_directories["src_dir"]
     out_dir = output_directories["dst_dir"]
     child = template_ctx.declare_file("generated.txt", directory = out_dir)
@@ -4744,5 +4744,372 @@ check_rule(name = "chk")
     assert_eq!(
         text,
         "b|15.2|-Xlint:all -source 11|@@bazel_tools//tools/test:lcov_merger"
+    );
+}
+
+#[test]
+fn cc_common_get_tool_for_action_errors_on_unconfigured_and_resolves_disabled_action_config() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _probe_impl(ctx):
+    cc_internal = cc_common.internal_DO_NOT_USE()
+    cfg_info = struct(
+        _features_DO_NOT_USE = [],
+        _action_configs_DO_NOT_USE = [
+            struct(
+                action_name = "c-compile",
+                enabled = True,
+                tools = [struct(path = "/usr/bin/clang")],
+            ),
+            struct(
+                action_name = "strip",
+                enabled = False,
+                tools = [struct(path = "/usr/bin/strip", execution_requirements = ["no-remote"])],
+            ),
+            struct(
+                action_name = "empty-tool",
+                enabled = True,
+                tools = [],
+            ),
+        ],
+        _artifact_name_patterns_DO_NOT_USE = [],
+    )
+    tf = cc_internal.cc_toolchain_features(toolchain_config_info = cfg_info, tools_directory = "")
+    fc = tf.configure_features(requested_features = tf.default_features_and_action_configs())
+    if not cc_common.action_is_enabled(feature_configuration = fc, action_name = "c-compile"):
+        fail("expected c-compile to be enabled")
+    if cc_common.action_is_enabled(feature_configuration = fc, action_name = "strip"):
+        fail("expected strip action_config to be disabled")
+    if ctx.attr.mode == "unconfigured":
+        cc_common.get_tool_for_action(
+            feature_configuration = fc,
+            action_name = "unregistered-action",
+        )
+    if ctx.attr.mode == "no_tool":
+        cc_common.get_tool_for_action(
+            feature_configuration = fc,
+            action_name = "empty-tool",
+        )
+    strip_tool = cc_common.get_tool_for_action(feature_configuration = fc, action_name = "strip")
+    strip_reqs = cc_common.get_execution_requirements(feature_configuration = fc, action_name = "strip")
+    compile_tool = cc_common.get_tool_for_action(feature_configuration = fc, action_name = "c-compile")
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, "{}|{}|{}".format(strip_tool, ",".join(strip_reqs), compile_tool))
+    return [DefaultInfo(files = depset([out]))]
+
+probe = rule(
+    implementation = _probe_impl,
+    attrs = {"mode": attr.string(default = "ok")},
+    fragments = ["cpp"],
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "probe")
+probe(name = "ok")
+probe(name = "bad_unconfigured", mode = "unconfigured")
+probe(name = "bad_no_tool", mode = "no_tool")
+"#,
+        ),
+    ]);
+
+    let ok_ct = ws.analyze("//:ok").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ok_ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(
+        String::from_utf8(content.render()).unwrap(),
+        "/usr/bin/strip|no-remote|/usr/bin/clang"
+    );
+
+    let err = ws.analyze("//:bad_unconfigured").unwrap_err().to_string();
+    assert!(
+        err.contains(
+            "Action unregistered-action does not have an enabled configuration in the toolchain."
+        ),
+        "unexpected error: {err}"
+    );
+
+    let no_tool_err = ws.analyze("//:bad_no_tool").unwrap_err().to_string();
+    assert!(
+        no_tool_err.contains(
+            "Matching tool for action empty-tool not found for given feature configuration"
+        ),
+        "unexpected error: {no_tool_err}"
+    );
+}
+
+#[test]
+fn coverage_instrumented_respects_flags_filter_test_targets_and_file_targets() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r##"
+def _cov_lib_impl(ctx):
+    info = coverage_common.instrumented_files_info(ctx, source_attributes = ["srcs"])
+    return [DefaultInfo(), info]
+
+cov_lib = rule(
+    implementation = _cov_lib_impl,
+    attrs = {"srcs": attr.label_list(allow_files = True)},
+)
+
+def _plain_impl(ctx):
+    return [DefaultInfo()]
+
+plain_lib = rule(implementation = _plain_impl)
+
+def _cov_test_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(exe, "#!/bin/sh\nexit 0\n", is_executable = True)
+    info = coverage_common.instrumented_files_info(ctx, source_attributes = ["srcs"])
+    return [DefaultInfo(executable = exe, files = depset([exe])), info]
+
+cov_test = rule(
+    implementation = _cov_test_impl,
+    test = True,
+    attrs = {"srcs": attr.label_list(allow_files = True)},
+)
+
+def _probe_impl(ctx):
+    if ctx.attr.bad_arg:
+        ctx.coverage_instrumented("not_a_target")
+    parts = [
+        "self=" + str(ctx.coverage_instrumented()),
+        "inc_cov=" + str(ctx.coverage_instrumented(ctx.attr.inc_cov)),
+        "exc_cov=" + str(ctx.coverage_instrumented(ctx.attr.exc_cov)),
+        "inc_fg=" + str(ctx.coverage_instrumented(ctx.attr.inc_fg)),
+        "exc_fg=" + str(ctx.coverage_instrumented(ctx.attr.exc_fg)),
+        "sub_fg=" + str(ctx.coverage_instrumented(ctx.attr.sub_fg)),
+        "inc_plain=" + str(ctx.coverage_instrumented(ctx.attr.inc_plain)),
+        "inc_test=" + str(ctx.coverage_instrumented(ctx.attr.inc_test)),
+        "src_file=" + str(ctx.coverage_instrumented(ctx.attr.src_file)),
+        "gen_file=" + str(ctx.coverage_instrumented(ctx.attr.gen_file)),
+    ]
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, "|".join(parts))
+    return [DefaultInfo(files = depset([out]))]
+
+probe = rule(
+    implementation = _probe_impl,
+    attrs = {
+        "inc_cov": attr.label(),
+        "exc_cov": attr.label(),
+        "inc_fg": attr.label(),
+        "exc_fg": attr.label(),
+        "sub_fg": attr.label(),
+        "inc_plain": attr.label(),
+        "inc_test": attr.label(),
+        "src_file": attr.label(allow_single_file = True),
+        "gen_file": attr.label(allow_single_file = True),
+        "bad_arg": attr.bool(default = False),
+    },
+)
+"##,
+        ),
+        ("BUILD", ""),
+        ("inc/src.c", "int main() { return 0; }\n"),
+        (
+            "inc/BUILD",
+            r#"
+load("//:defs.bzl", "cov_lib", "plain_lib", "cov_test", "probe")
+exports_files(["src.c"])
+genrule(name = "gen", outs = ["gen_out.c"], cmd = "echo 'int x = 0;' > $@")
+cov_lib(name = "lib", srcs = ["src.c"])
+filegroup(name = "fg", srcs = ["src.c"])
+filegroup(name = "excluded_fg", srcs = ["src.c"])
+plain_lib(name = "plain")
+cov_test(name = "my_test", srcs = ["src.c"])
+probe(
+    name = "p",
+    testonly = True,
+    inc_cov = "//inc:lib",
+    exc_cov = "//exc:lib",
+    inc_fg = "//inc:fg",
+    exc_fg = "//exc:fg",
+    sub_fg = "//inc:excluded_fg",
+    inc_plain = "//inc:plain",
+    inc_test = "//inc:my_test",
+    src_file = "//inc:src.c",
+    gen_file = "//inc:gen_out.c",
+)
+probe(name = "bad", bad_arg = True)
+"#,
+        ),
+        ("exc/src.c", "int y = 1;\n"),
+        (
+            "exc/BUILD",
+            r#"
+package(default_visibility = ["//visibility:public"])
+load("//:defs.bzl", "cov_lib")
+cov_lib(name = "lib", srcs = ["src.c"])
+filegroup(name = "fg", srcs = ["src.c"])
+"#,
+        ),
+    ]);
+
+    let run_with = |cov: bool, filter: Option<&str>, inst_tests: bool| -> String {
+        let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        cfg.options.insert(
+            "collect_code_coverage".into(),
+            if cov { "true" } else { "false" }.into(),
+        );
+        if let Some(f) = filter {
+            cfg.options
+                .insert("instrumentation_filter".into(), f.into());
+        }
+        cfg.options.insert(
+            "instrument_test_targets".into(),
+            if inst_tests { "true" } else { "false" }.into(),
+        );
+        let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
+        let ct = r
+            .analyze(&Label::parse_canonical("//inc:p").unwrap(), &cfg)
+            .unwrap();
+        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+            panic!("expected FileWrite");
+        };
+        String::from_utf8(content.render()).unwrap()
+    };
+
+    // Coverage disabled: everything is False.
+    assert_eq!(
+        run_with(false, Some("//inc"), true),
+        "self=False|inc_cov=False|exc_cov=False|inc_fg=False|exc_fg=False|sub_fg=False|inc_plain=False|inc_test=False|src_file=False|gen_file=False"
+    );
+
+    // Coverage enabled with filter `^//inc`, test targets excluded:
+    // - `//inc:lib`, `//inc:fg`, `//inc:excluded_fg`, and self (`//inc:p`) are True.
+    // - `//exc:lib` and `//exc:fg` have InstrumentedFilesInfo, but are excluded by filter -> False!
+    // - `//inc:plain` lacks InstrumentedFilesInfo -> False.
+    // - `//inc:my_test` is a test rule with --noinstrument_test_targets -> False.
+    // - `//inc:src.c` (source file) and `//inc:gen` (rule without InstrumentedFilesInfo) -> False.
+    assert_eq!(
+        run_with(true, Some("^//inc"), false),
+        "self=True|inc_cov=True|exc_cov=False|inc_fg=True|exc_fg=False|sub_fg=True|inc_plain=False|inc_test=False|src_file=False|gen_file=False"
+    );
+
+    // Coverage enabled with negative filter exclusion `-//inc:excluded_fg` and `--instrument_test_targets`:
+    // - `//inc:my_test` becomes True.
+    // - `//inc:excluded_fg` becomes False despite carrying InstrumentedFilesInfo.
+    assert_eq!(
+        run_with(true, Some("^//inc,-^//inc:excluded_fg$"), true),
+        "self=True|inc_cov=True|exc_cov=False|inc_fg=True|exc_fg=False|sub_fg=False|inc_plain=False|inc_test=True|src_file=False|gen_file=False"
+    );
+
+    // Invalid target type fails eagerly even when coverage is disabled.
+    let err = ws.analyze("//inc:bad").unwrap_err().to_string();
+    assert!(
+        err.contains("want 'Target or NoneType'"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn map_directory_analysis_validation_and_orphan_check() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _noop_expand(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    pass
+
+def _impl(ctx):
+    src_dir = ctx.actions.declare_directory("src")
+    ctx.actions.run(outputs = [src_dir], executable = "/bin/mkdir")
+    dst_dir = ctx.actions.declare_directory("dst")
+    if ctx.attr.mode == "orphan":
+        return [DefaultInfo(files = depset([dst_dir]))]
+    if ctx.attr.mode == "empty_in":
+        ctx.actions.map_directory(
+            input_directories = {},
+            output_directories = {"dst": dst_dir},
+            implementation = _noop_expand,
+        )
+    elif ctx.attr.mode == "empty_out":
+        ctx.actions.map_directory(
+            input_directories = {"src": src_dir},
+            output_directories = {},
+            implementation = _noop_expand,
+        )
+    elif ctx.attr.mode == "bad_param":
+        ctx.actions.map_directory(
+            input_directories = {"src": src_dir},
+            output_directories = {"dst": dst_dir},
+            additional_params = {"bad": [1, 2]},
+            implementation = _noop_expand,
+        )
+    else:
+        ctx.actions.map_directory(
+            input_directories = {"src": src_dir},
+            output_directories = {"dst": dst_dir},
+            additional_params = {"k": "v", "n": 3, "b": True},
+            mnemonic = "CustomExpanded",
+            implementation = _noop_expand,
+        )
+    return [DefaultInfo(files = depset([dst_dir]))]
+
+r = rule(implementation = _impl, attrs = {"mode": attr.string(default = "ok")})
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "r")
+r(name = "ok", mode = "ok")
+r(name = "orphan", mode = "orphan")
+r(name = "empty_in", mode = "empty_in")
+r(name = "empty_out", mode = "empty_out")
+r(name = "bad_param", mode = "bad_param")
+"#,
+        ),
+    ]);
+
+    let ok_ct = ws.analyze("//:ok").unwrap();
+    assert!(ok_ct
+        .typed_actions
+        .iter()
+        .any(|a| a.mnemonic == "StarlarkMapActionTemplate"));
+
+    let orphan_err = ws.analyze("//:orphan").unwrap_err().to_string();
+    assert!(
+        orphan_err.contains("have no generating action"),
+        "unexpected error: {orphan_err}"
+    );
+
+    let in_err = ws.analyze("//:empty_in").unwrap_err().to_string();
+    assert!(
+        in_err.contains("requires at least one input"),
+        "unexpected error: {in_err}"
+    );
+
+    let out_err = ws.analyze("//:empty_out").unwrap_err().to_string();
+    assert!(
+        out_err.contains("requires at least one output"),
+        "unexpected error: {out_err}"
+    );
+
+    let param_err = ws.analyze("//:bad_param").unwrap_err().to_string();
+    assert!(
+        param_err.contains("Expected one of [bool, int, string]"),
+        "unexpected error: {param_err}"
+    );
+
+    let mut disabled_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    disabled_cfg
+        .options
+        .insert("experimental_allow_map_directory".into(), "false".into());
+    let (res, cfg) = ws.resolver_with(disabled_cfg, AnalysisConfig::new());
+    let flag_err = res
+        .analyze(&Label::parse_canonical("//:ok").unwrap(), &cfg)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        flag_err.contains("--experimental_allow_map_directory"),
+        "unexpected error: {flag_err}"
     );
 }

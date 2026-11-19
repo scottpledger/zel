@@ -269,6 +269,13 @@ pub enum ActionKind {
         is_volatile: bool,
         translator: crate::BuildInfoTranslator,
     },
+    /// `ctx.actions.map_directory` (`StarlarkMapActionTemplate`).
+    MapDirectory {
+        input_directories: Vec<(String, Artifact)>,
+        output_directories: Vec<(String, Artifact)>,
+        expanded_mnemonic: String,
+        expander: crate::MapDirectoryExpanderHandle,
+    },
 }
 
 /// Target type for `SymlinkAction` (`SymlinkAction.TargetType`) / `UnresolvedSymlinkAction`.
@@ -541,7 +548,10 @@ impl Action {
     /// action environment (`--action_env`, or `--host_action_env` in exec configurations, plus the
     /// strict/default `PATH`) with `env` laid over it, otherwise only `env`.
     pub fn apply_configuration_env(&mut self, cfg: &crate::BuildConfigurationKey) {
-        if !matches!(self.kind, ActionKind::Spawn { .. }) {
+        if !matches!(
+            self.kind,
+            ActionKind::Spawn { .. } | ActionKind::MapDirectory { .. }
+        ) {
             return;
         }
         self.action_env = Some(zel_util::action_env::create_spawn_action_environment(
@@ -708,6 +718,22 @@ impl Action {
                     .add_str(status_file.exec_path.path_string())
                     .add_bool(*is_volatile)
                     .add_str(&translator.key);
+            }
+            ActionKind::MapDirectory {
+                input_directories,
+                output_directories,
+                expanded_mnemonic,
+                expander,
+            } => {
+                fp.add_str("StarlarkMapActionTemplate")
+                    .add_str(expanded_mnemonic)
+                    .add_str(&expander.0.key_fingerprint());
+                for (k, a) in input_directories {
+                    fp.add_str(k).add_str(a.exec_path.path_string());
+                }
+                for (k, a) in output_directories {
+                    fp.add_str(k).add_str(a.exec_path.path_string());
+                }
             }
         }
         for (k, v) in &self.env {
@@ -1201,6 +1227,41 @@ impl Action {
                         translator: translator.clone(),
                     });
                 }
+            }
+            ActionKind::MapDirectory {
+                input_directories,
+                output_directories,
+                expanded_mnemonic,
+                expander,
+            } => {
+                out.push(ActionAnalysisMetadata::MapDirectoryAction(Box::new(
+                    crate::MapDirectorySpec {
+                        owner: self.owner.clone(),
+                        input_directories: input_directories.clone(),
+                        output_directories: output_directories.clone(),
+                        inputs: self.inputs.clone(),
+                        outputs: self.outputs.clone(),
+                        tools: self.tools.clone(),
+                        env: self
+                            .action_env
+                            .as_ref()
+                            .map(|e| e.fixed_env().clone())
+                            .unwrap_or_else(|| self.env.clone()),
+                        inherited_env: self
+                            .action_env
+                            .as_ref()
+                            .map(|e| e.inherited_env().clone())
+                            .unwrap_or_default(),
+                        unset_env: self
+                            .action_env
+                            .as_ref()
+                            .map(|e| e.unset_env().clone())
+                            .unwrap_or_default(),
+                        execution_info: self.execution_requirements.clone(),
+                        expanded_mnemonic: expanded_mnemonic.clone(),
+                        expander: expander.0.clone(),
+                    },
+                )));
             }
         }
         out

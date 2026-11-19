@@ -1192,3 +1192,215 @@ capture_rule = rule(implementation = _impl)
         );
     }
 }
+
+#[test]
+fn map_directory_executes_expanded_subactions_end_to_end() {
+    let w = Ws::new("map-dir-e2e");
+
+    // Compile two small cross-platform helper binaries via `rustc` so this test works on
+    // Linux, macOS (`darwin-sandbox`), and Windows (`windows-latest`) without `/bin/sh`.
+    let exe_suffix = std::env::consts::EXE_SUFFIX;
+    let make_tree_name = format!("make_tree{exe_suffix}");
+    let map_tool_name = format!("map_tool{exe_suffix}");
+
+    let make_tree_src = w.root.join("make_tree.rs");
+    std::fs::write(
+        &make_tree_src,
+        r#"
+fn main() {
+    let out_dir = std::env::args().nth(1).expect("out_dir");
+    let root = std::path::Path::new(&out_dir);
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("alpha.txt"), "alpha-body").unwrap();
+    std::fs::write(root.join("sub").join("beta.txt"), "beta-body").unwrap();
+}
+"#,
+    )
+    .unwrap();
+    let status = std::process::Command::new("rustc")
+        .arg(&make_tree_src)
+        .arg("-o")
+        .arg(w.ws.join(&make_tree_name))
+        .status()
+        .expect("rustc must be available");
+    assert!(status.success(), "compiling make_tree helper failed");
+
+    let map_tool_src = w.root.join("map_tool.rs");
+    std::fs::write(
+        &map_tool_src,
+        r#"
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let in_file = &args[1];
+    let hdr_file = &args[2];
+    let out_file = &args[3];
+    let rel = &args[4];
+    let prefix = &args[5];
+    let stage = std::env::var("MAP_STAGE").unwrap_or_else(|_| "missing".to_string());
+    let body = std::fs::read_to_string(in_file).unwrap();
+    let hdr = std::fs::read_to_string(hdr_file).unwrap();
+    if let Some(parent) = std::path::Path::new(out_file).parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(
+        out_file,
+        format!("{prefix}:{stage}:{}:{rel}:{body}", hdr.trim()),
+    )
+    .unwrap();
+}
+"#,
+    )
+    .unwrap();
+    let status = std::process::Command::new("rustc")
+        .arg(&map_tool_src)
+        .arg("-o")
+        .arg(w.ws.join(&map_tool_name))
+        .status()
+        .expect("rustc must be available");
+    assert!(status.success(), "compiling map_tool helper failed");
+
+    w.write("hdr.txt", "v1\n");
+    w.write(
+        "defs.bzl",
+        r#"
+def _expand_stage(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    src = input_directories["src"]
+    dst = output_directories["dst"]
+    hdr = additional_inputs["hdr"]
+    mapper = tools["mapper"]
+    prefix = additional_params["prefix"]
+    for child in src.children:
+        rel = child.tree_relative_path
+        out = template_ctx.declare_file(rel + ".mapped", directory = dst)
+        args = template_ctx.args()
+        args.add(child)
+        args.add(hdr)
+        args.add(out)
+        args.add(rel)
+        args.add(prefix)
+        template_ctx.run(
+            outputs = [out],
+            inputs = [child, hdr],
+            executable = mapper.executable,
+            tools = [mapper],
+            arguments = [args],
+            progress_message = "Mapping " + rel,
+        )
+
+def _bad_return_expand(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    return "unexpected"
+
+def _pipeline_impl(ctx):
+    raw_dir = ctx.actions.declare_directory(ctx.label.name + "_raw")
+    mk_args = ctx.actions.args()
+    mk_args.add(raw_dir.path)
+    ctx.actions.run(
+        outputs = [raw_dir],
+        executable = ctx.executable.make_tree,
+        arguments = [mk_args],
+    )
+    if ctx.attr.bad_return:
+        bad_dir = ctx.actions.declare_directory(ctx.label.name + "_bad")
+        ctx.actions.map_directory(
+            input_directories = {"src": raw_dir},
+            output_directories = {"dst": bad_dir},
+            implementation = _bad_return_expand,
+        )
+        return [DefaultInfo(files = depset([bad_dir]))]
+
+    stage1_dir = ctx.actions.declare_directory(ctx.label.name + "_stage1")
+    ctx.actions.map_directory(
+        input_directories = {"src": raw_dir},
+        output_directories = {"dst": stage1_dir},
+        additional_inputs = {"hdr": ctx.file.hdr},
+        tools = {"mapper": ctx.attr.map_tool.files_to_run},
+        additional_params = {"prefix": "S1", "version": 1, "active": True},
+        env = {"MAP_STAGE": "one"},
+        mnemonic = "MapStageOne",
+        execution_requirements = {"no-remote": "1"},
+        implementation = _expand_stage,
+    )
+
+    stage2_dir = ctx.actions.declare_directory(ctx.label.name + "_stage2")
+    ctx.actions.map_directory(
+        input_directories = {"src": stage1_dir},
+        output_directories = {"dst": stage2_dir},
+        additional_inputs = {"hdr": ctx.file.hdr},
+        tools = {"mapper": ctx.attr.map_tool.files_to_run},
+        additional_params = {"prefix": "S2"},
+        env = {"MAP_STAGE": "two"},
+        mnemonic = "MapStageTwo",
+        implementation = _expand_stage,
+    )
+    return [DefaultInfo(files = depset([stage2_dir]))]
+
+pipeline = rule(
+    implementation = _pipeline_impl,
+    attrs = {
+        "make_tree": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
+        "map_tool": attr.label(executable = True, cfg = "exec", allow_single_file = True, mandatory = True),
+        "hdr": attr.label(allow_single_file = True, mandatory = True),
+        "bad_return": attr.bool(default = False),
+    },
+)
+"#,
+    );
+    w.write(
+        "BUILD",
+        &format!(
+            r#"
+load(":defs.bzl", "pipeline")
+exports_files(["{make_tree_name}", "{map_tool_name}", "hdr.txt"])
+pipeline(
+    name = "mapped",
+    make_tree = ":{make_tree_name}",
+    map_tool = ":{map_tool_name}",
+    hdr = ":hdr.txt",
+)
+pipeline(
+    name = "bad_ret",
+    make_tree = ":{make_tree_name}",
+    map_tool = ":{map_tool_name}",
+    hdr = ":hdr.txt",
+    bad_return = True,
+)
+"#
+        ),
+    );
+
+    let (code, _, err, _) = w.run(&["build", "//:mapped"]);
+    assert_eq!(code, 0, "map_directory build failed: {err}");
+
+    let bin_dir = w.ws.join("bazel-bin").join("mapped_stage2");
+    let alpha_out =
+        std::fs::read_to_string(bin_dir.join("alpha.txt.mapped.mapped")).expect("alpha output");
+    let beta_out = std::fs::read_to_string(bin_dir.join("sub").join("beta.txt.mapped.mapped"))
+        .expect("nested beta output");
+    assert_eq!(
+        alpha_out,
+        "S2:two:v1:alpha.txt.mapped:S1:one:v1:alpha.txt:alpha-body"
+    );
+    assert_eq!(
+        beta_out,
+        "S2:two:v1:sub/beta.txt.mapped:S1:one:v1:sub/beta.txt:beta-body"
+    );
+
+    // Modify `hdr.txt` and rebuild to verify incremental invalidation of `map_directory`.
+    w.write("hdr.txt", "v2\n");
+    let (code2, _, err2, _) = w.run(&["build", "//:mapped"]);
+    assert_eq!(code2, 0, "incremental map_directory build failed: {err2}");
+    let alpha_v2 =
+        std::fs::read_to_string(bin_dir.join("alpha.txt.mapped.mapped")).expect("alpha v2 output");
+    assert_eq!(
+        alpha_v2,
+        "S2:two:v2:alpha.txt.mapped:S1:one:v2:alpha.txt:alpha-body"
+    );
+
+    // Non-None return value from `map_directory` implementation fails execution cleanly.
+    let (code3, _, err3, _) = w.run(&["build", "//:bad_ret"]);
+    assert_ne!(code3, 0, "expected non-None return to fail execution");
+    assert!(
+        err3.contains("may not return a non-None value"),
+        "unexpected error: {err3}"
+    );
+}

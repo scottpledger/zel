@@ -385,7 +385,62 @@ fn call_subrule(
 
 /// Whether `--collect_code_coverage` is on in `cfg`.
 fn coverage_enabled(cfg: &BuildConfigurationKey) -> bool {
-    matches!(cfg.options.get("collect_code_coverage").map(String::as_str), Some("true") | Some("1"))
+    cfg.bool_option("collect_code_coverage", false)
+}
+
+/// `RegexFilter.isIncluded(label.toString())` for `--instrumentation_filter`.
+fn instrumentation_filter_includes(cfg: &BuildConfigurationKey, label: &Label) -> bool {
+    let spec = cfg
+        .option_str("instrumentation_filter")
+        .unwrap_or_else(|| "-/javatests[/:],-/test/java[/:]".to_string());
+    let mut pieces = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = spec.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c == ',' && !(i > 0 && chars[i - 1] == '\\') {
+            pieces.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    pieces.push(cur);
+    let mut inclusions = Vec::new();
+    let mut exclusions = Vec::new();
+    for raw_piece in pieces {
+        let mut p = raw_piece.replace("\\,", ",");
+        let excluded = p.starts_with('-');
+        if excluded || p.starts_with('+') {
+            p.remove(0);
+        }
+        if p.is_empty() {
+            continue;
+        }
+        // `build_options::regex_filter_string` normalises patterns using `(?>...)`; `java_regex`
+        // uses non-capturing `(?:...)` groups with identical substring match semantics here.
+        let normalized = p.replace("(?>", "(?:");
+        if let Ok(re) = zel_util::java_regex::Regex::new(&normalized) {
+            if excluded {
+                exclusions.push(re);
+            } else {
+                inclusions.push(re);
+            }
+        }
+    }
+    let label_str = format!(
+        "{}:{}",
+        label.package_identifier().canonical_form(),
+        label.name()
+    );
+    if exclusions.iter().any(|r| r.is_match(&label_str)) {
+        return false;
+    }
+    inclusions.is_empty() || inclusions.iter().any(|r| r.is_match(&label_str))
+}
+
+/// `InstrumentedFilesCollector.shouldIncludeLocalSources`.
+fn should_include_local_sources(cfg: &BuildConfigurationKey, label: &Label, is_test: bool) -> bool {
+    (cfg.bool_option("instrument_test_targets", false) || !is_test)
+        && instrumentation_filter_includes(cfg, label)
 }
 
 /// `coverage_common.instrumented_files_info(ctx, source_attributes, dependency_attributes,
@@ -424,22 +479,36 @@ fn instrumented_files_info(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Stri
         None => Vec::new(),
     };
     if coverage_enabled(&st.cfg) {
-        for a in &sources {
-            let Some(Value::Struct(fs)) = Some(&st.files_struct) else { continue };
-            // `InstrumentedFilesCollector.getPrerequisitesForAttributes`: attributes the rule class
-            // does not define (`getAttributeByNameMaybe`) are skipped.
-            let Some(list) = fs.fields.get(a) else { continue };
-            for f in files_in(list, a)? {
-                let ext_ok = match &extensions {
-                    None => true,
-                    Some(exts) => exts.iter().any(|e| {
-                        f.exec_path
-                            .path_string()
-                            .ends_with(&format!(".{}", e.trim_start_matches('.')))
-                    }),
-                };
-                if ext_ok {
-                    instrumented.push(f);
+        let is_test = st
+            .rule
+            .extra
+            .rule_class
+            .as_ref()
+            .is_some_and(|rc| rc.is_test);
+        let include_generated = st
+            .cfg
+            .bool_option("experimental_collect_code_coverage_for_generated_files", false);
+        if should_include_local_sources(&st.cfg, &st.label, is_test) {
+            for a in &sources {
+                let Some(Value::Struct(fs)) = Some(&st.files_struct) else { continue };
+                // `InstrumentedFilesCollector.getPrerequisitesForAttributes`: attributes the rule class
+                // does not define (`getAttributeByNameMaybe`) are skipped.
+                let Some(list) = fs.fields.get(a) else { continue };
+                for f in files_in(list, a)? {
+                    if !(f.is_source || include_generated) {
+                        continue;
+                    }
+                    let ext_ok = match &extensions {
+                        None => true,
+                        Some(exts) => exts.iter().any(|e| {
+                            f.exec_path
+                                .path_string()
+                                .ends_with(&format!(".{}", e.trim_start_matches('.')))
+                        }),
+                    };
+                    if ext_ok {
+                        instrumented.push(f);
+                    }
                 }
             }
         }
@@ -646,9 +715,11 @@ fn host_attr(st: &Arc<CtxState>, kind: &str, attr: &str, pos: &[Value]) -> HostR
             match attr {
                 "directory" => Ok(file_value(&dir)),
                 "children" => Ok(mk_list(children)),
-                other => err(format!(
-                    "'ExpandedDirectory' value has no field or method '{other}'"
-                )),
+                other => file_attr(&dir, other).map_err(|_| {
+                    StarlarkError(format!(
+                        "'ExpandedDirectory' value has no field or method '{other}'"
+                    ))
+                }),
             }
         }
         "analysis_failure" => {

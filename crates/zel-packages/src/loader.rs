@@ -1180,11 +1180,22 @@ impl PackageLoader {
                     .to_string(),
             ),
         );
-        // Native `cc_common`: rules_cc's Starlark is layered on `cc_common.internal_DO_NOT_USE()`.
+        // Native `cc_common`: rules_cc's Starlark is layered on `cc_common.internal_DO_NOT_USE()`
+        // and `_builtins.internal.cc_common.*` (overridden by `@_builtins` when mounted).
         let mut cc_common = BTreeMap::new();
         cc_common.insert(
             "internal_DO_NOT_USE".to_string(),
             Value::BuiltinFunction("host:cc_common.internal_DO_NOT_USE".to_string()),
+        );
+        for n in crate::builtins::CC_COMMON_NATIVES {
+            cc_common.insert(
+                (*n).to_string(),
+                Value::BuiltinFunction(format!("host:builtins.cc_common.{n}")),
+            );
+        }
+        cc_common.insert(
+            "do_not_use_tools_cpp_compiler_present".to_string(),
+            Value::None,
         );
         ctx.globals.insert(
             "cc_common".to_string(),

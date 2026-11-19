@@ -108,6 +108,15 @@ fn pretty_print(a: &Action, for_tool: bool) -> String {
                     )
                 }
             }
+            ActionKind::MapDirectory {
+                input_directories, ..
+            } => {
+                let dirs: Vec<String> = input_directories
+                    .iter()
+                    .map(|(_, d)| pretty_path(d))
+                    .collect();
+                format!("Expanding [{}] into actions.", dirs.join(", "))
+            }
         },
     };
     // `AbstractAction.getProgressMessage`: actions of the tool (exec) configurations are annotated.

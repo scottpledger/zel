@@ -1100,6 +1100,59 @@ pub fn invalidate_computed_digest(path: &str) {
     }
 }
 
+/// Recursively deletes a file, symlink, or directory tree via `FileSystem`.
+fn delete_path_recursive(fs: &dyn FileSystem, path: &PathFragment) {
+    if let Ok(st) = fs.stat(path, false) {
+        if st.is_directory {
+            if let Ok(entries) = fs.readdir(path) {
+                for e in entries {
+                    delete_path_recursive(fs, &path.get_relative_str(&e.name));
+                }
+            }
+        }
+    }
+    let _ = fs.delete(path);
+}
+
+/// Recursively collects `(tree_relative_path, Artifact)` entries inside a materialized tree artifact.
+fn collect_tree_children(
+    fs: &dyn FileSystem,
+    base_abs: &PathFragment,
+    cur_abs: &PathFragment,
+    parent_art: &Artifact,
+    owner: &zel_cmdline::Label,
+    out: &mut Vec<(String, Artifact)>,
+) -> io::Result<()> {
+    let mut entries = fs.readdir(cur_abs)?;
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    for e in entries {
+        let child_abs = cur_abs.get_relative_str(&e.name);
+        let st = fs.stat(&child_abs, true)?;
+        if st.is_directory {
+            collect_tree_children(fs, base_abs, &child_abs, parent_art, owner, out)?;
+        } else {
+            let rel = child_abs
+                .path_string()
+                .strip_prefix(base_abs.path_string())
+                .unwrap_or(child_abs.path_string())
+                .trim_start_matches(['/', '\\'])
+                .replace('\\', "/");
+            let child_art = Artifact {
+                is_source: false,
+                is_tree_artifact: false,
+                root: parent_art.root,
+                is_unresolved_symlink: false,
+                is_constant_metadata: false,
+                exec_path: parent_art.exec_path.get_relative_str(&rel),
+                root_relative_path: parent_art.root_relative_path.get_relative_str(&rel),
+                owner_label: owner.clone(),
+            };
+            out.push((rel, child_art));
+        }
+    }
+    Ok(())
+}
+
 /// Digest of a produced output: file contents, or for directories (tree artifacts) a digest over
 /// the sorted `(relative path, content digest)` listing. `None` when the path does not exist.
 pub fn path_digest(
@@ -1708,6 +1761,14 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
             p.payload.push(*is_volatile as u8);
             p.payload.extend_from_slice(translator.key.as_bytes());
         }
+        ActionAnalysisMetadata::MapDirectoryAction(spec) => {
+            p.kind = "map_directory".into();
+            p.env = spec.env.clone();
+            p.inherited_env = spec.inherited_env.iter().cloned().collect();
+            p.execution_info = spec.execution_info.clone();
+            p.payload
+                .extend_from_slice(spec.expander.key_fingerprint().as_bytes());
+        }
     }
     p
 }
@@ -1808,20 +1869,28 @@ pub fn execute_action_with(
             .iter()
             .filter_map(|k| opts.client_env.get(k).map(|v| (k.clone(), v.clone())))
             .collect(),
+        ActionAnalysisMetadata::MapDirectoryAction(spec) => spec
+            .inherited_env
+            .iter()
+            .filter_map(|k| opts.client_env.get(k).map(|v| (k.clone(), v.clone())))
+            .collect(),
         _ => BTreeMap::new(),
     };
     let env_digest = action_cache.client_env_digest(&used_client_env);
     let declared_inputs: Vec<String> = parts.input_paths.clone();
     let mut tool_rf_entries: Vec<(String, Option<String>)> = Vec::new();
-    if let ActionAnalysisMetadata::SpawnAction { tools, .. } = action {
-        for tp in tools {
-            if let Some(spec) = opts.tool_runfiles.get(tp.exec_path.path_string()) {
-                for (rf_path, target) in &spec.entries {
-                    tool_rf_entries.push((
-                        format!("runfiles:{}:{}", tp.exec_path.path_string(), rf_path),
-                        Some(target.clone()),
-                    ));
-                }
+    let action_tools: &[Artifact] = match action {
+        ActionAnalysisMetadata::SpawnAction { tools, .. } => tools,
+        ActionAnalysisMetadata::MapDirectoryAction(spec) => &spec.tools,
+        _ => &[],
+    };
+    for tp in action_tools {
+        if let Some(spec) = opts.tool_runfiles.get(tp.exec_path.path_string()) {
+            for (rf_path, target) in &spec.entries {
+                tool_rf_entries.push((
+                    format!("runfiles:{}:{}", tp.exec_path.path_string(), rf_path),
+                    Some(target.clone()),
+                ));
             }
         }
     }
@@ -1985,6 +2054,14 @@ pub fn execute_action_with(
             ActionAnalysisMetadata::SymlinkAction { output, .. } => {
                 format!("Creating symlink {}", output.root_relative_path)
             }
+            ActionAnalysisMetadata::MapDirectoryAction(spec) => {
+                let dirs: Vec<String> = spec
+                    .input_directories
+                    .iter()
+                    .map(|(_, d)| d.root_relative_path.path_string().to_string())
+                    .collect();
+                format!("Expanding [{}] into actions.", dirs.join(", "))
+            }
         };
         let mut messages = vec![format!("ERROR: action '{describe}' is not up-to-date")];
         if matches!(action, ActionAnalysisMetadata::SymlinkAction { .. }) {
@@ -2021,7 +2098,7 @@ pub fn execute_action_with(
                     catastrophic: bool| {
         // Bazel removes outputs of failed actions and forgets their cache entries.
         for o in &outputs {
-            let _ = fs.delete(&execroot.get_relative(&o.exec_path));
+            delete_path_recursive(fs, &execroot.get_relative(&o.exec_path));
         }
         if let Some(p) = outputs.first() {
             action_cache.remove(p.exec_path.path_string());
@@ -3076,6 +3153,91 @@ pub fn execute_action_with(
                     }
                 }
                 break;
+            }
+        }
+        ActionAnalysisMetadata::MapDirectoryAction(spec) => {
+            let dirs_desc: Vec<String> = spec
+                .input_directories
+                .iter()
+                .map(|(_, d)| d.root_relative_path.path_string().to_string())
+                .collect();
+            let progress = format!("Expanding [{}] into actions.", dirs_desc.join(", "));
+            outcome.progress = progress.clone();
+
+            let mut discovered: BTreeMap<String, Vec<(String, Artifact)>> = BTreeMap::new();
+            for (key, dir_art) in &spec.input_directories {
+                let dir_abs = execroot.get_relative(&dir_art.exec_path);
+                if !fs.exists(&dir_abs, true) {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: {progress} failed: missing input directory '{}'",
+                            dir_art.exec_path
+                        )],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+                let mut kids = Vec::new();
+                if let Err(e) =
+                    collect_tree_children(fs, &dir_abs, &dir_abs, dir_art, &spec.owner, &mut kids)
+                {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: {progress} failed: cannot read directory '{}': {e}",
+                            dir_art.exec_path
+                        )],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+                kids.sort_by(|a, b| a.0.cmp(&b.0));
+                discovered.insert(key.clone(), kids);
+            }
+
+            for (_, out_dir) in &spec.output_directories {
+                let out_abs = execroot.get_relative(&out_dir.exec_path);
+                delete_path_recursive(fs, &out_abs);
+                fs.create_directory_and_parents(&out_abs)?;
+            }
+
+            let sub_actions = match spec.expander.expand(&discovered) {
+                Ok(acts) => acts,
+                Err(msg) => {
+                    return Ok(fail(
+                        vec![format!("ERROR: {loc}: {msg}")],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+            };
+
+            for sub_action in &sub_actions {
+                if let Some(sub_primary) = sub_action.outputs().first() {
+                    action_cache.remove(sub_primary.exec_path.path_string());
+                }
+                let sub_res =
+                    execute_action_with(sub_action, execroot, fs, action_cache, reporter, opts)?;
+                outcome.stdout.extend_from_slice(&sub_res.stdout);
+                outcome.stderr.extend_from_slice(&sub_res.stderr);
+                if sub_res.runner.is_some() {
+                    outcome.runner = sub_res.runner;
+                }
+                if let Some(sub_fail) = sub_res.failure {
+                    return Ok(fail_ext(
+                        sub_fail.messages,
+                        sub_fail.exit_code,
+                        outcome.stdout,
+                        outcome.stderr,
+                        outcome.runner,
+                        sub_fail.catastrophic,
+                    ));
+                }
             }
         }
     }

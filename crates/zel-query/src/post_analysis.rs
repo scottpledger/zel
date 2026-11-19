@@ -3612,6 +3612,7 @@ pub(crate) fn action_kind_name(a: &Action) -> &'static str {
         ActionKind::Symlink { .. } => "Symlink",
         ActionKind::TemplateExpand { .. } => "TemplateExpand",
         ActionKind::BuildInfoTranslate { .. } => "TranslateBuildInfo",
+        ActionKind::MapDirectory { .. } => "StarlarkMapActionTemplate",
     }
 }
 

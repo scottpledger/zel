@@ -55,6 +55,7 @@ pub(crate) enum Obj {
 struct Table {
     items: Vec<Obj>,
     files: HashMap<(String, u8), usize>,
+    tree_rel: HashMap<String, String>,
 }
 
 fn table() -> &'static Mutex<Table> {
@@ -65,15 +66,36 @@ fn table() -> &'static Mutex<Table> {
     })
 }
 
+fn format_file_repr(a: &Artifact) -> String {
+    if a.is_source {
+        format!("<source file {}>", a.root_relative_path)
+    } else {
+        format!("<generated file {}>", a.root_relative_path_for_repr())
+    }
+}
+
 fn host_repr(kind: &str, id: &str) -> Option<String> {
     let idx: usize = id.parse().ok()?;
     let t = table().lock().unwrap();
+    if kind == "expanded_directory" {
+        if let Some(Obj::ExpandedDirectory {
+            directory,
+            children,
+        }) = t.items.get(idx)
+        {
+            let dir_str = format_file_repr(directory);
+            let kids = children.clone();
+            drop(t);
+            let kids_str: Vec<String> = kids.iter().map(|c| c.repr()).collect();
+            return Some(format!(
+                "ExpandedDirectory(directory = {dir_str}, children = [{}])",
+                kids_str.join(", ")
+            ));
+        }
+        return None;
+    }
     match (kind, t.items.get(idx)?) {
-        ("file", Obj::File(a)) => Some(if a.is_source {
-            format!("<source file {}>", a.root_relative_path)
-        } else {
-            format!("<generated file {}>", a.root_relative_path_for_repr())
-        }),
+        ("file", Obj::File(a)) => Some(format_file_repr(a)),
         ("target", Obj::Target(ct)) => {
             if ct.rule_class == "source file" {
                 Some(format!("<input file target {}>", ct.label.canonical_form()))
@@ -92,9 +114,6 @@ fn host_repr(kind: &str, id: &str) -> Option<String> {
             "action '{}'",
             a.progress_message.as_deref().unwrap_or(&a.mnemonic)
         )),
-        ("expanded_directory", Obj::ExpandedDirectory { directory, .. }) => {
-            Some(format!("<ExpandedDirectory {}>", directory.exec_path))
-        }
         ("analysis_failure", Obj::AnalysisFailure { label, message }) => Some(format!(
             "<AnalysisFailure({}, {})>",
             label.canonical_form(),
@@ -133,15 +152,23 @@ pub fn file_value(a: &Artifact) -> Value {
     Value::Host("file".into(), i.to_string())
 }
 
-/// The artifact behind a `File` value.
+/// Interns a `TreeFileArtifact` with its `tree_relative_path` (`FileApi.tree_relative_path`).
+pub(crate) fn tree_file_value(a: &Artifact, tree_relative_path: String) -> Value {
+    {
+        let mut t = table().lock().unwrap();
+        t.tree_rel
+            .insert(a.exec_path.path_string().to_string(), tree_relative_path);
+    }
+    file_value(a)
+}
+
+/// The artifact behind a `File` (or `ExpandedDirectory`) value.
 pub fn artifact_of(v: &Value) -> Option<Artifact> {
     let Value::Host(k, id) = v else { return None };
-    if k != "file" {
-        return None;
-    }
     let t = table().lock().unwrap();
-    match t.items.get(id.parse::<usize>().ok()?)? {
-        Obj::File(a) => Some(a.clone()),
+    match (k.as_str(), t.items.get(id.parse::<usize>().ok()?)?) {
+        ("file", Obj::File(a)) => Some(a.clone()),
+        ("expanded_directory", Obj::ExpandedDirectory { directory, .. }) => Some(directory.clone()),
         _ => None,
     }
 }
@@ -219,10 +246,19 @@ pub(crate) fn file_attr(a: &Artifact, attr: &str) -> Result<Value, String> {
             Value::Struct(Arc::new(StructValue::new(m)))
         }
         "tree_relative_path" => {
-            return Err(format!(
-            "'tree_relative_path' is only available on files inside a tree artifact; '{}' is not",
-            a.exec_path
-        ))
+            if let Some(rel) = table()
+                .lock()
+                .unwrap()
+                .tree_rel
+                .get(a.exec_path.path_string())
+            {
+                Value::String(rel.clone())
+            } else {
+                return Err(format!(
+                    "'tree_relative_path' is only available on files inside a tree artifact; '{}' is not",
+                    a.exec_path
+                ));
+            }
         }
         other => return Err(format!("'File' value has no field or method '{other}'")),
     })

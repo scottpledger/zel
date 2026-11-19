@@ -822,7 +822,6 @@ pub fn analyze_starlark_rule(
         actions: Mutex::new(Vec::new()),
         graph: Mutex::new(ActionGraph::new()),
         declared_trees: Mutex::new(BTreeSet::new()),
-        mapped_trees: Mutex::new(BTreeSet::new()),
         declared_files: Mutex::new(BTreeSet::new()),
         declared_artifacts: Mutex::new(Vec::new()),
         rule_errors: Mutex::new(attr_errors),

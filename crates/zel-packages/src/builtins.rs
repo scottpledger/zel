@@ -13,7 +13,7 @@ use zel_vfs::PathFragment;
 pub(crate) const BUILTINS_REPO: &str = "_builtins";
 
 /// Methods of `_builtins.internal.cc_common` (`CcModule.java`).
-const CC_COMMON_NATIVES: &[&str] = &[
+pub(crate) const CC_COMMON_NATIVES: &[&str] = &[
     "get_tool_for_action",
     "get_execution_requirements",
     "action_is_enabled",

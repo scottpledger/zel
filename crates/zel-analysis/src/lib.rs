@@ -1394,6 +1394,67 @@ impl ParamFileWriteSpec {
     }
 }
 
+/// Execution-time callback for `ctx.actions.map_directory()` (`StarlarkMapActionTemplate`).
+pub trait MapDirectoryExpander: Send + Sync + std::fmt::Debug {
+    /// Expands `discovered_children` (keyed by input directory dict key, each item `(tree_rel_path,
+    /// child_artifact)`) into lowered sub-actions producing files under `output_directories`.
+    fn expand(
+        &self,
+        discovered_children: &BTreeMap<String, Vec<(String, Artifact)>>,
+    ) -> Result<Vec<ActionAnalysisMetadata>, String>;
+
+    /// Deterministic fingerprint of the Starlark implementation & parameters for action caching.
+    fn key_fingerprint(&self) -> String;
+}
+
+/// Specification of a `StarlarkMapActionTemplate` action (`ctx.actions.map_directory()`).
+#[derive(Debug, Clone)]
+pub struct MapDirectorySpec {
+    pub owner: Label,
+    pub input_directories: Vec<(String, Artifact)>,
+    pub output_directories: Vec<(String, Artifact)>,
+    pub inputs: Vec<Artifact>,
+    pub outputs: Vec<Artifact>,
+    pub tools: Vec<Artifact>,
+    pub env: BTreeMap<String, String>,
+    pub inherited_env: std::collections::BTreeSet<String>,
+    pub unset_env: std::collections::BTreeSet<String>,
+    pub execution_info: BTreeMap<String, String>,
+    pub expanded_mnemonic: String,
+    pub expander: std::sync::Arc<dyn MapDirectoryExpander>,
+}
+
+impl PartialEq for MapDirectorySpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner == other.owner
+            && self.input_directories == other.input_directories
+            && self.output_directories == other.output_directories
+            && self.inputs == other.inputs
+            && self.outputs == other.outputs
+            && self.tools == other.tools
+            && self.env == other.env
+            && self.inherited_env == other.inherited_env
+            && self.unset_env == other.unset_env
+            && self.execution_info == other.execution_info
+            && self.expanded_mnemonic == other.expanded_mnemonic
+            && self.expander.key_fingerprint() == other.expander.key_fingerprint()
+    }
+}
+
+impl Eq for MapDirectorySpec {}
+
+/// `PartialEq`/`Eq`-implementing wrapper around [`MapDirectoryExpander`].
+#[derive(Debug, Clone)]
+pub struct MapDirectoryExpanderHandle(pub std::sync::Arc<dyn MapDirectoryExpander>);
+
+impl PartialEq for MapDirectoryExpanderHandle {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+            || self.0.key_fingerprint() == other.0.key_fingerprint()
+    }
+}
+
+impl Eq for MapDirectoryExpanderHandle {}
 /// Action specification generated during the Analysis phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionAnalysisMetadata {
@@ -1446,6 +1507,7 @@ pub enum ActionAnalysisMetadata {
         is_volatile: bool,
         translator: BuildInfoTranslator,
     },
+    MapDirectoryAction(Box<MapDirectorySpec>),
 }
 
 impl ActionAnalysisMetadata {
@@ -1456,6 +1518,7 @@ impl ActionAnalysisMetadata {
             Self::SymlinkAction { .. } => "Symlink",
             Self::TemplateExpansionAction { .. } => "TemplateExpand",
             Self::BuildInfoTranslateAction { .. } => "TranslateBuildInfo",
+            Self::MapDirectoryAction(_) => "StarlarkMapActionTemplate",
         }
     }
 
@@ -1466,6 +1529,7 @@ impl ActionAnalysisMetadata {
             | Self::SymlinkAction { owner, .. }
             | Self::TemplateExpansionAction { owner, .. }
             | Self::BuildInfoTranslateAction { owner, .. } => owner,
+            Self::MapDirectoryAction(spec) => &spec.owner,
         }
     }
 
@@ -1480,6 +1544,7 @@ impl ActionAnalysisMetadata {
                 template,
                 ..
             } => vec![status_file.clone(), template.clone()],
+            Self::MapDirectoryAction(spec) => spec.inputs.clone(),
             Self::SymlinkAction { .. } => Vec::new(),
         }
     }
@@ -1487,6 +1552,7 @@ impl ActionAnalysisMetadata {
     pub fn tools(&self) -> &[Artifact] {
         match self {
             Self::SpawnAction { tools, .. } => tools.as_slice(),
+            Self::MapDirectoryAction(spec) => spec.tools.as_slice(),
             _ => &[],
         }
     }
@@ -1498,6 +1564,7 @@ impl ActionAnalysisMetadata {
             | Self::SymlinkAction { output, .. }
             | Self::TemplateExpansionAction { output, .. }
             | Self::BuildInfoTranslateAction { output, .. } => vec![output.clone()],
+            Self::MapDirectoryAction(spec) => spec.outputs.clone(),
         }
     }
 
@@ -1593,6 +1660,24 @@ impl ActionAnalysisMetadata {
                     .add_bool(*is_volatile)
                     .add_str(&translator.key);
             }
+            Self::MapDirectoryAction(spec) => {
+                fp.add_str(&spec.expanded_mnemonic)
+                    .add_str(&spec.expander.key_fingerprint());
+                for (k, v) in &spec.env {
+                    fp.add_str(k).add_str(v);
+                }
+                if !spec.inherited_env.is_empty() || !spec.unset_env.is_empty() {
+                    fp.add_str("inherited")
+                        .add_strings(spec.inherited_env.iter());
+                    fp.add_str("unset").add_strings(spec.unset_env.iter());
+                }
+                for inp in &spec.inputs {
+                    fp.add_str(inp.exec_path.path_string());
+                }
+                for out in &spec.outputs {
+                    fp.add_str(out.exec_path.path_string());
+                }
+            }
         }
         if let Self::SpawnAction {
             java_compile: Some(jc),
@@ -1646,6 +1731,14 @@ impl ActionAnalysisMetadata {
                 } else {
                     "Translating stable BuildInfo file".to_string()
                 }
+            }
+            Self::MapDirectoryAction(spec) => {
+                let dirs: Vec<String> = spec
+                    .input_directories
+                    .iter()
+                    .map(|(_, a)| a.exec_path.path_string().to_string())
+                    .collect();
+                format!("Expanding [{}] into actions.", dirs.join(", "))
             }
         }
     }

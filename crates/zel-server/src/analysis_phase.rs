@@ -153,6 +153,7 @@ const CONFIG_OPTIONS: &[&str] = &[
     "collect_code_coverage",
     "instrument_test_targets",
     "instrumentation_filter",
+    "experimental_allow_map_directory",
     "test_env",
     "action_env",
     "host_action_env",

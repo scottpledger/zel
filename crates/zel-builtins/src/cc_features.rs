@@ -1269,14 +1269,15 @@ impl FeatureConfiguration {
             .map(|&idx| &self.toolchain.action_configs[idx])
     }
 
-    fn matching_tool(&self, action: &str) -> Res<Option<&Tool>> {
-        let Some(ac) = self.registered_action_config(action) else {
-            return Ok(None);
-        };
+    fn matching_tool(&self, action: &str) -> Res<&Tool> {
+        let ac = self.registered_action_config(action).ok_or_else(|| {
+            StarlarkError(format!(
+                "Action {action} does not have an enabled configuration in the toolchain."
+            ))
+        })?;
         ac.tools
             .iter()
             .find(|t| with_features_satisfied(&t.with_features, &self.enabled_names))
-            .map(Some)
             .ok_or_else(|| {
                 StarlarkError(format!(
                     "Matching tool for action {action} not found for given feature configuration"
@@ -1286,9 +1287,7 @@ impl FeatureConfiguration {
 
     /// `getToolPathForAction`.
     pub fn tool_path_for_action(&self, action: &str) -> Res<String> {
-        let Some(t) = self.matching_tool(action)? else {
-            return Ok(String::new());
-        };
+        let t = self.matching_tool(action)?;
         if t.crosstool_relative {
             let d = self.toolchain.tools_directory.trim_end_matches('/');
             let combined = if d.is_empty() {
@@ -1310,10 +1309,7 @@ impl FeatureConfiguration {
     }
 
     pub fn tool_requirements_for_action(&self, action: &str) -> Res<Vec<String>> {
-        Ok(self
-            .matching_tool(action)?
-            .map(|t| t.execution_requirements.clone())
-            .unwrap_or_default())
+        Ok(self.matching_tool(action)?.execution_requirements.clone())
     }
 }
 
@@ -1588,6 +1584,53 @@ mod tests {
                 "unfiltered_compile_flags".to_string(),
                 vec!["-DPIC=1".to_string()]
             )]
+        );
+    }
+
+    #[test]
+    fn tool_lookup_errors_on_unregistered_action_and_resolves_disabled_action_config() {
+        let tool = mk_struct(vec![
+            ("path", Value::String("bin/ar".into())),
+            (
+                "execution_requirements",
+                mk_list(vec![Value::String("no-remote".into())]),
+            ),
+        ]);
+        let disabled_ac = mk_struct(vec![
+            (
+                "action_name",
+                Value::String("c++-link-static-library".into()),
+            ),
+            ("enabled", Value::Bool(false)),
+            ("tools", mk_list(vec![tool])),
+        ]);
+        let tf = Arc::new(
+            ToolchainFeatures::new(&[], &[disabled_ac], &[], "crosstool/tools", &|_| None).unwrap(),
+        );
+        let fc = tf.configure(&[]).unwrap();
+
+        assert!(!fc.action_is_configured("c++-link-static-library"));
+        assert_eq!(
+            fc.tool_path_for_action("c++-link-static-library").unwrap(),
+            "crosstool/tools/bin/ar"
+        );
+        assert_eq!(
+            fc.tool_requirements_for_action("c++-link-static-library")
+                .unwrap(),
+            vec!["no-remote"]
+        );
+
+        let missing_err = fc.tool_path_for_action("unregistered-action").unwrap_err();
+        assert_eq!(
+            missing_err.0,
+            "Action unregistered-action does not have an enabled configuration in the toolchain."
+        );
+        let missing_req_err = fc
+            .tool_requirements_for_action("unregistered-action")
+            .unwrap_err();
+        assert_eq!(
+            missing_req_err.0,
+            "Action unregistered-action does not have an enabled configuration in the toolchain."
         );
     }
 }

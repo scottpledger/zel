@@ -443,6 +443,15 @@ pub fn action_key_for(a: &Action, exec_platform: Option<(&str, &str, &str)>) -> 
             fp.add_string(if *is_volatile { "volatile" } else { "stable" });
             fp.add_string(&translator.key);
         }
+        ActionKind::MapDirectory {
+            expanded_mnemonic,
+            expander,
+            ..
+        } => {
+            fp.add_string(&a.mnemonic)
+                .add_string(expanded_mnemonic)
+                .add_string(&expander.0.key_fingerprint());
+        }
     }
     // `SymlinkAction`, `SolibSymlinkAction` and `RunfilesTreeAction` are platform agnostic: they
     // override `getExecutionPlatform` with `PlatformInfo.EMPTY_PLATFORM_INFO`.
