@@ -1102,9 +1102,9 @@ fn invoke_system_javac(
     classpath: &[PathBuf],
     sources: &[PathBuf],
     vanilla: bool,
-) -> io::Result<(BlazeJavacStatus, String)> {
+) -> io::Result<(BlazeJavacStatus, String, bool)> {
     if sources.is_empty() {
-        return Ok((BlazeJavacStatus::Ok, String::new()));
+        return Ok((BlazeJavacStatus::Ok, String::new(), false));
     }
     let mut cmd = Command::new(javac_bin);
     cmd.arg("-encoding").arg("UTF-8");
@@ -1196,14 +1196,15 @@ fn invoke_system_javac(
         }
     }
 
-    let status = if output.status.success() && !promoted_error {
+    let javac_succeeded = output.status.success();
+    let status = if javac_succeeded && !promoted_error {
         BlazeJavacStatus::Ok
     } else if output.status.code() == Some(4) {
         BlazeJavacStatus::Crash
     } else {
         BlazeJavacStatus::Error
     };
-    Ok((status, stderr))
+    Ok((status, stderr, javac_succeeded))
 }
 
 fn extract_warning_category(line: &str) -> Option<&str> {
@@ -1307,64 +1308,116 @@ fn normalize_internal_class_ref(raw: &str) -> Option<String> {
 fn collect_descriptor_types(desc: &str, out: &mut HashSet<String>) {
     let bytes = desc.as_bytes();
     let mut i = 0;
+    // JVMS §4.7.9.1: a leading `<` in a ClassSignature or MethodSignature introduces formal
+    // `TypeParameters` (`< Identifier ClassBound InterfaceBound* ... >`), where `Identifier`
+    // is a formal type parameter name rather than a `TypeVariableSignature` (`T...;`) or
+    // `ClassTypeSignature` (`L...;`).
+    if bytes.first() == Some(&b'<') {
+        parse_type_parameters(bytes, &mut i, out);
+    }
     while i < bytes.len() {
-        match bytes[i] {
-            b'(' | b')' | b'[' | b'+' | b'-' | b'*' | b'^' | b':' => i += 1,
-            b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b'V' => i += 1,
-            b'T' => {
-                i += 1;
-                while i < bytes.len() && bytes[i] != b';' {
-                    i += 1;
-                }
-                if i < bytes.len() {
-                    i += 1;
-                }
+        parse_signature_component(bytes, &mut i, out);
+    }
+}
+
+fn parse_type_parameters(bytes: &[u8], i: &mut usize, out: &mut HashSet<String>) {
+    if bytes.get(*i) != Some(&b'<') {
+        return;
+    }
+    *i += 1;
+    while *i < bytes.len() && bytes[*i] != b'>' {
+        while *i < bytes.len() && bytes[*i] != b':' && bytes[*i] != b'>' {
+            *i += 1;
+        }
+        if bytes.get(*i) == Some(&b'>') {
+            break;
+        }
+        while bytes.get(*i) == Some(&b':') {
+            *i += 1;
+            if matches!(bytes.get(*i), Some(b'L' | b'[' | b'T')) {
+                parse_signature_component(bytes, i, out);
             }
-            b'L' => {
-                i += 1;
-                let mut current = String::new();
-                while i < bytes.len() {
-                    match bytes[i] {
-                        b';' => {
-                            if !current.is_empty() {
-                                out.insert(current);
-                            }
-                            i += 1;
-                            break;
+        }
+    }
+    if bytes.get(*i) == Some(&b'>') {
+        *i += 1;
+    }
+}
+
+fn parse_type_arguments(bytes: &[u8], i: &mut usize, out: &mut HashSet<String>) {
+    if bytes.get(*i) != Some(&b'<') {
+        return;
+    }
+    *i += 1;
+    while *i < bytes.len() && bytes[*i] != b'>' {
+        parse_signature_component(bytes, i, out);
+    }
+    if bytes.get(*i) == Some(&b'>') {
+        *i += 1;
+    }
+}
+
+fn parse_signature_component(bytes: &[u8], i: &mut usize, out: &mut HashSet<String>) {
+    let Some(&b) = bytes.get(*i) else {
+        return;
+    };
+    match b {
+        b'(' | b')' | b'+' | b'-' | b'*' | b'^' | b':' => *i += 1,
+        b'B' | b'C' | b'D' | b'F' | b'I' | b'J' | b'S' | b'Z' | b'V' => *i += 1,
+        b'[' => {
+            while bytes.get(*i) == Some(&b'[') {
+                *i += 1;
+            }
+            if *i < bytes.len() {
+                parse_signature_component(bytes, i, out);
+            }
+        }
+        b'T' => {
+            *i += 1;
+            while *i < bytes.len() && bytes[*i] != b';' {
+                *i += 1;
+            }
+            if *i < bytes.len() {
+                *i += 1;
+            }
+        }
+        b'L' => {
+            *i += 1;
+            let mut current = String::new();
+            while *i < bytes.len() {
+                match bytes[*i] {
+                    b';' => {
+                        if !current.is_empty() {
+                            out.insert(current);
                         }
-                        b'<' => {
-                            if !current.is_empty() {
-                                out.insert(current.clone());
-                            }
-                            let mut depth = 1usize;
-                            i += 1;
-                            let arg_start = i;
-                            while i < bytes.len() && depth > 0 {
-                                match bytes[i] {
-                                    b'<' => depth += 1,
-                                    b'>' => depth -= 1,
-                                    _ => {}
-                                }
-                                i += 1;
-                            }
-                            let arg_end = i.saturating_sub(1);
-                            if arg_end > arg_start {
-                                collect_descriptor_types(&desc[arg_start..arg_end], out);
-                            }
-                            if i < bytes.len() && bytes[i] == b'.' {
-                                current.push('$');
-                                i += 1;
-                            }
+                        *i += 1;
+                        break;
+                    }
+                    b'<' => {
+                        if !current.is_empty() {
+                            out.insert(current.clone());
                         }
-                        ch => {
-                            current.push(ch as char);
-                            i += 1;
+                        parse_type_arguments(bytes, i, out);
+                        if bytes.get(*i) == Some(&b'.') {
+                            current.push('$');
+                            *i += 1;
                         }
+                    }
+                    b'.' => {
+                        if !current.is_empty() {
+                            out.insert(current.clone());
+                        }
+                        current.push('$');
+                        *i += 1;
+                    }
+                    ch => {
+                        current.push(ch as char);
+                        *i += 1;
                     }
                 }
             }
-            _ => i += 1,
         }
+        _ => *i += 1,
     }
 }
 
@@ -1927,12 +1980,12 @@ pub fn run_bazel_java_builder(
 
     let mut active_sources = prepare_source_compilation(req)?;
     let mut active_cp: Vec<PathBuf> = req.class_path.clone();
-    let (mut status, mut diag_output) = match req.reduce_classpath_mode {
+    let (mut status, mut diag_output, javac_succeeded) = match req.reduce_classpath_mode {
         ReduceClasspathMode::JavaBuilderReduced if !active_sources.is_empty() => {
             let reduced_cp =
                 compute_strict_classpath(&req.class_path, &req.direct_jars, &req.deps_artifacts)?;
             reduced_len = reduced_cp.len();
-            let (st1, out1) =
+            let (st1, out1, ok1) =
                 invoke_system_javac(javac_bin, req, &reduced_cp, &active_sources, false)?;
             if should_fall_back(&st1, &out1) {
                 fallback_used = true;
@@ -1941,16 +1994,16 @@ pub fn run_bazel_java_builder(
                 invoke_system_javac(javac_bin, req, &active_cp, &active_sources, false)?
             } else {
                 active_cp = reduced_cp;
-                (st1, out1)
+                (st1, out1, ok1)
             }
         }
         ReduceClasspathMode::BazelReduced => {
-            let (st1, out1) =
+            let (st1, out1, ok1) =
                 invoke_system_javac(javac_bin, req, &req.class_path, &active_sources, false)?;
             if should_fall_back(&st1, &out1) {
-                (BlazeJavacStatus::RequiresFallback, String::new())
+                (BlazeJavacStatus::RequiresFallback, String::new(), false)
             } else {
-                (st1, out1)
+                (st1, out1, ok1)
             }
         }
         ReduceClasspathMode::None
@@ -1961,7 +2014,8 @@ pub fn run_bazel_java_builder(
     };
 
     let mut used_jars: Vec<(PathBuf, DependencyKind)> = Vec::new();
-    if status == BlazeJavacStatus::Ok && !active_sources.is_empty() {
+    if javac_succeeded && status != BlazeJavacStatus::RequiresFallback && !active_sources.is_empty()
+    {
         used_jars = collect_used_classpath_jars(req, &active_cp, &active_sources)?;
         let unescaped_label = req.target_label.as_deref().map(|l| {
             l.strip_prefix("@@")
@@ -2003,14 +2057,14 @@ pub fn run_bazel_java_builder(
         write_gensrc_jar(req)?;
     }
 
-    // Always emit `.jdeps` and `Manifest` in the `finally` path.
+    // Always emit `.jdeps` and `Manifest` in the `finally` path (`DependencyModule.emitDependencyInformation`).
     if let Some(deps_out) = &req.output_deps_proto {
-        let contained = if status == BlazeJavacStatus::Ok {
+        let contained = if javac_succeeded && status != BlazeJavacStatus::RequiresFallback {
             collect_contained_packages(&req.class_dir)?
         } else {
             Vec::new()
         };
-        let deps: Vec<Dependency> = if status == BlazeJavacStatus::Ok {
+        let deps: Vec<Dependency> = if status != BlazeJavacStatus::RequiresFallback {
             used_jars
                 .iter()
                 .map(|(p, kind)| Dependency {
@@ -2093,7 +2147,7 @@ pub fn run_vanilla_java_builder(
     req: &JavaLibraryBuildRequest,
 ) -> io::Result<JavaBuildResult> {
     let sources = prepare_source_compilation(req)?;
-    let (status, diag_output) =
+    let (status, diag_output, _javac_succeeded) =
         invoke_system_javac(javac_bin, req, &req.class_path, &sources, true)?;
 
     if status == BlazeJavacStatus::Ok {
@@ -2697,6 +2751,15 @@ mod tests {
         assert!(!d.join("libbad.jar").exists());
         let bad_jdeps = parse_jdeps(&std::fs::read(d.join("libbad.jdeps")).unwrap()).unwrap();
         assert_eq!(bad_jdeps.success, Some(false));
+        assert_eq!(bad_jdeps.contained_packages, vec!["app"]);
+        assert_eq!(
+            bad_jdeps.dependencies.len(),
+            1,
+            "{:?}",
+            bad_jdeps.dependencies
+        );
+        assert!(bad_jdeps.dependencies[0].path.ends_with("libind.jar"));
+        assert_eq!(bad_jdeps.dependencies[0].kind, DependencyKind::Explicit);
 
         let warn_req = JavaLibraryBuildRequest::from_options(
             OptionsParser::parse(
@@ -2803,6 +2866,368 @@ mod tests {
                 d.join("libind.jar"),
             ]
         );
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn strict_deps_error_jdeps_retains_discovered_dependencies_and_packages() {
+        if Command::new("javac").arg("-version").output().is_err() {
+            return;
+        }
+        let d = tmp_dir("strict_jdeps_retained");
+        std::fs::create_dir_all(d.join("trans")).unwrap();
+        std::fs::create_dir_all(d.join("viol")).unwrap();
+        std::fs::create_dir_all(d.join("dir")).unwrap();
+        std::fs::create_dir_all(d.join("app")).unwrap();
+
+        // `libtrans.jar`: transitive superclass of `dir.DirectSub`.
+        std::fs::write(
+            d.join("trans/TransBase.java"),
+            "package trans; public class TransBase {}\n",
+        )
+        .unwrap();
+        let trans_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libtrans.jar",
+                    "--target_label",
+                    "//trans:base",
+                    "--sources",
+                    "trans/TransBase.java",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(run_bazel_java_builder("javac", &trans_req).unwrap().is_ok());
+
+        // `libviol.jar`: indirect dependency directly referenced by `app.Caller` (strict-deps violation).
+        std::fs::write(
+            d.join("viol/ViolType.java"),
+            "package viol; public class ViolType {}\n",
+        )
+        .unwrap();
+        let viol_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libviol.jar",
+                    "--target_label",
+                    "//viol:type",
+                    "--sources",
+                    "viol/ViolType.java",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(run_bazel_java_builder("javac", &viol_req).unwrap().is_ok());
+
+        // `libdir.jar`: direct dependency extending `trans.TransBase`.
+        std::fs::write(
+            d.join("dir/DirectSub.java"),
+            "package dir; public class DirectSub extends trans.TransBase {}\n",
+        )
+        .unwrap();
+        let dir_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libdir.jar",
+                    "--target_label",
+                    "//dir:sub",
+                    "--sources",
+                    "dir/DirectSub.java",
+                    "--classpath",
+                    "libtrans.jar",
+                    "--direct_dependencies",
+                    "libtrans.jar",
+                    "--strict_java_deps",
+                    "ERROR",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(run_bazel_java_builder("javac", &dir_req).unwrap().is_ok());
+
+        // `app.Caller` uses `dir.DirectSub` (direct -> EXPLICIT, pulling `libtrans.jar` -> IMPLICIT)
+        // AND `viol.ViolType` (indirect -> EXPLICIT + strict-deps ERROR).
+        std::fs::write(
+            d.join("app/Caller.java"),
+            "package app; public class Caller { public dir.DirectSub s = new dir.DirectSub(); public viol.ViolType v = new viol.ViolType(); }\n",
+        )
+        .unwrap();
+        let app_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libcaller.jar",
+                    "--output_deps_proto",
+                    "libcaller.jdeps",
+                    "--target_label",
+                    "//app:caller",
+                    "--sources",
+                    "app/Caller.java",
+                    "--classpath",
+                    "libdir.jar",
+                    "libviol.jar",
+                    "libtrans.jar",
+                    "--direct_dependencies",
+                    "libdir.jar",
+                    "--strict_java_deps",
+                    "ERROR",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        let res = run_bazel_java_builder("javac", &app_req).unwrap();
+        assert!(!res.is_ok(), "expected strict-deps ERROR");
+        assert!(!d.join("libcaller.jar").exists());
+
+        let jdeps = parse_jdeps(&std::fs::read(d.join("libcaller.jdeps")).unwrap()).unwrap();
+        assert_eq!(jdeps.success, Some(false));
+        assert_eq!(jdeps.rule_label.as_deref(), Some("//app:caller"));
+        assert_eq!(jdeps.contained_packages, vec!["app"]);
+        assert_eq!(jdeps.dependencies.len(), 3, "{:?}", jdeps.dependencies);
+        assert!(jdeps.dependencies[0].path.ends_with("libdir.jar"));
+        assert_eq!(jdeps.dependencies[0].kind, DependencyKind::Explicit);
+        assert!(jdeps.dependencies[1].path.ends_with("libviol.jar"));
+        assert_eq!(jdeps.dependencies[1].kind, DependencyKind::Explicit);
+        assert!(jdeps.dependencies[2].path.ends_with("libtrans.jar"));
+        assert_eq!(jdeps.dependencies[2].kind, DependencyKind::Implicit);
+
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn generic_signature_type_parameter_bounds_extract_classes_and_enforce_strict_deps() {
+        // 1. Direct JVMS §4.7.9.1 `Signature` grammar checks on formal `TypeParameters` vs `TypeVariableSignature`.
+        let mut s1 = HashSet::new();
+        collect_descriptor_types("<T:Lcom/lib/Bar;>Ljava/lang/Object;", &mut s1);
+        assert_eq!(
+            s1,
+            HashSet::from(["com/lib/Bar".to_string(), "java/lang/Object".to_string()])
+        );
+
+        let mut s2 = HashSet::new();
+        collect_descriptor_types(
+            "<ListType::Ljava/io/Serializable;:Ljava/lang/Comparable<TListType;>;>Ljava/lang/Object;",
+            &mut s2,
+        );
+        assert_eq!(
+            s2,
+            HashSet::from([
+                "java/io/Serializable".to_string(),
+                "java/lang/Comparable".to_string(),
+                "java/lang/Object".to_string(),
+            ])
+        );
+
+        let mut s3 = HashSet::new();
+        collect_descriptor_types(
+            "<T:[Lcom/lib/Elem;U:Lcom/lib/Second;>([TT;Lcom/lib/Outer<Lcom/lib/Arg;>.Middle.Inner<+Lcom/lib/Wild;>;)TT;^Lcom/lib/CheckedEx;^TErr;",
+            &mut s3,
+        );
+        assert_eq!(
+            s3,
+            HashSet::from([
+                "com/lib/Elem".to_string(),
+                "com/lib/Second".to_string(),
+                "com/lib/Outer".to_string(),
+                "com/lib/Arg".to_string(),
+                "com/lib/Outer$Middle".to_string(),
+                "com/lib/Outer$Middle$Inner".to_string(),
+                "com/lib/Wild".to_string(),
+                "com/lib/CheckedEx".to_string(),
+            ])
+        );
+
+        // 2. End-to-end `javac` + `run_bazel_java_builder` check: `class Box<T extends com.lib.Bar> {}`
+        // (with no `import` and no fields/methods mentioning `T` or `Bar`, so `com/lib/Bar` appears
+        // ONLY inside the `ClassSignature` `<T:Lcom/lib/Bar;>Ljava/lang/Object;`!) must fail
+        // `--strict_java_deps ERROR` when `libbar.jar` is indirect, and must propagate `libbar.jar`
+        // as `IMPLICIT` when referenced through a direct generic holder class.
+        if Command::new("javac").arg("-version").output().is_err() {
+            return;
+        }
+        let d = tmp_dir("generic_bound_strict");
+        std::fs::create_dir_all(d.join("com/lib")).unwrap();
+        std::fs::create_dir_all(d.join("dir")).unwrap();
+        std::fs::create_dir_all(d.join("app")).unwrap();
+
+        std::fs::write(
+            d.join("com/lib/Bar.java"),
+            "package com.lib; public class Bar {}\n",
+        )
+        .unwrap();
+        let bar_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libbar.jar",
+                    "--target_label",
+                    "//com/lib:bar",
+                    "--sources",
+                    "com/lib/Bar.java",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(run_bazel_java_builder("javac", &bar_req).unwrap().is_ok());
+
+        // Indirect type used exclusively in formal type parameter bound `<T extends com.lib.Bar>`.
+        std::fs::write(
+            d.join("app/Box.java"),
+            "package app; public class Box<T extends com.lib.Bar> {}\n",
+        )
+        .unwrap();
+        let box_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libbox.jar",
+                    "--output_deps_proto",
+                    "libbox.jdeps",
+                    "--target_label",
+                    "//app:box",
+                    "--sources",
+                    "app/Box.java",
+                    "--classpath",
+                    "libbar.jar",
+                    "--strict_java_deps",
+                    "ERROR",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        let box_res = run_bazel_java_builder("javac", &box_req).unwrap();
+        assert!(
+            !box_res.is_ok(),
+            "expected strict-deps failure on type-parameter bound: {}",
+            box_res.output
+        );
+        assert!(
+            box_res.output.contains("[error] [strict]") && box_res.output.contains("//com/lib:bar"),
+            "{}",
+            box_res.output
+        );
+        let box_jdeps = parse_jdeps(&std::fs::read(d.join("libbox.jdeps")).unwrap()).unwrap();
+        assert_eq!(box_jdeps.success, Some(false));
+        assert_eq!(box_jdeps.dependencies.len(), 1);
+        assert!(box_jdeps.dependencies[0].path.ends_with("libbar.jar"));
+        assert_eq!(box_jdeps.dependencies[0].kind, DependencyKind::Explicit);
+
+        // Direct generic holder `Holder<T extends com.lib.Bar>`: downstream consumer referencing
+        // `Holder<?>` records `libholder.jar` as EXPLICIT and `libbar.jar` as IMPLICIT.
+        std::fs::write(
+            d.join("dir/Holder.java"),
+            "package dir; public class Holder<T extends com.lib.Bar> {}\n",
+        )
+        .unwrap();
+        let holder_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libholder.jar",
+                    "--target_label",
+                    "//dir:holder",
+                    "--sources",
+                    "dir/Holder.java",
+                    "--classpath",
+                    "libbar.jar",
+                    "--direct_dependencies",
+                    "libbar.jar",
+                    "--strict_java_deps",
+                    "ERROR",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        assert!(run_bazel_java_builder("javac", &holder_req)
+            .unwrap()
+            .is_ok());
+
+        std::fs::write(
+            d.join("app/UseHolder.java"),
+            "package app; public class UseHolder { public dir.Holder<?> h; }\n",
+        )
+        .unwrap();
+        let use_req = JavaLibraryBuildRequest::from_options(
+            OptionsParser::parse(
+                &d,
+                [
+                    "--output",
+                    "libuse.jar",
+                    "--output_deps_proto",
+                    "libuse.jdeps",
+                    "--target_label",
+                    "//app:use",
+                    "--sources",
+                    "app/UseHolder.java",
+                    "--classpath",
+                    "libholder.jar",
+                    "libbar.jar",
+                    "--direct_dependencies",
+                    "libholder.jar",
+                    "--strict_java_deps",
+                    "ERROR",
+                ],
+            )
+            .unwrap(),
+            &d,
+            false,
+            None,
+        )
+        .unwrap();
+        let use_res = run_bazel_java_builder("javac", &use_req).unwrap();
+        assert!(use_res.is_ok(), "{}", use_res.output);
+        let use_jdeps = parse_jdeps(&std::fs::read(d.join("libuse.jdeps")).unwrap()).unwrap();
+        assert_eq!(use_jdeps.success, Some(true));
+        assert_eq!(
+            use_jdeps.dependencies.len(),
+            2,
+            "{:?}",
+            use_jdeps.dependencies
+        );
+        assert!(use_jdeps.dependencies[0].path.ends_with("libholder.jar"));
+        assert_eq!(use_jdeps.dependencies[0].kind, DependencyKind::Explicit);
+        assert!(use_jdeps.dependencies[1].path.ends_with("libbar.jar"));
+        assert_eq!(use_jdeps.dependencies[1].kind, DependencyKind::Implicit);
 
         let _ = std::fs::remove_dir_all(&d);
     }
