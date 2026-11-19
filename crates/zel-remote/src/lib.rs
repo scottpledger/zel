@@ -22,6 +22,7 @@ pub mod fake_server;
 pub mod grpc;
 pub mod hpack;
 pub mod http2;
+pub mod http_cache;
 pub mod merkle;
 pub mod options;
 pub mod reapi_client;

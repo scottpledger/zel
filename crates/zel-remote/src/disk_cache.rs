@@ -12,19 +12,66 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `--disk_cache` (`remote/disk/DiskCacheClient.java`): `<root>[/<digest fn>]/{ac,cas}/<first two
-//! hex chars>/<hash>` plus `<root>/tmp`. Entries are written to a temp file and renamed; the
-//! mtime of an entry records the last store or retrieval (for LRU garbage collection). The
-//! `<digest fn>` directory is omitted for SHA-256 ("old style" layout).
+//! `--disk_cache` (`remote/disk/DiskCacheClient.java`) and `CachePolicy`:
+//! `<root>[/<digest fn>]/{ac,cas}/<first two hex chars>/<hash>` plus `<root>/tmp`.
+//! Only `<root>` and `<root>/tmp` are created on startup; `ac/` and `cas/` shard directories are
+//! created lazily when entries are written via fsynced temp files and atomic rename.
+//! The `<digest fn>` directory is omitted for old-style digest functions (`enum <= 7`: SHA-256,
+//! SHA-1, MD5, SHA-384, SHA-512) and included for newer functions (`blake3`).
 
 use crate::digest::DigestFn;
 use crate::merkle::{flatten_tree, BlobSource};
-use std::io;
+use std::fs::File;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::SystemTime;
 use zel_proto::reapi::{ActionResult, Digest, Message, Tree};
 use zel_vfs::PathFragment;
+
+/// Mirrors Bazel's `CombinedCache.CachePolicy` (`NO_CACHE`, `REMOTE_CACHE_ONLY`,
+/// `DISK_CACHE_ONLY`, `ANY_CACHE`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CachePolicy {
+    pub allow_remote_cache: bool,
+    pub allow_disk_cache: bool,
+}
+
+impl CachePolicy {
+    pub const NO_CACHE: Self = Self {
+        allow_remote_cache: false,
+        allow_disk_cache: false,
+    };
+    pub const REMOTE_CACHE_ONLY: Self = Self {
+        allow_remote_cache: true,
+        allow_disk_cache: false,
+    };
+    pub const DISK_CACHE_ONLY: Self = Self {
+        allow_remote_cache: false,
+        allow_disk_cache: true,
+    };
+    pub const ANY_CACHE: Self = Self {
+        allow_remote_cache: true,
+        allow_disk_cache: true,
+    };
+
+    pub const fn create(allow_remote_cache: bool, allow_disk_cache: bool) -> Self {
+        Self {
+            allow_remote_cache,
+            allow_disk_cache,
+        }
+    }
+
+    pub const fn add_remote_cache(self) -> Self {
+        Self {
+            allow_remote_cache: true,
+            allow_disk_cache: self.allow_disk_cache,
+        }
+    }
+
+    pub const fn allow_any_cache(self) -> bool {
+        self.allow_remote_cache || self.allow_disk_cache
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Store {
@@ -40,12 +87,12 @@ pub struct DiskCache {
     tmp_root: PathBuf,
     pub digest_fn: DigestFn,
     check_ac_integrity: bool,
-    tmp_counter: AtomicU64,
+    verify_downloads: bool,
+    capture_corrupted_dir: Option<PathBuf>,
 }
 
 impl DiskCache {
-    /// SHA-256 layout, with action-result integrity checking (as Bazel enables by default
-    /// when `--remote_download_outputs` is not `all`... here always on).
+    /// SHA-256 layout, with action-result integrity checking.
     pub fn new(root: PathFragment) -> Self {
         Self::open(Path::new(root.path_string()), DigestFn::Sha256, true).unwrap_or_else(|_| {
             Self::unopened(Path::new(root.path_string()), DigestFn::Sha256, true)
@@ -64,16 +111,27 @@ impl DiskCache {
             tmp_root: root.join("tmp"),
             digest_fn: f,
             check_ac_integrity: check,
-            tmp_counter: AtomicU64::new(0),
+            verify_downloads: true,
+            capture_corrupted_dir: None,
         }
     }
 
     pub fn open(root: &Path, f: DigestFn, check_ac_integrity: bool) -> io::Result<Self> {
         let c = Self::unopened(root, f, check_ac_integrity);
-        std::fs::create_dir_all(&c.ac_root)?;
-        std::fs::create_dir_all(&c.cas_root)?;
+        // Bazel creates only `<root>` and `<root>/tmp` on startup; `ac/` and `cas/` are created lazily.
+        std::fs::create_dir_all(&c.root)?;
         std::fs::create_dir_all(&c.tmp_root)?;
         Ok(c)
+    }
+
+    pub fn with_verification(
+        mut self,
+        verify_downloads: bool,
+        capture_corrupted_dir: Option<PathBuf>,
+    ) -> Self {
+        self.verify_downloads = verify_downloads;
+        self.capture_corrupted_dir = capture_corrupted_dir;
+        self
     }
 
     pub fn root(&self) -> &Path {
@@ -89,14 +147,8 @@ impl DiskCache {
         base.join(prefix).join(hash)
     }
 
-    fn temp_path(&self) -> PathBuf {
-        let n = self.tmp_counter.fetch_add(1, Ordering::SeqCst);
-        let t = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
-        self.tmp_root
-            .join(format!("{}-{t}-{n}", std::process::id()))
+    pub fn temp_path(&self) -> PathBuf {
+        self.tmp_root.join(zel_util::uuid_v4())
     }
 
     /// Updates the entry's mtime; returns whether it exists.
@@ -138,7 +190,7 @@ impl DiskCache {
         &self,
         store: Store,
         hash: &str,
-        write: impl FnOnce(&Path) -> io::Result<()>,
+        write_fn: impl FnOnce(&Path) -> io::Result<()>,
     ) -> io::Result<()> {
         let path = self.path(store, hash);
         if store == Store::Cas && self.refresh(&path)? {
@@ -149,11 +201,10 @@ impl DiskCache {
             std::fs::create_dir_all(p)?;
         }
         let r = (|| {
-            write(&tmp)?;
+            write_fn(&tmp)?;
             if let Some(p) = path.parent() {
                 std::fs::create_dir_all(p)?;
             }
-            // Tolerates concurrent creation: rename atomically replaces with identical content.
             std::fs::rename(&tmp, &path)
         })();
         if r.is_err() {
@@ -167,7 +218,10 @@ impl DiskCache {
             return Ok(());
         }
         self.save(Store::Cas, &d.hash, |tmp| {
-            std::fs::write(tmp, data)?;
+            let mut f = File::create(tmp)?;
+            f.write_all(data)?;
+            f.sync_all()?;
+            drop(f);
             set_mode_0644(tmp);
             Ok(())
         })
@@ -179,6 +233,9 @@ impl DiskCache {
         }
         self.save(Store::Cas, &d.hash, |tmp| {
             std::fs::copy(file, tmp)?;
+            if let Ok(f) = File::open(tmp) {
+                let _ = f.sync_all();
+            }
             set_mode_0644(tmp);
             Ok(())
         })
@@ -191,8 +248,19 @@ impl DiskCache {
         }
     }
 
-    /// Reads a blob (verifying its size) and refreshes its mtime.
-    pub fn get_blob(&self, d: &Digest) -> io::Result<Option<Vec<u8>>> {
+    fn maybe_capture_corrupted(&self, hash: &str, data: &[u8]) {
+        if let Some(dir) = &self.capture_corrupted_dir {
+            if std::fs::create_dir_all(dir).is_ok() {
+                let dest = dir.join(format!("{hash}-{}", zel_util::uuid_v4()));
+                let _ = std::fs::write(dest, data);
+            }
+        }
+    }
+
+    /// Reads a blob (verifying size and optionally digest) and refreshes its mtime.
+    /// Corrupted disk entries are evicted and reported as an error so callers know disk was corrupt
+    /// (or can distinguish missing vs corrupt).
+    pub fn get_blob_strict(&self, d: &Digest) -> io::Result<Option<Vec<u8>>> {
         if d.size_bytes == 0 {
             return Ok(Some(Vec::new()));
         }
@@ -200,7 +268,31 @@ impl DiskCache {
         match std::fs::read(&p) {
             Ok(b) => {
                 if b.len() as i64 != d.size_bytes {
-                    return Ok(None); // corrupted entry: treat as a miss
+                    self.maybe_capture_corrupted(&d.hash, &b);
+                    let _ = std::fs::remove_file(&p);
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "Disk cache entry {}/{} size mismatch (got {})",
+                            d.hash,
+                            d.size_bytes,
+                            b.len()
+                        ),
+                    ));
+                }
+                if self.verify_downloads {
+                    let actual = self.digest_fn.hash(&b);
+                    if actual != d.hash {
+                        self.maybe_capture_corrupted(&d.hash, &b);
+                        let _ = std::fs::remove_file(&p);
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "Disk cache entry {}/{} digest mismatch (got {actual})",
+                                d.hash, d.size_bytes
+                            ),
+                        ));
+                    }
                 }
                 let _ = self.refresh(&p);
                 Ok(Some(b))
@@ -210,40 +302,62 @@ impl DiskCache {
         }
     }
 
-    /// Copies a blob to `dest` (creating parents), optionally marking it executable.
+    /// Reads a blob (treating size/digest mismatch as a miss `Ok(None)`).
+    pub fn get_blob(&self, d: &Digest) -> io::Result<Option<Vec<u8>>> {
+        match self.get_blob_strict(d) {
+            Ok(v) => Ok(v),
+            Err(e) if e.kind() == io::ErrorKind::InvalidData => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Copies a blob to `dest` via an atomic temp file, optionally marking it executable.
     pub fn copy_blob_to(&self, d: &Digest, dest: &Path, executable: bool) -> io::Result<bool> {
         let Some(data) = self.get_blob(d)? else {
             return Ok(false);
         };
-        if let Some(p) = dest.parent() {
-            std::fs::create_dir_all(p)?;
-        }
-        let _ = std::fs::remove_file(dest);
-        std::fs::write(dest, data)?;
-        set_executable(dest, executable);
+        write_atomic_output(dest, &data, executable)?;
         Ok(true)
     }
 
     pub fn put_action_result(&self, action: &Digest, r: &ActionResult) -> io::Result<()> {
         let bytes = r.encode_to_vec();
         self.save(Store::Ac, &action.hash, |tmp| {
-            std::fs::write(tmp, &bytes)?;
+            let mut f = File::create(tmp)?;
+            f.write_all(&bytes)?;
+            f.sync_all()?;
+            drop(f);
             set_mode_0644(tmp);
             Ok(())
         })
     }
 
+    /// Strict AC lookup that surfaces disk I/O / protobuf corruption errors.
+    pub fn try_get_action_result(&self, action: &Digest) -> io::Result<Option<ActionResult>> {
+        let p = self.path(Store::Ac, &action.hash);
+        let bytes = match std::fs::read(&p) {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        let r = ActionResult::decode(&bytes).map_err(|e| {
+            let _ = std::fs::remove_file(&p);
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Corrupt ActionResult in disk cache {}: {e}", action.hash),
+            )
+        })?;
+        if self.check_ac_integrity && !self.action_result_complete(&r) {
+            return Ok(None);
+        }
+        let _ = self.refresh(&p);
+        Ok(Some(r))
+    }
+
     /// Looks up an action result; with integrity checking the result is only returned if all
     /// blobs it references are present in the CAS (a partially evicted entry is a miss).
     pub fn get_action_result(&self, action: &Digest) -> Option<ActionResult> {
-        let p = self.path(Store::Ac, &action.hash);
-        let bytes = std::fs::read(&p).ok()?;
-        let r = ActionResult::decode(&bytes).ok()?;
-        if self.check_ac_integrity && !self.action_result_complete(&r) {
-            return None;
-        }
-        let _ = self.refresh(&p);
-        Some(r)
+        self.try_get_action_result(action).ok().flatten()
     }
 
     fn action_result_complete(&self, r: &ActionResult) -> bool {
@@ -282,6 +396,28 @@ impl DiskCache {
         }
         true
     }
+}
+
+/// Writes `data` to a sibling temp file, applies `0755` / `0644` permissions (Bazel `0555` /
+/// `0644`-compatible executable bit), and atomically renames over `dest`.
+pub fn write_atomic_output(dest: &Path, data: &[u8], executable: bool) -> io::Result<()> {
+    if let Some(p) = dest.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    let file_name = dest.file_name().and_then(|n| n.to_str()).unwrap_or("out");
+    let tmp = dest.with_file_name(format!(".{file_name}.zel-tmp-{}", zel_util::uuid_v4()));
+    let res = (|| {
+        let mut f = File::create(&tmp)?;
+        f.write_all(data)?;
+        drop(f);
+        set_executable(&tmp, executable);
+        let _ = std::fs::remove_file(dest);
+        std::fs::rename(&tmp, dest)
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
 }
 
 #[cfg(windows)]
@@ -327,14 +463,18 @@ mod tests {
     }
 
     #[test]
-    fn layout_matches_bazel_and_roundtrips() {
+    fn layout_matches_bazel_lazy_dirs_and_roundtrips() {
         let root = tmpdir("layout");
         let dc = DiskCache::open(&root, DigestFn::Sha256, true).unwrap();
+        // Only root and tmp exist before any writes.
+        assert!(root.join("tmp").is_dir());
+        assert!(!root.join("ac").exists());
+        assert!(!root.join("cas").exists());
+
         let d = DigestFn::Sha256.digest(b"hello world");
         dc.put_blob(&d, b"hello world").unwrap();
         let expect = root.join("cas").join(&d.hash[..2]).join(&d.hash);
         assert_eq!(std::fs::read(&expect).unwrap(), b"hello world");
-        assert!(root.join("tmp").is_dir());
         assert_eq!(dc.get_blob(&d).unwrap().unwrap(), b"hello world");
         assert!(dc
             .get_blob(&DigestFn::Sha256.digest(b"nope"))
@@ -361,21 +501,34 @@ mod tests {
     }
 
     #[test]
-    fn non_sha256_uses_function_subdirectory_and_empty_blob_is_free() {
-        let root = tmpdir("md5");
-        let dc = DiskCache::open(&root, DigestFn::Md5, true).unwrap();
-        let d = DigestFn::Md5.digest(b"x");
-        dc.put_blob(&d, b"x").unwrap();
-        assert!(root
-            .join("md5")
+    fn old_style_md5_omits_subdir_and_blake3_uses_function_subdirectory() {
+        let root_md5 = tmpdir("md5");
+        let dc_md5 = DiskCache::open(&root_md5, DigestFn::Md5, true).unwrap();
+        let d_md5 = DigestFn::Md5.digest(b"x");
+        dc_md5.put_blob(&d_md5, b"x").unwrap();
+        // MD5 is an old-style hash function (<= 7) in Bazel: stored directly under <root>/cas/!
+        assert!(root_md5
             .join("cas")
-            .join(&d.hash[..2])
-            .join(&d.hash)
+            .join(&d_md5.hash[..2])
+            .join(&d_md5.hash)
             .is_file());
         let empty = DigestFn::Md5.digest(b"");
-        assert!(dc.contains_blob(&empty));
-        assert_eq!(dc.get_blob(&empty).unwrap().unwrap(), Vec::<u8>::new());
-        let _ = std::fs::remove_dir_all(&root);
+        assert!(dc_md5.contains_blob(&empty));
+        assert_eq!(dc_md5.get_blob(&empty).unwrap().unwrap(), Vec::<u8>::new());
+        let _ = std::fs::remove_dir_all(&root_md5);
+
+        let root_b3 = tmpdir("blake3");
+        let dc_b3 = DiskCache::open(&root_b3, DigestFn::Blake3, true).unwrap();
+        let d_b3 = DigestFn::Blake3.digest(b"x");
+        dc_b3.put_blob(&d_b3, b"x").unwrap();
+        // BLAKE3 (> 7) uses <root>/blake3/cas/!
+        assert!(root_b3
+            .join("blake3")
+            .join("cas")
+            .join(&d_b3.hash[..2])
+            .join(&d_b3.hash)
+            .is_file());
+        let _ = std::fs::remove_dir_all(&root_b3);
     }
 
     #[test]
