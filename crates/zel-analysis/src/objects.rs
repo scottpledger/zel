@@ -18,23 +18,44 @@
 //! can live in depsets and dict keys; ids stay valid across configured targets.
 
 use crate::args::ArgsBuilder;
-use crate::{Artifact, ConfiguredTarget, Runfiles};
-use std::collections::HashMap;
+use crate::{Action, Artifact, ConfiguredTarget, Runfiles};
+use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex, OnceLock};
+use zel_cmdline::Label;
 use zel_starlark::{StructValue, Value};
+
+#[derive(Clone)]
+pub(crate) enum TemplateDictEntry {
+    Literal(String, String),
+    Joined {
+        key: String,
+        values: Value,
+        kw: BTreeMap<String, Value>,
+    },
+}
 
 pub(crate) enum Obj {
     File(Artifact),
     Runfiles(Arc<Runfiles>),
     Target(Arc<ConfiguredTarget>),
     Args(Arc<Mutex<ArgsBuilder>>),
-    TemplateDict(Arc<Mutex<Vec<(String, String)>>>),
+    TemplateDict(Arc<Mutex<Vec<TemplateDictEntry>>>),
+    Action(Arc<Action>),
+    ExpandedDirectory {
+        directory: Artifact,
+        children: Vec<Value>,
+    },
+    AnalysisFailure {
+        label: Label,
+        message: String,
+    },
 }
 
 #[derive(Default)]
 struct Table {
     items: Vec<Obj>,
     files: HashMap<(String, u8), usize>,
+    tree_rel: HashMap<String, String>,
 }
 
 fn table() -> &'static Mutex<Table> {
@@ -45,15 +66,36 @@ fn table() -> &'static Mutex<Table> {
     })
 }
 
+fn format_file_repr(a: &Artifact) -> String {
+    if a.is_source {
+        format!("<source file {}>", a.root_relative_path)
+    } else {
+        format!("<generated file {}>", a.root_relative_path_for_repr())
+    }
+}
+
 fn host_repr(kind: &str, id: &str) -> Option<String> {
     let idx: usize = id.parse().ok()?;
     let t = table().lock().unwrap();
+    if kind == "expanded_directory" {
+        if let Some(Obj::ExpandedDirectory {
+            directory,
+            children,
+        }) = t.items.get(idx)
+        {
+            let dir_str = format_file_repr(directory);
+            let kids = children.clone();
+            drop(t);
+            let kids_str: Vec<String> = kids.iter().map(|c| c.repr()).collect();
+            return Some(format!(
+                "ExpandedDirectory(directory = {dir_str}, children = [{}])",
+                kids_str.join(", ")
+            ));
+        }
+        return None;
+    }
     match (kind, t.items.get(idx)?) {
-        ("file", Obj::File(a)) => Some(if a.is_source {
-            format!("<source file {}>", a.root_relative_path)
-        } else {
-            format!("<generated file {}>", a.root_relative_path_for_repr())
-        }),
+        ("file", Obj::File(a)) => Some(format_file_repr(a)),
         ("target", Obj::Target(ct)) => {
             if ct.rule_class == "source file" {
                 Some(format!("<input file target {}>", ct.label.canonical_form()))
@@ -68,6 +110,15 @@ fn host_repr(kind: &str, id: &str) -> Option<String> {
         }
         ("runfiles", Obj::Runfiles(_)) => Some("<runfiles>".to_string()),
         ("args", Obj::Args(_)) => Some("context.args() object".to_string()),
+        ("action", Obj::Action(a)) => Some(format!(
+            "action '{}'",
+            a.progress_message.as_deref().unwrap_or(&a.mnemonic)
+        )),
+        ("analysis_failure", Obj::AnalysisFailure { label, message }) => Some(format!(
+            "<AnalysisFailure({}, {})>",
+            label.canonical_form(),
+            message
+        )),
         _ => None,
     }
 }
@@ -101,15 +152,23 @@ pub fn file_value(a: &Artifact) -> Value {
     Value::Host("file".into(), i.to_string())
 }
 
-/// The artifact behind a `File` value.
+/// Interns a `TreeFileArtifact` with its `tree_relative_path` (`FileApi.tree_relative_path`).
+pub(crate) fn tree_file_value(a: &Artifact, tree_relative_path: String) -> Value {
+    {
+        let mut t = table().lock().unwrap();
+        t.tree_rel
+            .insert(a.exec_path.path_string().to_string(), tree_relative_path);
+    }
+    file_value(a)
+}
+
+/// The artifact behind a `File` (or `ExpandedDirectory`) value.
 pub fn artifact_of(v: &Value) -> Option<Artifact> {
     let Value::Host(k, id) = v else { return None };
-    if k != "file" {
-        return None;
-    }
     let t = table().lock().unwrap();
-    match t.items.get(id.parse::<usize>().ok()?)? {
-        Obj::File(a) => Some(a.clone()),
+    match (k.as_str(), t.items.get(id.parse::<usize>().ok()?)?) {
+        ("file", Obj::File(a)) => Some(a.clone()),
+        ("expanded_directory", Obj::ExpandedDirectory { directory, .. }) => Some(directory.clone()),
         _ => None,
     }
 }
@@ -187,10 +246,19 @@ pub(crate) fn file_attr(a: &Artifact, attr: &str) -> Result<Value, String> {
             Value::Struct(Arc::new(StructValue::new(m)))
         }
         "tree_relative_path" => {
-            return Err(format!(
-            "'tree_relative_path' is only available on files inside a tree artifact; '{}' is not",
-            a.exec_path
-        ))
+            if let Some(rel) = table()
+                .lock()
+                .unwrap()
+                .tree_rel
+                .get(a.exec_path.path_string())
+            {
+                Value::String(rel.clone())
+            } else {
+                return Err(format!(
+                    "'tree_relative_path' is only available on files inside a tree artifact; '{}' is not",
+                    a.exec_path
+                ));
+            }
         }
         other => return Err(format!("'File' value has no field or method '{other}'")),
     })
@@ -204,7 +272,7 @@ pub(crate) fn new_template_dict() -> Value {
     Value::Host("template_dict".into(), (t.items.len() - 1).to_string())
 }
 
-pub(crate) type TemplateDictEntries = Arc<Mutex<Vec<(String, String)>>>;
+pub(crate) type TemplateDictEntries = Arc<Mutex<Vec<TemplateDictEntry>>>;
 
 pub(crate) fn template_dict_of(v: &Value) -> Option<TemplateDictEntries> {
     let Value::Host(k, id) = v else { return None };
@@ -218,7 +286,67 @@ pub(crate) fn template_dict_of(v: &Value) -> Option<TemplateDictEntries> {
     }
 }
 
-pub(crate) fn template_dict_entries(id: &str) -> Option<Vec<(String, String)>> {
+pub(crate) fn template_dict_entries(id: &str) -> Option<Vec<TemplateDictEntry>> {
     template_dict_of(&Value::Host("template_dict".into(), id.to_string()))
         .map(|d| d.lock().unwrap().clone())
+}
+
+pub fn action_value(a: Arc<Action>) -> Value {
+    let mut t = table().lock().unwrap();
+    t.items.push(Obj::Action(a));
+    Value::Host("action".into(), (t.items.len() - 1).to_string())
+}
+
+pub fn action_of(v: &Value) -> Option<Arc<Action>> {
+    let Value::Host(k, id) = v else { return None };
+    if k != "action" {
+        return None;
+    }
+    let t = table().lock().unwrap();
+    match t.items.get(id.parse::<usize>().ok()?)? {
+        Obj::Action(a) => Some(a.clone()),
+        _ => None,
+    }
+}
+
+pub(crate) fn expanded_directory_value(directory: Artifact, children: Vec<Value>) -> Value {
+    let mut t = table().lock().unwrap();
+    t.items.push(Obj::ExpandedDirectory {
+        directory,
+        children,
+    });
+    Value::Host("expanded_directory".into(), (t.items.len() - 1).to_string())
+}
+
+pub(crate) fn expanded_directory_of(v: &Value) -> Option<(Artifact, Vec<Value>)> {
+    let Value::Host(k, id) = v else { return None };
+    if k != "expanded_directory" {
+        return None;
+    }
+    let t = table().lock().unwrap();
+    match t.items.get(id.parse::<usize>().ok()?)? {
+        Obj::ExpandedDirectory {
+            directory,
+            children,
+        } => Some((directory.clone(), children.clone())),
+        _ => None,
+    }
+}
+
+pub fn analysis_failure_value(label: Label, message: String) -> Value {
+    let mut t = table().lock().unwrap();
+    t.items.push(Obj::AnalysisFailure { label, message });
+    Value::Host("analysis_failure".into(), (t.items.len() - 1).to_string())
+}
+
+pub fn analysis_failure_of(v: &Value) -> Option<(Label, String)> {
+    let Value::Host(k, id) = v else { return None };
+    if k != "analysis_failure" {
+        return None;
+    }
+    let t = table().lock().unwrap();
+    match t.items.get(id.parse::<usize>().ok()?)? {
+        Obj::AnalysisFailure { label, message } => Some((label.clone(), message.clone())),
+        _ => None,
+    }
 }

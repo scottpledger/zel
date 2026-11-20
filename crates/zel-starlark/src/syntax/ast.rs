@@ -13,12 +13,171 @@
 // limitations under the License.
 
 use crate::syntax::location::Location;
+use std::collections::HashSet;
 use std::sync::Arc;
+
+/// A single `# ...` source comment token (`Comment.java`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Comment {
+    pub text: String,
+    pub location: Location,
+}
+
+impl Comment {
+    pub fn has_doc_comment_prefix(&self) -> bool {
+        self.text.starts_with("#:")
+    }
+
+    pub fn get_doc_comment_text(&self) -> Option<&str> {
+        self.text
+            .strip_prefix("#: ")
+            .or_else(|| self.text.strip_prefix("#:"))
+    }
+}
+
+/// Contiguous block of standalone `#:` doc-comment lines (`DocComments.java`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DocComments {
+    pub lines: Vec<Comment>,
+    text_joined: String,
+}
+
+impl DocComments {
+    pub fn new(lines: Vec<Comment>) -> Option<Self> {
+        if lines.is_empty() || !lines.iter().all(Comment::has_doc_comment_prefix) {
+            return None;
+        }
+        let text_joined = lines
+            .iter()
+            .filter_map(Comment::get_doc_comment_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+        Some(Self { lines, text_joined })
+    }
+
+    pub fn start_location(&self) -> &Location {
+        &self.lines[0].location
+    }
+
+    pub fn end_location(&self) -> &Location {
+        self.lines.last().map(|c| &c.location).unwrap()
+    }
+
+    pub fn text(&self) -> String {
+        self.text_joined.clone()
+    }
+}
+
+impl std::fmt::Display for DocComments {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let raw = self
+            .lines
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        f.write_str(&raw)
+    }
+}
+
+/// Associates contiguous standalone `#:` doc-comment blocks immediately preceding a single-LHS
+/// global assignment (`NAME = ...`) with that global, returning `(attached_in_decl_order, unused)`.
+pub fn extract_doc_comments(
+    stmts: &[Stmt],
+    comments: &[Comment],
+    standalone_lines: &HashSet<usize>,
+) -> (Vec<(String, DocComments)>, Vec<DocComments>) {
+    let mut assign_by_line = std::collections::BTreeMap::new();
+    for s in stmts {
+        if let Stmt::Assign {
+            target: AssignTarget::Ident(name),
+            op: AssignOp::Assign,
+            location,
+            ..
+        } = s
+        {
+            assign_by_line
+                .entry(location.line)
+                .or_insert_with(|| name.clone());
+        }
+    }
+
+    let mut attached = Vec::new();
+    let mut attached_names = HashSet::new();
+    let mut unused = Vec::new();
+    let mut block: Vec<Comment> = Vec::new();
+
+    let flush_block = |block: &mut Vec<Comment>,
+                       next_non_doc_comment_line: Option<usize>,
+                       attached: &mut Vec<(String, DocComments)>,
+                       attached_names: &mut HashSet<String>,
+                       unused: &mut Vec<DocComments>| {
+        if block.is_empty() {
+            return;
+        }
+        let last_line = block.last().unwrap().location.line;
+        let lines_taken = std::mem::take(block);
+        let Some(doc) = DocComments::new(lines_taken) else {
+            return;
+        };
+        let blocked_by_plain_comment = next_non_doc_comment_line == Some(last_line + 1);
+        if !blocked_by_plain_comment {
+            if let Some(var_name) = assign_by_line.get(&(last_line + 1)) {
+                if attached_names.insert(var_name.clone()) {
+                    attached.push((var_name.clone(), doc));
+                    return;
+                }
+            }
+        }
+        unused.push(doc);
+    };
+
+    for (idx, c) in comments.iter().enumerate() {
+        let is_standalone = standalone_lines.contains(&c.location.line);
+        if is_standalone && c.has_doc_comment_prefix() {
+            if let Some(prev) = block.last() {
+                if c.location.line != prev.location.line + 1 {
+                    flush_block(
+                        &mut block,
+                        None,
+                        &mut attached,
+                        &mut attached_names,
+                        &mut unused,
+                    );
+                }
+            }
+            block.push(c.clone());
+        } else {
+            let plain_line = if is_standalone {
+                Some(c.location.line)
+            } else {
+                None
+            };
+            flush_block(
+                &mut block,
+                plain_line,
+                &mut attached,
+                &mut attached_names,
+                &mut unused,
+            );
+            let _ = idx;
+        }
+    }
+    flush_block(
+        &mut block,
+        None,
+        &mut attached,
+        &mut attached_names,
+        &mut unused,
+    );
+    (attached, unused)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadStatement {
     pub module_label: String,
     pub symbols: Vec<(String, String)>, // (local_name, exported_name)
+    pub symbol_locations: Vec<(Location, Location)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,6 +217,21 @@ pub enum CmpOp {
     NotIn,
 }
 
+impl CmpOp {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Eq => "==",
+            Self::Ne => "!=",
+            Self::Lt => "<",
+            Self::Le => "<=",
+            Self::Gt => ">",
+            Self::Ge => ">=",
+            Self::In => "in",
+            Self::NotIn => "not in",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AssignOp {
     Assign,
@@ -80,22 +254,58 @@ pub enum CompClause {
     If(Expr),
 }
 
-/// A (possibly nested) unpacking pattern, e.g. the `a` / `(b, c)` of `for a, (b, c) in xs`
-/// or `d['b'], d['c'] = 2, 3`.
+/// A (possibly nested) unpacking pattern, e.g. the `a` / `(b, c)` / `x[0]` of `for a, (b, c) in xs`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
     Name(String),
     Tuple(Vec<Pattern>),
-    Index { target: Box<Expr>, index: Box<Expr> },
+    Index {
+        target: Box<Expr>,
+        index: Box<Expr>,
+        location: Location,
+    },
+    Attr {
+        target: Box<Expr>,
+        attr: String,
+        location: Location,
+    },
 }
 
 impl Pattern {
-    /// All variable names bound by this pattern.
+    /// All variable names bound by this pattern (in source order, including duplicates).
     pub fn names(&self) -> Vec<String> {
         match self {
             Pattern::Name(n) => vec![n.clone()],
             Pattern::Tuple(ps) => ps.iter().flat_map(|p| p.names()).collect(),
-            Pattern::Index { .. } => Vec::new(),
+            Pattern::Index { .. } | Pattern::Attr { .. } => Vec::new(),
+        }
+    }
+
+    /// Insertion-ordered distinct identifiers bound by this pattern (`Identifier.boundIdentifiers`).
+    pub fn bound_identifiers(&self) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut out = Vec::new();
+        for n in self.names() {
+            if seen.insert(n.clone()) {
+                out.push(n);
+            }
+        }
+        out
+    }
+
+    pub fn walk_exprs<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
+        match self {
+            Pattern::Name(_) => {}
+            Pattern::Tuple(ps) => {
+                for p in ps {
+                    p.walk_exprs(f);
+                }
+            }
+            Pattern::Index { target, index, .. } => {
+                f(target);
+                f(index);
+            }
+            Pattern::Attr { target, .. } => f(target),
         }
     }
 }
@@ -144,6 +354,10 @@ pub struct ModuleEnv {
     >,
     /// Label of the `.bzl` file as Bazel prints it in `<function f from LABEL>` (`//:e.bzl`, `@@repo+//p:f.bzl`).
     pub label_string: std::sync::Mutex<Option<String>>,
+    /// Global variable `#:` doc comments in declaration order.
+    pub doc_comments: std::sync::Mutex<Vec<(String, DocComments)>>,
+    /// Unattached `#:` doc comment blocks in file order.
+    pub unused_doc_comments: std::sync::Mutex<Vec<DocComments>>,
 }
 
 impl std::fmt::Debug for ModuleEnv {

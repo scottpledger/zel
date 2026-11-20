@@ -101,12 +101,110 @@ fn collect_aspect_path(
     Ok(())
 }
 
+/// Builds the `propagation_ctx` struct passed to `propagation_predicate`, `attr_aspects`, and
+/// `toolchains_aspects` functions (`StarlarkAspectPropagationContextApi`).
+fn build_propagation_ctx(
+    def: &zel_packages::aspect::AspectDef,
+    rule: &RuleInstance,
+    rc: &zel_packages::RuleClass,
+    label: &Label,
+    params: &BTreeMap<String, AttrValue>,
+) -> Value {
+    let mut aspect_attr_fields = BTreeMap::new();
+    for a in &def.attrs {
+        if a.name.starts_with('_') {
+            continue;
+        }
+        if let Some(v) = params.get(&a.name).or(a.default.as_ref()) {
+            aspect_attr_fields.insert(a.name.clone(), v.to_value());
+        }
+    }
+    let mut rule_attr_fields = BTreeMap::new();
+    for (k, attr_def) in &rc.attrs {
+        if k.starts_with('$') {
+            continue;
+        }
+        let val = rule
+            .attr_or_default(k)
+            .map(|av| av.to_value())
+            .unwrap_or(Value::None);
+        let is_tool = attr_def
+            .tool_dep
+            .unwrap_or(attr_def.cfg_exec || attr_def.cfg_exec_group.is_some());
+        rule_attr_fields.insert(
+            k.clone(),
+            mk_struct(vec![("value", val), ("is_tool", Value::Bool(is_tool))]),
+        );
+    }
+    let file_label = rc
+        .starlark
+        .as_ref()
+        .and_then(|sp| Label::parse_canonical(&sp.defined_in).ok())
+        .map(Value::Label)
+        .unwrap_or(Value::None);
+    let qualified_kind = mk_struct(vec![
+        ("file_label", file_label),
+        ("rule_name", Value::String(rule.rule_class.clone())),
+    ]);
+    let rule_v = mk_struct(vec![
+        ("label", Value::Label(label.clone())),
+        (
+            "attr",
+            Value::Struct(Arc::new(StructValue::new(rule_attr_fields))),
+        ),
+        ("qualified_kind", qualified_kind),
+    ]);
+    mk_struct(vec![
+        (
+            "attr",
+            Value::Struct(Arc::new(StructValue::new(aspect_attr_fields))),
+        ),
+        ("rule", rule_v),
+    ])
+}
+
+fn eval_dynamic_attr_aspects(
+    def: &zel_packages::aspect::AspectDef,
+    prop_ctx: &Value,
+    sibling_repository_layout: bool,
+) -> Result<Option<Vec<String>>, String> {
+    let Some(func) = &def.attr_aspects_fn else {
+        return Ok(None);
+    };
+    let mut ectx = EvalContext::default();
+    ectx.semantics.experimental_sibling_repository_layout = sibling_repository_layout;
+    ectx.thread.semantics.experimental_sibling_repository_layout = sibling_repository_layout;
+    let ret = ectx
+        .call_value(func.clone(), vec![prop_ctx.clone()], BTreeMap::new())
+        .map_err(|e| e.0)?;
+    let items = sequence(&ret).ok_or_else(|| {
+        format!(
+            "attr_aspects function must return a list of strings, got {}",
+            type_name(&ret)
+        )
+    })?;
+    let mut out = Vec::with_capacity(items.len());
+    for i in items {
+        match i {
+            Value::String(s) => out.push(s),
+            other => {
+                return Err(format!(
+                    "attr_aspects function elements must be strings, got {}",
+                    type_name(&other)
+                ))
+            }
+        }
+    }
+    Ok(Some(out))
+}
+
 /// `AspectResolutionHelpers.collectPropagatingAspects`: walks `aspects_path` backwards
 /// (top-down), skipping aspects that own `attr_name`, keeping aspects whose `attr_aspects` match
 /// OR that are required by an already-selected aspect, then reverses back to path order.
 fn collect_propagating_aspects(
     aspects_path: &[(Value, Arc<zel_packages::aspect::AspectDef>)],
     attr_name: &str,
+    dynamic_attrs: &std::collections::HashMap<usize, Vec<String>>,
 ) -> Vec<(Value, Arc<zel_packages::aspect::AspectDef>)> {
     let mut selected: Vec<(Value, Arc<zel_packages::aspect::AspectDef>)> = Vec::new();
     for (v, def) in aspects_path.iter().rev() {
@@ -114,7 +212,8 @@ fn collect_propagating_aspects(
         if def.attrs.iter().any(|a| a.name == attr_name) {
             continue;
         }
-        let matches_attr = def.attr_aspects.iter().any(|a| a == "*" || a == attr_name);
+        let attrs_list = dynamic_attrs.get(&def.id).unwrap_or(&def.attr_aspects);
+        let matches_attr = attrs_list.iter().any(|a| a == "*" || a == attr_name);
         if matches_attr || is_aspect_required_by_any(def.id, &selected) {
             selected.push((v.clone(), def.clone()));
         }
@@ -193,6 +292,27 @@ fn apply_aspect_path(
         {
             continue;
         }
+        let prop_ctx = build_propagation_ctx(def, &rule, &rc, current_ct.actual_target_label(), params);
+        if let Some(pred) = &def.propagation_predicate {
+            let mut pctx = EvalContext::default();
+            pctx.semantics.experimental_sibling_repository_layout =
+                inputs.sibling_repository_layout;
+            pctx.thread.semantics.experimental_sibling_repository_layout =
+                inputs.sibling_repository_layout;
+            let keep = pctx
+                .call_value(pred.clone(), vec![prop_ctx.clone()], BTreeMap::new())
+                .map_err(|e| e.0)?;
+            match keep {
+                Value::Bool(false) => continue,
+                Value::Bool(true) => {}
+                other => {
+                    return Err(format!(
+                        "propagation_predicate must return a bool, got {}",
+                        type_name(&other)
+                    ))
+                }
+            }
+        }
 
         let applied_so_far = &kept[..=idx];
         let aspect_id = def.display_id();
@@ -230,32 +350,156 @@ fn apply_aspect_path(
 
         // 1. `ctx.rule`: rule attributes + base aspects' attributes (`mergeRuleAndBaseAspectsAttributes`),
         // with propagating aspects applied along matching `attr_aspects`.
+        let mut dynamic_attrs_map: std::collections::HashMap<usize, Vec<String>> =
+            std::collections::HashMap::new();
+        for (_, d_item) in applied_so_far {
+            let item_pctx = build_propagation_ctx(
+                d_item,
+                &rule,
+                &rc,
+                current_ct.actual_target_label(),
+                params,
+            );
+            if let Some(dyn_list) =
+                eval_dynamic_attr_aspects(d_item, &item_pctx, inputs.sibling_repository_layout)
+                    .map_err(wrap)?
+            {
+                dynamic_attrs_map.insert(d_item.id, dyn_list);
+            }
+        }
+        let dyn_for_retain = dynamic_attrs_map.clone();
         let path_for_hook: Vec<(Value, Arc<zel_packages::aspect::AspectDef>)> = applied_so_far.to_vec();
         let hook = move |attr_name: &str, dep: Arc<ConfiguredTarget>, _c: &BuildConfigurationKey| {
-            let prop = collect_propagating_aspects(&path_for_hook, attr_name);
+            let prop = collect_propagating_aspects(&path_for_hook, attr_name, &dyn_for_retain);
             if prop.is_empty() {
                 Ok(dep)
             } else {
                 apply_aspect_path(inputs, dep, &prop, params)
             }
         };
-        let mut rule_attrs = rc.attrs.clone();
-        // Base aspects' attributes (first name wins; rule attributes already in `rule_attrs` win).
-        for (_, base_def) in &kept[..idx] {
-            for a in &base_def.attrs {
-                rule_attrs.entry(a.name.clone()).or_insert_with(|| a.clone());
-            }
-        }
-        rule_attrs.retain(|_, a| {
+        let attr_retained = |a: &Attribute| -> bool {
             !a.name.starts_with('_')
-                || applied_so_far
-                    .iter()
-                    .any(|(_, d)| d.attr_aspects.iter().any(|x| x == "*" || x == &a.name))
-        });
-        let rule_bundle =
-            convert_rule_attrs(&rule, &rule_attrs, &cfg, inputs, &pkg_dir, out_root, &wrap, Some(&hook))?;
+                || applied_so_far.iter().any(|(_, d)| {
+                    let list = dynamic_attrs_map.get(&d.id).unwrap_or(&d.attr_aspects);
+                    list.iter().any(|x| x == "*" || x == &a.name)
+                })
+        };
+        let build_aspect_exec_inputs =
+            |asp_def: &zel_packages::aspect::AspectDef| -> Result<(AnalysisInputs, BTreeSet<String>), String> {
+                let mut ai = inputs.clone();
+                ai.toolchains = BTreeMap::new();
+                ai.extra_make_variables = BTreeMap::new();
+                ai.exec_group_toolchains = BTreeMap::new();
+                ai.exec_group_platforms = BTreeMap::new();
+                let mut groups: BTreeSet<String> = match &asp_def.exec_groups {
+                    Some(Value::Dict(d)) => d
+                        .lock()
+                        .unwrap()
+                        .items()
+                        .into_iter()
+                        .filter_map(|(k, _)| k.as_str().map(str::to_string))
+                        .collect(),
+                    _ => BTreeSet::new(),
+                };
+                if let Some(res) = resolver
+                    .resolve_aspect_exec_context(&current_ct.label, asp_def, &cfg)
+                    .map_err(wrap)?
+                {
+                    ai.exec_platform = res.exec_platform;
+                    ai.toolchains = res.toolchains;
+                    ai.extra_make_variables = res.extra_make_variables;
+                    ai.exec_group_platforms = res.exec_group_platforms;
+                    ai.exec_group_toolchains = res.exec_group_toolchains;
+                    ai.has_exec_groups_context = true;
+                    groups.extend(ai.exec_group_platforms.keys().cloned());
+                    groups.extend(ai.exec_group_toolchains.keys().cloned());
+                } else {
+                    ai.has_exec_groups_context = false;
+                }
+                Ok((ai, groups))
+            };
 
-        // 2. The main aspect's own attributes (implicit dependencies and parameters).
+        let mut base_inputs = inputs.clone();
+        base_inputs.toolchains = current_ct.toolchains.clone();
+        base_inputs.extra_make_variables = current_ct.extra_make_variables.clone();
+        base_inputs.exec_group_toolchains = current_ct.exec_group_toolchains.clone();
+        base_inputs.exec_group_platforms = current_ct.exec_group_platforms.clone();
+        if current_ct.exec_platform.is_some() {
+            base_inputs.exec_platform = current_ct.exec_platform.clone();
+            base_inputs.has_exec_groups_context = true;
+        } else {
+            base_inputs.has_exec_groups_context = false;
+        }
+
+        let mut seen_rule_attrs: BTreeSet<String> = rc.attrs.keys().cloned().collect();
+        let mut only_rule_attrs = rc.attrs.clone();
+        only_rule_attrs.retain(|_, a| attr_retained(a));
+        let mut rule_bundle = convert_rule_attrs(
+            &rule,
+            &only_rule_attrs,
+            &cfg,
+            &base_inputs,
+            &pkg_dir,
+            out_root,
+            &wrap,
+            Some(&hook),
+        )?;
+        // Base aspects' attributes (first name wins; rule attributes already in `rc.attrs` win),
+        // resolved against each base aspect's own execution/toolchain context.
+        for (_, base_def) in &kept[..idx] {
+            let mut base_asp_attrs: BTreeMap<String, Attribute> = BTreeMap::new();
+            for a in &base_def.attrs {
+                if seen_rule_attrs.insert(a.name.clone()) && attr_retained(a) {
+                    base_asp_attrs.insert(a.name.clone(), a.clone());
+                }
+            }
+            if base_asp_attrs.is_empty() {
+                continue;
+            }
+            let mut brule = rule.clone();
+            brule.extra.attr_values.clear();
+            for a in base_asp_attrs.values() {
+                if !a.name.starts_with('_') {
+                    if let Some(v) = params.get(&a.name).cloned().or_else(|| a.default.clone()) {
+                        brule.extra.attr_values.insert(a.name.clone(), v);
+                    }
+                }
+            }
+            let (base_asp_inputs, _) = build_aspect_exec_inputs(base_def)?;
+            let sub_bundle = convert_rule_attrs(
+                &brule,
+                &base_asp_attrs,
+                &cfg,
+                &base_asp_inputs,
+                &pkg_dir,
+                out_root,
+                &wrap,
+                Some(&hook),
+            )?;
+            for (k, v) in sub_bundle.attr_fields {
+                rule_bundle.attr_fields.entry(k).or_insert(v);
+            }
+            for (k, v) in sub_bundle.file_fields {
+                rule_bundle.file_fields.entry(k).or_insert(v);
+            }
+            for (k, v) in sub_bundle.files_fields {
+                rule_bundle.files_fields.entry(k).or_insert(v);
+            }
+            for (k, v) in sub_bundle.exe_fields {
+                rule_bundle.exe_fields.entry(k).or_insert(v);
+            }
+            for (k, v) in sub_bundle.deps_by_attr {
+                rule_bundle.deps_by_attr.entry(k).or_insert(v);
+            }
+            rule_bundle.attr_errors.extend(sub_bundle.attr_errors);
+        }
+
+        // 2. Toolchains and `exec_groups` of the main aspect (isolated from base target's and
+        // caller's toolchains), resolved before converting the aspect's own attributes so
+        // `cfg = config.exec(exec_group = ...)` uses the aspect's execution platforms.
+        let (ainputs, aspect_exec_groups) = build_aspect_exec_inputs(def)?;
+
+        // 3. The main aspect's own attributes (implicit dependencies and parameters).
         let mut aspect_attr_map: BTreeMap<String, Attribute> = BTreeMap::new();
         for a in &def.attrs {
             aspect_attr_map.insert(a.name.clone(), a.clone());
@@ -283,20 +527,16 @@ fn apply_aspect_path(
                 }
             }
         }
-        let aspect_bundle =
-            convert_rule_attrs(&arule, &aspect_attr_map, &cfg, inputs, &pkg_dir, out_root, &wrap, None)?;
-
-        // 3. Toolchains of the aspect (isolated from base target's toolchains).
-        let mut ainputs = inputs.clone();
-        ainputs.toolchains = BTreeMap::new();
-        ainputs.extra_make_variables = BTreeMap::new();
-        if !def.toolchains.is_empty() {
-            let (tcs, vars) = resolver
-                .aspect_toolchains(&current_ct.label, &def.toolchains, &def.exec_compatible_with, &cfg)
-                .map_err(wrap)?;
-            ainputs.toolchains = tcs;
-            ainputs.extra_make_variables = vars;
-        }
+        let aspect_bundle = convert_rule_attrs(
+            &arule,
+            &aspect_attr_map,
+            &cfg,
+            &ainputs,
+            &pkg_dir,
+            out_root,
+            &wrap,
+            None,
+        )?;
 
         // Aspect `ctx.var` omits `--define`; `ctx.rule.var` includes `--define` and base target's toolchains.
         let mut make_vars = BTreeMap::new();
@@ -312,7 +552,7 @@ fn apply_aspect_path(
         rule_make_vars.insert("BINDIR".to_string(), format!("bazel-out/{}/bin", cfg.mnemonic()));
         rule_make_vars.insert("GENDIR".to_string(), format!("bazel-out/{}/bin", cfg.mnemonic()));
         rule_make_vars.insert("TARGET_CPU".to_string(), cfg.cpu.clone());
-        for (k, v) in &inputs.extra_make_variables {
+        for (k, v) in &base_inputs.extra_make_variables {
             rule_make_vars.insert(k.clone(), v.clone());
         }
         for (k, v) in &cfg.user_defines {
@@ -338,7 +578,12 @@ fn apply_aspect_path(
             ),
         ]);
         let aspect_ids: Vec<String> = applied_so_far.iter().map(|(_, d)| d.display_id()).collect();
-        let base_exec_groups: BTreeSet<String> = inputs.exec_group_toolchains.keys().cloned().collect();
+        let base_exec_groups: BTreeSet<String> = base_inputs
+            .exec_group_platforms
+            .keys()
+            .chain(base_inputs.exec_group_toolchains.keys())
+            .cloned()
+            .collect();
 
         // Seed the aspect's ActionGraph with the base target's actions so conflicts against the
         // underlying rule or earlier aspects are detected.
@@ -354,7 +599,7 @@ fn apply_aspect_path(
             inputs: ainputs,
             pkg_dir: pkg_dir.clone(),
             output_to_genfiles: false,
-            exec_groups: BTreeSet::new(),
+            exec_groups: aspect_exec_groups,
             deps: aspect_bundle.deps_by_attr.clone(),
             attr_struct: aspect_bundle.attr_struct(),
             file_struct: Value::Struct(Arc::new(StructValue::new(aspect_bundle.file_fields.clone()))),
@@ -383,10 +628,10 @@ fn apply_aspect_path(
             aspect_ids,
             aspect_fragments: def.fragments.clone(),
             aspect_toolchains_declared: def.toolchains.clone(),
-            base_toolchains: inputs.toolchains.clone(),
+            base_toolchains: base_inputs.toolchains.clone(),
             base_exec_groups,
-            base_exec_group_toolchains: inputs.exec_group_toolchains.clone(),
-            base_exec_group_platforms: inputs.exec_group_platforms.clone(),
+            base_exec_group_toolchains: base_inputs.exec_group_toolchains.clone(),
+            base_exec_group_platforms: base_inputs.exec_group_platforms.clone(),
             split_attr: Value::None,
             in_subrule: std::sync::atomic::AtomicBool::new(false),
         });

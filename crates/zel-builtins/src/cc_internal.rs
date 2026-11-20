@@ -671,6 +671,26 @@ pub fn call(name: &str, pos: Vec<Value>, kw: Kwargs) -> Result<Value, StarlarkEr
             }
             .to_string(),
         )),
+        "check_toplevel" => {
+            let fn_val = kwarg(&pos, &kw, 0, "fn").unwrap_or(Value::None);
+            match &fn_val {
+                Value::UserFunction(f) => {
+                    let is_top = f.closure.scopes.is_empty()
+                        && f.name != "<lambda>"
+                        && f.module
+                            .as_ref()
+                            .is_some_and(|m| m.globals.lock().unwrap().get(&f.name) == Some(&fn_val));
+                    if !is_top {
+                        return err("Passed function must be top-level functions.");
+                    }
+                    Ok(Value::None)
+                }
+                other => err(format!(
+                    "in call to check_toplevel(), parameter 'fn' got value of type '{}', want 'function'",
+                    other.type_name()
+                )),
+            }
+        }
         n if FUNCTIONS.contains(&n) => err(format!(
             "cc_internal.{n} is not implemented yet in zel (port of CcStarlarkInternal.{n})"
         )),
@@ -842,6 +862,70 @@ mod tests {
             .unwrap_err()
             .0,
             "in call to is_tree_artifact(), parameter 'artifact' got value of type 'string', want 'File'"
+        );
+    }
+
+    #[test]
+    fn check_toplevel_and_dotted_version_and_cc_flags() {
+        let mut ctx = zel_starlark::EvalContext {
+            host: Some(Arc::new(|_ctx, name, pos, kw| {
+                crate::call(name, pos, kw)
+                    .unwrap_or_else(|| Err(StarlarkError(format!("unknown host {name}"))))
+            })),
+            ..Default::default()
+        };
+        ctx.globals.insert(
+            "check_toplevel".into(),
+            Value::BuiltinFunction("host:cc_internal.check_toplevel".into()),
+        );
+        ctx.globals.insert(
+            "dotted_version".into(),
+            Value::BuiltinFunction("host:builtins.apple_common.dotted_version".into()),
+        );
+        ctx.eval_file_checked(
+            r#"
+def top_fn():
+    pass
+
+check_toplevel(top_fn)
+
+v1 = dotted_version("1.2")
+v2 = dotted_version(version = "1.10")
+if not (v1 < v2) or v1.compare_to(v2) >= 0:
+    fail("dotted_version comparison failed")
+"#,
+            None,
+        )
+        .unwrap();
+
+        let err_lambda = ctx
+            .eval_file_checked("check_toplevel(lambda: None)\n", None)
+            .unwrap_err()
+            .join("\n");
+        assert!(
+            err_lambda.contains("Passed function must be top-level functions."),
+            "{err_lambda}"
+        );
+
+        assert_eq!(
+            crate::call(
+                "builtins.cc_common.check_experimental_cc_shared_library",
+                vec![],
+                Kwargs::new()
+            )
+            .unwrap()
+            .unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            crate::call(
+                "builtins.cc_common.incompatible_disable_objc_library_transition",
+                vec![],
+                Kwargs::new()
+            )
+            .unwrap()
+            .unwrap(),
+            Value::Bool(true)
         );
     }
 }

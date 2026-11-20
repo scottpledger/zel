@@ -108,6 +108,15 @@ fn pretty_print(a: &Action, for_tool: bool) -> String {
                     )
                 }
             }
+            ActionKind::MapDirectory {
+                input_directories, ..
+            } => {
+                let dirs: Vec<String> = input_directories
+                    .iter()
+                    .map(|(_, d)| pretty_path(d))
+                    .collect();
+                format!("Expanding [{}] into actions.", dirs.join(", "))
+            }
         },
     };
     // `AbstractAction.getProgressMessage`: actions of the tool (exec) configurations are annotated.
@@ -572,6 +581,7 @@ fn record_action_param_files(a: &Action, m: &mut BTreeMap<String, String>) {
 fn collect(
     env: &mut PostEnv<'_>,
     nodes: &[Node],
+    popts: &PostOpts,
 ) -> Result<(Vec<Entry>, BTreeMap<String, String>), String> {
     let filters = filters_of(env);
     let mut out = Vec::new();
@@ -609,10 +619,22 @@ fn collect(
             let mut local: Vec<Entry> = Vec::new();
             for a in &current_ct.typed_actions {
                 record_action_param_files(a, &mut pre_params);
-                if !matches_filters(a, &filters) {
+                let mut action = a.clone();
+                if !popts.include_pruned_inputs && action.unused_inputs_list.is_some() {
+                    if let Some(primary) = action.outputs.first() {
+                        if let Some(used) = popts
+                            .cached_used_inputs
+                            .get(primary.exec_path.path_string())
+                        {
+                            action
+                                .inputs
+                                .retain(|i| used.contains(i.exec_path.path_string()));
+                        }
+                    }
+                }
+                if !matches_filters(&action, &filters) {
                     continue;
                 }
-                let mut action = a.clone();
                 if asp_opt.is_none() && action.mnemonic == "Genrule" {
                     // `GenRule`: the runfiles (middleman) of every executable `tools` entry are inputs.
                     let extra = tool_runfiles_inputs(env, &n.label, &cfg);
@@ -988,7 +1010,7 @@ pub(crate) fn format_aquery(
     popts: &PostOpts,
     _fopts: &FormatOpts,
 ) -> Result<Vec<u8>, String> {
-    let (mut entries, mut pre_params) = collect(env, nodes)?;
+    let (mut entries, mut pre_params) = collect(env, nodes, popts)?;
     if popts.prune_unused_actions {
         let mut generating: HashMap<Artifact, usize> = HashMap::new();
         for (i, e) in entries.iter().enumerate() {

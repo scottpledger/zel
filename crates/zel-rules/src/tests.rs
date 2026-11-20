@@ -4432,3 +4432,2210 @@ chained_rule(name = "t")
         other => panic!("expected TemplateExpand, got {other:?}"),
     }
 }
+
+#[test]
+fn starlark_actions_inspection_map_directory_and_shadowed_action() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _id(x):
+    return x
+
+def _expand_dir(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    in_exp = input_directories["src_dir"]
+    out_dir = output_directories["dst_dir"]
+    child = template_ctx.declare_file("generated.txt", directory = out_dir)
+    a = template_ctx.args()
+    a.add("--mode", additional_params["mode"])
+    a.add("--dir", in_exp.directory.path)
+    template_ctx.run(
+        outputs = [child],
+        inputs = [in_exp.directory],
+        executable = "/bin/cp",
+        arguments = [a],
+    )
+
+def _impl(ctx):
+    w = ctx.actions.declare_file("hello.txt")
+    ctx.actions.write(w, "hello")
+
+    tpl = ctx.actions.declare_file("tpl.in")
+    ctx.actions.write(tpl, "vals=%VALS%")
+    expanded = ctx.actions.declare_file("tpl.out")
+    td = ctx.actions.template_dict()
+    td.add_joined("%VALS%", depset(["a", "b", "a"]), join_with = ",", map_each = _id, uniquify = True)
+    ctx.actions.expand_template(template = tpl, output = expanded, computed_substitutions = td)
+
+    created = ctx.created_actions()
+    w_act = created.by_file[w]
+    if w_act.content != "hello" or w_act.mnemonic != "FileWrite":
+        fail("unexpected write action fields")
+    exp_act = created.by_file[expanded]
+    if exp_act.substitutions["%VALS%"] != "a,b":
+        fail("unexpected template_dict substitutions: " + repr(exp_act.substitutions))
+
+    base_out = ctx.actions.declare_file("base.out")
+    ctx.actions.run(
+        outputs = [base_out],
+        inputs = [w],
+        executable = "/bin/true",
+        arguments = ["--base"],
+        env = {"A": "1", "B": "base"},
+    )
+    base_act = ctx.created_actions().by_file[base_out]
+    shadow_out = ctx.actions.declare_file("shadow.out")
+    ctx.actions.run(
+        outputs = [shadow_out],
+        executable = "/bin/true",
+        shadowed_action = base_act,
+        env = {"B": "override"},
+    )
+    sh_act = ctx.created_actions().by_file[shadow_out]
+    if sh_act.env["A"] != "1" or sh_act.env["B"] != "override":
+        fail("shadowed_action env merge failed: " + repr(sh_act.env))
+    if w not in sh_act.inputs.to_list():
+        fail("shadowed_action inputs not inherited")
+
+    src_dir = ctx.actions.declare_directory("src_tree")
+    ctx.actions.run(outputs = [src_dir], executable = "/bin/mkdir")
+    dst_dir = ctx.actions.declare_directory("dst_tree")
+    ctx.actions.map_directory(
+        input_directories = {"src_dir": src_dir},
+        output_directories = {"dst_dir": dst_dir},
+        additional_params = {"mode": "fast"},
+        implementation = _expand_dir,
+    )
+    return [
+        DefaultInfo(files = depset([w, expanded, shadow_out, dst_dir])),
+        OutputGroupInfo(extra = depset([expanded])),
+    ]
+
+testable_rule = rule(implementation = _impl, _skylark_testable = True)
+
+def _inspect_impl(ctx):
+    dep = ctx.attr.dep
+    if len(dep.actions) < 4:
+        fail("expected target.actions on dep")
+    if "extra" not in dep.output_groups:
+        fail("expected extra in OutputGroupInfo iteration")
+    out = ctx.actions.declare_file("ok.txt")
+    ctx.actions.write(out, "ok")
+    return [DefaultInfo(files = depset([out]))]
+
+inspector = rule(implementation = _inspect_impl, attrs = {"dep": attr.label()})
+"#,
+        ),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"testable_rule\", \"inspector\")\ntestable_rule(name = \"t\")\ninspector(name = \"i\", dep = \":t\")\n",
+        ),
+    ]);
+    let ct = ws.analyze("//:i").unwrap();
+    assert_eq!(ct.default_info.files.len(), 1);
+}
+
+#[test]
+fn aspect_propagation_predicate_and_dynamic_attr_aspects() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+SeenInfo = provider(fields = ["labels"])
+
+def _pred(ctx):
+    return ctx.rule.qualified_kind.rule_name == "node" and ctx.rule.attr.tag.value != "skip"
+
+def _dyn_attrs(ctx):
+    if ctx.attr.follow_extra == "yes":
+        return ["deps", "extra"]
+    return ["deps"]
+
+def _asp_impl(target, ctx):
+    acc = [str(target.label)]
+    for d in getattr(ctx.rule.attr, "deps", []):
+        if SeenInfo in d:
+            acc.extend(d[SeenInfo].labels)
+    for d in getattr(ctx.rule.attr, "extra", []):
+        if SeenInfo in d:
+            acc.extend(d[SeenInfo].labels)
+    return [SeenInfo(labels = acc)]
+
+dyn_aspect = aspect(
+    implementation = _asp_impl,
+    attr_aspects = _dyn_attrs,
+    propagation_predicate = _pred,
+    attrs = {"follow_extra": attr.string(default = "yes")},
+)
+
+def _node_impl(ctx):
+    return [DefaultInfo()]
+
+node = rule(
+    implementation = _node_impl,
+    attrs = {
+        "deps": attr.label_list(),
+        "extra": attr.label_list(),
+        "tag": attr.string(default = ""),
+    },
+)
+
+def _collect_impl(ctx):
+    seen = ctx.attr.root[SeenInfo].labels
+    out = ctx.actions.declare_file("seen.txt")
+    ctx.actions.write(out, ",".join(seen))
+    return [DefaultInfo(files = depset([out]))]
+
+collector = rule(
+    implementation = _collect_impl,
+    attrs = {"root": attr.label(aspects = [dyn_aspect])},
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "node", "collector")
+node(name = "skipped", tag = "skip")
+node(name = "extra_leaf")
+node(name = "root", deps = [":skipped"], extra = [":extra_leaf"])
+collector(name = "c", root = ":root")
+"#,
+        ),
+    ]);
+    let ct = ws.analyze("//:c").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let rendered = String::from_utf8(content.render()).unwrap();
+    assert!(rendered.contains("//:root"), "{rendered}");
+    assert!(rendered.contains("//:extra_leaf"), "{rendered}");
+    assert!(!rendered.contains("skipped"), "{rendered}");
+}
+
+#[test]
+fn allow_analysis_failure_and_analysis_failure_info() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _bad_impl(ctx):
+    fail("boom from bad_rule")
+
+bad_rule = rule(implementation = _bad_impl)
+
+def _wrap_impl(ctx):
+    out = ctx.actions.declare_file("never.txt")
+    ctx.actions.write(out, "never")
+    return [DefaultInfo(files = depset([out]))]
+
+wrap_rule = rule(implementation = _wrap_impl, attrs = {"dep": attr.label()})
+
+def _test_impl(ctx):
+    tut = ctx.attr.target_under_test[0]
+    ok = AnalysisFailureInfo in tut
+    causes = tut[AnalysisFailureInfo].causes.to_list() if ok else []
+    msg = causes[0].message if len(causes) == 1 else "wrong causes"
+    return [AnalysisTestResultInfo(success = ok and "boom from bad_rule" in msg, message = msg)]
+
+failure_test = rule(
+    implementation = _test_impl,
+    analysis_test = True,
+    attrs = {
+        "target_under_test": attr.label(
+            cfg = analysis_test_transition(
+                settings = {"//command_line_option:allow_analysis_failures": "true"},
+            ),
+        ),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "bad_rule", "wrap_rule", "failure_test")
+bad_rule(name = "bad")
+wrap_rule(name = "wrap", dep = ":bad")
+failure_test(name = "check_failure", target_under_test = ":wrap")
+"#,
+        ),
+    ]);
+    let ct = ws.analyze("//:check_failure").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected analysis test script");
+    };
+    let script = String::from_utf8(content.render()).unwrap();
+    assert!(script.contains("exit 0"), "{script}");
+}
+
+#[test]
+fn fragments_configuration_methods_and_string_set_flags() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _flag_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, ",".join(list(ctx.build_setting_value)))
+    return [DefaultInfo(files = depset([out]))]
+
+set_flag = rule(
+    implementation = _flag_impl,
+    build_setting = config.string_set(flag = True),
+)
+
+def _disallowed_proto_impl(ctx):
+    _ = ctx.fragments.proto.strict_proto_deps()
+    return []
+
+disallowed_proto_rule = rule(
+    implementation = _disallowed_proto_impl,
+    fragments = ["proto"],
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "set_flag", "disallowed_proto_rule")
+load("@protobuf//:defs.bzl", "check_rule")
+set_flag(name = "my_set", build_setting_default = set(["x"]))
+check_rule(name = "chk")
+disallowed_proto_rule(name = "bad_proto")
+"#,
+        ),
+    ]);
+    let pb_root = PathFragment::create("/pb");
+    ws.fs.create_directory_and_parents(&pb_root).unwrap();
+    ws.fs
+        .write_file(&pb_root.get_relative_str("BUILD"), b"")
+        .unwrap();
+    ws.fs
+        .write_file(
+            &pb_root.get_relative_str("defs.bzl"),
+            br#"
+def _check_impl(ctx):
+    df = ctx.configuration.disabled_features()
+    ios_min = ctx.fragments.apple.ios_minimum_os_flag
+    j_ord = ctx.fragments.java.default_javac_flags_depset
+    cov_gen = ctx.fragments.coverage.output_generator
+    if cov_gen != None and type(cov_gen) != "Label":
+        fail("expected coverage.output_generator to be Label or None, got " + type(cov_gen))
+    if ctx.fragments.cpp._fdo_prefetch_hints_label != None:
+        fail("expected cpp._fdo_prefetch_hints_label struct field to be None by default")
+    strict_deps = ctx.fragments.proto.strict_proto_deps()
+    strict_pub = ctx.fragments.proto.strict_public_imports()
+    inc_src = ctx.fragments.proto.experimental_proto_descriptorsets_include_source_info()
+    out = ctx.actions.declare_file("info.txt")
+    ctx.actions.write(
+        out,
+        "{}|{}|{}|{}|{}|{}|{}".format(
+            ",".join(df),
+            str(ios_min),
+            ",".join(j_ord.to_list()),
+            str(cov_gen),
+            strict_deps,
+            strict_pub,
+            str(inc_src),
+        ),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+check_rule = rule(
+    implementation = _check_impl,
+    fragments = ["apple", "java", "cpp", "proto"],
+)
+"#,
+        )
+        .unwrap();
+    let make_resolver = |fs: Arc<InMemoryFileSystem>| {
+        let mut rr = SimpleRepoResolver::new(ws.root.clone());
+        rr.external.insert("protobuf".into(), pb_root.clone());
+        rr.apparent.insert(
+            "protobuf".into(),
+            RepositoryName::create("protobuf").unwrap(),
+        );
+        let lc = LoaderConfig::new(fs, Arc::new(rr));
+        TargetResolver::new(PackageLoader::new(lc), AnalysisConfig::new())
+    };
+    let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cfg.options.insert("features".into(), "a,-b".into());
+    cfg.options.insert("ios_minimum_os".into(), "15.2".into());
+    cfg.options.insert(
+        "javacopt".into(),
+        zel_analysis::build_options::encode_unsplit_list(&[
+            "-Xlint:all".to_string(),
+            "-source 11".to_string(),
+        ]),
+    );
+    cfg.options
+        .insert("collect_code_coverage".into(), "true".into());
+    cfg.flag_values.insert("//:my_set".into(), "p,q,p".into());
+    let r = make_resolver(ws.fs.clone());
+    let flag_ct = r
+        .analyze(&Label::parse_canonical("//:my_set").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &flag_ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(String::from_utf8(content.render()).unwrap(), "p,q");
+
+    let bad_err = r
+        .analyze(&Label::parse_canonical("//:bad_proto").unwrap(), &cfg)
+        .unwrap_err();
+    assert!(
+        bad_err.contains("cannot use private API"),
+        "expected private API error for main-repo rule: {bad_err}"
+    );
+
+    let chk_ct = r
+        .analyze(&Label::parse_canonical("//:chk").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &chk_ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    assert_eq!(
+        text,
+        "b|15.2|-Xlint:all -source 11|@@bazel_tools//tools/test:lcov_merger|ERROR|OFF|False"
+    );
+
+    // Without `--collect_code_coverage`, `ctx.fragments.coverage.output_generator` is `None`.
+    let mut no_cov_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    no_cov_cfg.options.insert("features".into(), "a,-b".into());
+    no_cov_cfg
+        .options
+        .insert("ios_minimum_os".into(), "15.2".into());
+    let r_nocov = make_resolver(ws.fs.clone());
+    let chk_nocov = r_nocov
+        .analyze(&Label::parse_canonical("//:chk").unwrap(), &no_cov_cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &chk_nocov.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text_nocov = String::from_utf8(content.render()).unwrap();
+    assert!(
+        text_nocov.contains("|None|ERROR|OFF|False"),
+        "expected None output_generator when coverage is off: {text_nocov}"
+    );
+}
+
+#[test]
+fn cc_common_get_tool_for_action_errors_on_unconfigured_and_resolves_disabled_action_config() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _probe_impl(ctx):
+    cc_internal = cc_common.internal_DO_NOT_USE()
+    cfg_info = struct(
+        _features_DO_NOT_USE = [],
+        _action_configs_DO_NOT_USE = [
+            struct(
+                action_name = "c-compile",
+                enabled = True,
+                tools = [struct(path = "/usr/bin/clang")],
+            ),
+            struct(
+                action_name = "strip",
+                enabled = False,
+                tools = [struct(path = "/usr/bin/strip", execution_requirements = ["no-remote"])],
+            ),
+            struct(
+                action_name = "empty-tool",
+                enabled = True,
+                tools = [],
+            ),
+        ],
+        _artifact_name_patterns_DO_NOT_USE = [],
+    )
+    tf = cc_internal.cc_toolchain_features(toolchain_config_info = cfg_info, tools_directory = "")
+    fc = tf.configure_features(requested_features = tf.default_features_and_action_configs())
+    if ctx.fragments.cpp.do_not_use_macos_set_install_name != True or type(ctx.fragments.cpp.do_not_use_macos_set_install_name) != "bool":
+        fail("expected cpp.do_not_use_macos_set_install_name to be bool True")
+    if not cc_common.action_is_enabled(feature_configuration = fc, action_name = "c-compile"):
+        fail("expected c-compile to be enabled")
+    if cc_common.action_is_enabled(feature_configuration = fc, action_name = "strip"):
+        fail("expected strip action_config to be disabled")
+    if ctx.attr.mode == "unconfigured":
+        cc_common.get_tool_for_action(
+            feature_configuration = fc,
+            action_name = "unregistered-action",
+        )
+    if ctx.attr.mode == "no_tool":
+        cc_common.get_tool_for_action(
+            feature_configuration = fc,
+            action_name = "empty-tool",
+        )
+    strip_tool = cc_common.get_tool_for_action(feature_configuration = fc, action_name = "strip")
+    strip_reqs = cc_common.get_execution_requirements(feature_configuration = fc, action_name = "strip")
+    compile_tool = cc_common.get_tool_for_action(feature_configuration = fc, action_name = "c-compile")
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, "{}|{}|{}".format(strip_tool, ",".join(strip_reqs), compile_tool))
+    return [DefaultInfo(files = depset([out]))]
+
+probe = rule(
+    implementation = _probe_impl,
+    attrs = {"mode": attr.string(default = "ok")},
+    fragments = ["cpp"],
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "probe")
+probe(name = "ok")
+probe(name = "bad_unconfigured", mode = "unconfigured")
+probe(name = "bad_no_tool", mode = "no_tool")
+"#,
+        ),
+    ]);
+
+    let ok_ct = ws.analyze("//:ok").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ok_ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(
+        String::from_utf8(content.render()).unwrap(),
+        "/usr/bin/strip|no-remote|/usr/bin/clang"
+    );
+
+    let err = ws.analyze("//:bad_unconfigured").unwrap_err().to_string();
+    assert!(
+        err.contains(
+            "Action unregistered-action does not have an enabled configuration in the toolchain."
+        ),
+        "unexpected error: {err}"
+    );
+
+    let no_tool_err = ws.analyze("//:bad_no_tool").unwrap_err().to_string();
+    assert!(
+        no_tool_err.contains(
+            "Matching tool for action empty-tool not found for given feature configuration"
+        ),
+        "unexpected error: {no_tool_err}"
+    );
+}
+
+#[test]
+fn coverage_instrumented_respects_flags_filter_test_targets_and_file_targets() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r##"
+def _cov_lib_impl(ctx):
+    info = coverage_common.instrumented_files_info(ctx, source_attributes = ["srcs"])
+    return [DefaultInfo(), info]
+
+cov_lib = rule(
+    implementation = _cov_lib_impl,
+    attrs = {"srcs": attr.label_list(allow_files = True)},
+)
+
+def _plain_impl(ctx):
+    return [DefaultInfo()]
+
+plain_lib = rule(implementation = _plain_impl)
+
+def _cov_test_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(exe, "#!/bin/sh\nexit 0\n", is_executable = True)
+    info = coverage_common.instrumented_files_info(ctx, source_attributes = ["srcs"])
+    return [DefaultInfo(executable = exe, files = depset([exe])), info]
+
+cov_test = rule(
+    implementation = _cov_test_impl,
+    test = True,
+    attrs = {"srcs": attr.label_list(allow_files = True)},
+)
+
+def _probe_impl(ctx):
+    if ctx.attr.bad_arg:
+        ctx.coverage_instrumented("not_a_target")
+    parts = [
+        "self=" + str(ctx.coverage_instrumented()),
+        "inc_cov=" + str(ctx.coverage_instrumented(ctx.attr.inc_cov)),
+        "exc_cov=" + str(ctx.coverage_instrumented(ctx.attr.exc_cov)),
+        "inc_fg=" + str(ctx.coverage_instrumented(ctx.attr.inc_fg)),
+        "exc_fg=" + str(ctx.coverage_instrumented(ctx.attr.exc_fg)),
+        "sub_fg=" + str(ctx.coverage_instrumented(ctx.attr.sub_fg)),
+        "inc_plain=" + str(ctx.coverage_instrumented(ctx.attr.inc_plain)),
+        "inc_test=" + str(ctx.coverage_instrumented(ctx.attr.inc_test)),
+        "alias_test=" + str(ctx.coverage_instrumented(ctx.attr.alias_test)),
+        "alias_inc_cov=" + str(ctx.coverage_instrumented(ctx.attr.alias_inc_cov)),
+        "alias_exc_cov=" + str(ctx.coverage_instrumented(ctx.attr.alias_exc_cov)),
+        "src_file=" + str(ctx.coverage_instrumented(ctx.attr.src_file)),
+        "gen_file=" + str(ctx.coverage_instrumented(ctx.attr.gen_file)),
+    ]
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, "|".join(parts))
+    return [DefaultInfo(files = depset([out]))]
+
+probe = rule(
+    implementation = _probe_impl,
+    attrs = {
+        "inc_cov": attr.label(),
+        "exc_cov": attr.label(),
+        "inc_fg": attr.label(),
+        "exc_fg": attr.label(),
+        "sub_fg": attr.label(),
+        "inc_plain": attr.label(),
+        "inc_test": attr.label(),
+        "alias_test": attr.label(),
+        "alias_inc_cov": attr.label(),
+        "alias_exc_cov": attr.label(),
+        "src_file": attr.label(allow_single_file = True),
+        "gen_file": attr.label(allow_single_file = True),
+        "bad_arg": attr.bool(default = False),
+    },
+)
+"##,
+        ),
+        ("BUILD", ""),
+        ("inc/src.c", "int main() { return 0; }\n"),
+        (
+            "inc/BUILD",
+            r#"
+package(default_visibility = ["//visibility:public"])
+load("//:defs.bzl", "cov_lib", "plain_lib", "cov_test", "probe")
+exports_files(["src.c"])
+genrule(name = "gen", outs = ["gen_out.c"], cmd = "echo 'int x = 0;' > $@")
+cov_lib(name = "lib", srcs = ["src.c"])
+filegroup(name = "fg", srcs = ["src.c"])
+filegroup(name = "excluded_fg", srcs = ["src.c"])
+plain_lib(name = "plain")
+cov_test(name = "my_test", srcs = ["src.c"])
+alias(name = "alias_to_exc_lib", actual = "//exc:lib")
+probe(
+    name = "p",
+    testonly = True,
+    inc_cov = "//inc:lib",
+    exc_cov = "//exc:lib",
+    inc_fg = "//inc:fg",
+    exc_fg = "//exc:fg",
+    sub_fg = "//inc:excluded_fg",
+    inc_plain = "//inc:plain",
+    inc_test = "//inc:my_test",
+    alias_test = "//exc:chain_to_inc_test",
+    alias_inc_cov = "//exc:alias_to_inc_lib",
+    alias_exc_cov = "//inc:alias_to_exc_lib",
+    src_file = "//inc:src.c",
+    gen_file = "//inc:gen_out.c",
+)
+probe(name = "bad", bad_arg = True)
+"#,
+        ),
+        ("exc/src.c", "int y = 1;\n"),
+        (
+            "exc/BUILD",
+            r#"
+package(default_visibility = ["//visibility:public"])
+load("//:defs.bzl", "cov_lib")
+cov_lib(name = "lib", srcs = ["src.c"])
+filegroup(name = "fg", srcs = ["src.c"])
+alias(name = "alias_to_inc_lib", actual = "//inc:lib")
+alias(name = "alias_to_inc_test", actual = "//inc:my_test", testonly = True)
+alias(name = "chain_to_inc_test", actual = ":alias_to_inc_test", testonly = True)
+"#,
+        ),
+    ]);
+
+    let run_with = |cov: bool, filter: Option<&str>, inst_tests: bool| -> String {
+        let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        cfg.options.insert(
+            "collect_code_coverage".into(),
+            if cov { "true" } else { "false" }.into(),
+        );
+        if let Some(f) = filter {
+            cfg.options
+                .insert("instrumentation_filter".into(), f.into());
+        }
+        cfg.options.insert(
+            "instrument_test_targets".into(),
+            if inst_tests { "true" } else { "false" }.into(),
+        );
+        let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
+        let ct = r
+            .analyze(&Label::parse_canonical("//inc:p").unwrap(), &cfg)
+            .unwrap();
+        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+            panic!("expected FileWrite");
+        };
+        String::from_utf8(content.render()).unwrap()
+    };
+
+    // Coverage disabled: everything is False.
+    assert_eq!(
+        run_with(false, Some("//inc"), true),
+        "self=False|inc_cov=False|exc_cov=False|inc_fg=False|exc_fg=False|sub_fg=False|inc_plain=False|inc_test=False|alias_test=False|alias_inc_cov=False|alias_exc_cov=False|src_file=False|gen_file=False"
+    );
+
+    // Coverage enabled with filter `^//inc`, test targets excluded:
+    // - `//inc:lib`, `//inc:fg`, `//inc:excluded_fg`, `//exc:alias_to_inc_lib`, and self (`//inc:p`) are True.
+    // - `//exc:lib`, `//inc:alias_to_exc_lib`, and `//exc:fg` are excluded by actual label -> False!
+    // - `//inc:plain` lacks InstrumentedFilesInfo -> False.
+    // - `//inc:my_test` and `//exc:chain_to_inc_test` (chained alias of a test) are excluded with --noinstrument_test_targets -> False.
+    // - `//inc:src.c` (source file) and `//inc:gen` (rule without InstrumentedFilesInfo) -> False.
+    assert_eq!(
+        run_with(true, Some("^//inc"), false),
+        "self=True|inc_cov=True|exc_cov=False|inc_fg=True|exc_fg=False|sub_fg=True|inc_plain=False|inc_test=False|alias_test=False|alias_inc_cov=True|alias_exc_cov=False|src_file=False|gen_file=False"
+    );
+
+    // Coverage enabled with negative filter exclusion `-//inc:excluded_fg` and `--instrument_test_targets`:
+    // - `//inc:my_test` and `//exc:chain_to_inc_test` become True.
+    // - `//inc:excluded_fg` becomes False despite carrying InstrumentedFilesInfo.
+    assert_eq!(
+        run_with(true, Some("^//inc,-^//inc:excluded_fg$"), true),
+        "self=True|inc_cov=True|exc_cov=False|inc_fg=True|exc_fg=False|sub_fg=False|inc_plain=False|inc_test=True|alias_test=True|alias_inc_cov=True|alias_exc_cov=False|src_file=False|gen_file=False"
+    );
+
+    // Invalid target type fails eagerly even when coverage is disabled.
+    let err = ws.analyze("//inc:bad").unwrap_err().to_string();
+    assert!(
+        err.contains("want 'Target or NoneType'"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn map_directory_analysis_validation_and_orphan_check() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _noop_expand(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    pass
+
+def _impl(ctx):
+    src_dir = ctx.actions.declare_directory("src")
+    ctx.actions.run(outputs = [src_dir], executable = "/bin/mkdir")
+    dst_dir = ctx.actions.declare_directory("dst")
+    if ctx.attr.mode == "orphan":
+        return [DefaultInfo(files = depset([dst_dir]))]
+    if ctx.attr.mode == "empty_in":
+        ctx.actions.map_directory(
+            input_directories = {},
+            output_directories = {"dst": dst_dir},
+            implementation = _noop_expand,
+        )
+    elif ctx.attr.mode == "empty_out":
+        ctx.actions.map_directory(
+            input_directories = {"src": src_dir},
+            output_directories = {},
+            implementation = _noop_expand,
+        )
+    elif ctx.attr.mode == "bad_param":
+        ctx.actions.map_directory(
+            input_directories = {"src": src_dir},
+            output_directories = {"dst": dst_dir},
+            additional_params = {"bad": [1, 2]},
+            implementation = _noop_expand,
+        )
+    else:
+        ctx.actions.map_directory(
+            input_directories = {"src": src_dir},
+            output_directories = {"dst": dst_dir},
+            additional_params = {"k": "v", "n": 3, "b": True},
+            mnemonic = "CustomExpanded",
+            implementation = _noop_expand,
+        )
+    return [DefaultInfo(files = depset([dst_dir]))]
+
+r = rule(implementation = _impl, attrs = {"mode": attr.string(default = "ok")})
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "r")
+r(name = "ok", mode = "ok")
+r(name = "orphan", mode = "orphan")
+r(name = "empty_in", mode = "empty_in")
+r(name = "empty_out", mode = "empty_out")
+r(name = "bad_param", mode = "bad_param")
+"#,
+        ),
+    ]);
+
+    let ok_ct = ws.analyze("//:ok").unwrap();
+    assert!(ok_ct
+        .typed_actions
+        .iter()
+        .any(|a| a.mnemonic == "StarlarkMapActionTemplate"));
+
+    let orphan_err = ws.analyze("//:orphan").unwrap_err().to_string();
+    assert!(
+        orphan_err.contains("have no generating action"),
+        "unexpected error: {orphan_err}"
+    );
+
+    let in_err = ws.analyze("//:empty_in").unwrap_err().to_string();
+    assert!(
+        in_err.contains("requires at least one input"),
+        "unexpected error: {in_err}"
+    );
+
+    let out_err = ws.analyze("//:empty_out").unwrap_err().to_string();
+    assert!(
+        out_err.contains("requires at least one output"),
+        "unexpected error: {out_err}"
+    );
+
+    let param_err = ws.analyze("//:bad_param").unwrap_err().to_string();
+    assert!(
+        param_err.contains("Expected one of [bool, int, string]"),
+        "unexpected error: {param_err}"
+    );
+
+    let mut disabled_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    disabled_cfg
+        .options
+        .insert("experimental_allow_map_directory".into(), "false".into());
+    let (res, cfg) = ws.resolver_with(disabled_cfg, AnalysisConfig::new());
+    let flag_err = res
+        .analyze(&Label::parse_canonical("//:ok").unwrap(), &cfg)
+        .unwrap_err()
+        .to_string();
+    assert!(
+        flag_err.contains("--experimental_allow_map_directory"),
+        "unexpected error: {flag_err}"
+    );
+}
+
+#[test]
+fn starlark_runfiles_merge_preserves_map_only_and_ordered_symlinks_in_both_directions() {
+    struct MapOnlyRunfilesResolver {
+        inner: Arc<TargetResolver>,
+    }
+
+    impl zel_analysis::starlark_rule::DepResolver for MapOnlyRunfilesResolver {
+        fn configured_target(
+            &self,
+            label: &Label,
+            cfg: &BuildConfigurationKey,
+        ) -> Result<Arc<ConfiguredTarget>, String> {
+            let ct = self.inner.configured_target(label, cfg)?;
+            if label.name() == "map_dep" {
+                let mut cloned = (*ct).clone();
+                let sym_art = zel_analysis::Artifact::source(
+                    PathFragment::create("dep_sym.txt"),
+                    label.clone(),
+                );
+                let root_art = zel_analysis::Artifact::source(
+                    PathFragment::create("dep_root.txt"),
+                    label.clone(),
+                );
+                let mut rf = zel_analysis::Runfiles::default();
+                // Populate ONLY the BTreeMaps (`symlink_entries` / `root_symlink_entries` left empty).
+                rf.symlinks.insert("from_map".to_string(), sym_art);
+                rf.root_symlinks
+                    .insert("root_from_map".to_string(), root_art);
+                cloned.providers.insert(
+                    "DefaultInfo".to_string(),
+                    zel_analysis::starlark_rule::default_info_provider(&[], rf.clone(), rf, None),
+                );
+                return Ok(Arc::new(cloned));
+            }
+            Ok(ct)
+        }
+    }
+
+    let ws = Ws::new(&[
+        ("dep_sym.txt", "1"),
+        ("dep_root.txt", "2"),
+        ("own_sym.txt", "3"),
+        ("own_root.txt", "4"),
+        (
+            "defs.bzl",
+            r#"
+def _empty_impl(ctx):
+    return [DefaultInfo()]
+
+empty_rule = rule(implementation = _empty_impl)
+
+def _merge_check_impl(ctx):
+    dep_rf = ctx.attr.dep[DefaultInfo].default_runfiles
+    own_rf = ctx.runfiles(
+        symlinks = {"from_vec": ctx.file.own_sym},
+        root_symlinks = {"root_from_vec": ctx.file.own_root},
+    )
+    m_own_first = own_rf.merge(dep_rf)
+    m_dep_first = dep_rf.merge(own_rf)
+    s1 = [e.path for e in m_own_first.symlinks.to_list()]
+    r1 = [e.path for e in m_own_first.root_symlinks.to_list()]
+    s2 = [e.path for e in m_dep_first.symlinks.to_list()]
+    r2 = [e.path for e in m_dep_first.root_symlinks.to_list()]
+    out = ctx.actions.declare_file("merged.txt")
+    ctx.actions.write(
+        out,
+        "{}|{}|{}|{}".format(",".join(s1), ",".join(r1), ",".join(s2), ",".join(r2)),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+merge_check = rule(
+    implementation = _merge_check_impl,
+    attrs = {
+        "dep": attr.label(),
+        "own_sym": attr.label(allow_single_file = True),
+        "own_root": attr.label(allow_single_file = True),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "empty_rule", "merge_check")
+empty_rule(name = "map_dep")
+merge_check(
+    name = "chk",
+    dep = ":map_dep",
+    own_sym = "own_sym.txt",
+    own_root = "own_root.txt",
+)
+"#,
+        ),
+    ]);
+
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let (inner, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
+    let pkg = inner
+        .loader()
+        .load_package(&zel_cmdline::PackageIdentifier::create_in_main_repo("").unwrap())
+        .unwrap();
+    let Some(zel_packages::Target::Rule(rule)) = pkg.targets.get("chk") else {
+        panic!("expected chk rule");
+    };
+    let wrapped: Arc<dyn zel_analysis::starlark_rule::DepResolver> =
+        Arc::new(MapOnlyRunfilesResolver { inner });
+    let ct = zel_analysis::starlark_rule::analyze_starlark_rule(
+        rule,
+        &cfg,
+        zel_analysis::starlark_rule::AnalysisInputs::new(wrapped),
+    )
+    .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let rendered = String::from_utf8(content.render()).unwrap();
+    assert_eq!(
+        rendered,
+        "from_vec,from_map|root_from_vec,root_from_map|from_map,from_vec|root_from_map,root_from_vec"
+    );
+}
+
+#[test]
+fn apple_fragment_watchos_device_and_simulator_cpus_in_starlark_rules() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _impl(ctx):
+    a = ctx.fragments.apple
+    p = a.single_arch_platform
+    cpus = a.apple_cpus
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(
+        out,
+        "{}|{}|{}|{}|{}|{}".format(
+            a.single_arch_cpu,
+            p.name,
+            p.name_in_plist,
+            p.platform_type,
+            p.is_device,
+            ",".join(list(cpus.watchos_cpus)),
+        ),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+apple_probe = rule(
+    implementation = _impl,
+    fragments = ["apple"],
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "apple_probe")
+apple_probe(name = "probe")
+"#,
+        ),
+    ]);
+
+    for (cpu, expected) in [
+        (
+            "watchos_device_arm64",
+            "arm64|watchos_device|WatchOS|watchos|True|device_arm64",
+        ),
+        (
+            "watchos_device_arm64e",
+            "arm64e|watchos_device|WatchOS|watchos|True|device_arm64e",
+        ),
+        (
+            "watchos_arm64_32",
+            "arm64_32|watchos_device|WatchOS|watchos|True|arm64_32",
+        ),
+        (
+            "watchos_arm64",
+            "arm64|watchos_simulator|WatchSimulator|watchos|False|arm64",
+        ),
+    ] {
+        let cfg = BuildConfigurationKey::target(cpu, "fastbuild");
+        let (r, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
+        let ct = r
+            .analyze(&Label::parse_canonical("//:probe").unwrap(), &cfg)
+            .unwrap();
+        let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+            panic!("expected FileWrite");
+        };
+        assert_eq!(
+            String::from_utf8(content.render()).unwrap(),
+            expected,
+            "unexpected apple fragment values for {cpu}"
+        );
+    }
+}
+
+#[test]
+fn map_directory_fingerprints_cyclic_bzl_globals_and_params_deterministically() {
+    let make_bzl = |tag: &str, cyclic: bool| {
+        if cyclic {
+            format!(
+                r#"
+LIST = ["{tag}"]
+LIST.append(LIST)
+
+DICT = {{"tag": "{tag}"}}
+DICT["self"] = DICT
+
+HOLDER = []
+WRAPPED = struct(items = HOLDER)
+HOLDER.append(WRAPPED)
+
+CYCLE_A = ["{tag}"]
+CYCLE_B = [CYCLE_A]
+CYCLE_A.append(CYCLE_B)
+
+def _make_helper():
+    local_cycle = ["{tag}"]
+    local_cycle.append(local_cycle)
+    def _helper():
+        return local_cycle
+    return _helper
+
+_HELPER = _make_helper()
+
+def _expand(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    _ = (LIST, DICT, WRAPPED, CYCLE_A, _HELPER)
+
+def _impl(ctx):
+    in_dir = ctx.actions.declare_directory(ctx.label.name + "_in")
+    ctx.actions.run(outputs = [in_dir], executable = "/bin/mkdir")
+    out_dir = ctx.actions.declare_directory(ctx.label.name + "_out")
+    ctx.actions.map_directory(
+        input_directories = {{"src": in_dir}},
+        output_directories = {{"dst": out_dir}},
+        additional_params = {{"mode": "ok"}},
+        implementation = _expand,
+    )
+    return [DefaultInfo(files = depset([out_dir]))]
+
+cyclic_map = rule(implementation = _impl)
+"#
+            )
+        } else {
+            format!(
+                r#"
+LIST = ["{tag}", []]
+DICT = {{"tag": "{tag}", "self": {{}}}}
+HOLDER = [struct(items = [])]
+WRAPPED = struct(items = HOLDER)
+
+CYCLE_A = ["{tag}", [[]]]
+CYCLE_B = [CYCLE_A]
+
+def _make_helper():
+    local_cycle = ["{tag}", []]
+    def _helper():
+        return local_cycle
+    return _helper
+
+_HELPER = _make_helper()
+
+def _expand(template_ctx, *, input_directories, output_directories, additional_inputs, tools, additional_params):
+    _ = (LIST, DICT, WRAPPED, CYCLE_A, _HELPER)
+
+def _impl(ctx):
+    in_dir = ctx.actions.declare_directory(ctx.label.name + "_in")
+    ctx.actions.run(outputs = [in_dir], executable = "/bin/mkdir")
+    out_dir = ctx.actions.declare_directory(ctx.label.name + "_out")
+    ctx.actions.map_directory(
+        input_directories = {{"src": in_dir}},
+        output_directories = {{"dst": out_dir}},
+        additional_params = {{"mode": "ok"}},
+        implementation = _expand,
+    )
+    return [DefaultInfo(files = depset([out_dir]))]
+
+cyclic_map = rule(implementation = _impl)
+"#
+            )
+        }
+    };
+
+    let analyze_key = |bzl: &str| -> String {
+        let ws = Ws::new(&[
+            ("defs.bzl", bzl),
+            (
+                "BUILD",
+                "load(\":defs.bzl\", \"cyclic_map\")\ncyclic_map(name = \"m\")\n",
+            ),
+        ]);
+        let ct = ws.analyze("//:m").unwrap();
+        let map_action = ct
+            .typed_actions
+            .iter()
+            .find(|a| matches!(a.kind, ActionKind::MapDirectory { .. }))
+            .expect("MapDirectory action");
+        map_action.key()
+    };
+
+    let cyc_v1_run1 = analyze_key(&make_bzl("v1", true));
+    let cyc_v1_run2 = analyze_key(&make_bzl("v1", true));
+    let cyc_v2 = analyze_key(&make_bzl("v2", true));
+    let non_cyc_v1 = analyze_key(&make_bzl("v1", false));
+
+    assert_eq!(
+        cyc_v1_run1, cyc_v1_run2,
+        "cyclic Starlark globals must produce deterministic action keys across evaluations"
+    );
+    assert_ne!(
+        cyc_v1_run1, cyc_v2,
+        "distinct cyclic globals must produce distinct action keys"
+    );
+    assert_ne!(
+        cyc_v1_run1, non_cyc_v1,
+        "cyclic vs non-cyclic globals must produce distinct action keys"
+    );
+}
+
+#[test]
+fn composed_split_and_patch_transitions_match_bazel_split_attr_keys() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _split1_impl(settings, attr):
+    return {
+        "a": {"//command_line_option:copt": ["-DA"]},
+        "b": {"//command_line_option:copt": ["-DB"]},
+    }
+
+def _split2_impl(settings, attr):
+    return {
+        "x": {"//command_line_option:cxxopt": ["-DX"]},
+        "y": {"//command_line_option:cxxopt": ["-DY"]},
+    }
+
+def _patch_impl(settings, attr):
+    return {"//command_line_option:conlyopt": ["-DPATCH"]}
+
+split1 = transition(
+    implementation = _split1_impl,
+    inputs = [],
+    outputs = ["//command_line_option:copt"],
+)
+split2 = transition(
+    implementation = _split2_impl,
+    inputs = [],
+    outputs = ["//command_line_option:cxxopt"],
+)
+patch = transition(
+    implementation = _patch_impl,
+    inputs = [],
+    outputs = ["//command_line_option:conlyopt"],
+)
+
+split_then_split = split1.and_then(split2)
+patch_then_split = patch.and_then(split2)
+split_then_patch = split1.and_then(patch)
+patch_then_patch = patch.and_then(config.target())
+
+def _leaf_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(
+        out,
+        "{}|{}|{}".format(
+            ",".join(ctx.fragments.cpp.copts),
+            ",".join(ctx.fragments.cpp.cxxopts),
+            ",".join(ctx.fragments.cpp.conlyopts),
+        ),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+leaf = rule(implementation = _leaf_impl, fragments = ["cpp"])
+
+def _format_split(split_dict):
+    entries = []
+    for k in sorted(split_dict.keys()):
+        entries.append(k + "->" + split_dict[k].files.to_list()[0].path)
+    return ";".join(entries)
+
+def _top_impl(ctx):
+    out = ctx.actions.declare_file("summary.txt")
+    lines = [
+        "ss=" + _format_split(ctx.split_attr.ss),
+        "ps=" + _format_split(ctx.split_attr.ps),
+        "sp=" + _format_split(ctx.split_attr.sp),
+        "pp=" + ctx.attr.pp.files.to_list()[0].path,
+    ]
+    ctx.actions.write(out, "\n".join(lines))
+    return [DefaultInfo(files = depset([out]))]
+
+top = rule(
+    implementation = _top_impl,
+    attrs = {
+        "ss": attr.label(cfg = split_then_split),
+        "ps": attr.label(cfg = patch_then_split),
+        "sp": attr.label(cfg = split_then_patch),
+        "pp": attr.label(cfg = patch_then_patch),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "leaf", "top")
+leaf(name = "l")
+top(name = "t", ss = ":l", ps = ":l", sp = ":l", pp = ":l")
+"#,
+        ),
+    ]);
+
+    let ct = ws.analyze("//:t").unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 4, "{text}");
+
+    let st_ax = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:copt=[-DA]",
+        "//command_line_option:cxxopt=[-DX]",
+    ]);
+    let st_ay = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:copt=[-DA]",
+        "//command_line_option:cxxopt=[-DY]",
+    ]);
+    let st_bx = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:copt=[-DB]",
+        "//command_line_option:cxxopt=[-DX]",
+    ]);
+    let st_by = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:copt=[-DB]",
+        "//command_line_option:cxxopt=[-DY]",
+    ]);
+    assert_eq!(
+        lines[0],
+        format!(
+            "ss=a,x->bazel-out/k8-fastbuild-{st_ax}/bin/l.txt;a,y->bazel-out/k8-fastbuild-{st_ay}/bin/l.txt;b,x->bazel-out/k8-fastbuild-{st_bx}/bin/l.txt;b,y->bazel-out/k8-fastbuild-{st_by}/bin/l.txt"
+        ),
+        "{text}"
+    );
+
+    let st_px = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+        "//command_line_option:cxxopt=[-DX]",
+    ]);
+    let st_py = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+        "//command_line_option:cxxopt=[-DY]",
+    ]);
+    assert_eq!(
+        lines[1],
+        format!(
+            "ps=x->bazel-out/k8-fastbuild-{st_px}/bin/l.txt;y->bazel-out/k8-fastbuild-{st_py}/bin/l.txt"
+        ),
+        "{text}"
+    );
+
+    let st_ap = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+        "//command_line_option:copt=[-DA]",
+    ]);
+    let st_bp = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+        "//command_line_option:copt=[-DB]",
+    ]);
+    assert_eq!(
+        lines[2],
+        format!(
+            "sp=a->bazel-out/k8-fastbuild-{st_ap}/bin/l.txt;b->bazel-out/k8-fastbuild-{st_bp}/bin/l.txt"
+        ),
+        "{text}"
+    );
+
+    let st_pp = zel_analysis::transition_directory_name_fragment([
+        "//command_line_option:conlyopt=[-DPATCH]",
+    ]);
+    assert_eq!(
+        lines[3],
+        format!("pp=bazel-out/k8-fastbuild-{st_pp}/bin/l.txt"),
+        "{text}"
+    );
+}
+
+#[test]
+fn composed_exec_transitions_use_resolved_default_and_exec_group_platforms() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+DepInfo = provider(fields = ["plat", "copts", "path", "matched"])
+
+def _tc_impl(ctx):
+    return [platform_common.ToolchainInfo(name = ctx.label.name)]
+
+my_tc = rule(implementation = _tc_impl)
+
+def _patch_impl(settings, attr):
+    return {"//command_line_option:host_copt": ["-DPATCH"]}
+
+patch = transition(
+    implementation = _patch_impl,
+    inputs = [],
+    outputs = ["//command_line_option:host_copt"],
+)
+
+def _read_plat_patch_impl(settings, attr):
+    plats = settings["//command_line_option:platforms"]
+    first = str(plats[0]) if plats else "none"
+    return {"//command_line_option:copt": ["-DFROM=" + first]}
+
+read_plat_patch = transition(
+    implementation = _read_plat_patch_impl,
+    inputs = ["//command_line_option:platforms"],
+    outputs = ["//command_line_option:copt"],
+)
+
+def _split_impl(settings, attr):
+    return {
+        "a": {"//command_line_option:host_copt": ["-DA"]},
+        "b": {"//command_line_option:host_copt": ["-DB"]},
+    }
+
+split_t = transition(
+    implementation = _split_impl,
+    inputs = [],
+    outputs = ["//command_line_option:host_copt"],
+)
+
+patch_then_default_exec = patch.and_then(config.exec())
+patch_then_custom_exec = patch.and_then(config.exec(exec_group = "custom"))
+custom_exec_then_patch = config.exec(exec_group = "custom").and_then(read_plat_patch)
+split_then_default_exec = split_t.and_then(config.exec())
+split_then_custom_exec = split_t.and_then(config.exec(exec_group = "custom"))
+
+def _tool_leaf_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, "ok")
+    return [
+        DefaultInfo(files = depset([out])),
+        DepInfo(
+            plat = str(ctx.fragments.platform.platform),
+            copts = ",".join(ctx.fragments.cpp.copts),
+            path = out.path,
+            matched = ctx.attr.matched,
+        ),
+    ]
+
+tool_leaf = rule(
+    implementation = _tool_leaf_impl,
+    fragments = ["platform", "cpp"],
+    attrs = {"matched": attr.string()},
+)
+
+def _fmt_dep(t):
+    info = t[DepInfo]
+    return "{}|{}|{}|{}".format(info.plat, info.matched, info.copts, info.path)
+
+def _fmt_split(split_dict):
+    parts = []
+    for k in sorted(split_dict.keys()):
+        parts.append(k + "=>" + _fmt_dep(split_dict[k]))
+    return ";".join(parts)
+
+def _consumer_impl(ctx):
+    out = ctx.actions.declare_file("report.txt")
+    lines = [
+        "pde=" + _fmt_dep(ctx.attr.pde),
+        "pce=" + _fmt_dep(ctx.attr.pce),
+        "cep=" + _fmt_dep(ctx.attr.cep),
+        "sde=" + _fmt_split(ctx.split_attr.sde),
+        "sce=" + _fmt_split(ctx.split_attr.sce),
+    ]
+    ctx.actions.write(out, "\n".join(lines))
+    return [DefaultInfo(files = depset([out]))]
+
+consumer = rule(
+    implementation = _consumer_impl,
+    toolchains = ["//:tt_default"],
+    exec_groups = {
+        "custom": exec_group(toolchains = ["//:tt_custom"]),
+    },
+    attrs = {
+        "pde": attr.label(cfg = patch_then_default_exec),
+        "pce": attr.label(cfg = patch_then_custom_exec),
+        "cep": attr.label(cfg = custom_exec_then_patch),
+        "sde": attr.label(cfg = split_then_default_exec),
+        "sce": attr.label(cfg = split_then_custom_exec),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "consumer", "my_tc", "tool_leaf")
+
+constraint_setting(name = "exec_kind")
+constraint_value(name = "is_default_exec", constraint_setting = ":exec_kind")
+constraint_value(name = "is_custom_exec", constraint_setting = ":exec_kind")
+
+platform(name = "default_exec_plat", constraint_values = [":is_default_exec"])
+platform(name = "custom_exec_plat", constraint_values = [":is_custom_exec"])
+
+config_setting(name = "on_default_exec", constraint_values = [":is_default_exec"])
+config_setting(name = "on_custom_exec", constraint_values = [":is_custom_exec"])
+
+toolchain_type(name = "tt_default")
+toolchain_type(name = "tt_custom")
+my_tc(name = "tc_default_impl")
+my_tc(name = "tc_custom_impl")
+toolchain(
+    name = "tc_default",
+    toolchain_type = ":tt_default",
+    toolchain = ":tc_default_impl",
+    exec_compatible_with = [":is_default_exec"],
+)
+toolchain(
+    name = "tc_custom",
+    toolchain_type = ":tt_custom",
+    toolchain = ":tc_custom_impl",
+    exec_compatible_with = [":is_custom_exec"],
+)
+
+tool_leaf(
+    name = "leaf",
+    matched = select({
+        ":on_default_exec": "default_exec",
+        ":on_custom_exec": "custom_exec",
+        "//conditions:default": "host_or_other",
+    }),
+)
+
+consumer(
+    name = "c",
+    pde = ":leaf",
+    pce = ":leaf",
+    cep = ":leaf",
+    sde = ":leaf",
+    sce = ":leaf",
+)
+"#,
+        ),
+    ]);
+
+    let mut acfg = AnalysisConfig::new();
+    acfg.toolchain_patterns = vec!["//:tc_default".to_string(), "//:tc_custom".to_string()];
+    acfg.execution_platform_patterns = vec![
+        "//:default_exec_plat".to_string(),
+        "//:custom_exec_plat".to_string(),
+    ];
+    let (r, cfg) = ws.resolver_with(BuildConfigurationKey::target("k8", "fastbuild"), acfg);
+    let ct = r
+        .analyze(&Label::parse_canonical("//:c").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), 5, "{text}");
+
+    let pre_exec_mnemonic = |plat: &str, hcopt: &str| -> String {
+        let mut expected = cfg.clone();
+        let list = Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+            zel_starlark::StarlarkList::new(vec![Value::String(hcopt.to_string())]),
+        )));
+        zel_analysis::transition::set_setting(
+            &mut expected,
+            "//command_line_option:host_copt",
+            &list,
+        )
+        .unwrap();
+        expected.to_exec_for(plat).mnemonic()
+    };
+    let post_exec_mnemonic = |plat: &str, copt: &str| -> String {
+        let mut expected = cfg.to_exec_for(plat);
+        let list = Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+            zel_starlark::StarlarkList::new(vec![Value::String(copt.to_string())]),
+        )));
+        zel_analysis::transition::set_setting(&mut expected, "//command_line_option:copt", &list)
+            .unwrap();
+        expected.mnemonic()
+    };
+    let exec_copts = |hcopt: &str| -> String {
+        if cfg!(windows) {
+            hcopt.to_string()
+        } else {
+            format!("{hcopt},-g0")
+        }
+    };
+
+    let m_pde = pre_exec_mnemonic("//:default_exec_plat", "-DPATCH");
+    let c_pde = exec_copts("-DPATCH");
+    assert!(
+        m_pde.starts_with("default_exec_plat-opt-exec-ST-"),
+        "{m_pde}"
+    );
+    assert_eq!(
+        lines[0],
+        format!("pde=@@//:default_exec_plat|default_exec|{c_pde}|bazel-out/{m_pde}/bin/leaf.txt"),
+        "{text}"
+    );
+
+    let m_pce = pre_exec_mnemonic("//:custom_exec_plat", "-DPATCH");
+    assert!(
+        m_pce.starts_with("custom_exec_plat-opt-exec-ST-"),
+        "{m_pce}"
+    );
+    assert_eq!(
+        lines[1],
+        format!("pce=@@//:custom_exec_plat|custom_exec|{c_pde}|bazel-out/{m_pce}/bin/leaf.txt"),
+        "{text}"
+    );
+
+    let m_cep = post_exec_mnemonic("//:custom_exec_plat", "-DFROM=//:custom_exec_plat");
+    assert_eq!(
+        lines[2],
+        format!(
+            "cep=@@//:custom_exec_plat|custom_exec|-DFROM=//:custom_exec_plat|bazel-out/{m_cep}/bin/leaf.txt"
+        ),
+        "{text}"
+    );
+
+    let m_sde_a = pre_exec_mnemonic("//:default_exec_plat", "-DA");
+    let m_sde_b = pre_exec_mnemonic("//:default_exec_plat", "-DB");
+    let c_a = exec_copts("-DA");
+    let c_b = exec_copts("-DB");
+    assert_eq!(
+        lines[3],
+        format!(
+            "sde=a=>@@//:default_exec_plat|default_exec|{c_a}|bazel-out/{m_sde_a}/bin/leaf.txt;b=>@@//:default_exec_plat|default_exec|{c_b}|bazel-out/{m_sde_b}/bin/leaf.txt"
+        ),
+        "{text}"
+    );
+
+    let m_sce_a = pre_exec_mnemonic("//:custom_exec_plat", "-DA");
+    let m_sce_b = pre_exec_mnemonic("//:custom_exec_plat", "-DB");
+    assert_eq!(
+        lines[4],
+        format!(
+            "sce=a=>@@//:custom_exec_plat|custom_exec|{c_a}|bazel-out/{m_sce_a}/bin/leaf.txt;b=>@@//:custom_exec_plat|custom_exec|{c_b}|bazel-out/{m_sce_b}/bin/leaf.txt"
+        ),
+        "{text}"
+    );
+
+    // Composing two exec transitions is rejected.
+    let two_exec_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _p(settings, attr):
+    return {}
+p = transition(implementation = _p, inputs = [], outputs = [])
+bad = config.exec().and_then(p).and_then(config.exec(exec_group = "g"))
+r = rule(implementation = lambda ctx: [], attrs = {"d": attr.label(cfg = bad)})
+"#,
+        ),
+        ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"x\")\n"),
+    ]);
+    let err = two_exec_ws.analyze("//:x").unwrap_err();
+    assert!(
+        err.contains("can't compose two exec transitions"),
+        "expected two-exec error, got: {err}"
+    );
+
+    // Composing an exec transition into a rule `cfg` is rejected.
+    let rule_exec_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _p(settings, attr):
+    return {}
+p = transition(implementation = _p, inputs = [], outputs = [])
+r = rule(implementation = lambda ctx: [], cfg = p.and_then(config.exec()))
+"#,
+        ),
+        ("BUILD", "load(\":defs.bzl\", \"r\")\nr(name = \"x\")\n"),
+    ]);
+    let err = rule_exec_ws.analyze("//:x").unwrap_err();
+    assert!(
+        err.contains(
+            "it contains a native transition that can only be used as an attribute transition"
+        ),
+        "expected rule-cfg exec error, got: {err}"
+    );
+
+    // Referencing a non-existent exec group in a composed transition fails analysis.
+    let bad_group_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+def _p(settings, attr):
+    return {}
+p = transition(implementation = _p, inputs = [], outputs = [])
+leaf = rule(implementation = lambda ctx: [])
+r = rule(
+    implementation = lambda ctx: [],
+    attrs = {"bad": attr.label(cfg = p.and_then(config.exec(exec_group = "missing")))},
+)
+"#,
+        ),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"leaf\", \"r\")\nleaf(name = \"l\")\nr(name = \"x\", bad = \":l\")\n",
+        ),
+    ]);
+    let err = bad_group_ws.analyze("//:x").unwrap_err();
+    assert!(
+        err.contains("Attr 'bad' declares a transition for non-existent exec group 'missing'"),
+        "expected missing exec_group error, got: {err}"
+    );
+}
+
+#[test]
+fn test_rules_automatically_register_and_resolve_test_exec_group() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let main_root = PathFragment::create("/ws");
+    let bt_root = PathFragment::create("/bt");
+    let plat_root = PathFragment::create("/plat");
+    fs.create_directory_and_parents(&main_root).unwrap();
+    fs.create_directory_and_parents(&bt_root.get_relative_str("tools/test"))
+        .unwrap();
+    fs.create_directory_and_parents(&plat_root.get_relative_str("host"))
+        .unwrap();
+
+    fs.write_file(
+        &plat_root.get_relative_str("host/BUILD"),
+        b"platform(name = \"host\", visibility = [\"//visibility:public\"])\n",
+    )
+    .unwrap();
+    fs.write_file(
+        &bt_root.get_relative_str("tools/test/defs.bzl"),
+        br#"
+def _empty_tc_impl(ctx):
+    return [platform_common.ToolchainInfo()]
+
+empty_tc = rule(implementation = _empty_tc_impl)
+"#,
+    )
+    .unwrap();
+    fs.write_file(
+        &bt_root.get_relative_str("tools/test/BUILD"),
+        br#"
+package(default_visibility = ["//visibility:public"])
+load(":defs.bzl", "empty_tc")
+
+toolchain_type(name = "default_test_toolchain_type")
+empty_tc(name = "empty_toolchain")
+toolchain(
+    name = "default_test_toolchain",
+    toolchain_type = ":default_test_toolchain_type",
+    toolchain = ":empty_toolchain",
+    use_target_platform_constraints = True,
+)
+"#,
+    )
+    .unwrap();
+    fs.write_file(
+        &main_root.get_relative_str("defs.bzl"),
+        br#"
+DepPlatInfo = provider(fields = ["plat", "copt"])
+
+def _patch_impl(settings, attr):
+    return {"//command_line_option:copt": ["-DTEST_EG"]}
+
+patch_t = transition(
+    implementation = _patch_impl,
+    inputs = [],
+    outputs = ["//command_line_option:copt"],
+)
+
+def _tool_impl(ctx):
+    return [DepPlatInfo(
+        plat = str(ctx.fragments.platform.platform),
+        copt = ",".join(ctx.fragments.cpp.copts),
+    )]
+
+tool_target = rule(
+    implementation = _tool_impl,
+    fragments = ["platform", "cpp"],
+)
+
+def _tc_impl(ctx):
+    return [platform_common.ToolchainInfo(marker = ctx.attr.marker)]
+
+marker_tc = rule(implementation = _tc_impl, attrs = {"marker": attr.string()})
+
+def _my_test_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".exe")
+    ctx.actions.write(
+        output = exe,
+        content = "\n".join([
+            "has_test=" + str("test" in ctx.exec_groups),
+            "rule_ep=" + str(ctx.exec_groups["test"].exec_platform),
+            "merger=" + ctx.attr._lcov_merger[DepPlatInfo].plat,
+            "composed=" + ctx.attr._composed_tool[DepPlatInfo].plat + "|" + ctx.attr._composed_tool[DepPlatInfo].copt,
+        ]),
+        is_executable = True,
+    )
+    return [DefaultInfo(executable = exe, files = depset([exe]))]
+
+my_test = rule(
+    implementation = _my_test_impl,
+    test = True,
+    attrs = {
+        "_lcov_merger": attr.label(
+            default = "//:tool",
+            cfg = config.exec("test"),
+        ),
+        "_composed_tool": attr.label(
+            default = "//:tool",
+            cfg = config.exec(exec_group = "test").and_then(patch_t),
+        ),
+    },
+)
+
+def _override_test_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".exe")
+    tc = ctx.exec_groups["test"].toolchains["//:tt_custom_test"]
+    ctx.actions.write(
+        output = exe,
+        content = str(ctx.exec_groups["test"].exec_platform) + "|" + tc.marker,
+        is_executable = True,
+    )
+    return [DefaultInfo(executable = exe, files = depset([exe]))]
+
+override_test = rule(
+    implementation = _override_test_impl,
+    test = True,
+    exec_groups = {
+        "test": exec_group(toolchains = ["//:tt_custom_test"]),
+    },
+)
+"#,
+    )
+    .unwrap();
+    fs.write_file(&main_root.get_relative_str("lib.rs"), b"fn main() {}\n")
+        .unwrap();
+    fs.write_file(
+        &main_root.get_relative_str("BUILD"),
+        br#"
+load(":defs.bzl", "marker_tc", "my_test", "override_test", "tool_target")
+
+constraint_setting(name = "env_kind")
+constraint_setting(name = "special_kind")
+constraint_value(name = "c_default", constraint_setting = ":env_kind")
+constraint_value(name = "c_target", constraint_setting = ":env_kind")
+constraint_value(name = "c_special", constraint_setting = ":special_kind")
+constraint_value(name = "c_unmatched", constraint_setting = ":env_kind")
+
+platform(name = "default_exec", constraint_values = [":c_default"])
+platform(name = "target_matching_exec", constraint_values = [":c_target"])
+platform(name = "special_exec", constraint_values = [":c_target", ":c_special"])
+platform(name = "unmatched_target", constraint_values = [":c_unmatched"])
+
+toolchain_type(name = "tt_custom_test")
+marker_tc(name = "custom_test_tc_impl", marker = "custom_override")
+toolchain(
+    name = "custom_test_tc",
+    toolchain_type = ":tt_custom_test",
+    toolchain = ":custom_test_tc_impl",
+    exec_compatible_with = [":c_special"],
+)
+
+tool_target(name = "tool")
+my_test(name = "t")
+my_test(
+    name = "t_ecw",
+    exec_group_compatible_with = {"test": [":c_special"]},
+)
+override_test(name = "t_override")
+"#,
+    )
+    .unwrap();
+
+    let make_resolver = || {
+        let mut rr = SimpleRepoResolver::new(main_root.clone());
+        rr.external.insert("bazel_tools".into(), bt_root.clone());
+        rr.external.insert("platforms".into(), plat_root.clone());
+        rr.apparent
+            .insert("bazel_tools".into(), RepositoryName::bazel_tools());
+        rr.apparent.insert(
+            "platforms".into(),
+            RepositoryName::create("platforms").unwrap(),
+        );
+        let lc = LoaderConfig::new(fs.clone(), Arc::new(rr));
+        let mut acfg = AnalysisConfig::new();
+        acfg.toolchain_patterns = vec![
+            "@@bazel_tools//tools/test:all".to_string(),
+            "//:custom_test_tc".to_string(),
+        ];
+        acfg.execution_platform_patterns = vec![
+            "//:default_exec".to_string(),
+            "//:target_matching_exec".to_string(),
+            "//:special_exec".to_string(),
+        ];
+        TargetResolver::new(PackageLoader::new(lc), acfg)
+    };
+
+    // 1. Target platform matches `//:target_matching_exec`: default rule exec platform is
+    //    `//:default_exec`, while the built-in `"test"` exec group resolves to
+    //    `//:target_matching_exec` via `@bazel_tools//tools/test:default_test_toolchain`.
+    let r = make_resolver();
+    let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cfg.platforms = vec!["//:target_matching_exec".to_string()];
+    let ct = r
+        .analyze(&Label::parse_canonical("//:t").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(ct.exec_platform.as_deref(), Some("//:default_exec"));
+    assert_eq!(
+        ct.exec_group_platforms.get("test").map(String::as_str),
+        Some("//:target_matching_exec")
+    );
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    assert_eq!(
+        text,
+        concat!(
+            "has_test=True\n",
+            "rule_ep=//:target_matching_exec\n",
+            "merger=@@//:target_matching_exec\n",
+            "composed=@@//:target_matching_exec|-DTEST_EG",
+        )
+    );
+
+    // 2. `exec_group_compatible_with = {"test": [":c_special"]}` refines the `"test"` exec group.
+    let ct_ecw = r
+        .analyze(&Label::parse_canonical("//:t_ecw").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(
+        ct_ecw.exec_group_platforms.get("test").map(String::as_str),
+        Some("//:special_exec")
+    );
+
+    // 3. Explicit `exec_groups = {"test": ...}` overrides the built-in default `"test"` exec group.
+    let ct_override = r
+        .analyze(&Label::parse_canonical("//:t_override").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct_override.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(
+        String::from_utf8(content.render()).unwrap(),
+        "//:special_exec|custom_override"
+    );
+
+    // 4. Native test rule (`rust_test`) also registers and resolves the `"test"` exec group.
+    let native_rule = zel_packages::RuleInstance {
+        label: Label::parse_canonical("//:native_t").unwrap(),
+        rule_class: "rust_test".to_string(),
+        attrs: Default::default(),
+        srcs: vec!["lib.rs".to_string()],
+        deps: Vec::new(),
+        outs: Vec::new(),
+        tools: Vec::new(),
+        data: Vec::new(),
+        visibility: Vec::new(),
+        cmd: None,
+        executable: true,
+        testonly: true,
+        extra: Default::default(),
+    };
+    let ct_native = analyze_rule_inner(
+        &native_rule,
+        &cfg,
+        r.clone() as Arc<dyn DepResolver>,
+        &r.config,
+    )
+    .unwrap();
+    assert_eq!(
+        ct_native
+            .exec_group_platforms
+            .get("test")
+            .map(String::as_str),
+        Some("//:target_matching_exec")
+    );
+
+    // 5. When no execution platform matches `--platforms`, optional `default_test_toolchain_type`
+    //    still allows building the test target by falling back to the first compatible platform.
+    let r2 = make_resolver();
+    let mut unmatched_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    unmatched_cfg.platforms = vec!["//:unmatched_target".to_string()];
+    let ct_unmatched = r2
+        .analyze(&Label::parse_canonical("//:t").unwrap(), &unmatched_cfg)
+        .unwrap();
+    assert_eq!(
+        ct_unmatched
+            .exec_group_platforms
+            .get("test")
+            .map(String::as_str),
+        Some("//:default_exec")
+    );
+}
+
+#[test]
+fn aspect_exec_groups_rule_exec_groups_and_exec_transitions_are_isolated() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+AspectReport = provider(fields = ["text"])
+ToolPlat = provider(fields = ["plat", "copt"])
+
+def _tc_impl(ctx):
+    return [
+        platform_common.ToolchainInfo(tag = ctx.attr.tag),
+        platform_common.TemplateVariableInfo({ctx.attr.var_key: ctx.attr.tag}),
+    ]
+
+tag_tc = rule(
+    implementation = _tc_impl,
+    attrs = {
+        "tag": attr.string(),
+        "var_key": attr.string(),
+    },
+)
+
+def _patch_impl(settings, attr):
+    return {"//command_line_option:copt": ["-DASP_COMPOSED"]}
+
+asp_patch = transition(
+    implementation = _patch_impl,
+    inputs = [],
+    outputs = ["//command_line_option:copt"],
+)
+
+def _leaf_impl(ctx):
+    return [ToolPlat(
+        plat = str(ctx.fragments.platform.platform),
+        copt = ",".join(ctx.fragments.cpp.copts),
+    )]
+
+tool_leaf = rule(
+    implementation = _leaf_impl,
+    fragments = ["platform", "cpp"],
+)
+
+def _probe_aspect_impl(target, ctx):
+    out = ctx.actions.declare_file(target.label.name + ".aspect_report")
+    lines = [
+        "asp_has_asp_eg=" + str("asp_eg" in ctx.exec_groups),
+        "asp_has_asp_copy=" + str("asp_copy" in ctx.exec_groups),
+        "asp_has_parent=" + str("parent_only" in ctx.exec_groups),
+        "asp_has_child=" + str("child_only" in ctx.exec_groups),
+        "asp_eg_plat=" + str(ctx.exec_groups["asp_eg"].exec_platform),
+        "asp_eg_tc=" + ctx.exec_groups["asp_eg"].toolchains["//:tt_asp_eg"].tag,
+        "asp_copy_plat=" + str(ctx.exec_groups["asp_copy"].exec_platform),
+        "asp_default_tc=" + ctx.toolchains["//:tt_asp_default"].tag,
+        "asp_var=" + ctx.var.get("ASP_VAR", "missing") + "|" + ctx.var.get("PARENT_VAR", "none"),
+        "rule_has_child=" + str("child_only" in ctx.rule.exec_groups),
+        "rule_has_parent=" + str("parent_only" in ctx.rule.exec_groups),
+        "rule_has_asp=" + str("asp_eg" in ctx.rule.exec_groups),
+        "rule_child_plat=" + str(ctx.rule.exec_groups["child_only"].exec_platform),
+        "rule_child_eg_tc=" + ctx.rule.exec_groups["child_only"].toolchains["//:tt_child_eg"].tag,
+        "rule_default_tc=" + ctx.rule.toolchains["//:tt_child_default"].tag,
+        "rule_var=" + ctx.rule.var.get("CHILD_VAR", "missing") + "|" + ctx.rule.var.get("PARENT_VAR", "none"),
+        "tool_default=" + ctx.attr._tool_default[ToolPlat].plat,
+        "tool_eg=" + ctx.attr._tool_eg[ToolPlat].plat,
+        "tool_composed=" + ctx.attr._tool_composed[ToolPlat].plat + "|" + ctx.attr._tool_composed[ToolPlat].copt,
+    ]
+    text = "\n".join(lines)
+    ctx.actions.write(out, text)
+    return [
+        AspectReport(text = text),
+        OutputGroupInfo(report = depset([out])),
+    ]
+
+probe_aspect = aspect(
+    implementation = _probe_aspect_impl,
+    toolchains = ["//:tt_asp_default"],
+    exec_groups = {
+        "asp_eg": exec_group(toolchains = ["//:tt_asp_eg"]),
+        "asp_copy": exec_group(copy_from_rule = True),
+    },
+    attrs = {
+        "_tool_default": attr.label(
+            default = "//:leaf",
+            cfg = config.exec(),
+        ),
+        "_tool_eg": attr.label(
+            default = "//:leaf",
+            cfg = config.exec(exec_group = "asp_eg"),
+        ),
+        "_tool_composed": attr.label(
+            default = "//:leaf",
+            cfg = config.exec(exec_group = "asp_eg").and_then(asp_patch),
+        ),
+    },
+)
+
+def _child_impl(ctx):
+    return []
+
+child_rule = rule(
+    implementation = _child_impl,
+    toolchains = ["//:tt_child_default"],
+    exec_groups = {
+        "child_only": exec_group(toolchains = ["//:tt_child_eg"]),
+    },
+)
+
+def _parent_impl(ctx):
+    out = ctx.actions.declare_file("parent_report.txt")
+    ctx.actions.write(out, ctx.attr.dep[AspectReport].text)
+    return [DefaultInfo(files = depset([out]))]
+
+parent_rule = rule(
+    implementation = _parent_impl,
+    toolchains = ["//:tt_parent"],
+    exec_groups = {
+        "parent_only": exec_group(toolchains = ["//:tt_parent"]),
+    },
+    attrs = {
+        "dep": attr.label(aspects = [probe_aspect]),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "child_rule", "parent_rule", "tag_tc", "tool_leaf")
+
+constraint_setting(name = "role")
+constraint_value(name = "c_parent", constraint_setting = ":role")
+constraint_value(name = "c_child_default", constraint_setting = ":role")
+constraint_value(name = "c_child_eg", constraint_setting = ":role")
+constraint_value(name = "c_asp_default", constraint_setting = ":role")
+constraint_value(name = "c_asp_eg", constraint_setting = ":role")
+
+platform(name = "ep_parent", constraint_values = [":c_parent"])
+platform(name = "ep_child_default", constraint_values = [":c_child_default"])
+platform(name = "ep_child_eg", constraint_values = [":c_child_eg"])
+platform(name = "ep_asp_default", constraint_values = [":c_asp_default"])
+platform(name = "ep_asp_eg", constraint_values = [":c_asp_eg"])
+
+toolchain_type(name = "tt_parent")
+toolchain_type(name = "tt_child_default")
+toolchain_type(name = "tt_child_eg")
+toolchain_type(name = "tt_asp_default")
+toolchain_type(name = "tt_asp_eg")
+
+tag_tc(name = "tc_parent_impl", tag = "parent_tc", var_key = "PARENT_VAR")
+tag_tc(name = "tc_child_default_impl", tag = "child_default_tc", var_key = "CHILD_VAR")
+tag_tc(name = "tc_child_eg_impl", tag = "child_eg_tc", var_key = "CHILD_EG_VAR")
+tag_tc(name = "tc_asp_default_impl", tag = "asp_default_tc", var_key = "ASP_VAR")
+tag_tc(name = "tc_asp_eg_impl", tag = "asp_eg_tc", var_key = "ASP_EG_VAR")
+
+toolchain(
+    name = "tc_parent",
+    toolchain_type = ":tt_parent",
+    toolchain = ":tc_parent_impl",
+    exec_compatible_with = [":c_parent"],
+)
+toolchain(
+    name = "tc_child_default",
+    toolchain_type = ":tt_child_default",
+    toolchain = ":tc_child_default_impl",
+    exec_compatible_with = [":c_child_default"],
+)
+toolchain(
+    name = "tc_child_eg",
+    toolchain_type = ":tt_child_eg",
+    toolchain = ":tc_child_eg_impl",
+    exec_compatible_with = [":c_child_eg"],
+)
+toolchain(
+    name = "tc_asp_default",
+    toolchain_type = ":tt_asp_default",
+    toolchain = ":tc_asp_default_impl",
+    exec_compatible_with = [":c_asp_default"],
+)
+toolchain(
+    name = "tc_asp_eg",
+    toolchain_type = ":tt_asp_eg",
+    toolchain = ":tc_asp_eg_impl",
+    exec_compatible_with = [":c_asp_eg"],
+)
+
+tool_leaf(name = "leaf")
+child_rule(name = "child")
+parent_rule(name = "parent", dep = ":child")
+"#,
+        ),
+    ]);
+
+    let make_acfg = || {
+        let mut acfg = AnalysisConfig::new();
+        acfg.toolchain_patterns = vec![
+            "//:tc_parent".to_string(),
+            "//:tc_child_default".to_string(),
+            "//:tc_child_eg".to_string(),
+            "//:tc_asp_default".to_string(),
+            "//:tc_asp_eg".to_string(),
+        ];
+        acfg.execution_platform_patterns = vec![
+            "//:ep_parent".to_string(),
+            "//:ep_child_default".to_string(),
+            "//:ep_child_eg".to_string(),
+            "//:ep_asp_default".to_string(),
+            "//:ep_asp_eg".to_string(),
+        ];
+        acfg
+    };
+
+    let expected_report = concat!(
+        "asp_has_asp_eg=True\n",
+        "asp_has_asp_copy=True\n",
+        "asp_has_parent=False\n",
+        "asp_has_child=False\n",
+        "asp_eg_plat=//:ep_asp_eg\n",
+        "asp_eg_tc=asp_eg_tc\n",
+        "asp_copy_plat=//:ep_asp_default\n",
+        "asp_default_tc=asp_default_tc\n",
+        "asp_var=asp_default_tc|none\n",
+        "rule_has_child=True\n",
+        "rule_has_parent=False\n",
+        "rule_has_asp=False\n",
+        "rule_child_plat=//:ep_child_eg\n",
+        "rule_child_eg_tc=child_eg_tc\n",
+        "rule_default_tc=child_default_tc\n",
+        "rule_var=child_default_tc|none\n",
+        "tool_default=@@//:ep_asp_default\n",
+        "tool_eg=@@//:ep_asp_eg\n",
+        "tool_composed=@@//:ep_asp_eg|-DASP_COMPOSED",
+    );
+
+    // 1. Propagated aspect via `parent_rule.dep`: neither `ctx.exec_groups` nor `ctx.rule.*`
+    //    nor aspect `config.exec(...)` attributes leak `parent_rule`'s `parent_only` / `ep_parent`.
+    let (r, cfg) = ws.resolver_with(
+        BuildConfigurationKey::target("k8", "fastbuild"),
+        make_acfg(),
+    );
+    let ct_parent = r
+        .analyze(&Label::parse_canonical("//:parent").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct_parent.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(
+        String::from_utf8(content.render()).unwrap(),
+        expected_report
+    );
+
+    // 2. Top-level aspect via `analyze_with_aspects` (where caller inputs are empty) resolves
+    //    identical `ctx.exec_groups`, `ctx.rule.exec_groups`, and `config.exec(...)` platforms.
+    let (r_top, cfg_top) = ws.resolver_with(
+        BuildConfigurationKey::target("k8", "fastbuild"),
+        make_acfg(),
+    );
+    let asp = r_top
+        .loader()
+        .load_bzl_export(
+            &Label::parse_canonical("//:defs.bzl").unwrap(),
+            "probe_aspect",
+        )
+        .unwrap();
+    let ct_top = r_top
+        .analyze_with_aspects(
+            &Label::parse_canonical("//:child").unwrap(),
+            &cfg_top,
+            std::slice::from_ref(&asp),
+            &Default::default(),
+        )
+        .unwrap();
+    let ActionKind::FileWrite {
+        content: top_content,
+        ..
+    } = &ct_top.typed_actions.last().unwrap().kind
+    else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(
+        String::from_utf8(top_content.render()).unwrap(),
+        expected_report
+    );
+
+    // 3. Aspect attribute referencing a target/parent exec group not declared on the aspect fails.
+    let bad_asp_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+leaf = rule(implementation = lambda ctx: [])
+bad_aspect = aspect(
+    implementation = lambda target, ctx: [],
+    attrs = {
+        "_bad": attr.label(
+            default = "//:leaf",
+            cfg = config.exec(exec_group = "parent_or_target_group"),
+        ),
+    },
+)
+child = rule(
+    implementation = lambda ctx: [],
+    exec_groups = {"parent_or_target_group": exec_group()},
+)
+parent = rule(
+    implementation = lambda ctx: [],
+    exec_groups = {"parent_or_target_group": exec_group()},
+    attrs = {"dep": attr.label(aspects = [bad_aspect])},
+)
+"#,
+        ),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"child\", \"leaf\", \"parent\")\nleaf(name = \"leaf\")\nchild(name = \"c\")\nparent(name = \"p\", dep = \":c\")\n",
+        ),
+    ]);
+    let err = bad_asp_ws.analyze("//:p").unwrap_err();
+    assert!(
+        err.contains(
+            "Attr '_bad' declares a transition for non-existent exec group 'parent_or_target_group'"
+        ),
+        "expected missing aspect exec_group error, got: {err}"
+    );
+
+    // 4. Invalid exec group name on `aspect(exec_groups = ...)` is rejected at definition time.
+    let invalid_name_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            "bad = aspect(implementation = lambda t, ctx: [], exec_groups = {\"bad name\": exec_group()})\n",
+        ),
+        ("BUILD", "load(\":defs.bzl\", \"bad\")\n"),
+    ]);
+    let err = invalid_name_ws.analyze("//:missing").unwrap_err();
+    assert!(
+        err.contains("Exec group name 'bad name' is not a valid name"),
+        "expected invalid exec group name error, got: {err}"
+    );
+}

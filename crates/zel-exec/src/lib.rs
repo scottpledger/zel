@@ -16,7 +16,7 @@
 //! and `StandaloneTestStrategy`).
 //! Mirrors `src/main/java/com/google/devtools/build/lib/exec` and `actions/cache`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
@@ -1100,6 +1100,202 @@ pub fn invalidate_computed_digest(path: &str) {
     }
 }
 
+/// Recursively deletes a file, symlink, or directory tree via `FileSystem`.
+fn delete_path_recursive(fs: &dyn FileSystem, path: &PathFragment) {
+    if let Ok(st) = fs.stat(path, false) {
+        if st.is_directory {
+            if let Ok(entries) = fs.readdir(path) {
+                for e in entries {
+                    delete_path_recursive(fs, &path.get_relative_str(&e.name));
+                }
+            }
+        }
+    }
+    let _ = fs.delete(path);
+}
+
+/// Resolves all symbolic links along `path`, returning `io::ErrorKind::InvalidData` (`ELOOP`) if
+/// more than 40 symlink indirections are encountered (`Path.resolveSymbolicLinks`).
+fn resolve_symlink_path(fs: &dyn FileSystem, path: &PathFragment) -> io::Result<PathFragment> {
+    fn step(
+        fs: &dyn FileSystem,
+        orig: &PathFragment,
+        cur_path: &PathFragment,
+        depth: &mut usize,
+    ) -> io::Result<PathFragment> {
+        if !cur_path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("path must be absolute: {cur_path}"),
+            ));
+        }
+        let segs = cur_path.segments();
+        let prefix = &cur_path.path_string()[..cur_path.drive_str_length()];
+        let mut acc = PathFragment::create_already_normalized(prefix);
+        for seg in &segs {
+            acc = acc.get_relative_str(seg);
+            while let Some(st) = fs.stat_if_found(&acc, false)? {
+                if !st.is_symlink {
+                    break;
+                }
+                *depth += 1;
+                if *depth > 40 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{orig} (Too many levels of symbolic links)"),
+                    ));
+                }
+                let target = fs.read_symbolic_link(&acc)?;
+                let next = if target.is_absolute() {
+                    target
+                } else if let Some(parent) = acc.parent_directory() {
+                    parent.get_relative(&target)
+                } else {
+                    acc.get_relative(&target)
+                };
+                acc = step(fs, orig, &next, depth)?;
+            }
+        }
+        Ok(acc)
+    }
+    let mut depth = 0usize;
+    step(fs, path, path, &mut depth)
+}
+
+#[derive(Clone, Copy)]
+enum TreeVisitEvent<'a> {
+    File(&'a PathFragment),
+    EnterDir,
+    ExitDir,
+}
+
+/// Visits entries inside a materialized tree artifact matching `TreeArtifactValue.visitTree`:
+/// enumerates with `NOFOLLOW`, rejects dangling symlinks, cyclic directory symlinks, and special
+/// files, and reports apparent tree-relative paths.
+fn visit_tree_artifact<F>(
+    fs: &dyn FileSystem,
+    base_abs: &PathFragment,
+    mut on_entry: F,
+) -> io::Result<()>
+where
+    F: FnMut(&str, TreeVisitEvent<'_>) -> io::Result<()>,
+{
+    fn walk<F>(
+        fs: &dyn FileSystem,
+        real_base: &PathFragment,
+        apparent_rel: &str,
+        cur_abs: &PathFragment,
+        active_dirs: &mut BTreeSet<PathFragment>,
+        on_entry: &mut F,
+    ) -> io::Result<()>
+    where
+        F: FnMut(&str, TreeVisitEvent<'_>) -> io::Result<()>,
+    {
+        let mut entries = fs.readdir(cur_abs)?;
+        entries.sort_by(|a, b| a.name.cmp(&b.name));
+        for e in entries {
+            let clean_name = e.name.replace('\\', "/");
+            let rel = if apparent_rel.is_empty() {
+                clean_name
+            } else {
+                format!("{apparent_rel}/{clean_name}")
+            };
+            let child_abs = cur_abs.get_relative_str(&e.name);
+            let lst = fs.stat(&child_abs, false)?;
+            if e.dirent_type == zel_vfs::DirentType::Symlink || lst.is_symlink {
+                let real_target = resolve_symlink_path(fs, &child_abs)?;
+                let Some(target_st) = fs.stat_if_found(&real_target, false)? else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("child {rel} is a dangling symbolic link"),
+                    ));
+                };
+                if target_st.is_file && !target_st.is_special_file {
+                    on_entry(&rel, TreeVisitEvent::File(&real_target))?;
+                } else if target_st.is_directory {
+                    if real_base.starts_with(&real_target)
+                        || !active_dirs.insert(real_target.clone())
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("{child_abs} (Too many levels of symbolic links)"),
+                        ));
+                    }
+                    on_entry(&rel, TreeVisitEvent::EnterDir)?;
+                    let res = walk(fs, real_base, &rel, &real_target, active_dirs, on_entry);
+                    active_dirs.remove(&real_target);
+                    res?;
+                    on_entry(&rel, TreeVisitEvent::ExitDir)?;
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("child {rel} has an unsupported type"),
+                    ));
+                }
+            } else if e.dirent_type == zel_vfs::DirentType::Unknown
+                || lst.is_special_file
+                || (!lst.is_file && !lst.is_directory)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("child {rel} has an unsupported type"),
+                ));
+            } else if lst.is_directory {
+                let real_dir = resolve_symlink_path(fs, &child_abs)?;
+                let inserted = active_dirs.insert(real_dir.clone());
+                on_entry(&rel, TreeVisitEvent::EnterDir)?;
+                let res = walk(fs, real_base, &rel, &child_abs, active_dirs, on_entry);
+                if inserted {
+                    active_dirs.remove(&real_dir);
+                }
+                res?;
+                on_entry(&rel, TreeVisitEvent::ExitDir)?;
+            } else {
+                on_entry(&rel, TreeVisitEvent::File(&child_abs))?;
+            }
+        }
+        Ok(())
+    }
+
+    let real_base = resolve_symlink_path(fs, base_abs)?;
+    let mut active_dirs = BTreeSet::new();
+    active_dirs.insert(real_base.clone());
+    walk(
+        fs,
+        &real_base,
+        "",
+        &real_base,
+        &mut active_dirs,
+        &mut on_entry,
+    )
+}
+
+/// Recursively collects `(tree_relative_path, Artifact)` entries inside a materialized tree artifact.
+fn collect_tree_children(
+    fs: &dyn FileSystem,
+    base_abs: &PathFragment,
+    parent_art: &Artifact,
+    owner: &zel_cmdline::Label,
+    out: &mut Vec<(String, Artifact)>,
+) -> io::Result<()> {
+    visit_tree_artifact(fs, base_abs, |rel, ev| {
+        if matches!(ev, TreeVisitEvent::File(_)) {
+            let child_art = Artifact {
+                is_source: false,
+                is_tree_artifact: false,
+                root: parent_art.root,
+                is_unresolved_symlink: false,
+                is_constant_metadata: false,
+                exec_path: parent_art.exec_path.get_relative_str(rel),
+                root_relative_path: parent_art.root_relative_path.get_relative_str(rel),
+                owner_label: owner.clone(),
+            };
+            out.push((rel.to_string(), child_art));
+        }
+        Ok(())
+    })
+}
+
 /// Digest of a produced output: file contents, or for directories (tree artifacts) a digest over
 /// the sorted `(relative path, content digest)` listing. `None` when the path does not exist.
 pub fn path_digest(
@@ -1109,41 +1305,30 @@ pub fn path_digest(
 ) -> Option<String> {
     let st = fs.stat(path, true).ok()?;
     if st.is_directory {
-        fn walk(
-            digest: DigestFunction,
-            fs: &dyn FileSystem,
-            base: &PathFragment,
-            dir: &PathFragment,
-            out: &mut Vec<u8>,
-        ) {
-            let mut entries = match fs.readdir(dir) {
-                Ok(r) => r,
-                Err(_) => return,
-            };
-            entries.sort_by(|a, b| a.name.cmp(&b.name));
-            for e in entries {
-                let p = dir.get_relative_str(&e.name);
-                let rel = p
-                    .path_string()
-                    .strip_prefix(base.path_string())
-                    .unwrap_or(p.path_string())
-                    .to_string();
-                out.extend_from_slice(rel.as_bytes());
-                out.push(0);
-                match fs.stat(&p, true) {
-                    Ok(s) if s.is_directory => walk(digest, fs, base, &p, out),
-                    Ok(_) => {
-                        if let Ok(b) = fs.read_file(&p) {
-                            out.extend_from_slice(digest.hex(&b).as_bytes());
-                        }
-                    }
-                    Err(_) => {}
-                }
-                out.push(0);
-            }
-        }
         let mut buf = Vec::new();
-        walk(digest, fs, path, path, &mut buf);
+        visit_tree_artifact(fs, path, |rel, ev| {
+            match ev {
+                TreeVisitEvent::File(resolved_path) => {
+                    let slash_rel = format!("/{rel}");
+                    buf.extend_from_slice(slash_rel.as_bytes());
+                    buf.push(0);
+                    if let Ok(b) = fs.read_file(resolved_path) {
+                        buf.extend_from_slice(digest.hex(&b).as_bytes());
+                    }
+                    buf.push(0);
+                }
+                TreeVisitEvent::EnterDir => {
+                    let slash_rel = format!("/{rel}");
+                    buf.extend_from_slice(slash_rel.as_bytes());
+                    buf.push(0);
+                }
+                TreeVisitEvent::ExitDir => {
+                    buf.push(0);
+                }
+            }
+            Ok(())
+        })
+        .ok()?;
         return Some(digest.hex(&buf));
     }
     if !st.is_file {
@@ -1643,6 +1828,7 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
             inherited_env,
             unset_env,
             execution_info,
+            unused_inputs_list,
             ..
         } => {
             p.kind = "spawn".into();
@@ -1651,6 +1837,12 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
             p.inherited_env = inherited_env.iter().cloned().collect();
             p.unset_env = unset_env.iter().cloned().collect();
             p.execution_info = execution_info.clone();
+            if let Some(u) = unused_inputs_list {
+                let s = u.exec_path.path_string();
+                p.payload.extend_from_slice(b"unused_inputs_list\0");
+                p.payload.extend_from_slice(&(s.len() as u64).to_le_bytes());
+                p.payload.extend_from_slice(s.as_bytes());
+            }
         }
         ActionAnalysisMetadata::FileWriteAction {
             content,
@@ -1707,6 +1899,36 @@ pub fn action_key_parts(action: &ActionAnalysisMetadata) -> ActionKeyParts {
                 .extend_from_slice(status_file.exec_path.path_string().as_bytes());
             p.payload.push(*is_volatile as u8);
             p.payload.extend_from_slice(translator.key.as_bytes());
+        }
+        ActionAnalysisMetadata::MapDirectoryAction(spec) => {
+            fn push_str(buf: &mut Vec<u8>, s: &str) {
+                buf.extend_from_slice(&(s.len() as u64).to_le_bytes());
+                buf.extend_from_slice(s.as_bytes());
+            }
+            p.kind = "map_directory".into();
+            p.env = spec.env.clone();
+            p.inherited_env = spec.inherited_env.iter().cloned().collect();
+            p.unset_env = spec.unset_env.iter().cloned().collect();
+            p.execution_info = spec.execution_info.clone();
+            push_str(&mut p.payload, &spec.expanded_mnemonic);
+            push_str(&mut p.payload, &spec.expander.key_fingerprint());
+            p.payload
+                .extend_from_slice(&(spec.input_directories.len() as u64).to_le_bytes());
+            for (k, dir) in &spec.input_directories {
+                push_str(&mut p.payload, k);
+                push_str(&mut p.payload, dir.exec_path.path_string());
+            }
+            p.payload
+                .extend_from_slice(&(spec.output_directories.len() as u64).to_le_bytes());
+            for (k, dir) in &spec.output_directories {
+                push_str(&mut p.payload, k);
+                push_str(&mut p.payload, dir.exec_path.path_string());
+            }
+            p.payload
+                .extend_from_slice(&(spec.tools.len() as u64).to_le_bytes());
+            for tool in &spec.tools {
+                push_str(&mut p.payload, tool.exec_path.path_string());
+            }
         }
     }
     p
@@ -1808,20 +2030,28 @@ pub fn execute_action_with(
             .iter()
             .filter_map(|k| opts.client_env.get(k).map(|v| (k.clone(), v.clone())))
             .collect(),
+        ActionAnalysisMetadata::MapDirectoryAction(spec) => spec
+            .inherited_env
+            .iter()
+            .filter_map(|k| opts.client_env.get(k).map(|v| (k.clone(), v.clone())))
+            .collect(),
         _ => BTreeMap::new(),
     };
     let env_digest = action_cache.client_env_digest(&used_client_env);
     let declared_inputs: Vec<String> = parts.input_paths.clone();
     let mut tool_rf_entries: Vec<(String, Option<String>)> = Vec::new();
-    if let ActionAnalysisMetadata::SpawnAction { tools, .. } = action {
-        for tp in tools {
-            if let Some(spec) = opts.tool_runfiles.get(tp.exec_path.path_string()) {
-                for (rf_path, target) in &spec.entries {
-                    tool_rf_entries.push((
-                        format!("runfiles:{}:{}", tp.exec_path.path_string(), rf_path),
-                        Some(target.clone()),
-                    ));
-                }
+    let action_tools: &[Artifact] = match action {
+        ActionAnalysisMetadata::SpawnAction { tools, .. } => tools,
+        ActionAnalysisMetadata::MapDirectoryAction(spec) => &spec.tools,
+        _ => &[],
+    };
+    for tp in action_tools {
+        if let Some(spec) = opts.tool_runfiles.get(tp.exec_path.path_string()) {
+            for (rf_path, target) in &spec.entries {
+                tool_rf_entries.push((
+                    format!("runfiles:{}:{}", tp.exec_path.path_string(), rf_path),
+                    Some(target.clone()),
+                ));
             }
         }
     }
@@ -1865,9 +2095,21 @@ pub fn execute_action_with(
             lookup_hybrid()
         }
     };
+    let has_unused_inputs_list = matches!(
+        action,
+        ActionAnalysisMetadata::SpawnAction {
+            unused_inputs_list: Some(_),
+            ..
+        }
+    );
     let md_digest_with = |discovered: &[String], check_ttl: bool| -> String {
         let mut all: Vec<(String, Option<String>)> = Vec::new();
-        for p in declared_inputs.iter().chain(discovered.iter()) {
+        let base_inputs: &[String] = if has_unused_inputs_list {
+            &[]
+        } else {
+            &declared_inputs
+        };
+        for p in base_inputs.iter().chain(discovered.iter()) {
             all.push((p.clone(), input_digest_with(p, check_ttl)));
         }
         all.extend(tool_rf_entries.iter().cloned());
@@ -1985,6 +2227,14 @@ pub fn execute_action_with(
             ActionAnalysisMetadata::SymlinkAction { output, .. } => {
                 format!("Creating symlink {}", output.root_relative_path)
             }
+            ActionAnalysisMetadata::MapDirectoryAction(spec) => {
+                let dirs: Vec<String> = spec
+                    .input_directories
+                    .iter()
+                    .map(|(_, d)| d.root_relative_path.path_string().to_string())
+                    .collect();
+                format!("Expanding [{}] into actions.", dirs.join(", "))
+            }
         };
         let mut messages = vec![format!("ERROR: action '{describe}' is not up-to-date")];
         if matches!(action, ActionAnalysisMetadata::SymlinkAction { .. }) {
@@ -2021,7 +2271,7 @@ pub fn execute_action_with(
                     catastrophic: bool| {
         // Bazel removes outputs of failed actions and forgets their cache entries.
         for o in &outputs {
-            let _ = fs.delete(&execroot.get_relative(&o.exec_path));
+            delete_path_recursive(fs, &execroot.get_relative(&o.exec_path));
         }
         if let Some(p) = outputs.first() {
             action_cache.remove(p.exec_path.path_string());
@@ -2058,6 +2308,8 @@ pub fn execute_action_with(
             (p.clone(), input_digest_with(p, false))
         })
         .collect();
+    let mut pruned_unused_inputs: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     match action {
         ActionAnalysisMetadata::FileWriteAction {
@@ -2430,6 +2682,7 @@ pub fn execute_action_with(
             outputs: spawn_outputs,
             execution_info,
             tools,
+            unused_inputs_list,
             java_compile,
         } => {
             for so in spawn_outputs {
@@ -2447,9 +2700,17 @@ pub fn execute_action_with(
             } else {
                 progress_message.clone()
             };
-            // `SkyframeActionExecutor.deleteOutputs`: remove any stale output paths before the action executes.
+            // `SkyframeActionExecutor.deleteOutputs` + `createOutputDirectories`: remove any stale
+            // output paths and ensure output directories (including nested parent directories inside
+            // output tree artifacts) exist before the action executes.
             for o in spawn_outputs {
-                let _ = fs.delete(&execroot.get_relative(&o.exec_path));
+                let out_abs = execroot.get_relative(&o.exec_path);
+                let _ = fs.delete(&out_abs);
+                if o.is_tree_artifact {
+                    fs.create_directory_and_parents(&out_abs)?;
+                } else if let Some(parent) = out_abs.parent_directory() {
+                    fs.create_directory_and_parents(&parent)?;
+                }
             }
             // `add_all(tree_artifact)` placeholders expand to the files of the (now produced)
             // directory (`expand_directories`).
@@ -2862,6 +3123,21 @@ pub fn execute_action_with(
                         return Ok(fail(msgs, 1, res.stdout, res.stderr, runner));
                     }
                     SpawnStatus::MissingOutputs => {
+                        if let Some(unused_art) = unused_inputs_list {
+                            let unused_abs = execroot.get_relative(&unused_art.exec_path);
+                            if !fs.exists(&unused_abs, true) {
+                                return Ok(fail(
+                                    vec![format!(
+                                        "ERROR: {loc}: {progress} failed: Action did not create expected output file listing unused inputs: {}",
+                                        unused_art.exec_path
+                                    )],
+                                    1,
+                                    res.stdout,
+                                    res.stderr,
+                                    runner,
+                                ));
+                            }
+                        }
                         let mut msgs: Vec<String> = res
                         .missing
                         .iter()
@@ -3077,6 +3353,218 @@ pub fn execute_action_with(
                 }
                 break;
             }
+            if let Some(unused_art) = unused_inputs_list {
+                let unused_abs = execroot.get_relative(&unused_art.exec_path);
+                if !fs.exists(&unused_abs, true) {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: {progress} failed: Action did not create expected output file listing unused inputs: {}",
+                            unused_art.exec_path
+                        )],
+                        1,
+                        outcome.stdout.clone(),
+                        outcome.stderr.clone(),
+                        outcome.runner.clone(),
+                    ));
+                }
+                match fs.read_file(&unused_abs) {
+                    Ok(bytes) => {
+                        for raw_line in bytes.split(|&b| b == b'\n') {
+                            let line = String::from_utf8_lossy(raw_line);
+                            let trimmed = line.trim();
+                            if trimmed.is_empty() {
+                                continue;
+                            }
+                            pruned_unused_inputs.insert(trimmed.to_string());
+                            #[cfg(windows)]
+                            if trimmed.contains('\\') {
+                                pruned_unused_inputs.insert(trimmed.replace('\\', "/"));
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        return Ok(fail(
+                            vec![format!(
+                                "ERROR: {loc}: {progress} failed: Unused inputs read failure: {e}"
+                            )],
+                            1,
+                            outcome.stdout.clone(),
+                            outcome.stderr.clone(),
+                            outcome.runner.clone(),
+                        ));
+                    }
+                }
+            }
+        }
+        ActionAnalysisMetadata::MapDirectoryAction(spec) => {
+            let dirs_desc: Vec<String> = spec
+                .input_directories
+                .iter()
+                .map(|(_, d)| d.root_relative_path.path_string().to_string())
+                .collect();
+            let progress = format!("Expanding [{}] into actions.", dirs_desc.join(", "));
+            outcome.progress = progress.clone();
+
+            let mut discovered: BTreeMap<String, Vec<(String, Artifact)>> = BTreeMap::new();
+            for (key, dir_art) in &spec.input_directories {
+                let dir_abs = execroot.get_relative(&dir_art.exec_path);
+                if !fs.exists(&dir_abs, true) {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: {progress} failed: missing input directory '{}'",
+                            dir_art.exec_path
+                        )],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+                let mut kids = Vec::new();
+                if let Err(e) = collect_tree_children(fs, &dir_abs, dir_art, &spec.owner, &mut kids)
+                {
+                    return Ok(fail(
+                        vec![format!(
+                            "ERROR: {loc}: {progress} failed: cannot read directory '{}': {e}",
+                            dir_art.exec_path
+                        )],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+                for (_, child_art) in &kids {
+                    invalidate_computed_digest(
+                        execroot.get_relative(&child_art.exec_path).path_string(),
+                    );
+                }
+                kids.sort_by(|a, b| a.0.cmp(&b.0));
+                discovered.insert(key.clone(), kids);
+            }
+
+            let sub_actions = match spec.expander.expand(&discovered) {
+                Ok(acts) => acts,
+                Err(msg) => {
+                    return Ok(fail(
+                        vec![format!("ERROR: {loc}: {msg}")],
+                        1,
+                        Vec::new(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+            };
+
+            let mut declared_sub_outputs: BTreeSet<PathFragment> = BTreeSet::new();
+            for sub_action in &sub_actions {
+                for o in sub_action.outputs() {
+                    declared_sub_outputs.insert(execroot.get_relative(&o.exec_path));
+                }
+            }
+            for (_, out_dir) in &spec.output_directories {
+                let out_abs = execroot.get_relative(&out_dir.exec_path);
+                if let Ok(Some(st)) = fs.stat_if_found(&out_abs, false) {
+                    if !st.is_directory || st.is_symlink {
+                        if !zel_vfs::unlink_path_for_write(std::path::Path::new(
+                            out_abs.path_string(),
+                        )) {
+                            let _ = fs.delete(&out_abs);
+                        }
+                    } else {
+                        #[cfg(unix)]
+                        {
+                            fn unlock_dirs(dir: &std::path::Path) {
+                                use std::os::unix::fs::PermissionsExt;
+                                if let Ok(sm) = std::fs::symlink_metadata(dir) {
+                                    if sm.file_type().is_dir()
+                                        && !zel_vfs::is_junction_or_symlink(dir)
+                                    {
+                                        let _ = std::fs::set_permissions(
+                                            dir,
+                                            std::fs::Permissions::from_mode(0o755),
+                                        );
+                                        if let Ok(rd) = std::fs::read_dir(dir) {
+                                            for entry in rd.flatten() {
+                                                unlock_dirs(&entry.path());
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            unlock_dirs(std::path::Path::new(out_abs.path_string()));
+                        }
+                        fn prune_unowned(
+                            fs: &dyn FileSystem,
+                            execroot: &PathFragment,
+                            dir: &PathFragment,
+                            keep: &BTreeSet<PathFragment>,
+                            action_cache: &CompactPersistentActionCache,
+                        ) -> bool {
+                            let Ok(entries) = fs.readdir(dir) else {
+                                return false;
+                            };
+                            let mut has_kept = false;
+                            for e in entries {
+                                let child = dir.get_relative_str(&e.name);
+                                if keep.contains(&child) {
+                                    has_kept = true;
+                                    continue;
+                                }
+                                let is_real_dir = fs
+                                    .stat(&child, false)
+                                    .is_ok_and(|s| s.is_directory && !s.is_symlink);
+                                if is_real_dir {
+                                    if prune_unowned(fs, execroot, &child, keep, action_cache) {
+                                        has_kept = true;
+                                    } else {
+                                        let _ = fs.delete(&child);
+                                    }
+                                } else {
+                                    if let Ok(rel) = child.relative_to(execroot) {
+                                        action_cache.remove(rel.path_string());
+                                    }
+                                    invalidate_computed_digest(child.path_string());
+                                    if !zel_vfs::unlink_path_for_write(std::path::Path::new(
+                                        child.path_string(),
+                                    )) {
+                                        let _ = fs.delete(&child);
+                                    }
+                                }
+                            }
+                            has_kept
+                        }
+                        let _ = prune_unowned(
+                            fs,
+                            execroot,
+                            &out_abs,
+                            &declared_sub_outputs,
+                            action_cache,
+                        );
+                    }
+                }
+                fs.create_directory_and_parents(&out_abs)?;
+            }
+
+            for sub_action in &sub_actions {
+                let sub_res =
+                    execute_action_with(sub_action, execroot, fs, action_cache, reporter, opts)?;
+                outcome.stdout.extend_from_slice(&sub_res.stdout);
+                outcome.stderr.extend_from_slice(&sub_res.stderr);
+                if sub_res.runner.is_some() {
+                    outcome.runner = sub_res.runner;
+                }
+                if let Some(sub_fail) = sub_res.failure {
+                    return Ok(fail_ext(
+                        sub_fail.messages,
+                        sub_fail.exit_code,
+                        outcome.stdout,
+                        outcome.stderr,
+                        outcome.runner,
+                        sub_fail.catastrophic,
+                    ));
+                }
+            }
         }
     }
 
@@ -3143,6 +3631,24 @@ pub fn execute_action_with(
             ));
         }
         if !pending && out_art.is_tree_artifact {
+            if let Err(e) = visit_tree_artifact(fs, &out_path, |_, _| Ok(())) {
+                return Ok(fail(
+                    vec![
+                        format!(
+                            "ERROR: {loc}: error while validating output tree artifact {}: {e}",
+                            out_art.exec_path
+                        ),
+                        format!(
+                            "ERROR: {loc}: {} failed: not all outputs were created or valid",
+                            action.mnemonic()
+                        ),
+                    ],
+                    1,
+                    Vec::new(),
+                    Vec::new(),
+                    outcome.runner.clone(),
+                ));
+            }
             let root_host = std::path::Path::new(out_path.path_string());
             if root_host.exists() {
                 if let Err(tree_err) =
@@ -3191,10 +3697,20 @@ pub fn execute_action_with(
     // the metadata digest over declared + discovered inputs (from `.d` depfiles and `/showIncludes`).
     if let Some(primary) = outputs.first() {
         let mut discovered: Vec<String> = Vec::new();
-        if let ActionAnalysisMetadata::SpawnAction { .. } = action {
+        if let ActionAnalysisMetadata::SpawnAction {
+            unused_inputs_list, ..
+        } = action
+        {
+            if unused_inputs_list.is_some() {
+                for p in &declared_inputs {
+                    if !pruned_unused_inputs.contains(p) {
+                        discovered.push(p.clone());
+                    }
+                }
+            }
             for hdr in &show_includes_headers {
                 if let Some(rel) = normalize_discovered_header(hdr, execroot.path_string()) {
-                    if !declared_inputs.contains(&rel) {
+                    if !declared_inputs.contains(&rel) && !pruned_unused_inputs.contains(&rel) {
                         discovered.push(rel);
                     }
                 }
@@ -3206,7 +3722,9 @@ pub fn execute_action_with(
                             if let Some(rel) =
                                 normalize_discovered_header(&dep, execroot.path_string())
                             {
-                                if !declared_inputs.contains(&rel) {
+                                if !declared_inputs.contains(&rel)
+                                    && !pruned_unused_inputs.contains(&rel)
+                                {
                                     discovered.push(rel);
                                 }
                             }
@@ -3229,21 +3747,34 @@ pub fn execute_action_with(
             })
             .collect();
         let recorded_md = {
-            let mut all: Vec<(String, Option<String>)> = pre_exec_inputs
-                .iter()
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            if declared_inputs
-                .iter()
-                .any(|p| p.as_str() == "bazel-out/volatile-status.txt")
-            {
-                all.push((
-                    "bazel-out/volatile-status.txt".to_string(),
-                    input_digest_with("bazel-out/volatile-status.txt", false),
-                ));
-            }
+            let mut all: Vec<(String, Option<String>)> = if has_unused_inputs_list {
+                Vec::new()
+            } else {
+                let mut base: Vec<(String, Option<String>)> = pre_exec_inputs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), v.clone()))
+                    .collect();
+                if declared_inputs
+                    .iter()
+                    .any(|p| p.as_str() == "bazel-out/volatile-status.txt")
+                {
+                    base.push((
+                        "bazel-out/volatile-status.txt".to_string(),
+                        input_digest_with("bazel-out/volatile-status.txt", false),
+                    ));
+                }
+                base
+            };
             for p in &discovered {
-                all.push((p.clone(), input_digest_with(p, false)));
+                let d = if p == "bazel-out/volatile-status.txt" {
+                    input_digest_with("bazel-out/volatile-status.txt", false)
+                } else {
+                    pre_exec_inputs
+                        .get(p)
+                        .cloned()
+                        .unwrap_or_else(|| input_digest_with(p, false))
+                };
+                all.push((p.clone(), d));
             }
             all.extend(tool_rf_entries.iter().cloned());
             all.sort();
@@ -3320,7 +3851,7 @@ fn validate_and_chmod_tree_artifact(
         for child in children {
             let sm = std::fs::symlink_metadata(&child).map_err(|e| e.to_string())?;
             let ft = sm.file_type();
-            if ft.is_symlink() {
+            if zel_vfs::is_junction_or_symlink(&child) {
                 match std::fs::metadata(&child) {
                     Ok(_) => {}
                     Err(e)
@@ -3699,6 +4230,7 @@ mod tests {
             outputs: vec![out_art.clone()],
             execution_info: BTreeMap::new(),
             tools: vec![tool_art],
+            unused_inputs_list: None,
             java_compile: None,
         };
 
@@ -3836,5 +4368,356 @@ mod tests {
             Some("pkg/caf\u{e9}.h".to_string())
         );
         assert_eq!(normalize_discovered_header(&parsed[1], "/execroot"), None);
+    }
+
+    #[test]
+    fn collect_tree_children_rejects_cycles_and_dangling_and_resolves_valid_symlinks() {
+        let fs = InMemoryFileSystem::default();
+        let owner = Label::parse_canonical("//pkg:tree").unwrap();
+        let mut parent_art = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/tree"),
+            owner.clone(),
+        );
+        parent_art.is_tree_artifact = true;
+
+        // 1. Valid file symlink + non-cyclic external directory symlink (`TreeArtifactValue.visitTree`).
+        let ext_dir = PathFragment::create("/external/dir");
+        fs.create_directory_and_parents(&ext_dir).unwrap();
+        fs.write_file(&ext_dir.get_relative_str("leaf.txt"), b"ext")
+            .unwrap();
+
+        let tree_ok = PathFragment::create("/execroot/_main/bazel-out/k8-fastbuild/bin/pkg/tree");
+        fs.create_directory_and_parents(&tree_ok).unwrap();
+        fs.write_file(&tree_ok.get_relative_str("real.txt"), b"hello")
+            .unwrap();
+        fs.create_symbolic_link(
+            &tree_ok.get_relative_str("file_sym.txt"),
+            &PathFragment::create("real.txt"),
+        )
+        .unwrap();
+        fs.create_symbolic_link(&tree_ok.get_relative_str("ext_sub"), &ext_dir)
+            .unwrap();
+
+        let mut kids = Vec::new();
+        collect_tree_children(&fs, &tree_ok, &parent_art, &owner, &mut kids).unwrap();
+        let rels: Vec<&str> = kids.iter().map(|(r, _)| r.as_str()).collect();
+        assert_eq!(rels, vec!["ext_sub/leaf.txt", "file_sym.txt", "real.txt"]);
+        assert!(path_digest(DigestFunction::Sha256, &fs, &tree_ok).is_some());
+
+        // 2. Self-referential directory symlink (`loop -> .`) is rejected without stack overflow.
+        let tree_self = PathFragment::create("/execroot/_main/tree_self");
+        fs.create_directory_and_parents(&tree_self).unwrap();
+        fs.create_symbolic_link(
+            &tree_self.get_relative_str("loop"),
+            &PathFragment::create("."),
+        )
+        .unwrap();
+        let err_self = collect_tree_children(&fs, &tree_self, &parent_art, &owner, &mut Vec::new())
+            .unwrap_err();
+        assert!(
+            err_self
+                .to_string()
+                .contains("Too many levels of symbolic links"),
+            "unexpected error: {err_self}"
+        );
+        assert!(path_digest(DigestFunction::Sha256, &fs, &tree_self).is_none());
+
+        // 3. Ancestor-escaping directory symlink (`sub/up -> ../..`) is rejected immediately.
+        let tree_up = PathFragment::create("/execroot/_main/tree_up");
+        fs.create_directory_and_parents(&tree_up.get_relative_str("sub"))
+            .unwrap();
+        fs.create_symbolic_link(
+            &tree_up.get_relative_str("sub/up"),
+            &PathFragment::create("../.."),
+        )
+        .unwrap();
+        let err_up =
+            collect_tree_children(&fs, &tree_up, &parent_art, &owner, &mut Vec::new()).unwrap_err();
+        assert!(
+            err_up
+                .to_string()
+                .contains("Too many levels of symbolic links"),
+            "unexpected error: {err_up}"
+        );
+
+        // 4. Mutual directory symlink cycle (`a/to_b -> ../b`, `b/to_a -> ../a`) is rejected.
+        let tree_mutual = PathFragment::create("/execroot/_main/tree_mutual");
+        fs.create_directory_and_parents(&tree_mutual.get_relative_str("a"))
+            .unwrap();
+        fs.create_directory_and_parents(&tree_mutual.get_relative_str("b"))
+            .unwrap();
+        fs.create_symbolic_link(
+            &tree_mutual.get_relative_str("a/to_b"),
+            &PathFragment::create("../b"),
+        )
+        .unwrap();
+        fs.create_symbolic_link(
+            &tree_mutual.get_relative_str("b/to_a"),
+            &PathFragment::create("../a"),
+        )
+        .unwrap();
+        let err_mutual =
+            collect_tree_children(&fs, &tree_mutual, &parent_art, &owner, &mut Vec::new())
+                .unwrap_err();
+        assert!(
+            err_mutual
+                .to_string()
+                .contains("Too many levels of symbolic links"),
+            "unexpected error: {err_mutual}"
+        );
+
+        // 5. Dangling symlink inside tree artifact is rejected (`TreeArtifactValue.visitTree`).
+        let tree_dangling = PathFragment::create("/execroot/_main/tree_dangling");
+        fs.create_directory_and_parents(&tree_dangling).unwrap();
+        fs.create_symbolic_link(
+            &tree_dangling.get_relative_str("broken"),
+            &PathFragment::create("does_not_exist"),
+        )
+        .unwrap();
+        let err_dangling =
+            collect_tree_children(&fs, &tree_dangling, &parent_art, &owner, &mut Vec::new())
+                .unwrap_err();
+        assert!(
+            err_dangling
+                .to_string()
+                .contains("child broken is a dangling symbolic link"),
+            "unexpected error: {err_dangling}"
+        );
+
+        // 6. Windows drive-prefixed tree path (`C:/...`) normalizes nested relative paths with `/`.
+        let win_tree = PathFragment::create(
+            "C:\\execroot\\_main\\bazel-out\\x64_windows-fastbuild\\bin\\pkg\\tree",
+        );
+        fs.create_directory_and_parents(&win_tree.get_relative_str("nested/deep"))
+            .unwrap();
+        fs.write_file(&win_tree.get_relative_str("nested/deep/item.txt"), b"win")
+            .unwrap();
+        let mut win_kids = Vec::new();
+        collect_tree_children(&fs, &win_tree, &parent_art, &owner, &mut win_kids).unwrap();
+        assert_eq!(win_kids.len(), 1);
+        assert_eq!(win_kids[0].0, "nested/deep/item.txt");
+    }
+
+    #[test]
+    fn sub_mapper_child_entrypoint() {
+        if std::env::var("ZEL_SUB_MAPPER_MODE").as_deref() != Ok("1") {
+            return;
+        }
+        use std::io::Write;
+        let rel = std::env::var("ZEL_SUB_MAPPER_REL").expect("ZEL_SUB_MAPPER_REL");
+        let log_path = std::env::var("ZEL_SUB_MAPPER_LOG").expect("ZEL_SUB_MAPPER_LOG");
+        let in_path = std::env::var("ZEL_SUB_MAPPER_IN").expect("ZEL_SUB_MAPPER_IN");
+        let out_path = std::env::var("ZEL_SUB_MAPPER_OUT").expect("ZEL_SUB_MAPPER_OUT");
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(log_path)
+            .unwrap();
+        writeln!(f, "{rel}").unwrap();
+        let body = std::fs::read_to_string(in_path).unwrap();
+        // Intentionally omit `create_dir_all` on `out_path` to verify `SpawnAction` pre-creates
+        // nested parent directories inside output tree artifacts.
+        std::fs::write(out_path, body.to_ascii_uppercase()).unwrap();
+    }
+
+    #[test]
+    fn map_directory_incremental_rebuild_reuses_unchanged_sub_action_cache_and_prunes_stale() {
+        #[derive(Debug)]
+        struct TestMapExpander {
+            owner: Label,
+            out_dir: Artifact,
+            mapper_bin: std::path::PathBuf,
+            log_file: std::path::PathBuf,
+        }
+
+        impl zel_analysis::MapDirectoryExpander for TestMapExpander {
+            fn expand(
+                &self,
+                discovered_children: &BTreeMap<String, Vec<(String, Artifact)>>,
+            ) -> Result<Vec<ActionAnalysisMetadata>, String> {
+                let mut acts = Vec::new();
+                for (rel, in_art) in discovered_children.get("src").into_iter().flatten() {
+                    let out_rel = format!("{rel}.out");
+                    let out_art = Artifact {
+                        is_source: false,
+                        is_tree_artifact: false,
+                        root: self.out_dir.root,
+                        is_unresolved_symlink: false,
+                        is_constant_metadata: false,
+                        exec_path: self.out_dir.exec_path.get_relative_str(&out_rel),
+                        root_relative_path: self
+                            .out_dir
+                            .root_relative_path
+                            .get_relative_str(&out_rel),
+                        owner_label: self.owner.clone(),
+                    };
+                    let env = BTreeMap::from([
+                        ("ZEL_SUB_MAPPER_MODE".to_string(), "1".to_string()),
+                        ("ZEL_SUB_MAPPER_REL".to_string(), rel.clone()),
+                        (
+                            "ZEL_SUB_MAPPER_LOG".to_string(),
+                            self.log_file.to_string_lossy().into_owned(),
+                        ),
+                        (
+                            "ZEL_SUB_MAPPER_IN".to_string(),
+                            in_art.exec_path.path_string().to_string(),
+                        ),
+                        (
+                            "ZEL_SUB_MAPPER_OUT".to_string(),
+                            out_art.exec_path.path_string().to_string(),
+                        ),
+                    ]);
+                    acts.push(ActionAnalysisMetadata::SpawnAction {
+                        owner: self.owner.clone(),
+                        mnemonic: "MapSub".to_string(),
+                        progress_message: format!("Mapping {rel}"),
+                        argv: vec![
+                            self.mapper_bin.to_string_lossy().into_owned(),
+                            "--exact".to_string(),
+                            "tests::sub_mapper_child_entrypoint".to_string(),
+                            "--quiet".to_string(),
+                        ],
+                        env,
+                        inherited_env: BTreeSet::new(),
+                        unset_env: BTreeSet::new(),
+                        inputs: vec![in_art.clone()],
+                        outputs: vec![out_art],
+                        execution_info: BTreeMap::new(),
+                        tools: Vec::new(),
+                        unused_inputs_list: None,
+                        java_compile: None,
+                    });
+                }
+                Ok(acts)
+            }
+
+            fn key_fingerprint(&self) -> String {
+                "test-map-expander-v1".to_string()
+            }
+        }
+
+        let tmp = std::env::temp_dir().join(format!("zel-mapdir-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let exec_dir = tmp.join("execroot");
+        std::fs::create_dir_all(&exec_dir).unwrap();
+        let log_file = tmp.join("runs.log");
+
+        // Re-invoke the running test binary (`current_exe()`) in child-helper mode so this test
+        // runs hermetically on Linux (including Bazel's `linux-sandbox` where `HOME=$TEST_TMPDIR`
+        // and no `rustup` toolchain is configured), macOS, and Windows without `/bin/sh` or `rustc`.
+        let mapper_bin = std::env::current_exe().expect("current_exe must be available");
+
+        let execroot = PathFragment::create(exec_dir.to_str().unwrap());
+        let fs = zel_vfs::LocalFileSystem::default();
+        let cache = CompactPersistentActionCache::new();
+        let reporter = Reporter::new();
+
+        let owner = Label::parse_canonical("//pkg:mapped").unwrap();
+        let mut in_dir = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/in_tree"),
+            owner.clone(),
+        );
+        in_dir.is_tree_artifact = true;
+        let mut out_dir = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/out_tree"),
+            owner.clone(),
+        );
+        out_dir.is_tree_artifact = true;
+
+        let in_abs = exec_dir.join(in_dir.exec_path.path_string());
+        let out_abs = exec_dir.join(out_dir.exec_path.path_string());
+        std::fs::create_dir_all(in_abs.join("sub")).unwrap();
+        std::fs::write(in_abs.join("a.txt"), "alpha-v1").unwrap();
+        std::fs::write(in_abs.join("sub").join("b.txt"), "beta-v1").unwrap();
+
+        let map_action =
+            ActionAnalysisMetadata::MapDirectoryAction(Box::new(zel_analysis::MapDirectorySpec {
+                owner: owner.clone(),
+                input_directories: vec![("src".to_string(), in_dir.clone())],
+                output_directories: vec![("dst".to_string(), out_dir.clone())],
+                inputs: vec![in_dir.clone()],
+                outputs: vec![out_dir.clone()],
+                tools: Vec::new(),
+                env: BTreeMap::new(),
+                inherited_env: BTreeSet::new(),
+                unset_env: BTreeSet::new(),
+                execution_info: BTreeMap::new(),
+                expanded_mnemonic: "MapSub".to_string(),
+                expander: std::sync::Arc::new(TestMapExpander {
+                    owner,
+                    out_dir: out_dir.clone(),
+                    mapper_bin,
+                    log_file: log_file.clone(),
+                }),
+            }));
+
+        // 1. Initial build executes both `a.txt` and `sub/b.txt` child actions.
+        let r1 = execute_action(&map_action, &execroot, &fs, &cache, &reporter, false).unwrap();
+        assert!(r1.succeeded(), "{:?}", r1.failure);
+        assert!(!r1.cache_hit);
+        let runs1: Vec<String> = std::fs::read_to_string(&log_file)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(runs1, vec!["a.txt", "sub/b.txt"]);
+        assert_eq!(
+            std::fs::read_to_string(out_abs.join("a.txt.out")).unwrap(),
+            "ALPHA-V1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out_abs.join("sub").join("b.txt.out")).unwrap(),
+            "BETA-V1"
+        );
+
+        // 2. Modify only `sub/b.txt`: `MapDirectoryAction` misses cache, `a.txt` hits sub-action cache,
+        //    and ONLY `sub/b.txt` re-executes!
+        std::fs::write(&log_file, "").unwrap();
+        std::fs::write(in_abs.join("sub").join("b.txt"), "beta-v2").unwrap();
+        invalidate_computed_digest(execroot.get_relative(&in_dir.exec_path).path_string());
+
+        let r2 = execute_action(&map_action, &execroot, &fs, &cache, &reporter, false).unwrap();
+        assert!(r2.succeeded(), "{:?}", r2.failure);
+        assert!(!r2.cache_hit);
+        let runs2: Vec<String> = std::fs::read_to_string(&log_file)
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect();
+        assert_eq!(
+            runs2,
+            vec!["sub/b.txt"],
+            "unchanged child action a.txt must hit action cache"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out_abs.join("a.txt.out")).unwrap(),
+            "ALPHA-V1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out_abs.join("sub").join("b.txt.out")).unwrap(),
+            "BETA-V2"
+        );
+
+        // 3. Remove `a.txt` from input tree: `out_tree/a.txt.out` is pruned and `sub/b.txt` still hits cache!
+        std::fs::write(&log_file, "").unwrap();
+        std::fs::remove_file(in_abs.join("a.txt")).unwrap();
+        invalidate_computed_digest(execroot.get_relative(&in_dir.exec_path).path_string());
+
+        let r3 = execute_action(&map_action, &execroot, &fs, &cache, &reporter, false).unwrap();
+        assert!(r3.succeeded(), "{:?}", r3.failure);
+        assert!(
+            !out_abs.join("a.txt.out").exists(),
+            "stale child output should be pruned"
+        );
+        assert_eq!(
+            std::fs::read_to_string(out_abs.join("sub").join("b.txt.out")).unwrap(),
+            "BETA-V2"
+        );
+        assert_eq!(std::fs::read_to_string(&log_file).unwrap(), "");
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }

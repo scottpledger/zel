@@ -266,7 +266,40 @@ pub(crate) fn filegroup(n: &Nctx) -> Result<ConfiguredTarget, String> {
     } else {
         None
     };
-    finish(n, files, default_rf, data_rf, exe, vec![])
+    let mut ct = finish(n, files.clone(), default_rf, data_rf, exe, vec![])?;
+    let mut inst_files = Vec::new();
+    let mut meta_files = Vec::new();
+    let mut cov_env = BTreeMap::new();
+    let mut sup_files = Vec::new();
+    if n.cfg.bool_option("collect_code_coverage", false) {
+        let include_gen = n.cfg.bool_option(
+            "experimental_collect_code_coverage_for_generated_files",
+            false,
+        );
+        for f in &files {
+            if f.is_source || include_gen {
+                inst_files.push(f.clone());
+            }
+        }
+        for d in srcs.iter().chain(data.iter()) {
+            if let Some(i) = &d.instrumented_files {
+                inst_files.extend(i.instrumented_files.iter().cloned());
+                meta_files.extend(i.metadata_files.iter().cloned());
+                cov_env.extend(i.environment.iter().map(|(k, v)| (k.clone(), v.clone())));
+                sup_files.extend(i.support_files.iter().cloned());
+            }
+        }
+    }
+    let inst_files = dedup(inst_files);
+    let meta_files = dedup(meta_files);
+    let sup_files = dedup(sup_files);
+    ct.instrumented_files = Some(zel_analysis::InstrumentedFiles {
+        instrumented_files: inst_files,
+        metadata_files: meta_files,
+        environment: cov_env,
+        support_files: sup_files,
+    });
+    Ok(ct)
 }
 
 /// The `genquery` rule (`GenQuery.java`): the query is evaluated at analysis time and its output is the

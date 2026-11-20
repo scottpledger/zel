@@ -244,6 +244,15 @@ impl BlazeRuntime {
                     popts.aspect_params.insert(k.to_string(), v.to_string());
                 }
             }
+            if aquery && !popts.include_pruned_inputs {
+                if let Ok(cache) = self.action_cache.lock() {
+                    popts.cached_used_inputs = cache
+                        .discovered_inputs_by_output()
+                        .into_iter()
+                        .map(|(k, v)| (k, v.into_iter().collect()))
+                        .collect();
+                }
+            }
         }
         let outcome = run_post_analysis(&resolver, tr, config, expr, &qopts, &fopts, &popts);
         let output_file = parsed.get_str("output_file").filter(|s| !s.is_empty());

@@ -22,17 +22,30 @@ fn flag_native(name: &str) -> Option<Value> {
         "cc_common.check_experimental_cc_shared_library" => Value::Bool(false),
         "cc_common.incompatible_disable_objc_library_transition" => Value::Bool(true),
         "cc_common.add_go_exec_groups_to_binary_rules" => Value::Bool(false),
-        "cc_common.do_not_use_tools_cpp_compiler_present" => Value::Bool(false),
+        "cc_common.do_not_use_tools_cpp_compiler_present" => Value::None,
         "py_builtins.is_bzlmod_enabled" => Value::Bool(true),
         "py_builtins.are_action_listeners_enabled" => Value::Bool(false),
         _ => return None,
     })
 }
 
-/// `apple_common.dotted_version(str)`: a `DottedVersion` host object.
+/// `apple_common.dotted_version(version)`: a `DottedVersion` host object.
 fn dotted_version(pos: &[Value], kw: &Kwargs) -> Result<Value, StarlarkError> {
-    if pos.len() + kw.len() > 1 {
-        return err("dotted_version() accepts no more than 1 positional argument");
+    if pos.len() > 1 {
+        return err(format!(
+            "dotted_version() accepts no more than 1 positional argument, got {}",
+            pos.len()
+        ));
+    }
+    for k in kw.keys() {
+        if k != "version" {
+            return err(format!(
+                "dotted_version() got unexpected keyword argument '{k}'"
+            ));
+        }
+    }
+    if !pos.is_empty() && kw.contains_key("version") {
+        return err("dotted_version() got multiple values for parameter 'version'");
     }
     let arg = pos.first().or_else(|| kw.get("version"));
     match arg {
@@ -40,12 +53,19 @@ fn dotted_version(pos: &[Value], kw: &Kwargs) -> Result<Value, StarlarkError> {
             zel_starlark::eval::builtins::parse_dotted_version(s).map_err(StarlarkError)?;
             Ok(Value::Host("dotted_version".into(), s.clone()))
         }
+        Some(v @ Value::Host(k, _)) if k == "dotted_version" => Ok(v.clone()),
         Some(other) => err(format!(
             "in call to dotted_version(), parameter 'version' got value of type '{}', want 'string'",
             other.type_name()
         )),
         None => err("dotted_version() missing 1 required positional argument: version"),
     }
+}
+
+fn frozen_str_list(items: Vec<String>) -> Value {
+    let mut l = zel_starlark::StarlarkList::new(items.into_iter().map(Value::String).collect());
+    l.freeze();
+    Value::List(Arc::new(std::sync::Mutex::new(l)))
 }
 
 /// `host:builtins.<ns>.<fn>`.
@@ -78,7 +98,7 @@ pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkE
         }
         "cc_common.get_execution_requirements" | "cc_common.get_tool_requirement_for_action" => {
             let r = fc_of(kwv("feature_configuration", 0))?.tool_requirements_for_action(&action_of(kwv("action_name", 1))?)?;
-            Ok(Value::Tuple(r.into_iter().map(Value::String).collect()))
+            Ok(frozen_str_list(r))
         }
         "cc_common.action_is_enabled" => {
             Ok(Value::Bool(fc_of(kwv("feature_configuration", 0))?.action_is_configured(&action_of(kwv("action_name", 1))?)))
@@ -87,10 +107,8 @@ pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkE
             let fc = fc_of(kwv("feature_configuration", 0))?;
             let vars = vars_of(kwv("variables", 2))?;
             let action = action_of(kwv("action_name", 1))?;
-            let line = fc
-                .command_line(&action, &vars, &|v| crate::artifact_path(v))
-                .map_err(|e| StarlarkError(format!("{} (while expanding action '{action}'; variables: {:?})", e.0, vars.flattened().keys().collect::<Vec<_>>())))?;
-            Ok(Value::Tuple(line.into_iter().map(Value::String).collect()))
+            let line = fc.command_line(&action, &vars, &|v| crate::artifact_path(v))?;
+            Ok(frozen_str_list(line))
         }
         "cc_common.get_environment_variables" => {
             let fc = fc_of(kwv("feature_configuration", 0))?;
@@ -100,9 +118,9 @@ pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkE
             for (k, v) in env {
                 d.insert(Value::String(k), Value::String(v))?;
             }
+            d.freeze();
             Ok(Value::Dict(Arc::new(std::sync::Mutex::new(d))))
         }
-        "cc_common.empty_variables" => Ok(cc_features::make_variables(None, Default::default())),
         "cc_common.legacy_cc_flags_make_variable_do_not_use" => {
             let tc = kwv("cc_toolchain", 0)
                 .ok_or_else(|| StarlarkError("cc_toolchain is required".into()))?;
@@ -112,6 +130,7 @@ pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkE
             };
             Ok(Value::String(val))
         }
+        "cc_common.empty_variables" => Ok(cc_features::make_variables(None, Default::default())),
         "apple_common.dotted_version" => dotted_version(&pos, &_kw),
         n => err(format!(
             "{n} is not implemented yet in zel (native part of Bazel's builtins; see crates/zel-builtins)"
@@ -138,7 +157,7 @@ pub fn dotted_version_member(
         (false, "compare_to") => Ok(Value::BuiltinFunction(
             "host:method:dotted_version.compare_to".into(),
         )),
-        (_, "__str__") | (false, "version") => Ok(Value::String(v.clone())),
+        (_, "__str__") | (false, "to_string") | (false, "version") => Ok(Value::String(v.clone())),
         _ => err(format!(
             "'DottedVersion' value has no field or method '{member}'"
         )),

@@ -96,8 +96,8 @@ fn host_method(
                 "add" => {
                     check_kwargs("add", pos, kw, &["key", "value"])?;
                     let v = want_str(arg(pos, kw, 1, "value").ok_or_else(|| StarlarkError("add() missing 1 required positional argument: value".into()))?, "add", "value")?;
-                    d.lock().unwrap().push((key, v));
-                    Ok(Value::Host("template_dict".into(), id.to_owned()))
+                    d.lock().unwrap().push(crate::objects::TemplateDictEntry::Literal(key, v));
+                    Ok(recv.clone())
                 }
                 "add_joined" => {
                     if pos.len() > 2 {
@@ -116,9 +116,11 @@ fn host_method(
                             type_name(&values)
                         ));
                     }
-                    if !kw.contains_key("join_with") {
-                        return err("add_joined() missing 1 required named-only argument: 'join_with'");
-                    }
+                    let _ = want_str(
+                        kw.get("join_with").ok_or_else(|| StarlarkError("add_joined() missing 1 required named-only argument: 'join_with'".into()))?,
+                        "add_joined",
+                        "join_with",
+                    )?;
                     let Some(map_fn) = kw.get("map_each") else {
                         return err("add_joined() missing 1 required named-only argument: 'map_each'");
                     };
@@ -132,18 +134,25 @@ fn host_method(
                             return err("map_each must be a function accepting a single positional argument");
                         }
                     }
-                    let mut b = ArgsBuilder::default();
+                    if let Some(fj) = none_or(kw.get("format_joined")) {
+                        let s = want_str(fj, "add_joined", "format_joined")?;
+                        crate::args::validate_format_str("format_joined", &s)?;
+                    }
                     let mut akw = kw.clone();
                     akw.remove("key");
                     akw.remove("values");
                     akw.insert("omit_if_empty".into(), Value::Bool(false));
-                    args_method(&mut b, ctx, "add_joined", &[values], &akw)?;
-                    d.lock().unwrap().push((key, b.args.pop().unwrap_or_default()));
-                    Ok(Value::Host("template_dict".into(), id.to_owned()))
+                    d.lock().unwrap().push(crate::objects::TemplateDictEntry::Joined {
+                        key,
+                        values,
+                        kw: akw,
+                    });
+                    Ok(recv.clone())
                 }
                 other => err(format!("'TemplateDict' value has no field or method '{other}'")),
             }
         }
+        "template_ctx" => template_ctx_method(st, ctx, method, pos, kw),
         "configuration" => match method {
             "is_tool_configuration" => Ok(Value::Bool(st.cfg.is_exec)),
             "is_sibling_repository_layout" => {
@@ -161,6 +170,11 @@ fn host_method(
             "runfiles_enabled" => Ok(Value::Bool(st.cfg.env.runfiles_enabled)),
             // Genfiles are merged into bin in this implementation.
             "has_separate_genfiles_directory" => Ok(Value::Bool(false)),
+            "disabled_features" => {
+                check_kwargs("disabled_features", pos, kw, &[])?;
+                let fs = FeatureSet::parse(&st.cfg.global_features());
+                Ok(mk_list(fs.off.into_iter().map(Value::String).collect()))
+            }
             other => err(format!("'configuration' value has no field or method '{other}'")),
         },
         "toolchains" => match method {
@@ -443,7 +457,11 @@ fn ctx_method(
             let mut has_symlinks = false;
             for (idx, name, root) in [(4usize, "symlinks", false), (5, "root_symlinks", true)] {
                 if let Some(s) = none_or(arg(pos, kw, idx, name)) {
-                    let target = if root { &mut out.root_symlinks } else { &mut out.symlinks };
+                    let (target, entries_vec) = if root {
+                        (&mut out.root_symlinks, &mut out.root_symlink_entries)
+                    } else {
+                        (&mut out.symlinks, &mut out.symlink_entries)
+                    };
                     match s {
                         Value::Dict(d) => {
                             let items = d.lock().unwrap().items();
@@ -452,7 +470,9 @@ fn ctx_method(
                             }
                             for (k, v) in items {
                                 let Value::String(k) = k else { return err(format!("{name} keys must be strings")) };
-                                target.insert(k, want_file(&v, "runfiles", name)?);
+                                let af = want_file(&v, "runfiles", name)?;
+                                entries_vec.push((k.clone(), af.clone()));
+                                target.insert(k, af);
                             }
                         }
                         other => {
@@ -466,7 +486,10 @@ fn ctx_method(
                                 };
                                 let p = sv.get("path")?;
                                 let f = sv.get("target_file")?;
-                                target.insert(want_str(&p, "runfiles", name)?, want_file(&f, "runfiles", name)?);
+                                let k = want_str(&p, "runfiles", name)?;
+                                let af = want_file(&f, "runfiles", name)?;
+                                entries_vec.push((k.clone(), af.clone()));
+                                target.insert(k, af);
                             }
                         }
                     }
@@ -638,50 +661,39 @@ fn ctx_method(
             ]))
         }
         "coverage_instrumented" => {
+            st.check_mutable("coverage_instrumented")?;
             check_kwargs("coverage_instrumented", pos, kw, &["target"])?;
+            let target_ct = match none_or(arg(pos, kw, 0, "target")) {
+                Some(t) => Some(target_of(t).ok_or_else(|| {
+                    StarlarkError(format!(
+                        "in call to coverage_instrumented(), parameter 'target' got value of type '{}', want 'Target or NoneType'",
+                        type_name(t)
+                    ))
+                })?),
+                None => None,
+            };
             if !coverage_enabled(&st.cfg) || st.cfg.is_exec {
                 return Ok(Value::Bool(false));
             }
-            let (lbl, is_test) = match arg(pos, kw, 0, "target") {
-                None | Some(Value::None) => (st.label.clone(), st.rule.is_test_rule()),
-                Some(v) => {
-                    let ct = target_of(v).ok_or_else(|| {
-                        StarlarkError("coverage_instrumented: expected Target or None".into())
-                    })?;
-                    (ct.label.clone(), ct.is_test)
-                }
-            };
-            if is_test && !st.cfg.bool_option("instrument_test_targets", false) {
-                return Ok(Value::Bool(false));
+            if let Some(ct) = target_ct {
+                let actual = ct.get_actual();
+                let has_provider = actual.instrumented_files.is_some()
+                    || actual.providers.contains_key("InstrumentedFilesInfo");
+                return Ok(Value::Bool(
+                    has_provider
+                        && should_include_local_sources(&st.cfg, &actual.label, actual.is_test),
+                ));
             }
-            let spec = st
-                .cfg
-                .option_str("instrumentation_filter")
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "-/javatests[/:],-/test/java[/:]".to_string());
-            let mut inc: Vec<zel_util::java_regex::Regex> = Vec::new();
-            let mut exc: Vec<zel_util::java_regex::Regex> = Vec::new();
-            for piece in spec.split(',').map(str::trim).filter(|s| !s.is_empty()) {
-                if let Some(rest) = piece.strip_prefix('-') {
-                    if let Ok(r) = zel_util::java_regex::Regex::new(rest) {
-                        exc.push(r);
-                    }
-                } else {
-                    let pat = piece.strip_prefix('+').unwrap_or(piece);
-                    if let Ok(r) = zel_util::java_regex::Regex::new(pat) {
-                        inc.push(r);
-                    }
-                }
-            }
-            let cand = lbl.to_string();
-            let matched = if exc.iter().any(|r| r.find(&cand).is_some()) {
-                false
-            } else if inc.is_empty() {
-                true
-            } else {
-                inc.iter().any(|r| r.find(&cand).is_some())
-            };
-            Ok(Value::Bool(matched))
+            let is_test = st
+                .rule
+                .extra
+                .rule_class
+                .as_ref()
+                .is_some_and(|rc| rc.is_test)
+                || (st.rule.is_test_rule() && st.rule.rule_class != "test_suite");
+            Ok(Value::Bool(should_include_local_sources(
+                &st.cfg, &st.label, is_test,
+            )))
         }
         "resolve_tools" => {
             st.check_mutable("resolve_tools")?;
@@ -706,7 +718,30 @@ fn ctx_method(
         "created_actions" => {
             st.check_mutable("created_actions")?;
             check_kwargs("created_actions", pos, kw, &[])?;
-            Ok(Value::None)
+            let testable = st
+                .rule
+                .extra
+                .rule_class
+                .as_ref()
+                .and_then(|rc| rc.starlark.as_ref())
+                .and_then(|sp| sp.kwargs.get("_skylark_testable"))
+                .is_some_and(|v| matches!(v, Value::Bool(true)));
+            if !testable {
+                return Ok(Value::None);
+            }
+            let mut by_file = StarlarkDict::new();
+            let mut seen = std::collections::HashSet::new();
+            for a in st.actions.lock().unwrap().iter() {
+                let av = action_value(Arc::new(a.clone()));
+                for out in &a.outputs {
+                    if seen.insert(out.exec_path.path_string().to_string()) {
+                        let _ = by_file.insert(file_value(out), av.clone());
+                    }
+                }
+            }
+            let d = Value::Dict(Arc::new(Mutex::new(by_file)));
+            d.freeze();
+            Ok(provider_instance("Actions", vec![("by_file", d)]))
         }
         "check_placeholders" => {
             st.check_mutable("check_placeholders")?;
@@ -998,12 +1033,34 @@ fn actions_method(
             let template = want_file(arg(pos, kw, 0, "template").ok_or_else(|| StarlarkError("expand_template() missing 1 required positional argument: template".into()))?, "expand_template", "template")?;
             let out = want_file(arg(pos, kw, 1, "output").ok_or_else(|| StarlarkError("expand_template() missing 1 required positional argument: output".into()))?, "expand_template", "output")?;
             check_output(&out, "expand_template")?;
-            let subs = str_dict_ordered(arg(pos, kw, 2, "substitutions").ok_or_else(|| StarlarkError("expand_template() missing 1 required positional argument: substitutions".into()))?, "substitutions")?;
+            let subs = match arg(pos, kw, 2, "substitutions") {
+                Some(v) => str_dict_ordered(v, "substitutions")?,
+                None => Vec::new(),
+            };
             let is_exec = arg(pos, kw, 3, "is_executable").map(|v| v.is_truthy()).unwrap_or(false);
             let mut computed = Vec::new();
-            if let Some(Value::Host(k, id)) = none_or(arg(pos, kw, 4, "computed_substitutions")) {
-                if k == "template_dict" {
-                    computed = crate::objects::template_dict_entries(id).unwrap_or_default();
+            if let Some(cs) = none_or(arg(pos, kw, 4, "computed_substitutions")) {
+                match cs {
+                    Value::Host(k, id) if k == "template_dict" => {
+                        for entry in crate::objects::template_dict_entries(id).unwrap_or_default() {
+                            match entry {
+                                crate::objects::TemplateDictEntry::Literal(k, v) => {
+                                    computed.push((k, v));
+                                }
+                                crate::objects::TemplateDictEntry::Joined { key, values, kw: akw } => {
+                                    let mut b = ArgsBuilder::default();
+                                    args_method(&mut b, ctx, "add_joined", &[values], &akw)?;
+                                    computed.push((key, b.args.pop().unwrap_or_default()));
+                                }
+                            }
+                        }
+                    }
+                    other => {
+                        return err(format!(
+                            "in call to expand_template(), parameter 'computed_substitutions' got value of type '{}', want 'TemplateDict or NoneType'",
+                            type_name(other)
+                        ));
+                    }
                 }
             }
             let mut seen_keys = std::collections::HashSet::new();
@@ -1190,6 +1247,7 @@ fn actions_method(
         }
         "run" => run_action(st, ctx, false, pos, kw),
         "run_shell" => run_action(st, ctx, true, pos, kw),
+        "map_directory" => map_directory_action(st, ctx, pos, kw),
         other => err(format!("'actions' value has no field or method '{other}'")),
     }
 }
@@ -1264,6 +1322,29 @@ fn run_action(
         Some(v) => files_in(v, "inputs")?,
         None => Vec::new(),
     };
+    let mut unused_inputs_list: Option<Artifact> = None;
+    if !shell {
+        if let Some(u) = get("unused_inputs_list") {
+            unused_inputs_list = Some(want_file(u, func, "unused_inputs_list")?);
+        }
+    }
+    let mut shadowed_env: BTreeMap<String, String> = BTreeMap::new();
+    if let Some(sa) = get("shadowed_action") {
+        let act = action_of(sa).ok_or_else(|| {
+            StarlarkError(format!(
+                "in call to {func}(), parameter 'shadowed_action' got value of type '{}', want 'Action or NoneType'",
+                type_name(sa)
+            ))
+        })?;
+        inputs.extend(act.inputs.iter().cloned());
+        let env_map = match &act.action_env {
+            Some(ae) => ae.fixed_env(),
+            None => &act.env,
+        };
+        for (k, v) in env_map {
+            shadowed_env.insert(k.clone(), v.clone());
+        }
+    }
     let mut tool_files: Vec<Artifact> = Vec::new();
 
     // tools
@@ -1398,10 +1479,10 @@ fn run_action(
         None => "Action".to_string(),
     };
 
-    let env = match get("env") {
-        Some(v) => str_dict(v, "env")?,
-        None => BTreeMap::new(),
-    };
+    let mut env = shadowed_env;
+    if let Some(v) = get("env") {
+        env.extend(str_dict(v, "env")?);
+    }
     let mut exec_req = match get("execution_requirements") {
         Some(v) => str_dict(v, "execution_requirements")?
             .into_iter()
@@ -1418,7 +1499,7 @@ fn run_action(
             }
         }
     }
-    let exec_group = match get("exec_group") {
+    let mut exec_group = match get("exec_group") {
         Some(g) => {
             let g = want_str(g, func, "exec_group")?;
             if !st.exec_groups.contains(&g) {
@@ -1431,6 +1512,47 @@ fn run_action(
         }
         None => None,
     };
+    if let Some(tc_v) = get("toolchain") {
+        let k = transform_toolchain_key(st, ctx, tc_v)?;
+        let matches_key = |m: &BTreeMap<String, Value>| {
+            m.contains_key(&k)
+                || (k.starts_with("//") && m.keys().any(|c| c.starts_with("@@") && c.ends_with(&k)))
+        };
+        if let Some(ref eg) = exec_group {
+            let in_eg = st
+                .inputs
+                .exec_group_toolchains
+                .get(eg)
+                .is_some_and(matches_key);
+            if !in_eg {
+                return err(format!(
+                    "Action declared for exec group '{eg}', which does not have toolchain '{k}'"
+                ));
+            }
+        } else if matches_key(&st.inputs.toolchains) {
+            // Default exec group declares this toolchain.
+        } else {
+            let matching_egs: Vec<String> = st
+                .inputs
+                .exec_group_toolchains
+                .iter()
+                .filter(|(_, m)| matches_key(m))
+                .map(|(g, _)| g.clone())
+                .collect();
+            if matching_egs.len() == 1 {
+                exec_group = Some(matching_egs[0].clone());
+            } else if matching_egs.is_empty() {
+                return err(format!(
+                    "Action declared for non-existent toolchain '{k}'."
+                ));
+            } else {
+                return err(format!(
+                    "Toolchain '{k}' is declared in multiple exec groups [{}]; specify 'exec_group' explicitly",
+                    matching_egs.join(", ")
+                ));
+            }
+        }
+    }
     inputs.extend(tool_files.iter().cloned());
     let mut resource_set = ResourceSet::default();
     if let Some(rs) = get("resource_set") {
@@ -1494,6 +1616,12 @@ fn run_action(
     if let Some(s) = &stdout {
         all_outputs.push(s.clone());
     }
+    if let Some(ref ua) = unused_inputs_list {
+        exec_req.insert(
+            "internal-inline-outputs".to_string(),
+            ua.exec_path.path_string().to_string(),
+        );
+    }
     let mut a = Action::new(
         st.label.clone(),
         &mnemonic,
@@ -1505,6 +1633,7 @@ fn run_action(
     a.inputs = inputs;
     a.tools = dedup(tool_files);
     a.outputs = all_outputs;
+    a.unused_inputs_list = unused_inputs_list;
     a.resource_set = resource_set;
     a.use_default_shell_env = get("use_default_shell_env").map(|v| v.is_truthy()).unwrap_or(false);
     a.exec_group = exec_group;
@@ -1545,4 +1674,1163 @@ fn add_files_to_run_inputs(fields: &BTreeMap<String, Value>, out: &mut Vec<Artif
         out.extend(r.symlinks.values().cloned());
         out.extend(r.root_symlinks.values().cloned());
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum FingerprintNodeKind {
+    List,
+    Dict,
+    Set,
+    Depset,
+    Struct,
+    UserFunction,
+    ClosureScope,
+    Module,
+}
+
+#[derive(Default)]
+struct StarlarkFingerprintState {
+    active: Vec<(FingerprintNodeKind, usize)>,
+    memo: std::collections::HashMap<(FingerprintNodeKind, usize), String>,
+}
+
+fn merge_min_anc(a: Option<usize>, b: Option<usize>) -> Option<usize> {
+    match (a, b) {
+        (Some(x), Some(y)) => Some(x.min(y)),
+        (Some(x), None) => Some(x),
+        (None, Some(y)) => Some(y),
+        (None, None) => None,
+    }
+}
+
+impl StarlarkFingerprintState {
+    fn enter_node<F>(
+        &mut self,
+        fp: &mut zel_util::Fingerprint,
+        kind: FingerprintNodeKind,
+        tag: &str,
+        ptr: usize,
+        build: F,
+    ) -> Option<usize>
+    where
+        F: FnOnce(&mut Self, &mut zel_util::Fingerprint) -> Option<usize>,
+    {
+        let my_depth = self.active.len();
+        if let Some(pos) = self.active.iter().rposition(|&(k, p)| k == kind && p == ptr) {
+            let rel_depth = (my_depth - 1 - pos) as u64;
+            fp.add_str("Cycle").add_str(tag).add_u64(rel_depth);
+            return Some(pos);
+        }
+        if let Some(cached) = self.memo.get(&(kind, ptr)) {
+            fp.add_str(tag).add_str(cached);
+            return None;
+        }
+        self.active.push((kind, ptr));
+        let mut sub_fp = zel_util::Fingerprint::new();
+        let min_anc = build(self, &mut sub_fp);
+        self.active.pop();
+        let digest = sub_fp.hex_digest_and_reset();
+        fp.add_str(tag).add_str(&digest);
+        let self_contained = match min_anc {
+            None => true,
+            Some(idx) => idx >= my_depth,
+        };
+        if self_contained {
+            self.memo.insert((kind, ptr), digest);
+            None
+        } else {
+            min_anc
+        }
+    }
+}
+
+fn fingerprint_starlark_value(
+    fp: &mut zel_util::Fingerprint,
+    val: &Value,
+    state: &mut StarlarkFingerprintState,
+) -> Option<usize> {
+    if let Some(art) = artifact_of(val) {
+        fp.add_str("Artifact")
+            .add_str(art.exec_path.path_string())
+            .add_bool(art.is_source)
+            .add_bool(art.is_tree_artifact)
+            .add_bool(art.is_unresolved_symlink);
+        return None;
+    }
+    if let Some(rf) = runfiles_of(val) {
+        fp.add_str("Runfiles")
+            .add_u64(rf.artifacts.len() as u64);
+        for a in &rf.artifacts {
+            fp.add_str(a.exec_path.path_string());
+        }
+        let syms = rf.ordered_symlinks();
+        fp.add_u64(syms.len() as u64);
+        for (k, a) in syms {
+            fp.add_str(&k).add_str(a.exec_path.path_string());
+        }
+        let rsyms = rf.ordered_root_symlinks();
+        fp.add_u64(rsyms.len() as u64);
+        for (k, a) in rsyms {
+            fp.add_str(&k).add_str(a.exec_path.path_string());
+        }
+        return None;
+    }
+    match val {
+        Value::None => {
+            fp.add_str("None");
+            None
+        }
+        Value::Bool(b) => {
+            fp.add_str("Bool").add_bool(*b);
+            None
+        }
+        Value::Int(i) => {
+            fp.add_str("Int").add_str(&i.to_string());
+            None
+        }
+        Value::Float(f) => {
+            fp.add_str("Float").add_u64(f.to_bits());
+            None
+        }
+        Value::String(s) => {
+            fp.add_str("String").add_str(s);
+            None
+        }
+        Value::Label(l) => {
+            fp.add_str("Label").add_str(&l.unambiguous_canonical_form());
+            None
+        }
+        Value::Range(_) => {
+            fp.add_str("Range").add_str(&val.repr());
+            None
+        }
+        Value::SelectorList(sel) => {
+            fp.add_str("SelectorList").add_u64(sel.elements.len() as u64);
+            let mut min_anc = None;
+            for elem in &sel.elements {
+                match elem {
+                    zel_starlark::SelectorElement::Native(v) => {
+                        fp.add_str("Native");
+                        min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(fp, v, state));
+                    }
+                    zel_starlark::SelectorElement::Select(entries) => {
+                        fp.add_str("Select").add_u64(entries.len() as u64);
+                        for (k, v) in entries {
+                            fp.add_str(k);
+                            min_anc =
+                                merge_min_anc(min_anc, fingerprint_starlark_value(fp, v, state));
+                        }
+                    }
+                }
+            }
+            min_anc
+        }
+        Value::List(l) => {
+            let ptr = Arc::as_ptr(l) as usize;
+            state.enter_node(fp, FingerprintNodeKind::List, "List", ptr, |st, sub| {
+                let elems = l.lock().unwrap().elements.clone();
+                sub.add_u64(elems.len() as u64);
+                let mut min_anc = None;
+                for e in &elems {
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, e, st));
+                }
+                min_anc
+            })
+        }
+        Value::Tuple(elems) => {
+            fp.add_str("Tuple").add_u64(elems.len() as u64);
+            let mut min_anc = None;
+            for e in elems {
+                min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(fp, e, state));
+            }
+            min_anc
+        }
+        Value::Dict(d) => {
+            let ptr = Arc::as_ptr(d) as usize;
+            state.enter_node(fp, FingerprintNodeKind::Dict, "Dict", ptr, |st, sub| {
+                let items = d.lock().unwrap().items();
+                sub.add_u64(items.len() as u64);
+                let mut min_anc = None;
+                for (k, v) in &items {
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, k, st));
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, v, st));
+                }
+                min_anc
+            })
+        }
+        Value::Set(s) => {
+            let ptr = Arc::as_ptr(s) as usize;
+            state.enter_node(fp, FingerprintNodeKind::Set, "Set", ptr, |st, sub| {
+                let elems = s.lock().unwrap().elements.clone();
+                sub.add_u64(elems.len() as u64);
+                let mut min_anc = None;
+                let mut elem_digests = Vec::with_capacity(elems.len());
+                for e in &elems {
+                    let mut efp = zel_util::Fingerprint::new();
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(&mut efp, e, st));
+                    elem_digests.push(efp.hex_digest_and_reset());
+                }
+                elem_digests.sort();
+                for d in &elem_digests {
+                    sub.add_str(d);
+                }
+                min_anc
+            })
+        }
+        Value::Depset(d) => {
+            let ptr = Arc::as_ptr(d) as usize;
+            state.enter_node(fp, FingerprintNodeKind::Depset, "Depset", ptr, |st, sub| {
+                let items = d.to_list();
+                sub.add_str(d.order.as_str()).add_u64(items.len() as u64);
+                let mut min_anc = None;
+                for item in &items {
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, item, st));
+                }
+                min_anc
+            })
+        }
+        Value::Struct(s) => {
+            let ptr = Arc::as_ptr(s) as usize;
+            state.enter_node(fp, FingerprintNodeKind::Struct, "Struct", ptr, |st, sub| {
+                sub.add_str(s.opaque_class.as_deref().unwrap_or(""))
+                    .add_u64(s.fields.len() as u64);
+                let mut min_anc = None;
+                for (k, v) in &s.fields {
+                    sub.add_str(k);
+                    min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(sub, v, st));
+                }
+                min_anc
+            })
+        }
+        Value::Provider { name } => {
+            fp.add_str("Provider").add_str(name);
+            None
+        }
+        Value::ProviderInstance {
+            provider_name,
+            fields,
+        } => {
+            fp.add_str("ProviderInstance")
+                .add_str(provider_name)
+                .add_u64(fields.len() as u64);
+            let mut min_anc = None;
+            for (k, v) in fields {
+                fp.add_str(k);
+                min_anc = merge_min_anc(min_anc, fingerprint_starlark_value(fp, v, state));
+            }
+            min_anc
+        }
+        Value::RuleCallable {
+            rule_class,
+            executable,
+            test,
+        } => {
+            fp.add_str("RuleCallable")
+                .add_str(rule_class)
+                .add_bool(*executable)
+                .add_bool(*test);
+            None
+        }
+        Value::BuiltinFunction(name) => {
+            fp.add_str("BuiltinFunction").add_str(name);
+            None
+        }
+        Value::UserFunction(u) => {
+            let ptr = Arc::as_ptr(u) as usize;
+            state.enter_node(
+                fp,
+                FingerprintNodeKind::UserFunction,
+                "UserFunction",
+                ptr,
+                |st, sub| {
+                    sub.add_str(&u.name)
+                        .add_str(&u.location.to_string())
+                        .add_str(u.repr_override.as_deref().unwrap_or(""))
+                        .add_str(&format!("{:?}", u.params))
+                        .add_str(&format!("{:?}", u.body));
+                    sub.add_u64(u.closure.scopes.len() as u64);
+                    let mut min_anc = None;
+                    for scope in &u.closure.scopes {
+                        let sptr = Arc::as_ptr(scope) as usize;
+                        min_anc = merge_min_anc(
+                            min_anc,
+                            st.enter_node(
+                                sub,
+                                FingerprintNodeKind::ClosureScope,
+                                "ClosureScope",
+                                sptr,
+                                |st2, ssub| {
+                                    let vars: Vec<(String, Value)> = scope
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect();
+                                    ssub.add_u64(vars.len() as u64);
+                                    let mut sm = None;
+                                    for (k, v) in &vars {
+                                        ssub.add_str(k);
+                                        sm = merge_min_anc(
+                                            sm,
+                                            fingerprint_starlark_value(ssub, v, st2),
+                                        );
+                                    }
+                                    sm
+                                },
+                            ),
+                        );
+                    }
+                    if let Some(m) = &u.module {
+                        let mptr = Arc::as_ptr(m) as usize;
+                        let mlabel = m.label_string.lock().unwrap().clone().unwrap_or_default();
+                        sub.add_str(&mlabel);
+                        min_anc = merge_min_anc(
+                            min_anc,
+                            st.enter_node(
+                                sub,
+                                FingerprintNodeKind::Module,
+                                "Module",
+                                mptr,
+                                |st2, msub| {
+                                    let globals: Vec<(String, Value)> = m
+                                        .globals
+                                        .lock()
+                                        .unwrap()
+                                        .iter()
+                                        .map(|(k, v)| (k.clone(), v.clone()))
+                                        .collect();
+                                    msub.add_u64(globals.len() as u64);
+                                    let mut mm = None;
+                                    for (k, v) in &globals {
+                                        msub.add_str(k);
+                                        mm = merge_min_anc(
+                                            mm,
+                                            fingerprint_starlark_value(msub, v, st2),
+                                        );
+                                    }
+                                    mm
+                                },
+                            ),
+                        );
+                    }
+                    min_anc
+                },
+            )
+        }
+        Value::Host(k, id) => {
+            fp.add_str("Host").add_str(k);
+            if k == "path" || k == "dotted_version" || k == "obj" {
+                fp.add_str(id);
+            }
+            None
+        }
+    }
+}
+
+const MAP_DIRECTORY_PARAMS: &[&str] = &[
+    "input_directories",
+    "additional_inputs",
+    "output_directories",
+    "tools",
+    "additional_params",
+    "execution_requirements",
+    "exec_group",
+    "toolchain",
+    "use_default_shell_env",
+    "env",
+    "mnemonic",
+    "resource_set",
+    "implementation",
+];
+
+fn validate_map_dir_inputs_dict(
+    entries: Vec<(Value, Value)>,
+    what: &str,
+    all_inputs: &mut Vec<Artifact>,
+    tool_files: Option<&mut Vec<Artifact>>,
+) -> Result<Vec<(Value, Value)>, StarlarkError> {
+    let mut tool_out = tool_files;
+    let mut validated = Vec::with_capacity(entries.len());
+    for (k, v) in entries {
+        let ks = want_str(&k, "map_directory", what)?;
+        if let Some(a) = artifact_of(&v) {
+            all_inputs.push(a.clone());
+            if let Some(tf) = tool_out.as_deref_mut() {
+                tf.push(a);
+            }
+        } else if let Value::ProviderInstance {
+            provider_name,
+            fields,
+        } = &v
+        {
+            if provider_name != "FilesToRunProvider" {
+                return err(format!(
+                    "Expected one of [File, FilesToRunProvider, depset]; but got {provider_name} in {what}['{ks}']."
+                ));
+            }
+            let mut ftr_files = Vec::new();
+            add_files_to_run_inputs(fields, &mut ftr_files);
+            all_inputs.extend(ftr_files.iter().cloned());
+            if let Some(tf) = tool_out.as_deref_mut() {
+                tf.extend(ftr_files);
+            }
+        } else if let Value::Depset(d) = &v {
+            for item in d.to_list() {
+                let a = artifact_of(&item).ok_or_else(|| {
+                    StarlarkError(format!(
+                        "Expected a Depset of Files in {what}['{ks}'], got member of type {}",
+                        type_name(&item)
+                    ))
+                })?;
+                all_inputs.push(a.clone());
+                if let Some(tf) = tool_out.as_deref_mut() {
+                    tf.push(a);
+                }
+            }
+        } else {
+            return err(format!(
+                "Expected one of [File, FilesToRunProvider, depset]; but got {} in {what}['{ks}'].",
+                type_name(&v)
+            ));
+        }
+        v.freeze();
+        validated.push((Value::String(ks), v));
+    }
+    Ok(validated)
+}
+
+#[derive(Clone)]
+struct StarlarkMapDirectoryExpander {
+    base_state: Arc<CtxState>,
+    semantics: zel_starlark::StarlarkSemantics,
+    globals: BTreeMap<String, Value>,
+    main_repo_mapping: Option<Arc<BTreeMap<String, String>>>,
+    input_directories: Vec<(String, Artifact)>,
+    output_directories: Vec<(String, Artifact)>,
+    additional_inputs: Vec<(Value, Value)>,
+    tools: Vec<(Value, Value)>,
+    additional_params: Vec<(Value, Value)>,
+    implementation: Value,
+    expanded_mnemonic: String,
+    env: BTreeMap<String, String>,
+    use_default_shell_env: bool,
+    execution_requirements: BTreeMap<String, String>,
+    exec_group: Option<String>,
+    resource_set: ResourceSet,
+    fingerprint: String,
+}
+
+impl std::fmt::Debug for StarlarkMapDirectoryExpander {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StarlarkMapDirectoryExpander")
+            .field("owner", &self.base_state.label)
+            .field("expanded_mnemonic", &self.expanded_mnemonic)
+            .finish()
+    }
+}
+
+struct TemplateCallState {
+    sub_st: Arc<CtxState>,
+    allowed_output_dirs: BTreeSet<String>,
+    expanded_mnemonic: String,
+    env: BTreeMap<String, String>,
+    use_default_shell_env: bool,
+    execution_requirements: BTreeMap<String, String>,
+    exec_group: Option<String>,
+    resource_set: ResourceSet,
+}
+
+impl crate::MapDirectoryExpander for StarlarkMapDirectoryExpander {
+    fn key_fingerprint(&self) -> String {
+        self.fingerprint.clone()
+    }
+
+    fn expand(
+        &self,
+        discovered_children: &BTreeMap<String, Vec<(String, Artifact)>>,
+    ) -> Result<Vec<crate::ActionAnalysisMetadata>, String> {
+        let b = &self.base_state;
+        let sub_st = Arc::new(CtxState {
+            rule: b.rule.clone(),
+            label: b.label.clone(),
+            cfg: b.cfg.clone(),
+            inputs: b.inputs.clone(),
+            pkg_dir: b.pkg_dir.clone(),
+            output_to_genfiles: b.output_to_genfiles,
+            exec_groups: b.exec_groups.clone(),
+            deps: b.deps.clone(),
+            attr_struct: b.attr_struct.clone(),
+            file_struct: b.file_struct.clone(),
+            files_struct: b.files_struct.clone(),
+            executable_struct: b.executable_struct.clone(),
+            outputs_struct: b.outputs_struct.clone(),
+            predeclared: Vec::new(),
+            default_executable: None,
+            default_executable_accessed: Mutex::new(false),
+            actions: Mutex::new(Vec::new()),
+            graph: Mutex::new(ActionGraph::new()),
+            declared_trees: Mutex::new(BTreeSet::new()),
+            declared_files: Mutex::new(BTreeSet::new()),
+            declared_artifacts: Mutex::new(Vec::new()),
+            rule_errors: Mutex::new(Vec::new()),
+            make_vars: b.make_vars.clone(),
+            frozen: Mutex::new(false),
+            rule_struct: None,
+            aspect_ids: Vec::new(),
+            aspect_fragments: Vec::new(),
+            aspect_toolchains_declared: Vec::new(),
+            base_toolchains: BTreeMap::new(),
+            base_exec_groups: BTreeSet::new(),
+            base_exec_group_toolchains: BTreeMap::new(),
+            base_exec_group_platforms: BTreeMap::new(),
+            split_attr: Value::None,
+            in_subrule: std::sync::atomic::AtomicBool::new(false),
+        });
+
+        let allowed_output_dirs: BTreeSet<String> = self
+            .output_directories
+            .iter()
+            .map(|(_, a)| a.exec_path.path_string().to_string())
+            .collect();
+
+        let tcall = Arc::new(TemplateCallState {
+            sub_st: sub_st.clone(),
+            allowed_output_dirs,
+            expanded_mnemonic: self.expanded_mnemonic.clone(),
+            env: self.env.clone(),
+            use_default_shell_env: self.use_default_shell_env,
+            execution_requirements: self.execution_requirements.clone(),
+            exec_group: self.exec_group.clone(),
+            resource_set: self.resource_set.clone(),
+        });
+
+        let mut in_dirs_entries = Vec::with_capacity(self.input_directories.len());
+        for (k, dir) in &self.input_directories {
+            let children_vals: Vec<Value> = discovered_children
+                .get(k)
+                .map(|kids| {
+                    kids.iter()
+                        .map(|(rel, art)| crate::objects::tree_file_value(art, rel.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+            in_dirs_entries.push((
+                Value::String(k.clone()),
+                expanded_directory_value(dir.clone(), children_vals),
+            ));
+        }
+        let out_dirs_entries: Vec<(Value, Value)> = self
+            .output_directories
+            .iter()
+            .map(|(k, dir)| (Value::String(k.clone()), file_value(dir)))
+            .collect();
+
+        let mut cb_kw = BTreeMap::new();
+        cb_kw.insert("input_directories".to_string(), mk_dict_frozen(in_dirs_entries));
+        cb_kw.insert("output_directories".to_string(), mk_dict_frozen(out_dirs_entries));
+        cb_kw.insert(
+            "additional_inputs".to_string(),
+            mk_dict_frozen(self.additional_inputs.clone()),
+        );
+        cb_kw.insert("tools".to_string(), mk_dict_frozen(self.tools.clone()));
+        cb_kw.insert(
+            "additional_params".to_string(),
+            mk_dict_frozen(self.additional_params.clone()),
+        );
+
+        let mut ectx = EvalContext::new(b.pkg_dir.clone(), None);
+        ectx.semantics = self.semantics.clone();
+        ectx.thread.semantics = self.semantics.clone();
+        for (k, v) in &self.globals {
+            ectx.globals.insert(k.clone(), v.clone());
+        }
+        ectx.main_repo_mapping = self.main_repo_mapping.clone();
+        ectx.file_name = b
+            .rule
+            .extra
+            .location
+            .clone()
+            .unwrap_or_else(|| "BUILD".to_string());
+        let tcall2 = tcall.clone();
+        ectx.host = Some(Arc::new(move |c, name, mut pos, kw| {
+            if let Some(rest) = name.strip_prefix("method:") {
+                let (kind, method) = rest.split_once('.').unwrap_or((rest, ""));
+                if kind == "template_ctx" {
+                    if !pos.is_empty() {
+                        pos.remove(0);
+                    }
+                    return eval_template_ctx_method(&tcall2, c, method, &pos, &kw);
+                }
+            }
+            dispatch(&tcall2.sub_st, c, name, pos, kw)
+        }));
+
+        let tctx = Value::Host("template_ctx".into(), "0".into());
+        let ret = ectx
+            .call_value(self.implementation.clone(), vec![tctx], cb_kw)
+            .map_err(|e| e.0)?;
+        *sub_st.frozen.lock().unwrap() = true;
+        ectx.mutability.freeze();
+
+        if ret != Value::None {
+            let (fn_name, fn_loc) = match &self.implementation {
+                Value::UserFunction(u) => (u.name.clone(), u.location.to_string()),
+                Value::BuiltinFunction(n) => (n.clone(), "<builtin>".to_string()),
+                _ => ("<callable>".to_string(), "<unknown>".to_string()),
+            };
+            return Err(format!(
+                "actions.map_directory() implementation {fn_name} at {fn_loc} may not return a non-None value (got {})",
+                ret.repr()
+            ));
+        }
+
+        sub_st.validate_artifacts()?;
+        let actions = sub_st.actions.lock().unwrap();
+        let mut lowered = Vec::new();
+        for a in actions.iter() {
+            lowered.extend(a.lower());
+        }
+        Ok(lowered)
+    }
+}
+
+fn mk_dict_frozen(entries: Vec<(Value, Value)>) -> Value {
+    let d = mk_dict(entries);
+    d.freeze();
+    d
+}
+
+fn map_directory_action(
+    st: &Arc<CtxState>,
+    ctx: &mut EvalContext,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+) -> HostResult {
+    if !st.cfg.bool_option("experimental_allow_map_directory", true) {
+        return err(
+            "actions.map_directory() is an experimental API and is subjected to change. Please set the flag --experimental_allow_map_directory to enable it.",
+        );
+    }
+    st.check_mutable("actions.map_directory")?;
+    check_kwargs("map_directory", &[], kw, MAP_DIRECTORY_PARAMS)?;
+    if !pos.is_empty() {
+        return err(format!(
+            "map_directory() accepts no positional arguments but got {}",
+            pos.len()
+        ));
+    }
+    let want_dict = |name: &str, required: bool| -> Result<Vec<(Value, Value)>, StarlarkError> {
+        match kw.get(name) {
+            Some(Value::Dict(d)) => Ok(d.lock().unwrap().items()),
+            Some(other) => err(format!(
+                "in call to map_directory(), parameter '{name}' got value of type '{}', want 'dict'",
+                type_name(other)
+            )),
+            None if required => err(format!(
+                "map_directory() missing 1 required keyword-only argument: {name}"
+            )),
+            None => Ok(Vec::new()),
+        }
+    };
+    let in_dirs_raw = want_dict("input_directories", true)?;
+    let add_in_raw = want_dict("additional_inputs", false)?;
+    let out_dirs_raw = want_dict("output_directories", true)?;
+    let tools_raw = want_dict("tools", false)?;
+    let add_params_raw = want_dict("additional_params", false)?;
+    let imp = kw.get("implementation").cloned().ok_or_else(|| {
+        StarlarkError(
+            "map_directory() missing 1 required keyword-only argument: implementation".into(),
+        )
+    })?;
+
+    if in_dirs_raw.is_empty() {
+        return err("actions.map_directory() requires at least one input.");
+    }
+    if out_dirs_raw.is_empty() {
+        return err("actions.map_directory() requires at least one output.");
+    }
+
+    match &imp {
+        Value::UserFunction(u) => {
+            if !u.closure.scopes.is_empty() || u.name == "<lambda>" {
+                return err(format!(
+                    "Error in map_directory: to avoid unintended retention of analysis data structures, the function (declared at {}) must be declared by a top-level def statement",
+                    u.location
+                ));
+            }
+        }
+        other => {
+            return err(format!(
+                "in call to map_directory(), parameter 'implementation' got value of type '{}', want 'function'",
+                type_name(other)
+            ));
+        }
+    }
+
+    let mut all_inputs: Vec<Artifact> = Vec::new();
+    let mut tool_files: Vec<Artifact> = Vec::new();
+
+    let mut input_directories = Vec::with_capacity(in_dirs_raw.len());
+    for (k, v) in in_dirs_raw {
+        let ks = want_str(&k, "map_directory", "input_directories")?;
+        let af = want_file(&v, "map_directory", "input_directories")?;
+        if !af.is_tree_artifact {
+            return err(format!(
+                "Expected a directory (SpecialArtifact) in input_directories['{ks}'], got '{}'",
+                af.exec_path
+            ));
+        }
+        all_inputs.push(af.clone());
+        input_directories.push((ks, af));
+    }
+
+    let additional_inputs =
+        validate_map_dir_inputs_dict(add_in_raw, "additional_inputs", &mut all_inputs, None)?;
+
+    let mut output_directories = Vec::with_capacity(out_dirs_raw.len());
+    let mut outputs_vec = Vec::with_capacity(out_dirs_raw.len());
+    for (k, v) in out_dirs_raw {
+        let ks = want_str(&k, "map_directory", "output_directories")?;
+        let af = want_file(&v, "map_directory", "output_directories")?;
+        if !af.is_tree_artifact || af.is_source {
+            return err(format!(
+                "Expected a declared output directory in output_directories['{ks}'], got '{}'",
+                af.exec_path
+            ));
+        }
+        outputs_vec.push(af.clone());
+        output_directories.push((ks, af));
+    }
+
+    let tools = validate_map_dir_inputs_dict(
+        tools_raw,
+        "tools",
+        &mut all_inputs,
+        Some(&mut tool_files),
+    )?;
+
+    let mut additional_params = Vec::with_capacity(add_params_raw.len());
+    for (k, v) in add_params_raw {
+        let ks = want_str(&k, "map_directory", "additional_params")?;
+        match &v {
+            Value::Bool(_) | Value::Int(_) | Value::String(_) => {}
+            other => {
+                return err(format!(
+                    "Expected one of [bool, int, string]; but got {} in additional_params['{ks}'].",
+                    type_name(other)
+                ));
+            }
+        }
+        additional_params.push((Value::String(ks), v));
+    }
+
+    let get = |k: &str| none_or(kw.get(k));
+    let expanded_mnemonic = match get("mnemonic") {
+        Some(m) => {
+            let m = want_str(m, "map_directory", "mnemonic")?;
+            if m.is_empty() || !m.chars().all(|c| c.is_alphanumeric()) {
+                return err(format!(
+                    "mnemonic must only contain letters and/or digits, and have non-zero length, was: \"{m}\""
+                ));
+            }
+            m
+        }
+        None => "ExpandedTemplateAction".to_string(),
+    };
+
+    let mut env = BTreeMap::new();
+    if let Some(v) = get("env") {
+        env.extend(str_dict(v, "env")?);
+    }
+    let use_default_shell_env = get("use_default_shell_env")
+        .map(|v| v.is_truthy())
+        .unwrap_or(false);
+
+    let mut exec_req = match get("execution_requirements") {
+        Some(v) => str_dict(v, "execution_requirements")?
+            .into_iter()
+            .filter(|(k, _)| is_legal_exec_info_key(k))
+            .collect(),
+        None => BTreeMap::new(),
+    };
+    if st.cfg.bool_option("incompatible_allow_tags_propagation", true) {
+        if let Some(zel_packages::attr::AttrValue::StrList(tags)) = st.rule.attr_or_default("tags")
+        {
+            for tag in tags {
+                if is_legal_exec_info_key(&tag) {
+                    exec_req.entry(tag).or_insert_with(String::new);
+                }
+            }
+        }
+    }
+
+    let mut exec_group = match get("exec_group") {
+        Some(g) => {
+            let g = want_str(g, "map_directory", "exec_group")?;
+            if !st.exec_groups.contains(&g) {
+                return err(format!("Action declared for non-existent exec group '{g}'."));
+            }
+            if g == "default-exec-group" || !is_valid_starlark_ident(&g) {
+                return err(format!("Invalid name for exec group '{g}'."));
+            }
+            Some(g)
+        }
+        None => None,
+    };
+    if let Some(tc_v) = get("toolchain") {
+        let k = transform_toolchain_key(st, ctx, tc_v)?;
+        let matches_key = |m: &BTreeMap<String, Value>| {
+            m.contains_key(&k)
+                || (k.starts_with("//") && m.keys().any(|c| c.starts_with("@@") && c.ends_with(&k)))
+        };
+        if let Some(ref eg) = exec_group {
+            let in_eg = st
+                .inputs
+                .exec_group_toolchains
+                .get(eg)
+                .is_some_and(matches_key);
+            if !in_eg {
+                return err(format!(
+                    "Action declared for exec group '{eg}', which does not have toolchain '{k}'"
+                ));
+            }
+        } else if matches_key(&st.inputs.toolchains) {
+            // Default exec group declares this toolchain.
+        } else {
+            let matching_egs: Vec<String> = st
+                .inputs
+                .exec_group_toolchains
+                .iter()
+                .filter(|(_, m)| matches_key(m))
+                .map(|(g, _)| g.clone())
+                .collect();
+            if matching_egs.len() == 1 {
+                exec_group = Some(matching_egs[0].clone());
+            } else if matching_egs.is_empty() {
+                return err(format!(
+                    "Action declared for non-existent toolchain '{k}'."
+                ));
+            } else {
+                return err(format!(
+                    "Toolchain '{k}' is declared in multiple exec groups [{}]; specify 'exec_group' explicitly",
+                    matching_egs.join(", ")
+                ));
+            }
+        }
+    }
+
+    let mut resource_set = ResourceSet::default();
+    if let Some(rs) = get("resource_set") {
+        let os = if cfg!(target_os = "macos") { "osx" } else { "linux" };
+        let d = match rs {
+            Value::Dict(_) => rs.clone(),
+            f @ (Value::UserFunction(_) | Value::BuiltinFunction(_)) => {
+                if let Value::UserFunction(u) = f {
+                    if !u.closure.scopes.is_empty() || u.name == "<lambda>" {
+                        return err(format!(
+                            "to avoid unintended retention of analysis data structures, the function (declared at {}) must be declared by a top-level def statement",
+                            u.location
+                        ));
+                    }
+                }
+                ctx.call_value(
+                    f.clone(),
+                    vec![
+                        Value::String(os.to_string()),
+                        Value::Int(BigInt::from_i64(all_inputs.len() as i64)),
+                    ],
+                    BTreeMap::new(),
+                )?
+            }
+            other => {
+                return err(format!(
+                    "in call to map_directory(), parameter 'resource_set' got value of type '{}', want 'callable, dict or NoneType'",
+                    type_name(other)
+                ));
+            }
+        };
+        let Value::Dict(dd) = d else {
+            return err("resource_set callback must return a dict");
+        };
+        let items_rs = dd.lock().unwrap().items();
+        let mut illegal = Vec::new();
+        for (k, _) in &items_rs {
+            let Value::String(k) = k else {
+                return err("resource_set keys must be strings");
+            };
+            if !matches!(k.as_str(), "cpu" | "memory" | "local_test") {
+                illegal.push(k.clone());
+            }
+        }
+        if !illegal.is_empty() {
+            return err(format!("Illegal resource keys: ({})", illegal.join(",")));
+        }
+        for (k, v) in items_rs {
+            let Value::String(k) = k else { unreachable!() };
+            let num = match &v {
+                Value::Int(i) => i.to_f64(),
+                Value::Float(f) => *f,
+                _ => {
+                    return err(format!(
+                        "Illegal resource value type for key {k}: got {}, want int or float",
+                        type_name(&v)
+                    ));
+                }
+            };
+            match k.as_str() {
+                "cpu" => resource_set.cpu = num,
+                "memory" => resource_set.memory_mb = num,
+                "local_test" => resource_set.local_test_count = num as i32,
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    let mut semantics = ctx.semantics.clone();
+    semantics.experimental_sibling_repository_layout = st.inputs.sibling_repository_layout;
+
+    let mut fp = zel_util::Fingerprint::new();
+    let mut fp_state = StarlarkFingerprintState::default();
+    fingerprint_starlark_value(&mut fp, &imp, &mut fp_state);
+    fp.add_bool(semantics.experimental_sibling_repository_layout);
+    fp.add_str(&expanded_mnemonic);
+    fp.add_u64(input_directories.len() as u64);
+    for (k, a) in &input_directories {
+        fp.add_str(k).add_str(a.exec_path.path_string());
+    }
+    fp.add_u64(output_directories.len() as u64);
+    for (k, a) in &output_directories {
+        fp.add_str(k).add_str(a.exec_path.path_string());
+    }
+    fp.add_u64(additional_params.len() as u64);
+    for (k, v) in &additional_params {
+        fingerprint_starlark_value(&mut fp, k, &mut fp_state);
+        fingerprint_starlark_value(&mut fp, v, &mut fp_state);
+    }
+    fp.add_u64(additional_inputs.len() as u64);
+    for (k, v) in &additional_inputs {
+        fingerprint_starlark_value(&mut fp, k, &mut fp_state);
+        fingerprint_starlark_value(&mut fp, v, &mut fp_state);
+    }
+    fp.add_u64(tools.len() as u64);
+    for (k, v) in &tools {
+        fingerprint_starlark_value(&mut fp, k, &mut fp_state);
+        fingerprint_starlark_value(&mut fp, v, &mut fp_state);
+    }
+    let fingerprint = fp.hex_digest_and_reset();
+
+    let expander = Arc::new(StarlarkMapDirectoryExpander {
+        base_state: st.clone(),
+        semantics,
+        globals: ctx.globals.clone(),
+        main_repo_mapping: ctx.main_repo_mapping.clone(),
+        input_directories: input_directories.clone(),
+        output_directories: output_directories.clone(),
+        additional_inputs,
+        tools,
+        additional_params,
+        implementation: imp,
+        expanded_mnemonic: expanded_mnemonic.clone(),
+        env: env.clone(),
+        use_default_shell_env,
+        execution_requirements: exec_req.clone(),
+        exec_group: exec_group.clone(),
+        resource_set: resource_set.clone(),
+        fingerprint,
+    });
+
+    let mut a = Action::new(
+        st.label.clone(),
+        "StarlarkMapActionTemplate",
+        ActionKind::MapDirectory {
+            input_directories,
+            output_directories,
+            expanded_mnemonic,
+            expander: crate::MapDirectoryExpanderHandle(expander),
+        },
+    );
+    a.env = env;
+    a.execution_requirements = exec_req;
+    a.inputs = all_inputs;
+    a.tools = dedup(tool_files);
+    a.outputs = outputs_vec;
+    a.resource_set = resource_set;
+    a.use_default_shell_env = use_default_shell_env;
+    a.exec_group = exec_group;
+    st.register(a)?;
+    Ok(Value::None)
+}
+
+fn eval_template_ctx_method(
+    tcall: &TemplateCallState,
+    ctx: &mut EvalContext,
+    method: &str,
+    pos: &[Value],
+    kw: &BTreeMap<String, Value>,
+) -> HostResult {
+    let st = &tcall.sub_st;
+    match method {
+        "declare_file" => {
+            check_kwargs("declare_file", pos, kw, &["filename", "directory"])?;
+            if pos.len() > 1 {
+                return err(format!(
+                    "declare_file() accepts no more than 1 positional argument but got {}",
+                    pos.len()
+                ));
+            }
+            let filename = want_str(
+                pos.first().or_else(|| kw.get("filename")).ok_or_else(|| {
+                    StarlarkError(
+                        "declare_file() missing 1 required positional argument: filename".into(),
+                    )
+                })?,
+                "declare_file",
+                "filename",
+            )?;
+            let dir_v = kw.get("directory").ok_or_else(|| {
+                StarlarkError(
+                    "declare_file() missing 1 required keyword-only argument: directory".into(),
+                )
+            })?;
+            let dir = want_file(dir_v, "declare_file", "directory")?;
+            if !dir.is_tree_artifact
+                || dir.is_source
+                || !tcall
+                    .allowed_output_dirs
+                    .contains(dir.exec_path.path_string())
+            {
+                return err(format!(
+                    "Cannot declare file `{filename}` in non-output directory {}",
+                    dir_v.repr()
+                ));
+            }
+            let norm = filename.replace('\\', "/");
+            if norm.is_empty()
+                || norm.starts_with('/')
+                || norm.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..")
+            {
+                return err(format!(
+                    "declare_file(): invalid relative filename '{filename}'"
+                ));
+            }
+            let a = Artifact {
+                is_source: false,
+                is_tree_artifact: false,
+                root: dir.root,
+                is_unresolved_symlink: false,
+                is_constant_metadata: false,
+                exec_path: dir.exec_path.get_relative_str(&norm),
+                root_relative_path: dir.root_relative_path.get_relative_str(&norm),
+                owner_label: dir.owner_label.clone(),
+            };
+            st.declared_files
+                .lock()
+                .unwrap()
+                .insert(a.exec_path.path_string().to_string());
+            st.declared_artifacts.lock().unwrap().push(a.clone());
+            Ok(crate::objects::tree_file_value(&a, norm))
+        }
+        "args" => {
+            check_kwargs("args", pos, kw, &[])?;
+            Ok(args_value(ArgsBuilder::default()))
+        }
+        "run" => {
+            check_kwargs(
+                "run",
+                &[],
+                kw,
+                &[
+                    "outputs",
+                    "inputs",
+                    "executable",
+                    "tools",
+                    "arguments",
+                    "progress_message",
+                ],
+            )?;
+            if !pos.is_empty() {
+                return err(format!(
+                    "run() accepts no positional arguments but got {}",
+                    pos.len()
+                ));
+            }
+            let out_v = kw.get("outputs").ok_or_else(|| {
+                StarlarkError("run() missing 1 required keyword-only argument: outputs".into())
+            })?;
+            let out_items = sequence(out_v).ok_or_else(|| {
+                StarlarkError(format!(
+                    "in call to run(), parameter 'outputs' got value of type '{}', want 'sequence'",
+                    type_name(out_v)
+                ))
+            })?;
+            {
+                let declared = st.declared_files.lock().unwrap();
+                for item in &out_items {
+                    let af = want_file(item, "run", "outputs")?;
+                    if !declared.contains(af.exec_path.path_string()) {
+                        return err(format!(
+                            "Action has conflicting output '{}' that is an output of another action, thus causing an action conflict. `template_ctx.run()` should only use outputs declared by `template_ctx.declare_file()` within the same Starlark implementation function.",
+                            af.exec_path
+                        ));
+                    }
+                }
+            }
+            let mut sub_kw = kw.clone();
+            sub_kw.insert(
+                "mnemonic".to_string(),
+                Value::String(tcall.expanded_mnemonic.clone()),
+            );
+            sub_kw.insert(
+                "use_default_shell_env".to_string(),
+                Value::Bool(tcall.use_default_shell_env),
+            );
+            if !tcall.env.is_empty() {
+                sub_kw.insert(
+                    "env".to_string(),
+                    mk_dict(
+                        tcall
+                            .env
+                            .iter()
+                            .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+            if !tcall.execution_requirements.is_empty() {
+                sub_kw.insert(
+                    "execution_requirements".to_string(),
+                    mk_dict(
+                        tcall
+                            .execution_requirements
+                            .iter()
+                            .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
+                            .collect(),
+                    ),
+                );
+            }
+            if let Some(ref eg) = tcall.exec_group {
+                sub_kw.insert("exec_group".to_string(), Value::String(eg.clone()));
+            }
+            run_action(st, ctx, false, &[], &sub_kw)?;
+            if let Some(last) = st.actions.lock().unwrap().last_mut() {
+                last.resource_set = tcall.resource_set.clone();
+            }
+            Ok(Value::None)
+        }
+        other => err(format!(
+            "'template_ctx' value has no field or method '{other}'"
+        )),
+    }
+}
+
+fn template_ctx_method(
+    _st: &Arc<CtxState>,
+    _ctx: &mut EvalContext,
+    method: &str,
+    _pos: &[Value],
+    _kw: &BTreeMap<String, Value>,
+) -> HostResult {
+    err(format!(
+        "cannot call template_ctx.{method}() outside of a map_directory implementation"
+    ))
 }

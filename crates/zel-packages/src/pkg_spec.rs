@@ -274,6 +274,103 @@ impl PackageGroupContents {
 pub type PackageGroupLookup<'a> =
     &'a mut dyn FnMut(&Label) -> Result<(Vec<PackageSpec>, Vec<Label>), String>;
 
+static PACKAGE_SPEC_GROUPS: std::sync::Mutex<Vec<Vec<PackageGroupContents>>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Registers the direct + transitive `PackageGroupContents` of a `PackageSpecificationInfo`.
+pub fn register_package_spec_groups(groups: Vec<PackageGroupContents>) -> String {
+    let mut reg = PACKAGE_SPEC_GROUPS.lock().unwrap();
+    reg.push(groups);
+    (reg.len() - 1).to_string()
+}
+
+/// Evaluates `PackageSpecificationInfo.contains(target)` against registered group contents.
+pub fn package_spec_groups_contain(id: &str, pkg: &PackageIdentifier) -> bool {
+    let Ok(idx) = id.parse::<usize>() else {
+        return false;
+    };
+    let reg = PACKAGE_SPEC_GROUPS.lock().unwrap();
+    reg.get(idx)
+        .is_some_and(|groups| groups.iter().any(|g| g.contains(pkg)))
+}
+
+/// Parses the argument of `.bzl` `visibility(...)` (`"public"`, `"private"`, `"//pkg/..."`, or a
+/// list/tuple of package specification strings).
+pub fn parse_bzl_visibility_specs(
+    mapping: &RepositoryMapping,
+    repo: &RepositoryName,
+    raw: &zel_starlark::Value,
+) -> Result<Vec<PackageSpec>, String> {
+    let items: Vec<String> = match raw {
+        zel_starlark::Value::String(s) => vec![s.clone()],
+        zel_starlark::Value::List(l) => {
+            let elems = l.lock().unwrap().elements.clone();
+            let mut out = Vec::with_capacity(elems.len());
+            for (i, e) in elems.iter().enumerate() {
+                match e {
+                    zel_starlark::Value::String(s) => out.push(s.clone()),
+                    other => {
+                        return Err(format!(
+                            "at index {i} of visibility list, got element of type {}, want string",
+                            other.type_name()
+                        ));
+                    }
+                }
+            }
+            out
+        }
+        zel_starlark::Value::Tuple(elems) => {
+            let mut out = Vec::with_capacity(elems.len());
+            for (i, e) in elems.iter().enumerate() {
+                match e {
+                    zel_starlark::Value::String(s) => out.push(s.clone()),
+                    other => {
+                        return Err(format!(
+                            "at index {i} of visibility list, got element of type {}, want string",
+                            other.type_name()
+                        ));
+                    }
+                }
+            }
+            out
+        }
+        other => {
+            return Err(format!(
+                "in call to visibility(), parameter 'value' got value of type '{}', want 'string or sequence of strings'",
+                other.type_name()
+            ));
+        }
+    };
+    let mut specs = Vec::with_capacity(items.len());
+    for item in &items {
+        if (item == "public" || item == "private") && items.len() > 1 {
+            return Err(format!(
+                "'public' and 'private' may not be combined with other visibility specs (got '{item}')"
+            ));
+        }
+        let parsed = PackageSpec::parse(mapping, repo, item)?;
+        specs.push(parsed);
+    }
+    Ok(specs)
+}
+
+/// Returns whether `importer_pkg` is allowed to `load()` a `.bzl` defined in `bzl_pkg` with
+/// declared `visibility` (`None` means default public). Same-package loads are always allowed.
+pub fn bzl_visibility_allows(
+    visibility: Option<&[PackageSpec]>,
+    bzl_pkg: &PackageIdentifier,
+    importer_pkg: &PackageIdentifier,
+) -> bool {
+    if bzl_pkg == importer_pkg || importer_pkg.repository().name() == "_builtins" {
+        return true;
+    }
+    let Some(specs) = visibility else {
+        return true;
+    };
+    let contents = PackageGroupContents::from_specs(specs.to_vec());
+    contents.contains(importer_pkg)
+}
+
 pub fn resolve_package_group(
     group: &Label,
     lookup: PackageGroupLookup<'_>,

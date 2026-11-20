@@ -588,6 +588,37 @@ fn analyze_rule(
     resolver: Arc<dyn DepResolver>,
     acfg: &AnalysisConfig,
 ) -> Result<ConfiguredTarget, String> {
+    let is_analysis_test = rule
+        .extra
+        .rule_class
+        .as_ref()
+        .and_then(|rc| rc.starlark.as_ref())
+        .and_then(|sp| sp.kwargs.get("analysis_test"))
+        .is_some_and(|v| matches!(v, Value::Bool(true)));
+    match analyze_rule_inner(rule, config, resolver, acfg) {
+        Ok(ct) => Ok(ct),
+        Err(e) if config.bool_option("allow_analysis_failures", false) && !is_analysis_test => {
+            let is_test = rule.extra.rule_class.as_ref().is_some_and(|rc| rc.is_test);
+            Ok(zel_analysis::starlark_rule::make_analysis_failure_target(
+                &rule.label,
+                config,
+                &rule.rule_class,
+                rule.testonly,
+                is_test,
+                Some(e),
+                Vec::new(),
+            ))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn analyze_rule_inner(
+    rule: &RuleInstance,
+    config: &BuildConfigurationKey,
+    resolver: Arc<dyn DepResolver>,
+    acfg: &AnalysisConfig,
+) -> Result<ConfiguredTarget, String> {
     let is_plat = matches!(
         rule.rule_class.as_str(),
         "platform" | "constraint_value" | "constraint_setting"
@@ -613,9 +644,12 @@ fn analyze_rule(
         if let Some(t @ Value::Struct(ts)) = spec.kwargs.get("cfg") {
             if ts.fields.get("_build_setting").and_then(|v| v.as_str()) == Some("none")
                 && !ts.fields.contains_key("implementation")
+                && !ts.fields.contains_key("_composed_transitions")
             {
                 cfg = config.to_core_only();
-            } else if ts.fields.contains_key("implementation") {
+            } else if ts.fields.contains_key("implementation")
+                || ts.fields.contains_key("_composed_transitions")
+            {
                 let attrs = zel_analysis::starlark_rule::build_transition_attr_struct(
                     rule,
                     config,
@@ -646,6 +680,7 @@ fn analyze_rule(
         inputs.allow_tags_propagation =
             cfg.bool_option("incompatible_allow_tags_propagation", true);
         inputs.exec_platform = Some(acfg.default_exec_platform());
+        inputs.has_exec_groups_context = true;
         if let Ok(Some(plat_ct)) = toolchain::target_platform(&cfg, &resolver, acfg) {
             let _ = resolver.check_dependency(rule, "$target_platform", &plat_ct);
             toolchain::record_exec_platform_edge(rule, &cfg, &resolver, acfg);
@@ -661,6 +696,17 @@ fn analyze_rule(
         {
             rule_ecw.extend(l.iter().cloned());
         }
+        let mut per_eg_ecw: BTreeMap<String, Vec<Label>> = BTreeMap::new();
+        if let Some(zel_packages::AttrValue::LabelListDict(entries)) =
+            rule.extra.attr_values.get("exec_group_compatible_with")
+        {
+            for (gname, labels) in entries {
+                per_eg_ecw
+                    .entry(gname.clone())
+                    .or_default()
+                    .extend(labels.iter().cloned());
+            }
+        }
         if !types.is_empty() || !rule_ecw.is_empty() {
             let tc = resolve_ctx_toolchains(&rule.label, &types, &rule_ecw, &cfg, acfg, &resolver)?;
             for d in &tc.deps {
@@ -675,10 +721,14 @@ fn analyze_rule(
             if auto_eg && !types.is_empty() {
                 for t in &types {
                     let gname = t.toolchain_type.canonical_form();
+                    let mut auto_ecw = rule_ecw.clone();
+                    if let Some(extra) = per_eg_ecw.get(&gname) {
+                        auto_ecw.extend(extra.iter().cloned());
+                    }
                     let gtc = resolve_ctx_toolchains(
                         &rule.label,
                         std::slice::from_ref(t),
-                        &rule_ecw,
+                        &auto_ecw,
                         &cfg,
                         acfg,
                         &resolver,
@@ -698,6 +748,10 @@ fn analyze_rule(
                     continue;
                 };
                 let Value::Struct(gs) = &g else { continue };
+                let is_default_test_eg = matches!(
+                    gs.fields.get("_default_test_exec_group"),
+                    Some(Value::Bool(true))
+                );
                 let copy = matches!(gs.fields.get("copy_from_rule"), Some(Value::Bool(true)));
                 let mut gtypes = toolchain_requests(gs.fields.get("toolchains"));
                 let mut gecw: Vec<Label> = gs
@@ -709,16 +763,49 @@ fn analyze_rule(
                     gtypes.extend(types.clone());
                     gecw.extend(rule_ecw.clone());
                 }
+                if let Some(extra) = per_eg_ecw.get(&name) {
+                    gecw.extend(extra.iter().cloned());
+                }
                 let tc =
                     resolve_ctx_toolchains(&rule.label, &gtypes, &gecw, &cfg, acfg, &resolver)?;
-                for d in &tc.deps {
-                    resolver.check_dependency(rule, "$toolchains", d)?;
+                if is_default_test_eg {
+                    for d in &tc.resolved_targets {
+                        resolver.check_dependency(rule, "[toolchain dependency: test]", d)?;
+                    }
+                } else {
+                    for d in &tc.deps {
+                        resolver.check_dependency(rule, "$toolchains", d)?;
+                    }
                 }
                 inputs
                     .exec_group_platforms
                     .insert(name.clone(), tc.exec_platform);
                 inputs.exec_group_toolchains.insert(name, tc.toolchains);
             }
+        }
+        if (rule.is_test_rule() || rule.extra.rule_class.as_ref().is_some_and(|rc| rc.is_test))
+            && rule.rule_class != "test_suite"
+            && !inputs.exec_group_platforms.contains_key("test")
+        {
+            let test_tt =
+                Label::parse_canonical("@bazel_tools//tools/test:default_test_toolchain_type")
+                    .expect("valid default_test_toolchain_type label");
+            let test_reqs = [ToolchainTypeRequest {
+                toolchain_type: test_tt,
+                mandatory: false,
+            }];
+            let test_ecw = per_eg_ecw.get("test").cloned().unwrap_or_default();
+            let tc =
+                resolve_ctx_toolchains(&rule.label, &test_reqs, &test_ecw, &cfg, acfg, &resolver)?;
+            for d in &tc.resolved_targets {
+                resolver.check_dependency(rule, "[toolchain dependency: test]", d)?;
+            }
+            inputs
+                .exec_group_platforms
+                .insert("test".to_string(), tc.exec_platform);
+            inputs
+                .exec_group_toolchains
+                .insert("test".to_string(), tc.toolchains);
         }
         let mut ct = analyze_starlark_rule(rule, &cfg, inputs)?;
         ct.visibility = rule.extra.effective_visibility.clone();
@@ -806,6 +893,46 @@ fn analyze_rule(
     ct.created_in_symbolic_macro = rule.extra.macro_instance.is_some();
     if rule.rule_class != "alias" && !(ct.is_late_bound_alias && ct.actual.is_some()) {
         ct.testonly = rule.testonly;
+    }
+    if !is_plat && rule.rule_class != "alias" && rule.rule_class != "package_group" {
+        if ct.exec_platform.is_none() {
+            ct.exec_platform = Some(acfg.default_exec_platform());
+        }
+        if (ct.is_test || rule.is_test_rule())
+            && rule.rule_class != "test_suite"
+            && !ct.exec_group_platforms.contains_key("test")
+        {
+            let test_tt =
+                Label::parse_canonical("@bazel_tools//tools/test:default_test_toolchain_type")
+                    .expect("valid default_test_toolchain_type label");
+            let test_reqs = [ToolchainTypeRequest {
+                toolchain_type: test_tt,
+                mandatory: false,
+            }];
+            let mut test_ecw: Vec<Label> = Vec::new();
+            if let Some(zel_packages::AttrValue::LabelListDict(entries)) =
+                rule.extra.attr_values.get("exec_group_compatible_with")
+            {
+                for (gname, labels) in entries {
+                    if gname == "test" {
+                        test_ecw.extend(labels.iter().cloned());
+                    }
+                }
+            }
+            if let Ok(tc) =
+                resolve_ctx_toolchains(&rule.label, &test_reqs, &test_ecw, config, acfg, &resolver)
+            {
+                ct.exec_group_platforms
+                    .insert("test".to_string(), tc.exec_platform);
+                ct.exec_group_toolchains
+                    .insert("test".to_string(), tc.toolchains);
+            } else {
+                ct.exec_group_platforms
+                    .insert("test".to_string(), acfg.default_exec_platform());
+                ct.exec_group_toolchains
+                    .insert("test".to_string(), BTreeMap::new());
+            }
+        }
     }
     if ct.incompatible.is_none()
         && !is_plat

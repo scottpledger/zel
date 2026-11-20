@@ -35,6 +35,7 @@ pub struct ExternalOptions {
     pub experimental_repository_ctx_execute_wasm: bool,
     pub experimental_sibling_repository_layout: bool,
     pub incompatible_no_implicit_watch_label: bool,
+    pub incompatible_use_cc_configure_from_rules_cc: bool,
     pub credential_helpers: Vec<(String, PathBuf)>,
 }
 
@@ -59,6 +60,7 @@ impl Default for ExternalOptions {
             experimental_repository_ctx_execute_wasm: false,
             experimental_sibling_repository_layout: false,
             incompatible_no_implicit_watch_label: true,
+            incompatible_use_cc_configure_from_rules_cc: false,
             credential_helpers: Vec::new(),
         }
     }
@@ -326,6 +328,7 @@ const BZL_BUILTIN_NAMES: &[&str] = &[
     "ProguardSpecProvider",
     "CcSharedLibraryInfo",
     "CcToolchainConfigInfo",
+    "IncompatiblePlatformProvider",
     "ConstraintValueInfo",
     "ConstraintSettingInfo",
     "PlatformInfo",
@@ -348,6 +351,7 @@ const BZL_BUILTIN_NAMES: &[&str] = &[
     "exports_files",
     "fail",
     "print",
+    "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc",
 ];
 
 impl Rt {
@@ -1057,7 +1061,6 @@ impl Rt {
             return crate::ctx::dispatch_object(self, ctx, name, pos, kw);
         }
         match name {
-            "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc" => Ok(Value::None),
             "native.package_name" => Err(StarlarkError(
                 "package_name() can only be used while evaluating a BUILD file or a legacy or symbolic macro".into(),
             )),
@@ -1085,6 +1088,15 @@ impl Rt {
             }
             "module_extension" => self.make_module_extension(ctx, pos, kw, ctx.call_location.clone()),
             "rule" => Ok(Value::Host("bzlmod_rule".into(), String::new())),
+            "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc" => {
+                if !pos.is_empty() || !kw.is_empty() {
+                    return err("__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc() accepts no arguments");
+                }
+                if self.opts.incompatible_use_cc_configure_from_rules_cc {
+                    return err("Incompatible flag --incompatible_use_cc_configure_from_rules_cc has been flipped. Please use cc_configure and related logic from https://github.com/bazelbuild/rules_cc. See https://github.com/bazelbuild/bazel/issues/10134 for details and migration instructions.");
+                }
+                Ok(Value::None)
+            }
             "tag_class" => {
                 if pos.len() > 1 {
                     return err(format!(

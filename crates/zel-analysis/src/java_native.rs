@@ -68,7 +68,15 @@ fn java_native(
                 if fname.ends_with(".ifso") || fname.ends_with(".tbd") || fname.ends_with(".lib") {
                     continue;
                 }
-                let shared = fname.ends_with(".so") || fname.ends_with(".dylib") || fname.ends_with(".dll") || fname.contains(".so.");
+                let shared = fname.ends_with(".so")
+                    || fname.ends_with(".dylib")
+                    || fname.ends_with(".dll")
+                    || fname.ends_with(".pyd")
+                    || fname.ends_with(".wasm")
+                    || fname.ends_with(".tgt")
+                    || fname.ends_with(".vpi")
+                    || fname.contains(".so.")
+                    || fname.contains(".dylib.");
                 if !shared {
                     return Some(err(format!("not a shared library :{}", art.exec_path.path_string())));
                 }

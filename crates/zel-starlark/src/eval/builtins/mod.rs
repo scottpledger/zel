@@ -20,6 +20,6 @@ pub use universal::{
     compare_values, dir_attrs, dotted_version_canonical_components, dotted_version_cmp,
     dotted_version_compare_to, eval_universal_function, eval_universal_function_in,
     eval_universal_function_with_semantics, fallible_merge_sort, is_callable, merge_sort_keyed,
-    parse_dotted_version, value_to_sequence, DICT_METHODS, LABEL_FIELDS, LABEL_METHODS,
-    LIST_METHODS, SET_METHODS, STRING_METHODS,
+    parse_dotted_version, to_int32, unpack_dict_pairs, value_to_sequence, DICT_METHODS,
+    LABEL_FIELDS, LABEL_METHODS, LIST_METHODS, SET_METHODS, STRING_METHODS,
 };

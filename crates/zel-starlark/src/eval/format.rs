@@ -13,7 +13,7 @@
 // limitations under the License.
 
 use crate::types::list::StarlarkError;
-use crate::types::value::{format_float, Value};
+use crate::types::value::Value;
 use std::collections::BTreeMap;
 
 /// String `%` formatting matching Bazel's `Printer.formatWithList`.
@@ -75,49 +75,6 @@ pub fn percent_format(
     Ok(out)
 }
 
-fn format_float_conv(v: f64, conv: char) -> String {
-    if v.is_nan() || v.is_infinite() {
-        let s = format_float(v);
-        return if conv.is_ascii_uppercase() {
-            s.to_ascii_uppercase()
-        } else {
-            s
-        };
-    }
-    let sign = if v.is_sign_negative() { "-" } else { "" };
-    let abs = v.abs();
-    match conv {
-        'e' | 'E' => {
-            let sci = format!("{abs:.6e}");
-            let (mant, exp_s) = sci.split_once('e').unwrap_or((&sci, "0"));
-            let exp: i32 = exp_s.parse().unwrap_or(0);
-            let e_ch = if conv == 'E' { 'E' } else { 'e' };
-            let exp_sign = if exp < 0 { '-' } else { '+' };
-            format!("{sign}{mant}{e_ch}{exp_sign}{:02}", exp.abs())
-        }
-        'f' | 'F' => {
-            let sci = format!("{abs:e}");
-            let (mant, exp_s) = sci.split_once('e').unwrap_or((&sci, "0"));
-            let exp: i32 = exp_s.parse().unwrap_or(0);
-            let digits: String = mant.chars().filter(|c| *c != '.').collect();
-            if exp >= 16 && digits.len() <= (exp as usize + 1) {
-                let pad = (exp as usize + 1) - digits.len();
-                format!("{sign}{digits}{}.000000", "0".repeat(pad))
-            } else {
-                format!("{sign}{abs:.6}")
-            }
-        }
-        _ => {
-            let s = format_float(v);
-            if conv == 'G' {
-                s.replace('e', "E")
-            } else {
-                s
-            }
-        }
-    }
-}
-
 fn format_one_value(
     out: &mut String,
     conv: char,
@@ -135,8 +92,9 @@ fn format_one_value(
         'd' | 'o' | 'x' | 'X' => {
             let n = match arg {
                 Value::Int(n) => n.clone(),
-                Value::Float(f) => crate::bigint::finite_double_to_int_exact(*f)
-                    .map_err(|_| StarlarkError(format!("got {arg}, want a finite number")))?,
+                Value::Float(f) => {
+                    crate::bigint::finite_double_to_int_exact(*f).map_err(StarlarkError)?
+                }
                 _ => {
                     return Err(StarlarkError(format!(
                         "got {} for '%{conv}' format, want int or float",
@@ -146,9 +104,39 @@ fn format_one_value(
             };
             match conv {
                 'd' => out.push_str(&n.to_string()),
-                'o' => out.push_str(&format!("{n:o}")),
-                'x' => out.push_str(&format!("{n:x}")),
-                'X' => out.push_str(&format!("{n:X}")),
+                'o' => {
+                    if let Some(i) = n.to_i64() {
+                        if let Ok(i32_v) = i32::try_from(i) {
+                            out.push_str(&format!("{:o}", i32_v as u32));
+                        } else {
+                            out.push_str(&format!("{:o}", i as u64));
+                        }
+                    } else {
+                        out.push_str(&format!("{n:o}"));
+                    }
+                }
+                'x' => {
+                    if let Some(i) = n.to_i64() {
+                        if let Ok(i32_v) = i32::try_from(i) {
+                            out.push_str(&format!("{:x}", i32_v as u32));
+                        } else {
+                            out.push_str(&format!("{:x}", i as u64));
+                        }
+                    } else {
+                        out.push_str(&format!("{n:x}"));
+                    }
+                }
+                'X' => {
+                    if let Some(i) = n.to_i64() {
+                        if let Ok(i32_v) = i32::try_from(i) {
+                            out.push_str(&format!("{:X}", i32_v as u32));
+                        } else {
+                            out.push_str(&format!("{:X}", i as u64));
+                        }
+                    } else {
+                        out.push_str(&format!("{n:X}"));
+                    }
+                }
                 _ => unreachable!(),
             }
         }
@@ -282,4 +270,99 @@ pub fn str_format(
     }
 
     Ok(output)
+}
+
+/// Formats `v` according to Starlark's `StarlarkFloat.format(v, conv)` for `%e`/`%E`/`%f`/`%F`/`%g`/`%G`.
+pub fn format_float_conv(v: f64, conv: char) -> String {
+    if v.is_nan() {
+        return if conv.is_ascii_uppercase() {
+            "NAN".to_string()
+        } else {
+            "nan".to_string()
+        };
+    }
+    if v.is_infinite() {
+        let s = if v.is_sign_positive() { "+inf" } else { "-inf" };
+        return if conv.is_ascii_uppercase() {
+            s.to_ascii_uppercase()
+        } else {
+            s.to_string()
+        };
+    }
+    let sign = if v.is_sign_negative() { "-" } else { "" };
+    let abs = v.abs();
+    match conv {
+        'f' | 'F' => {
+            let sci = format!("{abs:e}");
+            let (mant, exp_s) = sci.split_once('e').unwrap_or((&sci, "0"));
+            let exp: i32 = exp_s.parse().unwrap_or(0);
+            let digits: String = mant.chars().filter(|c| *c != '.').collect();
+            if exp >= 16 && digits.len() <= (exp as usize + 1) {
+                let pad = (exp as usize + 1) - digits.len();
+                format!("{sign}{digits}{}.000000", "0".repeat(pad))
+            } else {
+                format!("{sign}{abs:.6}")
+            }
+        }
+        'e' | 'E' => {
+            let sci = format!("{abs:.6e}");
+            let (mant, exp_s) = sci.split_once('e').unwrap_or((&sci, "0"));
+            let exp: i32 = exp_s.parse().unwrap_or(0);
+            let e_ch = if conv == 'E' { 'E' } else { 'e' };
+            let exp_sign = if exp < 0 { '-' } else { '+' };
+            format!("{sign}{mant}{e_ch}{exp_sign}{:02}", exp.abs())
+        }
+        'g' | 'G' => {
+            if v == 0.0 {
+                return if v.is_sign_negative() {
+                    "-0.0".to_string()
+                } else {
+                    "0.0".to_string()
+                };
+            }
+            let neg = v.is_sign_negative();
+            let abs = v.abs();
+            let sci = format!("{abs:e}");
+            let (mant, exp_s) = sci.split_once('e').unwrap();
+            let exp: i32 = exp_s.parse().unwrap();
+            let digits: String = mant.chars().filter(|&c| c != '.').collect();
+            let e_ch = if conv == 'G' { 'E' } else { 'e' };
+            let mut out = if (-4..17).contains(&exp) {
+                if exp < 0 {
+                    let mut r = String::from("0.");
+                    for _ in 0..(-exp - 1) {
+                        r.push('0');
+                    }
+                    r.push_str(&digits);
+                    r
+                } else {
+                    let split = (exp + 1) as usize;
+                    if digits.len() <= split {
+                        let mut r = digits;
+                        for _ in r.len()..split {
+                            r.push('0');
+                        }
+                        r.push_str(".0");
+                        r
+                    } else {
+                        format!("{}.{}", &digits[..split], &digits[split..])
+                    }
+                }
+            } else {
+                let sign_ch = if exp >= 0 { '+' } else { '-' };
+                let aexp = exp.unsigned_abs();
+                let m = if digits.len() == 1 {
+                    digits
+                } else {
+                    format!("{}.{}", &digits[..1], &digits[1..])
+                };
+                format!("{m}{e_ch}{sign_ch}{aexp:02}")
+            };
+            if neg {
+                out.insert(0, '-');
+            }
+            out
+        }
+        _ => crate::types::value::format_float(v),
+    }
 }

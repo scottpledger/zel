@@ -330,6 +330,16 @@ impl CompactPersistentActionCache {
         self.entries.lock().unwrap().get(primary_output).cloned()
     }
 
+    /// Snapshot of `(primary_output_exec_path -> discovered_inputs)` for `aquery --noinclude_pruned_inputs`.
+    pub fn discovered_inputs_by_output(&self) -> BTreeMap<String, Vec<String>> {
+        self.entries
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(k, e)| (k.clone(), e.discovered_inputs.clone()))
+            .collect()
+    }
+
     pub fn put_entry(&self, primary_output: &str, entry: ActionCacheEntry) {
         self.entries
             .lock()

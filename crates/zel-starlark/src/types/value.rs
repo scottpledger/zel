@@ -197,6 +197,21 @@ impl Value {
                 "repository_ctx" => "repository_ctx",
                 "module_ctx" => "module_ctx",
                 "extension_metadata" => "extension_metadata",
+                "dotted_version" => "DottedVersion",
+                "macro" => "macro",
+                "aspect" => "Aspect",
+                "subrule" => "subrule",
+                "transition" => "transition",
+                "toolchain_type" => "ToolchainTypeRequirement",
+                "action" => "Action",
+                "expanded_directory" => "ExpandedDirectory",
+                "template_ctx" => "template_ctx",
+                "analysis_failure" => "AnalysisFailure",
+                "cc_compilation_outputs" => "CcCompilationOutputs",
+                "cc_module_map" => "CcModuleMap",
+                "linker_input" => "LinkerInput",
+                "lto_compilation_context" => "LtoCompilationContext",
+                "attribute" => "Attribute",
                 _ => "host_object",
             },
         }
@@ -210,9 +225,11 @@ impl Value {
             | Self::Float(_)
             | Self::String(_)
             | Self::Label(_)
+            | Self::Range(_)
             | Self::Depset(_)
             | Self::SelectorList(_)
             | Self::UserFunction(_)
+            | Self::BuiltinFunction(_)
             | Self::Provider { .. }
             | Self::RuleCallable { .. } => true,
             Self::List(l) => l.lock().unwrap().is_frozen(),
@@ -222,7 +239,6 @@ impl Value {
             Self::Struct(s) => s.fields.values().all(|x| x.is_immutable()),
             Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_immutable()),
             Self::Host(k, id) => HOST_IS_IMMUTABLE.get().map(|f| f(k, id)).unwrap_or(true),
-            Self::Range(_) | Self::BuiltinFunction(_) => false,
         }
     }
 
@@ -239,36 +255,94 @@ impl Value {
             | Self::Provider { .. }
             | Self::RuleCallable { .. } => true,
             Self::Tuple(items) => items.iter().all(|x| x.is_hashable()),
-            Self::Struct(s) => s.fields.values().all(|x| x.is_immutable()),
-            Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_immutable()),
+            Self::Struct(s) => s.fields.values().all(|x| x.is_hashable()),
+            Self::ProviderInstance { fields, .. } => fields.values().all(|x| x.is_hashable()),
             Self::Host(k, id) => HOST_IS_IMMUTABLE.get().map(|f| f(k, id)).unwrap_or(true),
             Self::List(_)
             | Self::Dict(_)
             | Self::Set(_)
             | Self::Range(_)
-            | Self::BuiltinFunction(_)
-            | Self::SelectorList(_) => false,
+            | Self::SelectorList(_)
+            | Self::BuiltinFunction(_) => false,
         }
     }
 
     pub fn freeze(&self) {
+        let mut visited = std::collections::HashSet::new();
+        self.freeze_inner(&mut visited);
+    }
+
+    fn freeze_inner(&self, visited: &mut std::collections::HashSet<usize>) {
         match self {
-            Self::List(l) => l.lock().unwrap().freeze(),
-            Self::Dict(d) => d.lock().unwrap().freeze(),
-            Self::Set(s) => s.lock().unwrap().freeze(),
+            Self::List(l) => {
+                let ptr = Arc::as_ptr(l) as usize;
+                if !visited.insert(ptr) {
+                    return;
+                }
+                let elems = {
+                    let mut guard = l.lock().unwrap();
+                    if guard.is_frozen() {
+                        return;
+                    }
+                    guard.frozen = true;
+                    guard.elements.clone()
+                };
+                for elem in &elems {
+                    elem.freeze_inner(visited);
+                }
+            }
+            Self::Dict(d) => {
+                let ptr = Arc::as_ptr(d) as usize;
+                if !visited.insert(ptr) {
+                    return;
+                }
+                let entries = {
+                    let mut guard = d.lock().unwrap();
+                    if guard.is_frozen() {
+                        return;
+                    }
+                    guard.frozen = true;
+                    guard.entries.clone()
+                };
+                for (k, v) in &entries {
+                    k.freeze_inner(visited);
+                    v.freeze_inner(visited);
+                }
+            }
+            Self::Set(s) => {
+                let ptr = Arc::as_ptr(s) as usize;
+                if !visited.insert(ptr) {
+                    return;
+                }
+                let elems = {
+                    let mut guard = s.lock().unwrap();
+                    if guard.is_frozen() {
+                        return;
+                    }
+                    guard.frozen = true;
+                    guard.elements.clone()
+                };
+                for elem in &elems {
+                    elem.freeze_inner(visited);
+                }
+            }
             Self::Tuple(items) => {
                 for item in items {
-                    item.freeze();
+                    item.freeze_inner(visited);
                 }
             }
             Self::Struct(s) => {
+                let ptr = Arc::as_ptr(s) as usize;
+                if !visited.insert(ptr) {
+                    return;
+                }
                 for v in s.fields.values() {
-                    v.freeze();
+                    v.freeze_inner(visited);
                 }
             }
             Self::ProviderInstance { fields, .. } => {
                 for v in fields.values() {
-                    v.freeze();
+                    v.freeze_inner(visited);
                 }
             }
             _ => {}
@@ -355,7 +429,7 @@ impl Value {
                     provider_name: prov_b,
                     fields: f2,
                 },
-            ) => {
+            ) if prov_a != "OutputGroupInfo" && prov_b != "OutputGroupInfo" => {
                 if prov_a != prov_b {
                     fn printable(p: &str) -> &str {
                         if p.starts_with("%anonymous#") {
@@ -621,7 +695,32 @@ impl Value {
             }
             Self::Range(r) => out.push_str(&r.to_string()),
             Self::Depset(d) => out.push_str(&d.to_string()),
-            Self::SelectorList(s) => out.push_str(&format!("select({:?})", s.elements)),
+            Self::SelectorList(s) => {
+                for (idx, elem) in s.elements.iter().enumerate() {
+                    if idx > 0 {
+                        out.push_str(" + ");
+                    }
+                    match elem {
+                        SelectorElement::Native(v) => v.repr_into(out, stack),
+                        SelectorElement::Select(entries) => {
+                            out.push_str("select({");
+                            for (i, (k, v)) in entries.iter().enumerate() {
+                                if i > 0 {
+                                    out.push_str(", ");
+                                }
+                                if let Ok(lbl) = zel_cmdline::Label::parse_canonical(k) {
+                                    Value::Label(lbl).repr_into(out, stack);
+                                } else {
+                                    Value::String(k.clone()).repr_into(out, stack);
+                                }
+                                out.push_str(": ");
+                                v.repr_into(out, stack);
+                            }
+                            out.push_str("})");
+                        }
+                    }
+                }
+            }
             Self::Struct(s) => {
                 let ptr = Arc::as_ptr(s) as usize;
                 if stack.contains(&ptr) {
@@ -816,9 +915,17 @@ impl PartialEq for Value {
             (Self::Struct(a), Self::Struct(b)) => a.fields == b.fields,
             (Self::SelectorList(a), Self::SelectorList(b)) => a == b,
             (
-                Self::RuleCallable { rule_class: r1, .. },
-                Self::RuleCallable { rule_class: r2, .. },
-            ) => r1 == r2,
+                Self::RuleCallable {
+                    rule_class: r1,
+                    executable: e1,
+                    test: t1,
+                },
+                Self::RuleCallable {
+                    rule_class: r2,
+                    executable: e2,
+                    test: t2,
+                },
+            ) => r1 == r2 && e1 == e2 && t1 == t2,
             (Self::Provider { name: n1 }, Self::Provider { name: n2 }) => n1 == n2,
             (
                 Self::ProviderInstance {
@@ -839,7 +946,7 @@ impl PartialEq for Value {
                     crate::eval::builtins::dotted_version_canonical_components(i1)
                         == crate::eval::builtins::dotted_version_canonical_components(i2)
                 } else {
-                    i1 == i2
+                    k1 == k2 && i1 == i2
                 }
             }
             _ => false,
@@ -969,6 +1076,28 @@ impl Hash for Value {
                 16u8.hash(state);
                 name.hash(state);
             }
+            Self::RuleCallable {
+                rule_class,
+                executable,
+                test,
+            } => {
+                17u8.hash(state);
+                rule_class.hash(state);
+                executable.hash(state);
+                test.hash(state);
+            }
+            Self::Set(s) => {
+                18u8.hash(state);
+                let guard = s.lock().unwrap();
+                guard.elements.len().hash(state);
+                let mut acc = 0u64;
+                for x in &guard.elements {
+                    let mut sub = std::collections::hash_map::DefaultHasher::new();
+                    x.hash(&mut sub);
+                    acc ^= sub.finish();
+                }
+                acc.hash(state);
+            }
             _ => {
                 // Non-hashable
                 0xFFu8.hash(state);
@@ -1029,5 +1158,40 @@ impl fmt::Display for Value {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn freeze_cyclic_containers_without_deadlock_or_overflow() {
+        let list = Value::List(Arc::new(Mutex::new(StarlarkList::new(vec![]))));
+        if let Value::List(l) = &list {
+            l.lock().unwrap().append(list.clone()).unwrap();
+        }
+        list.freeze();
+        assert!(list.is_immutable());
+
+        let dict = Value::Dict(Arc::new(Mutex::new(StarlarkDict::new())));
+        if let Value::Dict(d) = &dict {
+            d.lock()
+                .unwrap()
+                .insert(Value::String("self".into()), dict.clone())
+                .unwrap();
+        }
+        dict.freeze();
+        assert!(dict.is_immutable());
+
+        let holder = Value::List(Arc::new(Mutex::new(StarlarkList::new(vec![]))));
+        let mut fields = BTreeMap::new();
+        fields.insert("items".into(), holder.clone());
+        let wrapped = Value::Struct(Arc::new(StructValue::new(fields)));
+        if let Value::List(l) = &holder {
+            l.lock().unwrap().append(wrapped.clone()).unwrap();
+        }
+        wrapped.freeze();
+        assert!(wrapped.is_immutable());
     }
 }

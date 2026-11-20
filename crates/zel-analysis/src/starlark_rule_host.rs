@@ -43,10 +43,10 @@ fn dispatch(
         return host_method(st, ctx, kind, method, &recv, &pos, &kw);
     }
     if let Some(kind) = name.strip_prefix("index:") {
-        return host_index(st, kind, &pos[0], &pos[1]);
+        return host_index(st, ctx, kind, &pos[0], &pos[1]);
     }
     if let Some(kind) = name.strip_prefix("contains:") {
-        return host_contains(st, kind, &pos[0], &pos[1]);
+        return host_contains(st, ctx, kind, &pos[0], &pos[1]);
     }
     if name == "call:subrule" {
         return call_subrule(st, ctx, pos, kw);
@@ -74,10 +74,14 @@ fn dispatch(
                 .map_err(|e| StarlarkError(format!("invalid label '{s}': {e}")))?
             }
             other => {
-                return err(format!(
-                    "in call to contains(), parameter 'target' got value of type '{}', want 'Target, Label, or string'",
-                    other.type_name()
-                ))
+                if let Some(ct) = target_of(other) {
+                    ct.label.clone()
+                } else {
+                    return err(format!(
+                        "in call to contains(), parameter 'target' got value of type '{}', want 'Target, Label, or string'",
+                        other.type_name()
+                    ));
+                }
             }
         };
         let groups = zel_packages::pkg_spec::PackageGroupContents::decode_canonical_groups(encoded);
@@ -381,7 +385,62 @@ fn call_subrule(
 
 /// Whether `--collect_code_coverage` is on in `cfg`.
 fn coverage_enabled(cfg: &BuildConfigurationKey) -> bool {
-    matches!(cfg.options.get("collect_code_coverage").map(String::as_str), Some("true") | Some("1"))
+    cfg.bool_option("collect_code_coverage", false)
+}
+
+/// `RegexFilter.isIncluded(label.toString())` for `--instrumentation_filter`.
+fn instrumentation_filter_includes(cfg: &BuildConfigurationKey, label: &Label) -> bool {
+    let spec = cfg
+        .option_str("instrumentation_filter")
+        .unwrap_or_else(|| "-/javatests[/:],-/test/java[/:]".to_string());
+    let mut pieces = Vec::new();
+    let mut cur = String::new();
+    let chars: Vec<char> = spec.chars().collect();
+    for (i, &c) in chars.iter().enumerate() {
+        if c == ',' && !(i > 0 && chars[i - 1] == '\\') {
+            pieces.push(std::mem::take(&mut cur));
+        } else {
+            cur.push(c);
+        }
+    }
+    pieces.push(cur);
+    let mut inclusions = Vec::new();
+    let mut exclusions = Vec::new();
+    for raw_piece in pieces {
+        let mut p = raw_piece.replace("\\,", ",");
+        let excluded = p.starts_with('-');
+        if excluded || p.starts_with('+') {
+            p.remove(0);
+        }
+        if p.is_empty() {
+            continue;
+        }
+        // `build_options::regex_filter_string` normalises patterns using `(?>...)`; `java_regex`
+        // uses non-capturing `(?:...)` groups with identical substring match semantics here.
+        let normalized = p.replace("(?>", "(?:");
+        if let Ok(re) = zel_util::java_regex::Regex::new(&normalized) {
+            if excluded {
+                exclusions.push(re);
+            } else {
+                inclusions.push(re);
+            }
+        }
+    }
+    let label_str = format!(
+        "{}:{}",
+        label.package_identifier().canonical_form(),
+        label.name()
+    );
+    if exclusions.iter().any(|r| r.is_match(&label_str)) {
+        return false;
+    }
+    inclusions.is_empty() || inclusions.iter().any(|r| r.is_match(&label_str))
+}
+
+/// `InstrumentedFilesCollector.shouldIncludeLocalSources`.
+fn should_include_local_sources(cfg: &BuildConfigurationKey, label: &Label, is_test: bool) -> bool {
+    (cfg.bool_option("instrument_test_targets", false) || !is_test)
+        && instrumentation_filter_includes(cfg, label)
 }
 
 /// `coverage_common.instrumented_files_info(ctx, source_attributes, dependency_attributes,
@@ -420,22 +479,36 @@ fn instrumented_files_info(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Stri
         None => Vec::new(),
     };
     if coverage_enabled(&st.cfg) {
-        for a in &sources {
-            let Some(Value::Struct(fs)) = Some(&st.files_struct) else { continue };
-            // `InstrumentedFilesCollector.getPrerequisitesForAttributes`: attributes the rule class
-            // does not define (`getAttributeByNameMaybe`) are skipped.
-            let Some(list) = fs.fields.get(a) else { continue };
-            for f in files_in(list, a)? {
-                let ext_ok = match &extensions {
-                    None => true,
-                    Some(exts) => exts.iter().any(|e| {
-                        f.exec_path
-                            .path_string()
-                            .ends_with(&format!(".{}", e.trim_start_matches('.')))
-                    }),
-                };
-                if ext_ok {
-                    instrumented.push(f);
+        let is_test = st
+            .rule
+            .extra
+            .rule_class
+            .as_ref()
+            .is_some_and(|rc| rc.is_test);
+        let include_generated = st
+            .cfg
+            .bool_option("experimental_collect_code_coverage_for_generated_files", false);
+        if should_include_local_sources(&st.cfg, &st.label, is_test) {
+            for a in &sources {
+                let Some(Value::Struct(fs)) = Some(&st.files_struct) else { continue };
+                // `InstrumentedFilesCollector.getPrerequisitesForAttributes`: attributes the rule class
+                // does not define (`getAttributeByNameMaybe`) are skipped.
+                let Some(list) = fs.fields.get(a) else { continue };
+                for f in files_in(list, a)? {
+                    if !(f.is_source || include_generated) {
+                        continue;
+                    }
+                    let ext_ok = match &extensions {
+                        None => true,
+                        Some(exts) => exts.iter().any(|e| {
+                            f.exec_path
+                                .path_string()
+                                .ends_with(&format!(".{}", e.trim_start_matches('.')))
+                        }),
+                    };
+                    if ext_ok {
+                        instrumented.push(f);
+                    }
                 }
             }
         }
@@ -529,13 +602,10 @@ fn fragment_value(st: &CtxState, name: &str) -> Result<Value, StarlarkError> {
             st.rule.rule_class
         ));
     }
-    match name {
-        "coverage" => Ok(mk_struct(vec![("collect_code_coverage", Value::Bool(coverage_enabled(&st.cfg)))])),
-        other => match crate::fragments::fragment(other, &st.cfg) {
-            Ok(Some(v)) => Ok(v),
-            Ok(None) => err(format!("unknown configuration fragment '{other}'")),
-            Err(e) => err(e),
-        },
+    match crate::fragments::fragment(name, &st.cfg) {
+        Ok(Some(v)) => Ok(v),
+        Ok(None) => err(format!("unknown configuration fragment '{name}'")),
+        Err(e) => err(e),
     }
 }
 
@@ -556,7 +626,51 @@ fn has_toolchain_context(st: &CtxState) -> bool {
         .is_some_and(|v| !v.is_empty())
 }
 
-fn transform_toolchain_key(st: &CtxState, key: &Value) -> Result<String, StarlarkError> {
+fn parse_bzl_or_rule_label(
+    st: &CtxState,
+    ctx: &EvalContext,
+    raw: &str,
+) -> Result<String, StarlarkError> {
+    if let Some((pkg, mapping)) = ctx.current_label_ctx() {
+        return zel_cmdline::Label::parse_with_package_context(raw, &pkg, &mapping)
+            .map(|l| l.canonical_form())
+            .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")));
+    }
+    if let Some(bzl_lbl) = st
+        .rule
+        .extra
+        .rule_class
+        .as_ref()
+        .and_then(|rc| rc.starlark.as_ref())
+        .and_then(|sp| Label::parse_canonical(&sp.defined_in).ok())
+    {
+        let owner = bzl_lbl.package_identifier();
+        let entries = st
+            .inputs
+            .resolver
+            .repo_mapping_entries(owner.repository().name());
+        let mut map = std::collections::HashMap::new();
+        for (a, c) in entries {
+            if let Ok(rn) = zel_cmdline::RepositoryName::create(&c) {
+                map.insert(a, rn);
+            }
+        }
+        let mapping = zel_cmdline::RepositoryMapping::new(map, owner.repository().clone());
+        return zel_cmdline::Label::parse_with_package_context(raw, owner, &mapping)
+            .map(|l| l.canonical_form())
+            .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")));
+    }
+    let rm = st.repo_mapping();
+    crate::location::parse_label_with_mapping(raw, st.label.package_identifier(), Some(&rm))
+        .map(|l| l.canonical_form())
+        .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")))
+}
+
+fn transform_toolchain_key(
+    st: &CtxState,
+    ctx: &EvalContext,
+    key: &Value,
+) -> Result<String, StarlarkError> {
     match key {
         Value::Label(l) => Ok(l.canonical_form()),
         Value::ProviderInstance { provider_name, fields } if provider_name == "ToolchainTypeInfo" => {
@@ -572,21 +686,11 @@ fn transform_toolchain_key(st: &CtxState, key: &Value) -> Result<String, Starlar
         {
             match s.fields.get("toolchain_type").or_else(|| s.fields.get("name")) {
                 Some(Value::Label(l)) => Ok(l.canonical_form()),
-                Some(Value::String(raw)) => {
-                    let rm = st.repo_mapping();
-                    crate::location::parse_label_with_mapping(raw, st.label.package_identifier(), Some(&rm))
-                        .map(|l| l.canonical_form())
-                        .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")))
-                }
+                Some(Value::String(raw)) => parse_bzl_or_rule_label(st, ctx, raw),
                 _ => err("invalid toolchain type key"),
             }
         }
-        Value::String(raw) => {
-            let rm = st.repo_mapping();
-            let parsed = crate::location::parse_label_with_mapping(raw, st.label.package_identifier(), Some(&rm))
-                .map_err(|e| StarlarkError(format!("Unable to parse toolchain label '{raw}': {e}")))?;
-            Ok(parsed.canonical_form())
-        }
+        Value::String(raw) => parse_bzl_or_rule_label(st, ctx, raw),
         o => err(format!(
             "Toolchains only supports indexing by toolchain type, got {} instead",
             o.type_name()
@@ -601,6 +705,42 @@ fn host_attr(st: &Arc<CtxState>, kind: &str, attr: &str, pos: &[Value]) -> HostR
             let a = artifact_of(recv).ok_or_else(|| StarlarkError("invalid File".into()))?;
             file_attr(&a, attr).map_err(StarlarkError)
         }
+        "action" => {
+            let a = action_of(recv).ok_or_else(|| StarlarkError("invalid Action".into()))?;
+            action_attr(&a, attr)
+        }
+        "expanded_directory" => {
+            let (dir, children) = expanded_directory_of(recv)
+                .ok_or_else(|| StarlarkError("invalid ExpandedDirectory".into()))?;
+            match attr {
+                "directory" => Ok(file_value(&dir)),
+                "children" => Ok(mk_list(children)),
+                other => file_attr(&dir, other).map_err(|_| {
+                    StarlarkError(format!(
+                        "'ExpandedDirectory' value has no field or method '{other}'"
+                    ))
+                }),
+            }
+        }
+        "analysis_failure" => {
+            let (lbl, msg) = analysis_failure_of(recv)
+                .ok_or_else(|| StarlarkError("invalid AnalysisFailure".into()))?;
+            match attr {
+                "label" => Ok(Value::Label(lbl)),
+                "message" => Ok(Value::String(msg)),
+                other => err(format!(
+                    "'AnalysisFailure' value has no field or method '{other}'"
+                )),
+            }
+        }
+        "template_ctx" => match attr {
+            "declare_file" | "args" | "run" => {
+                Ok(Value::BuiltinFunction(format!("host:method:template_ctx.{attr}")))
+            }
+            other => err(format!(
+                "'template_ctx' value has no field or method '{other}'"
+            )),
+        },
         "target" => {
             let ct = target_of(recv).ok_or_else(|| StarlarkError("invalid Target".into()))?;
             target_attr(&ct, attr)
@@ -609,26 +749,40 @@ fn host_attr(st: &Arc<CtxState>, kind: &str, attr: &str, pos: &[Value]) -> HostR
             let r = runfiles_of(recv).ok_or_else(|| StarlarkError("invalid runfiles".into()))?;
             match attr {
                 "files" => Ok(files_depset(&r.artifacts)),
-                "symlinks" => Ok(Value::Depset(Arc::new(Depset::new(
-                    DepsetOrder::Default,
-                    r.symlinks
-                        .iter()
+                "symlinks" => {
+                    let entries: Vec<Value> = r
+                        .ordered_symlinks()
+                        .into_iter()
                         .map(|(k, v)| {
-                            mk_struct(vec![("path", Value::String(k.clone())), ("target_file", file_value(v))])
+                            mk_struct(vec![
+                                ("path", Value::String(k)),
+                                ("target_file", file_value(&v)),
+                            ])
                         })
-                        .collect(),
-                    Vec::new(),
-                )?))),
-                "root_symlinks" => Ok(Value::Depset(Arc::new(Depset::new(
-                    DepsetOrder::Default,
-                    r.root_symlinks
-                        .iter()
+                        .collect();
+                    Ok(Value::Depset(Arc::new(Depset::new(
+                        DepsetOrder::Default,
+                        entries,
+                        Vec::new(),
+                    )?)))
+                }
+                "root_symlinks" => {
+                    let entries: Vec<Value> = r
+                        .ordered_root_symlinks()
+                        .into_iter()
                         .map(|(k, v)| {
-                            mk_struct(vec![("path", Value::String(k.clone())), ("target_file", file_value(v))])
+                            mk_struct(vec![
+                                ("path", Value::String(k)),
+                                ("target_file", file_value(&v)),
+                            ])
                         })
-                        .collect(),
-                    Vec::new(),
-                )?))),
+                        .collect();
+                    Ok(Value::Depset(Arc::new(Depset::new(
+                        DepsetOrder::Default,
+                        entries,
+                        Vec::new(),
+                    )?)))
+                }
                 "empty_filenames" => Ok(Value::Depset(Arc::new(Depset::new(
                     DepsetOrder::Default,
                     r.empty_filenames.iter().map(|s| Value::String(s.clone())).collect(),
@@ -674,11 +828,18 @@ fn host_attr(st: &Arc<CtxState>, kind: &str, attr: &str, pos: &[Value]) -> HostR
                     .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
                     .collect(),
             )),
-            "host_path_separator" => Ok(Value::String(":".into())),
+            "host_path_separator" => Ok(Value::String(if cfg!(windows) { ";" } else { ":" }.into())),
             "short_id" => Ok(Value::String(st.cfg.short_hash())),
+            "bin_dir" => Ok(mk_struct(vec![("path", Value::String(st.bin_dir()))])),
+            "genfiles_dir" => Ok(mk_struct(vec![("path", Value::String(st.genfiles_dir()))])),
             // Methods are first-class values in Starlark: `ctx.configuration.stamp_binaries`
             // (rules_python reads it without calling it) is a (truthy) bound builtin.
-            "stamp_binaries" | "is_tool_configuration" | "runfiles_enabled" | "has_separate_genfiles_directory" | "is_sibling_repository_layout" => {
+            "stamp_binaries"
+            | "is_tool_configuration"
+            | "runfiles_enabled"
+            | "has_separate_genfiles_directory"
+            | "is_sibling_repository_layout"
+            | "disabled_features" => {
                 Ok(Value::BuiltinFunction(format!("host:method:configuration.{attr}")))
             }
             other => err(format!("'configuration' value has no field or method '{other}'")),
@@ -724,10 +885,110 @@ fn is_alias_override_provider(ct: &ConfiguredTarget, pk: &str) -> bool {
     (ct.is_alias() || ct.is_late_bound_alias) && ALIAS_CLASS_OVERRIDES.contains(&pk)
 }
 
+fn action_attr(act: &Arc<Action>, attr: &str) -> HostResult {
+    match attr {
+        "mnemonic" => Ok(Value::String(act.mnemonic.clone())),
+        "inputs" => Ok(files_depset(&act.inputs)),
+        "outputs" => Ok(files_depset(&act.outputs)),
+        "env" => {
+            let env_map = match &act.action_env {
+                Some(ae) => ae.fixed_env(),
+                None => &act.env,
+            };
+            Ok(mk_dict(
+                env_map
+                    .iter()
+                    .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
+                    .collect(),
+            ))
+        }
+        "execution_info" => Ok(mk_dict(
+            act.execution_requirements
+                .iter()
+                .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
+                .collect(),
+        )),
+        "argv" => match &act.kind {
+            ActionKind::Spawn { .. } => Ok(mk_list(
+                act.all_arguments().into_iter().map(Value::String).collect(),
+            )),
+            _ => Ok(Value::None),
+        },
+        "args" => match &act.kind {
+            ActionKind::Spawn { arguments, .. } => {
+                let mut list = Vec::with_capacity(arguments.len());
+                for ca in arguments {
+                    let b = ArgsBuilder {
+                        args: ca.args.clone(),
+                        param_file: ca.param_file.clone(),
+                        format: ca.param_file.as_ref().map(|p| p.format),
+                        ..Default::default()
+                    };
+                    list.push(args_value(b));
+                }
+                Ok(mk_list(list))
+            }
+            _ => Ok(Value::None),
+        },
+        "content" => match &act.kind {
+            ActionKind::FileWrite { content, .. } => {
+                if let FileContent::Args { args, .. } = content {
+                    if args.iter().any(|s| s.starts_with(crate::args::TREE_MARKER)) {
+                        return Ok(Value::None);
+                    }
+                }
+                Ok(Value::String(
+                    String::from_utf8_lossy(&content.render()).to_string(),
+                ))
+            }
+            _ => Ok(Value::None),
+        },
+        "substitutions" => match &act.kind {
+            ActionKind::TemplateExpand {
+                substitutions,
+                computed_substitutions,
+                ..
+            } => Ok(mk_dict(
+                substitutions
+                    .iter()
+                    .chain(computed_substitutions.iter())
+                    .map(|(k, v)| (Value::String(k.clone()), Value::String(v.clone())))
+                    .collect(),
+            )),
+            _ => Ok(Value::None),
+        },
+        other => err(format!("'Action' value has no field or method '{other}'")),
+    }
+}
+
 fn target_attr(ct: &Arc<ConfiguredTarget>, attr: &str) -> HostResult {
     let actual = ct.get_actual();
+    if ct
+        .configuration
+        .bool_option("incompatible_disable_target_default_provider_fields", false)
+        && matches!(
+            attr,
+            "files" | "files_to_run" | "default_runfiles" | "data_runfiles" | "output_groups"
+        )
+    {
+        return err(
+            "Accessing the default provider in this manner is deprecated and will be removed soon. \
+             It may be temporarily re-enabled by setting \
+             --incompatible_disable_target_default_provider_fields=false. See \
+             https://github.com/bazelbuild/bazel/issues/20183 for details.",
+        );
+    }
     match attr {
         "label" => Ok(Value::Label(ct.actual_target_label().clone())),
+        "actions" => Ok(mk_list(
+            ct.typed_actions
+                .iter()
+                .filter(|a| {
+                    a.mnemonic != "SourceSymlinkManifest" && a.mnemonic != "RepoMappingManifest"
+                })
+                .map(|a| action_value(Arc::new(a.clone())))
+                .collect(),
+        )),
         "files" => Ok(files_depset(&target_files(ct))),
         "files_to_run" => actual
             .providers
@@ -745,9 +1006,17 @@ fn target_attr(ct: &Arc<ConfiguredTarget>, attr: &str) -> HostResult {
                 _ => None,
             })
             .ok_or_else(|| StarlarkError(format!("target has no {attr}"))),
+        "output_groups" => Ok(actual
+            .providers
+            .get("OutputGroupInfo")
+            .cloned()
+            .unwrap_or_else(|| Value::ProviderInstance {
+                provider_name: "OutputGroupInfo".to_string(),
+                fields: BTreeMap::new(),
+            })),
         other => {
-            // Legacy access to provider fields by name (`target.output_groups`, ...), excluding
-            // class-level alias overrides (`AliasConfiguredTarget.get`).
+            // Legacy access to provider fields by name, excluding class-level alias overrides
+            // (`AliasConfiguredTarget.get`).
             for (pk, p) in starlark_visible_providers(ct) {
                 if is_alias_override_provider(ct, pk) {
                     continue;
@@ -767,7 +1036,13 @@ fn target_attr(ct: &Arc<ConfiguredTarget>, attr: &str) -> HostResult {
     }
 }
 
-fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> HostResult {
+fn host_index(
+    _st: &Arc<CtxState>,
+    ctx: &EvalContext,
+    kind: &str,
+    recv: &Value,
+    key: &Value,
+) -> HostResult {
     match kind {
         "target" => {
             let ct = target_of(recv).ok_or_else(|| StarlarkError("invalid Target".into()))?;
@@ -802,7 +1077,7 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
             if !has_toolchain_context(st) {
                 return err("Toolchains are not valid in this context");
             }
-            let k = transform_toolchain_key(st, key)?;
+            let k = transform_toolchain_key(st, ctx, key)?;
             let k = if k.starts_with("//") {
                 st.inputs.toolchains.keys().find(|c| c.starts_with("@@") && c.ends_with(&k)).cloned().unwrap_or(k)
             } else {
@@ -839,8 +1114,13 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
         }
         "exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return err("invalid exec group toolchains") };
-            let k = transform_toolchain_key(_st, key)?;
+            let k = transform_toolchain_key(_st, ctx, key)?;
             let tcs = _st.inputs.exec_group_toolchains.get(group).cloned().unwrap_or_default();
+            let k = if k.starts_with("//") {
+                tcs.keys().find(|c| c.starts_with("@@") && c.ends_with(&k)).cloned().unwrap_or(k)
+            } else {
+                k
+            };
             tcs.get(&k).cloned().ok_or_else(|| {
                 StarlarkError(format!(
                     "In {} rule {}, exec group '{group}': toolchain type {k} was requested but only types [{}] are configured",
@@ -854,7 +1134,7 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
             if _st.base_toolchains.is_empty() {
                 return err("Toolchains are not valid in this context");
             }
-            let k = transform_toolchain_key(_st, key)?;
+            let k = transform_toolchain_key(_st, ctx, key)?;
             let k = if k.starts_with("//") {
                 _st.base_toolchains.keys().find(|c| c.starts_with("@@") && c.ends_with(&k)).cloned().unwrap_or(k)
             } else {
@@ -891,8 +1171,13 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
         }
         "rule_exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return err("invalid exec group toolchains") };
-            let k = transform_toolchain_key(_st, key)?;
+            let k = transform_toolchain_key(_st, ctx, key)?;
             let tcs = _st.base_exec_group_toolchains.get(group).cloned().unwrap_or_default();
+            let k = if k.starts_with("//") {
+                tcs.keys().find(|c| c.starts_with("@@") && c.ends_with(&k)).cloned().unwrap_or(k)
+            } else {
+                k
+            };
             tcs.get(&k).cloned().ok_or_else(|| {
                 StarlarkError(format!(
                     "In {} rule {}, exec group '{group}': toolchain type {k} was requested but only types [{}] are configured",
@@ -906,7 +1191,13 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
     }
 }
 
-fn host_contains(st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> HostResult {
+fn host_contains(
+    st: &Arc<CtxState>,
+    ctx: &EvalContext,
+    kind: &str,
+    recv: &Value,
+    key: &Value,
+) -> HostResult {
     match kind {
         "target" => {
             let ct = target_of(recv).ok_or_else(|| StarlarkError("invalid Target".into()))?;
@@ -927,27 +1218,45 @@ fn host_contains(st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> H
             if !has_toolchain_context(st) {
                 return Ok(Value::Bool(false));
             }
-            let k = transform_toolchain_key(st, key)?;
+            let k = transform_toolchain_key(st, ctx, key)?;
+            let k = if k.starts_with("//") {
+                st.inputs
+                    .toolchains
+                    .keys()
+                    .find(|c| c.starts_with("@@") && c.ends_with(&k))
+                    .cloned()
+                    .unwrap_or(k)
+            } else {
+                k
+            };
             Ok(Value::Bool(st.inputs.toolchains.contains_key(&k)))
         }
         "exec_groups" => Ok(Value::Bool(matches!(key, Value::String(n) if st.exec_groups.contains(n)))),
         "exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return Ok(Value::Bool(false)) };
-            let k = transform_toolchain_key(st, key)?;
-            Ok(Value::Bool(st.inputs.exec_group_toolchains.get(group).map(|m| m.contains_key(&k)).unwrap_or(false)))
+            let k = transform_toolchain_key(st, ctx, key)?;
+            Ok(Value::Bool(st.inputs.exec_group_toolchains.get(group).is_some_and(|m| {
+                m.contains_key(&k) || (k.starts_with("//") && m.keys().any(|c| c.starts_with("@@") && c.ends_with(&k)))
+            })))
         }
         "rule_toolchains" => {
             if st.base_toolchains.is_empty() {
                 return Ok(Value::Bool(false));
             }
-            let k = transform_toolchain_key(st, key)?;
-            Ok(Value::Bool(st.base_toolchains.contains_key(&k)))
+            let k = transform_toolchain_key(st, ctx, key)?;
+            Ok(Value::Bool(
+                st.base_toolchains.contains_key(&k)
+                    || (k.starts_with("//")
+                        && st.base_toolchains.keys().any(|c| c.starts_with("@@") && c.ends_with(&k))),
+            ))
         }
         "rule_exec_groups" => Ok(Value::Bool(matches!(key, Value::String(n) if st.base_exec_groups.contains(n)))),
         "rule_exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return Ok(Value::Bool(false)) };
-            let k = transform_toolchain_key(st, key)?;
-            Ok(Value::Bool(st.base_exec_group_toolchains.get(group).map(|m| m.contains_key(&k)).unwrap_or(false)))
+            let k = transform_toolchain_key(st, ctx, key)?;
+            Ok(Value::Bool(st.base_exec_group_toolchains.get(group).is_some_and(|m| {
+                m.contains_key(&k) || (k.starts_with("//") && m.keys().any(|c| c.starts_with("@@") && c.ends_with(&k)))
+            })))
         }
         other => err(format!("type '{other}' is not iterable")),
     }
@@ -1009,17 +1318,31 @@ fn ctx_attr(st: &Arc<CtxState>, attr: &str) -> HostResult {
             owner_label: st.label.clone(),
         }),
         "build_file_path" => {
-            if st.cfg.bool_option("incompatible_stop_exporting_build_file_path", true) {
+            if st
+                .cfg
+                .bool_option("incompatible_stop_exporting_build_file_path", true)
+            {
                 return err(
                     "Deprecated API: ctx.build_file_path has been removed. Use ctx.label.package + '/BUILD' instead of ctx.build_file_path.\nUse --noincompatible_stop_exporting_build_file_path to temporarily continue using it.",
                 );
             }
-            let pkg = st.label.package_identifier().package_fragment().path_string();
-            Value::String(if pkg.is_empty() {
-                "BUILD".to_string()
-            } else {
-                format!("{pkg}/BUILD")
-            })
+            let fname = st
+                .rule
+                .extra
+                .location
+                .as_deref()
+                .and_then(|loc| loc.split(':').next())
+                .and_then(|p| p.rsplit('/').next())
+                .filter(|b| *b == "BUILD.bazel" || *b == "BUILD")
+                .unwrap_or("BUILD");
+            Value::String(
+                st.label
+                    .package_identifier()
+                    .package_fragment()
+                    .get_relative_str(fname)
+                    .path_string()
+                    .to_string(),
+            )
         }
         "var" => mk_dict(
             st.make_vars
@@ -1194,21 +1517,19 @@ fn build_setting_value(st: &Arc<CtxState>) -> HostResult {
     }
     match st.attr_struct {
         Value::Struct(ref s) => {
-            let def = s
+            let mut def = s
                 .fields
                 .get("build_setting_default")
                 .cloned()
                 .ok_or_else(|| StarlarkError("build setting has no default".into()))?;
-            let def = if ty == "string_set" {
-                let items = sequence(&def).unwrap_or_default();
-                let mut set = zel_starlark::StarlarkSet::default();
-                for item in items {
-                    let _ = set.add(item);
+            if ty == "string_set" {
+                if let Some(items) = sequence(&def) {
+                    let set = zel_starlark::StarlarkSet::from_elements(items)?;
+                    let v = Value::Set(Arc::new(Mutex::new(set)));
+                    v.freeze();
+                    def = v;
                 }
-                Value::Set(Arc::new(Mutex::new(set)))
-            } else {
-                def
-            };
+            }
             if allow_multiple {
                 Ok(mk_list(vec![def]))
             } else if ty == "string_set" && !matches!(def, Value::Set(_)) {
@@ -1266,17 +1587,10 @@ pub fn render_flag_value(ty: &str, raw: &str) -> String {
         "bool" => parse_bazel_bool(raw)
             .map(|b| b.to_string())
             .unwrap_or_else(|| raw.to_string()),
-        "string_list" => {
+        "string_list" | "string_set" => {
             if raw.is_empty() {
                 "[]".to_string()
-            } else {
-                format!("[{}]", raw.split(',').collect::<Vec<_>>().join(", "))
-            }
-        }
-        "string_set" => {
-            if raw.is_empty() {
-                "[]".to_string()
-            } else {
+            } else if ty == "string_set" {
                 let mut seen = Vec::new();
                 for s in raw.split(',') {
                     if !seen.contains(&s) {
@@ -1284,6 +1598,8 @@ pub fn render_flag_value(ty: &str, raw: &str) -> String {
                     }
                 }
                 format!("[{}]", seen.join(", "))
+            } else {
+                format!("[{}]", raw.split(',').collect::<Vec<_>>().join(", "))
             }
         }
         _ => raw.to_string(),
@@ -1317,15 +1633,15 @@ pub fn convert_flag_value(ty: &str, raw: &str) -> Result<Value, String> {
             }
         }
         "string_set" => {
-            let mut set = zel_starlark::StarlarkSet::new();
-            if !raw.is_empty() {
-                for s in raw.split(',') {
-                    let _ = set.add(Value::String(s.to_string()));
-                }
-            }
-            let val = Value::Set(Arc::new(Mutex::new(set)));
-            val.freeze();
-            val
+            let items: Vec<Value> = if raw.is_empty() {
+                Vec::new()
+            } else {
+                raw.split(',').map(|s| Value::String(s.to_string())).collect()
+            };
+            let set = zel_starlark::StarlarkSet::from_elements(items).map_err(|e| e.0)?;
+            let v = Value::Set(Arc::new(Mutex::new(set)));
+            v.freeze();
+            v
         }
         _ => Value::String(raw.to_string()),
     })

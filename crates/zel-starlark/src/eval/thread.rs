@@ -16,20 +16,65 @@ use crate::eval::frame::CallFrame;
 use crate::semantics::StarlarkSemantics;
 use crate::syntax::location::Location;
 use crate::types::list::StarlarkError;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 
 /// Thread state during evaluation managing the call stack and frame isolation.
 #[derive(Debug)]
 pub struct StarlarkThread {
     pub frames: Vec<CallFrame>,
     pub semantics: StarlarkSemantics,
+    pub steps: u64,
+    pub step_limit: u64,
+    pub interrupted: Arc<AtomicBool>,
 }
 
 impl StarlarkThread {
     pub fn new(semantics: StarlarkSemantics) -> Self {
+        let step_limit = if semantics.max_computation_steps > 0 {
+            semantics.max_computation_steps
+        } else {
+            i64::MAX as u64
+        };
         Self {
             frames: Vec::new(),
             semantics,
+            steps: 0,
+            step_limit,
+            interrupted: Arc::new(AtomicBool::new(false)),
         }
+    }
+
+    pub fn set_step_limit(&mut self, limit: u64) {
+        self.step_limit = limit;
+    }
+
+    pub fn check_interrupted(&self) -> Result<(), StarlarkError> {
+        if self.interrupted.swap(false, Ordering::SeqCst) {
+            return Err(StarlarkError(
+                "Starlark computation interrupted".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn check_step(&mut self, sem_limit: u64) -> Result<(), StarlarkError> {
+        self.check_interrupted()?;
+        let effective_limit = if sem_limit > 0 {
+            sem_limit
+        } else {
+            self.step_limit
+        };
+        self.steps = self.steps.wrapping_add(1);
+        if self.steps >= effective_limit {
+            return Err(StarlarkError(
+                "Starlark computation cancelled: too many steps".to_string(),
+            ));
+        }
+        if (self.steps & 0xff) == 0 {
+            crate::profiler::record_sample(self);
+        }
+        Ok(())
     }
 
     pub fn is_recursive_call(&self, function_name: &str) -> bool {
@@ -116,15 +161,24 @@ impl StarlarkThread {
                 .unwrap_or_else(|| at.clone());
             entries.push((f.function_name.clone(), pos));
         }
-        if entries.is_empty() {
+        if entries.is_empty() && !(at.file.is_empty() && at.line == 0) {
             entries.push(("<toplevel>".to_string(), at.clone()));
         }
-        let mut out = format!("{at}: Traceback (most recent call last):\n");
+        let at_prefix = at.to_string();
+        let mut out = if at_prefix.is_empty() {
+            "Traceback (most recent call last):\n".to_string()
+        } else {
+            format!("{at_prefix}: Traceback (most recent call last):\n")
+        };
         for (name, loc) in entries {
-            out.push_str(&format!(
-                "\tFile \"{}\", line {}, column {}, in {}\n",
-                loc.file, loc.line, loc.column, name
-            ));
+            out.push_str(&format!("\tFile \"{}\"", loc.file));
+            if loc.line != 0 {
+                out.push_str(&format!(", line {}", loc.line));
+                if loc.column != 0 {
+                    out.push_str(&format!(", column {}", loc.column));
+                }
+            }
+            out.push_str(&format!(", in {name}\n"));
             if let Some(src) = source_line(&loc.file, loc.line) {
                 out.push_str(&format!("\t\t{src}\n"));
             }
@@ -138,10 +192,17 @@ impl StarlarkThread {
         }
         let mut out = String::from("Traceback (most recent call last):\n");
         for frame in &self.frames {
-            out.push_str(&format!(
-                "  File \"{}\", line {}, in {}\n",
-                frame.location.file, frame.location.line, frame.function_name
-            ));
+            out.push_str(&format!("\tFile \"{}\"", frame.location.file));
+            if frame.location.line != 0 {
+                out.push_str(&format!(", line {}", frame.location.line));
+                if frame.location.column != 0 {
+                    out.push_str(&format!(", column {}", frame.location.column));
+                }
+            }
+            out.push_str(&format!(", in {}\n", frame.function_name));
+            if let Some(src) = source_line(&frame.location.file, frame.location.line) {
+                out.push_str(&format!("\t\t{src}\n"));
+            }
         }
         out
     }

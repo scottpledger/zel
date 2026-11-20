@@ -891,8 +891,14 @@ impl BuildOptions {
         if let Some(t) = src.fragments.get(TEST_OPTIONS) {
             o.fragments.insert(TEST_OPTIONS, t.clone());
         }
-        if let Some(d) = src.get("define") {
-            o.set("define", d.clone());
+        if src
+            .get("experimental_exclude_defines_from_exec_config")
+            .map(|v| v.display())
+            != Some("true".into())
+        {
+            if let Some(d) = src.get("define") {
+                o.set("define", d.clone());
+            }
         }
         if src
             .get("incompatible_exclude_starlark_flags_from_exec_config")
@@ -945,6 +951,7 @@ impl BuildOptions {
         o.set("copt", with_g0(c));
         o.set("cxxopt", with_g0(cx));
         for (to, from) in [
+            ("compiler", "host_compiler"),
             ("conlyopt", "host_conlyopt"),
             ("per_file_copt", "host_per_file_copt"),
             ("linkopt", "host_linkopt"),

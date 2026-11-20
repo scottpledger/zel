@@ -69,6 +69,7 @@ fn spawn(
             .map(|(k, v)| (k.to_string(), v.to_string()))
             .collect(),
         tools: Vec::new(),
+        unused_inputs_list: None,
         java_compile: None,
     }
 }
@@ -1334,6 +1335,7 @@ fn output_filter_compiled_once_and_applied_across_multiple_actions() {
             outputs: vec![art],
             execution_info: BTreeMap::from([("local".into(), String::new())]),
             tools: Vec::new(),
+            unused_inputs_list: None,
             java_compile: None,
         }
     };

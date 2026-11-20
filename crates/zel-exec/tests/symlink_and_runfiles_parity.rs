@@ -93,6 +93,7 @@ fn tool_runfiles_tree_materialized_and_invalidated_on_mapping_change() {
         outputs: vec![out_art.clone()],
         execution_info: BTreeMap::new(),
         tools: vec![tool_art],
+        unused_inputs_list: None,
         java_compile: None,
     };
 
@@ -197,6 +198,7 @@ fn executable_symlink_validation_tree_dangling_check_self_cycle_and_minimal_runf
         outputs: vec![tree_out],
         execution_info: BTreeMap::new(),
         tools: vec![],
+        unused_inputs_list: None,
         java_compile: None,
     };
     let r_tree = execute_action_with(
@@ -229,6 +231,7 @@ fn executable_symlink_validation_tree_dangling_check_self_cycle_and_minimal_runf
         outputs: vec![self_art],
         execution_info: BTreeMap::new(),
         tools: vec![],
+        unused_inputs_list: None,
         java_compile: None,
     };
     let acts = [&self_cycle];

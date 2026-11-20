@@ -308,6 +308,10 @@ impl BuildConfigurationKey {
         let mut untrimmed = base.clone();
         untrimmed.keep_test_exec = true;
         let mut java = base;
+        java.options.insert(
+            "java_runtime_version".to_string(),
+            "remotejdk_25".to_string(),
+        );
         java.post_exec.insert(
             "java_runtime_version".to_string(),
             "remotejdk_25".to_string(),
@@ -330,18 +334,89 @@ impl BuildConfigurationKey {
     /// platform suffix `exec`. The baseline for the `ST-<hash>` diff stays the original
     /// top-level configuration.
     pub fn to_exec_for(&self, exec_platform: &str) -> Self {
-        // The exec transition is idempotent: an exec configuration for the same execution
-        // platform maps to itself (its `cpu`/`compilation_mode` already come from `--host_*`).
-        if self.is_exec && self.platforms.len() == 1 && self.platforms[0] == exec_platform {
+        // The exec transition is idempotent once in a plain exec configuration for the same
+        // execution platform (`post_exec` is empty); if a post-exec transition mutated options
+        // (such as `coverage_tool_configs` setting `java_runtime_version`), re-running the exec
+        // transition resets non-propagated / host-overwritten options just like
+        // `ExecutionTransitionFactory` + `FunctionTransitionUtil.maybeGetExecDefaults`.
+        if self.is_exec
+            && self.platforms.len() == 1
+            && self.platforms[0] == exec_platform
+            && self.post_exec.is_empty()
+        {
             return self.clone();
         }
         let mut out = self.clone();
+        let exclude_defines =
+            self.bool_option("experimental_exclude_defines_from_exec_config", false);
+        let exclude_starlark_flags = self.bool_option(
+            "incompatible_exclude_starlark_flags_from_exec_config",
+            false,
+        );
+        let keep_test_opts = !self.bool_option("trim_test_configuration", true);
+        let is_preserved_native = |name: &str| -> bool {
+            // `builtin_exec_platforms.bzl` `_java_options` overwrites both from `tool_java_*`
+            // even though `JavaOptions` lists them in `propagate`.
+            if matches!(name, "java_language_version" | "java_runtime_version") {
+                return false;
+            }
+            if name == "define" {
+                return !exclude_defines;
+            }
+            if matches!(
+                name,
+                "flag_alias"
+                    | "modify_execution_info"
+                    | "experimental_override_platform_cpu_name"
+                    | "incompatible_disable_select_on"
+                    | "incompatible_target_cpu_from_platform"
+            ) {
+                return true;
+            }
+            if keep_test_opts
+                && build_options::find_option(name)
+                    .is_some_and(|(cls, _)| cls == build_options::TEST_OPTIONS)
+            {
+                return true;
+            }
+            build_options::EXEC_PROPAGATED.contains(&name)
+        };
+        out.post_exec.clear();
+        if exclude_defines {
+            out.user_defines.clear();
+        }
+        if exclude_starlark_flags {
+            out.flag_values.clear();
+            out.flag_types.clear();
+        }
+        let overridden_non_preserved: Vec<String> = out
+            .options
+            .keys()
+            .filter(|name| self.has_options_override(name) && !is_preserved_native(name))
+            .cloned()
+            .collect();
+        for name in overridden_non_preserved {
+            if let Some(nat) = self.native.get(&name) {
+                out.options.insert(name, nat.raw.clone());
+            } else {
+                out.options.remove(&name);
+            }
+        }
+        let keep_change = |k: &str| match k.strip_prefix("//command_line_option:") {
+            Some("platforms") => true,
+            Some(name) => is_preserved_native(name),
+            None => !exclude_starlark_flags,
+        };
+        out.transition_changes.retain(|k, _| keep_change(k));
+        out.transition_baseline.retain(|k, _| keep_change(k));
         let native = |n: &str| self.native.get(n).map(|s| s.value.display());
         out.compilation_mode = native("host_compilation_mode")
             .or_else(|| self.options.get("host_compilation_mode").cloned())
             .unwrap_or_else(|| "opt".to_string());
         out.is_exec = true;
         out.keep_test = false;
+        out.keep_test_exec = false;
+        out.env.action_env = out.env.host_action_env.clone();
         // `_core_options`: `cpu` becomes `--host_cpu` in the exec configuration.
         out.cpu = native("host_cpu")
             .or_else(|| self.options.get("host_cpu").cloned())
@@ -404,6 +479,9 @@ impl BuildConfigurationKey {
                         value: build_options::ConfigValue::Scalar(val),
                     },
                 );
+            } else {
+                out.options.remove(target_k);
+                out.native.remove(target_k);
             }
         }
         const KEY: &str = "//command_line_option:platforms";
@@ -414,8 +492,7 @@ impl BuildConfigurationKey {
             .filter(|p| !p.is_empty())
             .unwrap_or_else(|| "@@platforms//host:host".to_string());
         out.transition_baseline
-            .entry(KEY.to_string())
-            .or_insert_with(|| Some(render_list(&[host_platform.clone()])));
+            .insert(KEY.to_string(), Some(render_list(&[host_platform.clone()])));
         out.platforms = vec![exec_platform.to_string()];
         let new = render_list(&out.platforms);
         if out.transition_baseline[KEY].as_deref() == Some(new.as_str()) {
@@ -718,8 +795,45 @@ impl BuildConfigurationKey {
                 .cloned()
                 .unwrap_or_else(|| "@@platforms//host:host".to_string());
             let mut e = o.exec(&platform);
-            for (name, v) in &self.post_exec {
-                e.set(name, ConfigValue::Scalar(v.clone()));
+            for (name, raw) in &self.post_exec {
+                if let Some((_, opt)) = find_option(name) {
+                    let is_list = build_options::is_list_option(opt);
+                    if opt.default == "null" && (raw == "null" || raw == NULL_VALUE) {
+                        e.set(
+                            name,
+                            if is_list {
+                                ConfigValue::List(vec![])
+                            } else {
+                                ConfigValue::Null
+                            },
+                        );
+                        continue;
+                    }
+                    let raws: Vec<String> = if is_list {
+                        if build_options::splits_commas_in_options_map(name, opt) {
+                            raw.split(',')
+                                .filter(|p| !p.is_empty())
+                                .map(str::to_string)
+                                .collect()
+                        } else {
+                            build_options::decode_unsplit_list(raw)
+                        }
+                    } else {
+                        vec![raw.clone()]
+                    };
+                    if let Ok(v) = build_options::convert_raws(
+                        opt,
+                        &raws,
+                        &build_options::canonical_label_default,
+                        host_cpu,
+                    ) {
+                        e.set(name, v);
+                    } else {
+                        e.set(name, ConfigValue::Scalar(raw.clone()));
+                    }
+                } else {
+                    e.set(name, ConfigValue::Scalar(raw.clone()));
+                }
             }
             e.normalize();
             return e;
@@ -1394,6 +1508,67 @@ impl ParamFileWriteSpec {
     }
 }
 
+/// Execution-time callback for `ctx.actions.map_directory()` (`StarlarkMapActionTemplate`).
+pub trait MapDirectoryExpander: Send + Sync + std::fmt::Debug {
+    /// Expands `discovered_children` (keyed by input directory dict key, each item `(tree_rel_path,
+    /// child_artifact)`) into lowered sub-actions producing files under `output_directories`.
+    fn expand(
+        &self,
+        discovered_children: &BTreeMap<String, Vec<(String, Artifact)>>,
+    ) -> Result<Vec<ActionAnalysisMetadata>, String>;
+
+    /// Deterministic fingerprint of the Starlark implementation & parameters for action caching.
+    fn key_fingerprint(&self) -> String;
+}
+
+/// Specification of a `StarlarkMapActionTemplate` action (`ctx.actions.map_directory()`).
+#[derive(Debug, Clone)]
+pub struct MapDirectorySpec {
+    pub owner: Label,
+    pub input_directories: Vec<(String, Artifact)>,
+    pub output_directories: Vec<(String, Artifact)>,
+    pub inputs: Vec<Artifact>,
+    pub outputs: Vec<Artifact>,
+    pub tools: Vec<Artifact>,
+    pub env: BTreeMap<String, String>,
+    pub inherited_env: std::collections::BTreeSet<String>,
+    pub unset_env: std::collections::BTreeSet<String>,
+    pub execution_info: BTreeMap<String, String>,
+    pub expanded_mnemonic: String,
+    pub expander: std::sync::Arc<dyn MapDirectoryExpander>,
+}
+
+impl PartialEq for MapDirectorySpec {
+    fn eq(&self, other: &Self) -> bool {
+        self.owner == other.owner
+            && self.input_directories == other.input_directories
+            && self.output_directories == other.output_directories
+            && self.inputs == other.inputs
+            && self.outputs == other.outputs
+            && self.tools == other.tools
+            && self.env == other.env
+            && self.inherited_env == other.inherited_env
+            && self.unset_env == other.unset_env
+            && self.execution_info == other.execution_info
+            && self.expanded_mnemonic == other.expanded_mnemonic
+            && self.expander.key_fingerprint() == other.expander.key_fingerprint()
+    }
+}
+
+impl Eq for MapDirectorySpec {}
+
+/// `PartialEq`/`Eq`-implementing wrapper around [`MapDirectoryExpander`].
+#[derive(Debug, Clone)]
+pub struct MapDirectoryExpanderHandle(pub std::sync::Arc<dyn MapDirectoryExpander>);
+
+impl PartialEq for MapDirectoryExpanderHandle {
+    fn eq(&self, other: &Self) -> bool {
+        std::sync::Arc::ptr_eq(&self.0, &other.0)
+            || self.0.key_fingerprint() == other.0.key_fingerprint()
+    }
+}
+
+impl Eq for MapDirectoryExpanderHandle {}
 /// Action specification generated during the Analysis phase.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActionAnalysisMetadata {
@@ -1414,6 +1589,8 @@ pub enum ActionAnalysisMetadata {
         execution_info: BTreeMap<String, String>,
         /// Tool inputs of the spawn (`Action.getTools` / `Spawn.getToolFiles`).
         tools: Vec<Artifact>,
+        /// Optional output file listing unused input exec paths (`StarlarkAction.unusedInputsList`).
+        unused_inputs_list: Option<Artifact>,
         /// Reduced-classpath data of a `JavaCompileAction` (`--experimental_java_classpath=bazel`).
         java_compile: Option<Box<JavaCompileSpec>>,
     },
@@ -1446,6 +1623,7 @@ pub enum ActionAnalysisMetadata {
         is_volatile: bool,
         translator: BuildInfoTranslator,
     },
+    MapDirectoryAction(Box<MapDirectorySpec>),
 }
 
 impl ActionAnalysisMetadata {
@@ -1456,6 +1634,7 @@ impl ActionAnalysisMetadata {
             Self::SymlinkAction { .. } => "Symlink",
             Self::TemplateExpansionAction { .. } => "TemplateExpand",
             Self::BuildInfoTranslateAction { .. } => "TranslateBuildInfo",
+            Self::MapDirectoryAction(_) => "StarlarkMapActionTemplate",
         }
     }
 
@@ -1466,6 +1645,7 @@ impl ActionAnalysisMetadata {
             | Self::SymlinkAction { owner, .. }
             | Self::TemplateExpansionAction { owner, .. }
             | Self::BuildInfoTranslateAction { owner, .. } => owner,
+            Self::MapDirectoryAction(spec) => &spec.owner,
         }
     }
 
@@ -1480,6 +1660,7 @@ impl ActionAnalysisMetadata {
                 template,
                 ..
             } => vec![status_file.clone(), template.clone()],
+            Self::MapDirectoryAction(spec) => spec.inputs.clone(),
             Self::SymlinkAction { .. } => Vec::new(),
         }
     }
@@ -1487,6 +1668,7 @@ impl ActionAnalysisMetadata {
     pub fn tools(&self) -> &[Artifact] {
         match self {
             Self::SpawnAction { tools, .. } => tools.as_slice(),
+            Self::MapDirectoryAction(spec) => spec.tools.as_slice(),
             _ => &[],
         }
     }
@@ -1498,6 +1680,7 @@ impl ActionAnalysisMetadata {
             | Self::SymlinkAction { output, .. }
             | Self::TemplateExpansionAction { output, .. }
             | Self::BuildInfoTranslateAction { output, .. } => vec![output.clone()],
+            Self::MapDirectoryAction(spec) => spec.outputs.clone(),
         }
     }
 
@@ -1514,6 +1697,7 @@ impl ActionAnalysisMetadata {
                 unset_env,
                 inputs,
                 outputs,
+                unused_inputs_list,
                 ..
             } => {
                 fp.add_strings(argv);
@@ -1529,6 +1713,10 @@ impl ActionAnalysisMetadata {
                 }
                 for out in outputs {
                     fp.add_str(out.exec_path.path_string());
+                }
+                if let Some(u) = unused_inputs_list {
+                    fp.add_str("unused_inputs_list")
+                        .add_str(u.exec_path.path_string());
                 }
             }
             Self::FileWriteAction {
@@ -1593,6 +1781,42 @@ impl ActionAnalysisMetadata {
                     .add_bool(*is_volatile)
                     .add_str(&translator.key);
             }
+            Self::MapDirectoryAction(spec) => {
+                fp.add_str(&spec.expanded_mnemonic)
+                    .add_str(&spec.expander.key_fingerprint());
+                fp.add_u64(spec.input_directories.len() as u64);
+                for (k, dir) in &spec.input_directories {
+                    fp.add_str(k).add_str(dir.exec_path.path_string());
+                }
+                fp.add_u64(spec.output_directories.len() as u64);
+                for (k, dir) in &spec.output_directories {
+                    fp.add_str(k).add_str(dir.exec_path.path_string());
+                }
+                fp.add_u64(spec.execution_info.len() as u64);
+                for (k, v) in &spec.execution_info {
+                    fp.add_str(k).add_str(v);
+                }
+                for (k, v) in &spec.env {
+                    fp.add_str(k).add_str(v);
+                }
+                if !spec.inherited_env.is_empty() || !spec.unset_env.is_empty() {
+                    fp.add_str("inherited")
+                        .add_strings(spec.inherited_env.iter());
+                    fp.add_str("unset").add_strings(spec.unset_env.iter());
+                }
+                fp.add_u64(spec.inputs.len() as u64);
+                for inp in &spec.inputs {
+                    fp.add_str(inp.exec_path.path_string());
+                }
+                fp.add_u64(spec.tools.len() as u64);
+                for tool in &spec.tools {
+                    fp.add_str(tool.exec_path.path_string());
+                }
+                fp.add_u64(spec.outputs.len() as u64);
+                for out in &spec.outputs {
+                    fp.add_str(out.exec_path.path_string());
+                }
+            }
         }
         if let Self::SpawnAction {
             java_compile: Some(jc),
@@ -1646,6 +1870,14 @@ impl ActionAnalysisMetadata {
                 } else {
                     "Translating stable BuildInfo file".to_string()
                 }
+            }
+            Self::MapDirectoryAction(spec) => {
+                let dirs: Vec<String> = spec
+                    .input_directories
+                    .iter()
+                    .map(|(_, a)| a.exec_path.path_string().to_string())
+                    .collect();
+                format!("Expanding [{}] into actions.", dirs.join(", "))
             }
         }
     }
@@ -1753,6 +1985,16 @@ pub struct ConfiguredTarget {
     pub test_exec_group: Option<String>,
     /// Execution platform resolved for `test_exec_group` on a test target.
     pub test_execution_platform: Option<String>,
+    /// Resolved default execution platform label of this target (`ToolchainContext.executionPlatform`).
+    pub exec_platform: Option<String>,
+    /// Resolved named `exec_group` execution platform labels of this target.
+    pub exec_group_platforms: BTreeMap<String, String>,
+    /// Resolved default toolchains of this target (`ToolchainContext`), exposed via `ctx.rule.toolchains`.
+    pub toolchains: BTreeMap<String, zel_starlark::Value>,
+    /// Resolved named `exec_group` toolchains of this target, exposed via `ctx.rule.exec_groups`.
+    pub exec_group_toolchains: BTreeMap<String, BTreeMap<String, zel_starlark::Value>>,
+    /// Toolchain Make variables (`TemplateVariableInfo`) of this target, exposed via `ctx.rule.var`.
+    pub extra_make_variables: BTreeMap<String, String>,
 }
 
 /// Reason a configured target is incompatible with its target platform (`IncompatiblePlatformProvider`).
@@ -1814,6 +2056,11 @@ impl ConfiguredTarget {
             incompatible: None,
             test_exec_group: None,
             test_execution_platform: None,
+            exec_platform: None,
+            exec_group_platforms: BTreeMap::new(),
+            toolchains: BTreeMap::new(),
+            exec_group_toolchains: BTreeMap::new(),
+            extra_make_variables: BTreeMap::new(),
         }
     }
 
@@ -2355,6 +2602,155 @@ mod tests {
         assert_eq!(
             fragments::late_bound_label("java", "launcher", &exec_with_host),
             Some(Label::parse_canonical("@@//pkg:host_launcher").unwrap())
+        );
+    }
+
+    #[test]
+    fn exec_transition_resets_post_exec_and_non_propagated_transition_changes() {
+        let host_cpu = build_options::auto_host_cpu();
+        let target = BuildConfigurationKey::target(host_cpu, "fastbuild");
+        let [_untrimmed_cov, java_cov] = target
+            .coverage_tool_configs()
+            .try_into()
+            .expect("two coverage tool configs");
+        assert_eq!(
+            java_cov.mnemonic(),
+            format!("{host_cpu}-opt-exec-ST-9b53c6127b00")
+        );
+        assert_eq!(
+            java_cov.option_str("java_runtime_version").as_deref(),
+            Some("remotejdk_25")
+        );
+        assert_eq!(
+            java_cov.build_options().get("java_runtime_version"),
+            Some(&build_options::ConfigValue::Scalar("remotejdk_25".into()))
+        );
+
+        // Re-applying the exec transition to a different execution platform drops the post-exec
+        // `java_runtime_version` override from `post_exec`, `options`, `build_options()`, AND
+        // `transition_changes` (ST-hash), matching `target.to_exec_for(...)`.
+        let expected_other = target.to_exec_for("@@//p:other_exec");
+        let re_exec_other = java_cov.to_exec_for("@@//p:other_exec");
+        assert!(re_exec_other.post_exec.is_empty());
+        assert!(
+            !re_exec_other
+                .transition_changes
+                .contains_key("//command_line_option:java_runtime_version"),
+            "unexpected stale transition_changes: {:?}",
+            re_exec_other.transition_changes
+        );
+        assert_eq!(
+            re_exec_other.option_str("java_runtime_version").as_deref(),
+            Some("local_jdk")
+        );
+        assert_eq!(
+            re_exec_other.build_options(),
+            expected_other.build_options()
+        );
+        assert_eq!(
+            re_exec_other.untrimmed_build_options(),
+            expected_other.untrimmed_build_options()
+        );
+        assert_eq!(re_exec_other.mnemonic(), expected_other.mnemonic());
+        assert_eq!(
+            re_exec_other.config_display_mnemonic(),
+            expected_other.config_display_mnemonic()
+        );
+        assert_eq!(re_exec_other.checksum(), expected_other.checksum());
+
+        // Re-applying the exec transition onto the same host platform also resets post-exec
+        // `java_runtime_version` back to the baseline exec configuration.
+        let re_exec_same = java_cov.to_exec();
+        let expected_same = target.to_exec();
+        assert_eq!(re_exec_same.mnemonic(), expected_same.mnemonic());
+        assert_eq!(re_exec_same.build_options(), expected_same.build_options());
+        assert_eq!(re_exec_same.checksum(), expected_same.checksum());
+
+        // When `--tool_java_runtime_version` was set on the command line, `coverage_tool_configs`
+        // overrides `java_runtime_version` to `remotejdk_25`, and a subsequent exec transition
+        // restores `java_runtime_version` back to `tool_java_runtime_version`.
+        let mut cli_tool_jdk = target.clone();
+        cli_tool_jdk
+            .options
+            .insert("tool_java_runtime_version".into(), "17".into());
+        cli_tool_jdk.native.insert(
+            "tool_java_runtime_version".into(),
+            NativeSetting {
+                raw: "17".into(),
+                value: build_options::ConfigValue::Scalar("17".into()),
+            },
+        );
+        let [_, java_cov_17] = cli_tool_jdk
+            .coverage_tool_configs()
+            .try_into()
+            .expect("two coverage tool configs");
+        assert_eq!(
+            java_cov_17.option_str("java_runtime_version").as_deref(),
+            Some("remotejdk_25")
+        );
+        let re_exec_17 = java_cov_17.to_exec_for("@@//p:other_exec");
+        let expected_17 = cli_tool_jdk.to_exec_for("@@//p:other_exec");
+        assert_eq!(
+            re_exec_17.option_str("java_runtime_version").as_deref(),
+            Some("17")
+        );
+        assert_eq!(re_exec_17.mnemonic(), expected_17.mnemonic());
+        assert_eq!(re_exec_17.build_options(), expected_17.build_options());
+
+        // Post-exec Starlark transition: non-propagated options (`copt`) are cleared on a
+        // subsequent exec transition, whereas propagated options (`protocopt`,
+        // `tool_java_runtime_version`) remain in both `build_options()` and `ST-<hash>`.
+        let mk_str_list = |s: &str| {
+            zel_starlark::Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+                zel_starlark::StarlarkList::new(vec![zel_starlark::Value::String(s.to_string())]),
+            )))
+        };
+        let mut post_exec_copt = target.to_exec();
+        transition::set_setting(
+            &mut post_exec_copt,
+            "//command_line_option:copt",
+            &mk_str_list("-DPOST_EXEC"),
+        )
+        .unwrap();
+        let after_copt_re_exec = post_exec_copt.to_exec_for("@@//p:other_exec");
+        assert_eq!(after_copt_re_exec.mnemonic(), expected_other.mnemonic());
+        assert_eq!(
+            after_copt_re_exec.build_options(),
+            expected_other.build_options()
+        );
+
+        let mut post_exec_prop = target.to_exec();
+        transition::set_setting(
+            &mut post_exec_prop,
+            "//command_line_option:protocopt",
+            &mk_str_list("--post-proto"),
+        )
+        .unwrap();
+        transition::set_setting(
+            &mut post_exec_prop,
+            "//command_line_option:tool_java_runtime_version",
+            &zel_starlark::Value::String("remotejdk_25".into()),
+        )
+        .unwrap();
+        let mut pre_exec_prop = target.clone();
+        transition::set_setting(
+            &mut pre_exec_prop,
+            "//command_line_option:protocopt",
+            &mk_str_list("--post-proto"),
+        )
+        .unwrap();
+        transition::set_setting(
+            &mut pre_exec_prop,
+            "//command_line_option:tool_java_runtime_version",
+            &zel_starlark::Value::String("remotejdk_25".into()),
+        )
+        .unwrap();
+        let from_post_prop = post_exec_prop.to_exec_for("@@//p:other_exec");
+        let from_pre_prop = pre_exec_prop.to_exec_for("@@//p:other_exec");
+        assert_eq!(from_post_prop.mnemonic(), from_pre_prop.mnemonic());
+        assert_eq!(
+            from_post_prop.build_options(),
+            from_pre_prop.build_options()
         );
     }
 }

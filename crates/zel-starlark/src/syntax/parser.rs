@@ -374,19 +374,26 @@ impl Parser {
                     self.next();
                 }
                 let mut symbols = Vec::new();
+                let mut symbol_locations = Vec::new();
                 while !matches!(self.peek(), TokenKind::RParen | TokenKind::Eof) {
-                    match self.next().kind {
+                    let sym_tok = self.next();
+                    match sym_tok.kind {
                         TokenKind::Str(sym) => {
+                            symbol_locations
+                                .push((sym_tok.location.clone(), sym_tok.location.clone()));
                             symbols.push((sym.clone(), sym));
                         }
                         TokenKind::Ident(alias) => {
+                            let alias_loc = sym_tok.location;
                             self.eat(&TokenKind::Assign)?;
-                            let TokenKind::Str(orig) = self.next().kind else {
+                            let orig_tok = self.next();
+                            let TokenKind::Str(orig) = orig_tok.kind else {
                                 return Err(StarlarkError(format!(
                                     "{}: Expected string literal in load alias",
                                     self.loc()
                                 )));
                             };
+                            symbol_locations.push((alias_loc, orig_tok.location));
                             symbols.push((alias, orig));
                         }
                         other => {
@@ -405,6 +412,7 @@ impl Parser {
                     LoadStatement {
                         module_label,
                         symbols,
+                        symbol_locations,
                     },
                     loc,
                 ))
@@ -512,67 +520,57 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> Result<Pattern, StarlarkError> {
-        match self.peek() {
-            TokenKind::LParen => {
-                self.next();
-                if matches!(self.peek(), TokenKind::RParen) {
-                    self.next();
-                    return Ok(Pattern::Tuple(Vec::new()));
-                }
-                let first = self.parse_pattern()?;
-                if !matches!(self.peek(), TokenKind::Comma) {
-                    self.eat(&TokenKind::RParen)?;
-                    return Ok(first);
-                }
-                let mut items = vec![first];
-                while matches!(self.peek(), TokenKind::Comma) {
-                    self.next();
-                    if matches!(self.peek(), TokenKind::RParen) {
-                        break;
-                    }
-                    items.push(self.parse_pattern()?);
-                }
-                self.eat(&TokenKind::RParen)?;
-                Ok(Pattern::Tuple(items))
-            }
-            TokenKind::LBracket => {
-                self.next();
-                let mut items = Vec::new();
-                while !matches!(self.peek(), TokenKind::RBracket | TokenKind::Eof) {
-                    items.push(self.parse_pattern()?);
-                    if matches!(self.peek(), TokenKind::Comma) {
-                        self.next();
-                    } else {
-                        break;
-                    }
-                }
-                self.eat(&TokenKind::RBracket)?;
-                Ok(Pattern::Tuple(items))
-            }
-            _ => match self.next().kind {
-                TokenKind::Ident(n) => Ok(Pattern::Name(n)),
-                _ => Err(StarlarkError(format!(
-                    "{}: Expected variable name",
-                    self.loc()
-                ))),
-            },
-        }
+        let loc = self.loc();
+        let e = self.parse_postfix()?;
+        Self::expr_to_pattern(e, &loc)
     }
 
     fn expr_to_pattern(e: Expr, loc: &Location) -> Result<Pattern, StarlarkError> {
         match e {
             Expr::Ident(n, _) => Ok(Pattern::Name(n)),
-            Expr::Index { target, index, .. } => Ok(Pattern::Index { target, index }),
             Expr::Tuple(items, _) | Expr::List(items, _) => Ok(Pattern::Tuple(
                 items
                     .into_iter()
                     .map(|i| Self::expr_to_pattern(i, loc))
                     .collect::<Result<_, _>>()?,
             )),
+            Expr::Index {
+                target,
+                index,
+                location,
+            } => Ok(Pattern::Index {
+                target,
+                index,
+                location,
+            }),
+            Expr::Attr {
+                target,
+                attr,
+                location,
+            } => Ok(Pattern::Attr {
+                target,
+                attr,
+                location,
+            }),
             _ => Err(StarlarkError(format!(
                 "{loc}: cannot assign to non-lvalue expression"
             ))),
         }
+    }
+
+    /// Parses a single complete expression followed by optional trailing newlines and EOF.
+    pub fn parse_complete_expr(&mut self) -> Result<Expr, StarlarkError> {
+        self.skip_newlines();
+        let expr = self.parse_expr_or_tuple()?;
+        self.skip_newlines();
+        if !matches!(self.peek(), TokenKind::Eof) {
+            return Err(StarlarkError(format!(
+                "{}: syntax error at {}: expected newline",
+                self.loc(),
+                token_desc(self.peek())
+            )));
+        }
+        Ok(expr)
     }
 
     /// Parses `expr` or an unparenthesised tuple `expr, expr, ...` (with optional trailing comma).
@@ -807,6 +805,12 @@ impl Parser {
 
         if comparisons.is_empty() {
             Ok(lhs)
+        } else if comparisons.len() > 1 {
+            let op1 = comparisons[0].0.as_str();
+            let op2 = comparisons[1].0.as_str();
+            Err(StarlarkError(format!(
+                "{loc}: Operator '{op1}' is not associative with operator '{op2}'. Use parens."
+            )))
         } else {
             Ok(Expr::Compare {
                 lhs: Box::new(lhs),
@@ -894,11 +898,21 @@ impl Parser {
                 BinaryOpKind::Sub
             };
             let rhs = self.parse_mul()?;
-            lhs = Expr::BinaryOp {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-                location: loc,
+            lhs = match (op, lhs, rhs) {
+                (
+                    BinaryOpKind::Add,
+                    Expr::Literal(Value::String(mut a)),
+                    Expr::Literal(Value::String(b)),
+                ) => {
+                    a.push_str(&b);
+                    Expr::Literal(Value::String(a))
+                }
+                (op, lhs, rhs) => Expr::BinaryOp {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                    location: loc,
+                },
             };
         }
         Ok(lhs)

@@ -340,7 +340,10 @@ pub fn set_setting(
                     }
                     _ => s.clone(),
                 };
-                cfg.options.insert(other.to_string(), stored);
+                cfg.options.insert(other.to_string(), stored.clone());
+                if cfg.is_exec {
+                    cfg.post_exec.insert(other.to_string(), stored);
+                }
                 sync_env_config(cfg, other, value);
             }
         }
@@ -874,11 +877,70 @@ pub fn apply_transition_split(
     apply_transition_split_with_resolver(trans, cfg, attrs, None)
 }
 
+/// Execution-platform resolution context (`AttributeTransitionData` +
+/// `DependencyResolutionHelpers.getExecutionPlatformLabel`) used when evaluating `config.exec(...)`
+/// transitions (standalone or composed via `.and_then(...)`).
+#[derive(Clone, Copy)]
+pub struct ExecTransitionContext<'a> {
+    pub attr_name: &'a str,
+    pub default_exec_platform: Option<&'a str>,
+    pub exec_group_platforms: Option<&'a BTreeMap<String, String>>,
+}
+
+impl<'a> ExecTransitionContext<'a> {
+    pub fn resolve_exec_platform(
+        &self,
+        exec_group: Option<&str>,
+    ) -> Result<Option<&'a str>, String> {
+        match exec_group {
+            None => Ok(self.default_exec_platform),
+            Some(g) => match self.exec_group_platforms {
+                Some(groups) => match groups.get(g) {
+                    Some(p) => Ok(Some(p.as_str())),
+                    None => Err(format!(
+                        "Attr '{}' declares a transition for non-existent exec group '{g}'",
+                        self.attr_name
+                    )),
+                },
+                None => Ok(self.default_exec_platform),
+            },
+        }
+    }
+}
+
+fn compose_split_keys(key1: Option<&str>, key2: Option<String>) -> Option<String> {
+    match (key1, key2) {
+        (None, k) => k,
+        (Some(a), None) => Some(a.to_string()),
+        (Some(""), Some(b)) => Some(b),
+        (Some(a), Some(b)) if b.is_empty() => Some(a.to_string()),
+        (Some(a), Some(b)) => Some(format!("{a},{b}")),
+    }
+}
+
+fn is_exec_transition_step(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::Struct(s)
+            if s.fields.get("_build_setting").and_then(|v| v.as_str()) == Some("exec")
+    )
+}
+
 pub fn apply_transition_split_with_resolver(
     trans: &Value,
     cfg: &BuildConfigurationKey,
     attrs: Option<&Value>,
     resolver: Option<&dyn crate::starlark_rule::DepResolver>,
+) -> Result<Vec<(Option<String>, BuildConfigurationKey)>, String> {
+    apply_transition_split_with_exec_ctx(trans, cfg, attrs, resolver, None)
+}
+
+pub fn apply_transition_split_with_exec_ctx(
+    trans: &Value,
+    cfg: &BuildConfigurationKey,
+    attrs: Option<&Value>,
+    resolver: Option<&dyn crate::starlark_rule::DepResolver>,
+    exec_ctx: Option<&ExecTransitionContext<'_>>,
 ) -> Result<Vec<(Option<String>, BuildConfigurationKey)>, String> {
     let Value::Struct(s) = trans else {
         return Err(format!(
@@ -886,7 +948,73 @@ pub fn apply_transition_split_with_resolver(
             trans.type_name()
         ));
     };
+    if let Some(Value::List(chain)) = s.fields.get("_composed_transitions") {
+        let steps = chain.lock().unwrap().elements.clone();
+        if steps
+            .iter()
+            .filter(|step| is_exec_transition_step(step))
+            .count()
+            > 1
+        {
+            return Err("can't compose two exec transitions".to_string());
+        }
+        let mut current: Vec<(Option<String>, BuildConfigurationKey)> = vec![(None, cfg.clone())];
+        for step in &steps {
+            let mut next = Vec::new();
+            for (k0, c0) in current {
+                for (k1, c1) in
+                    apply_transition_split_with_exec_ctx(step, &c0, attrs, resolver, exec_ctx)?
+                {
+                    next.push((compose_split_keys(k0.as_deref(), k1), c1));
+                }
+            }
+            current = next;
+        }
+        return Ok(current);
+    }
+    match s.fields.get("_build_setting").and_then(|v| v.as_str()) {
+        Some("none") => {
+            let mut out = cfg.clone();
+            out.flag_values.clear();
+            out.flag_types.clear();
+            out.transition_changes.clear();
+            return Ok(vec![(None, out)]);
+        }
+        Some("target") => {
+            return Ok(vec![(None, cfg.clone())]);
+        }
+        Some("exec") => {
+            let exec_group = s.fields.get("exec_group").and_then(|v| v.as_str());
+            let plat = match exec_ctx {
+                Some(ec) => ec.resolve_exec_platform(exec_group)?,
+                None => None,
+            };
+            let next_cfg = match plat {
+                Some(p) => cfg.to_exec_for(p),
+                None => cfg.to_exec(),
+            };
+            return Ok(vec![(None, next_cfg)]);
+        }
+        _ => {}
+    }
     let tctx = parse_transition_ctx(&s.fields);
+    if let Some(Value::String(attr_name)) = s.fields.get("_feature_flag_transition_attr") {
+        let mut out = cfg.clone();
+        if let Some(Value::Struct(attr_s)) = attrs {
+            if let Some(Value::Dict(d)) = attr_s.fields.get(attr_name) {
+                for (k, v) in d.lock().unwrap().items() {
+                    let key_str = match &k {
+                        Value::Label(l) => l.canonical_form(),
+                        Value::String(st) => canonicalize_setting(st, tctx.as_ref())?,
+                        _ => continue,
+                    };
+                    let spec = resolve_build_setting(&key_str, &out, resolver)?;
+                    set_setting_with_spec(&mut out, &key_str, &v, spec.as_ref(), tctx.as_ref())?;
+                }
+            }
+        }
+        return Ok(vec![(None, out)]);
+    }
     // `analysis_test_transition(settings = {...})`: sets the given build settings.
     if let Some(Value::Dict(d)) = s
         .fields
@@ -1172,5 +1300,28 @@ mod tests {
         set_setting(&mut d, "//b:flag", &Value::Bool(true)).unwrap();
         assert_eq!(c.mnemonic(), d.mnemonic());
         set_setting(&mut d, "//b:flag", &Value::None).ok();
+    }
+
+    #[test]
+    fn compose_split_keys_absorbs_patch_keys_and_joins_splits_with_comma() {
+        assert_eq!(compose_split_keys(None, None), None);
+        assert_eq!(compose_split_keys(None, Some("k".into())), Some("k".into()));
+        assert_eq!(compose_split_keys(Some("k"), None), Some("k".into()));
+        assert_eq!(
+            compose_split_keys(Some(""), Some("k".into())),
+            Some("k".into())
+        );
+        assert_eq!(
+            compose_split_keys(Some("k"), Some(String::new())),
+            Some("k".into())
+        );
+        assert_eq!(
+            compose_split_keys(Some(""), Some(String::new())),
+            Some(String::new())
+        );
+        assert_eq!(
+            compose_split_keys(Some("stub_split0"), Some("stub_split1".into())),
+            Some("stub_split0,stub_split1".into())
+        );
     }
 }

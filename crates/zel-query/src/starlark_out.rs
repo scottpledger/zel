@@ -1058,7 +1058,7 @@ pub(crate) fn run(
                 let key = args
                     .get(1)
                     .ok_or_else(|| StarlarkError("index expects key".into()))?;
-                let name = match key {
+                let lookup_key = match key {
                     Value::Provider { name } => {
                         if name == "Provider" {
                             return Err(StarlarkError(format!(
@@ -1066,7 +1066,18 @@ pub(crate) fn run(
                                 data.target_value.repr()
                             )));
                         }
-                        name.as_str()
+                        name.clone()
+                    }
+                    Value::Host(k, _) if k == "provider" => {
+                        match zel_packages::provider::provider_key_of(key) {
+                            Some(pk) => pk,
+                            None => {
+                                return Err(StarlarkError(format!(
+                                    "{} only supports indexing by exported providers. Assign the provider a name in a top-level assignment statement.",
+                                    data.target_value.repr()
+                                )));
+                            }
+                        }
                     }
                     other => {
                         return Err(StarlarkError(format!(
@@ -1075,26 +1086,21 @@ pub(crate) fn run(
                         )));
                     }
                 };
-                if let Some(v) = data.providers.get(name) {
-                    Ok(v.clone())
-                } else if let Some((_, v)) = data
-                    .providers
-                    .iter()
-                    .find(|(k, _)| k.ends_with(&format!("%{name}")) || k.as_str() == name)
-                {
+                if let Some(v) = data.providers.get(&lookup_key) {
                     Ok(v.clone())
                 } else {
+                    let disp = zel_packages::provider::provider_display_name(&lookup_key);
                     Err(StarlarkError(format!(
                         "{} doesn't contain declared provider '{}'",
                         data.target_value.repr(),
-                        name
+                        disp
                     )))
                 }
             } else if op == "contains:target" {
                 let key = args
                     .get(1)
                     .ok_or_else(|| StarlarkError("contains expects key".into()))?;
-                let name = match key {
+                let lookup_key = match key {
                     Value::Provider { name } => {
                         if name == "Provider" {
                             return Err(StarlarkError(format!(
@@ -1102,7 +1108,18 @@ pub(crate) fn run(
                                 data.target_value.repr()
                             )));
                         }
-                        name.as_str()
+                        name.clone()
+                    }
+                    Value::Host(k, _) if k == "provider" => {
+                        match zel_packages::provider::provider_key_of(key) {
+                            Some(pk) => pk,
+                            None => {
+                                return Err(StarlarkError(format!(
+                                    "{} only supports querying by exported providers. Assign the provider a name in a top-level assignment statement.",
+                                    data.target_value.repr()
+                                )));
+                            }
+                        }
                     }
                     other => {
                         return Err(StarlarkError(format!(
@@ -1111,11 +1128,7 @@ pub(crate) fn run(
                         )));
                     }
                 };
-                let found = data.providers.contains_key(name)
-                    || data
-                        .providers
-                        .keys()
-                        .any(|k| k.ends_with(&format!("%{name}")));
+                let found = data.providers.contains_key(&lookup_key);
                 Ok(Value::Bool(found))
             } else {
                 Err(StarlarkError(format!("unknown host operation '{op}'")))

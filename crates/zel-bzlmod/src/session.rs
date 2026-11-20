@@ -46,6 +46,7 @@ pub struct BzlmodConfig {
     pub experimental_repository_ctx_execute_wasm: bool,
     pub experimental_sibling_repository_layout: bool,
     pub incompatible_no_implicit_watch_label: bool,
+    pub incompatible_use_cc_configure_from_rules_cc: bool,
     pub credential_helpers: Vec<(String, PathBuf)>,
 }
 
@@ -512,6 +513,9 @@ impl BzlmodConfig {
             incompatible_no_implicit_watch_label: parsed
                 .get_bool("incompatible_no_implicit_watch_label")
                 .unwrap_or(true),
+            incompatible_use_cc_configure_from_rules_cc: parsed
+                .get_bool("incompatible_use_cc_configure_from_rules_cc")
+                .unwrap_or(false),
             credential_helpers,
         })
     }
@@ -536,6 +540,8 @@ impl BzlmodConfig {
             experimental_repository_ctx_execute_wasm: self.experimental_repository_ctx_execute_wasm,
             experimental_sibling_repository_layout: self.experimental_sibling_repository_layout,
             incompatible_no_implicit_watch_label: self.incompatible_no_implicit_watch_label,
+            incompatible_use_cc_configure_from_rules_cc: self
+                .incompatible_use_cc_configure_from_rules_cc,
             credential_helpers: self.credential_helpers.clone(),
         }
     }

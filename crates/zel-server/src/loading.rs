@@ -166,6 +166,12 @@ impl BlazeRuntime {
         cfg.sibling_repository_layout = parsed
             .get_bool("experimental_sibling_repository_layout")
             .unwrap_or(false);
+        cfg.experimental_dormant_deps = parsed
+            .get_bool("experimental_dormant_deps")
+            .unwrap_or(false);
+        cfg.incompatible_no_attr_license = parsed
+            .get_bool("incompatible_no_attr_license")
+            .unwrap_or(true);
         cfg.experimental_bzl_visibility = parsed
             .get_bool("experimental_bzl_visibility")
             .unwrap_or(true);
@@ -176,9 +182,13 @@ impl BlazeRuntime {
         cfg.incompatible_use_cc_configure_from_rules_cc = parsed
             .get_bool("incompatible_use_cc_configure_from_rules_cc")
             .unwrap_or(false);
+        cfg.incompatible_disable_transitions_on =
+            opt_list(parsed, "incompatible_disable_transitions_on");
         let mut sig_parts: Vec<String> = vec![
             format!("allow_empty_glob={}", cfg.allow_empty_glob),
             format!("sibling_repo={}", cfg.sibling_repository_layout),
+            format!("dormant_deps={}", cfg.experimental_dormant_deps),
+            format!("no_attr_license={}", cfg.incompatible_no_attr_license),
             format!(
                 "bzl_vis={}/{}",
                 cfg.experimental_bzl_visibility, cfg.check_bzl_visibility
@@ -187,6 +197,10 @@ impl BlazeRuntime {
             format!(
                 "cc_conf={}",
                 cfg.incompatible_use_cc_configure_from_rules_cc
+            ),
+            format!(
+                "disable_transitions_on={:?}",
+                cfg.incompatible_disable_transitions_on
             ),
             format!("deleted={:?}", cfg.lookup.deleted_packages),
         ];

@@ -130,6 +130,16 @@ impl StarlarkSet {
         self.elements.iter().any(|x| x == item)
     }
 
+    pub fn contains_checked(&self, item: &Value) -> Result<bool, StarlarkError> {
+        if !item.is_hashable() {
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                item.type_name()
+            )));
+        }
+        Ok(self.contains(item))
+    }
+
     pub fn add(&mut self, item: Value) -> Result<(), StarlarkError> {
         self.check_mutable()?;
         if !item.is_hashable() {
@@ -151,6 +161,12 @@ impl StarlarkSet {
     }
 
     pub fn discard(&mut self, item: &Value) -> Result<(), StarlarkError> {
+        if !item.is_hashable() {
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                item.type_name()
+            )));
+        }
         self.check_mutable()?;
         if let Some(pos) = self.elements.iter().position(|x| x == item) {
             self.elements.remove(pos);
@@ -159,20 +175,30 @@ impl StarlarkSet {
     }
 
     pub fn remove(&mut self, item: &Value) -> Result<(), StarlarkError> {
+        if !item.is_hashable() {
+            return Err(StarlarkError(format!(
+                "unhashable type: '{}'",
+                item.type_name()
+            )));
+        }
         self.check_mutable()?;
         if let Some(pos) = self.elements.iter().position(|x| x == item) {
             self.elements.remove(pos);
             Ok(())
         } else {
-            Err(StarlarkError(format!("item {item:?} not found in set")))
+            Err(StarlarkError(format!(
+                "element {} not found in set",
+                item.repr()
+            )))
         }
     }
 
     pub fn pop(&mut self) -> Result<Value, StarlarkError> {
         self.check_mutable()?;
-        self.elements
-            .pop()
-            .ok_or_else(|| StarlarkError("pop(): set is empty".to_string()))
+        if self.elements.is_empty() {
+            return Err(StarlarkError("set is empty".to_string()));
+        }
+        Ok(self.elements.remove(0))
     }
 
     pub fn issubset(&self, other: &Self) -> bool {

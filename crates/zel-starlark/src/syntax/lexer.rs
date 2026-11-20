@@ -13,8 +13,10 @@
 // limitations under the License.
 
 use crate::bigint::BigInt;
+use crate::syntax::ast::Comment;
 use crate::syntax::location::Location;
 use crate::syntax::token::{Token, TokenKind};
+use std::collections::HashSet;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LexerError {
@@ -40,6 +42,8 @@ pub struct Lexer<'a> {
     paren_depth: usize,
     indent_stack: Vec<usize>,
     at_line_start: bool,
+    pub comments: Vec<Comment>,
+    pub standalone_comment_lines: HashSet<usize>,
 }
 
 impl<'a> Lexer<'a> {
@@ -55,6 +59,8 @@ impl<'a> Lexer<'a> {
             paren_depth: 0,
             indent_stack: vec![0],
             at_line_start: true,
+            comments: Vec::new(),
+            standalone_comment_lines: HashSet::new(),
         }
     }
 
@@ -113,12 +119,20 @@ impl<'a> Lexer<'a> {
                 if let Some(c) = self.peek() {
                     if c == '#' || c == '\n' || c == '\r' {
                         if c == '#' {
+                            let c_loc = self.loc();
+                            let mut text = String::new();
                             while let Some(ch) = self.peek() {
-                                if ch == '\n' {
+                                if ch == '\n' || ch == '\r' {
                                     break;
                                 }
+                                text.push(ch);
                                 self.advance();
                             }
+                            self.standalone_comment_lines.insert(c_loc.line);
+                            self.comments.push(Comment {
+                                text,
+                                location: c_loc,
+                            });
                         }
                         if let Some('\r') = self.peek() {
                             self.advance();
@@ -191,12 +205,19 @@ impl<'a> Lexer<'a> {
 
             // Comments
             if c == '#' {
+                let c_loc = self.loc();
+                let mut text = String::new();
                 while let Some(ch) = self.peek() {
-                    if ch == '\n' {
+                    if ch == '\n' || ch == '\r' {
                         break;
                     }
+                    text.push(ch);
                     self.advance();
                 }
+                self.comments.push(Comment {
+                    text,
+                    location: c_loc,
+                });
                 continue;
             }
 

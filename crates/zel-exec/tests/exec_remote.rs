@@ -808,6 +808,7 @@ fn bwob_zero_remote_cache_ttl_succeeds_post_execution_and_reexecutes_next_invoca
         execution_info: BTreeMap::new(),
         tools: Vec::new(),
         java_compile: None,
+        unused_inputs_list: None,
     };
 
     let fs = LocalFileSystem::default();
@@ -1041,6 +1042,7 @@ fn hybrid_tree_artifact_digest_matches_materialized_path_digest_and_invalidates_
         execution_info: BTreeMap::new(),
         tools: Vec::new(),
         java_compile: None,
+        unused_inputs_list: None,
     };
 
     // Downstream consumer action taking `tree_art` as input, to verify `md_digest_with` too.
@@ -1066,6 +1068,7 @@ fn hybrid_tree_artifact_digest_matches_materialized_path_digest_and_invalidates_
         execution_info: BTreeMap::new(),
         tools: Vec::new(),
         java_compile: None,
+        unused_inputs_list: None,
     };
 
     let fs = LocalFileSystem::default();
@@ -1339,6 +1342,7 @@ fn tree_symlink_to_external_lazy_artifact_stays_consistent_across_partial_and_fu
         execution_info: BTreeMap::new(),
         tools: Vec::new(),
         java_compile: None,
+        unused_inputs_list: None,
     };
     let act_ext_tree = ActionAnalysisMetadata::SpawnAction {
         owner: owner.clone(),
@@ -1353,6 +1357,7 @@ fn tree_symlink_to_external_lazy_artifact_stays_consistent_across_partial_and_fu
         execution_info: BTreeMap::new(),
         tools: Vec::new(),
         java_compile: None,
+        unused_inputs_list: None,
     };
     let act_my_tree = ActionAnalysisMetadata::SpawnAction {
         owner,
@@ -1367,6 +1372,7 @@ fn tree_symlink_to_external_lazy_artifact_stays_consistent_across_partial_and_fu
         execution_info: BTreeMap::new(),
         tools: Vec::new(),
         java_compile: None,
+        unused_inputs_list: None,
     };
 
     let fs = LocalFileSystem::default();

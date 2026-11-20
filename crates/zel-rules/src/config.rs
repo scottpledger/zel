@@ -652,8 +652,13 @@ const KNOWN_OPTIONS: &[&str] = &[
     "host_cpu",
     "crosstool_top",
     "apple_platform_type",
+    "apple_split_cpu",
     "ios_multi_cpus",
+    "visionos_cpus",
+    "watchos_cpus",
+    "tvos_cpus",
     "macos_cpus",
+    "catalyst_cpus",
     "fission",
     "features",
     "compiler",
@@ -702,6 +707,7 @@ pub(crate) fn constraint_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
         }
         _ => mk_list(vec![]),
     };
+    let has_default = !matches!(default, Value::None);
     let mut ct = base(n);
     ct.providers.insert(
         "ConstraintSettingInfo".into(),
@@ -710,6 +716,7 @@ pub(crate) fn constraint_setting(n: &Nctx) -> Result<ConfiguredTarget, String> {
             vec![
                 ("label", lbl(&n.rule.label)),
                 ("default_constraint_value", default),
+                ("has_default_constraint_value", Value::Bool(has_default)),
                 ("refines_constraint_values", refines),
             ],
         ),

@@ -102,7 +102,7 @@ pub struct FlagSet {
 pub struct EnvEntry {
     pub key: String,
     pub value: Vec<Chunk>,
-    pub expand_if_available: Option<String>,
+    pub expand_if_available: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -283,7 +283,7 @@ fn parse_env_set(v: &Value) -> Res<EnvSet> {
         entries.push(EnvEntry {
             key: opt_str(field(&e, "key")).unwrap_or_default(),
             value: parse_chunks(&opt_str(field(&e, "value")).unwrap_or_default())?,
-            expand_if_available: opt_str(field(&e, "expand_if_available")),
+            expand_if_available: avail_list(field(&e, "expand_if_available")),
         });
     }
     Ok(EnvSet {
@@ -479,10 +479,17 @@ impl ToolchainFeatures {
                         (safe, !is_abs)
                     }
                 };
+                let mut reqs = Vec::new();
+                let mut seen_reqs = HashSet::new();
+                for r in str_list(field(&t, "execution_requirements")) {
+                    if seen_reqs.insert(r.clone()) {
+                        reqs.push(r);
+                    }
+                }
                 tools.push(Tool {
                     path,
                     crosstool_relative,
-                    execution_requirements: str_list(field(&t, "execution_requirements")),
+                    execution_requirements: reqs,
                     with_features: with_feature_sets(field(&t, "with_features")),
                 });
             }
@@ -1234,34 +1241,40 @@ impl FeatureConfiguration {
                     continue;
                 }
                 for e in &es.entries {
-                    if let Some(v) = &e.expand_if_available {
-                        if !scope.is_available(v, path_of) {
-                            continue;
-                        }
+                    if !e
+                        .expand_if_available
+                        .iter()
+                        .all(|v| scope.is_available(v, path_of))
+                    {
+                        continue;
                     }
                     let value = scope.expand_chunks(&e.value, path_of)?;
-                    if let Some(slot) = out.iter_mut().find(|(k, _)| *k == e.key) {
-                        slot.1 = value;
-                    } else {
-                        out.push((e.key.clone(), value));
+                    if let Some((_, prev)) = out.iter().find(|(k, _)| *k == e.key) {
+                        return err(format!(
+                            "Invalid toolchain configuration: Overlapping Variables {} is set to {} and {}",
+                            e.key, prev, value
+                        ));
                     }
+                    out.push((e.key.clone(), value));
                 }
             }
         }
         Ok(out)
     }
 
-    fn action_config(&self, action: &str) -> Res<&ActionConfig> {
-        let Some(&idx) = self.toolchain.action_config_by_action.get(action) else {
-            return err(format!(
-                "Action {action} does not have an enabled configuration in the toolchain."
-            ));
-        };
-        Ok(&self.toolchain.action_configs[idx])
+    fn registered_action_config(&self, action: &str) -> Option<&ActionConfig> {
+        self.toolchain
+            .action_config_by_action
+            .get(action)
+            .map(|&idx| &self.toolchain.action_configs[idx])
     }
 
     fn matching_tool(&self, action: &str) -> Res<&Tool> {
-        let ac = self.action_config(action)?;
+        let ac = self.registered_action_config(action).ok_or_else(|| {
+            StarlarkError(format!(
+                "Action {action} does not have an enabled configuration in the toolchain."
+            ))
+        })?;
         ac.tools
             .iter()
             .find(|t| with_features_satisfied(&t.with_features, &self.enabled_names))
@@ -1571,6 +1584,53 @@ mod tests {
                 "unfiltered_compile_flags".to_string(),
                 vec!["-DPIC=1".to_string()]
             )]
+        );
+    }
+
+    #[test]
+    fn tool_lookup_errors_on_unregistered_action_and_resolves_disabled_action_config() {
+        let tool = mk_struct(vec![
+            ("path", Value::String("bin/ar".into())),
+            (
+                "execution_requirements",
+                mk_list(vec![Value::String("no-remote".into())]),
+            ),
+        ]);
+        let disabled_ac = mk_struct(vec![
+            (
+                "action_name",
+                Value::String("c++-link-static-library".into()),
+            ),
+            ("enabled", Value::Bool(false)),
+            ("tools", mk_list(vec![tool])),
+        ]);
+        let tf = Arc::new(
+            ToolchainFeatures::new(&[], &[disabled_ac], &[], "crosstool/tools", &|_| None).unwrap(),
+        );
+        let fc = tf.configure(&[]).unwrap();
+
+        assert!(!fc.action_is_configured("c++-link-static-library"));
+        assert_eq!(
+            fc.tool_path_for_action("c++-link-static-library").unwrap(),
+            "crosstool/tools/bin/ar"
+        );
+        assert_eq!(
+            fc.tool_requirements_for_action("c++-link-static-library")
+                .unwrap(),
+            vec!["no-remote"]
+        );
+
+        let missing_err = fc.tool_path_for_action("unregistered-action").unwrap_err();
+        assert_eq!(
+            missing_err.0,
+            "Action unregistered-action does not have an enabled configuration in the toolchain."
+        );
+        let missing_req_err = fc
+            .tool_requirements_for_action("unregistered-action")
+            .unwrap_err();
+        assert_eq!(
+            missing_req_err.0,
+            "Action unregistered-action does not have an enabled configuration in the toolchain."
         );
     }
 }

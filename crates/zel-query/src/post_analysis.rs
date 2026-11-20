@@ -48,6 +48,8 @@ pub struct PostOpts {
     pub include_param_files: bool,
     pub include_file_write_contents: bool,
     pub include_pruned_inputs: bool,
+    /// When `!include_pruned_inputs`, maps primary-output exec path -> cached used input exec paths.
+    pub cached_used_inputs: BTreeMap<String, std::collections::BTreeSet<String>>,
     pub skyframe_state: bool,
     pub prune_unused_actions: bool,
     pub output_groups: Vec<String>,
@@ -79,6 +81,7 @@ impl Default for PostOpts {
             include_param_files: false,
             include_file_write_contents: false,
             include_pruned_inputs: true,
+            cached_used_inputs: BTreeMap::new(),
             skyframe_state: false,
             prune_unused_actions: false,
             output_groups: Vec::new(),
@@ -3612,6 +3615,7 @@ pub(crate) fn action_kind_name(a: &Action) -> &'static str {
         ActionKind::Symlink { .. } => "Symlink",
         ActionKind::TemplateExpand { .. } => "TemplateExpand",
         ActionKind::BuildInfoTranslate { .. } => "TranslateBuildInfo",
+        ActionKind::MapDirectory { .. } => "StarlarkMapActionTemplate",
     }
 }
 
@@ -3629,6 +3633,22 @@ fn _unused(_: LabelPrinter) {}
 /// `Starlark transition:<location>` (`StarlarkTransition.getName`) of a `transition()` object.
 fn starlark_transition_name(v: &zel_starlark::Value) -> Option<String> {
     match v {
+        zel_starlark::Value::Struct(s) if s.fields.contains_key("_composed_transitions") => {
+            let zel_starlark::Value::List(l) = s.fields.get("_composed_transitions")? else {
+                return None;
+            };
+            let elems = l.lock().unwrap().elements.clone();
+            let mut acc: Option<String> = None;
+            for step in &elems {
+                if let Some(name) = starlark_transition_name(step) {
+                    acc = Some(match acc {
+                        None => name,
+                        Some(prev) => format!("({prev} + {name})"),
+                    });
+                }
+            }
+            acc
+        }
         zel_starlark::Value::Struct(s) if s.fields.contains_key("implementation") => s
             .fields
             .get("location")
@@ -3636,6 +3656,9 @@ fn starlark_transition_name(v: &zel_starlark::Value) -> Option<String> {
         // `config.none()` (`NoConfigTransition`).
         zel_starlark::Value::Struct(s) if matches!(s.fields.get("_build_setting"), Some(zel_starlark::Value::String(k)) if k == "none") => {
             Some("NoConfigTransition".to_string())
+        }
+        zel_starlark::Value::Struct(s) if matches!(s.fields.get("_build_setting"), Some(zel_starlark::Value::String(k)) if k == "exec") => {
+            Some("exec".to_string())
         }
         _ => None,
     }
