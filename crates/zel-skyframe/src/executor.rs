@@ -273,7 +273,14 @@ impl PackageCache for SkyframePackageCache {
             .evaluator
             .evaluate_with(std::slice::from_ref(&key), &opts);
         match res.get::<PackageLoadValue>(&key) {
-            Some(v) => v.0.clone(),
+            Some(v) => {
+                if matches!(&v.0, Err(e) if e.repo_fetch_error.is_some()) {
+                    // Repository fetch failures depend on external/Bzlmod state outside the
+                    // recording FS, so do not memoize them across commands.
+                    self.exec.evaluator.invalidate(std::slice::from_ref(&key));
+                }
+                v.0.clone()
+            }
             None => {
                 let msg = res
                     .errors
@@ -283,6 +290,7 @@ impl PackageCache for SkyframePackageCache {
                 Err(PackageLoadError {
                     message: msg,
                     events: Vec::new(),
+                    repo_fetch_error: None,
                 })
             }
         }

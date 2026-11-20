@@ -24,19 +24,30 @@ impl BzlmodRepoResolver {
 
 impl RepoResolver for BzlmodRepoResolver {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+        self.resolve_repo_root(repo).ok()
+    }
+
+    fn resolve_repo_root(
+        &self,
+        repo: &RepositoryName,
+    ) -> Result<PathFragment, zel_packages::lookup::RepoRootError> {
         if !repo.is_visible() {
-            return None;
+            return Err(zel_packages::lookup::RepoRootError::NotFound);
         }
         if repo.is_main() || repo.name() == "_main" {
-            return Some(PathFragment::create(
+            return Ok(PathFragment::create(
                 &self.rt.opts.workspace_root.display().to_string(),
             ));
         }
         match self.rt.fetch_repo(repo.name()) {
-            Ok(dir) => Some(PathFragment::create(&dir.display().to_string())),
+            Ok(dir) => Ok(PathFragment::create(&dir.display().to_string())),
             Err(e) => {
-                self.errors.lock().unwrap().push(e.to_string());
-                None
+                if e == format!("Repository '@@{}' is not defined", repo.name()) {
+                    Err(zel_packages::lookup::RepoRootError::NotFound)
+                } else {
+                    self.errors.lock().unwrap().push(e.clone());
+                    Err(zel_packages::lookup::RepoRootError::FetchFailed(e))
+                }
             }
         }
     }
@@ -135,27 +146,35 @@ impl LazyBzlmodResolver {
 
 impl RepoResolver for LazyBzlmodResolver {
     fn repo_root(&self, repo: &RepositoryName) -> Option<PathFragment> {
+        self.resolve_repo_root(repo).ok()
+    }
+
+    fn resolve_repo_root(
+        &self,
+        repo: &RepositoryName,
+    ) -> Result<PathFragment, zel_packages::lookup::RepoRootError> {
         if !repo.is_visible() {
-            return None;
+            return Err(zel_packages::lookup::RepoRootError::NotFound);
         }
         if repo.is_main() || repo.name() == "_main" {
-            return Some(PathFragment::create(
+            return Ok(PathFragment::create(
                 &self.cfg.workspace.display().to_string(),
             ));
         }
-        let s = self.session()?;
+        let Some(s) = self.session() else {
+            return Err(zel_packages::lookup::RepoRootError::NotFound);
+        };
         match s.rt.fetch_repo(repo.name()) {
-            Ok(dir) => Some(PathFragment::create(&dir.display().to_string())),
+            Ok(dir) => Ok(PathFragment::create(&dir.display().to_string())),
             Err(e) => {
+                if e == format!("Repository '@@{}' is not defined", repo.name()) {
+                    return Err(zel_packages::lookup::RepoRootError::NotFound);
+                }
                 self.errors
                     .lock()
                     .unwrap()
-                    .push(if e.starts_with("INFO: ") {
-                        e
-                    } else {
-                        format!("ERROR: {e}")
-                    });
-                None
+                    .push(zel_packages::lookup::format_repo_fetch_error(&e));
+                Err(zel_packages::lookup::RepoRootError::FetchFailed(e))
             }
         }
     }

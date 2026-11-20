@@ -2272,6 +2272,27 @@ pub fn run_post_analysis(
     let set = match result {
         Ok(s) => s,
         Err(e) => {
+            let fetch_errs = env.tenv.repo_fetch_errors.borrow().clone();
+            if !fetch_errs.is_empty() {
+                let mut is_ext_err = false;
+                for raw in &fetch_errs {
+                    if zel_packages::lookup::is_module_extension_error(raw) {
+                        is_ext_err = true;
+                    }
+                    outcome
+                        .stderr
+                        .push(zel_packages::lookup::format_repo_fetch_error(raw));
+                }
+                outcome
+                    .stderr
+                    .push("ERROR: Build did NOT complete successfully".into());
+                outcome.exit_code = if is_ext_err {
+                    48
+                } else {
+                    crate::exit::BUILD_FAILURE_CODE
+                };
+                return outcome;
+            }
             if let Some(lines) = env.failure.take() {
                 outcome.stderr.extend(lines);
                 outcome

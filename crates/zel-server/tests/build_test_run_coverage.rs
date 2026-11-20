@@ -1673,3 +1673,323 @@ sh_test(name = "tmpcheck", srcs = ["tmpcheck.sh"])
         r_stream.out
     );
 }
+
+fn make_ws_no_root_build(name: &str, module_bazel: &str) -> (PathBuf, Ws) {
+    let root = std::env::temp_dir().join(format!("zel-btrc-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    let ws_dir = root.join("ws");
+    std::fs::create_dir_all(&ws_dir).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let ws_dir = root.join("ws");
+    std::fs::write(ws_dir.join("MODULE.bazel"), module_bazel).unwrap();
+    let fs: Arc<dyn FileSystem> = Arc::new(LocalFileSystem::default());
+    let p = |s: &str| PathFragment::create(root.join(s).to_str().unwrap());
+    let ob = root.join("ob");
+    let dirs = BlazeDirectories {
+        workspace_dir: PathFragment::create(ws_dir.to_str().unwrap()),
+        output_base: p("ob"),
+        install_base: p("ib"),
+        output_user_root: p("ur"),
+    };
+    (
+        root,
+        Ws {
+            ws: ws_dir,
+            ob,
+            rt: BlazeRuntime::new(dirs, fs, 1),
+        },
+    )
+}
+
+#[test]
+fn test_cli_extension_repo_succeeds_without_root_build() {
+    let ext_root = std::env::temp_dir().join(format!("zel-btrc-ext-ok-mod-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ext_root);
+    std::fs::create_dir_all(&ext_root).unwrap();
+    let ext_root = std::fs::canonicalize(&ext_root).unwrap();
+    std::fs::write(
+        ext_root.join("MODULE.bazel"),
+        "module(name = \"ext_mod\", version = \"0.1.0\")\n",
+    )
+    .unwrap();
+    std::fs::write(ext_root.join("BUILD.bazel"), "").unwrap();
+    std::fs::write(
+        ext_root.join("ext.bzl"),
+        r#"
+def _impl(rctx):
+    rctx.file("BUILD.bazel", """
+genrule(
+    name = "hello",
+    outs = ["hello.txt"],
+    cmd = "echo hello-from-ext > $@",
+    visibility = ["//visibility:public"],
+)
+""")
+
+my_repo = repository_rule(implementation = _impl)
+
+def _ext_impl(mctx):
+    my_repo(name = "my_ext_repo")
+    my_repo(name = "my_other_repo")
+
+ext = module_extension(implementation = _ext_impl)
+"#,
+    )
+    .unwrap();
+
+    let module_bazel = format!(
+        "module(name = \"root\")\nbazel_dep(name = \"ext_mod\", version = \"0.1.0\")\nlocal_path_override(module_name = \"ext_mod\", path = \"{}\")\next = use_extension(\"@ext_mod//:ext.bzl\", \"ext\")\nuse_repo(ext, \"my_ext_repo\", my_alias = \"my_other_repo\")\n",
+        ext_root.display()
+    );
+    let (_root, w) = make_ws_no_root_build("ext-ok-ws", &module_bazel);
+    assert!(!w.ws.join("BUILD").exists() && !w.ws.join("BUILD.bazel").exists());
+
+    // Build via apparent repo name, renamed apparent alias, and canonical repo name.
+    for target in [
+        "@my_ext_repo//:hello",
+        "@my_alias//:hello",
+        "@@ext_mod++ext+my_ext_repo//:hello",
+    ] {
+        let r = w.run(&["build", target]);
+        assert_eq!(r.code, 0, "target {target} failed:\n{}", r.err);
+        assert!(
+            r.err.contains("Build completed successfully"),
+            "target {target}:\n{}",
+            r.err
+        );
+    }
+
+    // Query, cquery, and aquery on the extension repo succeed without a root BUILD file.
+    let q = w.run(&["query", "@my_ext_repo//..."]);
+    assert_eq!(q.code, 0, "{}", q.err);
+    assert!(q.out.contains("@my_ext_repo//:hello"), "{}", q.out);
+
+    let cq = w.run(&["cquery", "@my_ext_repo//:hello"]);
+    assert_eq!(cq.code, 0, "{}", cq.err);
+    assert!(cq.out.contains("@my_ext_repo//:hello"), "{}", cq.out);
+
+    let aq = w.run(&["aquery", "@my_ext_repo//:hello"]);
+    assert_eq!(aq.code, 0, "{}", aq.err);
+    assert!(aq.out.contains("Mnemonic: Genrule"), "{}", aq.out);
+
+    // Genuinely unknown repositories still report the Bazel unknown/undefined repo errors.
+    let unk_app = w.run(&["build", "@no_such_repo//:foo"]);
+    assert_eq!(unk_app.code, 1, "{}", unk_app.err);
+    assert!(
+        unk_app
+            .err
+            .contains("ERROR: No repository visible as '@no_such_repo' from main repository"),
+        "{}",
+        unk_app.err
+    );
+    let unk_canon = w.run(&["build", "@@no_such_repo//:foo"]);
+    assert_eq!(unk_canon.code, 1, "{}", unk_canon.err);
+    assert!(
+        unk_canon
+            .err
+            .contains("ERROR: Repository '@@no_such_repo' is not defined"),
+        "{}",
+        unk_canon.err
+    );
+}
+
+#[test]
+fn test_cli_extension_repo_rule_fail_surfaces_diagnostics() {
+    let ext_root =
+        std::env::temp_dir().join(format!("zel-btrc-ext-fail-rule-mod-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ext_root);
+    std::fs::create_dir_all(&ext_root).unwrap();
+    let ext_root = std::fs::canonicalize(&ext_root).unwrap();
+    std::fs::write(
+        ext_root.join("MODULE.bazel"),
+        "module(name = \"ext_mod\", version = \"0.1.0\")\n",
+    )
+    .unwrap();
+    std::fs::write(ext_root.join("BUILD.bazel"), "").unwrap();
+    std::fs::write(
+        ext_root.join("ext.bzl"),
+        r#"
+def _impl(rctx):
+    fail("Diagnostics strict mode failures:\n\nFirst strict error\n\nSecond strict error")
+
+bad_repo = repository_rule(implementation = _impl)
+
+def _ext_impl(mctx):
+    bad_repo(name = "dotnet_projects")
+
+ext = module_extension(implementation = _ext_impl)
+"#,
+    )
+    .unwrap();
+
+    let module_bazel = format!(
+        "module(name = \"root\")\nbazel_dep(name = \"ext_mod\", version = \"0.1.0\")\nlocal_path_override(module_name = \"ext_mod\", path = \"{}\")\next = use_extension(\"@ext_mod//:ext.bzl\", \"ext\")\nuse_repo(ext, \"dotnet_projects\")\n",
+        ext_root.display()
+    );
+    let (_root, w) = make_ws_no_root_build("ext-fail-rule-ws", &module_bazel);
+
+    // build (apparent & canonical), test, run, cquery, aquery all surface the repo rule's fail().
+    for (cmd, target, extra_expected) in [
+        ("build", "@dotnet_projects//:diagnostics.json", None),
+        (
+            "build",
+            "@@ext_mod++ext+dotnet_projects//:diagnostics.json",
+            None,
+        ),
+        (
+            "test",
+            "@dotnet_projects//:diagnostics.json",
+            Some("ERROR: Couldn't start the build. Unable to run tests"),
+        ),
+        (
+            "run",
+            "@dotnet_projects//:diagnostics.json",
+            Some("ERROR: Build failed. Not running target"),
+        ),
+        ("cquery", "@dotnet_projects//:diagnostics.json", None),
+        ("aquery", "@dotnet_projects//:diagnostics.json", None),
+    ] {
+        let r = w.run(&[cmd, target]);
+        assert_eq!(r.code, 1, "{cmd} {target}:\n{}", r.err);
+        assert!(
+            r.err.contains(
+                "An error occurred during the fetch of repository 'ext_mod++ext+dotnet_projects'"
+            ),
+            "{cmd} {target}:\n{}",
+            r.err
+        );
+        assert!(
+            r.err
+                .contains("Error in fail: Diagnostics strict mode failures:"),
+            "{cmd} {target}:\n{}",
+            r.err
+        );
+        assert!(
+            r.err.contains("First strict error") && r.err.contains("Second strict error"),
+            "{cmd} {target}:\n{}",
+            r.err
+        );
+        assert!(
+            !r.err.contains("No repository visible"),
+            "{cmd} {target} must not report 'No repository visible':\n{}",
+            r.err
+        );
+        if let Some(extra) = extra_expected {
+            assert!(r.err.contains(extra), "{cmd} {target}:\n{}", r.err);
+        }
+    }
+
+    // query (single target, wildcard //..., and canonical name) surfaces fail() with exit code 7
+    // and never falsely reports 'No repository visible' or 'fetching repositories is disabled'.
+    for pattern in [
+        "@dotnet_projects//:diagnostics.json",
+        "@dotnet_projects//...",
+        "@@ext_mod++ext+dotnet_projects//:diagnostics.json",
+    ] {
+        let q = w.run(&["query", pattern]);
+        assert_eq!(q.code, 7, "query {pattern}:\n{}", q.err);
+        assert!(
+            q.err
+                .contains("Error in fail: Diagnostics strict mode failures:"),
+            "query {pattern}:\n{}",
+            q.err
+        );
+        assert!(
+            !q.err.contains("No repository visible"),
+            "query {pattern} must not report 'No repository visible':\n{}",
+            q.err
+        );
+        assert!(
+            !q.err.contains("fetching repositories is disabled"),
+            "query {pattern} must not falsely report --nofetch:\n{}",
+            q.err
+        );
+    }
+
+    // Fixing the repo rule on disk heals the next build on the same server without stale caching.
+    std::fs::write(
+        ext_root.join("ext.bzl"),
+        r#"
+def _impl(rctx):
+    rctx.file("diagnostics.json", "{}\n")
+    rctx.file("BUILD.bazel", 'exports_files(["diagnostics.json"])\n')
+
+bad_repo = repository_rule(implementation = _impl)
+
+def _ext_impl(mctx):
+    bad_repo(name = "dotnet_projects")
+
+ext = module_extension(implementation = _ext_impl)
+"#,
+    )
+    .unwrap();
+    let healed = w.run(&["build", "@dotnet_projects//:diagnostics.json"]);
+    assert_eq!(healed.code, 0, "healed build failed:\n{}", healed.err);
+}
+
+#[test]
+fn test_cli_module_extension_fail_surfaces_diagnostics() {
+    let ext_root =
+        std::env::temp_dir().join(format!("zel-btrc-ext-fail-ext-mod-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&ext_root);
+    std::fs::create_dir_all(&ext_root).unwrap();
+    let ext_root = std::fs::canonicalize(&ext_root).unwrap();
+    std::fs::write(
+        ext_root.join("MODULE.bazel"),
+        "module(name = \"ext_mod\", version = \"0.1.0\")\n",
+    )
+    .unwrap();
+    std::fs::write(ext_root.join("BUILD.bazel"), "").unwrap();
+    std::fs::write(
+        ext_root.join("ext.bzl"),
+        r#"
+def _ext_impl(mctx):
+    fail("boom from module extension")
+
+ext = module_extension(implementation = _ext_impl)
+"#,
+    )
+    .unwrap();
+
+    let module_bazel = format!(
+        "module(name = \"root\")\nbazel_dep(name = \"ext_mod\", version = \"0.1.0\")\nlocal_path_override(module_name = \"ext_mod\", path = \"{}\")\next = use_extension(\"@ext_mod//:ext.bzl\", \"ext\")\nuse_repo(ext, \"bad_ext_repo\")\n",
+        ext_root.display()
+    );
+    let (_root, w) = make_ws_no_root_build("ext-fail-ext-ws", &module_bazel);
+
+    for cmd in ["build", "test", "run", "cquery", "aquery"] {
+        let r = w.run(&[cmd, "@bad_ext_repo//:foo"]);
+        assert_eq!(r.code, 48, "{cmd}:\n{}", r.err);
+        assert!(
+            r.err.contains("Error in fail: boom from module extension"),
+            "{cmd}:\n{}",
+            r.err
+        );
+        assert!(
+            r.err.contains("ERROR: error evaluating module extension"),
+            "{cmd}:\n{}",
+            r.err
+        );
+        assert!(
+            !r.err.contains("No repository visible"),
+            "{cmd} must not report 'No repository visible':\n{}",
+            r.err
+        );
+    }
+
+    let q = w.run(&["query", "@bad_ext_repo//:foo"]);
+    assert_eq!(q.code, 7, "{}", q.err);
+    assert!(
+        q.err.contains("Error in fail: boom from module extension"),
+        "{}",
+        q.err
+    );
+    assert!(
+        q.err.contains(
+            "Target parsing failed due to unexpected exception: error evaluating module extension"
+        ),
+        "{}",
+        q.err
+    );
+    assert!(!q.err.contains("No repository visible"), "{}", q.err);
+}

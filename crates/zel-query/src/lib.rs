@@ -174,6 +174,9 @@ pub fn run_query(
     // Error events of loaded packages (`ErrorSensingEventHandler`) make the evaluation fail
     // (`--nokeep_going`) or partial (`--keep_going`).
     let mut event_errors = false;
+    for l in env.take_raw_stderr() {
+        outcome.stderr.push(l);
+    }
     for ev in env.take_events() {
         event_errors |= ev.kind == zel_packages::lookup::EventKind::Error;
         outcome.stderr.push(ev.render());
