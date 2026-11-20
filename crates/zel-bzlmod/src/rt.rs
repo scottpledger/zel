@@ -159,6 +159,51 @@ pub(crate) struct DeferredRepoCall {
 }
 
 #[derive(Default)]
+pub(crate) struct RepoCollector {
+    pub calls: Vec<DeferredRepoCall>,
+    /// Call-site location (`file:line:col`) of each repository rule call in this extension.
+    pub locs: BTreeMap<String, String>,
+}
+
+/// Execution phase active on the current Starlark evaluation call stack of [`Rt`].
+///
+/// Re-entrant `.bzl` loading triggered while evaluating an active `module_extension` or
+/// `repository_rule` pushes a fresh `BzlInit` frame on top of the outer `ExtensionImpl` /
+/// `RepoRuleImpl` frame and pops it on return (or error/unwind) via [`EvalPhaseGuard`].
+pub(crate) enum EvalPhase {
+    BzlInit(Arc<zel_starlark::ModuleEnv>),
+    ExtensionImpl,
+    RepoRuleImpl,
+}
+
+thread_local! {
+    static EVAL_PHASE_STACK: std::cell::RefCell<Vec<EvalPhase>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+pub(crate) struct EvalPhaseGuard {
+    active: bool,
+}
+
+impl EvalPhaseGuard {
+    pub(crate) fn enter(phase: EvalPhase) -> Self {
+        EVAL_PHASE_STACK.with(|stack| stack.borrow_mut().push(phase));
+        Self { active: true }
+    }
+}
+
+impl Drop for EvalPhaseGuard {
+    fn drop(&mut self) {
+        if self.active {
+            self.active = false;
+            EVAL_PHASE_STACK.with(|stack| {
+                stack.borrow_mut().pop();
+            });
+        }
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct RtState {
     pub rule_defs: Vec<RuleDef>,
     pub ext_defs: Vec<ExtensionDef>,
@@ -171,9 +216,7 @@ pub(crate) struct RtState {
     pub fetched: HashSet<String>,
     pub fetching: Vec<String>,
     /// Active collectors for repos created by calling repository rules inside an extension.
-    pub collectors: Vec<Vec<DeferredRepoCall>>,
-    /// Call-site location (`file:line:col`) of the repository rule call that generated a repo name in the active extension.
-    pub repo_call_locs: BTreeMap<String, String>,
+    pub collectors: Vec<RepoCollector>,
     pub ctxs: Vec<Option<crate::ctx::CtxData>>,
     pub exec_results: Vec<(i32, Vec<u8>, Vec<u8>)>,
     /// bzl key -> (sha256 of source, keys of directly loaded bzl files)
@@ -277,31 +320,6 @@ fn host_globals() -> Vec<&'static str> {
 pub(crate) const STATIC_FAILURE_MARK: &str = "<<zel-static-failure>>";
 pub(crate) const NESTED_STATIC_FAILURE_MARK: &str = "<<zel-nested-static-failure>>";
 pub(crate) const NESTED_STATIC_TRAILER_MARK: &str = "\n<<zel-nested-static-trailer>>";
-
-thread_local! {
-    /// True while the current thread is executing top-level `.bzl` file initialization inside
-    /// `Rt::eval_bzl_fresh`, so nested `.bzl` loads triggered from an active `repository_ctx` or
-    /// `module_ctx` (e.g. `rctx.path(Label("@other_ext_repo//:f"))`) can still call
-    /// `module_extension()`, while calls inside an implementation callback are rejected.
-    static IN_BZL_INIT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
-}
-
-struct BzlInitScope {
-    prev: bool,
-}
-
-impl BzlInitScope {
-    fn enter() -> Self {
-        let prev = IN_BZL_INIT.with(|flag| flag.replace(true));
-        Self { prev }
-    }
-}
-
-impl Drop for BzlInitScope {
-    fn drop(&mut self) {
-        IN_BZL_INIT.with(|flag| flag.set(self.prev));
-    }
-}
 
 /// `.bzl` builtins besides the Starlark core, which the resolver accepts as predeclared names.
 const BZL_BUILTIN_NAMES: &[&str] = &[
@@ -868,7 +886,7 @@ impl Rt {
         ctx.static_names = true;
         ctx.static_universe = BZL_BUILTIN_NAMES.iter().map(|s| s.to_string()).collect();
         let eval_res = {
-            let _bzl_init = BzlInitScope::enter();
+            let _phase = EvalPhaseGuard::enter(EvalPhase::BzlInit(Arc::clone(&ctx.module_env)));
             ctx.eval_file_checked(&src, None)
         };
         if let Err(errs) = eval_res {
@@ -1087,6 +1105,28 @@ impl Rt {
 
     // ---------------------------------------------------------------- host dispatch
 
+    /// Returns the label string of the `.bzl` file currently being initialized on this thread,
+    /// if and only if the innermost active evaluation phase is `.bzl` initialization for `ctx`.
+    fn current_bzl_init_label(&self, ctx: &EvalContext) -> Option<String> {
+        let is_active_bzl = EVAL_PHASE_STACK.with(|stack| {
+            matches!(
+                stack.borrow().last(),
+                Some(EvalPhase::BzlInit(env)) if Arc::ptr_eq(env, &ctx.module_env)
+            )
+        });
+        if !is_active_bzl {
+            return None;
+        }
+        ctx.module_env.label_string.lock().unwrap().clone()
+    }
+
+    /// Returns whether the innermost active evaluation phase on this thread is executing a
+    /// `module_extension` implementation function.
+    fn in_extension_impl(&self) -> bool {
+        EVAL_PHASE_STACK
+            .with(|stack| matches!(stack.borrow().last(), Some(EvalPhase::ExtensionImpl)))
+    }
+
     pub(crate) fn host_dispatch(
         self: &Arc<Self>,
         ctx: &mut EvalContext,
@@ -1117,8 +1157,14 @@ impl Rt {
                 "package_name() can only be used while evaluating a BUILD file or a legacy or symbolic macro".into(),
             )),
             "native.glob" => Err(StarlarkError("glob() can only be used while evaluating a BUILD file or a legacy macro".into())),
-            "native.existing_rule" if !self.state.lock().unwrap().collectors.is_empty() => Ok(Value::None),
-            "native.existing_rules" if !self.state.lock().unwrap().collectors.is_empty() => {
+            "native.existing_rule"
+                if self.in_extension_impl() && !self.state.lock().unwrap().collectors.is_empty() =>
+            {
+                Ok(Value::None)
+            }
+            "native.existing_rules"
+                if self.in_extension_impl() && !self.state.lock().unwrap().collectors.is_empty() =>
+            {
                 Ok(dict_value(Vec::new()))
             }
             "native.existing_rule" => Err(StarlarkError(
@@ -1128,6 +1174,11 @@ impl Rt {
                 "existing_rules() can only be used while evaluating a BUILD file, a legacy macro, or a rule finalizer".into(),
             )),
             "repository_rule" => {
+                if self.current_bzl_init_label(ctx).is_none() {
+                    return err(
+                        "repository_rule() can only be used while initializing a .bzl file",
+                    );
+                }
                 match self.make_repository_rule(pos, kw) {
                     Ok(v) => Ok(v),
                     Err(e) if !ctx.last_call_loc.file.is_empty() && !e.0.contains("Traceback (most recent call last)") => {
@@ -1139,7 +1190,12 @@ impl Rt {
                 }
             }
             "module_extension" => self.make_module_extension(ctx, pos, kw, ctx.call_location.clone()),
-            "rule" => Ok(Value::Host("bzlmod_rule".into(), String::new())),
+            "rule" => {
+                if self.current_bzl_init_label(ctx).is_none() {
+                    return err("rule() can only be used while initializing a .bzl file");
+                }
+                Ok(Value::Host("bzlmod_rule".into(), String::new()))
+            }
             "__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc" => {
                 if !pos.is_empty() || !kw.is_empty() {
                     return err("__do_not_use_fail_with_incompatible_use_cc_configure_from_rules_cc() accepts no arguments");
@@ -1393,7 +1449,7 @@ impl Rt {
                         .filter(|c| c.kind == crate::ctx::CtxKind::Module)
                         .cloned()
                         .collect();
-                    if active.is_empty() {
+                    if active.is_empty() || self.current_bzl_init_label(ctx).is_some() {
                         if let Some(r) = &resolved_canon {
                             let mut st = self.state.lock().unwrap();
                             let e = (repo.clone(), apparent.to_string(), r.clone());
@@ -1664,8 +1720,7 @@ impl Rt {
         kw: BTreeMap<String, Value>,
         location: String,
     ) -> Result<Value, StarlarkError> {
-        let init_label = ctx.module_env.label_string.lock().unwrap().clone();
-        let Some(raw_label) = init_label.filter(|_| IN_BZL_INIT.with(|f| f.get())) else {
+        let Some(raw_label) = self.current_bzl_init_label(ctx) else {
             return err("module_extension() can only be used while initializing a .bzl file");
         };
         let bzl_file = if raw_label.starts_with("//") {
@@ -1823,17 +1878,28 @@ impl Rt {
                     kw: attrs,
                 };
                 let call_loc = _ctx.call_location.clone();
+                if !self.in_extension_impl() {
+                    return err("repository rules can only be called from a module extension or MODULE.bazel (use_repo_rule)");
+                }
                 let mut st = self.state.lock().unwrap();
-                let dup = st.collectors.last().is_some_and(|c| c.iter().any(|d| d.name == name));
+                let dup = st
+                    .collectors
+                    .last()
+                    .is_some_and(|c| c.calls.iter().any(|d| d.name == name));
                 if dup {
-                    let at = st.repo_call_locs.get(&name).cloned().unwrap_or_default();
+                    let at = st
+                        .collectors
+                        .last()
+                        .and_then(|c| c.locs.get(&name))
+                        .cloned()
+                        .unwrap_or_default();
                     drop(st);
                     return builtin_err(_ctx, format!("A repo named {name} is already generated by this module extension at {at}"));
                 }
                 match st.collectors.last_mut() {
                     Some(c) => {
-                        c.push(call);
-                        st.repo_call_locs.insert(name, call_loc);
+                        c.calls.push(call);
+                        c.locs.insert(name, call_loc);
                         Ok(Value::None)
                     }
                     None => err("repository rules can only be called from a module extension or MODULE.bazel (use_repo_rule)"),
