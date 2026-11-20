@@ -1715,7 +1715,9 @@ impl Downloader {
                 r.read_to_end(&mut body)
                     .map_err(|e| fe(format!("Error reading body: {}", e), true))?;
             }
-            let is_gzip_ce = get("content-encoding").is_some_and(|v| v == "gzip" || v == "x-gzip");
+            let is_gzip_ce = get("content-encoding").is_some_and(|v| {
+                v.eq_ignore_ascii_case("gzip") || v.eq_ignore_ascii_case("x-gzip")
+            });
             let orig_path = Url::parse(orig_url)
                 .map(|u| u.path().to_string())
                 .unwrap_or_default();
@@ -2781,11 +2783,12 @@ mod tests {
         };
         let gz_tar = make_gz(b"hello");
         let gz_tar_clone = gz_tar.clone();
-        let (port_gz, _) = serve(2, move |path, _| {
-            let enc = if path.ends_with(".tar.gz") {
-                "gzip"
-            } else {
-                "x-gzip"
+        let (port_gz, _) = serve(4, move |path, _| {
+            let enc = match path {
+                "/pkg.tar.gz" => "GZIP",
+                "/upper-gzip.txt" => "GZIP",
+                "/mixed-xgzip.txt" => "X-GZip",
+                _ => "x-gzip",
             };
             let mut resp = format!(
                 "HTTP/1.1 200 OK\r\nContent-Encoding: {enc}\r\nContent-Length: {}\r\n\r\n",
@@ -2803,7 +2806,7 @@ mod tests {
         assert_eq!(
             fs::read(d.join("pkg.tar.gz")).unwrap(),
             gz_tar,
-            ".tar.gz with Content-Encoding: gzip must remain compressed"
+            ".tar.gz with Content-Encoding: GZIP must remain compressed"
         );
         let r_txt = req(
             vec![format!("http://127.0.0.1:{port_gz}/readme.txt")],
@@ -2815,6 +2818,19 @@ mod tests {
             b"hello",
             "non-.gz path with Content-Encoding: x-gzip must be gunzipped"
         );
+        for (idx, path) in ["/upper-gzip.txt", "/mixed-xgzip.txt"].iter().enumerate() {
+            let out = d.join(format!("case-ce-{idx}.txt"));
+            let r_case = req(
+                vec![format!("http://127.0.0.1:{port_gz}{path}")],
+                out.clone(),
+            );
+            quick().download(&r_case).unwrap();
+            assert_eq!(
+                fs::read(&out).unwrap(),
+                b"hello",
+                "case-insensitive Content-Encoding on {path} must be gunzipped"
+            );
+        }
 
         // 2. HTTP 403 is retried while HTTP 501 is NOT retried.
         let attempts_403 = Arc::new(Mutex::new(0usize));
@@ -2900,6 +2916,21 @@ mod tests {
             proxy_req.contains("Proxy-Authorization: Basic "),
             "{proxy_req}"
         );
+
+        let mut env_sub_only = BTreeMap::new();
+        env_sub_only.insert("no_proxy".to_string(), ".example.com".to_string());
+        assert!(host_bypassed_by_no_proxy("foo.example.com", &env_sub_only));
+        assert!(!host_bypassed_by_no_proxy("example.com", &env_sub_only));
+        let mut env_literal_and_sub = BTreeMap::new();
+        env_literal_and_sub.insert("no_proxy".to_string(), "example.com".to_string());
+        assert!(host_bypassed_by_no_proxy(
+            "example.com",
+            &env_literal_and_sub
+        ));
+        assert!(host_bypassed_by_no_proxy(
+            "foo.example.com",
+            &env_literal_and_sub
+        ));
     }
 }
 
