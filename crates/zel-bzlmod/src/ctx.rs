@@ -546,18 +546,9 @@ pub fn validate_repo_rule_call(
         let Some((_, d)) = defs2.iter().find(|(n, _)| n == k) else {
             continue;
         };
-        if let Some((ty, what, bad)) = repo_attr_type_error(&d.kind, v) {
-            let what = if what == "attribute" {
-                format!("attribute '{k}'")
-            } else {
-                what
-            };
-            let (r, t) = match bad {
-                Some((r, t)) => (r, t),
-                None => (v.repr(), v.type_name().to_string()),
-            };
+        if let Some(msg) = repo_attr_coercion_error(k, &d.kind, v) {
             return err(format!(
-                "in call to '{rule}' repo rule with name '{rname}', expected value of type '{ty}' for {what}, but got {r} ({t})"
+                "in call to '{rule}' repo rule with name '{rname}', {msg}"
             ));
         }
     }
@@ -600,19 +591,8 @@ pub fn validate_tag_call(
         let Some((_, d)) = defs.iter().find(|(n, _)| n == k) else {
             continue;
         };
-        if let Some((ty, what, bad)) = repo_attr_type_error(&d.kind, v) {
-            let what = if what == "attribute" {
-                format!("attribute '{k}'")
-            } else {
-                what
-            };
-            let (r, t) = match bad {
-                Some((r, t)) => (r, t),
-                None => (v.repr(), v.type_name().to_string()),
-            };
-            return err(format!(
-                "in '{tag_name}' tag, expected value of type '{ty}' for {what}, but got {r} ({t})"
-            ));
+        if let Some(msg) = repo_attr_coercion_error(k, &d.kind, v) {
+            return err(format!("in '{tag_name}' tag, {msg}"));
         }
     }
     for (n, d) in defs {
@@ -785,12 +765,12 @@ pub fn check_repo_rule_labels(
     Ok(())
 }
 
-/// `(expected type name, context)` when `v` cannot be coerced to an attribute of `kind`.
-#[allow(clippy::type_complexity)]
-fn repo_attr_type_error(
-    kind: &str,
-    v: &Value,
-) -> Option<(String, String, Option<(String, String)>)> {
+fn attr_val_is_i32(a: &AttrVal) -> bool {
+    matches!(a, AttrVal::Int(i) if i32::try_from(*i).is_ok())
+}
+
+/// Returns Bazel's `Type.convert` error suffix when `v` cannot be coerced to `kind` (`Type.java`).
+fn repo_attr_coercion_error(attr_name: &str, kind: &str, v: &Value) -> Option<String> {
     let a = AttrVal::from_value(v);
     let (ty, elem): (&str, Option<&str>) = match kind {
         "string" | "label" | "output" => ("string", None),
@@ -806,25 +786,65 @@ fn repo_attr_type_error(
         "label_list_dict" => ("dict(string, list(label))", Some("dict")),
         _ => return None,
     };
-    let ok_scalar = |a: &AttrVal, want: &str| match want {
-        "string" => matches!(a, AttrVal::Str(_) | AttrVal::Label(_)),
-        "int" => matches!(a, AttrVal::Int(_) | AttrVal::BigInt(_)),
-        _ => true,
+    let type_mismatch = |want_ty: &str, what: &str, repr_val: String, got_ty: &str| {
+        format!("expected value of type '{want_ty}' for {what}, but got {repr_val} ({got_ty})")
     };
     match elem {
-        None => {
-            let good = match kind {
-                "int" => matches!(a, AttrVal::Int(_) | AttrVal::BigInt(_)),
-                "bool" => matches!(a, AttrVal::Bool(_) | AttrVal::Int(0) | AttrVal::Int(1)),
-                "string" => matches!(a, AttrVal::Str(_)),
-                _ => matches!(a, AttrVal::Str(_) | AttrVal::Label(_)),
-            };
-            if good {
-                None
-            } else {
-                Some((ty.to_string(), "attribute".to_string(), None))
+        None => match kind {
+            "int" => {
+                if !matches!(a, AttrVal::Int(_) | AttrVal::BigInt(_)) {
+                    Some(type_mismatch(
+                        ty,
+                        &format!("attribute '{attr_name}'"),
+                        v.repr(),
+                        v.type_name(),
+                    ))
+                } else if !attr_val_is_i32(&a) {
+                    Some(format!(
+                        "for attribute '{attr_name}', got {}, want value in signed 32-bit range",
+                        a.repr()
+                    ))
+                } else {
+                    None
+                }
             }
-        }
+            "bool" => {
+                if matches!(a, AttrVal::Bool(_) | AttrVal::Int(0) | AttrVal::Int(1)) {
+                    None
+                } else {
+                    Some(type_mismatch(
+                        ty,
+                        &format!("attribute '{attr_name}'"),
+                        v.repr(),
+                        v.type_name(),
+                    ))
+                }
+            }
+            "string" => {
+                if matches!(a, AttrVal::Str(_)) {
+                    None
+                } else {
+                    Some(type_mismatch(
+                        ty,
+                        &format!("attribute '{attr_name}'"),
+                        v.repr(),
+                        v.type_name(),
+                    ))
+                }
+            }
+            _ => {
+                if matches!(a, AttrVal::Str(_) | AttrVal::Label(_)) {
+                    None
+                } else {
+                    Some(type_mismatch(
+                        ty,
+                        &format!("attribute '{attr_name}'"),
+                        v.repr(),
+                        v.type_name(),
+                    ))
+                }
+            }
+        },
         Some("dict") => match &a {
             AttrVal::Dict(entries) | AttrVal::LabelDict(entries) => {
                 for (_, val) in entries {
@@ -841,36 +861,62 @@ fn repo_attr_type_error(
                         _ => matches!(val, AttrVal::Str(_)),
                     };
                     if !vok {
-                        return Some((
-                            "string".to_string(),
-                            "dict value element".to_string(),
-                            Some((val.repr(), val.type_name().to_string())),
+                        return Some(type_mismatch(
+                            "string",
+                            "dict value element",
+                            val.repr(),
+                            val.type_name(),
                         ));
                     }
                 }
                 None
             }
-            _ => Some((ty.to_string(), "attribute".to_string(), None)),
+            _ => Some(type_mismatch(
+                ty,
+                &format!("attribute '{attr_name}'"),
+                v.repr(),
+                v.type_name(),
+            )),
         },
         Some(el) => match &a {
             AttrVal::List(l) => {
-                for e in l {
+                for (idx, e) in l.iter().enumerate() {
+                    if kind == "int_list" {
+                        if !matches!(e, AttrVal::Int(_) | AttrVal::BigInt(_)) {
+                            return Some(type_mismatch(
+                                el,
+                                "list element",
+                                e.repr(),
+                                e.type_name(),
+                            ));
+                        }
+                        if !attr_val_is_i32(e) {
+                            return Some(format!(
+                                "for element {idx} of attribute '{attr_name}', got {}, want value in signed 32-bit range",
+                                e.repr()
+                            ));
+                        }
+                        continue;
+                    }
                     let scalar_ok = if kind == "string_list" {
                         matches!(e, AttrVal::Str(_))
+                    } else if el == "string" {
+                        matches!(e, AttrVal::Str(_) | AttrVal::Label(_))
                     } else {
-                        ok_scalar(e, el)
+                        true
                     };
                     if !scalar_ok {
-                        return Some((
-                            el.to_string(),
-                            "list element".to_string(),
-                            Some((e.repr(), e.type_name().to_string())),
-                        ));
+                        return Some(type_mismatch(el, "list element", e.repr(), e.type_name()));
                     }
                 }
                 None
             }
-            _ => Some((ty.to_string(), "attribute".to_string(), None)),
+            _ => Some(type_mismatch(
+                ty,
+                &format!("attribute '{attr_name}'"),
+                v.repr(),
+                v.type_name(),
+            )),
         },
     }
 }
@@ -901,6 +947,20 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
             if !matches!(a, AttrVal::Int(_) | AttrVal::BigInt(_)) {
                 return bad("int");
             }
+            if !attr_val_is_i32(&a) {
+                return err(format!(
+                    "for attribute '{n}', got {}, want value in signed 32-bit range",
+                    a.repr()
+                ));
+            }
+            if !d.values.is_empty() && !d.values.contains(&a) {
+                return err(format!(
+                    "{rule}: expected value of type '{}' for attribute '{n}' to be one of [{}], but got {}",
+                    "int",
+                    d.values.iter().map(|x| x.repr()).collect::<Vec<_>>().join(", "),
+                    a.repr()
+                ));
+            }
         }
         "bool" => {
             if !matches!(a, AttrVal::Bool(_) | AttrVal::Int(0) | AttrVal::Int(1)) {
@@ -912,10 +972,20 @@ fn check_type(rule: &str, n: &str, d: &AttrDef, v: &Value) -> Result<(), Starlar
                 if !d.allow_empty && l.is_empty() {
                     return err(format!("attribute '{n}' in '{rule}' rule may not be empty"));
                 }
-                for e in l {
-                    let ok = if d.kind == "int_list" {
-                        matches!(e, AttrVal::Int(_) | AttrVal::BigInt(_))
-                    } else if d.kind == "string_list" {
+                for (idx, e) in l.iter().enumerate() {
+                    if d.kind == "int_list" {
+                        if !matches!(e, AttrVal::Int(_) | AttrVal::BigInt(_)) {
+                            return bad(&d.kind);
+                        }
+                        if !attr_val_is_i32(e) {
+                            return err(format!(
+                                "for element {idx} of attribute '{n}', got {}, want value in signed 32-bit range",
+                                e.repr()
+                            ));
+                        }
+                        continue;
+                    }
+                    let ok = if d.kind == "string_list" {
                         matches!(e, AttrVal::Str(_))
                     } else {
                         matches!(e, AttrVal::Str(_) | AttrVal::Label(_))
@@ -1737,18 +1807,10 @@ fn dispatch_object_inner(
                     "Program argument of which() may not contain a / or a \\ ('{prog}' given)"
                 ));
             }
-            let path_env = rt.opts.client_env.get("PATH").cloned().unwrap_or_default();
-            let sep = if cfg!(windows) { ';' } else { ':' };
-            for d in path_env.split(sep) {
-                if d.is_empty() || !Path::new(d).is_absolute() {
-                    continue;
-                }
-                let c = Path::new(d).join(&prog);
-                if c.is_file() && is_executable(&c) {
-                    return Ok(path_value(&c));
-                }
+            match find_program_on_path(&prog, &rt.opts.client_env, cfg!(windows)) {
+                Some(c) => Ok(path_value(&c)),
+                None => Ok(Value::None),
             }
-            Ok(Value::None)
         }
         "read" => {
             let v = kwr.get("path").unwrap();
@@ -2527,6 +2589,124 @@ fn latin1_bytes_to_string(b: &[u8]) -> String {
     }
 }
 
+fn is_path_entry_absolute(d: &str, is_windows: bool) -> bool {
+    if d.is_empty() {
+        return false;
+    }
+    if Path::new(d).is_absolute() {
+        return true;
+    }
+    if is_windows {
+        let b = d.as_bytes();
+        if b.len() >= 3
+            && b[0].is_ascii_alphabetic()
+            && b[1] == b':'
+            && matches!(b[2], b'/' | b'\\')
+        {
+            return true;
+        }
+        if d.starts_with("\\\\") {
+            return true;
+        }
+    }
+    false
+}
+
+pub(crate) fn find_program_on_path(
+    prog: &str,
+    env: &BTreeMap<String, String>,
+    is_windows: bool,
+) -> Option<PathBuf> {
+    let trimmed = prog.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let path_env = env
+        .get("PATH")
+        .map(String::as_str)
+        .or_else(|| {
+            is_windows
+                .then(|| {
+                    env.iter()
+                        .find(|(k, _)| k.eq_ignore_ascii_case("PATH"))
+                        .map(|(_, v)| v.as_str())
+                })
+                .flatten()
+        })
+        .unwrap_or_default();
+    let sep = if is_windows { ';' } else { ':' };
+    let dirs: Vec<&str> = path_env
+        .split(sep)
+        .filter(|d| is_path_entry_absolute(d, is_windows))
+        .collect();
+    if dirs.is_empty() {
+        return None;
+    }
+    let find_in_dirs = |candidate_name: &str| -> Option<PathBuf> {
+        for d in &dirs {
+            let c = Path::new(d).join(candidate_name);
+            if c.is_file() && (is_windows || is_executable(&c)) {
+                return Some(c);
+            }
+        }
+        None
+    };
+
+    // Pass 1: exact `program` across PATH (`StarlarkBaseExternalContext.findCommandOnPath`).
+    if let Some(p) = find_in_dirs(trimmed) {
+        return Some(p);
+    }
+    if !is_windows {
+        return None;
+    }
+
+    // Pass 2: `program + ".exe"` (`OsUtils.executableExtension()` on Windows).
+    let lower_prog = trimmed.to_ascii_lowercase();
+    if !lower_prog.ends_with(".exe") {
+        if let Some(p) = find_in_dirs(&format!("{trimmed}.exe")) {
+            return Some(p);
+        }
+        if let Some(p) = find_in_dirs(&format!("{trimmed}.EXE")) {
+            return Some(p);
+        }
+    }
+
+    // Pass 3: remaining `PATHEXT` extensions (e.g. `.cmd`, `.bat`, `.com`) when no explicit match succeeded.
+    let pathext = env
+        .get("PATHEXT")
+        .map(String::as_str)
+        .or_else(|| {
+            env.iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("PATHEXT"))
+                .map(|(_, v)| v.as_str())
+        })
+        .unwrap_or(".COM;.EXE;.BAT;.CMD");
+    for raw_ext in pathext.split(';') {
+        let raw_ext = raw_ext.trim();
+        if raw_ext.is_empty() {
+            continue;
+        }
+        let ext = if raw_ext.starts_with('.') {
+            raw_ext.to_string()
+        } else {
+            format!(".{raw_ext}")
+        };
+        let ext_lower = ext.to_ascii_lowercase();
+        if ext_lower == ".exe" || lower_prog.ends_with(&ext_lower) {
+            continue;
+        }
+        if let Some(p) = find_in_dirs(&format!("{trimmed}{ext_lower}")) {
+            return Some(p);
+        }
+        if ext != ext_lower {
+            if let Some(p) = find_in_dirs(&format!("{trimmed}{ext}")) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
 fn is_executable(p: &Path) -> bool {
     #[cfg(unix)]
     {
@@ -3159,5 +3339,133 @@ mod tests {
 
         assert_eq!(k1, Value::Tuple(vec![int_value(0), int_value(1)]));
         assert_eq!(k2, Value::Tuple(vec![int_value(1), int_value(0)]));
+    }
+
+    #[test]
+    fn find_program_on_path_windows_resolves_exe_and_pathext_and_skips_relative() {
+        let root = std::env::temp_dir().join(format!("zel_which_win_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let rel_dir = root.join("rel");
+        let dir_a = root.join("dir_a");
+        let dir_b = root.join("dir_b");
+        std::fs::create_dir_all(&rel_dir).unwrap();
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+
+        let git_exe = dir_a.join("git.exe");
+        let wrapper_cmd = dir_b.join("wrapper.cmd");
+        let custom_ps1 = dir_b.join("custom.ps1");
+        std::fs::write(rel_dir.join("git.exe"), b"rel").unwrap();
+        std::fs::write(&git_exe, b"exe").unwrap();
+        std::fs::write(&wrapper_cmd, b"@echo off\r\n").unwrap();
+        std::fs::write(&custom_ps1, b"Write-Host ok\n").unwrap();
+
+        let mut env = BTreeMap::new();
+        env.insert(
+            "Path".into(),
+            format!("relative_bin;{};{}", dir_a.display(), dir_b.display()),
+        );
+
+        assert_eq!(
+            find_program_on_path("git", &env, true),
+            Some(git_exe.clone())
+        );
+        assert_eq!(find_program_on_path("git.exe", &env, true), Some(git_exe));
+        assert_eq!(
+            find_program_on_path("wrapper", &env, true),
+            Some(wrapper_cmd)
+        );
+        assert_eq!(find_program_on_path("custom", &env, true), None);
+
+        env.insert("Pathext".into(), ".EXE;.PS1".into());
+        assert_eq!(find_program_on_path("custom", &env, true), Some(custom_ps1));
+        assert_eq!(find_program_on_path("wrapper", &env, true), None);
+
+        // Unix mode splits on `:`, requires `"PATH"`, and does not append `.exe` / `PATHEXT`.
+        let mut unix_env = BTreeMap::new();
+        unix_env.insert(
+            "PATH".into(),
+            format!("{}:{}", dir_a.display(), dir_b.display()),
+        );
+        assert_eq!(find_program_on_path("git", &unix_env, false), None);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn int_and_int_list_attrs_enforce_signed_32_bit_range() {
+        let defs = vec![
+            (
+                "count".to_string(),
+                AttrDef {
+                    kind: "int".into(),
+                    default: Some(AttrVal::Int(0)),
+                    mandatory: false,
+                    values: vec![],
+                    allow_empty: true,
+                },
+            ),
+            (
+                "counts".to_string(),
+                AttrDef {
+                    kind: "int_list".into(),
+                    default: Some(AttrVal::List(vec![])),
+                    mandatory: false,
+                    values: vec![],
+                    allow_empty: true,
+                },
+            ),
+        ];
+
+        // Exact i32 bounds succeed.
+        let mut ok_kw = BTreeMap::new();
+        ok_kw.insert("name".into(), str_value("ok_repo"));
+        ok_kw.insert(
+            "count".into(),
+            Value::Int(zel_starlark::BigInt::from_i64(i64::from(i32::MIN))),
+        );
+        ok_kw.insert(
+            "counts".into(),
+            list_value(vec![
+                Value::Int(zel_starlark::BigInt::from_i64(i64::from(i32::MIN))),
+                Value::Int(zel_starlark::BigInt::from_i64(i64::from(i32::MAX))),
+            ]),
+        );
+        validate_repo_rule_call("my_rule", &defs, &ok_kw, &[]).unwrap();
+        let mut ok_tag = ok_kw.clone();
+        ok_tag.remove("name");
+        validate_tag_call("my_tag", &defs, &ok_tag, &[]).unwrap();
+
+        // i32::MAX + 1 on `attr.int` is rejected.
+        let mut over_i64 = BTreeMap::new();
+        over_i64.insert("name".into(), str_value("r"));
+        over_i64.insert(
+            "count".into(),
+            Value::Int(zel_starlark::BigInt::from_i64(i64::from(i32::MAX) + 1)),
+        );
+        let e1 = validate_repo_rule_call("my_rule", &defs, &over_i64, &[]).unwrap_err();
+        assert_eq!(
+            e1.0,
+            "in call to 'my_rule' repo rule with name 'r', for attribute 'count', got 2147483648, want value in signed 32-bit range"
+        );
+
+        // BigInt beyond i64 on `attr.int` and `attr.int_list` is rejected on both repo rules and tags.
+        let huge =
+            Value::Int(zel_starlark::BigInt::from_str_radix("100000000000000000000", 10).unwrap());
+        let mut over_tag = BTreeMap::new();
+        over_tag.insert("count".into(), huge.clone());
+        let e2 = validate_tag_call("my_tag", &defs, &over_tag, &[]).unwrap_err();
+        assert_eq!(
+            e2.0,
+            "in 'my_tag' tag, for attribute 'count', got 100000000000000000000, want value in signed 32-bit range"
+        );
+
+        let mut over_list = BTreeMap::new();
+        over_list.insert("counts".into(), list_value(vec![int_value(1), huge]));
+        let e3 = validate_tag_call("my_tag", &defs, &over_list, &[]).unwrap_err();
+        assert_eq!(
+            e3.0,
+            "in 'my_tag' tag, for element 1 of attribute 'counts', got 100000000000000000000, want value in signed 32-bit range"
+        );
     }
 }

@@ -2037,15 +2037,21 @@ impl Resolution {
         out
     }
 
-    /// Finds the `(ExtensionId, exported_repo_name)` whose `<unique>+` prefix matches `canonical`,
-    /// preferring the longest `<unique>+` prefix so innate `_name` repo-rule proxies or overlapping
-    /// unique names cannot shadow isolated `+_name+<module>+<version>+<usage>+` extension repos.
-    pub fn extension_for_canonical<'a>(
+    /// Returns all `(ExtensionId, exported_repo_name)` pairs whose `<unique>+` prefix matches
+    /// `canonical`, ordered from longest `<unique>+` prefix to shortest.
+    pub fn extension_candidates_for_canonical<'a>(
         &self,
         canonical: &'a str,
-    ) -> Option<(ExtensionId, &'a str)> {
-        let mut best: Option<(usize, ExtensionId, &'a str)> = None;
-        for id in self.extension_ids() {
+    ) -> Vec<(ExtensionId, &'a str)> {
+        let mut candidates: Vec<(usize, ExtensionId, &'a str)> = Vec::new();
+        for id in self
+            .extension_ids()
+            .into_iter()
+            .chain(self.extension_unique_names.keys().cloned())
+        {
+            if candidates.iter().any(|(_, existing, _)| existing == &id) {
+                continue;
+            }
             let Some(unique) = self.extension_unique_names.get(&id) else {
                 continue;
             };
@@ -2055,11 +2061,25 @@ impl Resolution {
             else {
                 continue;
             };
-            if best.as_ref().is_none_or(|(len, _, _)| unique.len() > *len) {
-                best = Some((unique.len(), id, rest));
-            }
+            candidates.push((unique.len(), id, rest));
         }
-        best.map(|(_, id, rest)| (id, rest))
+        candidates.sort_by(|a, b| b.0.cmp(&a.0));
+        candidates
+            .into_iter()
+            .map(|(_, id, rest)| (id, rest))
+            .collect()
+    }
+
+    /// Finds the `(ExtensionId, exported_repo_name)` whose `<unique>+` prefix matches `canonical`,
+    /// preferring the longest `<unique>+` prefix so innate `_name` repo-rule proxies or overlapping
+    /// unique names cannot shadow isolated `+_name+<module>+<version>+<usage>+` extension repos.
+    pub fn extension_for_canonical<'a>(
+        &self,
+        canonical: &'a str,
+    ) -> Option<(ExtensionId, &'a str)> {
+        self.extension_candidates_for_canonical(canonical)
+            .into_iter()
+            .next()
     }
 
     /// Toolchain target patterns of all modules (canonical `@@repo//...` form), in dep graph order

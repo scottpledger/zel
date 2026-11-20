@@ -112,21 +112,63 @@ pub fn serialize_repo_definition_as_proto(
                         attr_pb.set_str("string_value", s);
                     }
                     crate::model::AttrVal::Int(i) => {
+                        let Ok(v32) = i32::try_from(*i) else {
+                            continue;
+                        };
                         attr_pb.set_enum("type", "INTEGER");
-                        attr_pb.set_int("int_value", *i);
+                        attr_pb.set_int("int_value", i64::from(v32));
                     }
                     crate::model::AttrVal::BigInt(i) => {
+                        let Some(v32) = i.to_i64().and_then(|n| i32::try_from(n).ok()) else {
+                            continue;
+                        };
                         attr_pb.set_enum("type", "INTEGER");
-                        attr_pb.set_int("int_value", i.to_i64().unwrap_or(0));
+                        attr_pb.set_int("int_value", i64::from(v32));
                     }
                     crate::model::AttrVal::Bool(b) => {
                         attr_pb.set_enum("type", "BOOLEAN");
                         attr_pb.set_bool("boolean_value", *b);
                     }
                     crate::model::AttrVal::List(l) => {
-                        attr_pb.set_enum("type", "STRING_LIST");
-                        for item in l {
-                            attr_pb.set_str("string_list_value", item.as_str().unwrap_or(""));
+                        let is_int_list = !l.is_empty()
+                            && l.iter().all(|item| {
+                                matches!(
+                                    item,
+                                    crate::model::AttrVal::Int(_)
+                                        | crate::model::AttrVal::BigInt(_)
+                                )
+                            });
+                        if is_int_list {
+                            let mut ints = Vec::with_capacity(l.len());
+                            let mut all_i32 = true;
+                            for item in l {
+                                let v32 = match item {
+                                    crate::model::AttrVal::Int(i) => i32::try_from(*i).ok(),
+                                    crate::model::AttrVal::BigInt(i) => {
+                                        i.to_i64().and_then(|n| i32::try_from(n).ok())
+                                    }
+                                    _ => None,
+                                };
+                                match v32 {
+                                    Some(n) => ints.push(i64::from(n)),
+                                    None => {
+                                        all_i32 = false;
+                                        break;
+                                    }
+                                }
+                            }
+                            if !all_i32 {
+                                continue;
+                            }
+                            attr_pb.set_enum("type", "INTEGER_LIST");
+                            for n in ints {
+                                attr_pb.set_int("int_list_value", n);
+                            }
+                        } else {
+                            attr_pb.set_enum("type", "STRING_LIST");
+                            for item in l {
+                                attr_pb.set_str("string_list_value", item.as_str().unwrap_or(""));
+                            }
                         }
                     }
                     crate::model::AttrVal::Dict(d) | crate::model::AttrVal::LabelDict(d) => {

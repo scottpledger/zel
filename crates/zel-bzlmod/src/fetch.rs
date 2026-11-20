@@ -310,6 +310,54 @@ impl Rt {
         Ok(apparent_hits.into_iter().next().map(|(_, p)| p.clone()))
     }
 
+    /// Resolves the extension that actually generated `canonical` by checking `<unique>+`
+    /// candidates from longest prefix to shortest against evaluated extension results.
+    pub(crate) fn owning_extension_for_canonical<'a>(
+        &self,
+        canonical: &'a str,
+    ) -> Option<(ExtensionId, &'a str)> {
+        let candidates = self
+            .resolution
+            .extension_candidates_for_canonical(canonical);
+        if candidates.is_empty() {
+            return None;
+        }
+        let mut saw_unevaluated = false;
+        for (id, exported) in &candidates {
+            let (cached_owns, evaluating, me) = {
+                let st = self.state.lock().unwrap();
+                (
+                    st.ext_results
+                        .get(id)
+                        .map(|r| r.generated.iter().any(|(n, _)| n == exported)),
+                    st.evaluating_exts.contains(id),
+                    st.me.upgrade(),
+                )
+            };
+            match cached_owns {
+                Some(true) => return Some((id.clone(), *exported)),
+                Some(false) => continue,
+                None if evaluating => return Some((id.clone(), *exported)),
+                None => {
+                    if let Some(rt) = me {
+                        if let Ok(r) = rt.eval_extension(id) {
+                            if r.generated.iter().any(|(n, _)| n == exported) {
+                                return Some((id.clone(), *exported));
+                            }
+                            continue;
+                        }
+                    }
+                    saw_unevaluated = true;
+                }
+            }
+        }
+        if saw_unevaluated {
+            candidates.into_iter().next()
+        } else {
+            None
+        }
+    }
+
     /// Computes `repository_ctx.original_name` matching Bazel's `RepoDefinitionFunction`
     /// (`RepoDefinitionFunction.java:145-174, 194-200`) and `StarlarkRepositoryContext`
     /// (`StarlarkRepositoryContext.java:137-143`):
@@ -328,7 +376,7 @@ impl Rt {
         {
             return canonical.to_string();
         }
-        if let Some((_, exported)) = res.extension_for_canonical(canonical) {
+        if let Some((_, exported)) = self.owning_extension_for_canonical(canonical) {
             if !exported.is_empty() {
                 return exported.to_string();
             }
@@ -352,13 +400,12 @@ impl Rt {
             let m = res.dep_graph.get(k).unwrap();
             return Ok(m.repo_spec.clone());
         }
-        // Extension-generated: longest matching `{unique}+` prefix owns it.
-        if let Some((id, exported)) = res.extension_for_canonical(canonical) {
+        // Extension-generated: check matching `{unique}+` prefixes longest-first for actual ownership.
+        for (id, exported) in res.extension_candidates_for_canonical(canonical) {
             let result = self.eval_extension(&id)?;
             if let Some((_, spec)) = result.generated.iter().find(|(n, _)| n == exported) {
                 return Ok(Some(spec.clone()));
             }
-            return Err(format!("Repository '@@{canonical}' is not defined"));
         }
         Err(format!("Repository '@@{canonical}' is not defined"))
     }
@@ -373,7 +420,7 @@ impl Rt {
         {
             return canonical.to_string();
         }
-        if let Some((id, exported)) = res.extension_for_canonical(canonical) {
+        if let Some((id, exported)) = self.owning_extension_for_canonical(canonical) {
             if id.is_innate() {
                 for (mk, u) in res.usages_of(&id) {
                     let declares = u.tags.iter().any(|t| {
@@ -4192,5 +4239,134 @@ inspect_repo(name = "via_use_repo_rule")
             std::fs::read_to_string(dir_retarget.join("captured.txt")).unwrap(),
             "bravo"
         );
+    }
+
+    #[test]
+    fn end_to_end_int_attrs_reject_out_of_i32_range_in_repo_rules_tags_and_defaults() {
+        let base = tmpdir("int32_bounds_e2e");
+
+        // 1. `attr.int(default = 1 << 40)` fails at `.bzl` load time.
+        {
+            let ws = base.join("ws_default");
+            write(&ws, "BUILD.bazel", "");
+            write(
+                &ws,
+                "defs.bzl",
+                concat!(
+                    "def _impl(rctx):\n",
+                    "    rctx.file('BUILD.bazel', '')\n",
+                    "bad_repo = repository_rule(implementation = _impl, attrs = {'n': attr.int(default = 1 << 40)})\n",
+                ),
+            );
+            write(
+                &ws,
+                "MODULE.bazel",
+                concat!(
+                    "module(name = 'root')\n",
+                    "bad_repo = use_repo_rule('//:defs.bzl', 'bad_repo')\n",
+                    "bad_repo(name = 'x')\n",
+                ),
+            );
+            let res = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+            let rt = Rt::new(
+                ExternalOptions {
+                    output_base: base.join("ob_default"),
+                    workspace_root: ws,
+                    ..Default::default()
+                },
+                res,
+            );
+            let err = rt.fetch_repo("+bad_repo+x").unwrap_err();
+            assert!(
+                err.contains("for default, got 1099511627776, want value in signed 32-bit range"),
+                "err: {err}"
+            );
+        }
+
+        // 2. Oversized `BigInt` (`1 << 80`) passed to `use_repo_rule` is rejected.
+        {
+            let ws = base.join("ws_repo_rule");
+            write(&ws, "BUILD.bazel", "");
+            write(
+                &ws,
+                "defs.bzl",
+                concat!(
+                    "def _impl(rctx):\n",
+                    "    rctx.file('BUILD.bazel', '')\n",
+                    "num_repo = repository_rule(implementation = _impl, attrs = {'n': attr.int()})\n",
+                ),
+            );
+            write(
+                &ws,
+                "MODULE.bazel",
+                concat!(
+                    "module(name = 'root')\n",
+                    "num_repo = use_repo_rule('//:defs.bzl', 'num_repo')\n",
+                    "num_repo(name = 'x', n = 1 << 80)\n",
+                ),
+            );
+            let res = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+            let rt = Rt::new(
+                ExternalOptions {
+                    output_base: base.join("ob_repo_rule"),
+                    workspace_root: ws,
+                    ..Default::default()
+                },
+                res,
+            );
+            let err = rt.fetch_repo("+num_repo+x").unwrap_err();
+            assert!(
+                err.contains("for attribute 'n'")
+                    && err.contains("want value in signed 32-bit range"),
+                "err: {err}"
+            );
+        }
+
+        // 3. Oversized element in `attr.int_list()` on a module extension tag is rejected.
+        {
+            let ws = base.join("ws_ext_tag");
+            write(&ws, "BUILD.bazel", "");
+            write(
+                &ws,
+                "ext.bzl",
+                concat!(
+                    "def _r_impl(rctx):\n",
+                    "    rctx.file('BUILD.bazel', '')\n",
+                    "r = repository_rule(implementation = _r_impl)\n",
+                    "def _ext_impl(mctx):\n",
+                    "    r(name = 'gen')\n",
+                    "ext = module_extension(\n",
+                    "    implementation = _ext_impl,\n",
+                    "    tag_classes = {'item': tag_class(attrs = {'counts': attr.int_list()})},\n",
+                    ")\n",
+                ),
+            );
+            write(
+                &ws,
+                "MODULE.bazel",
+                concat!(
+                    "module(name = 'root')\n",
+                    "ext = use_extension('//:ext.bzl', 'ext')\n",
+                    "ext.item(counts = [42, -(1 << 40)])\n",
+                    "use_repo(ext, 'gen')\n",
+                ),
+            );
+            let res = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+            let rt = Rt::new(
+                ExternalOptions {
+                    output_base: base.join("ob_ext_tag"),
+                    workspace_root: ws,
+                    ..Default::default()
+                },
+                res,
+            );
+            let err = rt.fetch_repo("+ext+gen").unwrap_err();
+            assert!(
+                err.contains(
+                    "in 'item' tag, for element 1 of attribute 'counts', got -1099511627776, want value in signed 32-bit range"
+                ),
+                "err: {err}"
+            );
+        }
     }
 }

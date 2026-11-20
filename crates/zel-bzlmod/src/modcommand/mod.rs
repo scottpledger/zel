@@ -489,9 +489,21 @@ fn repo_definition(
             });
         }
     }
-    // Extension-generated repo: `<unique name>+<internal name>`, preferring longest `<unique>+`.
-    let mut best_ext: Option<(usize, ExtensionId, &str)> = None;
-    for id in res.extension_ids().into_iter().chain(insp.extension_ids()) {
+    // Extension-generated repo: `<unique name>+<internal name>`. Check matching `<unique>+`
+    // candidates from longest prefix to shortest for actual ownership in `generated_repos`,
+    // falling back to shorter prefixes and finally `provider.repo_spec` when a longer prefix
+    // does not own `canonical`.
+    let mut candidates: Vec<(usize, ExtensionId, &str)> = Vec::new();
+    for id in res
+        .extension_ids()
+        .into_iter()
+        .chain(res.extension_unique_names.keys().cloned())
+        .chain(insp.extension_ids())
+        .chain(insp.extension_unique_names.keys().cloned())
+    {
+        if candidates.iter().any(|(_, existing, _)| existing == &id) {
+            continue;
+        }
         let Some(unique) = res
             .extension_unique_names
             .get(&id)
@@ -505,23 +517,18 @@ fn repo_definition(
         else {
             continue;
         };
-        if best_ext
-            .as_ref()
-            .is_none_or(|(len, _, _)| unique.len() > *len)
-        {
-            best_ext = Some((unique.len(), id, rest));
-        }
+        candidates.push((unique.len(), id, rest));
     }
+    candidates.sort_by(|a, b| b.0.cmp(&a.0));
     let mut original_name = None;
-    if let Some((_, id, rest)) = best_ext {
+    for (_, id, rest) in &candidates {
         let owns = ext_info
-            .generated_repos(&id)
-            .map(|r| r.iter().any(|x| x == rest))
-            .unwrap_or(false);
-        if !owns {
-            return None;
+            .generated_repos(id)
+            .is_some_and(|r| r.iter().any(|x| x == rest));
+        if owns {
+            original_name = Some((*rest).to_string());
+            break;
         }
-        original_name = Some(rest.to_string());
     }
     let spec = provider.repo_spec(canonical)?;
     Some(RepoDefinition::Found {
