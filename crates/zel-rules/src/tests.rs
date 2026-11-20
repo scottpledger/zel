@@ -4644,7 +4644,7 @@ failure_test = rule(
     attrs = {
         "target_under_test": attr.label(
             cfg = analysis_test_transition(
-                settings = {"//command_line_option:allow_analysis_failure": "true"},
+                settings = {"//command_line_option:allow_analysis_failures": "true"},
             ),
         ),
     },
@@ -4689,22 +4689,32 @@ def _check_impl(ctx):
     df = ctx.configuration.disabled_features()
     ios_min = ctx.fragments.apple.ios_minimum_os_flag
     j_ord = ctx.fragments.java.default_javac_flags_depset
-    cov_gen = ctx.fragments.coverage.output_generator()
+    cov_gen = ctx.fragments.coverage.output_generator
+    if cov_gen != None and type(cov_gen) != "Label":
+        fail("expected coverage.output_generator to be Label or None, got " + type(cov_gen))
+    if ctx.fragments.cpp._fdo_prefetch_hints_label != None:
+        fail("expected cpp._fdo_prefetch_hints_label struct field to be None by default")
+    strict_deps = ctx.fragments.proto.strict_proto_deps()
+    strict_pub = ctx.fragments.proto.strict_public_imports()
+    inc_src = ctx.fragments.proto.experimental_proto_descriptorsets_include_source_info()
     out = ctx.actions.declare_file("info.txt")
     ctx.actions.write(
         out,
-        "{}|{}|{}|{}".format(
+        "{}|{}|{}|{}|{}|{}|{}".format(
             ",".join(df),
             str(ios_min),
             ",".join(j_ord.to_list()),
             str(cov_gen),
+            strict_deps,
+            strict_pub,
+            str(inc_src),
         ),
     )
     return [DefaultInfo(files = depset([out]))]
 
 check_rule = rule(
     implementation = _check_impl,
-    fragments = ["apple", "java"],
+    fragments = ["apple", "java", "cpp", "proto"],
 )
 "#,
         ),
@@ -4743,7 +4753,26 @@ check_rule(name = "chk")
     let text = String::from_utf8(content.render()).unwrap();
     assert_eq!(
         text,
-        "b|15.2|-Xlint:all -source 11|@@bazel_tools//tools/test:lcov_merger"
+        "b|15.2|-Xlint:all -source 11|@@bazel_tools//tools/test:lcov_merger|ERROR|OFF|False"
+    );
+
+    // Without `--collect_code_coverage`, `ctx.fragments.coverage.output_generator` is `None`.
+    let mut no_cov_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    no_cov_cfg.options.insert("features".into(), "a,-b".into());
+    no_cov_cfg
+        .options
+        .insert("ios_minimum_os".into(), "15.2".into());
+    let (r_nocov, cfg_nocov) = ws.resolver_with(no_cov_cfg, AnalysisConfig::new());
+    let chk_nocov = r_nocov
+        .analyze(&Label::parse_canonical("//:chk").unwrap(), &cfg_nocov)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &chk_nocov.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text_nocov = String::from_utf8(content.render()).unwrap();
+    assert!(
+        text_nocov.contains("|None|ERROR|OFF|False"),
+        "expected None output_generator when coverage is off: {text_nocov}"
     );
 }
 
@@ -5113,5 +5142,127 @@ r(name = "bad_param", mode = "bad_param")
     assert!(
         flag_err.contains("--experimental_allow_map_directory"),
         "unexpected error: {flag_err}"
+    );
+}
+
+#[test]
+fn starlark_runfiles_merge_preserves_map_only_and_ordered_symlinks_in_both_directions() {
+    struct MapOnlyRunfilesResolver {
+        inner: Arc<TargetResolver>,
+    }
+
+    impl zel_analysis::starlark_rule::DepResolver for MapOnlyRunfilesResolver {
+        fn configured_target(
+            &self,
+            label: &Label,
+            cfg: &BuildConfigurationKey,
+        ) -> Result<Arc<ConfiguredTarget>, String> {
+            let ct = self.inner.configured_target(label, cfg)?;
+            if label.name() == "map_dep" {
+                let mut cloned = (*ct).clone();
+                let sym_art = zel_analysis::Artifact::source(
+                    PathFragment::create("dep_sym.txt"),
+                    label.clone(),
+                );
+                let root_art = zel_analysis::Artifact::source(
+                    PathFragment::create("dep_root.txt"),
+                    label.clone(),
+                );
+                let mut rf = zel_analysis::Runfiles::default();
+                // Populate ONLY the BTreeMaps (`symlink_entries` / `root_symlink_entries` left empty).
+                rf.symlinks.insert("from_map".to_string(), sym_art);
+                rf.root_symlinks
+                    .insert("root_from_map".to_string(), root_art);
+                cloned.providers.insert(
+                    "DefaultInfo".to_string(),
+                    zel_analysis::starlark_rule::default_info_provider(&[], rf.clone(), rf, None),
+                );
+                return Ok(Arc::new(cloned));
+            }
+            Ok(ct)
+        }
+    }
+
+    let ws = Ws::new(&[
+        ("dep_sym.txt", "1"),
+        ("dep_root.txt", "2"),
+        ("own_sym.txt", "3"),
+        ("own_root.txt", "4"),
+        (
+            "defs.bzl",
+            r#"
+def _empty_impl(ctx):
+    return [DefaultInfo()]
+
+empty_rule = rule(implementation = _empty_impl)
+
+def _merge_check_impl(ctx):
+    dep_rf = ctx.attr.dep[DefaultInfo].default_runfiles
+    own_rf = ctx.runfiles(
+        symlinks = {"from_vec": ctx.file.own_sym},
+        root_symlinks = {"root_from_vec": ctx.file.own_root},
+    )
+    m_own_first = own_rf.merge(dep_rf)
+    m_dep_first = dep_rf.merge(own_rf)
+    s1 = [e.path for e in m_own_first.symlinks.to_list()]
+    r1 = [e.path for e in m_own_first.root_symlinks.to_list()]
+    s2 = [e.path for e in m_dep_first.symlinks.to_list()]
+    r2 = [e.path for e in m_dep_first.root_symlinks.to_list()]
+    out = ctx.actions.declare_file("merged.txt")
+    ctx.actions.write(
+        out,
+        "{}|{}|{}|{}".format(",".join(s1), ",".join(r1), ",".join(s2), ",".join(r2)),
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+merge_check = rule(
+    implementation = _merge_check_impl,
+    attrs = {
+        "dep": attr.label(),
+        "own_sym": attr.label(allow_single_file = True),
+        "own_root": attr.label(allow_single_file = True),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "empty_rule", "merge_check")
+empty_rule(name = "map_dep")
+merge_check(
+    name = "chk",
+    dep = ":map_dep",
+    own_sym = "own_sym.txt",
+    own_root = "own_root.txt",
+)
+"#,
+        ),
+    ]);
+
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    let (inner, cfg) = ws.resolver_with(cfg, AnalysisConfig::new());
+    let pkg = inner
+        .loader()
+        .load_package(&zel_cmdline::PackageIdentifier::create_in_main_repo("").unwrap())
+        .unwrap();
+    let Some(zel_packages::Target::Rule(rule)) = pkg.targets.get("chk") else {
+        panic!("expected chk rule");
+    };
+    let wrapped: Arc<dyn zel_analysis::starlark_rule::DepResolver> =
+        Arc::new(MapOnlyRunfilesResolver { inner });
+    let ct = zel_analysis::starlark_rule::analyze_starlark_rule(
+        rule,
+        &cfg,
+        zel_analysis::starlark_rule::AnalysisInputs::new(wrapped),
+    )
+    .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let rendered = String::from_utf8(content.render()).unwrap();
+    assert_eq!(
+        rendered,
+        "from_vec,from_map|root_from_vec,root_from_map|from_map,from_vec|root_from_map,root_from_vec"
     );
 }

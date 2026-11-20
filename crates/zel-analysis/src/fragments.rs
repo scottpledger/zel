@@ -684,6 +684,7 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                 f("custom_malloc", o.label("custom_malloc")),
                 f("fdo_optimize", fdo_optimize_val),
                 f("fdo_prefetch_hints", o.label("fdo_prefetch_hints")),
+                f("_fdo_prefetch_hints_label", o.label("fdo_prefetch_hints")),
                 f("fdo_profile", fdo_profile),
                 f("cs_fdo_profile", cs_fdo_profile),
                 f("propeller_optimize", propeller_optimize),
@@ -746,7 +747,6 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
                     "propeller_optimize_absolute_ld_profile",
                     prop_ld.map(|s| sv(&s)).unwrap_or(Value::None),
                 ),
-                m("_fdo_prefetch_hints_label", o.label("fdo_prefetch_hints")),
                 m(
                     "use_llvm_coverage_map_format",
                     Value::Bool(o.b("experimental_use_llvm_covmap", false)),
@@ -1245,13 +1245,13 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
             ])
         }
         "coverage" => {
-            let cov_on = o.b("collect_code_coverage", false);
+            let cov_on = cfg.bool_option("collect_code_coverage", false);
             let out_gen = late_bound_label("coverage", "output_generator", cfg)
                 .map(Value::Label)
                 .unwrap_or(Value::None);
             mk(vec![
                 f("collect_code_coverage", Value::Bool(cov_on)),
-                m("output_generator", out_gen),
+                f("output_generator", out_gen),
             ])
         }
         _ => return Ok(None),
@@ -1326,8 +1326,12 @@ pub fn late_bound_label(fragment: &str, name: &str, cfg: &BuildConfigurationKey)
         }
         ("py", "native_rules_allowlist") => opt("python_native_rules_allowlist"),
         ("coverage", "output_generator") => {
-            if o.b("collect_code_coverage", false) {
-                opt("coverage_output_generator").or_else(|| tools("tools/test:lcov_merger"))
+            if cfg.bool_option("collect_code_coverage", false) {
+                cfg.option_str("coverage_output_generator")
+                    .filter(|v| !v.is_empty() && v != "null")
+                    .and_then(|v| Label::parse_canonical(&v).ok())
+                    .or_else(|| opt("coverage_output_generator"))
+                    .or_else(|| tools("tools/test:lcov_merger"))
             } else {
                 None
             }

@@ -664,6 +664,46 @@ pub fn build_transition_attr_struct(
     Value::Struct(Arc::new(StructValue::new(af)))
 }
 
+/// Constructs a keep-going `ConfiguredTarget` carrying `AnalysisFailureInfo` when
+/// `--allow_analysis_failures` is enabled (`RuleConfiguredTargetBuilder` failure path).
+pub fn make_analysis_failure_target(
+    label: &Label,
+    cfg: &BuildConfigurationKey,
+    rule_class: &str,
+    testonly: bool,
+    is_test: bool,
+    own_msg: Option<String>,
+    transitive: Vec<Arc<Depset>>,
+) -> ConfiguredTarget {
+    let direct = match own_msg {
+        Some(m) => vec![analysis_failure_value(label.clone(), m)],
+        None => Vec::new(),
+    };
+    let causes = Value::Depset(Arc::new(
+        Depset::new(DepsetOrder::Default, direct, transitive)
+            .expect("analysis_failure values are hashable"),
+    ));
+    let mut ct = ConfiguredTarget::new(label.clone(), cfg.clone(), rule_class.to_string());
+    ct.providers.insert(
+        "DefaultInfo".to_string(),
+        default_info_provider(&[], Runfiles::default(), Runfiles::default(), None),
+    );
+    ct.providers.insert(
+        "OutputGroupInfo".to_string(),
+        Value::ProviderInstance {
+            provider_name: "OutputGroupInfo".to_string(),
+            fields: BTreeMap::new(),
+        },
+    );
+    ct.providers.insert(
+        "AnalysisFailureInfo".to_string(),
+        provider_instance("AnalysisFailureInfo", vec![("causes", causes)]),
+    );
+    ct.testonly = testonly;
+    ct.is_test = is_test;
+    ct
+}
+
 /// Analyses a Starlark-defined rule: runs its `implementation` with a real `ctx`.
 pub fn analyze_starlark_rule(
     rule: &RuleInstance,
@@ -725,6 +765,23 @@ pub fn analyze_starlark_rule(
             }
         }
     }
+    let allow_failure = cfg.bool_option("allow_analysis_failures", false);
+    let is_analysis_test = spec
+        .kwargs
+        .get("analysis_test")
+        .is_some_and(|v| matches!(v, Value::Bool(true)));
+    let make_failure_target = |own_msg: Option<String>, transitive: Vec<Arc<Depset>>| {
+        make_analysis_failure_target(
+            &label,
+            cfg,
+            &rule.rule_class,
+            rule.testonly,
+            rc.is_test,
+            own_msg,
+            transitive,
+        )
+    };
+
     let AttrBundle {
         attr_fields,
         file_fields,
@@ -735,7 +792,15 @@ pub fn analyze_starlark_rule(
         mut predeclared,
         split_fields,
         attr_errors,
-    } = convert_rule_attrs(rule, &rc.attrs, cfg, &inputs, &pkg_dir, out_root, &wrap, None)?;
+    } = match convert_rule_attrs(rule, &rc.attrs, cfg, &inputs, &pkg_dir, out_root, &wrap, None) {
+        Ok(b) => b,
+        Err(e) => {
+            if allow_failure && !is_analysis_test {
+                return Ok(make_failure_target(Some(e), Vec::new()));
+            }
+            return Err(e);
+        }
+    };
     // `BaseRuleClasses.TestBaseRule`: the hidden test tool attributes are prerequisites (exec
     // configuration) of every test rule; resolving them records the dependency edges (and the
     // transitive packages / actions of the tools) like Bazel's dependency resolution does.
@@ -839,14 +904,14 @@ pub fn analyze_starlark_rule(
         in_subrule: std::sync::atomic::AtomicBool::new(false),
     });
 
-    crate::fragments::validate_declared_fragments(&declared_fragments(&st), &st.cfg)
-        .map_err(wrap)?;
-
-    let allow_failure = cfg.bool_option("allow_analysis_failure", false);
-    let is_analysis_test = spec
-        .kwargs
-        .get("analysis_test")
-        .is_some_and(|v| matches!(v, Value::Bool(true)));
+    if let Err(e) = crate::fragments::validate_declared_fragments(&declared_fragments(&st), &st.cfg)
+    {
+        let wrapped = wrap(e);
+        if allow_failure && !is_analysis_test {
+            return Ok(make_failure_target(Some(wrapped), Vec::new()));
+        }
+        return Err(wrapped);
+    }
     let mut dep_failure_sets: Vec<Arc<Depset>> = Vec::new();
     if allow_failure && !is_analysis_test {
         for dep_list in st.deps.values() {
@@ -861,36 +926,6 @@ pub fn analyze_starlark_rule(
             }
         }
     }
-    let make_failure_target =
-        |own_msg: Option<String>, transitive: Vec<Arc<Depset>>| -> ConfiguredTarget {
-            let direct = match own_msg {
-                Some(m) => vec![analysis_failure_value(label.clone(), m)],
-                None => Vec::new(),
-            };
-            let causes = Value::Depset(Arc::new(
-                Depset::new(DepsetOrder::Default, direct, transitive)
-                    .expect("analysis_failure values are hashable"),
-            ));
-            let mut ct = ConfiguredTarget::new(label.clone(), cfg.clone(), rule.rule_class.clone());
-            ct.providers.insert(
-                "DefaultInfo".to_string(),
-                default_info_provider(&[], Runfiles::default(), Runfiles::default(), None),
-            );
-            ct.providers.insert(
-                "OutputGroupInfo".to_string(),
-                Value::ProviderInstance {
-                    provider_name: "OutputGroupInfo".to_string(),
-                    fields: BTreeMap::new(),
-                },
-            );
-            ct.providers.insert(
-                "AnalysisFailureInfo".to_string(),
-                provider_instance("AnalysisFailureInfo", vec![("causes", causes)]),
-            );
-            ct.testonly = rule.testonly;
-            ct.is_test = rc.is_test;
-            ct
-        };
     if allow_failure && !is_analysis_test && !dep_failure_sets.is_empty() {
         return Ok(make_failure_target(None, dep_failure_sets));
     }

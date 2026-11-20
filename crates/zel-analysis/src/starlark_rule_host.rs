@@ -750,27 +750,16 @@ fn host_attr(st: &Arc<CtxState>, kind: &str, attr: &str, pos: &[Value]) -> HostR
             match attr {
                 "files" => Ok(files_depset(&r.artifacts)),
                 "symlinks" => {
-                    let entries: Vec<Value> = if !r.symlink_entries.is_empty() {
-                        r.symlink_entries
-                            .iter()
-                            .map(|(k, v)| {
-                                mk_struct(vec![
-                                    ("path", Value::String(k.clone())),
-                                    ("target_file", file_value(v)),
-                                ])
-                            })
-                            .collect()
-                    } else {
-                        r.symlinks
-                            .iter()
-                            .map(|(k, v)| {
-                                mk_struct(vec![
-                                    ("path", Value::String(k.clone())),
-                                    ("target_file", file_value(v)),
-                                ])
-                            })
-                            .collect()
-                    };
+                    let entries: Vec<Value> = r
+                        .ordered_symlinks()
+                        .into_iter()
+                        .map(|(k, v)| {
+                            mk_struct(vec![
+                                ("path", Value::String(k)),
+                                ("target_file", file_value(&v)),
+                            ])
+                        })
+                        .collect();
                     Ok(Value::Depset(Arc::new(Depset::new(
                         DepsetOrder::Default,
                         entries,
@@ -778,27 +767,16 @@ fn host_attr(st: &Arc<CtxState>, kind: &str, attr: &str, pos: &[Value]) -> HostR
                     )?)))
                 }
                 "root_symlinks" => {
-                    let entries: Vec<Value> = if !r.root_symlink_entries.is_empty() {
-                        r.root_symlink_entries
-                            .iter()
-                            .map(|(k, v)| {
-                                mk_struct(vec![
-                                    ("path", Value::String(k.clone())),
-                                    ("target_file", file_value(v)),
-                                ])
-                            })
-                            .collect()
-                    } else {
-                        r.root_symlinks
-                            .iter()
-                            .map(|(k, v)| {
-                                mk_struct(vec![
-                                    ("path", Value::String(k.clone())),
-                                    ("target_file", file_value(v)),
-                                ])
-                            })
-                            .collect()
-                    };
+                    let entries: Vec<Value> = r
+                        .ordered_root_symlinks()
+                        .into_iter()
+                        .map(|(k, v)| {
+                            mk_struct(vec![
+                                ("path", Value::String(k)),
+                                ("target_file", file_value(&v)),
+                            ])
+                        })
+                        .collect();
                     Ok(Value::Depset(Arc::new(Depset::new(
                         DepsetOrder::Default,
                         entries,

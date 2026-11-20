@@ -1455,3 +1455,79 @@ load("@bazel_tools//tools/cpp:unix_cc_toolchain_config.bzl", "cc_toolchain_confi
     ]);
     assert_eq!(code, 0, "darwin cc_toolchain_config analysis failed: {err}");
 }
+
+#[test]
+fn allow_analysis_failures_cli_flag_returns_analysis_failure_info_end_to_end() {
+    let w = Ws::new("allow-analysis-failures-e2e");
+    w.write("MODULE.bazel", "module(name = \"w\")\n");
+    w.write(
+        "defs.bzl",
+        r#"
+def _bad_impl(ctx):
+    fail("deliberate starlark rule failure")
+
+bad_rule = rule(implementation = _bad_impl)
+
+def _dep_wrap_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, "unreachable")
+    return [DefaultInfo(files = depset([out]))]
+
+dep_wrap = rule(
+    implementation = _dep_wrap_impl,
+    attrs = {"dep": attr.label()},
+)
+
+def _inspector_impl(ctx):
+    tut = ctx.attr.target_under_test
+    has_info = AnalysisFailureInfo in tut
+    causes = tut[AnalysisFailureInfo].causes.to_list() if has_info else []
+    msg = ";".join([str(c.label) + ":" + c.message for c in causes])
+    ok = has_info and len(causes) == 1 and "deliberate starlark rule failure" in msg
+    return [AnalysisTestResultInfo(success = ok, message = msg)]
+
+inspector_test = rule(
+    implementation = _inspector_impl,
+    analysis_test = True,
+    attrs = {"target_under_test": attr.label()},
+)
+"#,
+    );
+    w.write(
+        "BUILD",
+        r#"
+load(":defs.bzl", "bad_rule", "dep_wrap", "inspector_test")
+
+bad_rule(name = "bad")
+dep_wrap(name = "wrapped", dep = ":bad")
+inspector_test(name = "inspect_wrapped", target_under_test = ":wrapped")
+"#,
+    );
+
+    // Without `--allow_analysis_failures`, `:wrapped` fails analysis.
+    let (fail_code, _, fail_err, _) = w.run(&["build", "//:wrapped"]);
+    assert_ne!(
+        fail_code, 0,
+        "expected build without --allow_analysis_failures to fail"
+    );
+    assert!(
+        fail_err.contains("deliberate starlark rule failure"),
+        "unexpected error: {fail_err}"
+    );
+
+    // With `--allow_analysis_failures`, both `:wrapped` and `analysis_test` `:inspect_wrapped`
+    // succeed and observe `AnalysisFailureInfo` populated from `:bad`!
+    let (ok_code, _, ok_err, _) =
+        w.run(&["test", "--allow_analysis_failures", "//:inspect_wrapped"]);
+    assert_eq!(
+        ok_code, 0,
+        "expected --allow_analysis_failures test to pass: {ok_err}"
+    );
+
+    let (build_code, _, build_err, _) =
+        w.run(&["build", "--allow_analysis_failures", "//:wrapped"]);
+    assert_eq!(
+        build_code, 0,
+        "expected --allow_analysis_failures build to succeed: {build_err}"
+    );
+}

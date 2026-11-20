@@ -588,6 +588,37 @@ fn analyze_rule(
     resolver: Arc<dyn DepResolver>,
     acfg: &AnalysisConfig,
 ) -> Result<ConfiguredTarget, String> {
+    let is_analysis_test = rule
+        .extra
+        .rule_class
+        .as_ref()
+        .and_then(|rc| rc.starlark.as_ref())
+        .and_then(|sp| sp.kwargs.get("analysis_test"))
+        .is_some_and(|v| matches!(v, Value::Bool(true)));
+    match analyze_rule_inner(rule, config, resolver, acfg) {
+        Ok(ct) => Ok(ct),
+        Err(e) if config.bool_option("allow_analysis_failures", false) && !is_analysis_test => {
+            let is_test = rule.extra.rule_class.as_ref().is_some_and(|rc| rc.is_test);
+            Ok(zel_analysis::starlark_rule::make_analysis_failure_target(
+                &rule.label,
+                config,
+                &rule.rule_class,
+                rule.testonly,
+                is_test,
+                Some(e),
+                Vec::new(),
+            ))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn analyze_rule_inner(
+    rule: &RuleInstance,
+    config: &BuildConfigurationKey,
+    resolver: Arc<dyn DepResolver>,
+    acfg: &AnalysisConfig,
+) -> Result<ConfiguredTarget, String> {
     let is_plat = matches!(
         rule.rule_class.as_str(),
         "platform" | "constraint_value" | "constraint_setting"

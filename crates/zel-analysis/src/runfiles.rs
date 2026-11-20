@@ -80,7 +80,11 @@ fn filter_obscuring_symlinks(working: &mut BTreeMap<String, String>) {
 impl Runfiles {
     /// `Runfiles.isEmpty`: ignores `empty_filenames` (matches `Runfiles.java`).
     pub fn is_empty(&self) -> bool {
-        self.artifacts.is_empty() && self.symlinks.is_empty() && self.root_symlinks.is_empty()
+        self.artifacts.is_empty()
+            && self.symlinks.is_empty()
+            && self.root_symlinks.is_empty()
+            && self.symlink_entries.is_empty()
+            && self.root_symlink_entries.is_empty()
     }
 
     /// The nested artifact set: the recorded structure, or (for runfiles that were built from a
@@ -114,6 +118,32 @@ impl Runfiles {
         )
     }
 
+    /// Ordered `(path, target_file)` entries for Starlark `runfiles.symlinks`, falling back to
+    /// `self.symlinks` when `symlink_entries` was not populated directly.
+    pub fn ordered_symlinks(&self) -> Vec<(String, Artifact)> {
+        if !self.symlink_entries.is_empty() || self.symlinks.is_empty() {
+            self.symlink_entries.clone()
+        } else {
+            self.symlinks
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        }
+    }
+
+    /// Ordered `(path, target_file)` entries for Starlark `runfiles.root_symlinks`, falling back
+    /// to `self.root_symlinks` when `root_symlink_entries` was not populated directly.
+    pub fn ordered_root_symlinks(&self) -> Vec<(String, Artifact)> {
+        if !self.root_symlink_entries.is_empty() || self.root_symlinks.is_empty() {
+            self.root_symlink_entries.clone()
+        } else {
+            self.root_symlinks
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        }
+    }
+
     /// `Runfiles.merge`: compile-order merge where `other` overwrites `self` on conflicting
     /// runfiles paths and adopts the stricter `conflict_policy_error`.
     pub fn merge(&self, other: &Runfiles) -> Runfiles {
@@ -122,6 +152,13 @@ impl Runfiles {
         out.generate_init_py_files |= other.generate_init_py_files;
         if other.is_empty() {
             out.nested = self.nested_set();
+            out.symlink_entries = self.ordered_symlinks();
+            out.root_symlink_entries = self.ordered_root_symlinks();
+            for e in &other.empty_filenames {
+                if !out.empty_filenames.contains(e) {
+                    out.empty_filenames.push(e.clone());
+                }
+            }
             out.suppress_init |= other.suppress_init;
             return out;
         }
@@ -132,35 +169,29 @@ impl Runfiles {
         );
         out.artifacts.extend(other.artifacts.iter().cloned());
         out.artifacts = dedup_keep_last(std::mem::take(&mut out.artifacts));
-        for (k, v) in &other.symlinks {
-            out.symlinks.insert(k.clone(), v.clone());
+        for (k, v) in other.ordered_symlinks() {
+            out.symlinks.insert(k, v);
         }
-        if !other.symlink_entries.is_empty() {
-            if out.symlink_entries.is_empty() && !self.symlinks.is_empty() {
-                out.symlink_entries = self
-                    .symlinks
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-            }
-            for (k, v) in &other.symlink_entries {
-                out.symlink_entries.push((k.clone(), v.clone()));
-            }
+        if !self.symlinks.is_empty()
+            || !other.symlinks.is_empty()
+            || !self.symlink_entries.is_empty()
+            || !other.symlink_entries.is_empty()
+        {
+            let mut combined = self.ordered_symlinks();
+            combined.extend(other.ordered_symlinks());
+            out.symlink_entries = combined;
         }
-        for (k, v) in &other.root_symlinks {
-            out.root_symlinks.insert(k.clone(), v.clone());
+        for (k, v) in other.ordered_root_symlinks() {
+            out.root_symlinks.insert(k, v);
         }
-        if !other.root_symlink_entries.is_empty() {
-            if out.root_symlink_entries.is_empty() && !self.root_symlinks.is_empty() {
-                out.root_symlink_entries = self
-                    .root_symlinks
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.clone()))
-                    .collect();
-            }
-            for (k, v) in &other.root_symlink_entries {
-                out.root_symlink_entries.push((k.clone(), v.clone()));
-            }
+        if !self.root_symlinks.is_empty()
+            || !other.root_symlinks.is_empty()
+            || !self.root_symlink_entries.is_empty()
+            || !other.root_symlink_entries.is_empty()
+        {
+            let mut combined = self.ordered_root_symlinks();
+            combined.extend(other.ordered_root_symlinks());
+            out.root_symlink_entries = combined;
         }
         for e in &other.empty_filenames {
             if !out.empty_filenames.contains(e) {
@@ -184,8 +215,8 @@ impl Runfiles {
     /// `root_symlinks`, then `<workspace>/.runfile` when no entry sits under `<workspace>`.
     pub fn manifest_entries(&self, workspace_name: &str) -> BTreeMap<String, String> {
         let mut working = BTreeMap::new();
-        for (k, v) in &self.symlinks {
-            working.insert(k.clone(), v.exec_path.to_string());
+        for (k, v) in self.ordered_symlinks() {
+            working.insert(k, v.exec_path.to_string());
         }
         for a in &self.artifacts {
             working.insert(a.short_path(), a.exec_path.to_string());
@@ -238,11 +269,11 @@ impl Runfiles {
                 final_map.insert(format!("{workspace_name}/{path}"), target);
             }
         }
-        for (k, v) in &self.root_symlinks {
+        for (k, v) in self.ordered_root_symlinks() {
             if k == workspace_name || k.starts_with(&ws_prefix) {
                 saw_workspace = true;
             }
-            final_map.insert(k.clone(), v.exec_path.to_string());
+            final_map.insert(k, v.exec_path.to_string());
         }
         if !saw_workspace && !final_map.is_empty() {
             final_map.insert(format!("{workspace_name}/.runfile"), String::new());
@@ -406,6 +437,79 @@ mod tests {
                 .get("_main/my__pycache__/__init__.py")
                 .map(String::as_str),
             Some("")
+        );
+    }
+
+    #[test]
+    fn merge_preserves_ordered_symlinks_and_root_symlinks_across_map_and_vec_representations() {
+        let a1 = art("p/one");
+        let a2 = art("p/two");
+        let r1 = art("p/root_one");
+        let r2 = art("p/root_two");
+
+        // `map_only` populates `symlinks` / `root_symlinks` maps with empty `*_entries` vecs.
+        let mut map_only = Runfiles::default();
+        map_only.symlinks.insert("map_sym".into(), a1.clone());
+        map_only
+            .root_symlinks
+            .insert("map_root_sym".into(), r1.clone());
+
+        // `vec_backed` populates both maps and ordered `*_entries` vecs (`ctx.runfiles(symlinks=...)`).
+        let mut vec_backed = Runfiles::default();
+        vec_backed.symlinks.insert("vec_sym".into(), a2.clone());
+        vec_backed
+            .symlink_entries
+            .push(("vec_sym".into(), a2.clone()));
+        vec_backed
+            .root_symlinks
+            .insert("vec_root_sym".into(), r2.clone());
+        vec_backed
+            .root_symlink_entries
+            .push(("vec_root_sym".into(), r2.clone()));
+
+        // Direction 1: `vec_backed.merge(&map_only)` must retain `map_only`'s symlinks in `ordered_*`.
+        let m1 = vec_backed.merge(&map_only);
+        assert_eq!(
+            m1.ordered_symlinks(),
+            vec![
+                ("vec_sym".to_string(), a2.clone()),
+                ("map_sym".to_string(), a1.clone()),
+            ]
+        );
+        assert_eq!(
+            m1.ordered_root_symlinks(),
+            vec![
+                ("vec_root_sym".to_string(), r2.clone()),
+                ("map_root_sym".to_string(), r1.clone()),
+            ]
+        );
+
+        // Direction 2: `map_only.merge(&vec_backed)` must retain both in merge order.
+        let m2 = map_only.merge(&vec_backed);
+        assert_eq!(
+            m2.ordered_symlinks(),
+            vec![
+                ("map_sym".to_string(), a1.clone()),
+                ("vec_sym".to_string(), a2.clone()),
+            ]
+        );
+        assert_eq!(
+            m2.ordered_root_symlinks(),
+            vec![
+                ("map_root_sym".to_string(), r1.clone()),
+                ("vec_root_sym".to_string(), r2.clone()),
+            ]
+        );
+
+        // Direction 3: `map_only.merge(&map_only_other)` also populates ordered entries consistently.
+        let mut map_only_other = Runfiles::default();
+        map_only_other
+            .symlinks
+            .insert("map_sym_2".into(), a2.clone());
+        let m3 = map_only.merge(&map_only_other);
+        assert_eq!(
+            m3.ordered_symlinks(),
+            vec![("map_sym".to_string(), a1), ("map_sym_2".to_string(), a2),]
         );
     }
 }
