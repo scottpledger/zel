@@ -1594,10 +1594,7 @@ fn run_command_inner(
                         sys::send_signal(info.pid, sys::SIGQUIT);
                     }
                 }
-                if !cancelled
-                    && sigwinch_n > forwarded_sigwinch
-                    && !winch_in_flight.load(Ordering::SeqCst)
-                {
+                if sigwinch_n > forwarded_sigwinch && !winch_in_flight.load(Ordering::SeqCst) {
                     let cid = id.lock().unwrap().clone();
                     if !cid.is_empty() {
                         forwarded_sigwinch = sigwinch_n;
@@ -1894,6 +1891,7 @@ mod tests {
 
         struct MockState {
             hang_cancel: bool,
+            finish_on_cancel: bool,
             run_started: Gate,
             winch_entered: Gate,
             cancel_entered: Gate,
@@ -1940,12 +1938,14 @@ mod tests {
 
         fn start_mock_server(
             hang_cancel: bool,
+            finish_on_cancel: bool,
         ) -> (String, Arc<MockState>, std::thread::JoinHandle<()>) {
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
             let _ = listener.set_nonblocking(true);
             let addr = listener.local_addr().unwrap().to_string();
             let state = Arc::new(MockState {
                 hang_cancel,
+                finish_on_cancel,
                 run_started: Gate::new(),
                 winch_entered: Gate::new(),
                 cancel_entered: Gate::new(),
@@ -2036,7 +2036,7 @@ mod tests {
                                                     let _ = st_s
                                                         .release_hung_rpcs
                                                         .wait_timeout(Duration::from_secs(10));
-                                                } else {
+                                                } else if st_s.finish_on_cancel {
                                                     st_s.finish_run.signal();
                                                 }
                                                 let _ = send_grpc_ok_headers(&stream);
@@ -2069,7 +2069,7 @@ mod tests {
 
         // Case 1: Hung `UpdateTerminalSize` RPC must not delay `SIGINT` `Cancel` or `run_command` exit.
         {
-            let (addr, state, accept_handle) = start_mock_server(false);
+            let (addr, state, accept_handle) = start_mock_server(false, true);
             let signals = Arc::new(TestSignals::default());
             let info = ServerInfo {
                 pid: 0,
@@ -2126,7 +2126,7 @@ mod tests {
 
         // Case 2: Hung `UpdateTerminalSize` AND hung `Cancel` must not block 3-strike `SIGINT` kill.
         {
-            let (addr, state, accept_handle) = start_mock_server(true);
+            let (addr, state, accept_handle) = start_mock_server(true, false);
             let signals = Arc::new(TestSignals::default());
             let info = ServerInfo {
                 pid: 424242,
@@ -2182,6 +2182,53 @@ mod tests {
 
             state.stop_accept.store(true, Ordering::SeqCst);
             state.release_hung_rpcs.signal();
+            let _ = accept_handle.join();
+        }
+
+        // Case 3: `SIGWINCH` arriving after `Cancel` while `Run` is still winding down is forwarded
+        // (`BlazeServer::CancelThread` in `src/main/cpp/blaze.cc:1873-1904`).
+        {
+            let (addr, state, accept_handle) = start_mock_server(false, false);
+            let signals = Arc::new(TestSignals::default());
+            let info = ServerInfo {
+                pid: 0,
+                address: addr,
+                request_cookie: "req-cookie".into(),
+                response_cookie: "resp-cookie".into(),
+            };
+            let sig_client = Arc::clone(&signals);
+            let client = std::thread::spawn(move || {
+                let mut out = Vec::new();
+                let mut err = Vec::new();
+                run_command_inner(
+                    &info,
+                    &RunRequest::default(),
+                    &mut out,
+                    &mut err,
+                    Duration::from_secs(5),
+                    None,
+                    sig_client,
+                    Arc::new(|_| {}),
+                )
+            });
+
+            assert!(state.run_started.wait_timeout(Duration::from_secs(5)));
+            signals.sigint.fetch_add(1, Ordering::SeqCst);
+            assert!(state.cancel_entered.wait_timeout(Duration::from_secs(2)));
+
+            signals.sigwinch.fetch_add(1, Ordering::SeqCst);
+            assert!(
+                state.winch_entered.wait_timeout(Duration::from_secs(2)),
+                "UpdateTerminalSize must still be forwarded after Cancel while Run is active"
+            );
+
+            state.release_hung_rpcs.signal();
+            state.finish_run.signal();
+            let outcome = client.join().unwrap();
+            assert!(outcome.abrupt.is_none(), "{:?}", outcome.abrupt);
+            assert_eq!(outcome.response.exit_code, 8);
+
+            state.stop_accept.store(true, Ordering::SeqCst);
             let _ = accept_handle.join();
         }
     }
