@@ -780,7 +780,7 @@ impl BlazeRuntime {
         let resolver = if can_reuse_resolver {
             let prev = self.last_resolver.lock().unwrap().clone();
             match prev {
-                Some(r) if r.config.matches_for_reuse(&acfg) => {
+                Some(r) if !r.has_cli_aspects() && r.config.matches_for_reuse(&acfg) => {
                     r.prepare_for_reuse();
                     r
                 }

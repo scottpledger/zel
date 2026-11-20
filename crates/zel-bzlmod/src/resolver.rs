@@ -460,21 +460,9 @@ impl CommandResolver {
             cfg.main_mapping_errors = true;
             Some(cfg)
         })();
+        self.invalidated_this_command.store(false, Ordering::SeqCst);
         let installed = parsed_cfg.map(|cfg| {
             let has_module_file = cfg.workspace.join("MODULE.bazel").exists();
-            if !has_module_file {
-                let had_cached = self.cached.lock().unwrap().take().is_some();
-                let mut prev = self.last_no_module_cfg.lock().unwrap();
-                let unchanged = !had_cached
-                    && prev
-                        .as_ref()
-                        .is_some_and(|prev_cfg| prev_cfg.matches_for_reuse(&cfg));
-                *prev = Some(cfg.clone());
-                self.invalidated_this_command
-                    .store(!unchanged, Ordering::SeqCst);
-                return Arc::new(LazyBzlmodResolver::new(cfg));
-            }
-            *self.last_no_module_cfg.lock().unwrap() = None;
             let cacheable = !cfg.force && cfg.lockfile_mode != LockfileMode::Refresh;
             let mut cached_guard = self.cached.lock().unwrap();
             if cacheable {
@@ -484,6 +472,8 @@ impl CommandResolver {
                     {
                         match entry.session.rt.revalidate_for_command() {
                             RevalidateOutcome::Unchanged => {
+                                *self.last_no_module_cfg.lock().unwrap() =
+                                    (!has_module_file).then(|| cfg.clone());
                                 self.invalidated_this_command.store(false, Ordering::SeqCst);
                                 return Arc::new(LazyBzlmodResolver::from_cached(
                                     cfg,
@@ -491,6 +481,8 @@ impl CommandResolver {
                                 ));
                             }
                             RevalidateOutcome::PartialInvalidation => {
+                                *self.last_no_module_cfg.lock().unwrap() =
+                                    (!has_module_file).then(|| cfg.clone());
                                 self.invalidated_this_command.store(true, Ordering::SeqCst);
                                 return Arc::new(LazyBzlmodResolver::from_cached(
                                     cfg,
@@ -502,7 +494,19 @@ impl CommandResolver {
                     }
                 }
             }
-            *cached_guard = None;
+            let had_cached = cached_guard.take().is_some();
+            if !has_module_file {
+                let mut prev = self.last_no_module_cfg.lock().unwrap();
+                let unchanged = !had_cached
+                    && prev
+                        .as_ref()
+                        .is_some_and(|prev_cfg| prev_cfg.matches_for_reuse(&cfg));
+                *prev = Some(cfg.clone());
+                self.invalidated_this_command
+                    .store(!unchanged, Ordering::SeqCst);
+                return Arc::new(LazyBzlmodResolver::new(cfg));
+            }
+            *self.last_no_module_cfg.lock().unwrap() = None;
             self.invalidated_this_command.store(true, Ordering::SeqCst);
             Arc::new(LazyBzlmodResolver::new(cfg))
         });

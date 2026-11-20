@@ -129,10 +129,16 @@ impl BlazeRuntime {
             sibling_repository_layout: flag("experimental_sibling_repository_layout", false),
             ..Default::default()
         };
+        let has_cli_aspects = !crate::loading::opt_list(parsed, "aspects").is_empty();
         let tr = {
             let mut lr = self.last_resolver.lock().unwrap();
             if let Some(r) = lr.clone() {
-                if r.config.matches_for_reuse(&acfg) {
+                let can_reuse = if aquery && popts.skyframe_state {
+                    r.config.matches_for_reuse(&acfg)
+                } else {
+                    !has_cli_aspects && !r.has_cli_aspects() && r.config.matches_for_reuse(&acfg)
+                };
+                if can_reuse {
                     r.update_for_command(acfg);
                     r
                 } else {

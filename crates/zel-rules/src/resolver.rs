@@ -291,9 +291,12 @@ impl AnalysisConfig {
         } = other;
         let expander_matches = match (expander, o_expander) {
             (None, None) => true,
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+            (Some(a), Some(b)) => {
+                Arc::ptr_eq(a, b)
+                    || (a.is_default_loader_expander() && b.is_default_loader_expander())
+            }
             (Some(a), None) => a.is_default_loader_expander(),
-            (None, Some(_)) => false,
+            (None, Some(b)) => b.is_default_loader_expander(),
         };
         registered_toolchains == o_registered_toolchains
             && extra_execution_platforms == o_extra_execution_platforms
@@ -329,6 +332,14 @@ pub struct TargetResolver {
     order: Mutex<Vec<Arc<ConfiguredTarget>>>,
     /// Memoized aspect applications (see `DepResolver::aspect_cache_get`).
     aspects: Mutex<HashMap<String, Arc<ConfiguredTarget>>>,
+    /// Set once top-level CLI `--aspects` have been applied via `analyze_with_aspects`.
+    /// Resolvers with CLI aspects must not be reused by subsequent commands without those aspects.
+    has_cli_aspects: std::sync::atomic::AtomicBool,
+    /// Active `(owner_key, rule_stack_depth)` stack while evaluating aspects, so extra
+    /// dependencies pulled in by aspects are recorded in `all_deps` under the aspected target
+    /// without mutating `stack` or `edges`.
+    #[allow(clippy::type_complexity)]
+    aspect_owners: Mutex<Vec<((String, String), usize)>>,
     /// Direct dependency edges of configured targets as seen by `check_dependency` (consumer
     /// key -> deps in attribute order); used by `cquery`.
     #[allow(clippy::type_complexity)]
@@ -536,6 +547,8 @@ impl TargetResolver {
             defer_cycle_dedup: std::sync::atomic::AtomicBool::new(false),
             order: Mutex::new(Vec::new()),
             aspects: Mutex::new(HashMap::new()),
+            has_cli_aspects: std::sync::atomic::AtomicBool::new(false),
+            aspect_owners: Mutex::new(Vec::new()),
             edges: Mutex::new(HashMap::new()),
             all_deps: Mutex::new(HashMap::new()),
             warnings: Mutex::new(Vec::new()),
@@ -763,7 +776,15 @@ impl TargetResolver {
             }
         };
         let k = key(label, cfg);
-        if let Some(owner) = self.stack.lock().unwrap().last().cloned() {
+        let owner = {
+            let st = self.stack.lock().unwrap();
+            let ao = self.aspect_owners.lock().unwrap();
+            match ao.last() {
+                Some((aspect_owner, depth)) if st.len() == *depth => Some(aspect_owner.clone()),
+                _ => st.last().cloned(),
+            }
+        };
+        if let Some(owner) = owner {
             let mut deps = self.all_deps.lock().unwrap();
             let entry = deps.entry(owner).or_default();
             if !entry.contains(&k) {
@@ -957,10 +978,17 @@ impl TargetResolver {
     pub fn prepare_for_reuse(&self) {
         self.stack.lock().unwrap().clear();
         self.stack_cfg.lock().unwrap().clear();
+        self.aspect_owners.lock().unwrap().clear();
         self.reported_cycles.lock().unwrap().clear();
         self.warnings.lock().unwrap().clear();
         self.defer_cycle_dedup
             .store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Whether top-level CLI `--aspects` were applied to any target in this resolver.
+    pub fn has_cli_aspects(&self) -> bool {
+        self.has_cli_aspects
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Analyses `label` in `cfg` and applies the top-level `aspects` (`--aspects`, values as
@@ -977,7 +1005,17 @@ impl TargetResolver {
         if aspects.is_empty() {
             return Ok(ct);
         }
+        self.has_cli_aspects
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         let me: Arc<dyn DepResolver> = self.me();
+        struct RootAspectOwnerGuard<'a>(&'a TargetResolver);
+        impl Drop for RootAspectOwnerGuard<'_> {
+            fn drop(&mut self) {
+                <TargetResolver as DepResolver>::pop_aspect_owner(self.0);
+            }
+        }
+        <TargetResolver as DepResolver>::push_aspect_owner(self, &ct.label, &ct.configuration);
+        let _root_owner_guard = RootAspectOwnerGuard(self);
         let mut inputs = zel_analysis::starlark_rule::AnalysisInputs::new(me);
         inputs.sibling_repository_layout =
             self.config.sibling_repository_layout || self.loader.config().sibling_repository_layout;
@@ -1738,6 +1776,18 @@ impl DepResolver for TargetResolver {
         self.aspects.lock().unwrap().insert(key, value);
     }
 
+    fn push_aspect_owner(&self, label: &Label, cfg: &BuildConfigurationKey) {
+        let depth = self.stack.lock().unwrap().len();
+        self.aspect_owners
+            .lock()
+            .unwrap()
+            .push((key(label, cfg), depth));
+    }
+
+    fn pop_aspect_owner(&self) {
+        self.aspect_owners.lock().unwrap().pop();
+    }
+
     fn aspect_toolchains(
         &self,
         owner: &Label,
@@ -2174,6 +2224,28 @@ mod reuse_tests {
         let mut c_same = base.clone();
         c_same.expander = Some(Arc::clone(&custom));
         assert!(c.matches_for_reuse(&c_same));
+
+        // Two distinct default `LoaderExpander` instances (as created by `TargetResolver::new`
+        // and `TargetResolver::update_for_command`) are compatible with each other and with `None`,
+        // but never with a custom `PatternExpander`.
+        let fs = Arc::new(zel_vfs::InMemoryFileSystem::default());
+        let loader = zel_packages::PackageLoader::new(zel_packages::LoaderConfig::new(
+            fs,
+            Arc::new(zel_packages::SimpleRepoResolver::new(
+                zel_vfs::PathFragment::create("/ws"),
+            )),
+        ));
+        let mut def_a = base.clone();
+        def_a.expander = Some(Arc::new(LoaderExpander {
+            loader: loader.clone(),
+        }));
+        let mut def_b = base.clone();
+        def_b.expander = Some(Arc::new(LoaderExpander { loader }));
+        assert!(def_a.matches_for_reuse(&def_b));
+        assert!(def_a.matches_for_reuse(&base));
+        assert!(base.matches_for_reuse(&def_a));
+        assert!(!def_a.matches_for_reuse(&c));
+        assert!(!c.matches_for_reuse(&def_a));
 
         let mut c = base.clone();
         c.allow_unresolved_symlinks = false;

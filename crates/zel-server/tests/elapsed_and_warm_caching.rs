@@ -854,3 +854,229 @@ genrule(
         "identical warm build with --override_module must reuse TargetResolver"
     );
 }
+
+#[test]
+fn cli_aspects_deps_are_reachable_and_do_not_leak_to_warm_builds() {
+    let w = Ws::new("cli-aspects-reachability-and-isolation");
+    w.write(
+        "dep/BUILD",
+        r#"
+genrule(
+    name = "old",
+    outs = ["old.txt"],
+    cmd = "echo from_aspect_extra > $@",
+    deprecation = "old aspect helper is deprecated",
+    visibility = ["//visibility:public"],
+)
+"#,
+    );
+    w.write(
+        "extra/BUILD",
+        r#"
+genrule(
+    name = "aspect_extra",
+    srcs = ["//dep:old"],
+    outs = ["aspect_extra.txt"],
+    cmd = "cat $< > $@",
+    visibility = ["//visibility:public"],
+)
+"#,
+    );
+    w.write(
+        "defs.bzl",
+        r#"
+def _leaf_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".leaf.txt")
+    ctx.actions.write(out, "leaf\n")
+    return [DefaultInfo(files = depset([out]))]
+
+leaf_rule = rule(implementation = _leaf_impl)
+
+def _parent_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".parent.txt")
+    ctx.actions.write(out, "parent\n")
+    return [DefaultInfo(files = depset([out]))]
+
+parent_rule = rule(
+    implementation = _parent_impl,
+    attrs = {"deps": attr.label_list()},
+)
+
+def _my_aspect_impl(target, ctx):
+    extra_files = ctx.attr._extra[DefaultInfo].files.to_list()
+    out = ctx.actions.declare_file(target.label.name + ".aspect.txt")
+    ctx.actions.run_shell(
+        inputs = extra_files,
+        outputs = [out],
+        command = "cat %s > %s" % (extra_files[0].path, out.path),
+    )
+    transitive = [out]
+    for d in getattr(ctx.rule.attr, "deps", []):
+        if OutputGroupInfo in d and hasattr(d[OutputGroupInfo], "aspect_out"):
+            transitive.extend(d[OutputGroupInfo].aspect_out.to_list())
+    return [OutputGroupInfo(aspect_out = depset(transitive))]
+
+my_aspect = aspect(
+    implementation = _my_aspect_impl,
+    attr_aspects = ["deps"],
+    attrs = {
+        "_extra": attr.label(default = "//extra:aspect_extra"),
+    },
+)
+"#,
+    );
+    w.write(
+        "BUILD",
+        r#"
+load(":defs.bzl", "leaf_rule", "parent_rule")
+
+exports_files(["defs.bzl"])
+
+leaf_rule(name = "leaf")
+parent_rule(name = "parent", deps = [":leaf"])
+"#,
+    );
+
+    // 1. Build with CLI `--aspects`: the aspect's extra attribute dep (`//extra:aspect_extra`)
+    //    must be included in `reachable_targets` so its generating action executes and feeds
+    //    both `parent.aspect.txt` and propagated `leaf.aspect.txt`.
+    let (code, _, err) = w.run(&[
+        "build",
+        "--aspects=//:defs.bzl%my_aspect",
+        "--output_groups=+aspect_out",
+        "//:parent",
+    ]);
+    assert_eq!(code, 0, "build with --aspects failed:\n{err}");
+    let extra_out = w.bin_dir().join("extra/aspect_extra.txt");
+    let parent_aspect_out = w.bin_dir().join("parent.aspect.txt");
+    let leaf_aspect_out = w.bin_dir().join("leaf.aspect.txt");
+    assert_eq!(
+        std::fs::read_to_string(&extra_out).unwrap().trim(),
+        "from_aspect_extra",
+        "aspect extra attribute dep action must execute"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&parent_aspect_out).unwrap().trim(),
+        "from_aspect_extra"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&leaf_aspect_out).unwrap().trim(),
+        "from_aspect_extra"
+    );
+    assert!(
+        err.contains("old aspect helper is deprecated"),
+        "deprecation warning on aspect-pulled dep must be reported:\n{err}"
+    );
+    let r_aspect = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        r_aspect.has_cli_aspects(),
+        "resolver used with CLI --aspects must be flagged"
+    );
+
+    // Remove the aspect-generated outputs so we can prove a follow-up build without `--aspects`
+    // does not re-run or re-emit any aspect actions/outputs from the earlier command.
+    std::fs::remove_file(&extra_out).unwrap();
+    std::fs::remove_file(&parent_aspect_out).unwrap();
+    std::fs::remove_file(&leaf_aspect_out).unwrap();
+
+    // 2. Follow-up warm build WITHOUT `--aspects` (even requesting `--output_groups=+aspect_out`):
+    //    must NOT reuse the CLI-aspect-polluted resolver and must NOT emit aspect outputs.
+    let (code, _, err) = w.run(&["build", "--output_groups=+aspect_out", "//:parent"]);
+    assert_eq!(code, 0, "follow-up build without --aspects failed:\n{err}");
+    let r_clean = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        !Arc::ptr_eq(&r_aspect, &r_clean),
+        "warm build without --aspects must not reuse a resolver that ran CLI aspects"
+    );
+    assert!(!r_clean.has_cli_aspects());
+    assert!(
+        !parent_aspect_out.exists() && !leaf_aspect_out.exists() && !extra_out.exists(),
+        "CLI aspect outputs must not leak into subsequent builds without --aspects"
+    );
+    assert!(
+        !err.contains("old aspect helper is deprecated"),
+        "deprecation warnings from aspect-only deps must not leak into warm builds without --aspects:\n{err}"
+    );
+
+    // 3. Subsequent identical warm build without `--aspects` DOES reuse the clean resolver.
+    let (code, _, err) = w.run(&["build", "--output_groups=+aspect_out", "//:parent"]);
+    assert_eq!(code, 0, "{err}");
+    let r_clean2 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(
+        Arc::ptr_eq(&r_clean, &r_clean2),
+        "clean warm build without --aspects should reuse the clean resolver"
+    );
+
+    // 4. `aquery` after a `--aspects` build must also not leak aspect actions unless `--aspects`
+    //    or `--skyframe_state` is requested.
+    let (code, _, err) = w.run(&[
+        "build",
+        "--nobuild",
+        "--aspects=//:defs.bzl%my_aspect",
+        "//:parent",
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let (code, out, err) = w.run(&["aquery", "//:parent"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !out.contains("parent.aspect.txt"),
+        "plain aquery must not leak CLI aspect actions from previous build:\n{out}"
+    );
+}
+
+#[test]
+fn no_module_workspace_is_incremental_and_aquery_skyframe_state_works() {
+    let w = Ws::new("no-module-incremental-and-aquery");
+    // Remove MODULE.bazel so this exercises the plain (no-MODULE.bazel) workspace path
+    // regardless of whether `/workspace/MODULE.bazel` exists on the test host.
+    std::fs::remove_file(w.ws.join("MODULE.bazel")).unwrap();
+    w.write(
+        "lib/BUILD",
+        "genrule(name = 'l', outs = ['l.out'], cmd = 'echo l > $@', visibility = ['//visibility:public'])\n",
+    );
+    w.write(
+        "app/BUILD",
+        "genrule(name = 'other', outs = ['o.out'], cmd = 'echo o > $@')\n",
+    );
+
+    let (code, _, err) = w.run(&["build", "--nobuild", "//lib:l", "//app:other"]);
+    assert_eq!(code, 0, "{err}");
+    let loads_after_first = w.rt.skyframe.package_loads();
+    assert!(loads_after_first >= 2);
+    let r1 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+
+    // Warm repeat in a no-MODULE.bazel workspace must keep cached synthetic Bzlmod session,
+    // avoid re-evaluating packages, and reuse TargetResolver.
+    let (code, _, err) = w.run(&["build", "--nobuild", "//lib:l", "//app:other"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        !w.rt.repo_resolver.was_invalidated_this_command(),
+        "warm build without MODULE.bazel must not invalidate synthetic Bzlmod session"
+    );
+    assert_eq!(
+        w.rt.skyframe.package_loads(),
+        loads_after_first,
+        "no package should be re-evaluated on warm build without MODULE.bazel"
+    );
+    let r2 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(Arc::ptr_eq(&r1, &r2));
+
+    // `aquery --skyframe_state` immediately after the build must dump the Genrule actions.
+    let (code, out, err) = w.run(&["aquery", "--skyframe_state", "--output=textproto"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        out.contains("mnemonic: \"Genrule\""),
+        "aquery --skyframe_state must dump actions from last build:\n{out}"
+    );
+
+    // Creating MODULE.bazel must invalidate the cached synthetic session.
+    w.write("MODULE.bazel", "module(name = \"added\")\n");
+    let (code, _, err) = w.run(&["build", "--nobuild", "//lib:l"]);
+    assert_eq!(code, 0, "{err}");
+    assert!(
+        w.rt.repo_resolver.was_invalidated_this_command(),
+        "creating MODULE.bazel must invalidate cached no-module session"
+    );
+    let r3 = w.rt.last_resolver.lock().unwrap().clone().unwrap();
+    assert!(!Arc::ptr_eq(&r2, &r3));
+}

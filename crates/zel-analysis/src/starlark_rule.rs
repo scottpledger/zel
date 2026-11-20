@@ -105,6 +105,14 @@ pub trait DepResolver: Send + Sync {
 
     fn aspect_cache_put(&self, _key: String, _value: Arc<ConfiguredTarget>) {}
 
+    /// Scopes dependency recording to `(label, cfg)` while evaluating an aspect on that target
+    /// so aspect-added dependencies (e.g., private `_tool` / label attributes and aspect
+    /// toolchains) are recorded for reachability without modifying rule-analysis cycle stacks or
+    /// `direct_deps`.
+    fn push_aspect_owner(&self, _label: &Label, _cfg: &BuildConfigurationKey) {}
+
+    fn pop_aspect_owner(&self) {}
+
     /// Resolves the toolchains `toolchains` (raw `aspect(toolchains = ...)` values) for an aspect
     /// applied to `owner` in `cfg`: toolchain type → `ToolchainInfo` plus extra Make variables.
     #[allow(clippy::type_complexity)]
