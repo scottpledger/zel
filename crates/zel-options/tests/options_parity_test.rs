@@ -845,6 +845,40 @@ fn test_path_fragment_converter_expands_tilde_and_normalizes() {
             Some(format!("{norm_home}/my_ob").as_str())
         );
     }
+
+    // `--client_env=HOME=...` (and `USERPROFILE` fallback when `HOME` is empty) overrides process
+    // `HOME` for `PathFragmentConverter` / `EmptyToNullPathFragmentConverter` regardless of flag order.
+    let parsed_client_home = ParsedCommandOptions::parse_for_command(
+        "build",
+        &[
+            "--workspace_status_command=~/ws/status.sh".to_string(),
+            "--execution_log_json_file=~/logs/exec.json".to_string(),
+            "--client_env=HOME=/custom/client_home".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        parsed_client_home.get_str("workspace_status_command"),
+        Some("/custom/client_home/ws/status.sh")
+    );
+    assert_eq!(
+        parsed_client_home.get_str("execution_log_json_file"),
+        Some("/custom/client_home/logs/exec.json")
+    );
+
+    let parsed_userprofile = ParsedCommandOptions::parse_for_command(
+        "build",
+        &[
+            "--client_env=HOME=".to_string(),
+            "--client_env=USERPROFILE=/users/win_alice".to_string(),
+            "--workspace_status_command=~/ws/status.bat".to_string(),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        parsed_userprofile.get_str("workspace_status_command"),
+        Some("/users/win_alice/ws/status.bat")
+    );
 }
 
 #[test]

@@ -439,27 +439,52 @@ fn convert_multi_resource(input: &str) -> Result<OptionValue, OptionsParsingErro
     }
 }
 
-/// Expands a leading `~` or `~/` using `HOME` when set and normalizes via `PathFragment::create`
-/// (`OptionsUtils.PathFragmentConverter`).
-pub fn expand_tilde_path(raw: &str) -> String {
-    if raw == "~" {
-        if let Ok(home) = std::env::var("HOME") {
-            if !home.is_empty() {
-                return zel_vfs::PathFragment::create(&home)
-                    .path_string()
-                    .to_string();
-            }
+/// Resolves the effective home directory for `~` expansion: prefers non-empty `HOME` then
+/// `USERPROFILE` from `client_env` when present (returning `None` if `client_env` explicitly clears
+/// them without providing a non-empty value), otherwise falls back to process `HOME` / `USERPROFILE`.
+pub fn resolve_user_home(client_env: Option<&BTreeMap<String, String>>) -> Option<String> {
+    let non_empty = |v: Option<&String>| v.filter(|s| !s.is_empty()).cloned();
+    let non_empty_env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+    if let Some(env) = client_env {
+        if let Some(h) = non_empty(env.get("HOME")).or_else(|| non_empty(env.get("USERPROFILE"))) {
+            return Some(h);
         }
-    } else if let Some(rest) = raw.strip_prefix("~/") {
-        if let Ok(home) = std::env::var("HOME") {
-            if !home.is_empty() {
-                return zel_vfs::PathFragment::create(&format!("{home}/{rest}"))
-                    .path_string()
-                    .to_string();
+        if env.contains_key("HOME") || env.contains_key("USERPROFILE") {
+            return None;
+        }
+    }
+    non_empty_env("HOME").or_else(|| non_empty_env("USERPROFILE"))
+}
+
+/// Expands a leading `~` or `~/` (and `~\` on Windows) using `home` when non-empty and normalizes
+/// via `PathFragment::create` (`OptionsUtils.PathFragmentConverter`).
+pub fn expand_tilde_path_with_home(raw: &str, home: Option<&str>) -> String {
+    if let Some(home) = home.filter(|h| !h.is_empty()) {
+        let home_trimmed = home.trim_end_matches(['/', '\\']);
+        if raw == "~" {
+            return zel_vfs::PathFragment::create(home)
+                .path_string()
+                .to_string();
+        } else if let Some(rest) = raw.strip_prefix("~/").or_else(|| {
+            if cfg!(windows) {
+                raw.strip_prefix("~\\")
+            } else {
+                None
             }
+        }) {
+            return zel_vfs::PathFragment::create(&format!("{home_trimmed}/{rest}"))
+                .path_string()
+                .to_string();
         }
     }
     zel_vfs::PathFragment::create(raw).path_string().to_string()
+}
+
+/// Expands a leading `~` or `~/` using `HOME` / `USERPROFILE` when set and normalizes via
+/// `PathFragment::create` (`OptionsUtils.PathFragmentConverter`).
+pub fn expand_tilde_path(raw: &str) -> String {
+    let home = resolve_user_home(None);
+    expand_tilde_path_with_home(raw, home.as_deref())
 }
 
 /// `OptionsUtils.WorkspacePathFragmentConverter` (`PathFragment` normalizes `.` and `a/..`).
@@ -491,6 +516,15 @@ pub(crate) fn convert_workspace_path(input: &str) -> Result<OptionValue, Options
 
 /// Converters selected by `OptionType::Custom(name)` (Java class simple names).
 pub(crate) fn convert_custom(name: &str, raw: &str) -> Result<OptionValue, OptionsParsingError> {
+    let home = resolve_user_home(None);
+    convert_custom_with_home(name, raw, home.as_deref())
+}
+
+pub(crate) fn convert_custom_with_home(
+    name: &str,
+    raw: &str,
+    home: Option<&str>,
+) -> Result<OptionValue, OptionsParsingError> {
     match name {
         "NonNegativeIntegerConverter" => Ok(OptionValue::Int(convert_range(raw, 0, i32::MAX)?)),
         "PositiveIntegerConverter" => Ok(OptionValue::Int(convert_range(raw, 1, i32::MAX)?)),
@@ -568,16 +602,16 @@ pub(crate) fn convert_custom(name: &str, raw: &str) -> Result<OptionValue, Optio
         "TestTimeoutConverter" => convert_test_timeout(raw),
         "TestResourcesConverter" => convert_test_resources(raw),
         "MultiResourceConverter" => convert_multi_resource(raw),
-        "PathFragmentConverter" => Ok(OptionValue::String(expand_tilde_path(raw))),
+        "PathFragmentConverter" => Ok(OptionValue::String(expand_tilde_path_with_home(raw, home))),
         "EmptyToNullPathFragmentConverter" => {
             if raw.is_empty() {
                 Ok(OptionValue::Void)
             } else {
-                Ok(OptionValue::String(expand_tilde_path(raw)))
+                Ok(OptionValue::String(expand_tilde_path_with_home(raw, home)))
             }
         }
         "AbsolutePathFragmentConverter" => {
-            let expanded = expand_tilde_path(raw);
+            let expanded = expand_tilde_path_with_home(raw, home);
             if zel_vfs::PathFragment::create(&expanded).is_absolute() {
                 Ok(OptionValue::String(expanded))
             } else {
@@ -633,18 +667,37 @@ pub fn convert_option(
     raw: &str,
     def: &crate::definition::OptionDefinition,
 ) -> Result<OptionValue, OptionsParsingError> {
+    let home = resolve_user_home(None);
+    convert_option_with_home(raw, def, home.as_deref())
+}
+
+/// Like [`convert_option`], using `home` for `~` expansion in `PathFragment`-based converters.
+pub fn convert_option_with_home(
+    raw: &str,
+    def: &crate::definition::OptionDefinition,
+    home: Option<&str>,
+) -> Result<OptionValue, OptionsParsingError> {
     if let OptionType::Custom(name) = &def.option_type {
         if let Some(r) = crate::converters_ext::convert_custom_ext(def, name, raw) {
             return r;
         }
     }
-    convert_value(raw, &def.option_type)
+    convert_value_with_home(raw, &def.option_type, home)
 }
 
 /// Dispatches raw string to an `OptionValue` according to `OptionType`.
 pub fn convert_value(
     raw: &str,
     target_type: &OptionType,
+) -> Result<OptionValue, OptionsParsingError> {
+    let home = resolve_user_home(None);
+    convert_value_with_home(raw, target_type, home.as_deref())
+}
+
+pub(crate) fn convert_value_with_home(
+    raw: &str,
+    target_type: &OptionType,
+    home: Option<&str>,
 ) -> Result<OptionValue, OptionsParsingError> {
     match target_type {
         OptionType::Boolean => Ok(OptionValue::Boolean(convert_boolean(raw)?)),
@@ -683,7 +736,7 @@ pub fn convert_value(
                 rc::convert_resource_assignment(raw, &HostResources::detect_cached).map_err(err)?;
             Ok(OptionValue::Entry(name, Box::new(OptionValue::Double(v))))
         }
-        OptionType::Custom(name) => convert_custom(name, raw),
+        OptionType::Custom(name) => convert_custom_with_home(name, raw, home),
     }
 }
 
