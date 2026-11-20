@@ -151,19 +151,30 @@ impl PathFragment {
         if raw.is_empty() {
             return Self::empty();
         }
-        let mut replaced: String = raw
+        let unprefixed = if raw.starts_with(r"\\?\") || raw.starts_with(r"\??\") {
+            strip_windows_nt_prefix(raw)
+        } else {
+            std::borrow::Cow::Borrowed(raw)
+        };
+        let is_windows_unc = unprefixed.starts_with(r"\\") && !unprefixed.starts_with(r"\\\");
+        let mut replaced: String = unprefixed
             .chars()
             .map(|c| if c == '\\' { '/' } else { c })
             .collect();
         if let Some(rest) = replaced.strip_prefix("//?/") {
             let rb = rest.as_bytes();
+            if rb.len() >= 4 && rest[..3].eq_ignore_ascii_case("UNC") && rb[3] == b'/' {
+                return Self::create(&format!(r"\\{}", &rest[4..]));
+            }
             if rb.len() >= 2 && rb[0].is_ascii_alphabetic() && rb[1] == b':' {
                 replaced = rest.to_string();
             }
         }
         let bytes = replaced.as_bytes();
 
-        let (prefix, drive_str_len, rest) = if bytes.len() >= 3
+        let (prefix, drive_str_len, rest) = if is_windows_unc {
+            ("//".to_string(), 2u8, &replaced[2..])
+        } else if bytes.len() >= 3
             && bytes[0].is_ascii_alphabetic()
             && bytes[1] == b':'
             && bytes[2] == b'/'
@@ -219,6 +230,8 @@ impl PathFragment {
             && bytes[2] == b'/'
         {
             3
+        } else if s.starts_with("//") && (s.len() == 2 || bytes.get(2) != Some(&b'/')) {
+            2
         } else if s.starts_with('/') {
             1
         } else {
@@ -347,6 +360,13 @@ impl PathFragment {
         }
         if other.is_empty() {
             return self.clone();
+        }
+        if self.drive_str_len == 2 {
+            let tail = self.normalized[2..].trim_end_matches('/');
+            if tail.is_empty() {
+                return Self::create(&format!(r"\\{}", other.normalized));
+            }
+            return Self::create(&format!(r"\\{tail}/{}", other.normalized));
         }
         if self.normalized.ends_with('/') {
             Self::create(&format!("{}{}", self.normalized, other.normalized))
@@ -1183,7 +1203,7 @@ impl FileSystem for LocalFileSystem {
     fn read_symbolic_link(&self, link_path: &PathFragment) -> io::Result<PathFragment> {
         let target = fs::read_link(Self::to_std_path(link_path))?;
         let raw = target.to_string_lossy();
-        Ok(PathFragment::create(strip_windows_nt_prefix(&raw)))
+        Ok(PathFragment::create(&strip_windows_nt_prefix(&raw)))
     }
 
     fn chmod(&self, path: &PathFragment, mode: u32) -> io::Result<()> {
@@ -1312,11 +1332,24 @@ pub fn unlink_path_for_write(path: &StdPath) -> bool {
 }
 
 /// Strips Windows NT object (`\??\`) or extended-length (`\\?\`) prefixes returned by
-/// `std::fs::read_link` on NTFS directory junctions and symlinks.
-pub fn strip_windows_nt_prefix(raw: &str) -> &str {
-    raw.strip_prefix(r"\??\")
-        .or_else(|| raw.strip_prefix(r"\\?\"))
-        .unwrap_or(raw)
+/// `std::fs::canonicalize` and `std::fs::read_link`, converting `\\?\UNC\server\share\...` and
+/// `\??\UNC\server\share\...` (case-insensitive `UNC\`) back to `\\server\share\...` while turning
+/// `\\?\C:\...` into `C:\...`.
+pub fn strip_windows_nt_prefix(raw: &str) -> std::borrow::Cow<'_, str> {
+    if let Some(rest) = raw
+        .strip_prefix(r"\\?\")
+        .or_else(|| raw.strip_prefix(r"\??\"))
+    {
+        if rest.len() >= 4
+            && rest[..3].eq_ignore_ascii_case("UNC")
+            && matches!(rest.as_bytes()[3], b'\\' | b'/')
+        {
+            let sep = rest.as_bytes()[3] as char;
+            return std::borrow::Cow::Owned(format!("{sep}{sep}{}", &rest[4..]));
+        }
+        return std::borrow::Cow::Borrowed(rest);
+    }
+    std::borrow::Cow::Borrowed(raw)
 }
 
 /// Compares a raw `read_link` target string against an expected path string, accounting for
@@ -1331,10 +1364,7 @@ pub fn link_target_matches_str(
         return actual_link_target == expected_target;
     }
     let norm = |s: &str| -> String {
-        let mut stripped = strip_windows_nt_prefix(s).replace('\\', "/");
-        if stripped.len() >= 4 && stripped[..4].eq_ignore_ascii_case("unc/") {
-            stripped = format!("//{}", &stripped[4..]);
-        }
+        let stripped = strip_windows_nt_prefix(s).replace('\\', "/");
         let trimmed = if stripped.len() > 3 && stripped.ends_with('/') {
             stripped.trim_end_matches('/')
         } else {
@@ -1369,9 +1399,9 @@ pub fn junction_or_symlink_points_to(link: &StdPath, expected_target: &StdPath) 
         {
             return true;
         }
-        let actual_clean = StdPath::new(strip_windows_nt_prefix(&actual_s));
+        let actual_clean = strip_windows_nt_prefix(&actual_s);
         match (
-            fs::canonicalize(actual_clean),
+            fs::canonicalize(StdPath::new(actual_clean.as_ref())),
             fs::canonicalize(&abs_expected),
         ) {
             (Ok(ca), Ok(ce)) => {
@@ -1445,13 +1475,16 @@ fn create_windows_junction(target: &StdPath, link: &StdPath) -> io::Result<()> {
         std::env::current_dir()?.join(target)
     };
     let raw_target = abs_target.to_string_lossy().replace('/', "\\");
-    let stripped = raw_target
-        .strip_prefix(r"\\?\")
-        .or_else(|| raw_target.strip_prefix(r"\??\"))
-        .unwrap_or(&raw_target);
-    let subst = format!(r"\??\{}", stripped);
+    let win32_target = strip_windows_nt_prefix(&raw_target);
+    let subst = if let Some(unc_rest) = win32_target.strip_prefix(r"\\") {
+        format!(r"\??\UNC\{unc_rest}")
+    } else {
+        format!(r"\??\{win32_target}")
+    };
     let subst_utf16: Vec<u16> = std::ffi::OsStr::new(&subst).encode_wide().collect();
-    let print_utf16: Vec<u16> = std::ffi::OsStr::new(stripped).encode_wide().collect();
+    let print_utf16: Vec<u16> = std::ffi::OsStr::new(win32_target.as_ref())
+        .encode_wide()
+        .collect();
 
     let subst_bytes = (subst_utf16.len() * 2) as u16;
     let print_offset = subst_bytes + 2;
@@ -1789,7 +1822,7 @@ impl FileSystem for InMemoryFileSystem {
     fn create_directory_and_parents(&self, path: &PathFragment) -> io::Result<()> {
         let segs = path.segments();
         let prefix = &path.path_string()[..path.drive_str_length()];
-        let mut curr = PathFragment::create(prefix);
+        let mut curr = PathFragment::create_already_normalized(prefix);
         self.create_directory(&curr)?;
         for seg in segs {
             curr = curr.get_relative_str(seg);
@@ -2790,14 +2823,48 @@ mod tests {
     #[test]
     fn windows_nt_junction_prefix_and_link_target_matching() {
         assert_eq!(
-            strip_windows_nt_prefix(r"\??\C:\Users\runner\install_base"),
+            strip_windows_nt_prefix(r"\??\C:\Users\runner\install_base").as_ref(),
             r"C:\Users\runner\install_base"
         );
         assert_eq!(
-            strip_windows_nt_prefix(r"\\?\C:\Users\runner\install_base"),
+            strip_windows_nt_prefix(r"\\?\C:\Users\runner\install_base").as_ref(),
             r"C:\Users\runner\install_base"
         );
-        assert_eq!(strip_windows_nt_prefix("/tmp/install"), "/tmp/install");
+        assert_eq!(
+            strip_windows_nt_prefix(r"\\?\UNC\fileserver\share\ws").as_ref(),
+            r"\\fileserver\share\ws"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix(r"\\?\unc\fileserver\share\ws").as_ref(),
+            r"\\fileserver\share\ws"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix(r"\??\UNC\fileserver\share\ws").as_ref(),
+            r"\\fileserver\share\ws"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix(r"\\?\UNC_folder\sub").as_ref(),
+            r"UNC_folder\sub"
+        );
+        assert_eq!(
+            strip_windows_nt_prefix("/tmp/install").as_ref(),
+            "/tmp/install"
+        );
+
+        let unc_frag = PathFragment::create(&strip_windows_nt_prefix(
+            r"\\?\UNC\fileserver\share\repo\sub",
+        ));
+        assert!(unc_frag.is_absolute());
+        assert_eq!(unc_frag.path_string(), "//fileserver/share/repo/sub");
+        assert_eq!(
+            unc_frag.parent_directory().unwrap().path_string(),
+            "//fileserver/share/repo"
+        );
+        assert_eq!(
+            unc_frag.get_relative_str("MODULE.bazel").path_string(),
+            "//fileserver/share/repo/sub/MODULE.bazel"
+        );
+        assert!(unc_frag.starts_with(&PathFragment::create(r"\\fileserver\share\repo")));
 
         assert!(link_target_matches_str(
             r"\??\C:\Users\Runner\AppData\Local\zel\install\abc123",
@@ -2811,6 +2878,11 @@ mod tests {
         ));
         assert!(link_target_matches_str(
             r"\??\UNC\fileserver\share\install",
+            r"\\fileserver\share\install\",
+            true,
+        ));
+        assert!(link_target_matches_str(
+            r"\\?\UNC\fileserver\share\install",
             r"\\fileserver\share\install\",
             true,
         ));

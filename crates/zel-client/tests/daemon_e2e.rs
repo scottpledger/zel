@@ -171,7 +171,47 @@ fn shutdown_command_stops_server_and_removes_status_files() {
     // A following command transparently starts a fresh server.
     let o = e.run(&[], &["version"]);
     assert_eq!(o.status.code(), Some(0));
-    assert_ne!(e.pid(), Some(pid));
+    let pid2 = e.pid().unwrap();
+    assert_ne!(pid2, pid);
+
+    // Post-upgrade `shutdown` (mismatched `install_base` / `install_md5`): kills the running
+    // server, updates `<output_base>/install` without deleting the old `install_base` contents,
+    // and exits 0 without spawning a throwaway replacement daemon.
+    let old_sentinel = e.root.join("install/sentinel.txt");
+    fs::write(&old_sentinel, b"keep-install-base").unwrap();
+    let new_ib = e.root.join("install_upgraded");
+    let mut shut_upgrade = e.cmd(
+        &[&format!("--install_base={}", new_ib.display())],
+        &["shutdown"],
+    );
+    shut_upgrade.env(
+        "ZEL_INSTALL_MD5_OVERRIDE",
+        "e2etestinstallmd5999999999999999",
+    );
+    let out_upgrade = shut_upgrade.output().unwrap();
+    assert_eq!(
+        out_upgrade.status.code(),
+        Some(0),
+        "{}",
+        s(&out_upgrade.stderr)
+    );
+    assert!(
+        wait_dead(pid2, 10),
+        "old server must be killed on upgrade shutdown"
+    );
+    assert!(
+        !e.ob.join("server/server.pid.txt").exists(),
+        "upgrade shutdown must not leave a throwaway server running"
+    );
+    assert_eq!(
+        fs::read(&old_sentinel).unwrap(),
+        b"keep-install-base",
+        "old install_base contents must survive install link replacement"
+    );
+    assert!(zel_vfs::junction_or_symlink_points_to(
+        &e.ob.join("install"),
+        &new_ib
+    ));
 }
 
 #[test]

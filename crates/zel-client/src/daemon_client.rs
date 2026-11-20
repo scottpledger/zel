@@ -1009,8 +1009,7 @@ pub fn ensure_correct_running_version(
         }
         if !link_ok {
             let _ = fs::create_dir_all(Path::new(spec.output_base));
-            let _ = fs::remove_file(&link);
-            let _ = fs::remove_dir_all(&link);
+            zel_vfs::unlink_path_for_write(&link);
             #[cfg(unix)]
             std::os::unix::fs::symlink(ib, &link).map_err(|e| {
                 (
@@ -1113,9 +1112,6 @@ pub fn connect_or_start_for_command(
                 spec.startup.block_for_lock,
                 spec.connect_timeout(),
             );
-            if is_shutdown {
-                return Ok(None);
-            }
         } else {
             connected = Some(srv);
         }
@@ -1136,6 +1132,9 @@ pub fn connect_or_start_for_command(
     if let Some(mut srv) = connected {
         srv.restart_reason = restart_reason;
         return Ok(Some(srv));
+    }
+    if is_shutdown {
+        return Ok(None);
     }
     let mut srv = start_server(spec, &new_args, err)?;
     srv.restart_reason = restart_reason;
@@ -1578,5 +1577,57 @@ mod tests {
             "--client_debug=1".to_string(),
         ];
         assert!(are_startup_options_different(&a, &b).is_some());
+    }
+
+    #[test]
+    fn ensure_correct_running_version_replaces_install_link_without_deleting_old_install_base() {
+        let dir =
+            std::env::temp_dir().join(format!("zel-install-link-replace-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let ob = dir.join("ob");
+        let old_ib = dir.join("install_old");
+        let new_ib = dir.join("install_new");
+        fs::create_dir_all(&ob).unwrap();
+        fs::create_dir_all(old_ib.join("embedded_tools")).unwrap();
+        fs::write(old_ib.join("install_base_key"), "oldmd5").unwrap();
+        fs::write(old_ib.join("embedded_tools/keep.txt"), b"must-survive").unwrap();
+
+        let install_link = ob.join("install");
+        zel_vfs::create_directory_junction_or_symlink(&old_ib, &install_link).unwrap();
+        assert!(zel_vfs::junction_or_symlink_points_to(
+            &install_link,
+            &old_ib
+        ));
+
+        let startup = StartupOptions::default();
+        let ob_str = ob.to_string_lossy().into_owned();
+        let new_ib_str = new_ib.to_string_lossy().into_owned();
+        let spec = ServerSpec {
+            exe: std::path::PathBuf::from("zel"),
+            startup: &startup,
+            workspace_dir: "",
+            output_base: &ob_str,
+            install_base: &new_ib_str,
+            output_user_root: &ob_str,
+            install_md5: "newmd5",
+        };
+        let mut connected = None;
+        ensure_correct_running_version(&spec, &mut connected).unwrap();
+
+        assert!(zel_vfs::junction_or_symlink_points_to(
+            &install_link,
+            &new_ib
+        ));
+        assert_eq!(
+            fs::read(old_ib.join("embedded_tools/keep.txt")).unwrap(),
+            b"must-survive",
+            "replacing a stale install link/junction must never delete old install_base contents"
+        );
+        assert_eq!(
+            fs::read_to_string(new_ib.join("install_base_key")).unwrap(),
+            "newmd5"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

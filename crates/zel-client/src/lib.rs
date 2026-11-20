@@ -44,6 +44,21 @@ const WORKSPACE_BOUNDARY_FILES: &[&str] = &[
     "WORKSPACE",
 ];
 
+/// Converts a canonicalized `Path` into a Win32/POSIX path string, turning Windows extended-length
+/// drive paths (`\\?\C:\...`) into `C:\...` and extended-length UNC paths (`\\?\UNC\server\share\...`)
+/// back into `\\server\share\...`.
+pub fn normalize_canonical_path(path: &std::path::Path) -> String {
+    let raw = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        zel_vfs::strip_windows_nt_prefix(&raw).into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        raw.into_owned()
+    }
+}
+
 const BASIL_LEAF: &str = "\
                                           ,
                                        ,:' `..;
@@ -727,12 +742,7 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
             let rc_file = ws.get_relative_str(".bazelrc");
             if fs.exists(&rc_file, false) {
                 let real_rc = std::fs::canonicalize(rc_file.path_string())
-                    .map(|p| {
-                        let s = p.to_string_lossy();
-                        #[cfg(windows)]
-                        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-                        std::path::PathBuf::from(s.to_string())
-                    })
+                    .map(|p| std::path::PathBuf::from(normalize_canonical_path(&p)))
                     .unwrap_or_else(|_| std::path::PathBuf::from(rc_file.path_string()));
                 let _ = writeln!(
                     stderr_writer,
@@ -860,11 +870,7 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     }
     // `blaze_util::MakeCanonical(output_base.c_str())` after `PrepareDirectories`.
     let output_base = std::fs::canonicalize(raw_output_base.path_string())
-        .map(|c| {
-            let raw = c.to_string_lossy();
-            let s: &str = zel_vfs::strip_windows_nt_prefix(&raw);
-            PathFragment::create(s)
-        })
+        .map(|c| PathFragment::create(&normalize_canonical_path(&c)))
         .unwrap_or(raw_output_base);
 
     // `RepositoryOptions`/`BazelRepositoryModule`: the default repo contents cache
@@ -881,12 +887,7 @@ pub fn execute_cli_with_exec<O: Write + Send, E: Write + Send>(
     {
         let real = |p: &str| {
             std::fs::canonicalize(p)
-                .map(|c| {
-                    let s = c.to_string_lossy();
-                    #[cfg(windows)]
-                    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-                    s.to_string()
-                })
+                .map(|c| normalize_canonical_path(&c))
                 .unwrap_or_else(|_| p.to_string())
         };
         let cache = format!(
@@ -1656,5 +1657,31 @@ mod tests {
             .is_symlink());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn windows_canonical_paths_preserve_unc_shares_for_workspace_discovery() {
+        let drive = zel_vfs::strip_windows_nt_prefix(r"\\?\C:\Users\runner\ws\pkg");
+        assert_eq!(drive.as_ref(), r"C:\Users\runner\ws\pkg");
+        let drive_frag = PathFragment::create(&drive);
+        assert!(drive_frag.is_absolute());
+        assert_eq!(drive_frag.path_string(), "C:/Users/runner/ws/pkg");
+
+        let unc = zel_vfs::strip_windows_nt_prefix(r"\\?\UNC\fileserver\share\team\ws\sub");
+        assert_eq!(unc.as_ref(), r"\\fileserver\share\team\ws\sub");
+        let unc_lower = zel_vfs::strip_windows_nt_prefix(r"\\?\unc\fileserver\share\team\ws\sub");
+        assert_eq!(unc_lower.as_ref(), r"\\fileserver\share\team\ws\sub");
+
+        let fs = zel_vfs::InMemoryFileSystem::default();
+        let ws_root = PathFragment::create(r"\\fileserver\share\team\ws");
+        fs.create_directory_and_parents(&ws_root.get_relative_str("sub"))
+            .unwrap();
+        fs.write_file(
+            &ws_root.get_relative_str("MODULE.bazel"),
+            b"module(name = \"unc_ws\")\n",
+        )
+        .unwrap();
+        let unc_cwd = PathFragment::create(&unc);
+        assert_eq!(find_workspace_root_opt(&fs, &unc_cwd), Some(ws_root));
     }
 }

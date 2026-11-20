@@ -14,7 +14,7 @@
 
 use std::io;
 use std::sync::Arc;
-use zel_client::{execute_cli_with_exec, perform_exec_request};
+use zel_client::{execute_cli_with_exec, normalize_canonical_path, perform_exec_request};
 use zel_vfs::{LocalFileSystem, PathFragment};
 
 fn canonical_cwd() -> String {
@@ -22,10 +22,7 @@ fn canonical_cwd() -> String {
         return "/".to_string();
     };
     let resolved = std::fs::canonicalize(&cur).unwrap_or(cur);
-    let s = resolved.to_string_lossy();
-    #[cfg(windows)]
-    let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-    s.to_string()
+    normalize_canonical_path(&resolved)
 }
 
 fn main() {

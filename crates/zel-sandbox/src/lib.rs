@@ -639,7 +639,7 @@ pub fn sync_symlink_tree(
     fn ensure_symlink(link: &Path, target: &PathFragment) -> io::Result<()> {
         if let Ok(existing) = std::fs::read_link(link) {
             let raw = existing.to_string_lossy();
-            let existing_frag = PathFragment::create(zel_vfs::strip_windows_nt_prefix(&raw));
+            let existing_frag = PathFragment::create(&zel_vfs::strip_windows_nt_prefix(&raw));
             let target_frag = PathFragment::create(target.path_string());
             if existing_frag == target_frag {
                 return Ok(());

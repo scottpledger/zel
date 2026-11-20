@@ -34,14 +34,8 @@ impl Env {
     fn new(name: &str) -> Env {
         let base = std::fs::canonicalize(std::env::temp_dir()).unwrap();
         #[cfg(windows)]
-        let base = {
-            let s = base.to_string_lossy();
-            if let Some(rest) = s.strip_prefix(r"\\?\") {
-                PathBuf::from(rest)
-            } else {
-                base
-            }
-        };
+        let base =
+            PathBuf::from(zel_vfs::strip_windows_nt_prefix(&base.to_string_lossy()).into_owned());
         let root = base.join(format!("zel-cmd-e2e-{name}-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
         let ws = root.join("ws");

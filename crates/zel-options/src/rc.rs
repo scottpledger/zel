@@ -473,8 +473,8 @@ fn canonicalize_rc_path(fs: &dyn FileSystem, rc_path: &PathFragment) -> String {
     if let Ok(p) = std::fs::canonicalize(rc_path.path_string()) {
         let s = p.to_string_lossy();
         #[cfg(windows)]
-        let s = s.strip_prefix(r"\\?\").unwrap_or(&s);
-        return s.to_string();
+        let s = zel_vfs::strip_windows_nt_prefix(&s);
+        return s.into_owned();
     }
     if let Ok(resolved) = zel_vfs::resolve_symlink_chain(fs, rc_path) {
         return resolved.real_path.path_string().to_string();
