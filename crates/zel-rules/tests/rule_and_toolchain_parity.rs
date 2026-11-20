@@ -2085,7 +2085,15 @@ cc_win_only_probe(
     let android_ct = analyze_with_exec(&["//plats:android_box"], None, "//:pic_asm").unwrap();
     assert_eq!(get_exec_os(&android_ct), "UNKNOWN");
 
-    if !cfg!(windows) {
+    if cfg!(windows) {
+        let host_fallback_ct = analyze_with_exec(
+            &["//plats:windows_darwin_unconstrained"],
+            None,
+            "//:win_exts",
+        )
+        .unwrap();
+        assert_eq!(get_exec_os(&host_fallback_ct), "WINDOWS");
+    } else {
         let host_fallback_ct = analyze_with_exec(
             &["//plats:windows_darwin_unconstrained"],
             None,

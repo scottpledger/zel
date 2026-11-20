@@ -1559,10 +1559,13 @@ fn java_javacopt_tokenization_and_optimizer_validation_cli_parity() {
     w.write(
         "p/defs.bzl",
         r#"
+FlagsInfo = provider(fields = ["text"])
+
 def _dump_impl(ctx):
+    text = "|".join(ctx.fragments.java.default_javac_flags)
     out = ctx.actions.declare_file(ctx.label.name + ".txt")
-    ctx.actions.write(out, "|".join(ctx.fragments.java.default_javac_flags))
-    return [DefaultInfo(files = depset([out]))]
+    ctx.actions.write(out, text)
+    return [DefaultInfo(files = depset([out])), FlagsInfo(text = text)]
 
 dump_javac = rule(
     implementation = _dump_impl,
@@ -1571,18 +1574,13 @@ dump_javac = rule(
 
 def _exec_wrap_impl(ctx):
     out = ctx.actions.declare_file(ctx.label.name + ".txt")
-    ctx.actions.run_shell(
-        inputs = ctx.files.tool,
-        outputs = [out],
-        command = 'cp "$1" "$2"',
-        arguments = [ctx.files.tool[0].path, out.path],
-    )
+    ctx.actions.write(out, ctx.attr.tool[FlagsInfo].text)
     return [DefaultInfo(files = depset([out]))]
 
 exec_wrap = rule(
     implementation = _exec_wrap_impl,
     attrs = {
-        "tool": attr.label(cfg = "exec"),
+        "tool": attr.label(cfg = "exec", providers = [FlagsInfo]),
     },
 )
 "#,
