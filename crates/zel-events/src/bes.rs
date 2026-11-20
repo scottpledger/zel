@@ -444,7 +444,7 @@ impl ByteStreamBuildEventArtifactUploader {
 
     fn convert_file_msg(&self, f: &mut Msg, is_build_tool_logs: bool) {
         let uri = f.get_str("uri").to_string();
-        let Some(local_path) = decode_file_uri(&uri) else {
+        let Some(local_path) = crate::bep::file_uri_to_local_path(&uri) else {
             return;
         };
         let key = normalize_local_path_key(&local_path);
@@ -509,15 +509,8 @@ impl ByteStreamBuildEventArtifactUploader {
     }
 }
 
-fn has_windows_drive_prefix(s: &str) -> bool {
-    let b = s.as_bytes();
-    b.len() >= 2
-        && b[0].is_ascii_alphabetic()
-        && b[1] == b':'
-        && (b.len() == 2 || b[2] == b'/' || b[2] == b'\\')
-}
-
 fn normalize_local_path_key(path: &str) -> String {
+    use crate::bep::has_windows_drive_prefix;
     let replaced = path.replace('\\', "/");
     let trimmed = if replaced.starts_with('/') && has_windows_drive_prefix(&replaced[1..]) {
         &replaced[1..]
@@ -533,55 +526,6 @@ fn normalize_local_path_key(path: &str) -> String {
     }
 }
 
-fn decode_file_uri(uri: &str) -> Option<String> {
-    decode_file_uri_for_os(uri, cfg!(windows))
-}
-
-fn decode_file_uri_for_os(uri: &str, windows: bool) -> Option<String> {
-    let mut rest = uri.strip_prefix("file://")?;
-    if rest
-        .as_bytes()
-        .get(..10)
-        .is_some_and(|p| p.eq_ignore_ascii_case(b"localhost/"))
-    {
-        rest = &rest[9..];
-    }
-    let bytes = rest.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
-                out.push((hi << 4) | lo);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    let decoded = String::from_utf8(out).ok()?;
-    if decoded.starts_with('/') && has_windows_drive_prefix(&decoded[1..]) {
-        return Some(decoded[1..].to_string());
-    }
-    if !decoded.starts_with('/') && !has_windows_drive_prefix(&decoded) && !decoded.is_empty() {
-        if windows {
-            return Some(format!("\\\\{}", decoded.replace('/', "\\")));
-        }
-        return Some(format!("//{decoded}"));
-    }
-    Some(decoded)
-}
-
-fn hex_val(b: u8) -> Option<u8> {
-    match b {
-        b'0'..=b'9' => Some(b - b'0'),
-        b'a'..=b'f' => Some(b - b'a' + 10),
-        b'A'..=b'F' => Some(b - b'A' + 10),
-        _ => None,
-    }
-}
-
 /// Rewrites `build_event_stream.File` entries inside `ev` according to `path_conversion` and an
 /// optional [`ByteStreamBuildEventArtifactUploader`].
 pub fn rewrite_bep_event(
@@ -593,7 +537,7 @@ pub fn rewrite_bep_event(
     let transform_file = |f: &mut Msg, is_tool_logs: bool| {
         if !path_conversion {
             let uri = f.get_str("uri").to_string();
-            if let Some(local) = decode_file_uri(&uri) {
+            if let Some(local) = crate::bep::file_uri_to_local_path(&uri) {
                 if let Ok(md) = std::fs::symlink_metadata(&local) {
                     if md.file_type().is_dir() || md.file_type().is_symlink() {
                         f.clear("uri");
@@ -2296,7 +2240,7 @@ mod tests {
 
     #[test]
     fn windows_and_unc_file_uris_decode_and_rewrite_to_bytestream() {
-        use crate::bep::file_uri_for_os;
+        use crate::bep::{file_uri_for_os, file_uri_to_local_path_for_os};
 
         // `FileUriPathConverter` Windows encoding (`C:\Temp\Foo Bar.txt` -> `file:///C:/Temp/Foo%20Bar.txt`)
         // and UNC encoding (`\\server\share\Foo Bar.txt` -> `file://server/share/Foo%20Bar.txt`).
@@ -2309,30 +2253,31 @@ mod tests {
             "file://server/share/Foo%20Bar.txt"
         );
 
-        // `decode_file_uri_for_os` handles percent-encoded backslashes (`%5C`), forward slashes,
+        // `file_uri_to_local_path_for_os` handles percent-encoded backslashes (`%5C`), forward slashes,
         // `localhost` authority, and UNC authorities.
         let encoded_bs =
             "file:///C:%5CUsers%5CRUNNER~1%5CAppData%5CLocal%5CTemp%5Czel-bes-up-2192%5Cout.bin";
         let forward_slash = "file:///C:/Users/RUNNER~1/AppData/Local/Temp/zel-bes-up-2192/out.bin";
         assert_eq!(
-            decode_file_uri_for_os(encoded_bs, true).as_deref(),
+            file_uri_to_local_path_for_os(encoded_bs, true).as_deref(),
             Some(r"C:\Users\RUNNER~1\AppData\Local\Temp\zel-bes-up-2192\out.bin")
         );
         assert_eq!(
-            decode_file_uri_for_os(forward_slash, true).as_deref(),
+            file_uri_to_local_path_for_os(forward_slash, true).as_deref(),
             Some("C:/Users/RUNNER~1/AppData/Local/Temp/zel-bes-up-2192/out.bin")
         );
         assert_eq!(
-            decode_file_uri_for_os("file://localhost/C:/Temp/Foo%20Bar.txt", true).as_deref(),
+            file_uri_to_local_path_for_os("file://localhost/C:/Temp/Foo%20Bar.txt", true)
+                .as_deref(),
             Some("C:/Temp/Foo Bar.txt")
         );
         assert_eq!(
-            decode_file_uri_for_os("file://server/share/Foo%20Bar.txt", true).as_deref(),
+            file_uri_to_local_path_for_os("file://server/share/Foo%20Bar.txt", true).as_deref(),
             Some(r"\\server\share\Foo Bar.txt")
         );
 
-        // Rewriting BEP `File` messages works across both `file:///C:%5C...` and `file:///C:/...`
-        // (and case-insensitive drive letters) even when exercised on a non-Windows host.
+        // Rewriting BEP `File` messages works across `file:///C:%5C...`, `file:///C:/...`,
+        // case-insensitive drive letters, and UNC `file://server/share/...` URIs even on Linux.
         let uploader = ByteStreamBuildEventArtifactUploader::new(
             None,
             None,
@@ -2347,12 +2292,20 @@ mod tests {
             r"c:\Users\RUNNER~1\AppData\Local\Temp\zel-bes-up-2192\out.bin".to_string(),
             expected_d.clone(),
         );
+        uploader.register_remote_artifact(
+            r"\\server\share\Foo Bar.txt".to_string(),
+            expected_d.clone(),
+        );
         let expected_bs = format!(
             "bytestream://cas.example:443/main/blobs/{}/{}",
             expected_d.hash, expected_d.size_bytes
         );
 
-        for candidate_uri in [encoded_bs, forward_slash] {
+        for candidate_uri in [
+            encoded_bs,
+            forward_slash,
+            "file://server/share/Foo%20Bar.txt",
+        ] {
             let mut f = Msg::new("build_event_stream.File");
             f.set_str("name", "out.bin");
             f.set_str("uri", candidate_uri);

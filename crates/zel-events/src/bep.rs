@@ -359,33 +359,49 @@ pub fn serialize_event_with_options(
     }
 }
 
-fn has_windows_drive_prefix(s: &str) -> bool {
+pub(crate) fn has_windows_drive_prefix(s: &str) -> bool {
     let b = s.as_bytes();
-    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'/' || b[2] == b'\\')
+    b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && (b.len() == 2 || b[2] == b'/' || b[2] == b'\\')
 }
 
-/// Decodes a `file://` URI back into a raw filesystem path.
+fn hex_nibble(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Decodes a `file://` URI back into a local filesystem path for the current host OS.
 pub fn file_uri_to_local_path(uri: &str) -> Option<String> {
-    let rest = uri.strip_prefix("file://")?;
-    let rest = if rest
+    file_uri_to_local_path_for_os(uri, cfg!(windows))
+}
+
+/// Decodes a `file://` URI into a local filesystem path under Unix (`windows == false`) or
+/// Windows (`windows == true`) path conventions (`FileUriPathConverter` / `Paths.get(URI)`),
+/// handling `file://localhost/...`, Windows drive prefixes (`file:///C:/...`, `file://C:/...`),
+/// Windows UNC authorities (`file://server/share/...` and `file:////server/share/...` ->
+/// `\\server\share\...`), and percent-encoding.
+pub fn file_uri_to_local_path_for_os(uri: &str, windows: bool) -> Option<String> {
+    let mut rest = uri.strip_prefix("file://")?;
+    if rest
         .as_bytes()
         .get(..10)
         .is_some_and(|p| p.eq_ignore_ascii_case(b"localhost/"))
     {
-        &rest[9..]
-    } else {
-        rest
-    };
+        rest = &rest[9..];
+    }
     let bytes = rest.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(hi), Some(lo)) = (
-                (bytes[i + 1] as char).to_digit(16),
-                (bytes[i + 2] as char).to_digit(16),
-            ) {
-                out.push(((hi << 4) | lo) as u8);
+            if let (Some(hi), Some(lo)) = (hex_nibble(bytes[i + 1]), hex_nibble(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
                 i += 3;
                 continue;
             }
@@ -395,10 +411,18 @@ pub fn file_uri_to_local_path(uri: &str) -> Option<String> {
     }
     let decoded = String::from_utf8(out).ok()?;
     if decoded.starts_with('/') && has_windows_drive_prefix(&decoded[1..]) {
-        Some(decoded[1..].to_string())
-    } else {
-        Some(decoded)
+        return Some(decoded[1..].to_string());
     }
+    if !decoded.starts_with('/') && !has_windows_drive_prefix(&decoded) && !decoded.is_empty() {
+        if windows {
+            return Some(format!(r"\\{}", decoded.replace('/', r"\")));
+        }
+        return Some(format!("//{decoded}"));
+    }
+    if windows && decoded.starts_with("//") && !decoded.starts_with("///") {
+        return Some(decoded.replace('/', r"\"));
+    }
+    Some(decoded)
 }
 
 fn convert_file_msg(f: &Msg, path_conversion: bool, bytestream_prefix: Option<&str>) -> Msg {
@@ -2096,14 +2120,22 @@ pub(crate) fn file_uri_for_os(path: &str, windows: bool) -> String {
     }
     let normalized;
     let is_unc;
-    let p_in = if let Some(unc) = path.strip_prefix(r"\\?\UNC\") {
-        normalized = format!("//{}", unc.replace('\\', "/"));
-        is_unc = true;
-        normalized.as_str()
-    } else if let Some(verbatim) = path.strip_prefix(r"\\?\") {
-        normalized = verbatim.replace('\\', "/");
-        is_unc = false;
-        normalized.as_str()
+    let win_nt_prefix = path
+        .strip_prefix(r"\\?\")
+        .or_else(|| path.strip_prefix(r"\??\"));
+    let p_in = if let Some(rest) = win_nt_prefix {
+        if rest.len() >= 4
+            && rest.as_bytes()[..3].eq_ignore_ascii_case(b"UNC")
+            && matches!(rest.as_bytes()[3], b'\\' | b'/')
+        {
+            normalized = format!("//{}", rest[4..].replace('\\', "/"));
+            is_unc = true;
+            normalized.as_str()
+        } else {
+            normalized = rest.replace('\\', "/");
+            is_unc = false;
+            normalized.as_str()
+        }
     } else if windows || has_windows_drive_prefix(path) {
         normalized = path.replace('\\', "/");
         is_unc = windows && normalized.starts_with("//") && !normalized.starts_with("///");
@@ -3361,6 +3393,52 @@ mod tests {
         assert_eq!(
             file_uri(r"\\?\C:\Users\runner\out bin.txt"),
             "file:///C:/Users/runner/out%20bin.txt"
+        );
+        assert_eq!(
+            file_uri(r"\??\C:\Users\runner\out bin.txt"),
+            "file:///C:/Users/runner/out%20bin.txt"
+        );
+
+        // Cross-platform Windows (`windows == true`) round-trip across UNC paths, verbatim/NT UNC
+        // prefixes, `file://localhost/C:/...`, and drive paths (`C:\dir\f.txt`).
+        let unc_uri = file_uri_for_os(r"\\server\share\dir\f a.txt", true);
+        assert_eq!(unc_uri, "file://server/share/dir/f%20a.txt");
+        assert_eq!(
+            file_uri_to_local_path_for_os(&unc_uri, true).as_deref(),
+            Some(r"\\server\share\dir\f a.txt")
+        );
+        for nt_unc in [
+            r"\\?\UNC\server\share\dir\f a.txt",
+            r"\??\UNC\server\share\dir\f a.txt",
+        ] {
+            let encoded = file_uri_for_os(nt_unc, true);
+            assert_eq!(encoded, "file://server/share/dir/f%20a.txt");
+            assert_eq!(
+                file_uri_to_local_path_for_os(&encoded, true).as_deref(),
+                Some(r"\\server\share\dir\f a.txt")
+            );
+        }
+        assert_eq!(
+            file_uri_to_local_path_for_os("file:////server/share/dir/f%20a.txt", true).as_deref(),
+            Some(r"\\server\share\dir\f a.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path_for_os("file://server/share/dir/f%20a.txt", false).as_deref(),
+            Some("//server/share/dir/f a.txt")
+        );
+        let drive_uri = file_uri_for_os(r"C:\dir\f.txt", true);
+        assert_eq!(drive_uri, "file:///C:/dir/f.txt");
+        assert_eq!(
+            file_uri_to_local_path_for_os(&drive_uri, true).as_deref(),
+            Some("C:/dir/f.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path_for_os("file://C:/dir/f.txt", true).as_deref(),
+            Some("C:/dir/f.txt")
+        );
+        assert_eq!(
+            file_uri_to_local_path_for_os("file://localhost/C:/dir/f%20a.txt", true).as_deref(),
+            Some("C:/dir/f a.txt")
         );
 
         // `file_uri_to_local_path` strips the leading `/` before a Windows drive prefix for both
