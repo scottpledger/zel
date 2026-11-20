@@ -227,9 +227,9 @@ impl BlazeRuntime {
         let cwd = self.command_cwd(&parsed);
         let allow_empty = cmd_kind == "aquery"
             && (parsed.get_bool("skyframe_state").unwrap_or(false)
-                || parsed
-                    .get_str("universe_scope")
-                    .is_some_and(|s| !s.trim().is_empty()));
+                || opt_list(&parsed, "universe_scope")
+                    .iter()
+                    .any(|s| !s.trim().is_empty()));
         let expr_str = match read_query(&parsed, &cwd, cmd_kind, allow_empty) {
             Ok(q) => q,
             Err(_) => {
