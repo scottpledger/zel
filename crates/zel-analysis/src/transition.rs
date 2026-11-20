@@ -866,9 +866,14 @@ pub fn apply_transition_with_resolver(
     }
 }
 
-/// Applies a (possibly split) Starlark transition. Non-split transitions return a single entry
-/// with key `None`; split transitions (`{"key": {setting: value, ...}, ...}`) return one entry per
-/// key in dict order (`ctx.split_attr` is keyed by these).
+/// Applies a (possibly split) transition. Native non-split transitions (`config.exec()`,
+/// `config.target()`, `config.none()`, feature-flag transitions) return a single entry with key
+/// `None`. Starlark transitions (`transition(...)`, `analysis_test_transition(...)`) always behave
+/// as split-capable transitions in Bazel (`StarlarkAttributeTransitionProvider.isSplit() == true`):
+/// 1:1 outputs return a single entry with key `Some(String::new())` (Bazel's
+/// `PATCH_TRANSITION_KEY`, mapped to `None` in `ctx.split_attr` and list-wrapped in `ctx.attr`),
+/// and split outputs (`{"key": {setting: value, ...}, ...}`) return one entry per key in dict
+/// order.
 pub fn apply_transition_split(
     trans: &Value,
     cfg: &BuildConfigurationKey,
@@ -1143,7 +1148,7 @@ pub fn apply_transition_split_with_exec_ctx(
         .call_value(imp.clone(), args, BTreeMap::new())
         .map_err(|e| e.0)?;
     if matches!(r, Value::None) {
-        return Ok(vec![(None, cfg.clone())]);
+        return Ok(vec![(Some(String::new()), cfg.clone())]);
     }
     let apply_one = |entries: Vec<(Value, Value)>| -> Result<BuildConfigurationKey, String> {
         if entries.is_empty() && canonical_outputs.is_empty() {
@@ -1213,7 +1218,7 @@ pub fn apply_transition_split_with_exec_ctx(
         Value::Dict(d) => {
             let items = d.lock().unwrap().items();
             if items.is_empty() {
-                return Ok(vec![(None, cfg.clone())]);
+                return Ok(vec![(Some(String::new()), cfg.clone())]);
             }
             let is_split =
                 !items.is_empty() && items.iter().all(|(_, v)| matches!(v, Value::Dict(_)));
@@ -1234,7 +1239,7 @@ pub fn apply_transition_split_with_exec_ctx(
                 }
                 Ok(res)
             } else {
-                Ok(vec![(None, apply_one(items)?)])
+                Ok(vec![(Some(String::new()), apply_one(items)?)])
             }
         }
         other => Err(format!(
@@ -1323,5 +1328,102 @@ mod tests {
             compose_split_keys(Some("stub_split0"), Some("stub_split1".into())),
             Some("stub_split0,stub_split1".into())
         );
+    }
+
+    fn eval_fn(src: &str, name: &str) -> Value {
+        let mut ctx = EvalContext::default();
+        ctx.eval_str(src).unwrap();
+        ctx.globals.get(name).unwrap().clone()
+    }
+
+    fn starlark_transition(imp_src: &str, outputs: &[&str]) -> Value {
+        let imp = eval_fn(imp_src, "_impl");
+        let mut f = BTreeMap::new();
+        f.insert("_transition".into(), Value::Bool(true));
+        f.insert("implementation".into(), imp);
+        f.insert("inputs".into(), to_list_value(Vec::new()));
+        f.insert(
+            "outputs".into(),
+            to_list_value(outputs.iter().map(|s| (*s).to_string()).collect()),
+        );
+        Value::Struct(std::sync::Arc::new(zel_starlark::StructValue::new(f)))
+    }
+
+    fn native_transition(kind: &str) -> Value {
+        let mut f = BTreeMap::new();
+        f.insert("_build_setting".into(), Value::String(kind.into()));
+        Value::Struct(std::sync::Arc::new(zel_starlark::StructValue::new(f)))
+    }
+
+    fn composed_transition(steps: Vec<Value>) -> Value {
+        let mut f = BTreeMap::new();
+        f.insert("_transition".into(), Value::Bool(true));
+        f.insert(
+            "_composed_transitions".into(),
+            Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+                zel_starlark::StarlarkList::new(steps),
+            ))),
+        );
+        Value::Struct(std::sync::Arc::new(zel_starlark::StructValue::new(f)))
+    }
+
+    #[test]
+    fn starlark_1to1_and_composed_transitions_use_patch_key_while_native_stays_none() {
+        let base = BuildConfigurationKey::target("k8", "fastbuild");
+
+        let t_1to1 = starlark_transition(
+            "def _impl(s, a):\n  return {'//command_line_option:compilation_mode': 'opt'}\n",
+            &["//command_line_option:compilation_mode"],
+        );
+        let res = apply_transition_split(&t_1to1, &base, None).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].0.as_deref(), Some(""));
+        assert_eq!(res[0].1.compilation_mode, "opt");
+
+        let t_noop = starlark_transition("def _impl(s, a):\n  return {}\n", &[]);
+        let res = apply_transition_split(&t_noop, &base, None).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].0.as_deref(), Some(""));
+
+        let t_none = starlark_transition("def _impl(s, a):\n  return None\n", &[]);
+        let res = apply_transition_split(&t_none, &base, None).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].0.as_deref(), Some(""));
+
+        let t_split = starlark_transition(
+            "def _impl(s, a):\n  return {'a': {'//command_line_option:compilation_mode': 'opt'}, 'b': {'//command_line_option:compilation_mode': 'dbg'}}\n",
+            &["//command_line_option:compilation_mode"],
+        );
+        let res = apply_transition_split(&t_split, &base, None).unwrap();
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].0.as_deref(), Some("a"));
+        assert_eq!(res[1].0.as_deref(), Some("b"));
+
+        for kind in ["exec", "target", "none"] {
+            let native = native_transition(kind);
+            let res = apply_transition_split(&native, &base, None).unwrap();
+            assert_eq!(res.len(), 1);
+            assert_eq!(res[0].0, None, "native {kind} must stay non-split");
+        }
+
+        let native_only =
+            composed_transition(vec![native_transition("target"), native_transition("exec")]);
+        let res = apply_transition_split(&native_only, &base, None).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].0, None);
+        assert!(res[0].1.is_exec);
+
+        let starlark_then_native =
+            composed_transition(vec![t_1to1.clone(), native_transition("exec")]);
+        let res = apply_transition_split(&starlark_then_native, &base, None).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].0.as_deref(), Some(""));
+        assert!(res[0].1.is_exec);
+
+        let native_then_starlark = composed_transition(vec![native_transition("exec"), t_1to1]);
+        let res = apply_transition_split(&native_then_starlark, &base, None).unwrap();
+        assert_eq!(res.len(), 1);
+        assert_eq!(res[0].0.as_deref(), Some(""));
+        assert_eq!(res[0].1.compilation_mode, "opt");
     }
 }

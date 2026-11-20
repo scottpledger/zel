@@ -104,7 +104,8 @@ fn attr_to_value(
     if cfgs.len() == 1 && cfgs[0].0.is_none() {
         return attr_to_value_in(attr, av, rule, cfg, &cfgs[0].1, inputs, pkg_dir, out_root, attrs_for_transition, hook);
     }
-    // Split transition: one dependency set per key.
+    // Split or Starlark attribute transition: one dependency set per key (`None` for 1:1
+    // `PATCH_TRANSITION_KEY` entries). `ctx.attr.<name>` is list-wrapped for `attr.label`.
     let mut deps: Vec<Arc<ConfiguredTarget>> = Vec::new();
     let mut flat: Vec<Value> = Vec::new();
     let mut flat_dict: Vec<(Value, Value)> = Vec::new();
