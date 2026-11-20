@@ -47,6 +47,8 @@ pub struct AspectDef {
     pub subrules: Vec<Value>,
     pub apply_to_generating_rules: bool,
     pub exec_compatible_with: Vec<String>,
+    /// `exec_groups` declared on `aspect(exec_groups = {...})`.
+    pub exec_groups: Option<Value>,
     /// Canonical label of the `.bzl` file (set when exported).
     pub defined_in: Mutex<String>,
     /// Exported global name (set when the defining module finishes evaluating).

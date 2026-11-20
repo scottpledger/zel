@@ -753,6 +753,8 @@ pub fn analyze_starlark_rule(
     if rc.is_test {
         exec_groups.insert("test".to_string());
     }
+    exec_groups.extend(inputs.exec_group_platforms.keys().cloned());
+    exec_groups.extend(inputs.exec_group_toolchains.keys().cloned());
 
     // 1. Attributes.
     if rc.is_test {
@@ -763,9 +765,15 @@ pub fn analyze_starlark_rule(
                 let _ = inputs.resolver.check_dependency(rule, "$toolchains", &ct);
             }
         }
-        if let Ok(empty_tc) = Label::parse_canonical("@bazel_tools//tools/test:empty_toolchain") {
-            if let Ok(ct) = inputs.resolver.configured_target(&empty_tc, &trimmed) {
-                let _ = inputs.resolver.check_dependency(rule, "[toolchain dependency: test]", &ct);
+        let has_resolved_test_tc = inputs
+            .exec_group_toolchains
+            .get("test")
+            .is_some_and(|m| m.values().any(|v| !matches!(v, Value::None)));
+        if !has_resolved_test_tc {
+            if let Ok(empty_tc) = Label::parse_canonical("@bazel_tools//tools/test:empty_toolchain") {
+                if let Ok(ct) = inputs.resolver.configured_target(&empty_tc, &trimmed) {
+                    let _ = inputs.resolver.check_dependency(rule, "[toolchain dependency: test]", &ct);
+                }
             }
         }
     }
@@ -823,6 +831,7 @@ pub fn analyze_starlark_rule(
                 if let Some(a) = rc.implicit.get(n) {
                     let mut a = a.clone();
                     a.cfg_exec = true;
+                    a.cfg_exec_group = Some("test".to_string());
                     implicit.insert(n.to_string(), a);
                 }
             }
@@ -1583,6 +1592,9 @@ fn finish_target(
     ct.warnings = rule_warnings;
     ct.exec_platform = st.inputs.exec_platform.clone();
     ct.exec_group_platforms = st.inputs.exec_group_platforms.clone();
+    ct.toolchains = st.inputs.toolchains.clone();
+    ct.exec_group_toolchains = st.inputs.exec_group_toolchains.clone();
+    ct.extra_make_variables = st.inputs.extra_make_variables.clone();
     Ok(ct)
 }
 

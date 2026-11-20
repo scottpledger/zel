@@ -5937,3 +5937,623 @@ r = rule(
         "expected missing exec_group error, got: {err}"
     );
 }
+
+#[test]
+fn test_rules_automatically_register_and_resolve_test_exec_group() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let main_root = PathFragment::create("/ws");
+    let bt_root = PathFragment::create("/bt");
+    let plat_root = PathFragment::create("/plat");
+    fs.create_directory_and_parents(&main_root).unwrap();
+    fs.create_directory_and_parents(&bt_root.get_relative_str("tools/test"))
+        .unwrap();
+    fs.create_directory_and_parents(&plat_root.get_relative_str("host"))
+        .unwrap();
+
+    fs.write_file(
+        &plat_root.get_relative_str("host/BUILD"),
+        b"platform(name = \"host\", visibility = [\"//visibility:public\"])\n",
+    )
+    .unwrap();
+    fs.write_file(
+        &bt_root.get_relative_str("tools/test/defs.bzl"),
+        br#"
+def _empty_tc_impl(ctx):
+    return [platform_common.ToolchainInfo()]
+
+empty_tc = rule(implementation = _empty_tc_impl)
+"#,
+    )
+    .unwrap();
+    fs.write_file(
+        &bt_root.get_relative_str("tools/test/BUILD"),
+        br#"
+package(default_visibility = ["//visibility:public"])
+load(":defs.bzl", "empty_tc")
+
+toolchain_type(name = "default_test_toolchain_type")
+empty_tc(name = "empty_toolchain")
+toolchain(
+    name = "default_test_toolchain",
+    toolchain_type = ":default_test_toolchain_type",
+    toolchain = ":empty_toolchain",
+    use_target_platform_constraints = True,
+)
+"#,
+    )
+    .unwrap();
+    fs.write_file(
+        &main_root.get_relative_str("defs.bzl"),
+        br#"
+DepPlatInfo = provider(fields = ["plat", "copt"])
+
+def _patch_impl(settings, attr):
+    return {"//command_line_option:copt": ["-DTEST_EG"]}
+
+patch_t = transition(
+    implementation = _patch_impl,
+    inputs = [],
+    outputs = ["//command_line_option:copt"],
+)
+
+def _tool_impl(ctx):
+    return [DepPlatInfo(
+        plat = str(ctx.fragments.platform.platform),
+        copt = ",".join(ctx.fragments.cpp.copts),
+    )]
+
+tool_target = rule(
+    implementation = _tool_impl,
+    fragments = ["platform", "cpp"],
+)
+
+def _tc_impl(ctx):
+    return [platform_common.ToolchainInfo(marker = ctx.attr.marker)]
+
+marker_tc = rule(implementation = _tc_impl, attrs = {"marker": attr.string()})
+
+def _my_test_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".exe")
+    ctx.actions.write(
+        output = exe,
+        content = "\n".join([
+            "has_test=" + str("test" in ctx.exec_groups),
+            "rule_ep=" + str(ctx.exec_groups["test"].exec_platform),
+            "merger=" + ctx.attr._lcov_merger[DepPlatInfo].plat,
+            "composed=" + ctx.attr._composed_tool[DepPlatInfo].plat + "|" + ctx.attr._composed_tool[DepPlatInfo].copt,
+        ]),
+        is_executable = True,
+    )
+    return [DefaultInfo(executable = exe, files = depset([exe]))]
+
+my_test = rule(
+    implementation = _my_test_impl,
+    test = True,
+    attrs = {
+        "_lcov_merger": attr.label(
+            default = "//:tool",
+            cfg = config.exec("test"),
+        ),
+        "_composed_tool": attr.label(
+            default = "//:tool",
+            cfg = patch_t.and_then(config.exec(exec_group = "test")),
+        ),
+    },
+)
+
+def _override_test_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".exe")
+    tc = ctx.exec_groups["test"].toolchains["//:tt_custom_test"]
+    ctx.actions.write(
+        output = exe,
+        content = str(ctx.exec_groups["test"].exec_platform) + "|" + tc.marker,
+        is_executable = True,
+    )
+    return [DefaultInfo(executable = exe, files = depset([exe]))]
+
+override_test = rule(
+    implementation = _override_test_impl,
+    test = True,
+    exec_groups = {
+        "test": exec_group(toolchains = ["//:tt_custom_test"]),
+    },
+)
+"#,
+    )
+    .unwrap();
+    fs.write_file(&main_root.get_relative_str("lib.rs"), b"fn main() {}\n")
+        .unwrap();
+    fs.write_file(
+        &main_root.get_relative_str("BUILD"),
+        br#"
+load(":defs.bzl", "marker_tc", "my_test", "override_test", "tool_target")
+
+constraint_setting(name = "env_kind")
+constraint_setting(name = "special_kind")
+constraint_value(name = "c_default", constraint_setting = ":env_kind")
+constraint_value(name = "c_target", constraint_setting = ":env_kind")
+constraint_value(name = "c_special", constraint_setting = ":special_kind")
+constraint_value(name = "c_unmatched", constraint_setting = ":env_kind")
+
+platform(name = "default_exec", constraint_values = [":c_default"])
+platform(name = "target_matching_exec", constraint_values = [":c_target"])
+platform(name = "special_exec", constraint_values = [":c_target", ":c_special"])
+platform(name = "unmatched_target", constraint_values = [":c_unmatched"])
+
+toolchain_type(name = "tt_custom_test")
+marker_tc(name = "custom_test_tc_impl", marker = "custom_override")
+toolchain(
+    name = "custom_test_tc",
+    toolchain_type = ":tt_custom_test",
+    toolchain = ":custom_test_tc_impl",
+    exec_compatible_with = [":c_special"],
+)
+
+tool_target(name = "tool")
+my_test(name = "t")
+my_test(
+    name = "t_ecw",
+    exec_group_compatible_with = {"test": [":c_special"]},
+)
+override_test(name = "t_override")
+"#,
+    )
+    .unwrap();
+
+    let make_resolver = || {
+        let mut rr = SimpleRepoResolver::new(main_root.clone());
+        rr.external.insert("bazel_tools".into(), bt_root.clone());
+        rr.external.insert("platforms".into(), plat_root.clone());
+        rr.apparent
+            .insert("bazel_tools".into(), RepositoryName::bazel_tools());
+        rr.apparent.insert(
+            "platforms".into(),
+            RepositoryName::create("platforms").unwrap(),
+        );
+        let lc = LoaderConfig::new(fs.clone(), Arc::new(rr));
+        let mut acfg = AnalysisConfig::new();
+        acfg.toolchain_patterns = vec![
+            "@@bazel_tools//tools/test:all".to_string(),
+            "//:custom_test_tc".to_string(),
+        ];
+        acfg.execution_platform_patterns = vec![
+            "//:default_exec".to_string(),
+            "//:target_matching_exec".to_string(),
+            "//:special_exec".to_string(),
+        ];
+        TargetResolver::new(PackageLoader::new(lc), acfg)
+    };
+
+    // 1. Target platform matches `//:target_matching_exec`: default rule exec platform is
+    //    `//:default_exec`, while the built-in `"test"` exec group resolves to
+    //    `//:target_matching_exec` via `@bazel_tools//tools/test:default_test_toolchain`.
+    let r = make_resolver();
+    let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cfg.platforms = vec!["//:target_matching_exec".to_string()];
+    let ct = r
+        .analyze(&Label::parse_canonical("//:t").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(ct.exec_platform.as_deref(), Some("//:default_exec"));
+    assert_eq!(
+        ct.exec_group_platforms.get("test").map(String::as_str),
+        Some("//:target_matching_exec")
+    );
+    let ActionKind::FileWrite { content, .. } = &ct.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    let text = String::from_utf8(content.render()).unwrap();
+    assert_eq!(
+        text,
+        concat!(
+            "has_test=True\n",
+            "rule_ep=//:target_matching_exec\n",
+            "merger=@@//:target_matching_exec\n",
+            "composed=@@//:target_matching_exec|-DTEST_EG",
+        )
+    );
+
+    // 2. `exec_group_compatible_with = {"test": [":c_special"]}` refines the `"test"` exec group.
+    let ct_ecw = r
+        .analyze(&Label::parse_canonical("//:t_ecw").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(
+        ct_ecw.exec_group_platforms.get("test").map(String::as_str),
+        Some("//:special_exec")
+    );
+
+    // 3. Explicit `exec_groups = {"test": ...}` overrides the built-in default `"test"` exec group.
+    let ct_override = r
+        .analyze(&Label::parse_canonical("//:t_override").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct_override.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(
+        String::from_utf8(content.render()).unwrap(),
+        "//:special_exec|custom_override"
+    );
+
+    // 4. Native test rule (`rust_test`) also registers and resolves the `"test"` exec group.
+    let native_rule = zel_packages::RuleInstance {
+        label: Label::parse_canonical("//:native_t").unwrap(),
+        rule_class: "rust_test".to_string(),
+        attrs: Default::default(),
+        srcs: vec!["lib.rs".to_string()],
+        deps: Vec::new(),
+        outs: Vec::new(),
+        tools: Vec::new(),
+        data: Vec::new(),
+        visibility: Vec::new(),
+        cmd: None,
+        executable: true,
+        testonly: true,
+        extra: Default::default(),
+    };
+    let ct_native = analyze_rule_inner(
+        &native_rule,
+        &cfg,
+        r.clone() as Arc<dyn DepResolver>,
+        &r.config,
+    )
+    .unwrap();
+    assert_eq!(
+        ct_native
+            .exec_group_platforms
+            .get("test")
+            .map(String::as_str),
+        Some("//:target_matching_exec")
+    );
+
+    // 5. When no execution platform matches `--platforms`, optional `default_test_toolchain_type`
+    //    still allows building the test target by falling back to the first compatible platform.
+    let r2 = make_resolver();
+    let mut unmatched_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    unmatched_cfg.platforms = vec!["//:unmatched_target".to_string()];
+    let ct_unmatched = r2
+        .analyze(&Label::parse_canonical("//:t").unwrap(), &unmatched_cfg)
+        .unwrap();
+    assert_eq!(
+        ct_unmatched
+            .exec_group_platforms
+            .get("test")
+            .map(String::as_str),
+        Some("//:default_exec")
+    );
+}
+
+#[test]
+fn aspect_exec_groups_rule_exec_groups_and_exec_transitions_are_isolated() {
+    let ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+AspectReport = provider(fields = ["text"])
+ToolPlat = provider(fields = ["plat", "copt"])
+
+def _tc_impl(ctx):
+    return [
+        platform_common.ToolchainInfo(tag = ctx.attr.tag),
+        platform_common.TemplateVariableInfo({ctx.attr.var_key: ctx.attr.tag}),
+    ]
+
+tag_tc = rule(
+    implementation = _tc_impl,
+    attrs = {
+        "tag": attr.string(),
+        "var_key": attr.string(),
+    },
+)
+
+def _patch_impl(settings, attr):
+    return {"//command_line_option:copt": ["-DASP_COMPOSED"]}
+
+asp_patch = transition(
+    implementation = _patch_impl,
+    inputs = [],
+    outputs = ["//command_line_option:copt"],
+)
+
+def _leaf_impl(ctx):
+    return [ToolPlat(
+        plat = str(ctx.fragments.platform.platform),
+        copt = ",".join(ctx.fragments.cpp.copts),
+    )]
+
+tool_leaf = rule(
+    implementation = _leaf_impl,
+    fragments = ["platform", "cpp"],
+)
+
+def _probe_aspect_impl(target, ctx):
+    out = ctx.actions.declare_file(target.label.name + ".aspect_report")
+    lines = [
+        "asp_has_asp_eg=" + str("asp_eg" in ctx.exec_groups),
+        "asp_has_asp_copy=" + str("asp_copy" in ctx.exec_groups),
+        "asp_has_parent=" + str("parent_only" in ctx.exec_groups),
+        "asp_has_child=" + str("child_only" in ctx.exec_groups),
+        "asp_eg_plat=" + str(ctx.exec_groups["asp_eg"].exec_platform),
+        "asp_eg_tc=" + ctx.exec_groups["asp_eg"].toolchains["//:tt_asp_eg"].tag,
+        "asp_copy_plat=" + str(ctx.exec_groups["asp_copy"].exec_platform),
+        "asp_default_tc=" + ctx.toolchains["//:tt_asp_default"].tag,
+        "asp_var=" + ctx.var.get("ASP_VAR", "missing") + "|" + ctx.var.get("PARENT_VAR", "none"),
+        "rule_has_child=" + str("child_only" in ctx.rule.exec_groups),
+        "rule_has_parent=" + str("parent_only" in ctx.rule.exec_groups),
+        "rule_has_asp=" + str("asp_eg" in ctx.rule.exec_groups),
+        "rule_child_plat=" + str(ctx.rule.exec_groups["child_only"].exec_platform),
+        "rule_child_eg_tc=" + ctx.rule.exec_groups["child_only"].toolchains["//:tt_child_eg"].tag,
+        "rule_default_tc=" + ctx.rule.toolchains["//:tt_child_default"].tag,
+        "rule_var=" + ctx.rule.var.get("CHILD_VAR", "missing") + "|" + ctx.rule.var.get("PARENT_VAR", "none"),
+        "tool_default=" + ctx.attr._tool_default[ToolPlat].plat,
+        "tool_eg=" + ctx.attr._tool_eg[ToolPlat].plat,
+        "tool_composed=" + ctx.attr._tool_composed[ToolPlat].plat + "|" + ctx.attr._tool_composed[ToolPlat].copt,
+    ]
+    text = "\n".join(lines)
+    ctx.actions.write(out, text)
+    return [
+        AspectReport(text = text),
+        OutputGroupInfo(report = depset([out])),
+    ]
+
+probe_aspect = aspect(
+    implementation = _probe_aspect_impl,
+    toolchains = ["//:tt_asp_default"],
+    exec_groups = {
+        "asp_eg": exec_group(toolchains = ["//:tt_asp_eg"]),
+        "asp_copy": exec_group(copy_from_rule = True),
+    },
+    attrs = {
+        "_tool_default": attr.label(
+            default = "//:leaf",
+            cfg = config.exec(),
+        ),
+        "_tool_eg": attr.label(
+            default = "//:leaf",
+            cfg = config.exec(exec_group = "asp_eg"),
+        ),
+        "_tool_composed": attr.label(
+            default = "//:leaf",
+            cfg = asp_patch.and_then(config.exec(exec_group = "asp_eg")),
+        ),
+    },
+)
+
+def _child_impl(ctx):
+    return []
+
+child_rule = rule(
+    implementation = _child_impl,
+    toolchains = ["//:tt_child_default"],
+    exec_groups = {
+        "child_only": exec_group(toolchains = ["//:tt_child_eg"]),
+    },
+)
+
+def _parent_impl(ctx):
+    out = ctx.actions.declare_file("parent_report.txt")
+    ctx.actions.write(out, ctx.attr.dep[AspectReport].text)
+    return [DefaultInfo(files = depset([out]))]
+
+parent_rule = rule(
+    implementation = _parent_impl,
+    toolchains = ["//:tt_parent"],
+    exec_groups = {
+        "parent_only": exec_group(toolchains = ["//:tt_parent"]),
+    },
+    attrs = {
+        "dep": attr.label(aspects = [probe_aspect]),
+    },
+)
+"#,
+        ),
+        (
+            "BUILD",
+            r#"
+load(":defs.bzl", "child_rule", "parent_rule", "tag_tc", "tool_leaf")
+
+constraint_setting(name = "role")
+constraint_value(name = "c_parent", constraint_setting = ":role")
+constraint_value(name = "c_child_default", constraint_setting = ":role")
+constraint_value(name = "c_child_eg", constraint_setting = ":role")
+constraint_value(name = "c_asp_default", constraint_setting = ":role")
+constraint_value(name = "c_asp_eg", constraint_setting = ":role")
+
+platform(name = "ep_parent", constraint_values = [":c_parent"])
+platform(name = "ep_child_default", constraint_values = [":c_child_default"])
+platform(name = "ep_child_eg", constraint_values = [":c_child_eg"])
+platform(name = "ep_asp_default", constraint_values = [":c_asp_default"])
+platform(name = "ep_asp_eg", constraint_values = [":c_asp_eg"])
+
+toolchain_type(name = "tt_parent")
+toolchain_type(name = "tt_child_default")
+toolchain_type(name = "tt_child_eg")
+toolchain_type(name = "tt_asp_default")
+toolchain_type(name = "tt_asp_eg")
+
+tag_tc(name = "tc_parent_impl", tag = "parent_tc", var_key = "PARENT_VAR")
+tag_tc(name = "tc_child_default_impl", tag = "child_default_tc", var_key = "CHILD_VAR")
+tag_tc(name = "tc_child_eg_impl", tag = "child_eg_tc", var_key = "CHILD_EG_VAR")
+tag_tc(name = "tc_asp_default_impl", tag = "asp_default_tc", var_key = "ASP_VAR")
+tag_tc(name = "tc_asp_eg_impl", tag = "asp_eg_tc", var_key = "ASP_EG_VAR")
+
+toolchain(
+    name = "tc_parent",
+    toolchain_type = ":tt_parent",
+    toolchain = ":tc_parent_impl",
+    exec_compatible_with = [":c_parent"],
+)
+toolchain(
+    name = "tc_child_default",
+    toolchain_type = ":tt_child_default",
+    toolchain = ":tc_child_default_impl",
+    exec_compatible_with = [":c_child_default"],
+)
+toolchain(
+    name = "tc_child_eg",
+    toolchain_type = ":tt_child_eg",
+    toolchain = ":tc_child_eg_impl",
+    exec_compatible_with = [":c_child_eg"],
+)
+toolchain(
+    name = "tc_asp_default",
+    toolchain_type = ":tt_asp_default",
+    toolchain = ":tc_asp_default_impl",
+    exec_compatible_with = [":c_asp_default"],
+)
+toolchain(
+    name = "tc_asp_eg",
+    toolchain_type = ":tt_asp_eg",
+    toolchain = ":tc_asp_eg_impl",
+    exec_compatible_with = [":c_asp_eg"],
+)
+
+tool_leaf(name = "leaf")
+child_rule(name = "child")
+parent_rule(name = "parent", dep = ":child")
+"#,
+        ),
+    ]);
+
+    let make_acfg = || {
+        let mut acfg = AnalysisConfig::new();
+        acfg.toolchain_patterns = vec![
+            "//:tc_parent".to_string(),
+            "//:tc_child_default".to_string(),
+            "//:tc_child_eg".to_string(),
+            "//:tc_asp_default".to_string(),
+            "//:tc_asp_eg".to_string(),
+        ];
+        acfg.execution_platform_patterns = vec![
+            "//:ep_parent".to_string(),
+            "//:ep_child_default".to_string(),
+            "//:ep_child_eg".to_string(),
+            "//:ep_asp_default".to_string(),
+            "//:ep_asp_eg".to_string(),
+        ];
+        acfg
+    };
+
+    let expected_report = concat!(
+        "asp_has_asp_eg=True\n",
+        "asp_has_asp_copy=True\n",
+        "asp_has_parent=False\n",
+        "asp_has_child=False\n",
+        "asp_eg_plat=//:ep_asp_eg\n",
+        "asp_eg_tc=asp_eg_tc\n",
+        "asp_copy_plat=//:ep_asp_default\n",
+        "asp_default_tc=asp_default_tc\n",
+        "asp_var=asp_default_tc|none\n",
+        "rule_has_child=True\n",
+        "rule_has_parent=False\n",
+        "rule_has_asp=False\n",
+        "rule_child_plat=//:ep_child_eg\n",
+        "rule_child_eg_tc=child_eg_tc\n",
+        "rule_default_tc=child_default_tc\n",
+        "rule_var=child_default_tc|none\n",
+        "tool_default=@@//:ep_asp_default\n",
+        "tool_eg=@@//:ep_asp_eg\n",
+        "tool_composed=@@//:ep_asp_eg|-DASP_COMPOSED",
+    );
+
+    // 1. Propagated aspect via `parent_rule.dep`: neither `ctx.exec_groups` nor `ctx.rule.*`
+    //    nor aspect `config.exec(...)` attributes leak `parent_rule`'s `parent_only` / `ep_parent`.
+    let (r, cfg) = ws.resolver_with(
+        BuildConfigurationKey::target("k8", "fastbuild"),
+        make_acfg(),
+    );
+    let ct_parent = r
+        .analyze(&Label::parse_canonical("//:parent").unwrap(), &cfg)
+        .unwrap();
+    let ActionKind::FileWrite { content, .. } = &ct_parent.typed_actions[0].kind else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(
+        String::from_utf8(content.render()).unwrap(),
+        expected_report
+    );
+
+    // 2. Top-level aspect via `analyze_with_aspects` (where caller inputs are empty) resolves
+    //    identical `ctx.exec_groups`, `ctx.rule.exec_groups`, and `config.exec(...)` platforms.
+    let (r_top, cfg_top) = ws.resolver_with(
+        BuildConfigurationKey::target("k8", "fastbuild"),
+        make_acfg(),
+    );
+    let asp = r_top
+        .loader()
+        .load_bzl_export(
+            &Label::parse_canonical("//:defs.bzl").unwrap(),
+            "probe_aspect",
+        )
+        .unwrap();
+    let ct_top = r_top
+        .analyze_with_aspects(
+            &Label::parse_canonical("//:child").unwrap(),
+            &cfg_top,
+            std::slice::from_ref(&asp),
+            &Default::default(),
+        )
+        .unwrap();
+    let ActionKind::FileWrite {
+        content: top_content,
+        ..
+    } = &ct_top.typed_actions.last().unwrap().kind
+    else {
+        panic!("expected FileWrite");
+    };
+    assert_eq!(
+        String::from_utf8(top_content.render()).unwrap(),
+        expected_report
+    );
+
+    // 3. Aspect attribute referencing a target/parent exec group not declared on the aspect fails.
+    let bad_asp_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            r#"
+leaf = rule(implementation = lambda ctx: [])
+bad_aspect = aspect(
+    implementation = lambda target, ctx: [],
+    attrs = {
+        "_bad": attr.label(
+            default = "//:leaf",
+            cfg = config.exec(exec_group = "parent_or_target_group"),
+        ),
+    },
+)
+child = rule(
+    implementation = lambda ctx: [],
+    exec_groups = {"parent_or_target_group": exec_group()},
+)
+parent = rule(
+    implementation = lambda ctx: [],
+    exec_groups = {"parent_or_target_group": exec_group()},
+    attrs = {"dep": attr.label(aspects = [bad_aspect])},
+)
+"#,
+        ),
+        (
+            "BUILD",
+            "load(\":defs.bzl\", \"child\", \"leaf\", \"parent\")\nleaf(name = \"leaf\")\nchild(name = \"c\")\nparent(name = \"p\", dep = \":c\")\n",
+        ),
+    ]);
+    let err = bad_asp_ws.analyze("//:p").unwrap_err();
+    assert!(
+        err.contains(
+            "Attr '_bad' declares a transition for non-existent exec group 'parent_or_target_group'"
+        ),
+        "expected missing aspect exec_group error, got: {err}"
+    );
+
+    // 4. Invalid exec group name on `aspect(exec_groups = ...)` is rejected at definition time.
+    let invalid_name_ws = Ws::new(&[
+        (
+            "defs.bzl",
+            "bad = aspect(implementation = lambda t, ctx: [], exec_groups = {\"bad name\": exec_group()})\n",
+        ),
+        ("BUILD", "load(\":defs.bzl\", \"bad\")\n"),
+    ]);
+    let err = invalid_name_ws.analyze("//:missing").unwrap_err();
+    assert!(
+        err.contains("Exec group name 'bad name' is not a valid name"),
+        "expected invalid exec group name error, got: {err}"
+    );
+}

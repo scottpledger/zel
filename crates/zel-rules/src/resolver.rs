@@ -1572,6 +1572,90 @@ impl DepResolver for TargetResolver {
         Ok((tc.toolchains, tc.make_variables))
     }
 
+    fn resolve_aspect_exec_context(
+        &self,
+        owner: &Label,
+        def: &zel_packages::aspect::AspectDef,
+        cfg: &BuildConfigurationKey,
+    ) -> Result<Option<zel_analysis::starlark_rule::AspectExecResolution>, String> {
+        let list = zel_starlark::Value::List(Arc::new(Mutex::new(
+            zel_starlark::StarlarkList::new(def.toolchains.clone()),
+        )));
+        let types = crate::toolchain_requests(Some(&list));
+        let ecw: Vec<Label> = def
+            .exec_compatible_with
+            .iter()
+            .filter_map(|s| Label::parse_canonical(s).ok())
+            .collect();
+        let me: Arc<dyn DepResolver> = self.me();
+        let mut out = zel_analysis::starlark_rule::AspectExecResolution {
+            exec_platform: Some(self.config.default_exec_platform()),
+            ..Default::default()
+        };
+        if !types.is_empty() || !ecw.is_empty() {
+            let tc = crate::resolve_ctx_toolchains(owner, &types, &ecw, cfg, &self.config, &me)?;
+            out.exec_platform = Some(tc.exec_platform);
+            out.toolchains = tc.toolchains;
+            out.extra_make_variables = tc.make_variables;
+
+            let auto_eg = def
+                .attrs
+                .iter()
+                .find(|a| a.name == "_use_auto_exec_groups")
+                .and_then(|a| match &a.default {
+                    Some(AttrValue::Bool(b)) => Some(*b),
+                    _ => None,
+                })
+                .unwrap_or_else(|| cfg.bool_option("incompatible_auto_exec_groups", false));
+            if auto_eg {
+                for t in &types {
+                    let gname = t.toolchain_type.canonical_form();
+                    let gtc = crate::resolve_ctx_toolchains(
+                        owner,
+                        std::slice::from_ref(t),
+                        &ecw,
+                        cfg,
+                        &self.config,
+                        &me,
+                    )?;
+                    out.exec_group_platforms
+                        .insert(gname.clone(), gtc.exec_platform);
+                    out.exec_group_toolchains.insert(gname, gtc.toolchains);
+                }
+            }
+        }
+        if let Some(zel_starlark::Value::Dict(d)) = &def.exec_groups {
+            for (name, g) in d.lock().unwrap().items() {
+                let Some(name) = name.as_str().map(str::to_string) else {
+                    continue;
+                };
+                let zel_starlark::Value::Struct(gs) = &g else {
+                    continue;
+                };
+                let copy = matches!(
+                    gs.fields.get("copy_from_rule"),
+                    Some(zel_starlark::Value::Bool(true))
+                );
+                let mut gtypes = crate::toolchain_requests(gs.fields.get("toolchains"));
+                let mut gecw: Vec<Label> = gs
+                    .fields
+                    .get("exec_compatible_with")
+                    .map(crate::label_list)
+                    .unwrap_or_default();
+                if copy {
+                    gtypes.extend(types.clone());
+                    gecw.extend(ecw.clone());
+                }
+                let tc =
+                    crate::resolve_ctx_toolchains(owner, &gtypes, &gecw, cfg, &self.config, &me)?;
+                out.exec_group_platforms
+                    .insert(name.clone(), tc.exec_platform);
+                out.exec_group_toolchains.insert(name, tc.toolchains);
+            }
+        }
+        Ok(Some(out))
+    }
+
     fn configured_target(
         &self,
         label: &Label,

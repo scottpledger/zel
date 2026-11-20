@@ -117,6 +117,36 @@ pub trait DepResolver: Send + Sync {
     ) -> Result<(BTreeMap<String, Value>, BTreeMap<String, String>), String> {
         Err("toolchain resolution is not available for aspects".to_string())
     }
+
+    /// Resolves the execution platform, default toolchains, Make variables, and `exec_groups` for
+    /// `def` applied to `owner` in `cfg` (`AspectFunction.getUnloadedToolchainContextsInputs`).
+    fn resolve_aspect_exec_context(
+        &self,
+        owner: &Label,
+        def: &zel_packages::aspect::AspectDef,
+        cfg: &BuildConfigurationKey,
+    ) -> Result<Option<AspectExecResolution>, String> {
+        if !def.toolchains.is_empty() {
+            let (toolchains, extra_make_variables) =
+                self.aspect_toolchains(owner, &def.toolchains, &def.exec_compatible_with, cfg)?;
+            return Ok(Some(AspectExecResolution {
+                toolchains,
+                extra_make_variables,
+                ..Default::default()
+            }));
+        }
+        Ok(None)
+    }
+}
+
+/// Resolved toolchain and `exec_group` context for an aspect instance.
+#[derive(Clone, Default)]
+pub struct AspectExecResolution {
+    pub exec_platform: Option<String>,
+    pub toolchains: BTreeMap<String, Value>,
+    pub extra_make_variables: BTreeMap<String, String>,
+    pub exec_group_platforms: BTreeMap<String, String>,
+    pub exec_group_toolchains: BTreeMap<String, BTreeMap<String, Value>>,
 }
 
 /// Inputs of rule analysis beyond the rule itself.

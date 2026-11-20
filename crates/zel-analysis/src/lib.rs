@@ -1874,6 +1874,12 @@ pub struct ConfiguredTarget {
     pub exec_platform: Option<String>,
     /// Resolved named `exec_group` execution platform labels of this target.
     pub exec_group_platforms: BTreeMap<String, String>,
+    /// Resolved default toolchains of this target (`ToolchainContext`), exposed via `ctx.rule.toolchains`.
+    pub toolchains: BTreeMap<String, zel_starlark::Value>,
+    /// Resolved named `exec_group` toolchains of this target, exposed via `ctx.rule.exec_groups`.
+    pub exec_group_toolchains: BTreeMap<String, BTreeMap<String, zel_starlark::Value>>,
+    /// Toolchain Make variables (`TemplateVariableInfo`) of this target, exposed via `ctx.rule.var`.
+    pub extra_make_variables: BTreeMap<String, String>,
 }
 
 /// Reason a configured target is incompatible with its target platform (`IncompatiblePlatformProvider`).
@@ -1937,6 +1943,9 @@ impl ConfiguredTarget {
             test_execution_platform: None,
             exec_platform: None,
             exec_group_platforms: BTreeMap::new(),
+            toolchains: BTreeMap::new(),
+            exec_group_toolchains: BTreeMap::new(),
+            extra_make_variables: BTreeMap::new(),
         }
     }
 

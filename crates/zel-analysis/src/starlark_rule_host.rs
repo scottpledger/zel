@@ -1116,6 +1116,11 @@ fn host_index(
             let Value::Host(_, group) = recv else { return err("invalid exec group toolchains") };
             let k = transform_toolchain_key(_st, ctx, key)?;
             let tcs = _st.inputs.exec_group_toolchains.get(group).cloned().unwrap_or_default();
+            let k = if k.starts_with("//") {
+                tcs.keys().find(|c| c.starts_with("@@") && c.ends_with(&k)).cloned().unwrap_or(k)
+            } else {
+                k
+            };
             tcs.get(&k).cloned().ok_or_else(|| {
                 StarlarkError(format!(
                     "In {} rule {}, exec group '{group}': toolchain type {k} was requested but only types [{}] are configured",
@@ -1168,6 +1173,11 @@ fn host_index(
             let Value::Host(_, group) = recv else { return err("invalid exec group toolchains") };
             let k = transform_toolchain_key(_st, ctx, key)?;
             let tcs = _st.base_exec_group_toolchains.get(group).cloned().unwrap_or_default();
+            let k = if k.starts_with("//") {
+                tcs.keys().find(|c| c.starts_with("@@") && c.ends_with(&k)).cloned().unwrap_or(k)
+            } else {
+                k
+            };
             tcs.get(&k).cloned().ok_or_else(|| {
                 StarlarkError(format!(
                     "In {} rule {}, exec group '{group}': toolchain type {k} was requested but only types [{}] are configured",
@@ -1225,20 +1235,28 @@ fn host_contains(
         "exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return Ok(Value::Bool(false)) };
             let k = transform_toolchain_key(st, ctx, key)?;
-            Ok(Value::Bool(st.inputs.exec_group_toolchains.get(group).map(|m| m.contains_key(&k)).unwrap_or(false)))
+            Ok(Value::Bool(st.inputs.exec_group_toolchains.get(group).is_some_and(|m| {
+                m.contains_key(&k) || (k.starts_with("//") && m.keys().any(|c| c.starts_with("@@") && c.ends_with(&k)))
+            })))
         }
         "rule_toolchains" => {
             if st.base_toolchains.is_empty() {
                 return Ok(Value::Bool(false));
             }
             let k = transform_toolchain_key(st, ctx, key)?;
-            Ok(Value::Bool(st.base_toolchains.contains_key(&k)))
+            Ok(Value::Bool(
+                st.base_toolchains.contains_key(&k)
+                    || (k.starts_with("//")
+                        && st.base_toolchains.keys().any(|c| c.starts_with("@@") && c.ends_with(&k))),
+            ))
         }
         "rule_exec_groups" => Ok(Value::Bool(matches!(key, Value::String(n) if st.base_exec_groups.contains(n)))),
         "rule_exec_group_toolchains" => {
             let Value::Host(_, group) = recv else { return Ok(Value::Bool(false)) };
             let k = transform_toolchain_key(st, ctx, key)?;
-            Ok(Value::Bool(st.base_exec_group_toolchains.get(group).map(|m| m.contains_key(&k)).unwrap_or(false)))
+            Ok(Value::Bool(st.base_exec_group_toolchains.get(group).is_some_and(|m| {
+                m.contains_key(&k) || (k.starts_with("//") && m.keys().any(|c| c.starts_with("@@") && c.ends_with(&k)))
+            })))
         }
         other => err(format!("type '{other}' is not iterable")),
     }

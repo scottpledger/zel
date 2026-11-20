@@ -28,6 +28,68 @@ fn type_mismatch(param: &str, v: &Value, want: &str, func: &str) -> String {
     )
 }
 
+fn is_valid_exec_group_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !matches!(
+            name,
+            "and"
+                | "else"
+                | "load"
+                | "break"
+                | "for"
+                | "not"
+                | "continue"
+                | "if"
+                | "or"
+                | "def"
+                | "in"
+                | "pass"
+                | "elif"
+                | "lambda"
+                | "return"
+                | "as"
+                | "import"
+                | "assert"
+                | "is"
+                | "class"
+                | "nonlocal"
+                | "del"
+                | "raise"
+                | "except"
+                | "try"
+                | "finally"
+                | "while"
+                | "from"
+                | "with"
+                | "global"
+                | "yield"
+        )
+}
+
+fn default_test_runner_exec_group() -> Value {
+    let lbl = Label::parse_canonical("@bazel_tools//tools/test:default_test_toolchain_type")
+        .expect("valid default_test_toolchain_type label");
+    let mut tt_fields: BTreeMap<String, Value> = BTreeMap::new();
+    tt_fields.insert("toolchain_type".into(), Value::Label(lbl.clone()));
+    tt_fields.insert("name".into(), Value::Label(lbl));
+    tt_fields.insert("mandatory".into(), Value::Bool(false));
+    tt_fields.insert("_toolchain_type".into(), Value::Bool(true));
+    let tt_val = Value::Struct(Arc::new(zel_starlark::StructValue::new(tt_fields)));
+
+    let mut eg_fields: BTreeMap<String, Value> = BTreeMap::new();
+    eg_fields.insert("_exec_group".into(), Value::Bool(true));
+    eg_fields.insert("_default_test_exec_group".into(), Value::Bool(true));
+    eg_fields.insert("toolchains".into(), mk_list(vec![tt_val]));
+    Value::Struct(Arc::new(zel_starlark::StructValue::new(eg_fields)))
+}
+
 fn str_list_arg(v: &Value, what: &str) -> Result<Vec<String>, String> {
     sl_values(v).map_err(|_| {
         format!(
@@ -3492,12 +3554,51 @@ impl PackageLoader {
             mapping: &mapping,
             rule_class: "aspect",
         };
+        let conv_aspect_str = |s: &str| -> Result<Label, String> {
+            if s.starts_with("//") && !owner.repository().is_main() && mapping.get("").is_main() {
+                let pkg_body = s.trim_start_matches("//");
+                let (p, n) = match pkg_body.split_once(':') {
+                    Some((p, n)) => (p, n),
+                    None => (pkg_body, pkg_body.rsplit('/').next().unwrap_or("")),
+                };
+                if p == "conditions" || p == "visibility" {
+                    crate::attr::convert_label(s, &cctx)
+                } else {
+                    let pid = PackageIdentifier::create(
+                        owner.repository().clone(),
+                        zel_vfs::PathFragment::create(p),
+                    )
+                    .map_err(|e| e.to_string())?;
+                    Label::create(pid, n).map_err(|e| e.to_string())
+                }
+            } else {
+                crate::attr::convert_label(s, &cctx)
+            }
+        };
+        let conv_aspect_tc = |v: &Value| -> Value {
+            match v {
+                Value::String(s) if s.starts_with('@') || s.starts_with("//") || s.starts_with(':') => {
+                    conv_aspect_str(s).map(Value::Label).unwrap_or_else(|_| v.clone())
+                }
+                Value::Struct(st) if st.fields.contains_key("_toolchain_type") => {
+                    let mut f = st.fields.clone();
+                    if let Some(Value::String(n)) = f.get("name").cloned() {
+                        if let Ok(l) = conv_aspect_str(&n) {
+                            f.insert("name".into(), Value::Label(l.clone()));
+                            f.insert("toolchain_type".into(), Value::Label(l));
+                        }
+                    }
+                    Value::Struct(Arc::new(zel_starlark::StructValue::new(f)))
+                }
+                o => o.clone(),
+            }
+        };
         let mut exec_compatible_with = Vec::new();
         for v in seq("exec_compatible_with") {
             match v {
                 Value::Label(l) => exec_compatible_with.push(l.canonical_form()),
                 Value::String(s) => {
-                    let l = convert_label(&s, &cctx).map_err(|e| herr(ctx, e))?;
+                    let l = conv_aspect_str(&s).map_err(|e| herr(ctx, e))?;
                     exec_compatible_with.push(l.canonical_form());
                 }
                 other => {
@@ -3511,6 +3612,63 @@ impl PackageLoader {
                 }
             }
         }
+        let toolchains: Vec<Value> = seq("toolchains").iter().map(&conv_aspect_tc).collect();
+        let exec_groups = match kw.get("exec_groups") {
+            None | Some(Value::None) => None,
+            Some(Value::Dict(d)) => {
+                let items = d.lock().unwrap().items();
+                let mut new_entries = Vec::with_capacity(items.len());
+                for (gk, gv) in items {
+                    let Value::String(group_name) = &gk else {
+                        return Err(herr(
+                            ctx,
+                            format!(
+                                "at key of dict: got {}, want string",
+                                gk.type_name()
+                            ),
+                        ));
+                    };
+                    if !is_valid_exec_group_name(group_name) {
+                        return Err(herr(
+                            ctx,
+                            format!("Exec group name '{group_name}' is not a valid name."),
+                        ));
+                    }
+                    let Value::Struct(gs) = &gv else {
+                        return Err(herr(
+                            ctx,
+                            format!(
+                                "at value of dict: got {}, want exec_group",
+                                gv.type_name()
+                            ),
+                        ));
+                    };
+                    if !gs.fields.contains_key("_exec_group") {
+                        return Err(herr(
+                            ctx,
+                            format!(
+                                "at value of dict: got {}, want exec_group",
+                                gv.type_name()
+                            ),
+                        ));
+                    }
+                    let mut gf = gs.fields.clone();
+                    for key in ["toolchains", "exec_compatible_with"] {
+                        if let Some(v) = gf.get(key).cloned() {
+                            if let Ok(seq_items) = zel_starlark::eval::builtins::value_to_sequence(&v) {
+                                let out: Vec<Value> = seq_items.iter().map(&conv_aspect_tc).collect();
+                                gf.insert(key.to_string(), mk_list(out));
+                            }
+                        }
+                    }
+                    new_entries.push((gk, Value::Struct(Arc::new(zel_starlark::StructValue::new(gf)))));
+                }
+                Some(mk_dict(new_entries))
+            }
+            Some(other) => {
+                return Err(herr(ctx, type_mismatch("exec_groups", other, "dict or NoneType", "aspect")));
+            }
+        };
         let def = crate::aspect::AspectDef {
             id: 0,
             implementation,
@@ -3524,11 +3682,12 @@ impl PackageLoader {
             required_aspect_providers: groups("required_aspect_providers"),
             provides,
             requires: seq("requires"),
-            toolchains: seq("toolchains"),
+            toolchains,
             fragments: strs("fragments").map_err(|e| herr(ctx, e))?,
             subrules: seq("subrules"),
             apply_to_generating_rules,
             exec_compatible_with,
+            exec_groups,
             defined_in: Mutex::new(String::new()),
             name: Mutex::new(None),
             doc: match kw.get("doc") {
@@ -3788,29 +3947,64 @@ impl PackageLoader {
                     }
                 }
             }
-            if let Some(Value::Dict(d)) = rest_kwargs.get("exec_groups").cloned() {
-                let items = d.lock().unwrap().items();
-                let mut new_entries = Vec::with_capacity(items.len());
-                for (gk, gv) in items {
-                    if let Value::Struct(gs) = &gv {
-                        let mut gf = gs.fields.clone();
-                        for key in ["toolchains", "exec_compatible_with"] {
-                            if let Some(v) = gf.get(key).cloned() {
-                                if let Ok(seq) = zel_starlark::eval::builtins::value_to_sequence(&v) {
-                                    let out: Vec<Value> = seq.iter().map(&conv).collect();
-                                    gf.insert(key.to_string(), mk_list(out));
+            if let Some(eg_raw) = rest_kwargs.get("exec_groups").cloned() {
+                match eg_raw {
+                    Value::None => {
+                        rest_kwargs.remove("exec_groups");
+                    }
+                    Value::Dict(d) => {
+                        let items = d.lock().unwrap().items();
+                        let mut new_entries = Vec::with_capacity(items.len());
+                        for (gk, gv) in items {
+                            let Value::String(group_name) = &gk else {
+                                return Err(herr(
+                                    ctx,
+                                    format!("at key of dict: got {}, want string", gk.type_name()),
+                                ));
+                            };
+                            if !is_valid_exec_group_name(group_name) {
+                                return Err(herr(
+                                    ctx,
+                                    format!("Exec group name '{group_name}' is not a valid name."),
+                                ));
+                            }
+                            if let Value::Struct(gs) = &gv {
+                                let mut gf = gs.fields.clone();
+                                for key in ["toolchains", "exec_compatible_with"] {
+                                    if let Some(v) = gf.get(key).cloned() {
+                                        if let Ok(seq) = zel_starlark::eval::builtins::value_to_sequence(&v) {
+                                            let out: Vec<Value> = seq.iter().map(&conv).collect();
+                                            gf.insert(key.to_string(), mk_list(out));
+                                        }
+                                    }
                                 }
+                                new_entries.push((gk, Value::Struct(Arc::new(zel_starlark::StructValue::new(gf)))));
+                            } else {
+                                new_entries.push((gk, gv));
                             }
                         }
-                        new_entries.push((gk, Value::Struct(Arc::new(zel_starlark::StructValue::new(gf)))));
-                    } else {
-                        new_entries.push((gk, gv));
+                        rest_kwargs.insert("exec_groups".to_string(), mk_dict(new_entries));
+                    }
+                    other => {
+                        return Err(herr(
+                            ctx,
+                            type_mismatch("exec_groups", &other, "dict or NoneType", "rule"),
+                        ));
                     }
                 }
-                rest_kwargs.insert("exec_groups".to_string(), mk_dict(new_entries));
             }
         }
         let test = own_test || parent_test;
+        if test {
+            let mut entries = match rest_kwargs.get("exec_groups") {
+                Some(Value::Dict(d)) => d.lock().unwrap().items(),
+                _ => Vec::new(),
+            };
+            if !entries.iter().any(|(k, _)| k.as_str() == Some("test")) {
+                entries.push((Value::String("test".to_string()), default_test_runner_exec_group()));
+                rest_kwargs.insert("exec_groups".to_string(), mk_dict(entries));
+            }
+        }
         let executable = own_exec || parent_exec || test;
         let mut attrs = parent_attrs;
         if let Some(a) = kw.get("attrs") {
