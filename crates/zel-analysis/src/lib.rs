@@ -771,24 +771,35 @@ impl Artifact {
         owner_label: Label,
         sibling_repository_layout: bool,
     ) -> Self {
-        let exec_path = if owner_label.repository().is_main() {
-            root_relative_path.clone()
+        let (root_relative_path, exec_path) = if owner_label.repository().is_main() {
+            (root_relative_path.clone(), root_relative_path)
         } else {
             let repo_name = owner_label.repository().name();
-            let prefix = if sibling_repository_layout {
-                format!("../{repo_name}")
+            let raw = root_relative_path.path_string();
+            let legacy_exact = format!("external/{repo_name}");
+            let legacy_prefix = format!("{legacy_exact}/");
+            let sib_exact = format!("../{repo_name}");
+            let sib_prefix = format!("{sib_exact}/");
+            let repo_rel = if raw == legacy_exact || raw == sib_exact {
+                ""
+            } else if let Some(s) = raw.strip_prefix(legacy_prefix.as_str()) {
+                s
+            } else if let Some(s) = raw.strip_prefix(sib_prefix.as_str()) {
+                s
             } else {
-                format!("external/{repo_name}")
+                raw
             };
-            let rel_str = root_relative_path.path_string();
-            let prefixed = format!("{prefix}/");
-            if rel_str == prefix || rel_str.starts_with(&prefixed) {
-                root_relative_path.clone()
-            } else if rel_str.is_empty() {
+            let prefix = if sibling_repository_layout {
+                sib_exact
+            } else {
+                legacy_exact
+            };
+            let exec = if repo_rel.is_empty() {
                 PathFragment::create(&prefix)
             } else {
-                PathFragment::create(&format!("{prefix}/{rel_str}"))
-            }
+                PathFragment::create(&format!("{prefix}/{repo_rel}"))
+            };
+            (PathFragment::create(repo_rel), exec)
         };
         Self {
             is_source: true,
@@ -939,19 +950,50 @@ impl Artifact {
         }
     }
 
+    /// `Artifact.getRepositoryRelativePath`: path relative to the artifact's repository root.
+    pub fn repository_relative_path(&self) -> PathFragment {
+        let repo = self.owner_label.repository();
+        if repo.is_main() {
+            return self.root_relative_path.clone();
+        }
+        let rel = self.root_relative_path.path_string();
+        let legacy_exact = format!("external/{}", repo.name());
+        let legacy_prefix = format!("{legacy_exact}/");
+        let sib_exact = format!("../{}", repo.name());
+        let sib_prefix = format!("{sib_exact}/");
+        if rel == legacy_exact || rel == sib_exact {
+            PathFragment::empty()
+        } else if let Some(s) = rel.strip_prefix(legacy_prefix.as_str()) {
+            PathFragment::create(s)
+        } else if let Some(s) = rel.strip_prefix(sib_prefix.as_str()) {
+            PathFragment::create(s)
+        } else {
+            self.root_relative_path.clone()
+        }
+    }
+
+    /// `Artifact.getOutputDirRelativePath(siblingRepositoryLayout)`: used by
+    /// `ctx.actions.declare_file(..., sibling = ...)` and `declare_directory` / `declare_symlink`.
+    pub fn output_dir_relative_path(&self, sibling_repository_layout: bool) -> PathFragment {
+        if self.is_source {
+            if sibling_repository_layout {
+                self.repository_relative_path()
+            } else {
+                self.exec_path.clone()
+            }
+        } else {
+            self.root_relative_path.clone()
+        }
+    }
+
     /// `File.short_path`: path relative to the runfiles root (`../repo/x` for external repos).
     pub fn short_path(&self) -> String {
         let repo = self.owner_label.repository();
-        let rel = self.root_relative_path.path_string();
         if repo.is_main() {
-            rel.to_string()
+            self.root_relative_path.path_string().to_string()
         } else {
-            let exact = format!("external/{}", repo.name());
-            if rel == exact {
-                return format!("../{}", repo.name());
-            }
-            let prefix = format!("{exact}/");
-            let rel = rel.strip_prefix(prefix.as_str()).unwrap_or(rel);
+            let rel_frag = self.repository_relative_path();
+            let rel = rel_frag.path_string();
             if rel.is_empty() {
                 format!("../{}", repo.name())
             } else {

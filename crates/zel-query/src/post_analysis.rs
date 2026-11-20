@@ -2874,16 +2874,12 @@ fn format_cquery(
                             .package_identifier()
                             .package_fragment()
                             .get_relative_str(label.name());
-                        let path = if label.repository().is_main() {
-                            rel.path_string().to_string()
-                        } else {
-                            format!(
-                                "external/{}/{}",
-                                label.repository().name(),
-                                rel.path_string()
-                            )
-                        };
-                        results.push(path);
+                        let art = Artifact::source_with_layout(
+                            rel,
+                            label.clone(),
+                            popts.sibling_repository_layout,
+                        );
+                        results.push(art.exec_path.path_string().to_string());
                     }
                     Target::PackageGroup { .. } | Target::EnvironmentGroup { .. } => {}
                     Target::Rule(r) if r.rule_class.contains('$') => {}
@@ -2901,7 +2897,9 @@ fn format_cquery(
                                 .chain(ct.output_groups.groups.values().flatten())
                                 .chain(ct.typed_actions.iter().flat_map(|act| act.outputs.iter()))
                             {
-                                if a.owner_label == *label || a.root_relative_path == expected_rel {
+                                if a.owner_label == *label
+                                    || a.repository_relative_path() == expected_rel
+                                {
                                     found = Some(a);
                                     break;
                                 }

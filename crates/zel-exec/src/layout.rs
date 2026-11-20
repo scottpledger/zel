@@ -142,6 +142,17 @@ pub fn plant_external_repo_links(execroot: &Path, output_base: &Path) -> io::Res
     plant_external_repo_links_with_layout(execroot, output_base, false)
 }
 
+fn remove_symlink(p: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        std::fs::remove_dir(p).or_else(|_| std::fs::remove_file(p))
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::remove_file(p)
+    }
+}
+
 pub fn plant_external_repo_links_with_layout(
     execroot: &Path,
     output_base: &Path,
@@ -149,6 +160,7 @@ pub fn plant_external_repo_links_with_layout(
 ) -> io::Result<Vec<PathBuf>> {
     let ext = output_base.join("external");
     let mut planted = Vec::new();
+    let execroot_name = execroot.file_name();
     if sibling_repository_layout {
         let link_parent = execroot.parent().ok_or_else(|| {
             io::Error::new(
@@ -159,9 +171,13 @@ pub fn plant_external_repo_links_with_layout(
         std::fs::create_dir_all(link_parent)?;
         if let Ok(entries) = std::fs::read_dir(link_parent) {
             for e in entries.flatten() {
+                let fname = e.file_name();
+                if Some(fname.as_os_str()) == execroot_name || fname == "bazel-out" {
+                    continue;
+                }
                 let p = e.path();
                 if std::fs::symlink_metadata(&p).is_ok_and(|m| m.file_type().is_symlink()) {
-                    let _ = std::fs::remove_file(&p);
+                    let _ = remove_symlink(&p);
                 }
             }
         }
@@ -187,7 +203,9 @@ pub fn plant_external_repo_links_with_layout(
         d
     };
     for n in names {
-        if sibling_repository_layout && execroot.file_name() == Some(std::ffi::OsStr::new(&n)) {
+        if sibling_repository_layout
+            && (execroot_name == Some(std::ffi::OsStr::new(&n)) || n == "bazel-out")
+        {
             continue;
         }
         let link = link_dir.join(&n);
@@ -196,7 +214,11 @@ pub fn plant_external_repo_links_with_layout(
         }
         #[cfg(unix)]
         std::os::unix::fs::symlink(ext.join(&n), &link)?;
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        if std::os::windows::fs::symlink_dir(ext.join(&n), &link).is_err() {
+            copy_tree_fallback(&ext.join(&n), &link)?;
+        }
+        #[cfg(not(any(unix, windows)))]
         copy_tree_fallback(&ext.join(&n), &link)?;
         planted.push(link);
     }
@@ -517,11 +539,21 @@ mod tests {
         );
         #[cfg(unix)]
         std::os::unix::fs::symlink(ob.join("external"), ob.join("execroot/stale_repo+")).unwrap();
+        std::fs::create_dir_all(ob.join("execroot/bazel-out/keep")).unwrap();
+        std::fs::create_dir_all(ob.join("execroot/real_dir")).unwrap();
         let sib_planted = plant_external_repo_links_with_layout(&er, &ob, true).unwrap();
         assert_eq!(sib_planted, [ob.join("execroot/rules_x+")]);
         assert!(ob.join("execroot/rules_x+").exists());
         assert!(!ob.join("execroot/stale_repo+").exists());
         assert!(er.is_dir(), "_main execroot preserved");
+        assert!(
+            ob.join("execroot/bazel-out/keep").is_dir(),
+            "bazel-out preserved"
+        );
+        assert!(
+            ob.join("execroot/real_dir").is_dir(),
+            "real directory preserved"
+        );
     }
 
     #[test]

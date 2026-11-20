@@ -190,6 +190,7 @@ fn matches_filters(a: &Action, filters: &(Vec<String>, Vec<String>, Vec<String>)
 /// `RunfilesSupport` registers (in this order, after the rule's own actions) the repo-mapping
 /// manifest, the source manifest, the `SymlinkTree` and the `RunfilesTree`; tests then get their
 /// `TestRunner`. The source manifest's runfiles are not inputs (remotable manifests).
+#[allow(clippy::too_many_arguments)]
 fn executable_actions(
     local: &mut Vec<Entry>,
     ct: &zel_analysis::ConfiguredTarget,
@@ -198,6 +199,7 @@ fn executable_actions(
     cfg: &BuildConfigurationKey,
     cfg_id: &str,
     filters: &(Vec<String>, Vec<String>, Vec<String>),
+    sibling_repository_layout: bool,
 ) {
     let Some(rs) = &ct.runfiles_support else {
         return;
@@ -230,7 +232,7 @@ fn executable_actions(
     };
     let cfg_mnemonic = cfg.mnemonic();
     let root = zel_analysis::ArtifactRoot::Bin;
-    let manifest_in_tree = Artifact::derived_in_root(
+    let manifest_in_tree = Artifact::derived_in_root_with_layout(
         &cfg_mnemonic,
         root,
         zel_vfs::PathFragment::create(&format!(
@@ -241,6 +243,7 @@ fn executable_actions(
                 .unwrap_or(&rs.runfiles_dir)
         )),
         label.clone(),
+        sibling_repository_layout,
     );
     let tree_dir = Artifact {
         is_source: false,
@@ -301,7 +304,26 @@ fn executable_actions(
     if ct.is_test {
         let short = format!("{}/{}", label.package_name(), label.name());
         let short = short.trim_start_matches('/').to_string();
-        let logs = format!("bazel-out/{cfg_mnemonic}/testlogs/{short}");
+        let repo = label.repository();
+        let (logs, log_rel_prefix) = if repo.is_main() {
+            (
+                format!("bazel-out/{cfg_mnemonic}/testlogs/{short}"),
+                format!("testlogs/{short}"),
+            )
+        } else if sibling_repository_layout {
+            (
+                format!("bazel-out/{}/{cfg_mnemonic}/testlogs/{short}", repo.name()),
+                format!("testlogs/{short}"),
+            )
+        } else {
+            (
+                format!(
+                    "bazel-out/{cfg_mnemonic}/testlogs/external/{}/{short}",
+                    repo.name()
+                ),
+                format!("testlogs/external/{}/{short}", repo.name()),
+            )
+        };
         let out_art = |name: &str, tree: bool| Artifact {
             is_source: false,
             is_tree_artifact: tree,
@@ -309,8 +331,13 @@ fn executable_actions(
             is_unresolved_symlink: false,
             is_constant_metadata: false,
             exec_path: zel_vfs::PathFragment::create(&format!("{logs}/{name}")),
-            root_relative_path: zel_vfs::PathFragment::create(&format!("testlogs/{short}/{name}")),
+            root_relative_path: zel_vfs::PathFragment::create(&format!("{log_rel_prefix}/{name}")),
             owner_label: label.clone(),
+        };
+        let tools_prefix = if sibling_repository_layout {
+            "../bazel_tools"
+        } else {
+            "external/bazel_tools"
         };
         let tool = |p: &str| Artifact {
             is_source: true,
@@ -318,7 +345,7 @@ fn executable_actions(
             root: zel_analysis::ArtifactRoot::Source,
             is_unresolved_symlink: false,
             is_constant_metadata: false,
-            exec_path: zel_vfs::PathFragment::create(&format!("external/bazel_tools/{p}")),
+            exec_path: zel_vfs::PathFragment::create(&format!("{tools_prefix}/{p}")),
             root_relative_path: zel_vfs::PathFragment::create(p),
             owner_label: label.clone(),
         };
@@ -326,7 +353,7 @@ fn executable_actions(
             label.clone(),
             "TestRunner",
             ActionKind::Spawn {
-                executable: "external/bazel_tools/tools/test/test-setup.sh".to_string(),
+                executable: format!("{tools_prefix}/tools/test/test-setup.sh"),
                 arguments: vec![zel_analysis::CommandLineArgs {
                     args: vec![short.clone()],
                     param_file: None,
@@ -596,7 +623,18 @@ fn collect(
                 });
             }
             if asp_opt.is_none() {
-                executable_actions(&mut local, &current_ct, &n.label, &kind, &cfg, id, &filters);
+                let sibling_layout = env.tr.config.sibling_repository_layout
+                    || env.tr.loader().config().sibling_repository_layout;
+                executable_actions(
+                    &mut local,
+                    &current_ct,
+                    &n.label,
+                    &kind,
+                    &cfg,
+                    id,
+                    &filters,
+                    sibling_layout,
+                );
                 if current_ct.is_test {
                     if let Some(zel_packages::Target::Rule(r)) =
                         env.info_of(&n.label).map(|i| i.target.clone())

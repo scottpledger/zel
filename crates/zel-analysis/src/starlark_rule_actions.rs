@@ -695,12 +695,16 @@ fn declare_ext(
     if symlink && !st.inputs.allow_unresolved_symlinks {
         return err("actions.declare_symlink() is not allowed; use the --allow_unresolved_symlinks command line option");
     }
-    let pkg = path_of_frag(&st.pkg_dir);
+    let pkg_dir = st.package_directory();
+    let pkg = path_of_frag(&pkg_dir);
     let frag = match none_or(arg(pos, kw, 1, "sibling")) {
-        None => st.pkg_dir.get_relative_str(&filename),
+        None => pkg_dir.get_relative_str(&filename),
         Some(s) => {
             let sib = want_file(s, &func, "sibling")?;
-            let orig = sib.root_relative_path.path_string().to_string();
+            let orig = sib
+                .output_dir_relative_path(st.inputs.sibling_repository_layout)
+                .path_string()
+                .to_string();
             let dir = orig.rsplit_once('/').map(|(d, _)| d.to_string()).unwrap_or_default();
             if dir.is_empty() {
                 PathFragment::create(&filename)
@@ -718,16 +722,7 @@ fn declare_ext(
                 st.label.canonical_form()
             ));
         }
-    } else if uplevel || !{
-        let rel = if st.inputs.sibling_repository_layout {
-            fs.as_str()
-        } else {
-            // Outputs next to a sibling of an external-repository target carry `external/<repo>/`.
-            let repo_prefix = format!("external/{}/", st.label.package_identifier().repository().name());
-            fs.strip_prefix(repo_prefix.as_str()).unwrap_or(&fs)
-        };
-        starts_with_dir(rel, &pkg)
-    } {
+    } else if uplevel || !starts_with_dir(&fs, &pkg) {
         return err(format!(
             "the output {} '{fs}' is not under package directory '{pkg}' for target '{}'",
             if tree { "directory" } else { "artifact" },
@@ -976,6 +971,7 @@ fn actions_method(
                 Arc::new(move |status_map: &BTreeMap<String, String>| {
                     let mut eval = EvalContext::new(PathFragment::empty(), None);
                     eval.semantics = semantics.clone();
+                    eval.thread.semantics = semantics.clone();
                     for (k, v) in &globals {
                         eval.globals.insert(k.clone(), v.clone());
                     }

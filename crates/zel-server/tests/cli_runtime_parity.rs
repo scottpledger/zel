@@ -1205,6 +1205,44 @@ probe_rule(
     assert_eq!(cq_def.code, 0, "{}", cq_def.err);
     assert_eq!(cq_def.out.trim(), "external/rules_shell+");
 
+    // `cquery --output=files` and `aquery` also reflect --experimental_sibling_repository_layout.
+    let cqf_sib = w.run(&[
+        "cquery",
+        "--experimental_sibling_repository_layout",
+        "--output=files",
+        "@my_shell//shell:sh_binary.bzl",
+    ]);
+    assert_eq!(cqf_sib.code, 0, "{}", cqf_sib.err);
+    assert_eq!(cqf_sib.out.trim(), "../rules_shell+/shell/sh_binary.bzl");
+
+    let cqf_def = w.run(&["cquery", "--output=files", "@my_shell//shell:sh_binary.bzl"]);
+    assert_eq!(cqf_def.code, 0, "{}", cqf_def.err);
+    assert_eq!(
+        cqf_def.out.trim(),
+        "external/rules_shell+/shell/sh_binary.bzl"
+    );
+
+    let aq_sib = w.run(&[
+        "aquery",
+        "--experimental_sibling_repository_layout",
+        "//p:probe",
+    ]);
+    assert_eq!(aq_sib.code, 0, "{}", aq_sib.err);
+    assert!(
+        aq_sib
+            .out
+            .contains("../bazel_tools/tools/genrule/genrule-setup.sh"),
+        "expected sibling external input in aquery output:\n{}",
+        aq_sib.out
+    );
+    assert!(
+        !aq_sib
+            .out
+            .contains("external/bazel_tools/tools/genrule/genrule-setup.sh"),
+        "unexpected legacy external input in aquery output:\n{}",
+        aq_sib.out
+    );
+
     // 4. Unmapped `platforms` (absent from root MODULE.bazel) and typo `my_shel` must fail with
     //    invalid Label errors rather than returning `[unknown repo ...]`.
     w.write(
