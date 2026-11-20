@@ -63,8 +63,6 @@ pub struct LoaderConfig {
     /// Lets an embedding runtime evaluate selected `.bzl` files itself (files defining repository
     /// rules / module extensions): returns `None` to let the loader evaluate the file.
     pub bzl_override: Option<BzlOverride>,
-    /// Value of `--experimental_sibling_repository_layout` for Starlark `Label.workspace_root`.
-    pub sibling_repository_layout: bool,
 }
 
 /// See [`LoaderConfig::bzl_override`].
@@ -107,7 +105,6 @@ impl LoaderConfig {
             incompatible_use_cc_configure_from_rules_cc: false,
             external_host: None,
             bzl_override: None,
-            sibling_repository_layout: false,
         }
     }
 }
