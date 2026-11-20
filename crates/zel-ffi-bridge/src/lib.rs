@@ -162,12 +162,22 @@ mod tests {
 
     #[test]
     fn test_ffi_bridge_roundtrip() {
-        let input = CString::new("//src/main/rust/../java:bazel").unwrap();
+        let input = CString::new("///src//main/rust/./../java:bazel").unwrap();
         let out_ptr = unsafe { zel_normalize_path(input.as_ptr()) };
         assert!(!out_ptr.is_null());
         let out_str = unsafe { CStr::from_ptr(out_ptr) }.to_str().unwrap();
         assert_eq!(out_str, "/src/main/java:bazel");
         unsafe { zel_free_string(out_ptr) };
+
+        let two_slash = CString::new("//server/share/rust/../java/Bazel.java").unwrap();
+        let two_slash_ptr = unsafe { zel_normalize_path(two_slash.as_ptr()) };
+        assert!(!two_slash_ptr.is_null());
+        let two_slash_str = unsafe { CStr::from_ptr(two_slash_ptr) }.to_str().unwrap();
+        #[cfg(windows)]
+        assert_eq!(two_slash_str, "//server/share/java/Bazel.java");
+        #[cfg(not(windows))]
+        assert_eq!(two_slash_str, "/server/share/java/Bazel.java");
+        unsafe { zel_free_string(two_slash_ptr) };
 
         let label_in = CString::new("@rules_rs//rs:rust_binary.bzl").unwrap();
         let label_ptr = unsafe { zel_canonicalize_label(label_in.as_ptr()) };
