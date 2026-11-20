@@ -821,6 +821,7 @@ def _bad_kwargs_impl(ctx):
                 outputs_fn: None,
                 is_starlark: true,
                 build_setting: false,
+                build_setting_is_flag: false,
                 starlark: Some(Arc::new(StarlarkRuleSpec {
                     implementation: func,
                     kwargs: BTreeMap::new(),
@@ -1001,6 +1002,7 @@ def _cross_sib(ctx):
                     outputs_fn: None,
                     is_starlark: true,
                     build_setting: false,
+                    build_setting_is_flag: false,
                     starlark: Some(Arc::new(StarlarkRuleSpec {
                         implementation: func,
                         kwargs: BTreeMap::new(),
