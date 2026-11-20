@@ -183,9 +183,50 @@ pub fn are_startup_options_different(
 
 // ------------------------------------------------------------------------------------ locking
 
+const LOCK_METADATA_MAX_LEN: usize = 4096;
+/// On Windows, `LockFileEx` byte-range locks are mandatory, so locking byte `LOCK_METADATA_MAX_LEN`
+/// leaves `[0..LOCK_METADATA_MAX_LEN)` unlocked for owner metadata reads and updates.
+#[cfg(windows)]
+const WINDOWS_LOCK_OFFSET: u32 = LOCK_METADATA_MAX_LEN as u32;
+
 /// A held file lock handle (`AcquireLock`); released on drop.
 pub struct OutputBaseLock {
     _file: File,
+}
+
+#[cfg(windows)]
+impl Drop for OutputBaseLock {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        #[repr(C)]
+        struct Overlapped {
+            internal: usize,
+            internal_high: usize,
+            offset: u32,
+            offset_high: u32,
+            event: *mut core::ffi::c_void,
+        }
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn UnlockFileEx(
+                h_file: *mut core::ffi::c_void,
+                dw_reserved: u32,
+                n_low: u32,
+                n_high: u32,
+                lp_overlapped: *mut Overlapped,
+            ) -> i32;
+        }
+        let mut ov = Overlapped {
+            internal: 0,
+            internal_high: 0,
+            offset: WINDOWS_LOCK_OFFSET,
+            offset_high: 0,
+            event: std::ptr::null_mut(),
+        };
+        unsafe {
+            let _ = UnlockFileEx(self._file.as_raw_handle(), 0, 1, 0, &mut ov);
+        }
+    }
 }
 
 pub struct ClientLocks {
@@ -315,7 +356,7 @@ fn try_lock_fd(file: &File, exclusive: bool) -> Result<bool, io::Error> {
     let mut ov = Overlapped {
         internal: 0,
         internal_high: 0,
-        offset: 0,
+        offset: WINDOWS_LOCK_OFFSET,
         offset_high: 0,
         event: std::ptr::null_mut(),
     };
@@ -357,16 +398,25 @@ fn current_tty() -> Option<String> {
     }
 }
 
+#[cfg(not(unix))]
+fn current_tty() -> Option<String> {
+    None
+}
+
 fn read_lock_owner(file: &mut File) -> String {
     let mut s = String::new();
     let _ = file.seek(SeekFrom::Start(0));
-    let _ = file.take(4096).read_to_string(&mut s);
+    let _ = file
+        .take(LOCK_METADATA_MAX_LEN as u64)
+        .read_to_string(&mut s);
     s
 }
 
-/// `AcquireLock` (`blaze_util_posix.cc`): open (with `O_CLOEXEC` unless `batch_mode`),
-/// lock (`fcntl` OFD with POSIX fallback + `flock`), verify `st_nlink > 0`, write owner
-/// metadata for exclusive locks, poll every 500 ms. Returns `(lock, wait_ms)`.
+/// `AcquireLock` (`blaze_util_posix.cc` / `blaze_util_windows.cc`): open (with `O_CLOEXEC` unless
+/// `batch_mode` on Unix, or `FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE` on Windows),
+/// lock (`fcntl` OFD with POSIX fallback + `flock` on Unix, `LockFileEx` at byte 4096 on Windows),
+/// verify `st_nlink > 0`, write owner metadata (`[0..len)`, `len <= 4096`) for exclusive locks,
+/// poll every 500 ms. Returns `(lock, wait_ms)`.
 pub fn acquire_lock(
     name: &str,
     path: &Path,
@@ -385,7 +435,7 @@ pub fn acquire_lock(
     const F_SETFD: i32 = 2;
     let start = Instant::now();
     let mut multiple_attempts = false;
-    let mut owner = String::new();
+    let mut owner: Option<String> = None;
     loop {
         let mut oo = OpenOptions::new();
         oo.read(true).write(true).create(true).truncate(false);
@@ -439,21 +489,26 @@ pub fn acquire_lock(
                 #[cfg(not(unix))]
                 let nlink = 1u64;
                 if nlink > 0 {
-                    #[cfg(unix)]
                     if exclusive {
-                        let _ = file.set_len(0);
-                        let _ = file.seek(SeekFrom::Start(0));
                         let cwd = std::env::current_dir()
                             .map(|p| p.display().to_string())
                             .unwrap_or_default();
-                        let _ = write!(
-                            file,
-                            "pid={}\nowner=client\ncwd={cwd}\n",
-                            std::process::id()
-                        );
+                        let mut payload =
+                            format!("pid={}\nowner=client\ncwd={cwd}\n", std::process::id());
                         if let Some(tty) = current_tty() {
-                            let _ = writeln!(file, "tty={tty}");
+                            use std::fmt::Write as _;
+                            let _ = writeln!(payload, "tty={tty}");
                         }
+                        if payload.len() > LOCK_METADATA_MAX_LEN {
+                            let mut cut = LOCK_METADATA_MAX_LEN;
+                            while !payload.is_char_boundary(cut) {
+                                cut -= 1;
+                            }
+                            payload.truncate(cut);
+                        }
+                        let _ = file.seek(SeekFrom::Start(0));
+                        let _ = file.write_all(payload.as_bytes());
+                        let _ = file.set_len(payload.len() as u64);
                         let _ = file.flush();
                     }
                     let wait_ms = if multiple_attempts {
@@ -466,19 +521,20 @@ pub fn acquire_lock(
             }
             Ok(false) => {}
             Err(e) => {
+                let syscall = if cfg!(windows) { "LockFileEx" } else { "fcntl" };
                 let _ = writeln!(
                     err,
-                    "FATAL: fcntl failed for {name} lock: {}",
+                    "FATAL: {syscall} failed for {name} lock: {}",
                     errno_string(&e)
                 );
                 return Err(ExitCode::LOCAL_ENVIRONMENTAL_ERROR.numeric_exit_code());
             }
         }
         let new_owner = read_lock_owner(&mut file);
-        let changed = new_owner != owner;
+        let changed = owner.as_deref() != Some(new_owner.as_str());
         if changed {
             let _ = writeln!(err, "Another command holds the {name} lock: \n{new_owner}");
-            owner = new_owner;
+            owner = Some(new_owner);
         }
         if !block {
             let _ = writeln!(
@@ -1626,6 +1682,77 @@ mod tests {
         assert_eq!(
             fs::read_to_string(new_ib.join("install_base_key")).unwrap(),
             "newmd5"
+        );
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn exclusive_output_base_lock_writes_and_reports_blocking_owner_metadata() {
+        let dir =
+            std::env::temp_dir().join(format!("zel-client-lock-owner-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let ob = dir.join("ob");
+        fs::create_dir_all(&ob).unwrap();
+
+        let mut holder_err = Vec::new();
+        let (held_lock, wait0) = acquire_output_base_lock(&ob, false, false, &mut holder_err)
+            .expect("initial exclusive lock must succeed");
+        assert_eq!(wait0, 0);
+        assert!(holder_err.is_empty());
+
+        let expected_pid = format!("pid={}", std::process::id());
+        let expected_cwd = format!(
+            "cwd={}",
+            std::env::current_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default()
+        );
+
+        // Competing non-blocking client fails with exit code 9 and reports the holder's metadata.
+        let mut contender_err = Vec::new();
+        let res = acquire_output_base_lock(&ob, false, false, &mut contender_err);
+        assert_eq!(
+            res.err(),
+            Some(ExitCode::LOCK_HELD_NOBLOCK_FOR_LOCK.numeric_exit_code())
+        );
+        let msg = String::from_utf8_lossy(&contender_err);
+        assert!(
+            msg.contains("Another command holds the output base lock:"),
+            "{msg}"
+        );
+        assert!(msg.contains(&expected_pid), "{msg}");
+        assert!(msg.contains("owner=client"), "{msg}");
+        assert!(msg.contains(&expected_cwd), "{msg}");
+        assert!(
+            msg.contains(
+                "Exiting because the output base lock is held and --noblock_for_lock was given."
+            ),
+            "{msg}"
+        );
+
+        // Blocking client reports wait message with owner metadata, then acquires once dropped.
+        let ob_wait = ob.clone();
+        let waiter = std::thread::spawn(move || {
+            let mut wait_err = Vec::new();
+            let (_lock, waited_ms) = acquire_output_base_lock(&ob_wait, false, true, &mut wait_err)
+                .expect("blocking lock must succeed after holder drops");
+            (waited_ms, String::from_utf8(wait_err).unwrap())
+        });
+        std::thread::sleep(Duration::from_millis(150));
+        drop(held_lock);
+
+        let (waited_ms, wait_msg) = waiter.join().unwrap();
+        assert!(waited_ms >= 100, "waited_ms={waited_ms}");
+        assert!(
+            wait_msg.contains("Another command holds the output base lock:"),
+            "{wait_msg}"
+        );
+        assert!(wait_msg.contains(&expected_pid), "{wait_msg}");
+        assert!(wait_msg.contains(&expected_cwd), "{wait_msg}");
+        assert!(
+            wait_msg.contains("Waiting for it to complete..."),
+            "{wait_msg}"
         );
 
         let _ = fs::remove_dir_all(&dir);
