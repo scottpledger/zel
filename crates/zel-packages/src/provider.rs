@@ -30,6 +30,8 @@ struct ProviderDef {
     /// Allowed fields (schema), or `None` for a schemaless provider.
     fields: Option<Vec<String>>,
     init: Option<Value>,
+    /// True only for builtin pre-registered providers (`ProtoInfo`, `ProtoLangToolchainInfo`).
+    pre_registered: bool,
 }
 
 static REGISTRY: Mutex<Vec<ProviderDef>> = Mutex::new(Vec::new());
@@ -112,6 +114,7 @@ pub fn define_provider(
         key: None,
         fields,
         init: init.clone(),
+        pre_registered: false,
     });
     let id = (reg.len() - 1).to_string();
     let sym = Value::Host("provider".to_string(), id.clone());
@@ -125,14 +128,95 @@ pub fn define_provider(
     }
 }
 
-/// Called when a `.bzl` file finishes loading and assigns `name` to provider `idx`.
-pub fn export_provider(idx: usize, name: &str, bzl_label: &str) {
+/// Pre-registers (or looks up) an exported Starlark provider symbol for `key`
+/// (`<canonical bzl label>%<exported name>`), returning the shared `Value::Host("provider", id)`.
+pub fn exported_builtin_provider(key: &str, fields: Option<&[&str]>) -> Value {
+    let _ = zel_starlark::HOST_IS_IMMUTABLE.set(host_is_immutable);
     let mut reg = REGISTRY.lock().unwrap();
-    if let Some(d) = reg.get_mut(idx) {
-        if d.key.is_none() {
-            d.key = Some(format!("{bzl_label}%{name}"));
-        }
+    if let Some((idx, _)) = reg
+        .iter()
+        .enumerate()
+        .find(|(_, d)| d.key.as_deref() == Some(key))
+    {
+        return Value::Host("provider".to_string(), idx.to_string());
     }
+    reg.push(ProviderDef {
+        key: Some(key.to_string()),
+        fields: fields.map(|fs| fs.iter().map(|s| (*s).to_string()).collect()),
+        init: None,
+        pre_registered: true,
+    });
+    let id = (reg.len() - 1).to_string();
+    Value::Host("provider".to_string(), id)
+}
+
+/// The three external `ProtoInfo` Starlark provider symbols published by `ProtoConstants.java`.
+pub fn external_proto_infos() -> Vec<Value> {
+    [
+        "@@com_google_protobuf//bazel/private:proto_info.bzl%ProtoInfo",
+        "@@com_google_protobuf+//bazel/private:proto_info.bzl%ProtoInfo",
+        "@@protobuf+//bazel/private:proto_info.bzl%ProtoInfo",
+    ]
+    .into_iter()
+    .map(|k| exported_builtin_provider(k, None))
+    .collect()
+}
+
+/// The `ProtoLangToolchainInfo` Starlark provider registered for
+/// `@@com_google_protobuf+//bazel/common:proto_lang_toolchain_info.bzl`.
+pub fn proto_lang_toolchain_info_provider() -> Value {
+    const FIELDS: &[&str] = &[
+        "out_replacement_format_flag",
+        "output_files",
+        "plugin_format_flag",
+        "plugin",
+        "runtime",
+        "provided_proto_sources",
+        "proto_compiler",
+        "protoc_opts",
+        "progress_message",
+        "mnemonic",
+        "allowlist_different_package",
+        "toolchain_type",
+    ];
+    exported_builtin_provider(
+        "@@com_google_protobuf+//bazel/common:proto_lang_toolchain_info.bzl%ProtoLangToolchainInfo",
+        Some(FIELDS),
+    )
+}
+
+/// Called when a `.bzl` file finishes loading and assigns `name` to provider `idx`.
+/// If a pre-registered builtin provider symbol already owns `{bzl_label}%{name}`, updates its
+/// schema/init from `idx` and returns that existing symbol so identity (`==` / hashing) matches.
+pub fn export_provider(idx: usize, name: &str, bzl_label: &str) -> Option<Value> {
+    let full_key = format!("{bzl_label}%{name}");
+    let mut reg = REGISTRY.lock().unwrap();
+    let existing_idx = reg
+        .iter()
+        .enumerate()
+        .find(|(i, d)| *i != idx && d.pre_registered && d.key.as_deref() == Some(full_key.as_str()))
+        .map(|(i, _)| i);
+    let (new_fields, new_init) = match reg.get_mut(idx) {
+        Some(d) => {
+            if d.key.is_none() {
+                d.key = Some(full_key.clone());
+            }
+            (d.fields.clone(), d.init.clone())
+        }
+        None => return None,
+    };
+    if let Some(ex_idx) = existing_idx {
+        if let Some(ex) = reg.get_mut(ex_idx) {
+            if new_fields.is_some() {
+                ex.fields = new_fields;
+            }
+            if new_init.is_some() {
+                ex.init = new_init;
+            }
+        }
+        return Some(Value::Host("provider".to_string(), ex_idx.to_string()));
+    }
+    None
 }
 
 /// Maps the placeholder key of an instance created before its provider was exported

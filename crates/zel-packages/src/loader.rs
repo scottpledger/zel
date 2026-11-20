@@ -400,6 +400,10 @@ fn install_analysis_modules(ctx: &mut EvalContext) {
         mk_struct(vec![
             ("FeatureFlagInfo", provider("FeatureFlagInfo")),
             ("toolchain_type", host("config_common.toolchain_type")),
+            (
+                "config_feature_flag_transition",
+                host("config_common.config_feature_flag_transition"),
+            ),
         ]),
     );
     ctx.globals.insert(
@@ -407,6 +411,7 @@ fn install_analysis_modules(ctx: &mut EvalContext) {
         mk_struct(vec![
             ("ExecutionInfo", provider("ExecutionInfo")),
             ("TestEnvironment", provider("TestEnvironment")),
+            ("analysis_test", host("testing.analysis_test")),
         ]),
     );
     ctx.globals.insert(
@@ -572,6 +577,20 @@ impl PackageLoader {
 
     pub fn invalidate_bzl_cache(&self) {
         self.bzl_cache.lock().unwrap().clear();
+    }
+
+    /// Canonical repository names of all `.bzl` modules loaded so far (excluding `@_builtins`).
+    pub fn loaded_bzl_repos(&self) -> Vec<String> {
+        let mut repos = std::collections::BTreeSet::new();
+        for k in self.bzl_cache.lock().unwrap().keys() {
+            if let Ok(lbl) = Label::parse_canonical(k) {
+                let r = lbl.package_identifier().repository().name().to_string();
+                if r != "_builtins" {
+                    repos.insert(r);
+                }
+            }
+        }
+        repos.into_iter().collect()
     }
 
     fn fs(&self) -> &dyn FileSystem {
@@ -985,6 +1004,31 @@ impl PackageLoader {
                 .entry(n.to_string())
                 .or_insert_with(|| Value::BuiltinFunction(n.to_string()));
         }
+        let host = |n: &str| Value::BuiltinFunction(format!("host:{n}"));
+        ctx.globals.entry("testing".into()).or_insert_with(|| {
+            mk_struct(vec![
+                ("ExecutionInfo", provider("ExecutionInfo")),
+                ("TestEnvironment", provider("TestEnvironment")),
+                ("analysis_test", host("testing.analysis_test")),
+            ])
+        });
+        ctx.globals
+            .entry("coverage_common".into())
+            .or_insert_with(|| {
+                mk_struct(vec![(
+                    "instrumented_files_info",
+                    host("coverage_common.instrumented_files_info"),
+                )])
+            });
+        for p in [
+            "InstrumentedFilesInfo",
+            "AnalysisFailureInfo",
+            "AnalysisTestResultInfo",
+        ] {
+            ctx.globals
+                .entry(p.to_string())
+                .or_insert_with(|| provider(p));
+        }
     }
 
     /// Symbols shared by `.bzl` files.
@@ -1065,12 +1109,39 @@ impl PackageLoader {
             ),
         );
         pcdnu.insert(
+            "INCOMPATIBLE_ENABLE_PROTO_TOOLCHAIN_RESOLUTION".to_string(),
+            Value::Bool(true),
+        );
+        pcdnu.insert(
             "external_proto_infos".to_string(),
             Value::BuiltinFunction("host:proto_common_do_not_use.external_proto_infos".into()),
+        );
+        pcdnu.insert(
+            "ProtoLangToolchainInfo".to_string(),
+            crate::provider::proto_lang_toolchain_info_provider(),
+        );
+        pcdnu.insert(
+            "direct_dependencies_violation_msg".to_string(),
+            Value::BuiltinFunction(
+                "host:proto_common_do_not_use.direct_dependencies_violation_msg".into(),
+            ),
         );
         ctx.globals.insert(
             "proto_common_do_not_use".to_string(),
             Value::Struct(Arc::new(StructValue::new(pcdnu))),
+        );
+        let mut proto_common = BTreeMap::new();
+        proto_common.insert(
+            "ProtoLangToolchainInfo".to_string(),
+            crate::provider::proto_lang_toolchain_info_provider(),
+        );
+        proto_common.insert(
+            "INCOMPATIBLE_ENABLE_PROTO_TOOLCHAIN_RESOLUTION".to_string(),
+            Value::Bool(true),
+        );
+        ctx.globals.insert(
+            "proto_common".to_string(),
+            Value::Struct(Arc::new(StructValue::new(proto_common))),
         );
         ctx.globals
             .entry("exec_transition".to_string())
@@ -1935,6 +2006,7 @@ impl PackageLoader {
             zel_util::sha256::digest(&fp)
         };
         // Export rules/macros: assign names by variable.
+        let mut provider_replacements: Vec<(String, Value)> = Vec::new();
         {
             let mut reg = self.registry.lock().unwrap();
             for (k, v) in &ctx.globals {
@@ -1998,21 +2070,26 @@ impl PackageLoader {
                                                         .unwrap_or_else(|_| v.clone())
                                                 }
                                                 Value::Struct(st)
-                                                    if st
-                                                        .fields
-                                                        .contains_key("_toolchain_type") =>
+                                                    if st.fields.contains_key("toolchain_type")
+                                                        || st
+                                                            .fields
+                                                            .contains_key("_toolchain_type") =>
                                                 {
                                                     let mut f = st.fields.clone();
-                                                    if let Some(Value::String(n)) =
-                                                        f.get("name").cloned()
-                                                    {
-                                                        if let Ok(l) =
-                                                            crate::attr::convert_label(&n, &cctx)
+                                                    for fnm in ["toolchain_type", "name"] {
+                                                        if let Some(Value::String(n)) =
+                                                            f.get(fnm).cloned()
                                                         {
-                                                            f.insert(
-                                                                "name".into(),
-                                                                Value::Label(l),
-                                                            );
+                                                            if let Ok(l) =
+                                                                crate::attr::convert_label(
+                                                                    &n, &cctx,
+                                                                )
+                                                            {
+                                                                f.insert(
+                                                                    fnm.into(),
+                                                                    Value::Label(l),
+                                                                );
+                                                            }
                                                         }
                                                     }
                                                     Value::Struct(Arc::new(
@@ -2105,7 +2182,11 @@ impl PackageLoader {
                             }
                         }
                         "provider" => {
-                            crate::provider::export_provider(idx, k, &label.canonical_form());
+                            if let Some(shared) =
+                                crate::provider::export_provider(idx, k, &label.canonical_form())
+                            {
+                                provider_replacements.push((k.clone(), shared));
+                            }
                         }
                         "aspect" => {
                             crate::aspect::export_aspect(idx, k, &label.canonical_form());
@@ -2114,6 +2195,9 @@ impl PackageLoader {
                     }
                 }
             }
+        }
+        for (k, shared) in provider_replacements {
+            ctx.globals.insert(k, shared);
         }
         let mut exports = BTreeMap::new();
         for (k, v) in &ctx.globals {

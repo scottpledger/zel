@@ -11,6 +11,20 @@ fn dispatch(
     mut pos: Vec<Value>,
     kw: BTreeMap<String, Value>,
 ) -> HostResult {
+    if name == "builtins.cc_common.check_experimental_cc_shared_library" {
+        let enabled = crate::fragments::Opts::new(&st.cfg).b("experimental_cc_shared_library", true);
+        return if enabled {
+            Ok(Value::None)
+        } else {
+            err("Target/Rule requires --experimental_cc_shared_library to be enabled")
+        };
+    }
+    if name == "builtins.cc_common.incompatible_disable_objc_library_transition" {
+        return Ok(Value::Bool(
+            crate::fragments::Opts::new(&st.cfg)
+                .b("incompatible_disable_objc_library_transition", true),
+        ));
+    }
     if let Some(r) = cc_native(st, ctx, name, &pos, &kw) {
         return r;
     }
@@ -74,22 +88,184 @@ fn dispatch(
         return Ok(Value::Bool(true));
     }
     if name == "proto_common_do_not_use.external_proto_infos" {
-        return Ok(mk_list(Vec::new()));
+        return Ok(Value::Tuple(zel_packages::provider::external_proto_infos()));
     }
     if name.starts_with("call:") && name != "call:provider" && name != "call:provider_raw" {
         return err(format!("'{}' object is not callable", pos.first().map(|v| v.type_name()).unwrap_or("host_object")));
     }
     if name == "config_common.toolchain_type" {
+        check_kwargs("toolchain_type", &pos, &kw, &["name", "mandatory"])?;
+        let raw_name = arg(&pos, &kw, 0, "name").ok_or_else(|| {
+            StarlarkError("toolchain_type() missing 1 required positional argument: name".into())
+        })?;
+        let tc_lbl = match raw_name {
+            Value::Label(l) => l.clone(),
+            Value::String(s) => {
+                let (pkg, mapping) = match ctx.current_label_ctx() {
+                    Some((p, m)) => (p, m),
+                    None => (st.label.package_identifier().clone(), st.repo_mapping()),
+                };
+                zel_cmdline::Label::parse_with_package_context(s, &pkg, &mapping)
+                    .map_err(|e| StarlarkError(format!("Unable to parse toolchain_type label '{s}': {e}")))?
+            }
+            other => {
+                return err(format!(
+                    "in call to toolchain_type(), parameter 'name' got value of type '{}', want 'string or Label'",
+                    other.type_name()
+                ))
+            }
+        };
+        let mandatory = match arg(&pos, &kw, 1, "mandatory") {
+            None => true,
+            Some(Value::Bool(b)) => *b,
+            Some(other) => {
+                return err(format!(
+                    "in call to toolchain_type(), parameter 'mandatory' got value of type '{}', want 'bool'",
+                    other.type_name()
+                ))
+            }
+        };
         let mut f: BTreeMap<String, Value> = BTreeMap::new();
-        if let Some(v) = arg(&pos, &kw, 0, "name") {
-            f.insert("name".into(), v.clone());
-        }
-        f.insert("mandatory".into(), kw.get("mandatory").cloned().unwrap_or(Value::Bool(true)));
-        f.insert("_toolchain_type".into(), Value::Bool(true));
+        f.insert("toolchain_type".into(), Value::Label(tc_lbl));
+        f.insert("mandatory".into(), Value::Bool(mandatory));
+        return Ok(Value::Struct(Arc::new(StructValue::new(f))));
+    }
+    if name == "config_common.config_feature_flag_transition" {
+        check_kwargs("config_feature_flag_transition", &pos, &kw, &["attribute"])?;
+        let attr_name = want_str(
+            arg(&pos, &kw, 0, "attribute").ok_or_else(|| {
+                StarlarkError("config_feature_flag_transition() missing 1 required positional argument: attribute".into())
+            })?,
+            "config_feature_flag_transition",
+            "attribute",
+        )?;
+        let mut f: BTreeMap<String, Value> = BTreeMap::new();
+        f.insert("attribute".into(), Value::String(attr_name));
+        f.insert("_config_feature_flag_transition".into(), Value::Bool(true));
+        f.insert("_transition".into(), Value::Bool(true));
         return Ok(Value::Struct(Arc::new(StructValue::new(f))));
     }
     if name == "coverage_common.instrumented_files_info" {
         return instrumented_files_info(st, &pos, &kw);
+    }
+    if let Some(frag_fn) = name.strip_prefix("fragment.") {
+        return match frag_fn {
+            "apple.multi_arch_platform" => {
+                check_kwargs("multi_arch_platform", &pos, &kw, &["platform_type"])?;
+                let pt = want_str(
+                    arg(&pos, &kw, 0, "platform_type").ok_or_else(|| {
+                        StarlarkError(
+                            "multi_arch_platform() missing 1 required positional argument: platform_type"
+                                .into(),
+                        )
+                    })?,
+                    "multi_arch_platform",
+                    "platform_type",
+                )?;
+                crate::fragments::apple_multi_arch_platform(&st.cfg, &pt).map_err(StarlarkError)
+            }
+            "objc.target_should_alwayslink" => {
+                if let Some((pkg, _)) = ctx.current_label_ctx() {
+                    let repo = pkg.repository().name();
+                    if repo != "_builtins"
+                        && !repo.starts_with("apple_support")
+                        && !repo.starts_with("build_bazel_rules_apple")
+                    {
+                        return err(format!("Rule in '{pkg}' cannot use private API"));
+                    }
+                }
+                check_kwargs("target_should_alwayslink", &pos, &kw, &["ctx"])?;
+                let ctx_arg = arg(&pos, &kw, 0, "ctx").ok_or_else(|| {
+                    StarlarkError(
+                        "target_should_alwayslink() missing 1 required positional argument: ctx"
+                            .into(),
+                    )
+                })?;
+                if !matches!(ctx_arg, Value::Host(k, _) if k == "ctx") {
+                    return err(format!(
+                        "in call to target_should_alwayslink(), parameter 'ctx' got value of type '{}', want 'ctx'",
+                        ctx_arg.type_name()
+                    ));
+                }
+                if st.rule.attrs.contains_key("alwayslink") {
+                    if let Value::Struct(ref s) = st.attr_struct {
+                        if let Some(Value::Bool(b)) = s.fields.get("alwayslink") {
+                            return Ok(Value::Bool(*b));
+                        }
+                    }
+                    if let Some(Value::Bool(b)) = st.rule.attrs.get("alwayslink") {
+                        return Ok(Value::Bool(*b));
+                    }
+                }
+                let by_default = st
+                    .cfg
+                    .options
+                    .get("incompatible_objc_alwayslink_by_default")
+                    .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                    .or_else(|| {
+                        match st
+                            .cfg
+                            .build_options()
+                            .get("incompatible_objc_alwayslink_by_default")
+                        {
+                            Some(crate::build_options::ConfigValue::Scalar(s)) => {
+                                Some(matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                            }
+                            _ => None,
+                        }
+                    })
+                    .unwrap_or(false);
+                Ok(Value::Bool(by_default))
+            }
+            "proto.strict_proto_deps"
+            | "proto.strict_public_imports"
+            | "proto.experimental_proto_descriptorsets_include_source_info" => {
+                if let Some((pkg, _)) = ctx.current_label_ctx() {
+                    let repo = pkg.repository().name();
+                    let allowed = repo == "_builtins"
+                        || repo == "bazel_tools"
+                        || repo.starts_with("protobuf")
+                        || repo.starts_with("com_google_protobuf")
+                        || repo.starts_with("rules_proto");
+                    if !allowed {
+                        return err(format!("Rule in '{pkg}' cannot use private API"));
+                    }
+                }
+                check_kwargs(frag_fn, &pos, &kw, &[])?;
+                match frag_fn {
+                    "proto.strict_proto_deps" => {
+                        crate::fragments::strict_deps_mode_upper(&st.cfg, "strict_proto_deps", "error")
+                            .map(Value::String)
+                            .map_err(StarlarkError)
+                    }
+                    "proto.strict_public_imports" => {
+                        crate::fragments::strict_deps_mode_upper(&st.cfg, "strict_public_imports", "off")
+                            .map(Value::String)
+                            .map_err(StarlarkError)
+                    }
+                    _ => {
+                        let on = st
+                            .cfg
+                            .options
+                            .get("experimental_proto_descriptor_sets_include_source_info")
+                            .map(|v| matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                            .or_else(|| {
+                                match st.cfg.build_options().get(
+                                    "experimental_proto_descriptor_sets_include_source_info",
+                                ) {
+                                    Some(crate::build_options::ConfigValue::Scalar(s)) => Some(
+                                        matches!(s.to_ascii_lowercase().as_str(), "1" | "true" | "yes"),
+                                    ),
+                                    _ => None,
+                                }
+                            })
+                            .unwrap_or(false);
+                        Ok(Value::Bool(on))
+                    }
+                }
+            }
+            other => err(format!("unknown fragment method '{other}'")),
+        };
     }
     if name == "Label" {
         let v = pos.first().or_else(|| kw.get("input")).ok_or_else(|| {
@@ -355,8 +531,11 @@ fn fragment_value(st: &CtxState, name: &str) -> Result<Value, StarlarkError> {
     }
     match name {
         "coverage" => Ok(mk_struct(vec![("collect_code_coverage", Value::Bool(coverage_enabled(&st.cfg)))])),
-        other => crate::fragments::fragment(other, &st.cfg)
-            .ok_or_else(|| StarlarkError(format!("unknown configuration fragment '{other}'"))),
+        other => match crate::fragments::fragment(other, &st.cfg) {
+            Ok(Some(v)) => Ok(v),
+            Ok(None) => err(format!("unknown configuration fragment '{other}'")),
+            Err(e) => err(e),
+        },
     }
 }
 
@@ -386,8 +565,12 @@ fn transform_toolchain_key(st: &CtxState, key: &Value) -> Result<String, Starlar
                 _ => err("invalid ToolchainTypeInfo"),
             }
         }
-        Value::Struct(s) if s.fields.contains_key("_toolchain_type") || s.fields.contains_key("name") => {
-            match s.fields.get("name") {
+        Value::Struct(s)
+            if s.fields.contains_key("toolchain_type")
+                || s.fields.contains_key("_toolchain_type")
+                || s.fields.contains_key("name") =>
+        {
+            match s.fields.get("toolchain_type").or_else(|| s.fields.get("name")) {
                 Some(Value::Label(l)) => Ok(l.canonical_form()),
                 Some(Value::String(raw)) => {
                     let rm = st.repo_mapping();
@@ -509,16 +692,44 @@ fn host_attr(st: &Arc<CtxState>, kind: &str, attr: &str, pos: &[Value]) -> HostR
             }
         }
         "exec_groups" | "rule_exec_groups" => err(format!("'{kind}' value has no field or method '{attr}'")),
+        "constraint_collection" => {
+            let cc = crate::constraint_collection_of(recv)
+                .ok_or_else(|| StarlarkError("invalid ConstraintCollection".into()))?;
+            match attr {
+                "constraint_settings" => Ok(mk_list(crate::constraint_collection_settings(&cc))),
+                "get" | "has" | "has_constraint_value" => {
+                    Ok(Value::BuiltinFunction(format!("host:method:constraint_collection.{attr}")))
+                }
+                _ => err(format!("'ConstraintCollection' value has no field or method '{attr}'")),
+            }
+        }
         "ctx" => ctx_attr(st, attr),
         other => err(format!("'{other}' value has no field or method '{attr}'")),
     }
 }
 
+const ALIAS_CLASS_OVERRIDES: &[&str] = &[
+    "AliasProvider",
+    "LateBoundAliasProvider",
+    "VisibilityProvider",
+    "RequiredConfigFragmentsProvider",
+    "BuildSettingProvider",
+];
+
+fn starlark_visible_providers(ct: &ConfiguredTarget) -> &BTreeMap<String, Value> {
+    &ct.get_actual().providers
+}
+
+fn is_alias_override_provider(ct: &ConfiguredTarget, pk: &str) -> bool {
+    (ct.is_alias() || ct.is_late_bound_alias) && ALIAS_CLASS_OVERRIDES.contains(&pk)
+}
+
 fn target_attr(ct: &Arc<ConfiguredTarget>, attr: &str) -> HostResult {
+    let actual = ct.get_actual();
     match attr {
         "label" => Ok(Value::Label(ct.actual_target_label().clone())),
         "files" => Ok(files_depset(&target_files(ct))),
-        "files_to_run" => ct
+        "files_to_run" => actual
             .providers
             .get("DefaultInfo")
             .and_then(|d| match d {
@@ -526,7 +737,7 @@ fn target_attr(ct: &Arc<ConfiguredTarget>, attr: &str) -> HostResult {
                 _ => None,
             })
             .ok_or_else(|| StarlarkError("target has no files_to_run".into())),
-        "default_runfiles" | "data_runfiles" => ct
+        "default_runfiles" | "data_runfiles" => actual
             .providers
             .get("DefaultInfo")
             .and_then(|d| match d {
@@ -535,8 +746,12 @@ fn target_attr(ct: &Arc<ConfiguredTarget>, attr: &str) -> HostResult {
             })
             .ok_or_else(|| StarlarkError(format!("target has no {attr}"))),
         other => {
-            // Legacy access to provider fields by name (`target.output_groups`, ...).
-            for p in ct.providers.values() {
+            // Legacy access to provider fields by name (`target.output_groups`, ...), excluding
+            // class-level alias overrides (`AliasConfiguredTarget.get`).
+            for (pk, p) in starlark_visible_providers(ct) {
+                if is_alias_override_provider(ct, pk) {
+                    continue;
+                }
                 if let Value::ProviderInstance { fields, .. } = p {
                     if let Some(v) = fields.get(other) {
                         return Ok(v.clone());
@@ -545,8 +760,8 @@ fn target_attr(ct: &Arc<ConfiguredTarget>, attr: &str) -> HostResult {
             }
             err(format!(
                 "<target {}> (rule '{}') doesn't have provider '{other}'",
-                ct.label.canonical_form(),
-                ct.rule_class
+                actual.label.canonical_form(),
+                actual.rule_class
             ))
         }
     }
@@ -562,14 +777,25 @@ fn host_index(_st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> Hos
                     key.type_name()
                 ))
             })?;
-            ct.providers.get(&pk).cloned().ok_or_else(|| {
+            let actual = ct.get_actual();
+            let found = if is_alias_override_provider(&ct, &pk) {
+                None
+            } else {
+                actual.providers.get(&pk).cloned()
+            };
+            found.ok_or_else(|| {
                 StarlarkError(format!(
                     "<target {}> (rule '{}') doesn't contain declared provider '{}'",
-                    ct.label.canonical_form(),
-                    ct.rule_class,
+                    actual.label.canonical_form(),
+                    actual.rule_class,
                     zel_packages::provider::provider_display_name(&pk)
                 ))
             })
+        }
+        "constraint_collection" => {
+            let cc = crate::constraint_collection_of(recv)
+                .ok_or_else(|| StarlarkError("invalid ConstraintCollection".into()))?;
+            crate::constraint_collection_get(&cc, key).map_err(StarlarkError)
         }
         "toolchains" => {
             let st = _st;
@@ -686,7 +912,16 @@ fn host_contains(st: &Arc<CtxState>, kind: &str, recv: &Value, key: &Value) -> H
             let ct = target_of(recv).ok_or_else(|| StarlarkError("invalid Target".into()))?;
             let pk = zel_packages::provider::provider_key_of(key)
                 .ok_or_else(|| StarlarkError("'in <target>' requires a provider as left operand".into()))?;
-            Ok(Value::Bool(ct.providers.contains_key(&pk)))
+            let has = !is_alias_override_provider(&ct, &pk)
+                && ct.get_actual().providers.contains_key(&pk);
+            Ok(Value::Bool(has))
+        }
+        "constraint_collection" => {
+            let cc = crate::constraint_collection_of(recv)
+                .ok_or_else(|| StarlarkError("invalid ConstraintCollection".into()))?;
+            crate::constraint_collection_has(&cc, key)
+                .map(Value::Bool)
+                .map_err(StarlarkError)
         }
         "toolchains" => {
             if !has_toolchain_context(st) {
@@ -976,6 +1211,16 @@ fn build_setting_value(st: &Arc<CtxState>) -> HostResult {
             };
             if allow_multiple {
                 Ok(mk_list(vec![def]))
+            } else if ty == "string_set" && !matches!(def, Value::Set(_)) {
+                let mut set = zel_starlark::StarlarkSet::new();
+                if let Ok(seq) = zel_starlark::eval::builtins::value_to_sequence(&def) {
+                    for x in seq {
+                        let _ = set.add(x);
+                    }
+                }
+                let val = Value::Set(Arc::new(Mutex::new(set)));
+                val.freeze();
+                Ok(val)
             } else {
                 Ok(def)
             }
@@ -989,6 +1234,9 @@ pub fn build_setting_type_of(rule: &zel_packages::RuleInstance) -> Option<String
     let rc = rule.extra.rule_class.as_ref()?;
     if !rc.build_setting {
         return None;
+    }
+    if rule.rule_class == "label_flag" || rule.rule_class == "label_setting" {
+        return Some("label".to_string());
     }
     let spec = rc.starlark.as_ref()?;
     Some(match spec.kwargs.get("build_setting") {
@@ -1030,9 +1278,9 @@ pub fn render_flag_value(ty: &str, raw: &str) -> String {
                 "[]".to_string()
             } else {
                 let mut seen = Vec::new();
-                for item in raw.split(',') {
-                    if !seen.contains(&item) {
-                        seen.push(item);
+                for s in raw.split(',') {
+                    if !seen.contains(&s) {
+                        seen.push(s);
                     }
                 }
                 format!("[{}]", seen.join(", "))
@@ -1069,13 +1317,15 @@ pub fn convert_flag_value(ty: &str, raw: &str) -> Result<Value, String> {
             }
         }
         "string_set" => {
-            let mut set = zel_starlark::StarlarkSet::default();
+            let mut set = zel_starlark::StarlarkSet::new();
             if !raw.is_empty() {
                 for s in raw.split(',') {
                     let _ = set.add(Value::String(s.to_string()));
                 }
             }
-            Value::Set(Arc::new(Mutex::new(set)))
+            let val = Value::Set(Arc::new(Mutex::new(set)));
+            val.freeze();
+            val
         }
         _ => Value::String(raw.to_string()),
     })

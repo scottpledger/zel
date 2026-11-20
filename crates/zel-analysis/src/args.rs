@@ -760,6 +760,7 @@ pub(crate) fn args_method(
                 use_always,
                 leading_args: 0,
                 flag_groups: b.groups.clone(),
+                explicit_path: None,
             });
             Ok(())
         }

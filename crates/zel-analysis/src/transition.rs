@@ -22,18 +22,17 @@ use zel_starlark::{BigInt, EvalContext, Value};
 
 const CLO: &str = "//command_line_option:";
 
-fn to_value(v: &str, list: bool) -> Value {
-    if list {
-        Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-            zel_starlark::StarlarkList::new(
-                v.split(',')
-                    .filter(|s| !s.is_empty())
-                    .map(|s| Value::String(s.to_string()))
-                    .collect(),
-            ),
-        )))
-    } else {
-        Value::String(v.to_string())
+fn to_list_value(items: Vec<String>) -> Value {
+    Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+        zel_starlark::StarlarkList::new(items.into_iter().map(Value::String).collect()),
+    )))
+}
+
+fn env_var_raw(var: &zel_util::action_env::EnvVar) -> String {
+    match var {
+        zel_util::action_env::EnvVar::Set(n, v) => format!("{n}={v}"),
+        zel_util::action_env::EnvVar::Inherit(n) => n.clone(),
+        zel_util::action_env::EnvVar::Unset(n) => format!("={n}"),
     }
 }
 
@@ -66,20 +65,105 @@ pub fn setting_value(cfg: &BuildConfigurationKey, key: &str) -> Value {
                         .collect(),
                 ),
             ))),
-            other => match cfg.options.get(other) {
-                Some(v) => to_value(v, is_list_option(other)),
-                None => match cfg.build_options().get(other) {
-                    Some(crate::build_options::ConfigValue::List(l)) => {
-                        Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-                            zel_starlark::StarlarkList::new(
-                                l.iter().map(|s| Value::String(s.clone())).collect(),
-                            ),
-                        )))
+            "action_env" | "host_action_env" | "test_env" if !cfg.has_options_override(name) => {
+                let vars = match name {
+                    "action_env" => &cfg.env.action_env,
+                    "host_action_env" => &cfg.env.host_action_env,
+                    _ => &cfg.env.test_env,
+                };
+                to_list_value(vars.iter().map(env_var_raw).collect())
+            }
+            other if is_list_option(other) => {
+                if crate::build_options::find_option(other)
+                    .is_some_and(|(_, opt)| opt.java_type.contains("PerLabelOptions"))
+                {
+                    if cfg.is_exec {
+                        if other == "per_file_copt" {
+                            if let Some(raw) = cfg.options.get("per_file_copt") {
+                                return to_list_value(crate::build_options::decode_unsplit_list(
+                                    raw,
+                                ));
+                            }
+                            if cfg.has_options_override("host_per_file_copt") {
+                                let raw = cfg
+                                    .options
+                                    .get("host_per_file_copt")
+                                    .map(String::as_str)
+                                    .unwrap_or("");
+                                return to_list_value(crate::build_options::decode_unsplit_list(
+                                    raw,
+                                ));
+                            }
+                            if let Some(n) = cfg.native.get("host_per_file_copt") {
+                                if !n.raw.is_empty() {
+                                    return to_list_value(
+                                        crate::build_options::decode_unsplit_list(&n.raw),
+                                    );
+                                }
+                            }
+                        } else if other == "per_file_ltobackendopt" {
+                            if let Some(raw) = cfg.options.get("per_file_ltobackendopt") {
+                                return to_list_value(crate::build_options::decode_unsplit_list(
+                                    raw,
+                                ));
+                            }
+                        } else if cfg.has_options_override(other) {
+                            let raw = cfg.options.get(other).map(String::as_str).unwrap_or("");
+                            return to_list_value(crate::build_options::decode_unsplit_list(raw));
+                        } else if let Some(n) = cfg.native.get(other) {
+                            if !n.raw.is_empty() {
+                                return to_list_value(crate::build_options::decode_unsplit_list(
+                                    &n.raw,
+                                ));
+                            }
+                        }
+                    } else if cfg.has_options_override(other) {
+                        let raw = cfg.options.get(other).map(String::as_str).unwrap_or("");
+                        return to_list_value(crate::build_options::decode_unsplit_list(raw));
+                    } else if let Some(n) = cfg.native.get(other) {
+                        if !n.raw.is_empty() {
+                            return to_list_value(crate::build_options::decode_unsplit_list(
+                                &n.raw,
+                            ));
+                        }
                     }
+                    return match cfg.build_options().get(other) {
+                        Some(crate::build_options::ConfigValue::List(l)) => to_list_value(
+                            l.iter()
+                                .map(|e| crate::starlark_rule::reverse_per_label_for_starlark(e))
+                                .collect(),
+                        ),
+                        _ => to_list_value(Vec::new()),
+                    };
+                }
+                if cfg.has_options_override(other) {
+                    let raw = cfg.options.get(other).map(String::as_str).unwrap_or("");
+                    let splits_commas =
+                        crate::build_options::find_option(other).is_some_and(|(_, opt)| {
+                            crate::build_options::splits_commas_in_options_map(other, opt)
+                        });
+                    let items = if splits_commas {
+                        raw.split(',')
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    } else {
+                        crate::build_options::decode_unsplit_list(raw)
+                    };
+                    to_list_value(items)
+                } else {
+                    match cfg.build_options().get(other) {
+                        Some(crate::build_options::ConfigValue::List(l)) => {
+                            to_list_value(l.clone())
+                        }
+                        _ => to_list_value(Vec::new()),
+                    }
+                }
+            }
+            other => match cfg.options.get(other) {
+                Some(v) => Value::String(v.clone()),
+                None => match cfg.build_options().get(other) {
                     Some(crate::build_options::ConfigValue::Scalar(s)) => Value::String(s.clone()),
-                    _ if is_list_option(other) => Value::List(std::sync::Arc::new(
-                        std::sync::Mutex::new(zel_starlark::StarlarkList::new(vec![])),
-                    )),
                     _ => Value::String(String::new()),
                 },
             },
@@ -97,6 +181,14 @@ fn stringify(v: &Value) -> Result<String, String> {
         Value::Bool(b) => if *b { "true" } else { "false" }.to_string(),
         Value::Int(i) => i.to_string(),
         Value::Label(l) => l.canonical_form(),
+        Value::Set(s) => s
+            .lock()
+            .unwrap()
+            .elements
+            .iter()
+            .map(stringify)
+            .collect::<Result<Vec<_>, _>>()?
+            .join(","),
         Value::List(_) | Value::Tuple(_) => zel_starlark::eval::builtins::value_to_sequence(v)
             .map_err(|e| e.0)?
             .iter()
@@ -143,35 +235,46 @@ fn sync_env_config(cfg: &mut BuildConfigurationKey, name: &str, value: &Value) {
 
 /// Native options holding lists (`List.toString` rendering in the `ST-<hash>` input).
 fn is_list_option(name: &str) -> bool {
-    matches!(
-        name,
-        "platforms"
-            | "define"
-            | "copt"
-            | "cxxopt"
-            | "conlyopt"
-            | "linkopt"
-            | "ltoopt"
-            | "features"
-            | "host_features"
-            | "host_copt"
-            | "host_cxxopt"
-            | "host_conlyopt"
-            | "host_linkopt"
-            | "extra_toolchains"
-            | "extra_execution_platforms"
-            | "action_env"
-            | "host_action_env"
-            | "test_env"
-            | "test_arg"
-            | "javacopt"
-    )
+    if let Some((_, opt)) = crate::build_options::find_option(name) {
+        return crate::build_options::is_list_option(opt);
+    }
+    matches!(name, "ltoopt")
+}
+
+fn stringify_list_items(v: &Value) -> Result<Vec<String>, String> {
+    match v {
+        Value::None => Ok(Vec::new()),
+        Value::Set(s) => s.lock().unwrap().elements.iter().map(stringify).collect(),
+        Value::List(_) | Value::Tuple(_) => zel_starlark::eval::builtins::value_to_sequence(v)
+            .map_err(|e| e.0)?
+            .iter()
+            .map(stringify)
+            .collect(),
+        other => {
+            let item = stringify(other)?;
+            Ok(if item.is_empty() {
+                Vec::new()
+            } else {
+                vec![item]
+            })
+        }
+    }
 }
 
 /// Java `toString` rendering of a build-setting value, as hashed by
 /// `OutputPathMnemonicComputer.hashChosenOptions`.
 pub fn render_java(v: &Value, native_list: bool) -> Result<String, String> {
     Ok(match v {
+        Value::Set(s) => {
+            let items = s
+                .lock()
+                .unwrap()
+                .elements
+                .iter()
+                .map(|x| render_java(x, false))
+                .collect::<Result<Vec<_>, _>>()?;
+            crate::render_list(&items)
+        }
         Value::List(_) | Value::Tuple(_) => {
             let items = zel_starlark::eval::builtins::value_to_sequence(v)
                 .map_err(|e| e.0)?
@@ -227,7 +330,17 @@ pub fn set_setting(
                 }
             }
             other => {
-                cfg.options.insert(other.to_string(), s.clone());
+                let stored = match crate::build_options::find_option(other) {
+                    Some((_, opt))
+                        if crate::build_options::is_list_option(opt)
+                            && !crate::build_options::splits_commas_in_options_map(other, opt) =>
+                    {
+                        let items = stringify_list_items(value)?;
+                        crate::build_options::encode_unsplit_list(&items)
+                    }
+                    _ => s.clone(),
+                };
+                cfg.options.insert(other.to_string(), stored);
                 sync_env_config(cfg, other, value);
             }
         }
@@ -454,25 +567,36 @@ fn default_value_for_spec(spec: &BuildSettingSpec) -> Value {
         Some(AttrValue::Int(i)) => Value::Int(BigInt::from_i64(*i)),
         Some(AttrValue::Bool(b)) => Value::Bool(*b),
         Some(AttrValue::Label(Some(l))) => Value::Label(l.clone()),
-        Some(AttrValue::StrList(l)) if spec.ty == "string_set" => {
-            let mut set = zel_starlark::StarlarkSet::default();
-            for s in l {
-                let _ = set.add(Value::String(s.clone()));
+        Some(AttrValue::StrList(l)) => {
+            if spec.ty == "string_set" {
+                let mut set = zel_starlark::StarlarkSet::new();
+                for s in l {
+                    let _ = set.add(Value::String(s.clone()));
+                }
+                let val = Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)));
+                val.freeze();
+                val
+            } else {
+                Value::List(std::sync::Arc::new(std::sync::Mutex::new(
+                    zel_starlark::StarlarkList::new(
+                        l.iter().map(|s| Value::String(s.clone())).collect(),
+                    ),
+                )))
             }
-            Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)))
         }
-        Some(AttrValue::StrList(l)) => Value::List(std::sync::Arc::new(std::sync::Mutex::new(
-            zel_starlark::StarlarkList::new(l.iter().map(|s| Value::String(s.clone())).collect()),
-        ))),
         _ => match spec.ty.as_str() {
             "int" => Value::Int(BigInt::from_i64(0)),
             "bool" => Value::Bool(false),
             "string_list" => Value::List(std::sync::Arc::new(std::sync::Mutex::new(
                 zel_starlark::StarlarkList::new(vec![]),
             ))),
-            "string_set" => Value::Set(std::sync::Arc::new(std::sync::Mutex::new(
-                zel_starlark::StarlarkSet::default(),
-            ))),
+            "string_set" => {
+                let val = Value::Set(std::sync::Arc::new(std::sync::Mutex::new(
+                    zel_starlark::StarlarkSet::new(),
+                )));
+                val.freeze();
+                val
+            }
             "label" => Value::None,
             _ => Value::String(String::new()),
         },
@@ -496,11 +620,13 @@ fn setting_value_with_spec(
     };
     if let Some(raw) = cfg.flag_values.get(&spec.resolved_key) {
         if spec.ty == "string_set" {
-            let mut set = zel_starlark::StarlarkSet::default();
+            let mut set = zel_starlark::StarlarkSet::new();
             for part in raw.split(',').filter(|s| !s.is_empty()) {
                 let _ = set.add(Value::String(part.to_string()));
             }
-            return Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)));
+            let val = Value::Set(std::sync::Arc::new(std::sync::Mutex::new(set)));
+            val.freeze();
+            return val;
         }
         if spec.allow_multiple || spec.ty == "string_list" {
             let mut items = Vec::new();
@@ -626,27 +752,27 @@ fn set_setting_with_spec(
         }
         parts.join(",")
     } else if spec.ty == "string_set" {
-        let items = match value {
+        let items: Vec<Value> = match value {
             Value::Set(s) => s.lock().unwrap().elements.clone(),
             Value::List(_) | Value::Tuple(_) => {
                 zel_starlark::eval::builtins::value_to_sequence(value).map_err(|e| e.0)?
             }
-            _ => {
+            other => {
                 return Err(format!(
                     "expected value of type 'set(string)' for {key}, but got {} ({})",
-                    value.repr(),
-                    value.type_name()
+                    other.repr(),
+                    other.type_name()
                 ))
             }
         };
-        let mut parts = Vec::with_capacity(items.len());
+        let mut seen = Vec::new();
         for item in &items {
             let s = validate_scalar_for_spec(key, "string", item, tctx)?;
-            if !parts.contains(&s) {
-                parts.push(s);
+            if !seen.contains(&s) {
+                seen.push(s);
             }
         }
-        parts.join(",")
+        seen.join(",")
     } else {
         validate_scalar_for_spec(key, &spec.ty, value, eff_ctx)?
     };
@@ -666,11 +792,7 @@ fn set_setting_with_spec(
     } else {
         render_java(&def_val, false)?
     };
-    let new_rendered = if spec.allow_multiple || spec.ty == "string_list" {
-        crate::starlark_rule::render_flag_value("string_list", &raw_new)
-    } else {
-        crate::starlark_rule::render_flag_value(&spec.ty, &raw_new)
-    };
+    let new_rendered = crate::starlark_rule::render_flag_value(&spec.ty, &raw_new);
     let before_val = setting_value_with_spec(cfg, key, Some(spec));
     let before_java = if cfg.flag_values.contains_key(resolved) {
         if let Value::Set(s) = &before_val {
@@ -783,6 +905,29 @@ pub fn apply_transition_split_with_resolver(
         // Like Bazel's `PATCH_TRANSITION_KEY`: a split with a single anonymous entry, so that
         // `ctx.attr.<name>` is a list (`target_under_test[0]`).
         return Ok(vec![(Some(String::new()), out)]);
+    }
+    if let Some(Value::String(attr_name)) = s
+        .fields
+        .get("attribute")
+        .filter(|_| s.fields.contains_key("_config_feature_flag_transition"))
+    {
+        let mut out = cfg.clone();
+        if let Some(Value::Struct(attr_st)) = attrs {
+            if let Some(Value::Dict(d)) = attr_st.fields.get(attr_name) {
+                for (k, v) in d.lock().unwrap().items() {
+                    let ck = match &k {
+                        Value::Label(l) => l.canonical_form(),
+                        Value::String(ks) => canonicalize_setting(ks, tctx.as_ref())?,
+                        _ => continue,
+                    };
+                    if let Value::String(vs) = v {
+                        out.flag_values.insert(ck.clone(), vs.clone());
+                        out.transition_changes.insert(ck, vs);
+                    }
+                }
+            }
+        }
+        return Ok(vec![(None, out)]);
     }
     let Some(imp) = s.fields.get("implementation") else {
         // `config.exec()` / `config.target()` / `config.none()` are handled by the caller; a

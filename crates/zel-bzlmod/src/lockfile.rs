@@ -458,22 +458,37 @@ pub fn escape_unescape_roundtrip_for_tests(s: &str) -> bool {
     unescape_input(&crate::ctx::escape_input(s)).as_deref() == Some(s)
 }
 
-/// Checks recorded inputs (`ENV:, `FILE:`, `DIRENTS:` and `REPO_MAPPING:`) against the current
-/// state; returns the description of the first change.
+/// Checks recorded inputs (`ENV:`, `FILE:`, `DIRENTS:`, `DIRTREE:`, and `REPO_MAPPING:`) against
+/// the current state; returns the description of the first change.
 pub fn recorded_inputs_outdated(
     inputs: &[String],
     env: &BTreeMap<String, String>,
     workspace: &std::path::Path,
     external: &std::path::Path,
 ) -> Option<String> {
+    recorded_inputs_outdated_with_lookup(inputs, env, workspace, external, None)
+}
+
+/// Like [`recorded_inputs_outdated`], additionally validating `REPO_MAPPING:` entries against
+/// `repo_mapping_lookup(source_repo)` (`None` if `source_repo` no longer exists).
+#[allow(clippy::type_complexity)]
+pub fn recorded_inputs_outdated_with_lookup(
+    inputs: &[String],
+    env: &BTreeMap<String, String>,
+    workspace: &std::path::Path,
+    external: &std::path::Path,
+    repo_mapping_lookup: Option<&dyn Fn(&str) -> Option<BTreeMap<String, String>>>,
+) -> Option<String> {
     let resolve = |p: &str| -> Option<std::path::PathBuf> {
-        if let Some(rest) = p.strip_prefix("@@") {
+        if let Some(rest) = p.strip_prefix("@@").or_else(|| p.strip_prefix('@')) {
             let (repo, rel) = rest.split_once("//")?;
             Some(if repo.is_empty() {
                 workspace.join(rel)
             } else {
                 external.join(repo).join(rel)
             })
+        } else if let Some(rel) = p.strip_prefix("//") {
+            Some(workspace.join(rel))
         } else {
             Some(std::path::PathBuf::from(p))
         }
@@ -518,6 +533,9 @@ pub fn recorded_inputs_outdated(
             let Some(path) = resolve(p) else {
                 return Some("malformed recorded input".into());
             };
+            if !path.is_dir() {
+                return Some(format!("directory entries of {p} changed"));
+            }
             let mut names: Vec<String> = std::fs::read_dir(&path)
                 .map(|rd| {
                     rd.filter_map(|e| e.ok())
@@ -533,6 +551,42 @@ pub fn recorded_inputs_outdated(
             ) != value
             {
                 return Some(format!("directory entries of {p} changed"));
+            }
+        } else if let Some(p) = input.strip_prefix("DIRTREE:") {
+            let Some(path) = resolve(p) else {
+                return Some("malformed recorded input".into());
+            };
+            let cur = crate::ctx::compute_dirtree_digest(&path).ok();
+            if cur != value {
+                return Some(format!("directory tree at {p} changed"));
+            }
+        } else if let Some(spec) = input.strip_prefix("REPO_MAPPING:") {
+            let Some((source_repo, apparent)) = spec.split_once(',') else {
+                return Some("malformed recorded input".into());
+            };
+            if let Some(lookup) = repo_mapping_lookup {
+                let Some(map) = lookup(source_repo) else {
+                    return Some(format!("source repo {source_repo} doesn't exist anymore"));
+                };
+                let cur = map.get(apparent).cloned();
+                if cur != value {
+                    let show = |v: &Option<String>| {
+                        v.as_ref()
+                            .map(|x| {
+                                if x.is_empty() {
+                                    "@@".to_string()
+                                } else {
+                                    format!("@@{x}")
+                                }
+                            })
+                            .unwrap_or_else(|| "<doesn't exist>".into())
+                    };
+                    return Some(format!(
+                        "canonical name for @{apparent} in {source_repo} changed: {} -> {}",
+                        show(&value),
+                        show(&cur)
+                    ));
+                }
             }
         }
     }
@@ -636,6 +690,88 @@ mod tests {
             lf.registry_file_hashes
                 .get("https://r/modules/a/1/MODULE.bazel"),
             Some(&Some(h.to_string()))
+        );
+    }
+
+    #[test]
+    fn recorded_inputs_support_dirtree_workspace_labels_and_repo_mappings() {
+        let ws = crate::registry::testutil::tmpdir("rec_ws");
+        let ext = crate::registry::testutil::tmpdir("rec_ext");
+        std::fs::create_dir_all(ws.join("pkg/sub")).unwrap();
+        std::fs::write(ws.join("pkg/sub/a.txt"), b"v1").unwrap();
+        std::fs::create_dir_all(ext.join("dep+/dir")).unwrap();
+        std::fs::write(ext.join("dep+/dir/b.txt"), b"ext1").unwrap();
+
+        let ws_tree = crate::ctx::compute_dirtree_digest(&ws.join("pkg")).unwrap();
+        let file_sha = crate::hash::sha256_hex(b"v1");
+        let ext_sha = crate::hash::sha256_hex(b"ext1");
+        let inputs = vec![
+            format!("FILE://pkg/sub/a.txt {file_sha}"),
+            format!("FILE:@dep+//dir/b.txt {ext_sha}"),
+            format!("DIRTREE:@@//pkg {ws_tree}"),
+            "REPO_MAPPING:,my_dep dep+".to_string(),
+        ];
+        let env = BTreeMap::new();
+        let mut root_map = BTreeMap::new();
+        root_map.insert("my_dep".to_string(), "dep+".to_string());
+        let lookup_ok = |src: &str| -> Option<BTreeMap<String, String>> {
+            if src.is_empty() {
+                Some(root_map.clone())
+            } else {
+                None
+            }
+        };
+        assert_eq!(
+            recorded_inputs_outdated_with_lookup(&inputs, &env, &ws, &ext, Some(&lookup_ok)),
+            None
+        );
+
+        // Changing a nested file invalidates DIRTREE even when top-level DIRENTS are unchanged.
+        std::fs::write(ws.join("pkg/sub/a.txt"), b"v2").unwrap();
+        let inputs_tree_only = vec![format!("DIRTREE:@@//pkg {ws_tree}")];
+        assert_eq!(
+            recorded_inputs_outdated_with_lookup(
+                &inputs_tree_only,
+                &env,
+                &ws,
+                &ext,
+                Some(&lookup_ok)
+            ),
+            Some("directory tree at @@//pkg changed".to_string())
+        );
+
+        // Changing a repo mapping entry reports canonical name diff.
+        let mut changed_map = BTreeMap::new();
+        changed_map.insert("my_dep".to_string(), "dep+v2".to_string());
+        let lookup_changed = |src: &str| -> Option<BTreeMap<String, String>> {
+            if src.is_empty() {
+                Some(changed_map.clone())
+            } else {
+                None
+            }
+        };
+        assert_eq!(
+            recorded_inputs_outdated_with_lookup(
+                &["REPO_MAPPING:,my_dep dep+".to_string()],
+                &env,
+                &ws,
+                &ext,
+                Some(&lookup_changed),
+            ),
+            Some("canonical name for @my_dep in  changed: @@dep+ -> @@dep+v2".to_string())
+        );
+
+        // Deleted source repo reports missing source repo.
+        let lookup_missing = |_src: &str| -> Option<BTreeMap<String, String>> { None };
+        assert_eq!(
+            recorded_inputs_outdated_with_lookup(
+                &["REPO_MAPPING:gone_repo+,my_dep dep+".to_string()],
+                &env,
+                &ws,
+                &ext,
+                Some(&lookup_missing),
+            ),
+            Some("source repo gone_repo+ doesn't exist anymore".to_string())
         );
     }
 }

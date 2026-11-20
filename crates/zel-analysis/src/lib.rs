@@ -64,7 +64,7 @@ pub struct BuildConfigurationKey {
     /// `config.<type>` of each Starlark flag in `flag_values` (label -> `string`/`bool`/`int`/`string_list`/...).
     pub flag_types: BTreeMap<String, String>,
     /// Other native options by name without dashes (`copt`, `cxxopt`, `platforms`, ...);
-    /// multi-valued options are comma-joined.
+    /// comma-separated options are `,`-joined and repeatable unsplit options are `\x1f`-joined.
     pub options: BTreeMap<String, String>,
     /// `--platforms` (target platform labels).
     pub platforms: Vec<String>,
@@ -165,6 +165,35 @@ impl BuildConfigurationKey {
             env: zel_util::action_env::EnvConfig::default(),
             native: BTreeMap::new(),
         }
+    }
+
+    /// Returns true when `self.options[name]` was populated or mutated independently of
+    /// `self.native[name]` (e.g. by a configuration transition, platform flags, or direct
+    /// insertion into `options`).
+    pub fn has_options_override(&self, name: &str) -> bool {
+        let Some(raw) = self.options.get(name) else {
+            return false;
+        };
+        let Some(n) = self.native.get(name) else {
+            return true;
+        };
+        if n.raw != *raw {
+            let clo = format!("//command_line_option:{name}");
+            if n.raw.contains(build_options::MULTI_OPT_SEP)
+                && !self.transition_changes.contains_key(&clo)
+                && !self.post_exec.contains_key(name)
+                && n.raw.replace(build_options::MULTI_OPT_SEP, ",") == *raw
+            {
+                return false;
+            }
+            return true;
+        }
+        raw.is_empty()
+            && match &n.value {
+                build_options::ConfigValue::List(vs) => !vs.is_empty(),
+                build_options::ConfigValue::Scalar(s) => !s.is_empty(),
+                build_options::ConfigValue::Null => false,
+            }
     }
 
     /// Returns the string rendering of option `name` from `options`, `native`, or the default in
@@ -322,6 +351,21 @@ impl BuildConfigurationKey {
         // `--tool_java_{language,runtime}_version` become `--java_{language,runtime}_version`.
         out.options.remove("plugin");
         out.native.remove("plugin");
+        out.options.remove("per_file_ltobackendopt");
+        out.native.remove("per_file_ltobackendopt");
+        if self.has_options_override("host_per_file_copt") {
+            if let Some(hpfc) = self.options.get("host_per_file_copt").cloned() {
+                out.options.insert("per_file_copt".to_string(), hpfc);
+            }
+            if let Some(hpfc_nat) = self.native.get("host_per_file_copt").cloned() {
+                out.native.insert("per_file_copt".to_string(), hpfc_nat);
+            } else {
+                out.native.remove("per_file_copt");
+            }
+        } else {
+            out.options.remove("per_file_copt");
+            out.native.remove("per_file_copt");
+        }
         let host_launcher = self
             .options
             .get("host_java_launcher")
@@ -583,14 +627,13 @@ impl BuildConfigurationKey {
         if !self.platforms.is_empty() {
             o.set("platforms", ConfigValue::List(self.platforms.clone()));
         }
-        // Options written by transitions differ from what the command line set.
+        // Options written by transitions or direct map insertions differ from what the command line set.
         for (name, raw) in &self.options {
-            if self.native.get(name).map(|n| &n.raw) == Some(raw) {
+            if !self.has_options_override(name) {
                 continue;
             }
             if let Some((_, opt)) = find_option(name) {
-                let is_list = opt.java_type.starts_with("List<")
-                    || opt.java_type.starts_with("ImmutableList<");
+                let is_list = build_options::is_list_option(opt);
                 if opt.default == "null" && (raw == "null" || raw == NULL_VALUE) {
                     o.set(
                         name,
@@ -603,10 +646,14 @@ impl BuildConfigurationKey {
                     continue;
                 }
                 let raws: Vec<String> = if is_list {
-                    raw.split(',')
-                        .filter(|p| !p.is_empty())
-                        .map(str::to_string)
-                        .collect()
+                    if build_options::splits_commas_in_options_map(name, opt) {
+                        raw.split(',')
+                            .filter(|p| !p.is_empty())
+                            .map(str::to_string)
+                            .collect()
+                    } else {
+                        build_options::decode_unsplit_list(raw)
+                    }
                 } else {
                     vec![raw.clone()]
                 };
@@ -624,10 +671,12 @@ impl BuildConfigurationKey {
             let Some(name) = k.strip_prefix("//command_line_option:") else {
                 continue;
             };
+            if v != NULL_VALUE && self.has_options_override(name) {
+                continue;
+            }
             if let Some((_, opt)) = find_option(name) {
                 if v == NULL_VALUE {
-                    let is_list = opt.java_type.starts_with("List<")
-                        || opt.java_type.starts_with("ImmutableList<");
+                    let is_list = build_options::is_list_option(opt);
                     o.set(
                         name,
                         if is_list {
@@ -1696,8 +1745,14 @@ pub struct ConfiguredTarget {
     pub warnings: Vec<String>,
     /// For `alias` targets: the chain of aliased target labels ending at the final non-alias target.
     pub alias_targets: Vec<Label>,
+    /// Direct aliased `ConfiguredTarget` (`AliasConfiguredTarget.getActualNoFollow`).
+    pub actual: Option<std::sync::Arc<ConfiguredTarget>>,
     /// Non-`None` when this target is incompatible with the target platform (`target_compatible_with`).
     pub incompatible: Option<IncompatiblePlatform>,
+    /// Execution group selected for the `TestRunner` action of a test target (`ExecutionInfo.exec_group`).
+    pub test_exec_group: Option<String>,
+    /// Execution platform resolved for `test_exec_group` on a test target.
+    pub test_execution_platform: Option<String>,
 }
 
 /// Reason a configured target is incompatible with its target platform (`IncompatiblePlatformProvider`).
@@ -1755,8 +1810,30 @@ impl ConfiguredTarget {
             created_in_symbolic_macro: false,
             warnings: Vec::new(),
             alias_targets: Vec::new(),
+            actual: None,
             incompatible: None,
+            test_exec_group: None,
+            test_execution_platform: None,
         }
+    }
+
+    /// `AliasConfiguredTarget.getOriginalLabel`: the lookup-key label of this configured target.
+    pub fn original_label(&self) -> &Label {
+        &self.label
+    }
+
+    /// `AliasConfiguredTarget.getActualNoFollow`: the direct aliased target, if this is an alias.
+    pub fn get_actual_no_follow(&self) -> Option<&std::sync::Arc<ConfiguredTarget>> {
+        self.actual.as_ref()
+    }
+
+    /// `AliasConfiguredTarget.getActual`: walks the alias chain to the underlying real target.
+    pub fn get_actual(&self) -> &ConfiguredTarget {
+        let mut cur = self;
+        while let Some(next) = cur.actual.as_deref() {
+            cur = next;
+        }
+        cur
     }
 
     /// `AliasProvider.getDependencyLabel`: head of the alias chain, or `self.label`.
@@ -1814,6 +1891,330 @@ impl ConfiguredTarget {
         }
         s
     }
+}
+
+/// Backing representation of `PlatformInfo.constraints` (`ConstraintCollection.java`),
+/// preserving the parent chain and falling back to `ConstraintSettingInfo.default_constraint_value`.
+#[derive(Debug, Clone)]
+pub struct ConstraintCollectionData {
+    /// `(ConstraintSettingInfo, ConstraintValueInfo)` entries explicitly declared on this platform.
+    pub entries: Vec<(zel_starlark::Value, zel_starlark::Value)>,
+    pub parent: Option<std::sync::Arc<ConstraintCollectionData>>,
+}
+
+static CONSTRAINT_COLLECTIONS: std::sync::Mutex<Vec<std::sync::Arc<ConstraintCollectionData>>> =
+    std::sync::Mutex::new(Vec::new());
+
+pub fn register_constraint_collection(
+    entries: Vec<(zel_starlark::Value, zel_starlark::Value)>,
+    parent_constraints: Option<&zel_starlark::Value>,
+) -> zel_starlark::Value {
+    let parent = parent_constraints.and_then(constraint_collection_of);
+    let data = std::sync::Arc::new(ConstraintCollectionData { entries, parent });
+    let mut reg = CONSTRAINT_COLLECTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let id = reg.len();
+    reg.push(data);
+    zel_starlark::Value::Host("constraint_collection".to_string(), id.to_string())
+}
+
+pub fn constraint_collection_of(
+    v: &zel_starlark::Value,
+) -> Option<std::sync::Arc<ConstraintCollectionData>> {
+    let zel_starlark::Value::Host(k, id) = v else {
+        return None;
+    };
+    if k != "constraint_collection" {
+        return None;
+    }
+    let idx: usize = id.parse().ok()?;
+    CONSTRAINT_COLLECTIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(idx)
+        .cloned()
+}
+
+fn constraint_setting_label(v: &zel_starlark::Value) -> Option<Label> {
+    match v {
+        zel_starlark::Value::ProviderInstance {
+            provider_name,
+            fields,
+        } if provider_name == "ConstraintSettingInfo"
+            || provider_name.ends_with("%ConstraintSettingInfo") =>
+        {
+            match fields.get("label") {
+                Some(zel_starlark::Value::Label(l)) => Some(l.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn constraint_value_label(v: &zel_starlark::Value) -> Option<Label> {
+    match v {
+        zel_starlark::Value::ProviderInstance {
+            provider_name,
+            fields,
+        } if provider_name == "ConstraintValueInfo"
+            || provider_name.ends_with("%ConstraintValueInfo") =>
+        {
+            match fields.get("label") {
+                Some(zel_starlark::Value::Label(l)) => Some(l.clone()),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn collect_cc_map(
+    cc: &ConstraintCollectionData,
+    out: &mut BTreeMap<String, (Label, Label)>,
+    order: &mut Vec<String>,
+) {
+    if let Some(p) = &cc.parent {
+        collect_cc_map(p, out, order);
+    }
+    for (s, v) in &cc.entries {
+        if let (Some(sl), Some(vl)) = (constraint_setting_label(s), constraint_value_label(v)) {
+            let key = sl.canonical_form();
+            if !out.contains_key(&key) {
+                order.push(key.clone());
+            }
+            out.insert(key, (sl, vl));
+        }
+    }
+}
+
+/// Flattens a `ConstraintCollection` (or legacy `(Label -> Label)` dict) into `(setting, value)` labels.
+pub fn platform_constraint_map(
+    constraints_val: &zel_starlark::Value,
+) -> BTreeMap<String, (Label, Label)> {
+    let mut out = BTreeMap::new();
+    if let Some(cc) = constraint_collection_of(constraints_val) {
+        let mut order = Vec::new();
+        collect_cc_map(&cc, &mut out, &mut order);
+        return out;
+    }
+    if let zel_starlark::Value::Dict(d) = constraints_val {
+        for (k, v) in d.lock().unwrap().items() {
+            if let (zel_starlark::Value::Label(sl), zel_starlark::Value::Label(vl)) = (k, v) {
+                out.insert(sl.canonical_form(), (sl, vl));
+            }
+        }
+    }
+    out
+}
+
+/// Ordered constraint value labels of a platform's `constraints` (parent-then-own, child wins).
+pub fn platform_constraint_value_labels(constraints_val: &zel_starlark::Value) -> Vec<Label> {
+    if let Some(cc) = constraint_collection_of(constraints_val) {
+        let mut map = BTreeMap::new();
+        let mut order = Vec::new();
+        collect_cc_map(&cc, &mut map, &mut order);
+        return order
+            .into_iter()
+            .filter_map(|k| map.remove(&k).map(|(_, v)| v))
+            .collect();
+    }
+    platform_constraint_map(constraints_val)
+        .into_values()
+        .map(|(_, v)| v)
+        .collect()
+}
+
+fn is_platforms_repo_name(repo: &str) -> bool {
+    repo == "platforms" || repo.starts_with("platforms+") || repo.starts_with("platforms~")
+}
+
+fn is_platforms_os_setting_label(label: &Label) -> bool {
+    let repo = label.package_identifier().repository().name();
+    let pkg = label.package_identifier().package_fragment().path_string();
+    pkg == "os" && label.name() == "os" && is_platforms_repo_name(repo)
+}
+
+fn platform_info_value(ct: &ConfiguredTarget) -> Option<&zel_starlark::Value> {
+    for target in [ct.get_actual(), ct] {
+        if let Some(v) = target.providers.get("PlatformInfo") {
+            return Some(v);
+        }
+        if let Some((_, v)) = target
+            .providers
+            .iter()
+            .find(|(k, _)| k.ends_with(":PlatformInfo") || k.ends_with("%PlatformInfo"))
+        {
+            return Some(v);
+        }
+    }
+    None
+}
+
+/// Resolves a platform target under its canonical core-only configuration (falling back to
+/// `cfg.to_core_only()` and `cfg` for custom `DepResolver` implementations).
+pub fn lookup_platform_target(
+    resolver: &dyn starlark_rule::DepResolver,
+    cfg: &BuildConfigurationKey,
+    label: &Label,
+) -> Option<std::sync::Arc<ConfiguredTarget>> {
+    let host_core = BuildConfigurationKey::target(&cfg.cpu, "fastbuild").to_core_only();
+    resolver
+        .configured_target(label, &host_core)
+        .or_else(|_| {
+            let cfg_core = cfg.to_core_only();
+            if cfg_core == host_core {
+                Err(String::new())
+            } else {
+                resolver.configured_target(label, &cfg_core)
+            }
+        })
+        .or_else(|_| resolver.configured_target(label, cfg))
+        .ok()
+}
+
+/// `ConstraintConstants.getOsFromConstraintsOrHost` (`ConstraintConstants.java:38-96`):
+/// returns `Some(OS.name())` (`"LINUX"`, `"DARWIN"`, `"WINDOWS"`, `"FREEBSD"`, `"OPENBSD"`, or
+/// `"UNKNOWN"`) when the platform (or an ancestor `parent` platform) sets `@platforms//os:os`,
+/// or `None` when no `@platforms//os:os` constraint is present so callers fall back to `OS.getCurrent()`.
+pub fn platform_os_from_target(ct: &ConfiguredTarget) -> Option<&'static str> {
+    let zel_starlark::Value::ProviderInstance { fields, .. } = platform_info_value(ct)? else {
+        return None;
+    };
+    let constraints_val = fields.get("constraints")?;
+    for (setting, value) in platform_constraint_map(constraints_val).into_values() {
+        if is_platforms_os_setting_label(&setting) {
+            let repo = value.package_identifier().repository().name();
+            let pkg = value.package_identifier().package_fragment().path_string();
+            if pkg == "os" && is_platforms_repo_name(repo) {
+                return Some(match value.name() {
+                    "linux" => "LINUX",
+                    "osx" | "macos" => "DARWIN",
+                    "windows" => "WINDOWS",
+                    "freebsd" => "FREEBSD",
+                    "openbsd" => "OPENBSD",
+                    _ => "UNKNOWN",
+                });
+            }
+            return Some("UNKNOWN");
+        }
+    }
+    None
+}
+
+fn cc_lookup_explicit(
+    cc: &ConstraintCollectionData,
+    setting_canon: &str,
+) -> Option<zel_starlark::Value> {
+    for (s, v) in &cc.entries {
+        if constraint_setting_label(s)
+            .as_ref()
+            .map(Label::canonical_form)
+            .as_deref()
+            == Some(setting_canon)
+        {
+            return Some(v.clone());
+        }
+    }
+    cc.parent
+        .as_ref()
+        .and_then(|p| cc_lookup_explicit(p, setting_canon))
+}
+
+/// `ConstraintCollection.get(constraint)`: returns explicit `ConstraintValueInfo`, parent's value,
+/// synthesized default `ConstraintValueInfo`, or `None`.
+pub fn constraint_collection_get(
+    cc: &ConstraintCollectionData,
+    setting_info: &zel_starlark::Value,
+) -> Result<zel_starlark::Value, String> {
+    let Some(sl) = constraint_setting_label(setting_info) else {
+        return Err(format!(
+            "got value of type '{}', want 'ConstraintSettingInfo'",
+            setting_info.type_name()
+        ));
+    };
+    if let Some(found) = cc_lookup_explicit(cc, &sl.canonical_form()) {
+        return Ok(found);
+    }
+    if let zel_starlark::Value::ProviderInstance { fields, .. } = setting_info {
+        match fields.get("default_constraint_value") {
+            Some(v @ zel_starlark::Value::ProviderInstance { .. }) => return Ok(v.clone()),
+            Some(zel_starlark::Value::Label(def_lbl)) => {
+                let refines = fields
+                    .get("refines_constraint_values")
+                    .cloned()
+                    .unwrap_or_else(|| crate::starlark_rule::mk_list(vec![]));
+                return Ok(crate::starlark_rule::provider_instance(
+                    "ConstraintValueInfo",
+                    vec![
+                        ("constraint", setting_info.clone()),
+                        ("label", zel_starlark::Value::Label(def_lbl.clone())),
+                        ("refines", refines),
+                    ],
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(zel_starlark::Value::None)
+}
+
+pub fn constraint_collection_has(
+    cc: &ConstraintCollectionData,
+    setting_info: &zel_starlark::Value,
+) -> Result<bool, String> {
+    Ok(!matches!(
+        constraint_collection_get(cc, setting_info)?,
+        zel_starlark::Value::None
+    ))
+}
+
+pub fn constraint_collection_has_value(
+    cc: &ConstraintCollectionData,
+    cv_info: &zel_starlark::Value,
+) -> Result<bool, String> {
+    let Some(cv_lbl) = constraint_value_label(cv_info) else {
+        return Err(format!(
+            "got value of type '{}', want 'ConstraintValueInfo'",
+            cv_info.type_name()
+        ));
+    };
+    let setting = match cv_info {
+        zel_starlark::Value::ProviderInstance { fields, .. } => fields
+            .get("constraint")
+            .ok_or_else(|| "ConstraintValueInfo missing constraint".to_string())?,
+        _ => return Ok(false),
+    };
+    let cur = constraint_collection_get(cc, setting)?;
+    Ok(constraint_value_label(&cur).as_ref() == Some(&cv_lbl))
+}
+
+pub fn constraint_collection_settings(cc: &ConstraintCollectionData) -> Vec<zel_starlark::Value> {
+    fn walk(
+        cc: &ConstraintCollectionData,
+        seen: &mut BTreeMap<String, usize>,
+        out: &mut Vec<zel_starlark::Value>,
+    ) {
+        if let Some(p) = &cc.parent {
+            walk(p, seen, out);
+        }
+        for (s, _) in &cc.entries {
+            if let Some(sl) = constraint_setting_label(s) {
+                let key = sl.canonical_form();
+                if let Some(&idx) = seen.get(&key) {
+                    out[idx] = s.clone();
+                } else {
+                    seen.insert(key, out.len());
+                    out.push(s.clone());
+                }
+            }
+        }
+    }
+    let mut seen = BTreeMap::new();
+    let mut out = Vec::new();
+    walk(cc, &mut seen, &mut out);
+    out
 }
 
 #[cfg(test)]

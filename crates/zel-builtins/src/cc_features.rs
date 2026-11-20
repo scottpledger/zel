@@ -16,11 +16,14 @@ fn err<T>(m: impl Into<String>) -> Res<T> {
 // ---------------------------------------------------------------------------------------------
 // Reading Starlark values
 
-/// Field of a struct / provider instance.
+/// Field of a struct / provider instance / `HeaderInfo`.
 pub fn field(v: &Value, name: &str) -> Option<Value> {
     match v {
         Value::Struct(s) => s.fields.get(name).cloned(),
         Value::ProviderInstance { fields, .. } => fields.get(name).cloned(),
+        Value::Host(k, _) if k == "HeaderInfo" => {
+            crate::cc_internal::header_info_attr(name, std::slice::from_ref(v)).ok()
+        }
         _ => None,
     }
 }
@@ -290,6 +293,81 @@ fn parse_env_set(v: &Value) -> Res<EnvSet> {
     })
 }
 
+/// Normalizes a relative or absolute path for `exec_os`, returning `(normalized, is_absolute)`.
+pub fn normalize_os_path(raw: &str, is_windows: bool) -> (String, bool) {
+    let raw_bytes = raw.as_bytes();
+    let raw_win_abs = raw.starts_with("\\\\")
+        || (raw_bytes.len() >= 3
+            && raw_bytes[0].is_ascii_alphabetic()
+            && raw_bytes[1] == b':'
+            && (raw_bytes[2] == b'/' || raw_bytes[2] == b'\\'));
+    let unified = if is_windows {
+        raw.replace('\\', "/")
+    } else {
+        raw.to_string()
+    };
+    let (drive_or_root, rest, is_abs) = if is_windows {
+        let bytes = unified.as_bytes();
+        if unified.starts_with("//") {
+            ("//".to_string(), unified.trim_start_matches('/'), true)
+        } else if bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            let after_drive = &unified[2..];
+            let has_slash = after_drive.starts_with('/');
+            (
+                format!("{}:/", unified[..1].to_ascii_uppercase()),
+                after_drive.trim_start_matches('/'),
+                has_slash || after_drive.is_empty(),
+            )
+        } else if unified.starts_with('/') {
+            ("/".to_string(), unified.trim_start_matches('/'), true)
+        } else {
+            (String::new(), unified.as_str(), false)
+        }
+    } else if unified.starts_with('/') {
+        ("/".to_string(), unified.trim_start_matches('/'), true)
+    } else {
+        (String::new(), unified.as_str(), raw_win_abs)
+    };
+    let mut segs: Vec<&str> = Vec::new();
+    for seg in rest.split('/') {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        if seg == ".." {
+            if let Some(last) = segs.last() {
+                if *last != ".." {
+                    segs.pop();
+                    continue;
+                }
+            }
+            if !is_abs {
+                segs.push("..");
+            }
+        } else {
+            segs.push(seg);
+        }
+    }
+    let joined = segs.join("/");
+    if is_abs {
+        (format!("{drive_or_root}{joined}"), true)
+    } else {
+        (joined, false)
+    }
+}
+
+fn validate_exec_os(exec_os: Option<&str>) -> Res<bool> {
+    let Some(os) = exec_os else {
+        return Ok(false);
+    };
+    match os {
+        "DARWIN" | "FREEBSD" | "OPENBSD" | "LINUX" | "UNKNOWN" => Ok(false),
+        "WINDOWS" => Ok(true),
+        other => err(format!(
+            "No enum constant com.google.devtools.build.lib.util.OS.{other}"
+        )),
+    }
+}
+
 /// `artifact_path_of(File)` resolves a `File`/artifact value to the path used by tools.
 impl ToolchainFeatures {
     /// Builds the feature system from the `features`, `action_configs` and
@@ -301,8 +379,40 @@ impl ToolchainFeatures {
         tools_directory: &str,
         tool_path: &dyn Fn(&Value) -> Option<String>,
     ) -> Res<ToolchainFeatures> {
+        Self::new_with_os(
+            features,
+            action_configs,
+            artifact_name_patterns,
+            tools_directory,
+            None,
+            tool_path,
+        )
+    }
+
+    /// Variant of [`Self::new`] that validates `_exec_os_DO_NOT_USE` and normalizes tool paths
+    /// for that OS.
+    pub fn new_with_os(
+        features: &[Value],
+        action_configs: &[Value],
+        artifact_name_patterns: &[Value],
+        tools_directory: &str,
+        exec_os: Option<&str>,
+        tool_path: &dyn Fn(&Value) -> Option<String>,
+    ) -> Res<ToolchainFeatures> {
+        let is_windows = validate_exec_os(exec_os)?;
+        let check_type = |v: &Value, expected: &str| -> Res<()> {
+            if let Some(Value::String(tn)) = field(v, "type_name") {
+                if tn != expected {
+                    return err(format!(
+                        "Invalid toolchain configuration: expected type_name '{expected}', got '{tn}'"
+                    ));
+                }
+            }
+            Ok(())
+        };
         let mut fs = Vec::new();
         for f in features {
+            check_type(f, "feature")?;
             if field(f, "name").is_none() {
                 return err(format!(
                     "Invalid toolchain configuration: feature has no name (got {})",
@@ -311,10 +421,12 @@ impl ToolchainFeatures {
             }
             let mut flag_sets = vec![];
             for s in items(&field(f, "flag_sets").unwrap_or(Value::None)) {
+                check_type(&s, "flag_set")?;
                 flag_sets.push(parse_flag_set(&s)?);
             }
             let mut env_sets = vec![];
             for s in items(&field(f, "env_sets").unwrap_or(Value::None)) {
+                check_type(&s, "env_set")?;
                 env_sets.push(parse_env_set(&s)?);
             }
             let requires = items(&field(f, "requires").unwrap_or(Value::None))
@@ -333,21 +445,38 @@ impl ToolchainFeatures {
         }
         let mut acs = Vec::new();
         for a in action_configs {
+            check_type(a, "action_config")?;
             let mut tools = vec![];
             for t in items(&field(a, "tools").unwrap_or(Value::None)) {
+                check_type(&t, "tool")?;
                 let tool_value = field(&t, "tool").filter(|v| !matches!(v, Value::None));
+                let raw_path_field = field(&t, "path").filter(|v| !matches!(v, Value::None));
+                if tool_value.is_some()
+                    && raw_path_field
+                        .as_ref()
+                        .and_then(str_of)
+                        .is_some_and(|p| p != "NOT_USED")
+                {
+                    return err(
+                        "Invalid toolchain configuration: tool cannot specify both 'tool' and 'path'",
+                    );
+                }
                 let (path, crosstool_relative) = match tool_value {
                     Some(tv) => (tool_path(&tv).unwrap_or_default(), false),
                     None => {
-                        let p = opt_str(field(&t, "path")).unwrap_or_default();
-                        let b = p.as_bytes();
-                        let is_abs = p.starts_with('/')
-                            || p.starts_with("\\\\")
-                            || (b.len() >= 3
-                                && b[0].is_ascii_alphabetic()
-                                && b[1] == b':'
-                                && (b[2] == b'/' || b[2] == b'\\'));
-                        (p, !is_abs)
+                        let raw_p = opt_str(raw_path_field).unwrap_or_default();
+                        if raw_p.is_empty() {
+                            return err(
+                                "Invalid toolchain configuration: tool path must not be empty",
+                            );
+                        }
+                        let (norm, is_abs) = normalize_os_path(&raw_p, is_windows);
+                        let safe = if norm.is_empty() && !is_abs {
+                            ".".to_string()
+                        } else {
+                            norm
+                        };
+                        (safe, !is_abs)
                     }
                 };
                 tools.push(Tool {
@@ -360,6 +489,7 @@ impl ToolchainFeatures {
             let action_name = opt_str(field(a, "action_name")).unwrap_or_default();
             let mut flag_sets = vec![];
             for s in items(&field(a, "flag_sets").unwrap_or(Value::None)) {
+                check_type(&s, "flag_set")?;
                 let mut fs = parse_flag_set(&s)?;
                 if !fs.actions.is_empty() {
                     return Err(StarlarkError(format!(
@@ -369,10 +499,13 @@ impl ToolchainFeatures {
                 fs.actions = vec![action_name.clone()];
                 flag_sets.push(fs);
             }
+            let config_name = if !action_name.is_empty() {
+                action_name.clone()
+            } else {
+                opt_str(field(a, "config_name")).unwrap_or_default()
+            };
             acs.push(ActionConfig {
-                // An action_config is named after its action.
-                config_name: opt_str(field(a, "config_name"))
-                    .unwrap_or_else(|| action_name.clone()),
+                config_name,
                 action_name,
                 enabled: truthy(&field(a, "enabled")),
                 tools,
@@ -380,18 +513,49 @@ impl ToolchainFeatures {
                 implies: str_list(field(a, "implies")),
             });
         }
-        let mut patterns = HashMap::new();
+        let mut patterns: HashMap<String, (String, String)> = HashMap::new();
         for p in artifact_name_patterns {
-            if let Some(cat) = opt_str(field(p, "category_name")) {
-                // `ArtifactCategory.categoryByName`: the configs use the lower-case category names.
-                patterns.insert(
-                    cat.to_ascii_uppercase(),
-                    (
-                        opt_str(field(p, "prefix")).unwrap_or_default(),
-                        opt_str(field(p, "extension")).unwrap_or_default(),
-                    ),
+            check_type(p, "artifact_name_pattern")?;
+            let Some(cat) = opt_str(field(p, "category_name")) else {
+                return err(
+                    "Invalid toolchain configuration: artifact_name_pattern missing category_name",
                 );
+            };
+            let cat_upper = cat.to_ascii_uppercase();
+            let Some((def_prefix, allowed_exts)) = artifact_category_spec(&cat_upper) else {
+                return err(format!("Artifact category {cat} is not recognized"));
+            };
+            if cat != cat_upper.to_ascii_lowercase() {
+                return err(format!("Artifact category {cat} is not recognized"));
             }
+            let prefix = opt_str(field(p, "prefix")).unwrap_or_default();
+            let extension = opt_str(field(p, "extension")).unwrap_or_default();
+            if !allowed_exts.contains(&extension.as_str()) {
+                let formatted_exts: Vec<String> =
+                    allowed_exts.iter().map(|e| format!("'{e}'")).collect();
+                let list_str = match formatted_exts.len() {
+                    0 => String::new(),
+                    1 => formatted_exts[0].clone(),
+                    2 => format!("{} or {}", formatted_exts[0], formatted_exts[1]),
+                    n => format!(
+                        "{}, or {}",
+                        formatted_exts[..n - 1].join(", "),
+                        formatted_exts[n - 1]
+                    ),
+                };
+                return err(format!(
+                    "Unrecognized file extension '{extension}', allowed extensions are {list_str}, please check artifact_name_pattern configuration for {cat}."
+                ));
+            }
+            if patterns.contains_key(&cat_upper) {
+                return err(format!(
+                    "Invalid toolchain configuration: duplicate artifact_name_pattern for category '{cat}'"
+                ));
+            }
+            if prefix == def_prefix && extension == allowed_exts[0] {
+                continue;
+            }
+            patterns.insert(cat_upper, (prefix, extension));
         }
         Self::build(fs, acs, patterns, tools_directory)
     }
@@ -612,12 +776,17 @@ impl ToolchainFeatures {
     /// `getArtifactNameForCategory`.
     pub fn artifact_name_for_category(&self, category: &str, output_name: &str) -> Res<String> {
         let (prefix, ext) = self.pattern(category)?;
-        let (dir, base) = match output_name.rsplit_once('/') {
+        let (norm, is_abs) = normalize_os_path(output_name, false);
+        if norm.is_empty() || (is_abs && norm == "/") {
+            return err(format!("Invalid output_name '{output_name}'"));
+        }
+        let (dir, base) = match norm.rsplit_once('/') {
             Some((d, b)) => (Some(d), b),
-            None => (None, output_name),
+            None => (None, norm.as_str()),
         };
         let name = format!("{prefix}{base}{ext}");
         Ok(match dir {
+            Some("") if is_abs => format!("/{name}"),
             Some(d) if !d.is_empty() => format!("{d}/{name}"),
             _ => name,
         })
@@ -628,42 +797,49 @@ impl ToolchainFeatures {
     }
 
     fn pattern(&self, category: &str) -> Res<(String, String)> {
-        if let Some(p) = self.artifact_name_patterns.get(category) {
+        let upper = category.to_ascii_uppercase();
+        if let Some(p) = self.artifact_name_patterns.get(&upper) {
             return Ok(p.clone());
         }
-        default_artifact_pattern(category)
+        default_artifact_pattern(&upper)
             .map(|(p, e)| (p.to_string(), e.to_string()))
             .ok_or_else(|| StarlarkError(format!("No enum constant ArtifactCategory.{category}")))
     }
 }
 
-/// `ArtifactCategory` default prefix and (first) extension.
-pub fn default_artifact_pattern(category: &str) -> Option<(&'static str, &'static str)> {
+/// `ArtifactCategory`: `(default_prefix, allowed_extensions)` where `allowed_extensions[0]` is
+/// the default extension (`ArtifactCategory.java`).
+pub fn artifact_category_spec(category: &str) -> Option<(&'static str, &'static [&'static str])> {
     Some(match category {
-        "STATIC_LIBRARY" => ("lib", ".a"),
-        "ALWAYSLINK_STATIC_LIBRARY" => ("lib", ".lo"),
-        "DYNAMIC_LIBRARY" => ("lib", ".so"),
-        "EXECUTABLE" => ("", ""),
-        "INTERFACE_LIBRARY" => ("lib", ".ifso"),
-        "PIC_FILE" => ("", ".pic"),
-        "INCLUDED_FILE_LIST" => ("", ".d"),
-        "SERIALIZED_DIAGNOSTICS_FILE" => ("", ".dia"),
-        "OBJECT_FILE" => ("", ".o"),
-        "PIC_OBJECT_FILE" => ("", ".pic.o"),
-        "CPP_MODULE" => ("", ".pcm"),
-        "CPP_MODULES_INFO" => ("", ".CXXModules.json"),
-        "CPP_MODULES_DDI" => ("", ".ddi"),
-        "CPP_MODULES_MODMAP" => ("", ".modmap"),
-        "CPP_MODULES_MODMAP_INPUT" => ("", ".modmap.input"),
-        "GENERATED_ASSEMBLY" => ("", ".s"),
-        "PROCESSED_HEADER" => ("", ".processed"),
-        "GENERATED_HEADER" => ("", ".h"),
-        "PREPROCESSED_C_SOURCE" => ("", ".i"),
-        "PREPROCESSED_CPP_SOURCE" => ("", ".ii"),
-        "COVERAGE_DATA_FILE" => ("", ".gcno"),
-        "CLIF_OUTPUT_PROTO" => ("", ".opb"),
+        "STATIC_LIBRARY" => ("lib", &[".a", ".lib"]),
+        "ALWAYSLINK_STATIC_LIBRARY" => ("lib", &[".lo", ".lo.lib"]),
+        "DYNAMIC_LIBRARY" => ("lib", &[".so", ".dylib", ".dll", ".pyd", ".wasm"]),
+        "EXECUTABLE" => ("", &["", ".exe", ".wasm"]),
+        "INTERFACE_LIBRARY" => ("lib", &[".ifso", ".tbd", ".if.lib", ".lib"]),
+        "PIC_FILE" => ("", &[".pic"]),
+        "INCLUDED_FILE_LIST" => ("", &[".d"]),
+        "SERIALIZED_DIAGNOSTICS_FILE" => ("", &[".dia"]),
+        "OBJECT_FILE" => ("", &[".o", ".obj"]),
+        "PIC_OBJECT_FILE" => ("", &[".pic.o"]),
+        "CPP_MODULE" => ("", &[".pcm", ".gcm", ".ifc"]),
+        "CPP_MODULES_INFO" => ("", &[".CXXModules.json"]),
+        "CPP_MODULES_DDI" => ("", &[".ddi"]),
+        "CPP_MODULES_MODMAP" => ("", &[".modmap"]),
+        "CPP_MODULES_MODMAP_INPUT" => ("", &[".modmap.input"]),
+        "GENERATED_ASSEMBLY" => ("", &[".s", ".asm"]),
+        "PROCESSED_HEADER" => ("", &[".processed"]),
+        "GENERATED_HEADER" => ("", &[".h"]),
+        "PREPROCESSED_C_SOURCE" => ("", &[".i"]),
+        "PREPROCESSED_CPP_SOURCE" => ("", &[".ii"]),
+        "COVERAGE_DATA_FILE" => ("", &[".gcno"]),
+        "CLIF_OUTPUT_PROTO" => ("", &[".opb"]),
         _ => return None,
     })
+}
+
+/// `ArtifactCategory` default prefix and (first) extension.
+pub fn default_artifact_pattern(category: &str) -> Option<(&'static str, &'static str)> {
+    artifact_category_spec(category).map(|(p, exts)| (p, exts[0]))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -776,6 +952,15 @@ impl Variables {
             )),
         }
     }
+
+    /// Mirrors `variables.isAvailable(name)` followed by `getVariable(name).getStringValue(name)`
+    /// in Bazel's `CcToolchainVariables`.
+    pub fn get_string_if_available(&self, name: &str, path_of: PathOf) -> Res<Option<String>> {
+        match self.lookup(name, path_of)? {
+            Some(v) => string_value(name, &v).map(Some),
+            None => Ok(None),
+        }
+    }
 }
 
 fn truthy_var(v: &Var) -> bool {
@@ -799,6 +984,7 @@ fn var_type(v: &Var) -> &'static str {
 fn string_value(name: &str, v: &Var) -> Res<String> {
     match v {
         Var::Str(s) => Ok(s.clone()),
+        Var::Bool(b) => Ok(if *b { "1".to_string() } else { "0".to_string() }),
         other => err(format!(
             "Invalid toolchain configuration: Cannot expand variable '{name}': expected string, found {}",
             var_type(other)
@@ -964,6 +1150,56 @@ impl FeatureConfiguration {
         self.enabled_action_names.contains(action)
     }
 
+    /// `getPerFeatureExpansions`: returns `(selectable_name, flags)` buckets so callers such as
+    /// `CompileCommandLine` can exempt `unfiltered_compile_flags` from `copts_filter`.
+    pub fn per_feature_command_line(
+        &self,
+        action: &str,
+        vars: &Variables,
+        path_of: PathOf,
+    ) -> Res<Vec<(String, Vec<String>)>> {
+        let mut buckets: Vec<(String, Vec<String>)> = Vec::new();
+        let mut scope = Scope {
+            base: vars,
+            bound: vec![],
+        };
+        if self.action_is_configured(action) {
+            let ac = &self.toolchain.action_configs[self.toolchain.action_config_by_action[action]];
+            let mut flags = Vec::new();
+            for fs in &ac.flag_sets {
+                expand_flag_set(
+                    fs,
+                    action,
+                    &mut scope,
+                    &self.enabled_names,
+                    path_of,
+                    &mut flags,
+                )?;
+            }
+            if !flags.is_empty() {
+                buckets.push((ac.config_name.clone(), flags));
+            }
+        }
+        for &fi in &self.enabled_features {
+            let feat = &self.toolchain.features[fi];
+            let mut flags = Vec::new();
+            for fs in &feat.flag_sets {
+                expand_flag_set(
+                    fs,
+                    action,
+                    &mut scope,
+                    &self.enabled_names,
+                    path_of,
+                    &mut flags,
+                )?;
+            }
+            if !flags.is_empty() {
+                buckets.push((feat.name.clone(), flags));
+            }
+        }
+        Ok(buckets)
+    }
+
     /// `getCommandLine`.
     pub fn command_line(
         &self,
@@ -972,34 +1208,8 @@ impl FeatureConfiguration {
         path_of: PathOf,
     ) -> Res<Vec<String>> {
         let mut out = Vec::new();
-        let mut scope = Scope {
-            base: vars,
-            bound: vec![],
-        };
-        if self.action_is_configured(action) {
-            let ac = &self.toolchain.action_configs[self.toolchain.action_config_by_action[action]];
-            for fs in &ac.flag_sets {
-                expand_flag_set(
-                    fs,
-                    action,
-                    &mut scope,
-                    &self.enabled_names,
-                    path_of,
-                    &mut out,
-                )?;
-            }
-        }
-        for &fi in &self.enabled_features {
-            for fs in &self.toolchain.features[fi].flag_sets {
-                expand_flag_set(
-                    fs,
-                    action,
-                    &mut scope,
-                    &self.enabled_names,
-                    path_of,
-                    &mut out,
-                )?;
-            }
+        for (_, flags) in self.per_feature_command_line(action, vars, path_of)? {
+            out.extend(flags);
         }
         Ok(out)
     }
@@ -1042,12 +1252,12 @@ impl FeatureConfiguration {
     }
 
     fn action_config(&self, action: &str) -> Res<&ActionConfig> {
-        if !self.action_is_configured(action) {
+        let Some(&idx) = self.toolchain.action_config_by_action.get(action) else {
             return err(format!(
                 "Action {action} does not have an enabled configuration in the toolchain."
             ));
-        }
-        Ok(&self.toolchain.action_configs[self.toolchain.action_config_by_action[action]])
+        };
+        Ok(&self.toolchain.action_configs[idx])
     }
 
     fn matching_tool(&self, action: &str) -> Res<&Tool> {
@@ -1067,10 +1277,18 @@ impl FeatureConfiguration {
         let t = self.matching_tool(action)?;
         if t.crosstool_relative {
             let d = self.toolchain.tools_directory.trim_end_matches('/');
-            Ok(if d.is_empty() {
+            let combined = if d.is_empty() {
                 t.path.clone()
+            } else if t.path == "." {
+                d.to_string()
             } else {
                 format!("{d}/{}", t.path)
+            };
+            let (norm, is_abs) = normalize_os_path(&combined, false);
+            Ok(if norm.is_empty() && !is_abs {
+                ".".to_string()
+            } else {
+                norm
             })
         } else {
             Ok(t.path.clone())
@@ -1258,5 +1476,101 @@ mod tests {
         )
         .unwrap();
         assert_eq!(empty, Value::String(String::new()));
+    }
+
+    #[test]
+    fn artifact_category_validation_exec_os_and_bool_var_expansion() {
+        let valid_pat = mk_struct(vec![
+            ("category_name", Value::String("dynamic_library".into())),
+            ("prefix", Value::String("lib".into())),
+            ("extension", Value::String(".dylib".into())),
+        ]);
+        let tf =
+            ToolchainFeatures::new_with_os(&[], &[], &[valid_pat], "", Some("DARWIN"), &|_| None)
+                .unwrap();
+        assert_eq!(
+            tf.artifact_name_for_category("dynamic_library", "dir//foo")
+                .unwrap(),
+            "dir/libfoo.dylib"
+        );
+
+        let bad_ext = mk_struct(vec![
+            ("category_name", Value::String("object_file".into())),
+            ("prefix", Value::String("".into())),
+            ("extension", Value::String(".bad".into())),
+        ]);
+        let e = ToolchainFeatures::new_with_os(&[], &[], &[bad_ext], "", Some("LINUX"), &|_| None)
+            .err()
+            .unwrap();
+        assert!(
+            e.0.contains("Unrecognized file extension '.bad'"),
+            "{}",
+            e.0
+        );
+
+        let bad_os = ToolchainFeatures::new_with_os(&[], &[], &[], "", Some("SOLARIS"), &|_| None)
+            .err()
+            .unwrap();
+        assert!(bad_os.0.contains("SOLARIS"), "{}", bad_os.0);
+
+        let win_tool = mk_struct(vec![(
+            "path",
+            Value::String(r"C:\msvc\bin\..\cl.exe".into()),
+        )]);
+        let win_ac = mk_struct(vec![
+            ("action_name", Value::String("c-compile".into())),
+            ("enabled", Value::Bool(true)),
+            ("tools", mk_list(vec![win_tool])),
+        ]);
+        let wtf = Arc::new(
+            ToolchainFeatures::new_with_os(
+                &[],
+                &[win_ac],
+                &[],
+                "crosstool",
+                Some("WINDOWS"),
+                &|_| None,
+            )
+            .unwrap(),
+        );
+        let wfc = wtf.configure(&[]).unwrap();
+        assert_eq!(
+            wfc.tool_path_for_action("c-compile").unwrap(),
+            "C:/msvc/cl.exe"
+        );
+
+        let bool_fg = mk_struct(vec![(
+            "flags",
+            mk_list(vec![Value::String("-DPIC=%{pic_flag}".into())]),
+        )]);
+        let bool_fs = mk_struct(vec![
+            ("actions", mk_list(vec![Value::String("c-compile".into())])),
+            ("flag_groups", mk_list(vec![bool_fg])),
+        ]);
+        let feat = mk_struct(vec![
+            ("name", Value::String("unfiltered_compile_flags".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![bool_fs])),
+        ]);
+        let btf = Arc::new(ToolchainFeatures::new(&[feat], &[], &[], "", &|_| None).unwrap());
+        let bfc = btf
+            .configure(&btf.default_features_and_action_configs())
+            .unwrap();
+        let mut vmap = BTreeMap::new();
+        vmap.insert("pic_flag".into(), Value::Bool(true));
+        let bvars = Variables {
+            parent: None,
+            map: vmap,
+        };
+        let buckets = bfc
+            .per_feature_command_line("c-compile", &bvars, &|_| None)
+            .unwrap();
+        assert_eq!(
+            buckets,
+            vec![(
+                "unfiltered_compile_flags".to_string(),
+                vec!["-DPIC=1".to_string()]
+            )]
+        );
     }
 }

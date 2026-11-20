@@ -486,6 +486,10 @@ pub(crate) fn run(
                                             | "ConstraintSettingInfo"
                                             | "ConfigMatchingProvider"
                                             | "BuildSettingProvider"
+                                            | "AliasProvider"
+                                            | "LateBoundAliasProvider"
+                                            | "VisibilityProvider"
+                                            | "RequiredConfigFragmentsProvider"
                                     ) {
                                         providers_ordered.push((k.clone(), v.clone()));
                                     }
@@ -524,11 +528,10 @@ pub(crate) fn run(
                                         _ => target_label.canonical_form(),
                                     };
                                     let mut cvals: Vec<String> = Vec::new();
-                                    if let Some(Value::Dict(d)) = fields.get("constraints") {
-                                        for (_, v) in d.lock().unwrap().items() {
-                                            if let Value::Label(vl) = v {
-                                                cvals.push(vl.canonical_form());
-                                            }
+                                    if let Some(c) = fields.get("constraints") {
+                                        for vl in zel_analysis::platform_constraint_value_labels(c)
+                                        {
+                                            cvals.push(vl.canonical_form());
                                         }
                                     }
                                     providers_ordered.push((

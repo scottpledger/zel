@@ -55,27 +55,65 @@ pub fn host_platform(platforms_repo: &str) -> Arc<ConfiguredTarget> {
         "platform".into(),
     );
     ct.default_info = DefaultInfo::default();
+    let os_setting = provider_instance(
+        "ConstraintSettingInfo",
+        vec![
+            ("label", Value::Label(lab(&format!("@{r}//os:os")))),
+            ("default_constraint_value", Value::None),
+            (
+                "refines_constraint_values",
+                zel_analysis::starlark_rule::mk_list(vec![]),
+            ),
+        ],
+    );
+    let os_val = provider_instance(
+        "ConstraintValueInfo",
+        vec![
+            ("constraint", os_setting.clone()),
+            (
+                "label",
+                Value::Label(lab(&format!("@{r}//os:{}", host_os_name()))),
+            ),
+            ("refines", zel_analysis::starlark_rule::mk_list(vec![])),
+        ],
+    );
+    let cpu_setting = provider_instance(
+        "ConstraintSettingInfo",
+        vec![
+            ("label", Value::Label(lab(&format!("@{r}//cpu:cpu")))),
+            ("default_constraint_value", Value::None),
+            (
+                "refines_constraint_values",
+                zel_analysis::starlark_rule::mk_list(vec![]),
+            ),
+        ],
+    );
+    let cpu_val = provider_instance(
+        "ConstraintValueInfo",
+        vec![
+            ("constraint", cpu_setting.clone()),
+            (
+                "label",
+                Value::Label(lab(&format!("@{r}//cpu:{}", host_cpu_name()))),
+            ),
+            ("refines", zel_analysis::starlark_rule::mk_list(vec![])),
+        ],
+    );
+    let constraints = zel_analysis::register_constraint_collection(
+        vec![(os_setting, os_val), (cpu_setting, cpu_val)],
+        None,
+    );
     ct.providers.insert(
         "PlatformInfo".into(),
         provider_instance(
             "PlatformInfo",
             vec![
                 ("label", Value::Label(label)),
-                (
-                    "constraints",
-                    mk_dict(vec![
-                        (
-                            Value::Label(lab(&format!("@{r}//os:os"))),
-                            Value::Label(lab(&format!("@{r}//os:{}", host_os_name()))),
-                        ),
-                        (
-                            Value::Label(lab(&format!("@{r}//cpu:cpu"))),
-                            Value::Label(lab(&format!("@{r}//cpu:{}", host_cpu_name()))),
-                        ),
-                    ]),
-                ),
-                ("exec_properties", mk_dict(vec![])),
+                ("parent", Value::None),
+                ("constraints", constraints),
                 ("flags", zel_analysis::starlark_rule::mk_list(vec![])),
+                ("exec_properties", mk_dict(vec![])),
+                ("remote_execution_properties", Value::String(String::new())),
             ],
         ),
     );
@@ -161,11 +199,9 @@ pub fn record_exec_platform_edge(
 fn platform_constraints(p: &ConfiguredTarget) -> BTreeMap<String, Label> {
     let mut m = BTreeMap::new();
     if let Some(Value::ProviderInstance { fields, .. }) = p.providers.get("PlatformInfo") {
-        if let Some(Value::Dict(d)) = fields.get("constraints") {
-            for (k, v) in d.lock().unwrap().items() {
-                if let (Value::Label(k), Value::Label(v)) = (k, v) {
-                    m.insert(k.canonical_form(), v);
-                }
+        if let Some(c) = fields.get("constraints") {
+            for (k, (_, v)) in zel_analysis::platform_constraint_map(c) {
+                m.insert(k, v);
             }
         }
     }
@@ -390,9 +426,10 @@ pub(crate) fn resolve_toolchains_lazy(
     acfg: &crate::AnalysisConfig,
 ) -> Result<ResolvedToolchains, String> {
     let target = target_platform(cfg, resolver, acfg)?.expect("platform");
+    let plat_core_cfg = BuildConfigurationKey::target(&cfg.cpu, "fastbuild").to_core_only();
     let mut exec_platforms: Vec<Arc<ConfiguredTarget>> = Vec::new();
     for l in extra_exec_platforms.iter() {
-        let ep = resolver.configured_target(l, cfg)?;
+        let ep = resolver.configured_target(l, &plat_core_cfg)?;
         if !ep.providers.contains_key("PlatformInfo") {
             return Err(format!(
                 "Target {} was referenced as a platform, but does not provide PlatformInfo",
@@ -567,9 +604,10 @@ pub fn resolve_toolchains(
     acfg: &crate::AnalysisConfig,
 ) -> Result<ResolvedToolchains, String> {
     let target = target_platform(cfg, resolver, acfg)?.expect("platform");
+    let plat_core_cfg = BuildConfigurationKey::target(&cfg.cpu, "fastbuild").to_core_only();
     let mut exec_platforms: Vec<Arc<ConfiguredTarget>> = Vec::new();
     for l in extra_exec_platforms.iter() {
-        let ep = resolver.configured_target(l, cfg)?;
+        let ep = resolver.configured_target(l, &plat_core_cfg)?;
         if !ep.providers.contains_key("PlatformInfo") {
             return Err(format!(
                 "Target {} was referenced as a platform, but does not provide PlatformInfo",

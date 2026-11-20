@@ -47,6 +47,8 @@ pub struct RuleClass {
     pub is_starlark: bool,
     /// `rule(..., build_setting = ...)`.
     pub build_setting: bool,
+    /// Whether this build setting can be set as a command-line flag (`BuildSetting.isFlag()`).
+    pub build_setting_is_flag: bool,
     /// Starlark `rule()` definition (implementation function and the remaining parameters).
     pub starlark: Option<Arc<StarlarkRuleSpec>>,
 }
@@ -170,9 +172,15 @@ impl Builder {
                 outputs_fn: None,
                 is_starlark: false,
                 build_setting: false,
+                build_setting_is_flag: false,
                 starlark: None,
             },
         }
+    }
+    fn build_setting(mut self, is_flag: bool) -> Self {
+        self.rc.build_setting = true;
+        self.rc.build_setting_is_flag = is_flag;
+        self
     }
     fn attr(mut self, a: Attribute) -> Self {
         if !self.rc.attr_order.contains(&a.name) {
@@ -553,12 +561,22 @@ pub fn native_rule_classes() -> BTreeMap<String, Arc<RuleClass>> {
     // Build settings.
     v.push(
         Builder::new("label_flag")
-            .attr(a("build_setting_default", AttrType::Label).nonconfigurable())
+            .build_setting(true)
+            .attr(
+                a("build_setting_default", AttrType::Label)
+                    .mandatory()
+                    .nonconfigurable(),
+            )
             .build(),
     );
     v.push(
         Builder::new("label_setting")
-            .attr(a("build_setting_default", AttrType::Label).nonconfigurable())
+            .build_setting(false)
+            .attr(
+                a("build_setting_default", AttrType::Label)
+                    .mandatory()
+                    .nonconfigurable(),
+            )
             .build(),
     );
 

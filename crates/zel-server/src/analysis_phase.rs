@@ -133,6 +133,9 @@ const CONFIG_OPTIONS: &[&str] = &[
     "ltoopt",
     "dynamic_mode",
     "protocopt",
+    "per_file_copt",
+    "host_per_file_copt",
+    "per_file_ltobackendopt",
     "features",
     "host_features",
     "host_copt",
@@ -175,6 +178,7 @@ const CONFIG_OPTIONS: &[&str] = &[
     "java_launcher",
     "host_java_launcher",
     "javacopt",
+    "host_javacopt",
     "plugin",
     "compiler",
     "crosstool_top",
@@ -433,15 +437,24 @@ impl BlazeRuntime {
         key.platforms = platforms;
         for name in CONFIG_OPTIONS {
             if let Some(d) = parsed.parsed_options.get(*name) {
-                let vals = opt_list(parsed, name);
-                let joined = if vals.is_empty() {
-                    match (d.value.as_bool(), d.value.as_str()) {
-                        (Some(b), _) => b.to_string(),
-                        (None, Some(s)) => s.to_string(),
-                        _ => continue,
-                    }
+                let unsplit =
+                    zel_analysis::build_options::find_option(name).is_some_and(|(_, opt)| {
+                        zel_analysis::build_options::is_list_option(opt)
+                            && !zel_analysis::build_options::splits_commas_in_options_map(name, opt)
+                    });
+                let joined = if unsplit {
+                    zel_analysis::build_options::encode_unsplit_list(&d.raw_values)
                 } else {
-                    vals.join(",")
+                    let vals = opt_list(parsed, name);
+                    if vals.is_empty() {
+                        match (d.value.as_bool(), d.value.as_str()) {
+                            (Some(b), _) => b.to_string(),
+                            (None, Some(s)) => s.to_string(),
+                            _ => continue,
+                        }
+                    } else {
+                        vals.join(",")
+                    }
                 };
                 key.options.insert((*name).to_string(), joined);
             }

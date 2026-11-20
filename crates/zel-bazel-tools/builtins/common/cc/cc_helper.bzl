@@ -362,21 +362,19 @@ def _build_precompiled_files(ctx):
         # end with ".nopic.o". (The ".nopic.o" extension is an undocumented
         # feature to give users at least some control over this.) Note that
         # some target platforms do not require shared library code to be PIC.
-        if _matches_extension(short_path, extensions.OBJECT_FILE):
+        if _matches_extension(short_path, extensions.PIC_OBJECT_FILE):
+            pic_objects.append(src)
+        elif _matches_disjoint_extension(short_path, extensions.OBJECT_FILE):
             objects.append(src)
             if not short_path.endswith(".nopic.o"):
                 pic_objects.append(src)
-
-            if _matches_extension(short_path, extensions.PIC_OBJECT_FILE):
-                pic_objects.append(src)
-
         elif _matches_extension(short_path, extensions.PIC_ARCHIVE):
             pic_static_libraries.append(src)
-        elif _matches_extension(short_path, extensions.ARCHIVE):
+        elif _matches_disjoint_extension(short_path, extensions.ARCHIVE):
             static_libraries.append(src)
         elif _matches_extension(short_path, extensions.ALWAYSLINK_PIC_LIBRARY):
             pic_alwayslink_static_libraries.append(src)
-        elif _matches_extension(short_path, extensions.ALWAYSLINK_LIBRARY):
+        elif _matches_disjoint_extension(short_path, extensions.ALWAYSLINK_LIBRARY):
             alwayslink_static_libraries.append(src)
         elif _is_valid_shared_library_artifact(src):
             shared_libraries.append(src)
@@ -390,9 +388,29 @@ def _build_precompiled_files(ctx):
         shared_libraries,
     )
 
+def _matches_disjoint_extension(path, patterns):
+    for pattern in patterns:
+        if not path.endswith(pattern):
+            continue
+        if pattern == ".o" and (path.endswith(".pic.o") or path.endswith(".indexing.o")):
+            continue
+        if pattern == ".a" and (path.endswith(".pic.a") or path.endswith(".dll.a")):
+            continue
+        if pattern == ".lib" and (path.endswith(".if.lib") or path.endswith(".lo.lib")):
+            continue
+        if pattern == ".lo" and path.endswith(".pic.lo"):
+            continue
+        if pattern == ".s" and path.endswith(".pic.s"):
+            continue
+        if pattern == ".i" and path.endswith(".pic.i"):
+            continue
+        if pattern == ".ii" and path.endswith(".pic.ii"):
+            continue
+        return True
+    return False
+
 def _check_file_extension(file, allowed_extensions, allow_versioned_shared_libraries):
-    extension = "." + file.extension
-    if _matches_extension(extension, allowed_extensions) or (allow_versioned_shared_libraries and is_versioned_shared_library_extension_valid(file.path)):
+    if _matches_disjoint_extension(file.path, allowed_extensions) or (allow_versioned_shared_libraries and is_versioned_shared_library_extension_valid(file.path)):
         return True
     return False
 

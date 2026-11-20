@@ -338,8 +338,15 @@ fn toolchain_requests(v: Option<&Value>) -> Vec<ToolchainTypeRequest> {
         .unwrap_or_default()
         .into_iter()
         .filter_map(|x| match &x {
-            Value::Struct(s) if s.fields.contains_key("_toolchain_type") => {
-                let l = match s.fields.get("name") {
+            Value::Struct(s)
+                if s.fields.contains_key("toolchain_type")
+                    || s.fields.contains_key("_toolchain_type") =>
+            {
+                let l = match s
+                    .fields
+                    .get("toolchain_type")
+                    .or_else(|| s.fields.get("name"))
+                {
                     Some(Value::Label(l)) => l.clone(),
                     Some(Value::String(n)) => Label::parse_canonical(n).ok()?,
                     _ => return None,
@@ -665,7 +672,7 @@ fn analyze_rule(
             // `--incompatible_auto_exec_groups`: automatically creates an exec group keyed by
             // each requested toolchain type's canonical label.
             let auto_eg = cfg.bool_option("incompatible_auto_exec_groups", false);
-            if auto_eg {
+            if auto_eg && !types.is_empty() {
                 for t in &types {
                     let gname = t.toolchain_type.canonical_form();
                     let gtc = resolve_ctx_toolchains(
@@ -796,7 +803,8 @@ fn analyze_rule(
         }
     };
     ct.visibility = rule.extra.effective_visibility.clone();
-    if rule.rule_class != "alias" {
+    ct.created_in_symbolic_macro = rule.extra.macro_instance.is_some();
+    if rule.rule_class != "alias" && !(ct.is_late_bound_alias && ct.actual.is_some()) {
         ct.testonly = rule.testonly;
     }
     if ct.incompatible.is_none()

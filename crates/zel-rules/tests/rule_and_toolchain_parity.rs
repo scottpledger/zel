@@ -1089,7 +1089,9 @@ fn config_feature_flag_platform_flags_flag_alias_transition_and_fragments() {
         zel_analysis::fragments::late_bound_label("java", "launcher", &base_cfg),
         Some(Label::parse_canonical("@@//tools:custom_launcher").unwrap())
     );
-    let Value::Struct(apple_frag) = zel_analysis::fragments::fragment("apple", &base_cfg).unwrap()
+    let Value::Struct(apple_frag) = zel_analysis::fragments::fragment("apple", &base_cfg)
+        .unwrap()
+        .unwrap()
     else {
         panic!("expected apple struct");
     };
@@ -1097,7 +1099,8 @@ fn config_feature_flag_platform_flags_flag_alias_transition_and_fragments() {
         apple_frag
             .fields
             .get("ios_sdk_version_flag")
-            .and_then(|v| v.as_str()),
+            .map(|v| v.to_string())
+            .as_deref(),
         Some("17.2")
     );
 
@@ -1479,4 +1482,634 @@ no_files_rule(name = "bad_src", deps = [":src.cc"])
         invis_err.contains("Visibility error") && invis_err.contains("//tc:private_type"),
         "got: {invis_err}"
     );
+}
+
+#[test]
+fn filegroup_missing_output_group_and_genrule_escapes_script_spill_and_stamp() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(&fs, &root, "a.txt", "a");
+    write(&fs, &root, "b.txt", "b");
+    let big_echo = "x".repeat(70_000);
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        &format!(
+            r#"
+filegroup(name = "base", srcs = ["a.txt"])
+filegroup(name = "missing_og", srcs = [":base"], output_group = "nonexistent_group")
+
+genrule(
+    name = "escaped_dollar",
+    srcs = ["a.txt", "b.txt"],
+    outs = ["esc.out"],
+    cmd = "echo $$(<) $$< > $@",
+    stamp = 1,
+    tags = ["requires-darwin", "block-network", "cpu:4", "disable-remote"],
+)
+
+genrule(
+    name = "spilled_script",
+    outs = ["spilled.out"],
+    cmd = "echo {big_echo} > $@",
+)
+"#
+        ),
+    );
+    let r = resolver_for(fs, root);
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+    // Missing output_group on filegroup yields empty files rather than failing analysis.
+    let fg = r
+        .analyze(&Label::parse_canonical("//:missing_og").unwrap(), &cfg)
+        .unwrap();
+    assert!(fg.default_info.files.is_empty());
+
+    // Escaped `$$(<)` and `$$<` with 2 srcs succeeds, stamps status files, and uses /bin/bash for requires-darwin.
+    let esc = r
+        .analyze(&Label::parse_canonical("//:escaped_dollar").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(esc.typed_actions.len(), 1);
+    let act = &esc.typed_actions[0];
+    assert!(act
+        .inputs
+        .iter()
+        .any(|i| i.exec_path.path_string() == "bazel-out/stable-status.txt"));
+    assert!(act
+        .inputs
+        .iter()
+        .any(|i| i.exec_path.path_string() == "bazel-out/volatile-status.txt"));
+    assert_eq!(
+        act.execution_requirements.get("cpu").map(String::as_str),
+        Some("4")
+    );
+    assert!(act.execution_requirements.contains_key("block-network"));
+    assert!(act.execution_requirements.contains_key("disable-remote"));
+    let zel_analysis::ActionKind::Spawn { executable, .. } = &act.kind else {
+        panic!("expected Spawn");
+    };
+    assert_eq!(executable, "/bin/bash");
+
+    // Commands > 64KB spill to `.genrule_script.sh` via a FileWrite action.
+    let spilled = r
+        .analyze(&Label::parse_canonical("//:spilled_script").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(spilled.typed_actions.len(), 2);
+    assert_eq!(spilled.typed_actions[0].mnemonic, "FileWrite");
+    assert!(spilled.typed_actions[0].outputs[0]
+        .exec_path
+        .path_string()
+        .ends_with("spilled_script.genrule_script.sh"));
+}
+
+#[test]
+fn analysis_test_in_build_thread_and_test_suite_semantics() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(
+        &fs,
+        &root,
+        "defs.bzl",
+        r##"
+def check_impl(ctx):
+    return [AnalysisTestResultInfo(success = True, message = "ok")]
+
+def _tok_impl(ctx):
+    exe = ctx.actions.declare_file(ctx.label.name + ".sh")
+    ctx.actions.write(exe, "#!/bin/sh\nexit 0\n", is_executable = True)
+    rf = ctx.runfiles(files = [exe])
+    return [
+        DefaultInfo(executable = exe, runfiles = rf),
+        testing.ExecutionInfo({"requires-network": ""}, exec_group = "custom_grp"),
+        testing.TestEnvironment({"MY_VAR": "1"}, inherited_environment = ["HOME"]),
+    ]
+
+custom_exec_test = rule(
+    implementation = _tok_impl,
+    test = True,
+    exec_groups = {"custom_grp": exec_group()},
+)
+"##,
+    );
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        r#"
+package(default_testonly = False)
+load(":defs.bzl", "check_impl", "custom_exec_test")
+
+testing.analysis_test(
+    name = "inline_check",
+    implementation = check_impl,
+)
+
+custom_exec_test(
+    name = "t_fast",
+    tags = ["fast"],
+)
+
+custom_exec_test(
+    name = "t_slow",
+    tags = ["slow"],
+)
+
+alias(
+    name = "alias_fast",
+    actual = ":t_fast",
+)
+
+test_suite(
+    name = "fast_suite",
+    tests = [":alias_fast", ":t_slow"],
+    tags = ["fast", "-slow", "manual"],
+)
+
+test_suite(
+    name = "implicit_suite",
+    tags = ["fast"],
+)
+"#,
+    );
+    let r = resolver_for(fs, root);
+    let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+
+    let at = r
+        .analyze(&Label::parse_canonical("//:inline_check").unwrap(), &cfg)
+        .unwrap();
+    assert!(at.is_test);
+    assert_eq!(at.rule_class, "inline_check_test");
+
+    let t_fast = r
+        .analyze(&Label::parse_canonical("//:t_fast").unwrap(), &cfg)
+        .unwrap();
+    assert_eq!(t_fast.test_exec_group.as_deref(), Some("custom_grp"));
+    assert_eq!(
+        t_fast
+            .run_environment
+            .as_ref()
+            .and_then(|re| re.environment.get("MY_VAR"))
+            .map(String::as_str),
+        Some("1")
+    );
+
+    let suite = r
+        .analyze(&Label::parse_canonical("//:fast_suite").unwrap(), &cfg)
+        .unwrap();
+    // test_suite is testonly by default even when package(default_testonly = False), is_test = false,
+    // and omits compilation_outputs.
+    assert!(suite.testonly);
+    assert!(!suite.is_test);
+    assert!(!suite
+        .output_groups
+        .groups
+        .contains_key("compilation_outputs"));
+    let Value::ProviderInstance { fields, .. } = &suite.providers["TransitiveTestsInfo"] else {
+        panic!("expected TransitiveTestsInfo");
+    };
+    let Value::List(tests_list) = &fields["tests"] else {
+        panic!("expected tests list");
+    };
+    assert_eq!(
+        tests_list.lock().unwrap().elements,
+        vec![Value::Label(Label::parse_canonical("//:t_fast").unwrap())]
+    );
+
+    let imp_suite = r
+        .analyze(&Label::parse_canonical("//:implicit_suite").unwrap(), &cfg)
+        .unwrap();
+    let Value::ProviderInstance {
+        fields: imp_fields, ..
+    } = &imp_suite.providers["TransitiveTestsInfo"]
+    else {
+        panic!("expected TransitiveTestsInfo");
+    };
+    let Value::List(imp_list) = &imp_fields["tests"] else {
+        panic!("expected tests list");
+    };
+    assert_eq!(
+        imp_list.lock().unwrap().elements,
+        vec![Value::Label(Label::parse_canonical("//:t_fast").unwrap())]
+    );
+}
+
+#[test]
+fn unsplit_repeatable_flags_preserve_commas_across_starlark_transitions() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    write(
+        &fs,
+        &root,
+        "defs.bzl",
+        r#"
+FlagsInfo = provider(fields = ["copts", "javacopts"])
+
+def _tr_impl(settings, attr):
+    return {
+        "//command_line_option:copt": settings["//command_line_option:copt"] + ["-Wl,-rpath,/opt", "-DFOO=a, b"],
+        "//command_line_option:javacopt": ["-XepOpt:Foo=a,b", "-XDbar='1, 2'"],
+    }
+
+tr = transition(
+    implementation = _tr_impl,
+    inputs = ["//command_line_option:copt"],
+    outputs = ["//command_line_option:copt", "//command_line_option:javacopt"],
+)
+
+def _leaf_impl(ctx):
+    return [FlagsInfo(
+        copts = list(ctx.fragments.cpp.copts),
+        javacopts = list(ctx.fragments.java.default_javac_flags),
+    )]
+
+leaf = rule(
+    implementation = _leaf_impl,
+    cfg = tr,
+    fragments = ["cpp", "java"],
+)
+"#,
+    );
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        "load(':defs.bzl', 'leaf')\nleaf(name = 't')\n",
+    );
+
+    let lc = LoaderConfig::new(
+        fs as Arc<dyn FileSystem>,
+        Arc::new(SimpleRepoResolver::new(root)),
+    );
+    let r = TargetResolver::new(PackageLoader::new(lc), AnalysisConfig::new());
+
+    let mut cli_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+    cli_cfg
+        .options
+        .insert("copt".into(), "-Wl,-rpath,/base".into());
+    cli_cfg.native.insert(
+        "copt".into(),
+        zel_analysis::NativeSetting {
+            raw: "-Wl,-rpath,/base".into(),
+            value: zel_analysis::build_options::ConfigValue::List(vec!["-Wl,-rpath,/base".into()]),
+        },
+    );
+
+    let ct = r
+        .analyze(&Label::parse_canonical("//:t").unwrap(), &cli_cfg)
+        .unwrap();
+    let Value::ProviderInstance { fields, .. } = &ct.providers["//:defs.bzl%FlagsInfo"] else {
+        panic!("expected FlagsInfo");
+    };
+    let Value::List(copts) = &fields["copts"] else {
+        panic!("expected copts list");
+    };
+    assert_eq!(
+        copts.lock().unwrap().elements,
+        vec![
+            Value::String("-Wl,-rpath,/base".into()),
+            Value::String("-Wl,-rpath,/opt".into()),
+            Value::String("-DFOO=a, b".into()),
+        ]
+    );
+    let Value::List(javacopts) = &fields["javacopts"] else {
+        panic!("expected javacopts list");
+    };
+    let jc: Vec<String> = javacopts
+        .lock()
+        .unwrap()
+        .elements
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    let tail = &jc[jc.len() - 2..];
+    assert_eq!(
+        tail,
+        &["-XepOpt:Foo=a,b".to_string(), "-XDbar=1, 2".to_string()]
+    );
+}
+
+#[test]
+fn exec_os_and_cc_compile_extensions_follow_platform_info_constraints() {
+    let fs = Arc::new(InMemoryFileSystem::default());
+    let root = PathFragment::create("/ws");
+    let plat_repo_root = PathFragment::create("/repos/platforms");
+    fs.create_directory_and_parents(&root).unwrap();
+    fs.create_directory_and_parents(&plat_repo_root).unwrap();
+
+    write(
+        &fs,
+        &plat_repo_root,
+        "os/BUILD",
+        r#"
+package(default_visibility = ["//visibility:public"])
+constraint_setting(name = "os")
+constraint_value(name = "windows", constraint_setting = ":os")
+constraint_value(name = "linux", constraint_setting = ":os")
+constraint_value(name = "osx", constraint_setting = ":os")
+constraint_value(name = "macos", constraint_setting = ":os")
+constraint_value(name = "none", constraint_setting = ":os")
+constraint_value(name = "android", constraint_setting = ":os")
+"#,
+    );
+    write(
+        &fs,
+        &plat_repo_root,
+        "cpu/BUILD",
+        r#"
+package(default_visibility = ["//visibility:public"])
+constraint_setting(name = "cpu")
+constraint_value(name = "x86_64", constraint_setting = ":cpu")
+"#,
+    );
+
+    write(
+        &fs,
+        &root,
+        "plats/BUILD",
+        r#"
+package(default_visibility = ["//visibility:public"])
+
+# Deliberately neutral names without any OS substring.
+platform(
+    name = "neutral_exec_box",
+    constraint_values = ["@platforms//os:windows", "@platforms//cpu:x86_64"],
+)
+
+platform(
+    name = "child_box",
+    parents = [":neutral_exec_box"],
+    constraint_values = [],
+)
+
+alias(
+    name = "aliased_child_box",
+    actual = ":child_box",
+)
+
+# Deliberately misleading label containing "windows", while PlatformInfo specifies Linux.
+platform(
+    name = "windows_named_box",
+    constraint_values = ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+)
+
+platform(
+    name = "apple_parent_box",
+    constraint_values = ["@platforms//os:osx"],
+)
+
+platform(
+    name = "apple_child_box",
+    parents = [":apple_parent_box"],
+)
+
+platform(
+    name = "android_box",
+    constraint_values = ["@platforms//os:android"],
+)
+
+# No OS constraint at all, despite "windows" and "darwin" in the label.
+platform(
+    name = "windows_darwin_unconstrained",
+    constraint_values = ["@platforms//cpu:x86_64"],
+)
+"#,
+    );
+
+    write(
+        &fs,
+        &root,
+        "defs.bzl",
+        r#"
+_cc_internal = cc_common.internal_DO_NOT_USE()
+ProbeInfo = provider(fields = ["exec_os"])
+
+def _make_fc(ctx):
+    tool = struct(type_name = "tool", path = "C:\\tools\\cl.exe", with_features = [], execution_requirements = [])
+    acs = [
+        struct(
+            type_name = "action_config",
+            action_name = name,
+            enabled = True,
+            tools = [tool],
+            flag_sets = [],
+            implies = [],
+        )
+        for name in ["c++-header-parsing", "assemble", "c++-module-compile", "c++-compile"]
+    ]
+    ph = struct(
+        type_name = "feature",
+        name = "parse_headers",
+        enabled = True,
+        flag_sets = [],
+        env_sets = [],
+        requires = [],
+        implies = [],
+        provides = [],
+    )
+    info = struct(
+        _features_DO_NOT_USE = [ph],
+        _action_configs_DO_NOT_USE = acs,
+        _artifact_name_patterns_DO_NOT_USE = [],
+        _exec_os_DO_NOT_USE = _cc_internal.exec_os(ctx),
+    )
+    tf = _cc_internal.cc_toolchain_features(
+        toolchain_config_info = info,
+        tools_directory = "",
+    )
+    return tf.configure_features(
+        requested_features = [
+            "parse_headers",
+            "c++-header-parsing",
+            "assemble",
+            "c++-module-compile",
+            "c++-compile",
+        ],
+    )
+
+def _probe_impl(ctx):
+    fc = _make_fc(ctx)
+    vars = _cc_internal.cc_toolchain_variables()
+    outs = []
+    for src in ctx.files.srcs:
+        out = ctx.actions.declare_file(src.basename + ".out")
+        outs.append(out)
+        _cc_internal.create_cc_compile_action(
+            action_construction_context = ctx,
+            cc_compilation_context = None,
+            cc_toolchain = None,
+            configuration = ctx.configuration,
+            feature_configuration = fc,
+            compile_build_variables = vars,
+            source = src,
+            output_file = out,
+        )
+    return [
+        DefaultInfo(files = depset(outs)),
+        ProbeInfo(
+            exec_os = _cc_internal.exec_os(ctx),
+        ),
+    ]
+
+cc_probe = rule(
+    implementation = _probe_impl,
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+    },
+)
+
+cc_win_only_probe = rule(
+    implementation = _probe_impl,
+    exec_compatible_with = ["@platforms//os:windows"],
+    attrs = {
+        "srcs": attr.label_list(allow_files = True),
+    },
+)
+"#,
+    );
+    write(&fs, &root, "hdr.HPP", "inline int x() { return 1; }\n");
+    write(&fs, &root, "asm.ASM", "nop\n");
+    write(&fs, &root, "mod.CPPMAP", "module m {}\n");
+    write(&fs, &root, "bad.PIC.s", "nop\n");
+    write(
+        &fs,
+        &root,
+        "BUILD",
+        r#"
+load(":defs.bzl", "cc_probe", "cc_win_only_probe")
+
+cc_probe(
+    name = "win_exts",
+    srcs = ["hdr.HPP", "asm.ASM", "mod.CPPMAP"],
+)
+
+cc_probe(
+    name = "pic_asm",
+    srcs = ["bad.PIC.s"],
+)
+
+cc_win_only_probe(
+    name = "ecw_win",
+    srcs = ["hdr.HPP", "asm.ASM"],
+)
+"#,
+    );
+
+    let mut rr = SimpleRepoResolver::new(root);
+    rr.apparent.insert(String::new(), RepositoryName::main());
+    rr.apparent.insert(
+        "platforms".into(),
+        RepositoryName::create("platforms").unwrap(),
+    );
+    rr.external.insert("platforms".into(), plat_repo_root);
+    let rr_arc: Arc<dyn zel_packages::RepoResolver> = Arc::new(rr);
+
+    let analyze_with_exec = |extra_exec: &[&str],
+                             host_plat: Option<&str>,
+                             target: &str|
+     -> Result<Arc<zel_analysis::ConfiguredTarget>, String> {
+        let lc = LoaderConfig::new(fs.clone() as Arc<dyn FileSystem>, Arc::clone(&rr_arc));
+        let mut acfg = AnalysisConfig::new();
+        acfg.extra_execution_platforms = extra_exec
+            .iter()
+            .map(|s| Label::parse_canonical(s).unwrap())
+            .collect();
+        acfg.host_platform = host_plat.map(|s| Label::parse_canonical(s).unwrap());
+        let r = TargetResolver::new(PackageLoader::new(lc), acfg);
+        let cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        r.analyze(&Label::parse_canonical(target).unwrap(), &cfg)
+    };
+
+    let get_exec_os = |ct: &zel_analysis::ConfiguredTarget| -> String {
+        let Value::ProviderInstance { fields, .. } = &ct.providers["//:defs.bzl%ProbeInfo"] else {
+            panic!("missing ProbeInfo");
+        };
+        fields["exec_os"].as_str().unwrap().to_string()
+    };
+
+    // 1. Neutral-named Windows platform (`--extra_execution_platforms` and `--host_platform`,
+    //    plus `parents` inheritance + `alias` chain): `exec_os == "WINDOWS"`, `.HPP` / `.ASM` /
+    //    `.CPPMAP` compile with normalized `C:/tools/cl.exe`, and `.PIC.s` is rejected as PIC asm.
+    for (extra, host) in [
+        (&["//plats:neutral_exec_box"][..], None),
+        (&[][..], Some("//plats:aliased_child_box")),
+    ] {
+        let ct = analyze_with_exec(extra, host, "//:win_exts").unwrap();
+        assert_eq!(get_exec_os(&ct), "WINDOWS");
+        assert_eq!(ct.typed_actions.len(), 3);
+        assert_eq!(ct.typed_actions[0].mnemonic, "CppCompileHeader");
+        assert_eq!(ct.typed_actions[1].mnemonic, "CppCompile");
+        assert_eq!(ct.typed_actions[2].mnemonic, "CppCompile");
+        if let zel_analysis::ActionKind::Spawn { executable, .. } = &ct.typed_actions[0].kind {
+            assert_eq!(executable, "C:/tools/cl.exe");
+        } else {
+            panic!("expected Spawn action");
+        }
+
+        let pic_err = analyze_with_exec(extra, host, "//:pic_asm").unwrap_err();
+        assert!(
+            pic_err.contains("should not have '.pic.s' extension"),
+            "expected Windows PIC_ASSEMBLER rejection, got: {pic_err}"
+        );
+    }
+
+    // 2. Misleadingly-named `//plats:windows_named_box` with `@platforms//os:linux`:
+    //    `exec_os == "LINUX"` (no label substring fallback!), `.HPP` fails as unrecognized,
+    //    and `bad.PIC.s` is accepted as regular `.s` assembly on non-Windows.
+    let linux_pic = analyze_with_exec(&["//plats:windows_named_box"], None, "//:pic_asm").unwrap();
+    assert_eq!(get_exec_os(&linux_pic), "LINUX");
+    let linux_hdr_err =
+        analyze_with_exec(&["//plats:windows_named_box"], None, "//:win_exts").unwrap_err();
+    assert!(
+        linux_hdr_err.contains("Unrecognized source file type for 'hdr.HPP'"),
+        "expected non-Windows rejection of .HPP, got: {linux_hdr_err}"
+    );
+
+    // 3. `exec_compatible_with = ["@platforms//os:windows"]` on a Starlark rule with `toolchains = []`
+    //    skips incompatible `//plats:windows_named_box` (Linux) and selects `//plats:child_box` (Windows).
+    let ecw_ct = analyze_with_exec(
+        &["//plats:windows_named_box", "//plats:child_box"],
+        None,
+        "//:ecw_win",
+    )
+    .unwrap();
+    assert_eq!(get_exec_os(&ecw_ct), "WINDOWS");
+    assert_eq!(ecw_ct.typed_actions.len(), 2);
+
+    // 4. Parent-inherited `@platforms//os:osx` -> `"DARWIN"`; `@platforms//os:android` -> `"UNKNOWN"`
+    //    (`ConstraintConstants.CONSTRAINT_VALUE_TO_OS`); unconstrained platform -> host OS (`OS.getCurrent()`).
+    let apple_ct = analyze_with_exec(&["//plats:apple_child_box"], None, "//:pic_asm").unwrap();
+    assert_eq!(get_exec_os(&apple_ct), "DARWIN");
+
+    let android_ct = analyze_with_exec(&["//plats:android_box"], None, "//:pic_asm").unwrap();
+    assert_eq!(get_exec_os(&android_ct), "UNKNOWN");
+
+    if cfg!(windows) {
+        let host_fallback_ct = analyze_with_exec(
+            &["//plats:windows_darwin_unconstrained"],
+            None,
+            "//:win_exts",
+        )
+        .unwrap();
+        assert_eq!(get_exec_os(&host_fallback_ct), "WINDOWS");
+    } else {
+        let host_fallback_ct = analyze_with_exec(
+            &["//plats:windows_darwin_unconstrained"],
+            None,
+            "//:pic_asm",
+        )
+        .unwrap();
+        let expected_host = if cfg!(target_os = "macos") {
+            "DARWIN"
+        } else if cfg!(target_os = "freebsd") {
+            "FREEBSD"
+        } else if cfg!(target_os = "openbsd") {
+            "OPENBSD"
+        } else if cfg!(target_os = "linux") {
+            "LINUX"
+        } else {
+            "UNKNOWN"
+        };
+        assert_eq!(get_exec_os(&host_fallback_ct), expected_host);
+    }
 }

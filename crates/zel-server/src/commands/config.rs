@@ -94,7 +94,7 @@ pub(crate) fn native_settings(
             out.insert(
                 name.clone(),
                 zel_analysis::NativeSetting {
-                    raw: String::new(),
+                    raw: zel_analysis::build_options::encode_unsplit_list(&d.raw_values),
                     value,
                 },
             );

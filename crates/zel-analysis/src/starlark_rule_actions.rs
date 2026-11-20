@@ -14,6 +14,40 @@ fn host_method(
     match kind {
         "actions" => actions_method(st, ctx, method, pos, kw),
         "ctx" => ctx_method(st, ctx, method, pos, kw),
+        "constraint_collection" => {
+            let cc = crate::constraint_collection_of(recv)
+                .ok_or_else(|| StarlarkError("invalid ConstraintCollection".into()))?;
+            match method {
+                "get" => {
+                    check_kwargs("get", pos, kw, &["constraint"])?;
+                    let c = arg(pos, kw, 0, "constraint").ok_or_else(|| {
+                        StarlarkError("get() missing 1 required positional argument: constraint".into())
+                    })?;
+                    crate::constraint_collection_get(&cc, c).map_err(StarlarkError)
+                }
+                "has" => {
+                    check_kwargs("has", pos, kw, &["constraint"])?;
+                    let c = arg(pos, kw, 0, "constraint").ok_or_else(|| {
+                        StarlarkError("has() missing 1 required positional argument: constraint".into())
+                    })?;
+                    crate::constraint_collection_has(&cc, c)
+                        .map(Value::Bool)
+                        .map_err(StarlarkError)
+                }
+                "has_constraint_value" => {
+                    check_kwargs("has_constraint_value", pos, kw, &["constraint_value"])?;
+                    let cv = arg(pos, kw, 0, "constraint_value").ok_or_else(|| {
+                        StarlarkError(
+                            "has_constraint_value() missing 1 required positional argument: constraint_value".into(),
+                        )
+                    })?;
+                    crate::constraint_collection_has_value(&cc, cv)
+                        .map(Value::Bool)
+                        .map_err(StarlarkError)
+                }
+                other => err(format!("'ConstraintCollection' value has no field or method '{other}'")),
+            }
+        }
         "args" => args_host_method(recv, ctx, method, pos, kw),
         "runfiles" => {
             let r = runfiles_of(recv).ok_or_else(|| StarlarkError("invalid runfiles".into()))?;

@@ -174,6 +174,152 @@ pub fn feature_configuration_method(
     }
 }
 
+/// Native backing representation of Bazel's `HeaderInfo` (`CcCompilationContext.HeaderInfo`).
+#[derive(Debug, Clone)]
+pub struct HeaderInfoData {
+    pub id: u64,
+    pub header_module: Value,
+    pub pic_header_module: Value,
+    pub separate_module: Value,
+    pub separate_pic_module: Value,
+    pub modular_public_headers: Vec<Value>,
+    pub modular_private_headers: Vec<Value>,
+    pub textual_headers: Vec<Value>,
+    pub separate_module_headers: Vec<Value>,
+    pub deps: Vec<Arc<HeaderInfoData>>,
+    pub transitive_headers: Vec<Value>,
+}
+
+impl HeaderInfoData {
+    fn direct_modular_headers(&self) -> Vec<Value> {
+        let mut out = Vec::new();
+        for v in self
+            .modular_public_headers
+            .iter()
+            .chain(&self.modular_private_headers)
+            .chain(&self.separate_module_headers)
+        {
+            if !out.contains(v) {
+                out.push(v.clone());
+            }
+        }
+        out
+    }
+}
+
+static NEXT_HEADER_INFO_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn frozen_list_value(elems: Vec<Value>) -> Value {
+    let mut nl = StarlarkList::new(elems);
+    nl.freeze();
+    Value::List(Arc::new(Mutex::new(nl)))
+}
+
+fn is_inc_header(v: &Value) -> bool {
+    if let Some(p) = crate::artifact_path(v) {
+        return p.ends_with(".inc");
+    }
+    match v {
+        Value::String(s) => s.ends_with(".inc"),
+        Value::Struct(s) => s
+            .fields
+            .get("short_path")
+            .or_else(|| s.fields.get("path"))
+            .or_else(|| s.fields.get("basename"))
+            .and_then(|pv| match pv {
+                Value::String(st) => Some(st.ends_with(".inc")),
+                _ => None,
+            })
+            .unwrap_or(false),
+        _ => false,
+    }
+}
+
+fn dedupe_preserving_order(items: impl IntoIterator<Item = Value>) -> Vec<Value> {
+    let mut out = Vec::new();
+    for v in items {
+        if !out.contains(&v) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+fn compute_transitive_headers(
+    direct_modular: &[Value],
+    deps: &[Arc<HeaderInfoData>],
+) -> Vec<Value> {
+    if deps.is_empty() {
+        return direct_modular.to_vec();
+    }
+    let largest_dep = deps
+        .iter()
+        .max_by_key(|d| d.transitive_headers.len())
+        .expect("non-empty deps");
+    let mut out: Vec<Value> = Vec::new();
+    let in_largest = |v: &Value| largest_dep.transitive_headers.contains(v);
+    for h in direct_modular {
+        if !in_largest(h) && !out.contains(h) {
+            out.push(h.clone());
+        }
+    }
+    let mut visited_ids = std::collections::HashSet::new();
+    visited_ids.insert(largest_dep.id);
+    fn dfs(
+        node: &HeaderInfoData,
+        visited: &mut std::collections::HashSet<u64>,
+        largest_headers: &[Value],
+        out: &mut Vec<Value>,
+    ) {
+        if !visited.insert(node.id) {
+            return;
+        }
+        for h in node.direct_modular_headers() {
+            if !largest_headers.contains(&h) && !out.contains(&h) {
+                out.push(h);
+            }
+        }
+        for child in &node.deps {
+            dfs(child, visited, largest_headers, out);
+        }
+    }
+    for dep in deps {
+        dfs(
+            dep,
+            &mut visited_ids,
+            &largest_dep.transitive_headers,
+            &mut out,
+        );
+    }
+    out.extend(largest_dep.transitive_headers.iter().cloned());
+    out
+}
+
+/// Looks up the native `HeaderInfoData` backing a `HeaderInfo` Starlark value.
+pub fn get_header_info(v: &Value) -> Option<Arc<HeaderInfoData>> {
+    cc_features::lookup::<HeaderInfoData>(v, "HeaderInfo")
+}
+
+/// Resolves Starlark field access (`header_info.<field>`) on `HeaderInfo`.
+pub fn header_info_attr(attr: &str, pos: &[Value]) -> Result<Value, StarlarkError> {
+    let recv = pos.first().cloned().unwrap_or(Value::None);
+    let hi = get_header_info(&recv)
+        .ok_or_else(|| StarlarkError("invalid HeaderInfo receiver".into()))?;
+    match attr {
+        "header_module" => Ok(hi.header_module.clone()),
+        "pic_header_module" => Ok(hi.pic_header_module.clone()),
+        "separate_module" => Ok(hi.separate_module.clone()),
+        "separate_pic_module" => Ok(hi.separate_pic_module.clone()),
+        "modular_public_headers" => Ok(frozen_list_value(hi.modular_public_headers.clone())),
+        "modular_private_headers" => Ok(frozen_list_value(hi.modular_private_headers.clone())),
+        "textual_headers" => Ok(frozen_list_value(hi.textual_headers.clone())),
+        "separate_module_headers" => Ok(frozen_list_value(hi.separate_module_headers.clone())),
+        other => err(format!(
+            "'HeaderInfo' value has no field or method '{other}'"
+        )),
+    }
+}
+
 pub fn call(name: &str, pos: Vec<Value>, kw: Kwargs) -> Result<Value, StarlarkError> {
     match name {
         // `Dict.immutableCopyOf` / `StarlarkList.immutableCopyOf`.
@@ -214,54 +360,154 @@ pub fn call(name: &str, pos: Vec<Value>, kw: Kwargs) -> Result<Value, StarlarkEr
         "intern_seq" => kwarg(&pos, &kw, 0, "seq")
             .ok_or_else(|| StarlarkError("intern_seq() missing argument: seq".into())),
         "create_header_info" => {
-            let mut f: BTreeMap<String, Value> = BTreeMap::new();
-            for k in [
+            const ALLOWED: &[&str] = &[
                 "header_module",
                 "pic_header_module",
-                "separate_module",
-                "separate_pic_module",
-            ] {
-                f.insert(k.into(), kw.get(k).cloned().unwrap_or(Value::None));
-            }
-            for k in [
                 "modular_public_headers",
                 "modular_private_headers",
                 "textual_headers",
                 "separate_module_headers",
-            ] {
-                let mut nl = StarlarkList::new(seq(kw.get(k).unwrap_or(&Value::None))?);
-                nl.freeze();
-                f.insert(k.into(), Value::List(Arc::new(Mutex::new(nl))));
+                "separate_module",
+                "separate_pic_module",
+            ];
+            if !pos.is_empty() {
+                return err("create_header_info() accepts no positional arguments");
             }
-            let mut empty_deps = StarlarkList::new(vec![]);
-            empty_deps.freeze();
-            let mut empty_merged = StarlarkList::new(vec![]);
-            empty_merged.freeze();
-            f.insert("deps".into(), Value::List(Arc::new(Mutex::new(empty_deps))));
-            f.insert(
-                "merged_deps".into(),
-                Value::List(Arc::new(Mutex::new(empty_merged))),
-            );
-            f.insert("_zel_native".into(), Value::String("HeaderInfo".into()));
-            Ok(Value::Struct(Arc::new(StructValue::new(f))))
+            for k in kw.keys() {
+                if !ALLOWED.contains(&k.as_str()) {
+                    return err(format!(
+                        "create_header_info() got unexpected keyword argument '{k}'"
+                    ));
+                }
+            }
+            let header_module = kw.get("header_module").cloned().unwrap_or(Value::None);
+            let pic_header_module = kw.get("pic_header_module").cloned().unwrap_or(Value::None);
+            let separate_module = kw.get("separate_module").cloned().unwrap_or(Value::None);
+            let separate_pic_module = kw
+                .get("separate_pic_module")
+                .cloned()
+                .unwrap_or(Value::None);
+            if !matches!(separate_module, Value::None) && matches!(header_module, Value::None) {
+                return err("separate_module cannot be used without header_module");
+            }
+            if !matches!(separate_pic_module, Value::None)
+                && matches!(pic_header_module, Value::None)
+            {
+                return err("separate_pic_module cannot be used without pic_header_module");
+            }
+            let raw_pub = seq(kw.get("modular_public_headers").unwrap_or(&Value::None))?;
+            let raw_priv = seq(kw.get("modular_private_headers").unwrap_or(&Value::None))?;
+            let raw_tex = seq(kw.get("textual_headers").unwrap_or(&Value::None))?;
+            let raw_sep = seq(kw.get("separate_module_headers").unwrap_or(&Value::None))?;
+            let mut pub_hdrs = Vec::new();
+            let mut priv_hdrs = Vec::new();
+            let mut tex_hdrs = raw_tex;
+            for h in raw_pub {
+                if is_inc_header(&h) {
+                    tex_hdrs.push(h);
+                } else {
+                    pub_hdrs.push(h);
+                }
+            }
+            for h in raw_priv {
+                if is_inc_header(&h) {
+                    tex_hdrs.push(h);
+                } else {
+                    priv_hdrs.push(h);
+                }
+            }
+            let modular_public_headers = dedupe_preserving_order(pub_hdrs);
+            let modular_private_headers = dedupe_preserving_order(priv_hdrs);
+            let textual_headers = dedupe_preserving_order(tex_hdrs);
+            let separate_module_headers = dedupe_preserving_order(raw_sep);
+            let id = NEXT_HEADER_INFO_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut data = HeaderInfoData {
+                id,
+                header_module,
+                pic_header_module,
+                separate_module,
+                separate_pic_module,
+                modular_public_headers,
+                modular_private_headers,
+                textual_headers,
+                separate_module_headers,
+                deps: Vec::new(),
+                transitive_headers: Vec::new(),
+            };
+            data.transitive_headers = data.direct_modular_headers();
+            Ok(cc_features::register("HeaderInfo", data))
         }
         "create_header_info_with_deps" => {
-            let hi = kwarg(&pos, &kw, 0, "header_info").unwrap_or(Value::None);
-            let Value::Struct(s) = hi else {
+            for k in kw.keys() {
+                if !matches!(k.as_str(), "header_info" | "deps" | "merged_deps") {
+                    return err(format!(
+                        "create_header_info_with_deps() got unexpected keyword argument '{k}'"
+                    ));
+                }
+            }
+            let hi_val = kwarg(&pos, &kw, 0, "header_info").unwrap_or(Value::None);
+            let Some(base) = get_header_info(&hi_val) else {
                 return err("create_header_info_with_deps: header_info must be a HeaderInfo");
             };
-            let mut f = s.fields.clone();
-            let mut deps = StarlarkList::new(seq(kw.get("deps").unwrap_or(&Value::None))?);
-            deps.freeze();
-            let mut merged_deps =
-                StarlarkList::new(seq(kw.get("merged_deps").unwrap_or(&Value::None))?);
-            merged_deps.freeze();
-            f.insert("deps".into(), Value::List(Arc::new(Mutex::new(deps))));
-            f.insert(
-                "merged_deps".into(),
-                Value::List(Arc::new(Mutex::new(merged_deps))),
-            );
-            Ok(Value::Struct(Arc::new(StructValue::new(f))))
+            let raw_deps = seq(&kwarg(&pos, &kw, 1, "deps").unwrap_or(Value::None))?;
+            let raw_merged = seq(&kwarg(&pos, &kw, 2, "merged_deps").unwrap_or(Value::None))?;
+            let mut deps = Vec::with_capacity(raw_deps.len());
+            for d in &raw_deps {
+                let Some(hd) = get_header_info(d) else {
+                    return err("create_header_info_with_deps: deps must contain HeaderInfo");
+                };
+                deps.push(hd);
+            }
+            let mut merged = Vec::with_capacity(raw_merged.len());
+            for m in &raw_merged {
+                let Some(hm) = get_header_info(m) else {
+                    return err(
+                        "create_header_info_with_deps: merged_deps must contain HeaderInfo",
+                    );
+                };
+                merged.push(hm);
+            }
+            let mut pub_hdrs = base.modular_public_headers.clone();
+            let mut priv_hdrs = base.modular_private_headers.clone();
+            let mut tex_hdrs = base.textual_headers.clone();
+            let mut all_deps: Vec<Arc<HeaderInfoData>> = base.deps.clone();
+            let mut seen_dep_ids: std::collections::HashSet<u64> =
+                all_deps.iter().map(|d| d.id).collect();
+            for m in &merged {
+                pub_hdrs.extend(m.modular_public_headers.iter().cloned());
+                priv_hdrs.extend(m.modular_private_headers.iter().cloned());
+                tex_hdrs.extend(m.textual_headers.iter().cloned());
+                for md in &m.deps {
+                    if seen_dep_ids.insert(md.id) {
+                        all_deps.push(Arc::clone(md));
+                    }
+                }
+            }
+            for d in deps {
+                if seen_dep_ids.insert(d.id) {
+                    all_deps.push(d);
+                }
+            }
+            let modular_public_headers = dedupe_preserving_order(pub_hdrs);
+            let modular_private_headers = dedupe_preserving_order(priv_hdrs);
+            let textual_headers = dedupe_preserving_order(tex_hdrs);
+            let id = NEXT_HEADER_INFO_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let mut data = HeaderInfoData {
+                id,
+                header_module: base.header_module.clone(),
+                pic_header_module: base.pic_header_module.clone(),
+                separate_module: base.separate_module.clone(),
+                separate_pic_module: base.separate_pic_module.clone(),
+                modular_public_headers,
+                modular_private_headers,
+                textual_headers,
+                separate_module_headers: base.separate_module_headers.clone(),
+                deps: all_deps,
+                transitive_headers: Vec::new(),
+            };
+            let direct_modular = data.direct_modular_headers();
+            data.transitive_headers = compute_transitive_headers(&direct_modular, &data.deps);
+            Ok(cc_features::register("HeaderInfo", data))
         }
         "is_tree_artifact" => {
             if let Some(v) = pos.first() {
@@ -298,41 +544,33 @@ pub fn call(name: &str, pos: Vec<Value>, kw: Kwargs) -> Result<Value, StarlarkEr
             Ok(variables_from_dict(None, &vars)?)
         }
         "combine_cc_toolchain_variables" => {
-            let parent = kwarg(&pos, &kw, 0, "parent").unwrap_or(Value::None);
-            let parent = match &parent {
-                Value::None => None,
-                p => Some(cc_features::variables_of(p).ok_or_else(|| {
-                    StarlarkError(
-                        "combine_cc_toolchain_variables: parent must be CcToolchainVariables"
-                            .into(),
-                    )
-                })?),
-            };
-            // Every further positional argument is a CcToolchainVariables (or a list of them).
-            let mut to_merge: Vec<Value> = Vec::new();
-            let extra: Vec<Value> = if let Some(v) = kw.get("variables") {
-                vec![v.clone()]
-            } else {
-                pos.iter().skip(1).cloned().collect()
-            };
-            for e in extra {
-                match cc_features::variables_of(&e) {
-                    Some(_) => to_merge.push(e),
-                    None => to_merge.extend(cc_features::items(&e)),
-                }
+            if kw.keys().any(|k| k != "parent") {
+                return err("combine_cc_toolchain_variables: unexpected keyword argument");
             }
+            let parent_val = kwarg(&pos, &kw, 0, "parent").ok_or_else(|| {
+                StarlarkError("combine_cc_toolchain_variables: missing parent argument".into())
+            })?;
+            let parent = cc_features::variables_of(&parent_val).ok_or_else(|| {
+                StarlarkError(
+                    "combine_cc_toolchain_variables: parent must be CcToolchainVariables".into(),
+                )
+            })?;
+            let extra_start = if kw.contains_key("parent") { 0 } else { 1 };
             let mut map = BTreeMap::new();
-            for v in to_merge {
-                let vars = cc_features::variables_of(&v).ok_or_else(|| {
+            for v in pos.iter().skip(extra_start) {
+                let vars = cc_features::variables_of(v).ok_or_else(|| {
                     StarlarkError(
                         "combine_cc_toolchain_variables: expected CcToolchainVariables".into(),
                     )
                 })?;
-                for (k, val) in vars.flattened() {
-                    map.insert(k, val);
+                for (k, val) in &vars.map {
+                    if map.contains_key(k) {
+                        return err("Cannot overwrite existing variables");
+                    }
+                    map.insert(k.clone(), val.clone());
                 }
             }
-            Ok(cc_features::make_variables(parent, map))
+            Ok(cc_features::make_variables(Some(parent), map))
         }
         "intern_string_sequence_variable_value" => kwarg(&pos, &kw, 0, "string_sequence")
             .ok_or_else(|| StarlarkError("missing argument: string_sequence".into())),
@@ -344,13 +582,18 @@ pub fn call(name: &str, pos: Vec<Value>, kw: Kwargs) -> Result<Value, StarlarkEr
                 Some(other) => crate::artifact_path(&other).unwrap_or_default(),
                 None => String::new(),
             };
+            let exec_os = match cc_features::field(&info, "_exec_os_DO_NOT_USE") {
+                Some(Value::String(s)) => Some(s),
+                _ => None,
+            };
             let get =
                 |n: &str| cc_features::items(&cc_features::field(&info, n).unwrap_or(Value::None));
-            let tf = cc_features::ToolchainFeatures::new(
+            let tf = cc_features::ToolchainFeatures::new_with_os(
                 &get("_features_DO_NOT_USE"),
                 &get("_action_configs_DO_NOT_USE"),
                 &get("_artifact_name_patterns_DO_NOT_USE"),
                 &dir,
+                exec_os.as_deref(),
                 &|v| crate::artifact_path(v),
             )?;
             Ok(cc_features::register(
@@ -409,19 +652,25 @@ pub fn call(name: &str, pos: Vec<Value>, kw: Kwargs) -> Result<Value, StarlarkEr
                 format!("{hashed}.{ext}")
             }))
         }
-        "exec_os" => {
-            // `getOsFromConstraintsOrHost(execution platform)`: the host OS name.
-            Ok(Value::String(
-                if cfg!(target_os = "macos") {
-                    "osx"
-                } else if cfg!(windows) {
-                    "windows"
-                } else {
-                    "linux"
-                }
-                .to_string(),
-            ))
-        }
+        "stl_computed_default" => Ok(Value::BuiltinFunction(
+            "cc_internal.stl_computed_default_fn".into(),
+        )),
+        "exec_os" => Ok(Value::String(
+            if cfg!(target_os = "macos") {
+                "DARWIN"
+            } else if cfg!(windows) {
+                "WINDOWS"
+            } else if cfg!(target_os = "freebsd") {
+                "FREEBSD"
+            } else if cfg!(target_os = "openbsd") {
+                "OPENBSD"
+            } else if cfg!(target_os = "linux") {
+                "LINUX"
+            } else {
+                "UNKNOWN"
+            }
+            .to_string(),
+        )),
         n if FUNCTIONS.contains(&n) => err(format!(
             "cc_internal.{n} is not implemented yet in zel (port of CcStarlarkInternal.{n})"
         )),
@@ -436,11 +685,86 @@ mod tests {
     #[test]
     fn header_info_roundtrip() {
         let hi = call("create_header_info", vec![], Kwargs::new()).unwrap();
+        let hi_dup = call("create_header_info", vec![], Kwargs::new()).unwrap();
+        assert_ne!(hi, hi_dup, "HeaderInfo instances have unique identity");
         let mut kw = Kwargs::new();
         kw.insert("header_info".into(), hi);
         kw.insert("deps".into(), list(vec![]));
         let hi2 = call("create_header_info_with_deps", vec![], kw).unwrap();
-        assert!(matches!(hi2, Value::Struct(_)));
+        assert!(get_header_info(&hi2).is_some());
+    }
+
+    #[test]
+    fn header_info_inc_promotion_dedup_and_merged_deps() {
+        let mut kw = Kwargs::new();
+        kw.insert(
+            "modular_public_headers".into(),
+            list(vec![
+                Value::String("a.h".into()),
+                Value::String("a.h".into()),
+                Value::String("inline.inc".into()),
+            ]),
+        );
+        kw.insert(
+            "modular_private_headers".into(),
+            list(vec![
+                Value::String("priv.inc".into()),
+                Value::String("p.h".into()),
+            ]),
+        );
+        let base = call("create_header_info", vec![], kw).unwrap();
+        let bd = get_header_info(&base).unwrap();
+        assert_eq!(bd.modular_public_headers, vec![Value::String("a.h".into())]);
+        assert_eq!(
+            bd.modular_private_headers,
+            vec![Value::String("p.h".into())]
+        );
+        assert_eq!(
+            bd.textual_headers,
+            vec![
+                Value::String("inline.inc".into()),
+                Value::String("priv.inc".into())
+            ]
+        );
+
+        let mut kw_exp = Kwargs::new();
+        kw_exp.insert(
+            "modular_public_headers".into(),
+            list(vec![Value::String("exported.h".into())]),
+        );
+        kw_exp.insert(
+            "textual_headers".into(),
+            list(vec![Value::String("exp_tex.h".into())]),
+        );
+        let exported = call("create_header_info", vec![], kw_exp).unwrap();
+
+        let mut kw_merge = Kwargs::new();
+        kw_merge.insert("header_info".into(), base);
+        kw_merge.insert("deps".into(), list(vec![exported.clone()]));
+        kw_merge.insert("merged_deps".into(), list(vec![exported]));
+        let merged = call("create_header_info_with_deps", vec![], kw_merge).unwrap();
+        let md = get_header_info(&merged).unwrap();
+        assert_eq!(
+            md.modular_public_headers,
+            vec![
+                Value::String("a.h".into()),
+                Value::String("exported.h".into())
+            ]
+        );
+        assert_eq!(
+            md.textual_headers,
+            vec![
+                Value::String("inline.inc".into()),
+                Value::String("priv.inc".into()),
+                Value::String("exp_tex.h".into()),
+            ]
+        );
+        assert!(header_info_attr("deps", std::slice::from_ref(&merged)).is_err());
+        assert!(header_info_attr("merged_deps", std::slice::from_ref(&merged)).is_err());
+
+        let mut bad_mod = Kwargs::new();
+        bad_mod.insert("separate_module".into(), Value::String("sep.pcm".into()));
+        assert!(call("create_header_info", vec![], bad_mod).is_err());
     }
 
     #[test]
@@ -473,16 +797,13 @@ mod tests {
     #[test]
     fn header_info_fields_are_immutable_lists() {
         let hi = call("create_header_info", vec![], Kwargs::new()).unwrap();
-        let Value::Struct(s) = hi else { panic!() };
         for k in [
             "modular_public_headers",
             "modular_private_headers",
             "textual_headers",
             "separate_module_headers",
-            "deps",
-            "merged_deps",
         ] {
-            let Value::List(l) = s.fields.get(k).unwrap() else {
+            let Value::List(l) = header_info_attr(k, std::slice::from_ref(&hi)).unwrap() else {
                 panic!("{k} should be a list");
             };
             assert!(l.lock().unwrap().is_frozen());

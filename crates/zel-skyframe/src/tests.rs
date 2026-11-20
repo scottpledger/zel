@@ -979,3 +979,92 @@ fn package_lookup_and_load_preserve_repo_did_you_mean_suggestion() {
     let load_err = loader.load_package(&pkg_non_vis_main).unwrap_err();
     assert_eq!(load_err.message, err_main.message);
 }
+
+#[test]
+fn repository_directory_value_is_not_comparable_and_marks_dependents_dirty() {
+    use crate::{
+        Environment, RepositoryDirectoryValue, SkyFunction, SkyFunctionError, SkyFunctionName,
+        SkyValue,
+    };
+    use std::any::Any;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use zel_cmdline::RepositoryName;
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct CounterVal(usize);
+    impl SkyValue for CounterVal {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn eq_value(&self, other: &dyn SkyValue) -> bool {
+            other.as_any().downcast_ref::<Self>() == Some(self)
+        }
+    }
+
+    struct RepoFn;
+    impl SkyFunction for RepoFn {
+        fn compute(
+            &self,
+            _key: &SkyKey,
+            _env: &mut Environment<'_>,
+        ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+            Ok(Some(Arc::new(RepositoryDirectoryValue::Success {
+                path: PathFragment::create("/ext/foo+"),
+                exclude_from_vendoring: false,
+            })))
+        }
+    }
+
+    struct DepFn {
+        repo_key: SkyKey,
+        evals: Arc<AtomicUsize>,
+    }
+    impl SkyFunction for DepFn {
+        fn compute(
+            &self,
+            _key: &SkyKey,
+            env: &mut Environment<'_>,
+        ) -> Result<Option<Arc<dyn SkyValue>>, SkyFunctionError> {
+            if env.get_value(&self.repo_key).is_none() {
+                return Ok(None);
+            }
+            let n = self.evals.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(Some(Arc::new(CounterVal(n))))
+        }
+    }
+
+    let v1 = RepositoryDirectoryValue::Success {
+        path: PathFragment::create("/ext/foo+"),
+        exclude_from_vendoring: false,
+    };
+    let v2 = v1.clone();
+    assert!(v1.is_repository_exists());
+    // NotComparableSkyValue: identical payloads must still compare unequal for Skyframe pruning.
+    assert!(!v1.eq_value(&v2));
+    assert!(v1.is_not_comparable());
+
+    let evals = Arc::new(AtomicUsize::new(0));
+    let repo_key = SkyKey::RepositoryDirectory(RepositoryName::create_unvalidated("foo+"));
+    let dep_key = SkyKey::Custom {
+        function_name: SkyFunctionName("DEP_ON_REPO"),
+        argument: "x".into(),
+    };
+    let mut evaluator = crate::InMemoryMemoizingEvaluator::new();
+    evaluator.register_function(SkyFunctionName::REPOSITORY_DIRECTORY, Arc::new(RepoFn));
+    evaluator.register_function(
+        SkyFunctionName("DEP_ON_REPO"),
+        Arc::new(DepFn {
+            repo_key: repo_key.clone(),
+            evals: evals.clone(),
+        }),
+    );
+
+    evaluator.evaluate(std::slice::from_ref(&dep_key));
+    assert_eq!(evals.load(Ordering::SeqCst), 1);
+
+    // Invalidating the repository directory forces the dependent to re-evaluate even though the
+    // new RepositoryDirectoryValue has the exact same path and flags.
+    evaluator.invalidate(std::slice::from_ref(&repo_key));
+    evaluator.evaluate(std::slice::from_ref(&dep_key));
+    assert_eq!(evals.load(Ordering::SeqCst), 2);
+}

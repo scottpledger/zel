@@ -19,8 +19,8 @@ fn flag_native(name: &str) -> Option<Value> {
         "java_common_internal_do_not_use.incompatible_disable_non_executable_java_binary" => {
             Value::Bool(false)
         }
-        "cc_common.check_experimental_cc_shared_library" => Value::Bool(true),
-        "cc_common.incompatible_disable_objc_library_transition" => Value::Bool(false),
+        "cc_common.check_experimental_cc_shared_library" => Value::Bool(false),
+        "cc_common.incompatible_disable_objc_library_transition" => Value::Bool(true),
         "cc_common.add_go_exec_groups_to_binary_rules" => Value::Bool(false),
         "cc_common.do_not_use_tools_cpp_compiler_present" => Value::Bool(false),
         "py_builtins.is_bzlmod_enabled" => Value::Bool(true),
@@ -30,56 +30,22 @@ fn flag_native(name: &str) -> Option<Value> {
 }
 
 /// `apple_common.dotted_version(str)`: a `DottedVersion` host object.
-fn dotted_version(pos: &[Value]) -> Result<Value, StarlarkError> {
-    match pos.first() {
+fn dotted_version(pos: &[Value], kw: &Kwargs) -> Result<Value, StarlarkError> {
+    if pos.len() + kw.len() > 1 {
+        return err("dotted_version() accepts no more than 1 positional argument");
+    }
+    let arg = pos.first().or_else(|| kw.get("version"));
+    match arg {
         Some(Value::String(s)) => {
-            if s.is_empty() || !s.chars().next().unwrap().is_ascii_digit() {
-                return err(format!(
-                    "Dotted version components must start with a number: {s}"
-                ));
-            }
+            zel_starlark::eval::builtins::parse_dotted_version(s).map_err(StarlarkError)?;
             Ok(Value::Host("dotted_version".into(), s.clone()))
         }
-        Some(Value::None) | None => Ok(Value::None),
-        Some(v @ Value::Host(k, _)) if k == "dotted_version" => Ok(v.clone()),
         Some(other) => err(format!(
-            "dotted_version: got value of type '{}', want 'string'",
+            "in call to dotted_version(), parameter 'version' got value of type '{}', want 'string'",
             other.type_name()
         )),
+        None => err("dotted_version() missing 1 required positional argument: version"),
     }
-}
-
-/// Numeric components of a dotted version; each component's leading digits, then its alpha tail.
-fn components(v: &str) -> Vec<(u64, String)> {
-    v.split('.')
-        .map(|c| {
-            let digits: String = c.chars().take_while(|ch| ch.is_ascii_digit()).collect();
-            let rest: String = c.chars().skip(digits.len()).collect();
-            (digits.parse().unwrap_or(0), rest)
-        })
-        .collect()
-}
-
-fn compare(a: &str, b: &str) -> i64 {
-    let (x, y) = (components(a), components(b));
-    for i in 0..x.len().max(y.len()) {
-        let ca = x.get(i).cloned().unwrap_or((0, String::new()));
-        let cb = y.get(i).cloned().unwrap_or((0, String::new()));
-        match ca.0.cmp(&cb.0) {
-            std::cmp::Ordering::Equal => {}
-            o => return o as i64,
-        }
-        // An alpha tail (`beta`) sorts before the bare number.
-        match (ca.1.is_empty(), cb.1.is_empty()) {
-            (true, false) => return 1,
-            (false, true) => return -1,
-            _ => match ca.1.cmp(&cb.1) {
-                std::cmp::Ordering::Equal => {}
-                o => return o as i64,
-            },
-        }
-    }
-    0
 }
 
 /// `host:builtins.<ns>.<fn>`.
@@ -146,7 +112,7 @@ pub fn call(rest: &str, pos: Vec<Value>, _kw: Kwargs) -> Result<Value, StarlarkE
             };
             Ok(Value::String(val))
         }
-        "apple_common.dotted_version" => dotted_version(&pos),
+        "apple_common.dotted_version" => dotted_version(&pos, &_kw),
         n => err(format!(
             "{n} is not implemented yet in zel (native part of Bazel's builtins; see crates/zel-builtins)"
         )),
@@ -164,9 +130,9 @@ pub fn dotted_version_member(
     };
     match (is_method, member) {
         (true, "compare_to") => match pos.get(1) {
-            Some(Value::Host(k, o)) if k == "dotted_version" => {
-                Ok(Value::Int(compare(v, o).into()))
-            }
+            Some(Value::Host(k, o)) if k == "dotted_version" => Ok(Value::Int(
+                zel_starlark::eval::builtins::dotted_version_compare_to(v, o).into(),
+            )),
             _ => err("DottedVersion.compare_to: argument must be a DottedVersion"),
         },
         (false, "compare_to") => Ok(Value::BuiltinFunction(
@@ -186,12 +152,22 @@ fn _unused(_: Arc<()>) {}
 mod tests {
     use super::*;
     use std::collections::hash_map::DefaultHasher;
+    use std::collections::BTreeMap;
     use std::hash::{Hash, Hasher};
 
     fn hash_val(v: &Value) -> u64 {
         let mut h = DefaultHasher::new();
         v.hash(&mut h);
         h.finish()
+    }
+
+    fn dv(s: &str) -> Value {
+        call(
+            "apple_common.dotted_version",
+            vec![Value::String(s.to_string())],
+            BTreeMap::new(),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -203,16 +179,72 @@ mod tests {
             ("1.2", "1.2.0"),
             ("10", "10.0"),
         ] {
-            let va = dotted_version(&[Value::String(a.into())]).unwrap();
-            let vb = dotted_version(&[Value::String(b.into())]).unwrap();
-            assert_eq!(compare(a, b), 0, "{a} vs {b}");
+            let va = dv(a);
+            let vb = dv(b);
+            assert_eq!(
+                zel_starlark::eval::builtins::dotted_version_compare_to(a, b),
+                0,
+                "{a} vs {b}"
+            );
             assert_eq!(va, vb, "{a} == {b}");
             assert_eq!(hash_val(&va), hash_val(&vb), "hash({a}) == hash({b})");
             assert_eq!(va.to_string(), a);
             assert_eq!(vb.to_string(), b);
         }
-        let v1 = dotted_version(&[Value::String("1.0alpha".into())]).unwrap();
-        let v2 = dotted_version(&[Value::String("1.0".into())]).unwrap();
+        let v1 = dv("1.0alpha");
+        let v2 = dv("1.0");
         assert_ne!(v1, v2);
+    }
+
+    #[test]
+    fn dotted_version_comparison_equality_and_validation() {
+        assert_eq!(dv("1.0"), dv("1"));
+        assert_eq!(dv("0.1"), dv("0.01"));
+        assert_eq!(dv("1.2x"), dv("1.2x0"));
+        assert_eq!(dv("1.2x"), dv("1.2x0.0"));
+        assert_eq!(dv("1.2.experimental"), dv("1.2"));
+        assert_eq!(dv("10.10.simulator.internal"), dv("10.10"));
+
+        let mut dict = zel_starlark::StarlarkDict::new();
+        dict.insert(dv("1.0"), Value::String("ok".into())).unwrap();
+        assert_eq!(dict.get(&dv("1")), Some(&Value::String("ok".into())));
+
+        assert!(
+            zel_starlark::eval::builtins::compare_values(&dv("1.2beta2"), &dv("1.2beta10"))
+                .unwrap()
+                .is_lt()
+        );
+        assert!(
+            zel_starlark::eval::builtins::compare_values(&dv("1.0beta2"), &dv("1.0"))
+                .unwrap()
+                .is_lt()
+        );
+
+        for bad in [
+            "",
+            "1.",
+            ".1",
+            "1..2",
+            "2:3",
+            "1.-1",
+            "2147483648",
+            "1beta2147483648",
+        ] {
+            assert!(
+                call(
+                    "apple_common.dotted_version",
+                    vec![Value::String(bad.to_string())],
+                    BTreeMap::new(),
+                )
+                .is_err(),
+                "expected error for '{bad}'"
+            );
+        }
+        assert!(call(
+            "apple_common.dotted_version",
+            vec![Value::None],
+            BTreeMap::new()
+        )
+        .is_err());
     }
 }

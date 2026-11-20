@@ -1555,7 +1555,7 @@ fn dispatch_object_inner(
                     p.display()
                 ));
             }
-            maybe_watch(rt, &data, &p, "yes")?;
+            maybe_watch_tree(rt, &data, &p)?;
             Ok(Value::None)
         }
         "which" => {
@@ -2557,6 +2557,57 @@ fn maybe_watch_dirents(rt: &Rt, data: &CtxData, p: &Path, mode: &str) -> Result<
                 .hex_digest(),
         ),
     );
+    Ok(())
+}
+
+/// `DirectoryTreeDigestValue`: recursively hashes sorted directory entries (name, kind, regular
+/// file SHA-256 / symlink target / subdirectory tree digest).
+pub(crate) fn compute_dirtree_digest(p: &Path) -> Result<String, std::io::Error> {
+    let mut entries: Vec<(String, std::fs::DirEntry)> = Vec::new();
+    for entry in std::fs::read_dir(p)? {
+        let entry = entry?;
+        entries.push((entry.file_name().to_string_lossy().into_owned(), entry));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut parts: Vec<String> = Vec::with_capacity(entries.len() * 3);
+    for (name, entry) in entries {
+        let ft = entry.file_type()?;
+        parts.push(name);
+        let child = entry.path();
+        if ft.is_symlink() {
+            parts.push("SYM".to_string());
+            let target = std::fs::read_link(&child)?;
+            parts.push(target.to_string_lossy().into_owned());
+        } else if ft.is_dir() {
+            parts.push("DIR".to_string());
+            parts.push(compute_dirtree_digest(&child)?);
+        } else if ft.is_file() {
+            parts.push("FILE".to_string());
+            let bytes = std::fs::read(&child)?;
+            parts.push(crate::hash::sha256_hex(&bytes));
+        } else {
+            parts.push("SPECIAL".to_string());
+            parts.push(String::new());
+        }
+    }
+    Ok(crate::hash::Fingerprint::new()
+        .add_strings(&parts)
+        .hex_digest())
+}
+
+/// `watch_tree`: records a `DIRTREE:` recursive directory tree digest input.
+fn maybe_watch_tree(rt: &Rt, data: &CtxData, p: &Path) -> Result<(), StarlarkError> {
+    let Some(rel) = repo_cache_friendly_path(rt, data, p, "yes")? else {
+        return Ok(());
+    };
+    let digest = compute_dirtree_digest(p).map_err(|e| {
+        StarlarkError(format!(
+            "java.io.IOException: {} ({})",
+            p.display(),
+            errno_text(&e)
+        ))
+    })?;
+    data.record(format!("DIRTREE:{}", escape_input(&rel)), Some(digest));
     Ok(())
 }
 

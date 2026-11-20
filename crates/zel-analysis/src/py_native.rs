@@ -24,9 +24,9 @@ fn py_native(
                 (Some(s), Some(p)) => (s, p),
                 _ => return Some(err("regex_match: subject and pattern must be strings")),
             };
-            match pattern {
-                "(?U)\\w+" | "\\w+" => Ok(Value::Bool(!subject.is_empty() && subject.chars().all(|c| c.is_alphanumeric() || c == '_'))),
-                other => err(format!("py_builtins.regex_match: pattern '{other}' is not supported by zel's matcher")),
+            match zel_util::java_regex::Regex::new(pattern) {
+                Ok(re) => Ok(Value::Bool(re.full_match(subject))),
+                Err(e) => err(format!("py_builtins.regex_match: invalid regex '{pattern}': {e}")),
             }
         }
         "get_rule_name" => Ok(Value::String(st.rule.rule_class.clone())),
@@ -102,49 +102,8 @@ fn py_native(
             if rf.is_empty() {
                 return err("input runfiles cannot be empty");
             }
-            let ws = st.inputs.workspace_name.clone();
-            let manifest = rf.manifest_entries(&ws);
-            // `Runfiles.EmptyFilesSupplier.getExtraPaths` sees the manifest paths relative to the
-            // workspace directory: external files are `../<repo>/...`.
-            let ws_prefix = format!("{ws}/");
-            let rel_paths: Vec<String> = manifest
-                .keys()
-                .map(|k| match k.strip_prefix(&ws_prefix) {
-                    Some(r) => r.to_string(),
-                    None => format!("../{k}"),
-                })
-                .collect();
-            let paths: std::collections::BTreeSet<&str> = rel_paths.iter().map(|s| s.as_str()).collect();
-            let is_init = |p: &str| p.ends_with("/__init__.py") || p.ends_with("/__init__.pyc");
-            let init_dirs: std::collections::BTreeSet<String> = paths
-                .iter()
-                .filter(|p| is_init(p))
-                .filter_map(|p| p.rsplit_once('/').map(|x| x.0.to_string()))
-                .collect();
-            let mut extra: Vec<String> = Vec::new();
-            for p in &paths {
-                if !(p.ends_with(".py") || p.ends_with(".so") || p.ends_with(".pyc")) {
-                    continue;
-                }
-                let mut cur = p.to_string();
-                while cur.contains('/') {
-                    cur = cur.rsplit_once('/').unwrap().0.to_string();
-                    if cur.ends_with("__pycache__") || init_dirs.contains(&cur) {
-                        continue;
-                    }
-                    let initpy = format!("{cur}/__init__.py");
-                    let initpyc = format!("{cur}/__init__.pyc");
-                    if !paths.contains(initpy.as_str()) && !paths.contains(initpyc.as_str()) && !extra.contains(&initpy) {
-                        extra.push(initpy);
-                    }
-                }
-            }
             let mut out = (*rf).clone();
-            for e in extra {
-                if !out.empty_filenames.contains(&e) {
-                    out.empty_filenames.push(e);
-                }
-            }
+            out.generate_init_py_files = true;
             Ok(runfiles_value(out))
         })(),
         "expand_location_and_make_variables" => (|| {

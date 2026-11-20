@@ -356,6 +356,140 @@ pub fn attempt_inputs(
     out
 }
 
+fn strip_cfg_segment(p: &str) -> Option<String> {
+    let rest = p.strip_prefix("bazel-out/")?;
+    let (_, after_cfg) = rest.split_once('/')?;
+    Some(format!("bazel-out/cfg/{after_cfg}"))
+}
+
+/// `JavaCompileAction.createFullOutputDeps`: maps stripped `bazel-out/cfg/...` dependency paths
+/// in `bytes` back to their original `bazel-out/<mnemonic>/...` paths from `classpath_inputs`
+/// (retaining the first seen path on collisions).
+pub fn create_full_output_deps(
+    bytes: &[u8],
+    classpath_inputs: &[String],
+) -> Result<Vec<u8>, String> {
+    let mut reverse_map: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    for orig in classpath_inputs {
+        if let Some(mapped) = strip_cfg_segment(orig) {
+            reverse_map.entry(mapped).or_insert_with(|| orig.clone());
+        }
+    }
+    if reverse_map.is_empty() {
+        return Ok(bytes.to_vec());
+    }
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut changed = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let tag_start = i;
+        let tag = varint(bytes, &mut i)?;
+        let (field, wire) = (tag >> 3, tag & 7);
+        match (field, wire) {
+            (1, 2) => {
+                let len = varint(bytes, &mut i)? as usize;
+                let end = i
+                    .checked_add(len)
+                    .filter(|e| *e <= bytes.len())
+                    .ok_or("truncated Dependency")?;
+                let payload = &bytes[i..end];
+                i = end;
+                let mut inner_out = Vec::with_capacity(payload.len());
+                let mut j = 0;
+                while j < payload.len() {
+                    let itag_start = j;
+                    let itag = varint(payload, &mut j)?;
+                    let (ifield, iwire) = (itag >> 3, itag & 7);
+                    match (ifield, iwire) {
+                        (1, 2) => {
+                            let ilen = varint(payload, &mut j)? as usize;
+                            let iend = j
+                                .checked_add(ilen)
+                                .filter(|e| *e <= payload.len())
+                                .ok_or("truncated Dependency.path")?;
+                            let pstr = String::from_utf8_lossy(&payload[j..iend]);
+                            j = iend;
+                            if let Some(orig) = reverse_map.get(pstr.as_ref()) {
+                                changed = true;
+                                push_varint(&mut inner_out, itag);
+                                push_varint(&mut inner_out, orig.len() as u64);
+                                inner_out.extend_from_slice(orig.as_bytes());
+                            } else {
+                                inner_out.extend_from_slice(&payload[itag_start..iend]);
+                            }
+                        }
+                        (_, 0) => {
+                            let _ = varint(payload, &mut j)?;
+                            inner_out.extend_from_slice(&payload[itag_start..j]);
+                        }
+                        (_, 1) => {
+                            let iend = j
+                                .checked_add(8)
+                                .filter(|e| *e <= payload.len())
+                                .ok_or("truncated fixed64")?;
+                            inner_out.extend_from_slice(&payload[itag_start..iend]);
+                            j = iend;
+                        }
+                        (_, 2) => {
+                            let ilen = varint(payload, &mut j)? as usize;
+                            let iend = j
+                                .checked_add(ilen)
+                                .filter(|e| *e <= payload.len())
+                                .ok_or("truncated field")?;
+                            inner_out.extend_from_slice(&payload[itag_start..iend]);
+                            j = iend;
+                        }
+                        (_, 5) => {
+                            let iend = j
+                                .checked_add(4)
+                                .filter(|e| *e <= payload.len())
+                                .ok_or("truncated fixed32")?;
+                            inner_out.extend_from_slice(&payload[itag_start..iend]);
+                            j = iend;
+                        }
+                        (_, w) => return Err(format!("unsupported wire type {w}")),
+                    }
+                }
+                push_varint(&mut out, tag);
+                push_varint(&mut out, inner_out.len() as u64);
+                out.extend_from_slice(&inner_out);
+            }
+            (_, 0) => {
+                let _ = varint(bytes, &mut i)?;
+                out.extend_from_slice(&bytes[tag_start..i]);
+            }
+            (_, 1) => {
+                let end = i
+                    .checked_add(8)
+                    .filter(|e| *e <= bytes.len())
+                    .ok_or("truncated fixed64")?;
+                out.extend_from_slice(&bytes[tag_start..end]);
+                i = end;
+            }
+            (_, 2) => {
+                let len = varint(bytes, &mut i)? as usize;
+                let end = i
+                    .checked_add(len)
+                    .filter(|e| *e <= bytes.len())
+                    .ok_or("truncated field")?;
+                out.extend_from_slice(&bytes[tag_start..end]);
+                i = end;
+            }
+            (_, 5) => {
+                let end = i
+                    .checked_add(4)
+                    .filter(|e| *e <= bytes.len())
+                    .ok_or("truncated fixed32")?;
+                out.extend_from_slice(&bytes[tag_start..end]);
+                i = end;
+            }
+            (_, w) => return Err(format!("unsupported wire type {w}")),
+        }
+    }
+    Ok(if changed { out } else { bytes.to_vec() })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,5 +626,20 @@ mod tests {
             ]
         );
         assert_eq!(attempt_inputs(&s, &all, &s.transitive_inputs).len(), 8);
+    }
+
+    #[test]
+    fn create_full_output_deps_restores_first_seen_config_paths() {
+        let mapped_jdeps = dep("bazel-out/cfg/bin/pkg/libdep-hjar.jar", 0);
+        let cp = vec![
+            "bazel-out/k8-fastbuild/bin/pkg/libdep-hjar.jar".to_string(),
+            "bazel-out/k8-opt/bin/pkg/libdep-hjar.jar".to_string(),
+        ];
+        let full = create_full_output_deps(&mapped_jdeps, &cp).unwrap();
+        let parsed = parse_jdeps(&full).unwrap();
+        assert_eq!(
+            parsed.paths,
+            vec!["bazel-out/k8-fastbuild/bin/pkg/libdep-hjar.jar".to_string()]
+        );
     }
 }

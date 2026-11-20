@@ -77,6 +77,11 @@ pub trait DepResolver: Send + Sync {
         Vec::new()
     }
 
+    /// Canonical repository names of all transitively loaded packages and `.bzl` modules.
+    fn loaded_package_repos(&self) -> Vec<String> {
+        Vec::new()
+    }
+
     /// The loaded rule instance behind `label` (`None` for files, package groups, ...).
     /// Needed to apply aspects (`ctx.rule`).
     fn rule_instance(&self, _label: &Label) -> Result<Option<RuleInstance>, String> {
@@ -341,11 +346,13 @@ impl CtxState {
     /// Repo-mapping manifest entries for `runfiles` of this target (`RepoMappingManifestAction`).
     pub fn repo_mapping_for(&self, rf: &Runfiles) -> Vec<(String, String, String)> {
         let resolver = self.inputs.resolver.clone();
-        crate::repo_mapping::repo_mapping_entries(
+        let extra_sources = self.inputs.resolver.loaded_package_repos();
+        crate::repo_mapping::repo_mapping_entries_with_sources(
             &move |r: &str| resolver.repo_mapping_entries(r),
             &self.inputs.workspace_name,
             rf,
             self.label.package_identifier().repository().name(),
+            &extra_sources,
             self.inputs.compact_repo_mapping,
         )
     }
@@ -415,6 +422,7 @@ impl CtxState {
         if self.inputs.allow_tags_propagation && matches!(a.kind, ActionKind::Spawn { .. }) {
             crate::action::propagate_rule_tags(&self.rule, &mut a.execution_requirements);
         }
+        a.apply_modify_execution_info(&self.cfg);
         a.apply_configuration_env(&self.cfg);
         a.inputs = dedup(std::mem::take(&mut a.inputs));
         self.graph
@@ -760,6 +768,52 @@ mod java_native_tests {
             utf8_env_for_inputs(&cfg_auto_eg, &inputs_auto_eg, false)["LC_CTYPE"],
             "en_US.UTF-8"
         );
+
+        // Real `ConstraintCollection` (as produced by native `platform(...)` with `parents = [...]`).
+        let os_setting = provider_instance(
+            "ConstraintSettingInfo",
+            vec![(
+                "label",
+                Value::Label(Label::parse_canonical("@@platforms+//os:os").unwrap()),
+            )],
+        );
+        let osx_val = provider_instance(
+            "ConstraintValueInfo",
+            vec![
+                ("constraint", os_setting.clone()),
+                (
+                    "label",
+                    Value::Label(Label::parse_canonical("@@platforms+//os:osx").unwrap()),
+                ),
+            ],
+        );
+        let parent_cc = crate::register_constraint_collection(vec![(os_setting, osx_val)], None);
+        let child_cc = crate::register_constraint_collection(vec![], Some(&parent_cc));
+        let child_lbl = Label::parse_canonical("//pkg:inherited_apple_box").unwrap();
+        let mut child_ct = ConfiguredTarget::new(
+            child_lbl.clone(),
+            BuildConfigurationKey::target("k8", "fastbuild").to_core_only(),
+            "platform".into(),
+        );
+        child_ct.providers.insert(
+            "PlatformInfo".into(),
+            provider_instance(
+                "PlatformInfo",
+                vec![
+                    ("label", Value::Label(child_lbl.clone())),
+                    ("constraints", child_cc),
+                ],
+            ),
+        );
+        let cc_resolver: Arc<dyn DepResolver> = Arc::new(MapPlatformResolver {
+            platforms: BTreeMap::from([(child_lbl.canonical_form(), Arc::new(child_ct))]),
+        });
+        let mut inputs_inherited = AnalysisInputs::new(cc_resolver);
+        inputs_inherited.exec_platform = Some(child_lbl.canonical_form());
+        assert_eq!(
+            utf8_env_for_inputs(&cfg_linux_target, &inputs_inherited, false)["LC_CTYPE"],
+            "en_US.UTF-8"
+        );
     }
 
     #[test]
@@ -813,6 +867,7 @@ def _bad_kwargs_impl(ctx):
                 outputs_fn: None,
                 is_starlark: true,
                 build_setting: false,
+                build_setting_is_flag: false,
                 starlark: Some(Arc::new(StarlarkRuleSpec {
                     implementation: func,
                     kwargs: BTreeMap::new(),
@@ -993,6 +1048,7 @@ def _cross_sib(ctx):
                     outputs_fn: None,
                     is_starlark: true,
                     build_setting: false,
+                    build_setting_is_flag: false,
                     starlark: Some(Arc::new(StarlarkRuleSpec {
                         implementation: func,
                         kwargs: BTreeMap::new(),

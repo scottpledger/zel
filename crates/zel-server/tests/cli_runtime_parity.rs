@@ -1273,3 +1273,413 @@ probe_rule(
         bad2.err
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn per_file_copt_escaped_commas_and_ipp_header_parsing_cli_parity() {
+    let w = make_ws("per-file-copt-ipp");
+    w.write(
+        "MODULE.bazel",
+        "module(name = \"w\")\nbazel_dep(name = \"rules_cc\", version = \"0.2.17\")\nbazel_dep(name = \"platforms\", version = \"1.0.0\")\n",
+    );
+    w.write(
+        "tc/BUILD",
+        r#"
+load("@rules_cc//cc/toolchains:cc_toolchain.bzl", "cc_toolchain")
+load("@rules_cc//cc/private/toolchain:unix_cc_toolchain_config.bzl", "cc_toolchain_config")
+
+package(default_visibility = ["//visibility:public"])
+
+filegroup(name = "empty", srcs = [])
+
+cc_toolchain_config(
+    name = "unix_cfg",
+    cpu = "k8",
+    compiler = "clang",
+    toolchain_identifier = "test-k8-clang",
+    host_system_name = "local",
+    target_system_name = "local",
+    target_libc = "local",
+    abi_version = "local",
+    abi_libc_version = "local",
+    supports_start_end_lib = True,
+    tool_paths = {
+        "ar": "/usr/bin/ar",
+        "cpp": "/usr/bin/cpp",
+        "gcc": "/usr/bin/clang",
+        "gcov": "/usr/bin/gcov",
+        "ld": "/usr/bin/ld",
+        "llvm-cov": "/usr/bin/llvm-cov",
+        "nm": "/usr/bin/nm",
+        "objcopy": "/usr/bin/objcopy",
+        "objdump": "/usr/bin/objdump",
+        "parse_headers": "/usr/bin/clang",
+        "strip": "/usr/bin/strip",
+    },
+)
+
+cc_toolchain(
+    name = "cc_impl",
+    all_files = ":empty",
+    ar_files = ":empty",
+    as_files = ":empty",
+    compiler_files = ":empty",
+    dwp_files = ":empty",
+    linker_files = ":empty",
+    objcopy_files = ":empty",
+    strip_files = ":empty",
+    supports_header_parsing = 1,
+    supports_param_files = 0,
+    toolchain_config = ":unix_cfg",
+    toolchain_identifier = "test-k8-clang",
+)
+
+toolchain(
+    name = "cc_tc",
+    toolchain = ":cc_impl",
+    toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+)
+"#,
+    );
+    w.write("p/a,1.cc", "int f() { return 1; }\n");
+    w.write("p/skip,me.cc", "int g() { return 2; }\n");
+    w.write("p/tmpl.ipp", "inline int h() { return 3; }\n");
+    w.write(
+        "p/main.cc",
+        "int f(); int g(); int main() { return f() + g(); }\n",
+    );
+    w.write(
+        "p/defs.bzl",
+        r#"
+def _tr_impl(settings, attr):
+    cur = settings["//command_line_option:per_file_copt"]
+    if len(cur) != 2:
+        fail("expected 2 CLI per_file_copt entries, got %r" % (cur,))
+    lto_cur = settings["//command_line_option:per_file_ltobackendopt"]
+    if len(lto_cur) != 2:
+        fail("expected 2 CLI per_file_ltobackendopt entries, got %r" % (lto_cur,))
+    return {
+        "//command_line_option:per_file_copt": list(cur) + ["p/main\\.cc@-DTRANSITION_PER_FILE=1"],
+        "//command_line_option:per_file_ltobackendopt": list(lto_cur) + [".*main.*\\.o@-DLTO_TRANSITION=1"],
+    }
+
+_tr = transition(
+    implementation = _tr_impl,
+    inputs = [
+        "//command_line_option:per_file_copt",
+        "//command_line_option:per_file_ltobackendopt",
+    ],
+    outputs = [
+        "//command_line_option:per_file_copt",
+        "//command_line_option:per_file_ltobackendopt",
+    ],
+)
+
+def _wrap_impl(ctx):
+    return [DefaultInfo(files = depset(ctx.files.dep))]
+
+wrap = rule(
+    implementation = _wrap_impl,
+    attrs = {
+        "dep": attr.label(cfg = _tr),
+    },
+)
+"#,
+    );
+    w.write(
+        "p/BUILD",
+        r#"
+load("@rules_cc//cc:cc_binary.bzl", "cc_binary")
+load("@rules_cc//cc:cc_library.bzl", "cc_library")
+load("//p:defs.bzl", "wrap")
+
+cc_library(
+    name = "mylib",
+    srcs = ["a,1.cc", "skip,me.cc"],
+    hdrs = ["tmpl.ipp"],
+)
+
+cc_binary(
+    name = "app",
+    srcs = ["main.cc"],
+    deps = [":mylib"],
+)
+
+wrap(
+    name = "wrapped_app",
+    dep = ":app",
+)
+"#,
+    );
+
+    let aq = w.run(&[
+        "aquery",
+        "--extra_toolchains=//tc:cc_tc",
+        "--features=parse_headers",
+        "--features=thin_lto",
+        "--per_file_copt=p/.*\\.cc,-p/skip\\,me\\.cc@-DPER_FILE_HIT=1,-DCOMMA_OPT=u\\,v",
+        "--per_file_copt=p/a\\,1\\.cc@-DPER_FILE_SECOND=2",
+        "--per_file_ltobackendopt=.*a\\,1.*\\.o,-.*skip\\,me.*\\.o@-DLTO_PER_FILE=1",
+        "--per_file_ltobackendopt=.*main.*\\.o@-DLTO_SECOND=2,-DLTO_COMMA=x\\,y",
+        "deps(//p:wrapped_app)",
+    ]);
+    assert_eq!(aq.code, 0, "stdout:\n{}\nstderr:\n{}", aq.out, aq.err);
+    assert!(
+        aq.out.contains("Mnemonic: CppCompileHeader"),
+        "expected .ipp header compile action in aquery output:\n{}",
+        aq.out
+    );
+    assert!(
+        aq.out.contains("-DPER_FILE_HIT=1")
+            && aq.out.contains("-DCOMMA_OPT=u,v")
+            && aq.out.contains("-DPER_FILE_SECOND=2"),
+        "expected both CLI --per_file_copt flags in matching compile actions:\n{}",
+        aq.out
+    );
+    assert!(
+        aq.out.contains("-DTRANSITION_PER_FILE=1"),
+        "expected Starlark-transitioned per_file_copt flag in main.cc compile action:\n{}",
+        aq.out
+    );
+    assert!(
+        aq.out.contains("-DLTO_PER_FILE=1")
+            && aq.out.contains("-DLTO_SECOND=2")
+            && aq.out.contains("-DLTO_COMMA=x,y")
+            && aq.out.contains("-DLTO_TRANSITION=1"),
+        "expected both CLI --per_file_ltobackendopt flags and transition flag in LTO backend actions:\n{}",
+        aq.out
+    );
+
+    let mut saw_a1_compile = false;
+    let mut saw_main_compile = false;
+    let mut saw_a1_lto = false;
+    let mut saw_main_lto = false;
+    let mut saw_skip_compile = false;
+    let mut saw_skip_lto = false;
+    let mut saw_ipp_header = false;
+    for block in aq.out.split("\n\n") {
+        let header = block.lines().next().unwrap_or("");
+        if header.contains("tmpl.ipp") {
+            saw_ipp_header = true;
+            assert!(
+                block.contains("Mnemonic: CppCompileHeader"),
+                "expected CppCompileHeader for tmpl.ipp:\n{block}"
+            );
+        }
+        if header.contains("a,1") {
+            if header.contains("Compiling") {
+                saw_a1_compile = true;
+                assert!(
+                    block.contains("-DPER_FILE_HIT=1")
+                        && block.contains("-DCOMMA_OPT=u,v")
+                        && block.contains("-DPER_FILE_SECOND=2")
+                        && !block.contains("-DTRANSITION_PER_FILE=1"),
+                    "a,1.cc compile action got unexpected per_file_copt flags:\n{block}"
+                );
+            }
+            if header.contains("LTO Backend Compile") {
+                saw_a1_lto = true;
+                assert!(
+                    block.contains("-DLTO_PER_FILE=1")
+                        && !block.contains("-DLTO_SECOND=2")
+                        && !block.contains("-DLTO_TRANSITION=1"),
+                    "a,1.o LTO backend action got unexpected per_file_ltobackendopt flags:\n{block}"
+                );
+            }
+        }
+        if header.contains("main") {
+            if header.contains("Compiling") {
+                saw_main_compile = true;
+                assert!(
+                    block.contains("-DPER_FILE_HIT=1")
+                        && block.contains("-DCOMMA_OPT=u,v")
+                        && block.contains("-DTRANSITION_PER_FILE=1")
+                        && !block.contains("-DPER_FILE_SECOND=2"),
+                    "main.cc compile action got unexpected per_file_copt flags:\n{block}"
+                );
+            }
+            if header.contains("LTO Backend Compile") {
+                saw_main_lto = true;
+                assert!(
+                    block.contains("-DLTO_SECOND=2")
+                        && block.contains("-DLTO_COMMA=x,y")
+                        && block.contains("-DLTO_TRANSITION=1")
+                        && !block.contains("-DLTO_PER_FILE=1"),
+                    "main.o LTO backend action got unexpected per_file_ltobackendopt flags:\n{block}"
+                );
+            }
+        }
+        if header.contains("skip,me") {
+            if header.contains("Compiling") {
+                saw_skip_compile = true;
+            }
+            if header.contains("LTO Backend Compile") {
+                saw_skip_lto = true;
+            }
+            assert!(
+                !block.contains("-DPER_FILE_HIT=1")
+                    && !block.contains("-DPER_FILE_SECOND=2")
+                    && !block.contains("-DLTO_PER_FILE=1")
+                    && !block.contains("-DLTO_SECOND=2")
+                    && !block.contains("-DLTO_TRANSITION=1")
+                    && !block.contains("-DTRANSITION_PER_FILE=1"),
+                "excluded file skip,me.cc must not receive per-file copt or LTO backend opt:\n{block}"
+            );
+        }
+    }
+    assert!(
+        saw_ipp_header,
+        "did not find tmpl.ipp action block in:\n{}",
+        aq.out
+    );
+    assert!(
+        saw_a1_compile && saw_main_compile && saw_a1_lto && saw_main_lto,
+        "missing expected compile or LTO backend action blocks in:\n{}",
+        aq.out
+    );
+    assert!(
+        saw_skip_compile,
+        "did not find Compiling p/skip,me.cc in:\n{}",
+        aq.out
+    );
+    assert!(
+        saw_skip_lto,
+        "did not find LTO Backend Compile for skip,me in:\n{}",
+        aq.out
+    );
+}
+
+#[test]
+fn java_javacopt_tokenization_and_optimizer_validation_cli_parity() {
+    let w = make_ws("java-javacopt-parity");
+    w.write(
+        "MODULE.bazel",
+        "module(name = \"w\")\nbazel_dep(name = \"rules_java\", version = \"9.1.0\")\n",
+    );
+    w.write(
+        "p/defs.bzl",
+        r#"
+FlagsInfo = provider(fields = ["text"])
+
+def _dump_impl(ctx):
+    text = "|".join(ctx.fragments.java.default_javac_flags)
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, text)
+    return [DefaultInfo(files = depset([out])), FlagsInfo(text = text)]
+
+dump_javac = rule(
+    implementation = _dump_impl,
+    fragments = ["java"],
+)
+
+def _exec_wrap_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, ctx.attr.tool[FlagsInfo].text)
+    return [DefaultInfo(files = depset([out]))]
+
+exec_wrap = rule(
+    implementation = _exec_wrap_impl,
+    attrs = {
+        "tool": attr.label(cfg = "exec", providers = [FlagsInfo]),
+    },
+)
+"#,
+    );
+    w.write(
+        "p/BUILD",
+        r#"
+load("@rules_java//java/toolchains:java_package_configuration.bzl", "java_package_configuration")
+load("//p:defs.bzl", "dump_javac", "exec_wrap")
+
+dump_javac(name = "target_flags")
+dump_javac(name = "exec_flags")
+exec_wrap(name = "wrapped_exec", tool = ":exec_flags")
+
+java_package_configuration(
+    name = "bad_quote_pkg_cfg",
+    javacopts = ["'unterminated"],
+)
+
+java_package_configuration(
+    name = "bad_escape_pkg_cfg",
+    javacopts = ["trailing\\"],
+)
+"#,
+    );
+
+    // 1. CLI `--javacopt` and `--host_javacopt` follow `JavaHelper.tokenizeJavaOptions`
+    // (`JavaHelper.java:58-74`): partial tokens before `TokenizationException` are preserved and
+    // untokenizable raw flags are passed through rather than failing `JavaConfiguration`.
+    let b = w.run(&[
+        "build",
+        "--javacopt=-Werror 'unterminated",
+        "--javacopt=trailing\\",
+        "--host_javacopt=-Xlint 'host_unterminated",
+        "//p:target_flags",
+        "//p:wrapped_exec",
+    ]);
+    assert_eq!(b.code, 0, "stdout:\n{}\nstderr:\n{}", b.out, b.err);
+    let info_bin = w.run(&["info", "bazel-bin"]);
+    assert_eq!(
+        info_bin.code, 0,
+        "stdout:\n{}\nstderr:\n{}",
+        info_bin.out, info_bin.err
+    );
+    let bin_dir = PathBuf::from(info_bin.out.trim());
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("p/target_flags.txt")).unwrap(),
+        "-Werror|-Werror 'unterminated|trailing\\"
+    );
+    assert_eq!(
+        std::fs::read_to_string(bin_dir.join("p/wrapped_exec.txt")).unwrap(),
+        "-Xlint|-Xlint 'host_unterminated"
+    );
+
+    // 2. Rule-level `javacopts` tokenized via `Expander.tokenized` (`expand_java_opts(..., tokenize = True)`)
+    // reports `unterminated quotation` and `backslash at end of string` attribute errors.
+    let bad_q = w.run(&["build", "//p:bad_quote_pkg_cfg"]);
+    assert_ne!(bad_q.code, 0);
+    assert!(
+        bad_q.err.contains("unterminated quotation"),
+        "expected unterminated quotation error, got:\n{}",
+        bad_q.err
+    );
+
+    let bad_e = w.run(&["build", "//p:bad_escape_pkg_cfg"]);
+    assert_ne!(bad_e.code, 0);
+    assert!(
+        bad_e.err.contains("backslash at end of string"),
+        "expected backslash at end of string error, got:\n{}",
+        bad_e.err
+    );
+
+    // 3. `JavaConfiguration` `InvalidConfigurationException` validation on `--bytecode_optimizers`
+    // and `--experimental_local_java_optimizations`.
+    let bad_opt = w.run(&[
+        "build",
+        "--bytecode_optimizers=CustomOpt",
+        "//p:target_flags",
+    ]);
+    assert_ne!(bad_opt.code, 0);
+    assert!(
+        bad_opt
+            .err
+            .contains("Must supply label for optimizer CustomOpt"),
+        "expected optimizer label error, got:\n{}",
+        bad_opt.err
+    );
+
+    let bad_local = w.run(&[
+        "build",
+        "--experimental_local_java_optimizations",
+        "//p:target_flags",
+    ]);
+    assert_ne!(bad_local.code, 0);
+    assert!(
+        bad_local
+            .err
+            .contains("--experimental_local_java_optimizations cannot be provided without"),
+        "expected local java optimizations error, got:\n{}",
+        bad_local.err
+    );
+}

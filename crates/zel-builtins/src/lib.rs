@@ -53,6 +53,9 @@ pub fn call(name: &str, pos: Vec<Value>, kw: Kwargs) -> Option<Result<Value, Sta
     if let Some(a) = name.strip_prefix("attr:dotted_version.") {
         return Some(natives::dotted_version_member(false, a, &pos));
     }
+    if let Some(a) = name.strip_prefix("attr:HeaderInfo.") {
+        return Some(cc_internal::header_info_attr(a, &pos));
+    }
     None
 }
 
