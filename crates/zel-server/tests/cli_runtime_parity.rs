@@ -1548,3 +1548,133 @@ wrap(
         aq.out
     );
 }
+
+#[test]
+fn java_javacopt_tokenization_and_optimizer_validation_cli_parity() {
+    let w = make_ws("java-javacopt-parity");
+    w.write(
+        "MODULE.bazel",
+        "module(name = \"w\")\nbazel_dep(name = \"rules_java\", version = \"9.1.0\")\n",
+    );
+    w.write(
+        "p/defs.bzl",
+        r#"
+def _dump_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.write(out, "|".join(ctx.fragments.java.default_javac_flags))
+    return [DefaultInfo(files = depset([out]))]
+
+dump_javac = rule(
+    implementation = _dump_impl,
+    fragments = ["java"],
+)
+
+def _exec_wrap_impl(ctx):
+    out = ctx.actions.declare_file(ctx.label.name + ".txt")
+    ctx.actions.run_shell(
+        inputs = ctx.files.tool,
+        outputs = [out],
+        command = 'cp "$1" "$2"',
+        arguments = [ctx.files.tool[0].path, out.path],
+    )
+    return [DefaultInfo(files = depset([out]))]
+
+exec_wrap = rule(
+    implementation = _exec_wrap_impl,
+    attrs = {
+        "tool": attr.label(cfg = "exec"),
+    },
+)
+"#,
+    );
+    w.write(
+        "p/BUILD",
+        r#"
+load("@rules_java//java/toolchains:java_package_configuration.bzl", "java_package_configuration")
+load("//p:defs.bzl", "dump_javac", "exec_wrap")
+
+dump_javac(name = "target_flags")
+dump_javac(name = "exec_flags")
+exec_wrap(name = "wrapped_exec", tool = ":exec_flags")
+
+java_package_configuration(
+    name = "bad_quote_pkg_cfg",
+    javacopts = ["'unterminated"],
+)
+
+java_package_configuration(
+    name = "bad_escape_pkg_cfg",
+    javacopts = ["trailing\\"],
+)
+"#,
+    );
+
+    // 1. CLI `--javacopt` and `--host_javacopt` follow `JavaHelper.tokenizeJavaOptions`
+    // (`JavaHelper.java:58-74`): partial tokens before `TokenizationException` are preserved and
+    // untokenizable raw flags are passed through rather than failing `JavaConfiguration`.
+    let b = w.run(&[
+        "build",
+        "--javacopt=-Werror 'unterminated",
+        "--javacopt=trailing\\",
+        "--host_javacopt=-Xlint 'host_unterminated",
+        "//p:target_flags",
+        "//p:wrapped_exec",
+    ]);
+    assert_eq!(b.code, 0, "stdout:\n{}\nstderr:\n{}", b.out, b.err);
+    assert_eq!(
+        std::fs::read_to_string(w.ws.join("bazel-bin/p/target_flags.txt")).unwrap(),
+        "-Werror|-Werror 'unterminated|trailing\\"
+    );
+    assert_eq!(
+        std::fs::read_to_string(w.ws.join("bazel-bin/p/wrapped_exec.txt")).unwrap(),
+        "-Xlint|-Xlint 'host_unterminated"
+    );
+
+    // 2. Rule-level `javacopts` tokenized via `Expander.tokenized` (`expand_java_opts(..., tokenize = True)`)
+    // reports `unterminated quotation` and `backslash at end of string` attribute errors.
+    let bad_q = w.run(&["build", "//p:bad_quote_pkg_cfg"]);
+    assert_ne!(bad_q.code, 0);
+    assert!(
+        bad_q.err.contains("unterminated quotation"),
+        "expected unterminated quotation error, got:\n{}",
+        bad_q.err
+    );
+
+    let bad_e = w.run(&["build", "//p:bad_escape_pkg_cfg"]);
+    assert_ne!(bad_e.code, 0);
+    assert!(
+        bad_e.err.contains("backslash at end of string"),
+        "expected backslash at end of string error, got:\n{}",
+        bad_e.err
+    );
+
+    // 3. `JavaConfiguration` `InvalidConfigurationException` validation on `--bytecode_optimizers`
+    // and `--experimental_local_java_optimizations`.
+    let bad_opt = w.run(&[
+        "build",
+        "--bytecode_optimizers=CustomOpt",
+        "//p:target_flags",
+    ]);
+    assert_ne!(bad_opt.code, 0);
+    assert!(
+        bad_opt
+            .err
+            .contains("Must supply label for optimizer CustomOpt"),
+        "expected optimizer label error, got:\n{}",
+        bad_opt.err
+    );
+
+    let bad_local = w.run(&[
+        "build",
+        "--experimental_local_java_optimizations",
+        "//p:target_flags",
+    ]);
+    assert_ne!(bad_local.code, 0);
+    assert!(
+        bad_local
+            .err
+            .contains("--experimental_local_java_optimizations cannot be provided without"),
+        "expected local java optimizations error, got:\n{}",
+        bad_local.err
+    );
+}

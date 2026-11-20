@@ -467,11 +467,11 @@ pub fn parse_libc_top_label(raw: &str) -> Result<Option<Label>, String> {
     Ok(Some(rewritten))
 }
 
-/// Tokenizes Java options (`ShellUtils.tokenize` on UTF-16 code units): splits only on ASCII
-/// space and tab, and inside `"..."` retains `\` unless followed by `\` or `"`.
-pub fn tokenize_java_options(s: &str) -> Result<Vec<String>, String> {
+/// `ShellUtils.tokenize(List<String>, String)` (`ShellUtils.java:83-135`) on UTF-16 code units:
+/// appends completed tokens to `out` in place, splits only on ASCII space and tab, and inside
+/// `"..."` retains `\` unless followed by `\` or `"`.
+pub fn shell_tokenize_into(out: &mut Vec<String>, s: &str) -> Result<(), String> {
     let units: Vec<u16> = s.encode_utf16().collect();
-    let mut out = Vec::new();
     let mut cur: Vec<u16> = Vec::new();
     let mut has_tok = false;
     let mut quote: Option<u16> = None;
@@ -483,7 +483,7 @@ pub fn tokenize_java_options(s: &str) -> Result<Vec<String>, String> {
                 quote = None;
             } else if q == u16::from(b'"') && u == u16::from(b'\\') {
                 if i + 1 >= units.len() {
-                    return Err("unterminated quotation".to_string());
+                    return Err("backslash at end of string".to_string());
                 }
                 let next = units[i + 1];
                 if next == u16::from(b'\\') || next == u16::from(b'"') {
@@ -507,7 +507,7 @@ pub fn tokenize_java_options(s: &str) -> Result<Vec<String>, String> {
         } else if u == u16::from(b'\\') {
             i += 1;
             if i >= units.len() {
-                return Err("unterminated backslash escape".to_string());
+                return Err("backslash at end of string".to_string());
             }
             cur.push(units[i]);
             has_tok = true;
@@ -523,22 +523,41 @@ pub fn tokenize_java_options(s: &str) -> Result<Vec<String>, String> {
     if has_tok {
         out.push(String::from_utf16_lossy(&cur));
     }
+    Ok(())
+}
+
+/// Tokenizes Java options (`ShellUtils.tokenize` on UTF-16 code units).
+pub fn tokenize_java_options(s: &str) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    shell_tokenize_into(&mut out, s)?;
     Ok(out)
 }
 
+/// `JavaHelper.tokenizeJavaOptions(Iterable<String>)` (`JavaHelper.java:58-74`): calls
+/// `ShellUtils.tokenize(result, current)` for each option, and when `TokenizationException` is
+/// thrown (for example on Windows paths ending in `\` or arguments with literal unmatched quotes),
+/// Bazel intentionally appends `current` verbatim (`result.add(current)`) rather than failing
+/// `JavaConfiguration` construction so the underlying tool reports any flag error directly.
+pub fn java_helper_tokenize_options(in_opts: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for current in in_opts {
+        if shell_tokenize_into(&mut result, current).is_err() {
+            result.push(current.clone());
+        }
+    }
+    result
+}
+
 /// Escapes and joins tokenized Java options into a single shell-quoted string
-/// (`JavaHelper.detokenizeJavaOptions`).
+/// (`JavaHelper.detokenizeJavaOptions` + `ShellUtils.shellEscape`, `SAFE_PUNCTUATION = "@%-_+:,./"`).
 pub fn detokenize_java_options(opts: &[String]) -> String {
     opts.iter()
         .map(|t| {
-            if !t.is_empty()
-                && t.bytes().all(|b| {
-                    b.is_ascii_alphanumeric()
-                        || matches!(
-                            b,
-                            b'_' | b'-' | b'.' | b'/' | b':' | b'=' | b'+' | b',' | b'@'
-                        )
-                })
+            if t.is_empty() {
+                "''".to_string()
+            } else if t
+                .chars()
+                .all(|c| c.is_alphanumeric() || "@%-_+:,./".contains(c))
             {
                 t.clone()
             } else {
@@ -811,18 +830,59 @@ pub fn fragment_checked(name: &str, cfg: &BuildConfigurationKey) -> Result<Optio
             ])
         }
         "java" => {
-            let mut flags: Vec<String> = Vec::new();
-            for raw_opt in o.list_unsplit("javacopt") {
-                match tokenize_java_options(&raw_opt) {
-                    Ok(toks) => flags.extend(toks),
-                    Err(_) => flags.push(raw_opt),
+            // `JavaConfiguration` (`JavaConfiguration.java:104-146`): `JavaHelper.tokenizeJavaOptions`
+            // passes untokenizable `--javacopt` / `--host_javacopt` entries through verbatim, while
+            // `--bytecode_optimizers` and `--experimental_local_java_optimizations` throw
+            // `InvalidConfigurationException` when misconfigured.
+            let raw_javacopts = o.list_unsplit("javacopt");
+            let detokenized =
+                detokenize_java_options(&java_helper_tokenize_options(&raw_javacopts));
+            let (flags, depset_direct) = if detokenized.is_empty() {
+                (Vec::new(), Vec::new())
+            } else {
+                (
+                    java_helper_tokenize_options(std::slice::from_ref(&detokenized)),
+                    vec![Value::String(detokenized)],
+                )
+            };
+            let raw_optimizers = o.s("bytecode_optimizers", "{Proguard=null}");
+            let trimmed_opt = raw_optimizers
+                .strip_prefix('{')
+                .and_then(|s| s.strip_suffix('}'))
+                .unwrap_or(&raw_optimizers);
+            let mut optimizers: Vec<(String, Option<String>)> = Vec::new();
+            for entry in trimmed_opt
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+            {
+                let (k, v) = match entry.split_once('=') {
+                    Some((k, "null")) | Some((k, "")) => (k.trim().to_string(), None),
+                    Some((k, v)) => (k.trim().to_string(), Some(v.trim().to_string())),
+                    None => (entry.to_string(), None),
+                };
+                if let Some(existing) = optimizers.iter_mut().find(|(ek, _)| *ek == k) {
+                    existing.1 = v;
+                } else {
+                    optimizers.push((k, v));
                 }
             }
-            let depset_direct = if flags.is_empty() {
-                Vec::new()
-            } else {
-                vec![Value::String(detokenize_java_options(&flags))]
-            };
+            if optimizers.len() != 1 {
+                return Err(format!(
+                    "--experimental_bytecode_optimizers can only accept exactly one mapping, but {} mappings were provided.",
+                    optimizers.len()
+                ));
+            }
+            let (opt_mnemonic, opt_label) = &optimizers[0];
+            if opt_label.is_none() && opt_mnemonic != "Proguard" {
+                return Err(format!("Must supply label for optimizer {opt_mnemonic}"));
+            }
+            if o.b("experimental_local_java_optimizations", false) && opt_label.is_none() {
+                return Err(
+                    "--experimental_local_java_optimizations cannot be provided without --experimental_bytecode_optimizers."
+                        .to_string(),
+                );
+            }
             let reduce_cp = o
                 .s("experimental_java_classpath", "bazel")
                 .to_ascii_uppercase();
@@ -1550,6 +1610,68 @@ mod tests {
             late_bound_label("java", "launcher", &cfg),
             Some(Label::parse_canonical("@@//tools/jdk:custom_launcher").unwrap())
         );
+
+        // `JavaUtilTest.testDetokenization` + `JavaHelper.tokenizeJavaOptions` (`JavaHelper.java:58-74`):
+        // `--arg=val` is single-quoted by `ShellUtils.shellEscape`, and untokenizable `--javacopt`
+        // / `--host_javacopt` strings preserve any prior tokens and pass the raw string through.
+        let util_opts = vec![
+            "-source".to_string(),
+            "8".to_string(),
+            "-target".to_string(),
+            "8".to_string(),
+            "-Xmx1G".to_string(),
+            "--arg=val".to_string(),
+            "-XepExcludedPaths:.*/\\\\$$?\\\\$$?AutoValue(Gson)?_.*\\.java".to_string(),
+        ];
+        let detok = detokenize_java_options(&util_opts);
+        assert_eq!(
+            detok,
+            "-source 8 -target 8 -Xmx1G '--arg=val' '-XepExcludedPaths:.*/\\\\$$?\\\\$$?AutoValue(Gson)?_.*\\.java'"
+        );
+        assert_eq!(
+            java_helper_tokenize_options(std::slice::from_ref(&detok)),
+            util_opts
+        );
+        assert_eq!(
+            tokenize_java_options("'unterminated").unwrap_err(),
+            "unterminated quotation"
+        );
+        assert_eq!(
+            tokenize_java_options("trailing\\").unwrap_err(),
+            "backslash at end of string"
+        );
+        assert_eq!(
+            tokenize_java_options("\"trailing\\").unwrap_err(),
+            "backslash at end of string"
+        );
+        assert_eq!(
+            java_helper_tokenize_options(&[
+                "-Werror 'unterminated".to_string(),
+                "trailing\\".to_string(),
+            ]),
+            vec![
+                "-Werror".to_string(),
+                "-Werror 'unterminated".to_string(),
+                "trailing\\".to_string(),
+            ]
+        );
+
+        // `JavaConfiguration` optimizer validation (`JavaConfiguration.java:125-146`).
+        let mut bad_opt = BuildConfigurationKey::default();
+        set_scalar(&mut bad_opt, "bytecode_optimizers", "{CustomOpt=null}");
+        assert_eq!(
+            fragment_checked("java", &bad_opt).unwrap_err(),
+            "Must supply label for optimizer CustomOpt"
+        );
+        let mut bad_local = BuildConfigurationKey::default();
+        set_scalar(
+            &mut bad_local,
+            "experimental_local_java_optimizations",
+            "true",
+        );
+        assert!(fragment_checked("java", &bad_local)
+            .unwrap_err()
+            .contains("--experimental_local_java_optimizations cannot be provided without"));
     }
 
     #[test]

@@ -174,20 +174,16 @@ fn java_native(
                     }
                 };
                 if tokenize {
-                    match crate::fragments::tokenize_java_options(&expanded) {
-                        Ok(toks) => {
-                            for t in toks {
-                                out.push(Value::String(t));
-                            }
-                        }
-                        Err(e) => {
-                            st.rule_errors.lock().unwrap().push(format!(
-                                "in {attr} attribute of {} rule {}: {e}",
-                                st.rule.rule_class,
-                                st.label.canonical_form()
-                            ));
-                            out.push(Value::String(expanded));
-                        }
+                    let mut toks = Vec::new();
+                    if let Err(e) = crate::fragments::shell_tokenize_into(&mut toks, &expanded) {
+                        st.rule_errors.lock().unwrap().push(format!(
+                            "in {attr} attribute of {} rule {}: {e}",
+                            st.rule.rule_class,
+                            st.label.canonical_form()
+                        ));
+                    }
+                    for t in toks {
+                        out.push(Value::String(t));
                     }
                 } else {
                     out.push(Value::String(expanded));
@@ -230,14 +226,7 @@ fn java_tokenize_opts(v: Option<&Value>) -> Vec<String> {
     if matches!(v, Some(Value::Depset(_))) {
         raw.reverse();
     }
-    let mut out = Vec::new();
-    for o in raw {
-        match crate::fragments::tokenize_java_options(&o) {
-            Ok(t) => out.extend(t),
-            Err(_) => out.push(o),
-        }
-    }
-    out
+    crate::fragments::java_helper_tokenize_options(&raw)
 }
 
 fn jpath(a: &Artifact) -> String {

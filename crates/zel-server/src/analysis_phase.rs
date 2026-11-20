@@ -178,6 +178,7 @@ const CONFIG_OPTIONS: &[&str] = &[
     "java_launcher",
     "host_java_launcher",
     "javacopt",
+    "host_javacopt",
     "plugin",
     "compiler",
     "crosstool_top",

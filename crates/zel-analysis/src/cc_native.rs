@@ -406,6 +406,26 @@ fn cc_declare_other_output(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Stri
     Ok(file_value(&st.derived(PathFragment::create(&rel))))
 }
 
+/// `FileType.hasExtension(path, ext)` (`FileType.java:116-127`): ASCII case-insensitive suffix
+/// match on Windows, exact byte suffix match on Unix. Uses byte slices so multibyte UTF-8 paths
+/// never panic.
+fn file_type_has_ext(path: &str, ext: &str, windows: bool) -> bool {
+    let pb = path.as_bytes();
+    let eb = ext.as_bytes();
+    if pb.len() < eb.len() {
+        return false;
+    }
+    if windows {
+        pb[pb.len() - eb.len()..].eq_ignore_ascii_case(eb)
+    } else {
+        pb.ends_with(eb)
+    }
+}
+
+fn file_type_has_any_ext(path: &str, exts: &[&str], windows: bool) -> bool {
+    exts.iter().any(|ext| file_type_has_ext(path, ext, windows))
+}
+
 /// `CppCompileActionBuilder.getActionName`: determines the default action name for `source`
 /// when no explicit `action_name` is supplied.
 fn cc_default_compile_action(
@@ -420,64 +440,61 @@ fn cc_default_compile_action_for_os(
     fc: &FeatureConfiguration,
     windows: bool,
 ) -> Result<&'static str, StarlarkError> {
-    let bytes = source.as_bytes();
-    let is_cppmap = if windows {
-        bytes.len() >= 7 && bytes[bytes.len() - 7..].eq_ignore_ascii_case(b".cppmap")
-    } else {
-        bytes.ends_with(b".cppmap")
-    };
-    if is_cppmap {
-        return Ok("c++-module-compile");
-    }
-    if source.ends_with(".pic.s") {
+    // `CppFileTypes.PIC_ASSEMBLER` (`CppFileTypes.java:136-146`):
+    // `hasExtension(path, ".pic.s") && path.endsWith(".s")`.
+    if file_type_has_ext(source, ".pic.s", windows) && source.ends_with(".s") {
         return err(format!(
             "Assembler source '{source}' should not have '.pic.s' extension"
         ));
     }
-    let ext = source.rsplit_once('.').map(|(_, e)| e).unwrap_or("");
-    // `CppFileTypes`: `C_SOURCE`, `CPP_SOURCE`, `.s`, and `.S` are always case-sensitive;
-    // `FileType.of(...)` extensions (`CPP_HEADER`, `.m`, `.mm`, `.asm`, `.ipb`, `CPP_MODULE`)
-    // are case-sensitive on Unix and case-insensitive on Windows (`FileType.hasExtension`).
-    let is_header = if windows {
-        matches!(
-            ext.to_ascii_lowercase().as_str(),
-            "h" | "hh" | "hpp" | "ipp" | "hxx" | "h++" | "inc" | "inl" | "tlh" | "tli" | "tcc"
-        )
-    } else {
-        matches!(
-            ext,
-            "h" | "hh" | "hpp" | "ipp" | "hxx" | "h++" | "inc" | "inl" | "tlh" | "tli" | "H" | "tcc"
-        )
-    };
-    if is_header {
-        return if fc.is_enabled("parse_headers") {
+    // Exact evaluation order of `CppCompileActionBuilder.getActionName` (`CppCompileActionBuilder.java:244-276`)
+    // against `CppFileTypes` (`CppFileTypes.java:30-264`):
+    // - `CPP_MODULE_MAP`, `CPP_HEADER`, `OBJC_SOURCE`, `OBJCPP_SOURCE`, `.asm` in `ASSEMBLER`,
+    //   `CLIF_INPUT_PROTO`, and `CPP_MODULE` use `FileType.of(...)` (`FileType.hasExtension`,
+    //   case-insensitive on Windows and case-sensitive on Unix).
+    // - `C_SOURCE` (`.c`), `CPP_SOURCE` (`.cc`, `.cpp`, `.cxx`, `.c++`, `.C`, `.cu`, `.cl`),
+    //   `.s` in `ASSEMBLER`, and `ASSEMBLER_WITH_C_PREPROCESSOR` (`.S`) explicitly override
+    //   `FileType.apply` in `CppFileTypes.java` with `path.endsWith(...)` so they remain
+    //   case-sensitive even on Windows (verified by `CppFileTypesTest.testCaseSensitiveCFiles`
+    //   and `CppFileTypesTest.testCaseSensitiveAssemblyFiles`).
+    if file_type_has_ext(source, ".cppmap", windows) {
+        Ok("c++-module-compile")
+    } else if file_type_has_any_ext(
+        source,
+        &[
+            ".h", ".hh", ".hpp", ".ipp", ".hxx", ".h++", ".inc", ".inl", ".tlh", ".tli", ".H",
+            ".tcc",
+        ],
+        windows,
+    ) {
+        if fc.is_enabled("parse_headers") {
             Ok("c++-header-parsing")
         } else {
             err(format!(
                 "Header file '{source}' cannot be compiled without 'parse_headers' feature enabled"
             ))
-        };
-    }
-    match ext {
-        "c" => Ok("c-compile"),
-        "cc" | "cpp" | "cxx" | "c++" | "C" | "cu" | "cl" => Ok("c++-compile"),
-        "s" => Ok("assemble"),
-        "S" => Ok("preprocess-assemble"),
-        _ => {
-            let norm = if windows {
-                ext.to_ascii_lowercase()
-            } else {
-                ext.to_string()
-            };
-            match norm.as_str() {
-                "m" => Ok("objc-compile"),
-                "mm" => Ok("objc++-compile"),
-                "asm" => Ok("assemble"),
-                "ipb" => Ok("clif-match"),
-                "pcm" | "gcm" | "ifc" => Ok("c++-module-codegen"),
-                _ => err(format!("Unrecognized source file type for '{source}'")),
-            }
         }
+    } else if source.ends_with(".c") {
+        Ok("c-compile")
+    } else if [".cc", ".cpp", ".cxx", ".c++", ".C", ".cu", ".cl"]
+        .iter()
+        .any(|ext| source.ends_with(ext))
+    {
+        Ok("c++-compile")
+    } else if file_type_has_ext(source, ".m", windows) {
+        Ok("objc-compile")
+    } else if file_type_has_ext(source, ".mm", windows) {
+        Ok("objc++-compile")
+    } else if source.ends_with(".s") || file_type_has_ext(source, ".asm", windows) {
+        Ok("assemble")
+    } else if source.ends_with(".S") {
+        Ok("preprocess-assemble")
+    } else if file_type_has_ext(source, ".ipb", windows) {
+        Ok("clif-match")
+    } else if file_type_has_any_ext(source, &[".pcm", ".gcm", ".ifc"], windows) {
+        Ok("c++-module-codegen")
+    } else {
+        err(format!("Unrecognized source file type for '{source}'"))
     }
 }
 
@@ -2388,5 +2405,94 @@ mod cc_native_tests {
             "c++-module-compile"
         );
         assert!(cc_default_compile_action_for_os("модуль.CPPMAP", &fc_enabled, false).is_err());
+
+        // 4. Exhaustive `CppFileTypes` + `FileType.hasExtension` + `CppCompileActionBuilder.getActionName`
+        // table across `windows = false` and `windows = true`.
+        let cases: &[(&str, Option<&str>, Option<&str>)] = &[
+            ("pkg/src.c", Some("c-compile"), Some("c-compile")),
+            ("pkg/src.C", Some("c++-compile"), Some("c++-compile")),
+            ("pkg/src.cc", Some("c++-compile"), Some("c++-compile")),
+            ("pkg/src.CC", None, None),
+            ("pkg/src.cpp", Some("c++-compile"), Some("c++-compile")),
+            ("pkg/src.CPP", None, None),
+            ("pkg/src.cxx", Some("c++-compile"), Some("c++-compile")),
+            ("pkg/src.CXX", None, None),
+            ("pkg/src.c++", Some("c++-compile"), Some("c++-compile")),
+            ("pkg/src.C++", None, None),
+            ("pkg/src.cu", Some("c++-compile"), Some("c++-compile")),
+            ("pkg/src.CU", None, None),
+            ("pkg/src.cl", Some("c++-compile"), Some("c++-compile")),
+            ("pkg/src.CL", None, None),
+            (
+                "pkg/hdr.h",
+                Some("c++-header-parsing"),
+                Some("c++-header-parsing"),
+            ),
+            (
+                "pkg/hdr.H",
+                Some("c++-header-parsing"),
+                Some("c++-header-parsing"),
+            ),
+            (
+                "pkg/hdr.hpp",
+                Some("c++-header-parsing"),
+                Some("c++-header-parsing"),
+            ),
+            ("pkg/hdr.HPP", None, Some("c++-header-parsing")),
+            (
+                "pkg/hdr.ipp",
+                Some("c++-header-parsing"),
+                Some("c++-header-parsing"),
+            ),
+            ("pkg/hdr.IPP", None, Some("c++-header-parsing")),
+            ("pkg/src.s", Some("assemble"), Some("assemble")),
+            (
+                "pkg/src.S",
+                Some("preprocess-assemble"),
+                Some("preprocess-assemble"),
+            ),
+            ("pkg/src.pic.s", None, None),
+            ("pkg/src.PIC.s", Some("assemble"), None),
+            (
+                "pkg/src.pic.S",
+                Some("preprocess-assemble"),
+                Some("preprocess-assemble"),
+            ),
+            ("pkg/src.asm", Some("assemble"), Some("assemble")),
+            ("pkg/src.ASM", None, Some("assemble")),
+            ("pkg/src.m", Some("objc-compile"), Some("objc-compile")),
+            ("pkg/src.M", None, Some("objc-compile")),
+            ("pkg/src.mm", Some("objc++-compile"), Some("objc++-compile")),
+            ("pkg/src.MM", None, Some("objc++-compile")),
+            ("pkg/src.ipb", Some("clif-match"), Some("clif-match")),
+            ("pkg/src.IPB", None, Some("clif-match")),
+            (
+                "pkg/mod.pcm",
+                Some("c++-module-codegen"),
+                Some("c++-module-codegen"),
+            ),
+            ("pkg/mod.PCM", None, Some("c++-module-codegen")),
+            ("pkg/mod.cppm", None, None),
+            ("pkg/mod.CPPM", None, None),
+            (
+                "pkg/mod.cppmap",
+                Some("c++-module-compile"),
+                Some("c++-module-compile"),
+            ),
+            ("pkg/mod.CPPMAP", None, Some("c++-module-compile")),
+            ("pkg.c/no_ext", None, None),
+        ];
+        for &(path, unix_exp, win_exp) in cases {
+            assert_eq!(
+                cc_default_compile_action_for_os(path, &fc_enabled, false).ok(),
+                unix_exp,
+                "unix mismatch for {path}"
+            );
+            assert_eq!(
+                cc_default_compile_action_for_os(path, &fc_enabled, true).ok(),
+                win_exp,
+                "windows mismatch for {path}"
+            );
+        }
     }
 }
