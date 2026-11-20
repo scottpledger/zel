@@ -800,6 +800,32 @@ fn cc_create_compile_action_template(st: &Arc<CtxState>, pos: &[Value], kw: &BTr
     Ok(Value::None)
 }
 
+fn cc_lto_backend_env(
+    fc: &FeatureConfiguration,
+    action_name: &str,
+    vars: &Variables,
+    env_kw: Option<&Value>,
+) -> Result<BTreeMap<String, String>, StarlarkError> {
+    if let Some(Value::Dict(d)) = env_kw {
+        let mut env = BTreeMap::new();
+        for (k, v) in &d.lock().unwrap().entries {
+            if let Some(ks) = k.as_str() {
+                env.insert(ks.to_string(), v.as_str().unwrap_or("").to_string());
+            }
+        }
+        return Ok(env);
+    }
+    let path_of = |v: &Value| artifact_of(v).map(|a| a.exec_path.path_string().to_string());
+    let mut env = BTreeMap::new();
+    for (k, v) in fc
+        .environment(action_name, vars, &path_of)
+        .map_err(|e| StarlarkError(e.0))?
+    {
+        env.insert(k, v);
+    }
+    Ok(env)
+}
+
 fn cc_create_lto_backend_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<String, Value>) -> HostResult {
     let fc = cc_kw(pos, kw, 1, "feature_configuration")
         .and_then(|v| cc_features::lookup::<FeatureConfiguration>(v, cc_features::KIND_FEATURE_CONFIGURATION))
@@ -850,18 +876,15 @@ fn cc_create_lto_backend_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap
     if !fc.action_is_configured(action_name) {
         return err("Action lto-backend does not have an enabled configuration in the toolchain.");
     }
+    let use_pic = matches!(cc_kw(pos, kw, 3, "use_pic"), Some(Value::Bool(true)));
     let path_of = |v: &Value| artifact_of(v).map(|a| a.exec_path.path_string().to_string());
     let tool = fc.tool_path_for_action(action_name).map_err(|e| StarlarkError(e.0))?;
-    let argv = fc.command_line(action_name, &vars, &path_of).map_err(|e| StarlarkError(e.0))?;
-    let exec_reqs = cc_build_exec_reqs(&fc, action_name, None);
-    let mut env = cc_build_compile_env(&fc, action_name, &vars, &exec_reqs)?;
-    if let Some(Value::Dict(d)) = cc_kw(pos, kw, 8, "env") {
-        for (k, v) in &d.lock().unwrap().entries {
-            if let Some(ks) = k.as_str() {
-                env.insert(ks.to_string(), v.as_str().unwrap_or("").to_string());
-            }
-        }
+    let mut argv = fc.command_line(action_name, &vars, &path_of).map_err(|e| StarlarkError(e.0))?;
+    if use_pic {
+        argv.push("-fPIC".to_string());
     }
+    let exec_reqs = cc_build_exec_reqs(&fc, action_name, None);
+    let env = cc_lto_backend_env(&fc, action_name, &vars, cc_kw(pos, kw, 8, "env"))?;
     let mut tools = Vec::new();
     if let Some(tc) = cc_kw(pos, kw, 100, "cc_toolchain") {
         for f in ["_compiler_files", "compiler_files", "_all_files", "all_files"] {
@@ -885,7 +908,7 @@ fn cc_create_lto_backend_action(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap
     a.inputs = dedup(inputs);
     a.tools = dedup(tools);
     a.outputs = outputs;
-    a.use_default_shell_env = true;
+    a.use_default_shell_env = false;
     st.register(a)?;
     Ok(Value::None)
 }
@@ -894,15 +917,16 @@ fn cc_create_lto_backend_action_template(st: &Arc<CtxState>, pos: &[Value], kw: 
     let fc = cc_kw(pos, kw, 1, "feature_configuration")
         .and_then(|v| cc_features::lookup::<FeatureConfiguration>(v, cc_features::KIND_FEATURE_CONFIGURATION))
         .ok_or_else(|| StarlarkError("create_lto_backend_action_template: invalid feature_configuration".into()))?;
-    let vars: Arc<Variables> = cc_kw(pos, kw, 3, "build_variables")
+    let vars: Arc<Variables> = cc_kw(pos, kw, 2, "build_variables")
+        .or_else(|| cc_kw(pos, kw, 3, "build_variables"))
         .or_else(|| cc_kw(pos, kw, 100, "compile_build_variables"))
         .and_then(cc_features::variables_of)
         .ok_or_else(|| StarlarkError("create_lto_backend_action_template: invalid build_variables".into()))?;
-    let bitcode = cc_kw(pos, kw, 100, "bitcode_file")
+    let bitcode = cc_kw(pos, kw, 7, "bitcode_file")
         .or_else(|| cc_kw(pos, kw, 100, "bitcode_directory"))
         .and_then(artifact_of)
         .ok_or_else(|| StarlarkError("create_lto_backend_action_template: bitcode_file must be a tree artifact".into()))?;
-    let object_dir = cc_kw(pos, kw, 100, "object_file")
+    let object_dir = cc_kw(pos, kw, 8, "object_file")
         .or_else(|| cc_kw(pos, kw, 100, "object_directory"))
         .and_then(artifact_of)
         .ok_or_else(|| StarlarkError("create_lto_backend_action_template: object_file must be a tree artifact".into()))?;
@@ -913,26 +937,37 @@ fn cc_create_lto_backend_action_template(st: &Arc<CtxState>, pos: &[Value], kw: 
     if !fc.action_is_configured(action_name) {
         return err("Action lto-backend does not have an enabled configuration in the toolchain.");
     }
+    let use_pic = matches!(cc_kw(pos, kw, 3, "use_pic"), Some(Value::Bool(true)));
     let path_of = |v: &Value| artifact_of(v).map(|a| a.exec_path.path_string().to_string());
     let tool = fc.tool_path_for_action(action_name).map_err(|e| StarlarkError(e.0))?;
-    let argv = fc.command_line(action_name, &vars, &path_of).map_err(|e| StarlarkError(e.0))?;
+    let mut argv = fc.command_line(action_name, &vars, &path_of).map_err(|e| StarlarkError(e.0))?;
+    if use_pic {
+        argv.push("-fPIC".to_string());
+    }
     let exec_reqs = cc_build_exec_reqs(&fc, action_name, None);
-    let env = cc_build_compile_env(&fc, action_name, &vars, &exec_reqs)?;
+    let env = cc_lto_backend_env(&fc, action_name, &vars, cc_kw(pos, kw, 10, "env"))?;
     let mut outputs = vec![object_dir.clone()];
-    if let Some(dwo) = cc_kw(pos, kw, 100, "dwo_file")
+    if let Some(dwo) = cc_kw(pos, kw, 9, "dwo_file")
         .or_else(|| cc_kw(pos, kw, 100, "dwo_directory"))
         .and_then(artifact_of)
     {
         outputs.push(dwo);
     }
     let mut inputs = vec![bitcode];
+    inputs.extend(cc_artifacts(cc_kw(pos, kw, 5, "additional_inputs")));
+    inputs.extend(cc_artifacts(cc_kw(pos, kw, 4, "all_bitcode_files")));
     for k in ["index", "imports"] {
-        if let Some(a) = cc_kw(pos, kw, 100, k).and_then(artifact_of) {
+        let arg_val = if k == "index" {
+            cc_kw(pos, kw, 6, k)
+        } else {
+            cc_kw(pos, kw, 100, k)
+        };
+        if let Some(a) = arg_val.and_then(artifact_of) {
             inputs.push(a);
         }
     }
     let mut tools = Vec::new();
-    if let Some(tc) = cc_kw(pos, kw, 2, "cc_toolchain") {
+    if let Some(tc) = cc_kw(pos, kw, 100, "cc_toolchain") {
         for f in ["_compiler_files", "compiler_files", "_all_files", "all_files"] {
             tools.extend(cc_artifacts(field(tc, f).as_ref()));
         }
@@ -950,7 +985,7 @@ fn cc_create_lto_backend_action_template(st: &Arc<CtxState>, pos: &[Value], kw: 
     a.env = env;
     a.execution_requirements = exec_reqs;
     inputs.extend(tools.iter().cloned());
-    a.inputs = inputs;
+    a.inputs = dedup(inputs);
     a.tools = dedup(tools);
     a.outputs = outputs;
     a.use_default_shell_env = false;
@@ -2466,6 +2501,187 @@ mod cc_native_tests {
                 win_exp,
                 "windows mismatch for {path}"
             );
+        }
+    }
+
+    #[test]
+    fn lto_backend_action_and_template_environment_and_use_pic_parity() {
+        let label = Label::parse_canonical("//pkg:lto_env").unwrap();
+        let tool = test_struct(vec![("path", Value::String("toolchain/clang".into()))]);
+        let compile_ac = test_struct(vec![
+            ("action_name", Value::String("c++-compile".into())),
+            ("enabled", Value::Bool(true)),
+            ("tools", mk_list(vec![tool.clone()])),
+        ]);
+        let lto_ac = test_struct(vec![
+            ("action_name", Value::String("lto-backend".into())),
+            ("enabled", Value::Bool(true)),
+            ("tools", mk_list(vec![tool])),
+        ]);
+        let compile_fg = test_struct(vec![(
+            "flags",
+            mk_list(vec![Value::String("-O2".into())]),
+        )]);
+        let compile_fs = test_struct(vec![
+            (
+                "actions",
+                mk_list(vec![
+                    Value::String("c++-compile".into()),
+                    Value::String("lto-backend".into()),
+                ]),
+            ),
+            ("flag_groups", mk_list(vec![compile_fg])),
+        ]);
+        let flags_feat = test_struct(vec![
+            ("name", Value::String("compile_flags".into())),
+            ("enabled", Value::Bool(true)),
+            ("flag_sets", mk_list(vec![compile_fs])),
+        ]);
+        let tf = Arc::new(
+            ToolchainFeatures::new(&[flags_feat], &[compile_ac, lto_ac], &[], "", &|_| None)
+                .unwrap(),
+        );
+        let fc = cc_features::register(
+            cc_features::KIND_FEATURE_CONFIGURATION,
+            tf.configure(&tf.default_features_and_action_configs()).unwrap(),
+        );
+        let vars = cc_features::make_variables(None, BTreeMap::new());
+
+        let mut cfg = BuildConfigurationKey::target("k8", "fastbuild");
+        cfg.env.action_env = vec![zel_util::action_env::EnvVar::Set(
+            "FROM_ACTION_ENV".into(),
+            "1".into(),
+        )];
+        let mut st_inner = Arc::try_unwrap(cc_test_ctx_state(&label)).ok().unwrap();
+        st_inner.cfg = cfg.clone();
+        let st = Arc::new(st_inner);
+
+        let src_file = Artifact::source(PathFragment::create("pkg/a.cc"), label.clone());
+        let compile_out = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/a.pic.o"),
+            label.clone(),
+        );
+        cc_create_compile_action(
+            &st,
+            &[],
+            &BTreeMap::from([
+                ("feature_configuration".to_string(), fc.clone()),
+                ("compile_build_variables".to_string(), vars.clone()),
+                ("source".to_string(), file_value(&src_file)),
+                ("output_file".to_string(), file_value(&compile_out)),
+            ]),
+        )
+        .unwrap();
+
+        let lto_env = crate::starlark_rule::mk_dict(vec![(
+            Value::String("LTO_FIXED".into()),
+            Value::String("yes".into()),
+        )]);
+        let bc_file = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/a.bc"),
+            label.clone(),
+        );
+        let obj_file = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/a.lto.o"),
+            label.clone(),
+        );
+        let extra_in = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/profile.afdo"),
+            label.clone(),
+        );
+        cc_create_lto_backend_action(
+            &st,
+            &[],
+            &BTreeMap::from([
+                ("feature_configuration".to_string(), fc.clone()),
+                ("build_variables".to_string(), vars.clone()),
+                ("use_pic".to_string(), Value::Bool(true)),
+                ("inputs".to_string(), mk_list(vec![file_value(&bc_file), file_value(&extra_in)])),
+                ("outputs".to_string(), mk_list(vec![file_value(&obj_file)])),
+                ("env".to_string(), lto_env.clone()),
+            ]),
+        )
+        .unwrap();
+
+        let mut bc_tree = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/bc_tree"),
+            label.clone(),
+        );
+        bc_tree.is_tree_artifact = true;
+        let mut obj_tree = Artifact::derived(
+            "k8-fastbuild",
+            PathFragment::create("pkg/obj_tree"),
+            label,
+        );
+        obj_tree.is_tree_artifact = true;
+        cc_create_lto_backend_action_template(
+            &st,
+            &[],
+            &BTreeMap::from([
+                ("feature_configuration".to_string(), fc),
+                ("build_variables".to_string(), vars),
+                ("use_pic".to_string(), Value::Bool(true)),
+                ("additional_inputs".to_string(), mk_list(vec![file_value(&extra_in)])),
+                ("bitcode_file".to_string(), file_value(&bc_tree)),
+                ("object_file".to_string(), file_value(&obj_tree)),
+                ("env".to_string(), lto_env),
+            ]),
+        )
+        .unwrap();
+
+        let mut actions = st.actions.lock().unwrap().clone();
+        assert_eq!(actions.len(), 3);
+        for a in &mut actions {
+            a.apply_configuration_env(&cfg);
+        }
+
+        // `CppCompileAction` uses `configuration.getActionEnvironment()` (`use_default_shell_env = true`)
+        // plus `PWD=/proc/self/cwd`.
+        assert!(actions[0].use_default_shell_env);
+        let mut compile_resolved = BTreeMap::new();
+        actions[0]
+            .action_env
+            .as_ref()
+            .unwrap()
+            .resolve(&mut compile_resolved, &BTreeMap::new());
+        assert_eq!(compile_resolved.get("FROM_ACTION_ENV").map(String::as_str), Some("1"));
+        assert_eq!(compile_resolved.get("PWD").map(String::as_str), Some("/proc/self/cwd"));
+
+        // Both `CcStarlarkInternal.createLtoBackendAction` and `createLtoBackendActionTemplate`
+        // construct `ActionEnvironment.create(ImmutableMap.copyOf(env))` (`use_default_shell_env = false`),
+        // without `configuration.getActionEnvironment()` or `PWD`, and append `-fPIC` when `use_pic` is true.
+        for idx in [1usize, 2usize] {
+            assert!(!actions[idx].use_default_shell_env);
+            let mut resolved = BTreeMap::new();
+            actions[idx]
+                .action_env
+                .as_ref()
+                .unwrap()
+                .resolve(&mut resolved, &BTreeMap::new());
+            assert_eq!(
+                resolved,
+                BTreeMap::from([("LTO_FIXED".to_string(), "yes".to_string())]),
+                "unexpected env on LTO action {idx}"
+            );
+            assert!(
+                actions[idx].inputs.iter().any(|a| a.exec_path == extra_in.exec_path),
+                "expected additional input in LTO action {idx}"
+            );
+            match &actions[idx].kind {
+                ActionKind::Spawn { arguments, .. } => {
+                    assert_eq!(
+                        arguments[0].args,
+                        vec!["-O2".to_string(), "-fPIC".to_string()],
+                        "expected -fPIC appended last on LTO action {idx}"
+                    );
+                }
+                other => panic!("expected Spawn, got {other:?}"),
+            }
         }
     }
 }

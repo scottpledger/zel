@@ -116,36 +116,54 @@ fn java_native(
                 _ => return err("expand_java_opts: invalid ctx.attr"),
             };
             let mut map: BTreeMap<Label, Vec<Artifact>> = BTreeMap::new();
-            let mut dep_attrs = vec!["srcs", "deps", "implementation_deps", "tools", "resources"];
+            let is_label_list_attr = |name: &str| -> bool {
+                match &st.rule.extra.rule_class {
+                    Some(rc) => match rc.attrs.get(name) {
+                        Some(spec) => matches!(spec.ty, zel_packages::AttrType::LabelList),
+                        None => false,
+                    },
+                    None => true,
+                }
+            };
+            if st.rule_struct.is_none() {
+                let pkg_prefix = st.pkg_dir.path_string();
+                for out_art in &st.predeclared {
+                    let rr = out_art.root_relative_path.path_string();
+                    let rel_name = if pkg_prefix.is_empty() {
+                        rr
+                    } else {
+                        rr.strip_prefix(&format!("{pkg_prefix}/")).unwrap_or(rr)
+                    };
+                    if let Ok(out_lbl) = Label::create(st.label.package_identifier().clone(), rel_name) {
+                        map.entry(out_lbl).or_default().push(out_art.clone());
+                    }
+                }
+            }
+            if is_label_list_attr("srcs") {
+                if let Some(ts) = st.deps.get("srcs") {
+                    for t in ts {
+                        insert_target_location_keys(&mut map, t, target_files(t));
+                    }
+                }
+            }
+            let mut dep_attrs = vec!["deps", "implementation_deps"];
             if !exec_paths {
                 dep_attrs.push("data");
             }
+            dep_attrs.push("tools");
             for k in dep_attrs {
+                if !is_label_list_attr(k) {
+                    continue;
+                }
                 if let Some(ts) = st.deps.get(k) {
                     for t in ts {
-                        let files = if matches!(k, "deps" | "tools") {
-                            if let Some(exe) = &t.get_actual().default_info.executable {
-                                vec![exe.clone()]
-                            } else {
-                                target_files(t)
-                            }
+                        let files = if let Some(exe) = &t.get_actual().default_info.executable {
+                            vec![exe.clone()]
                         } else {
                             target_files(t)
                         };
                         insert_target_location_keys(&mut map, t, files);
                     }
-                }
-            }
-            let pkg_prefix = st.pkg_dir.path_string();
-            for out_art in &st.predeclared {
-                let rr = out_art.root_relative_path.path_string();
-                let rel_name = if pkg_prefix.is_empty() {
-                    rr
-                } else {
-                    rr.strip_prefix(&format!("{pkg_prefix}/")).unwrap_or(rr)
-                };
-                if let Ok(out_lbl) = Label::create(st.label.package_identifier().clone(), rel_name) {
-                    map.entry(out_lbl).or_default().push(out_art.clone());
                 }
             }
             let mode = if exec_paths { LocationMode::Exec } else { LocationMode::Runfiles };
@@ -161,7 +179,7 @@ fn java_native(
                     mode,
                     &st.inputs.workspace_name,
                     Some(&repo_map),
-                    cfg!(windows),
+                    false,
                 ) {
                     Ok(res) => res.text,
                     Err(e) => {
@@ -1657,5 +1675,175 @@ mod java_compile_lowering_tests {
             }
             other => panic!("expected SpawnAction, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn expand_java_opts_location_map_matches_bazel_location_expander() {
+        let label = Label::parse_canonical("//pkg:consumer").unwrap();
+        let cfg = BuildConfigurationKey::default();
+
+        // Non-executable multi-jar library (`FilesToRunProvider.getExecutable() == null`):
+        // `$(locations)` expands to all `filesToBuild` jars, while `$(location)` reports an error.
+        let lib_lbl = Label::parse_canonical("//pkg:multi_lib").unwrap();
+        let jar_a = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/a.jar"), lib_lbl.clone());
+        let jar_b = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/b.jar"), lib_lbl.clone());
+        let mut multi_lib = ConfiguredTarget::new(lib_lbl.clone(), cfg.clone(), "java_library".into());
+        multi_lib.default_info = crate::DefaultInfo {
+            files: vec![jar_a.clone(), jar_b.clone()],
+            executable: None,
+            ..Default::default()
+        };
+
+        // Executable binary (`FilesToRunProvider.getExecutable() != null` with `[bin.jar, bin]` in
+        // `filesToBuild`): in `deps`, `implementation_deps`, `data`, and `tools`, Bazel's
+        // `LocationExpander.buildLocationMap` maps the label to `[executable]` for both
+        // `$(location)` and `$(locations)`, whereas in `srcs` it maps to `filesToBuild`.
+        let bin_lbl = Label::parse_canonical("//pkg:helper_bin").unwrap();
+        let bin_jar = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/helper_bin.jar"), bin_lbl.clone());
+        let bin_exe = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/helper_bin"), bin_lbl.clone());
+        let mut helper_bin = ConfiguredTarget::new(bin_lbl.clone(), cfg.clone(), "java_binary".into());
+        helper_bin.default_info = crate::DefaultInfo {
+            files: vec![bin_jar.clone(), bin_exe.clone()],
+            executable: Some(bin_exe.clone()),
+            ..Default::default()
+        };
+
+        let impl_bin_lbl = Label::parse_canonical("//pkg:impl_bin").unwrap();
+        let impl_jar = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/impl_bin.jar"), impl_bin_lbl.clone());
+        let impl_exe = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/impl_bin"), impl_bin_lbl.clone());
+        let mut impl_bin = ConfiguredTarget::new(impl_bin_lbl.clone(), cfg.clone(), "java_binary".into());
+        impl_bin.default_info = crate::DefaultInfo {
+            files: vec![impl_jar, impl_exe.clone()],
+            executable: Some(impl_exe.clone()),
+            ..Default::default()
+        };
+
+        let src_bin_lbl = Label::parse_canonical("//pkg:src_bin").unwrap();
+        let src_bin_jar = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/src_bin.jar"), src_bin_lbl.clone());
+        let src_bin_exe = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/src_bin"), src_bin_lbl.clone());
+        let mut src_bin = ConfiguredTarget::new(src_bin_lbl, cfg.clone(), "java_binary".into());
+        src_bin.default_info = crate::DefaultInfo {
+            files: vec![src_bin_jar.clone(), src_bin_exe.clone()],
+            executable: Some(src_bin_exe.clone()),
+            ..Default::default()
+        };
+
+        let data_bin_lbl = Label::parse_canonical("//pkg:data_bin").unwrap();
+        let data_jar = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/data_bin.jar"), data_bin_lbl.clone());
+        let data_exe = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/data_bin"), data_bin_lbl.clone());
+        let mut data_bin = ConfiguredTarget::new(data_bin_lbl, cfg.clone(), "java_binary".into());
+        data_bin.default_info = crate::DefaultInfo {
+            files: vec![data_jar, data_exe.clone()],
+            executable: Some(data_exe.clone()),
+            ..Default::default()
+        };
+
+        let res_lbl = Label::parse_canonical("//pkg:res_file").unwrap();
+        let res_art = Artifact::source(PathFragment::create("pkg/res.txt"), res_lbl.clone());
+        let mut res_ct = ConfiguredTarget::new(res_lbl, cfg, "source file".into());
+        res_ct.default_info = crate::DefaultInfo {
+            files: vec![res_art],
+            executable: None,
+            ..Default::default()
+        };
+
+        let out_art = Artifact::derived("k8-fastbuild", PathFragment::create("pkg/gen.jar"), label.clone());
+
+        let mut st_inner = Arc::try_unwrap(test_ctx_state(&label)).ok().unwrap();
+        st_inner.deps = BTreeMap::from([
+            ("srcs".to_string(), vec![Arc::new(src_bin)]),
+            ("deps".to_string(), vec![Arc::new(multi_lib), Arc::new(helper_bin)]),
+            ("implementation_deps".to_string(), vec![Arc::new(impl_bin)]),
+            ("data".to_string(), vec![Arc::new(data_bin)]),
+            ("resources".to_string(), vec![Arc::new(res_ct)]),
+        ]);
+        st_inner.predeclared = vec![out_art.clone()];
+        st_inner.attr_struct = Value::Struct(Arc::new(StructValue::new(BTreeMap::from([
+            (
+                "javacopts".to_string(),
+                mk_list(vec![
+                    Value::String("$(locations :multi_lib)".into()),
+                    Value::String("$(location :helper_bin)".into()),
+                    Value::String("$(locations :helper_bin)".into()),
+                    Value::String("$(locations :impl_bin)".into()),
+                    Value::String("$(locations :src_bin)".into()),
+                    Value::String("$(location :gen.jar)".into()),
+                    Value::String("$(location :data_bin)".into()),
+                ]),
+            ),
+            (
+                "jvm_opts".to_string(),
+                mk_list(vec![
+                    Value::String("$(locations :multi_lib)".into()),
+                    Value::String("$(location :helper_bin)".into()),
+                    Value::String("$(location :data_bin)".into()),
+                ]),
+            ),
+            (
+                "res_opts".to_string(),
+                mk_list(vec![Value::String("$(location :res_file)".into())]),
+            ),
+        ]))));
+        let st = Arc::new(st_inner);
+        let ctx_val = Value::Host("ctx".into(), "0".into());
+
+        // 1. Runfiles mode (`exec_paths = False`): `withDataLocations()`.
+        let expanded_rf = java_native(
+            &st,
+            "java_common_internal_do_not_use.expand_java_opts",
+            &[ctx_val.clone(), Value::String("javacopts".into()), Value::Bool(false), Value::Bool(false)],
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert!(st.rule_errors.lock().unwrap().is_empty(), "{:?}", st.rule_errors.lock().unwrap());
+        assert_eq!(
+            expanded_rf,
+            mk_list(vec![
+                Value::String("pkg/a.jar pkg/b.jar".into()),
+                Value::String("pkg/helper_bin".into()),
+                Value::String("pkg/helper_bin".into()),
+                Value::String("pkg/impl_bin".into()),
+                Value::String("pkg/src_bin pkg/src_bin.jar".into()),
+                Value::String("pkg/gen.jar".into()),
+                Value::String("pkg/data_bin".into()),
+            ])
+        );
+
+        // 2. Exec mode (`exec_paths = True`): `withExecLocations(ImmutableMap.of())` omits `data`
+        // and keeps forward slashes (`windowsPath = false`).
+        let expanded_exec = java_native(
+            &st,
+            "java_common_internal_do_not_use.expand_java_opts",
+            &[ctx_val.clone(), Value::String("jvm_opts".into()), Value::Bool(false), Value::Bool(true)],
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            expanded_exec,
+            mk_list(vec![
+                Value::String(format!("{} {}", jar_a.exec_path.path_string(), jar_b.exec_path.path_string())),
+                Value::String(bin_exe.exec_path.path_string().to_string()),
+                Value::String("$(location :data_bin)".into()),
+            ])
+        );
+        let errs = st.rule_errors.lock().unwrap().clone();
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        assert!(errs[0].contains("not a declared prerequisite"), "{errs:?}");
+
+        // 3. `resources` is not in `LocationExpander.buildLocationMap`.
+        st.rule_errors.lock().unwrap().clear();
+        let _ = java_native(
+            &st,
+            "java_common_internal_do_not_use.expand_java_opts",
+            &[ctx_val, Value::String("res_opts".into()), Value::Bool(false), Value::Bool(false)],
+            &BTreeMap::new(),
+        )
+        .unwrap()
+        .unwrap();
+        let res_errs = st.rule_errors.lock().unwrap().clone();
+        assert_eq!(res_errs.len(), 1, "{res_errs:?}");
+        assert!(res_errs[0].contains("not a declared prerequisite"), "{res_errs:?}");
     }
 }
