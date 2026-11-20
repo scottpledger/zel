@@ -1244,7 +1244,12 @@ impl CtxData {
                 let pkg = l.package_name();
                 let base = if pkg.is_empty() { dir } else { dir.join(pkg) };
                 let resolved = base.join(l.name());
-                let _ = maybe_watch(rt, self, &resolved, "auto");
+                let watch_mode = if rt.opts.incompatible_no_implicit_watch_label {
+                    "no"
+                } else {
+                    "auto"
+                };
+                maybe_watch(rt, self, &resolved, watch_mode)?;
                 Ok(resolved)
             }
             other => err(format!(
@@ -1968,6 +1973,7 @@ fn dispatch_object_inner(
                     std::fs::write(&to, b"")
                         .map_err(|e| StarlarkError(format!("java.io.IOException: {e}")))?;
                 }
+                maybe_watch(rt, &data, &from, "auto")?;
                 Ok(Value::None)
             }
             #[cfg(all(not(unix), not(windows)))]
@@ -1989,6 +1995,7 @@ fn dispatch_object_inner(
                     std::fs::write(&to, b"")
                         .map_err(|e| StarlarkError(format!("java.io.IOException: {e}")))?;
                 }
+                maybe_watch(rt, &data, &from, "auto")?;
                 Ok(Value::None)
             }
         }
@@ -2473,7 +2480,9 @@ fn dispatch_object_inner(
             let path_val = arg(args, kwr, 0, "path")
                 .ok_or_else(|| StarlarkError("load_wasm() missing 'path'".into()))?;
             let alloc_fn = str_arg(args, kwr, 2, "allocate_fn", "allocate")?;
+            let watch = str_arg(&[], kwr, 99, "watch", "auto")?;
             let p = data.resolve(rt, path_val)?;
+            maybe_watch(rt, &data, &p, &watch)?;
             if !p.exists() {
                 return err(format!("load_wasm(): file not found: {}", p.display()));
             }
@@ -2518,7 +2527,9 @@ fn dispatch_object_inner(
                     )
                 }
                 other => {
+                    let watch = str_arg(&[], kwr, 99, "watch", "auto")?;
                     let p = data.resolve(rt, other)?;
+                    maybe_watch(rt, &data, &p, &watch)?;
                     (p.to_string_lossy().to_string(), "allocate".to_string())
                 }
             };
@@ -2878,12 +2889,9 @@ fn maybe_watch(rt: &Rt, data: &CtxData, p: &Path, mode: &str) -> Result<(), Star
     let Some(rel) = repo_cache_friendly_path(rt, data, p, mode)? else {
         return Ok(());
     };
-    let value = if p.is_dir() {
-        "DIR".to_string()
-    } else if !p.exists() {
-        "ENOENT".to_string()
-    } else {
-        match std::fs::read(p) {
+    let value = match std::fs::metadata(p) {
+        Ok(meta) if meta.is_dir() => "DIR".to_string(),
+        Ok(_) => match std::fs::read(p) {
             Ok(b) => crate::hash::sha256_hex(&b),
             Err(e) => {
                 return err(format!(
@@ -2892,6 +2900,21 @@ fn maybe_watch(rt: &Rt, data: &CtxData, p: &Path, mode: &str) -> Result<(), Star
                     errno_text(&e)
                 ))
             }
+        },
+        Err(e)
+            if matches!(
+                e.kind(),
+                std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+            ) =>
+        {
+            "ENOENT".to_string()
+        }
+        Err(e) => {
+            return err(format!(
+                "java.io.IOException: {} ({})",
+                p.display(),
+                errno_text(&e)
+            ))
         }
     };
     data.record(format!("FILE:{}", escape_input(&rel)), Some(value));

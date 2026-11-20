@@ -635,14 +635,21 @@ pub fn recorded_inputs_outdated_with_lookup(
             let Some(path) = resolve(p) else {
                 return Some("malformed recorded input".into());
             };
-            let cur = if path.is_dir() {
-                "DIR".to_string()
-            } else if !path.exists() {
-                "ENOENT".to_string()
-            } else {
-                std::fs::read(&path)
-                    .map(|b| crate::hash::sha256_hex(&b))
-                    .unwrap_or_default()
+            let cur = match std::fs::metadata(&path) {
+                Ok(meta) if meta.is_dir() => "DIR".to_string(),
+                Ok(_) => match std::fs::read(&path) {
+                    Ok(b) => crate::hash::sha256_hex(&b),
+                    Err(e) => return Some(format!("failed to stat {p}: {e}")),
+                },
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                    ) =>
+                {
+                    "ENOENT".to_string()
+                }
+                Err(e) => return Some(format!("failed to stat {p}: {e}")),
             };
             if Some(&cur) != value.as_ref() {
                 return Some(format!("file info or contents of {p} changed"));

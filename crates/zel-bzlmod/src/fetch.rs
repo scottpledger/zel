@@ -4496,4 +4496,182 @@ inspect_repo(name = "via_use_repo_rule")
         assert_eq!(rt.owning_extension_for_canonical(ghost), None);
         assert!(rt.repo_mapping_of(ghost).is_empty());
     }
+
+    #[test]
+    fn label_path_watch_respects_incompatible_flag_and_propagates_io_errors() {
+        let base = tmpdir("label_path_watch_errors");
+        let ws = base.join("ws");
+        write(&ws, "BUILD.bazel", "");
+        write(&ws, "data.txt", "v1");
+        write(&ws, "unwatched.txt", "u1");
+        std::fs::create_dir_all(ws.join("subdir")).unwrap();
+        write(
+            &ws,
+            "defs.bzl",
+            concat!(
+                "def _impl(rctx):\n",
+                "    _p_data = rctx.path(Label('//:data.txt'))\n",
+                "    _p_missing = rctx.path(Label('//:missing.txt'))\n",
+                "    _p_dir = rctx.path(Label('//:subdir'))\n",
+                "    txt = rctx.read(Label('//:unwatched.txt'), watch = 'no')\n",
+                "    rctx.file('BUILD.bazel', '')\n",
+                "    rctx.file('out.txt', txt)\n",
+                "r = repository_rule(implementation = _impl)\n",
+            ),
+        );
+        write(
+            &ws,
+            "MODULE.bazel",
+            "module(name = 'root')\nr = use_repo_rule('//:defs.bzl', 'r')\nr(name = 'probe')\n",
+        );
+
+        let res = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+
+        // 1. Default `--incompatible_no_implicit_watch_label=true`: `path(Label(...))` and
+        //    `read(Label(...), watch = 'no')` do NOT implicitly record `FILE:` inputs.
+        let ob_default = base.join("ob_default");
+        let rt_default = Rt::new(
+            ExternalOptions {
+                output_base: ob_default.clone(),
+                workspace_root: ws.clone(),
+                ..Default::default()
+            },
+            res.clone(),
+        );
+        rt_default.fetch_repo("+r+probe").unwrap();
+        let marker_default =
+            std::fs::read_to_string(ob_default.join("external/@+r+probe.marker")).unwrap();
+        assert!(
+            !marker_default.contains("FILE:@@//data.txt"),
+            "default --incompatible_no_implicit_watch_label=true must not watch path(Label): {marker_default}"
+        );
+        assert!(
+            !marker_default.contains("FILE:@@//unwatched.txt"),
+            "read(Label, watch='no') must not watch label: {marker_default}"
+        );
+
+        // 2. `--noincompatible_no_implicit_watch_label` (`false`): `path(Label(...))` records
+        //    `FILE:` for regular files (digest), missing files (`ENOENT`), and directories (`DIR`).
+        let ob_legacy = base.join("ob_legacy");
+        let rt_legacy = Rt::new(
+            ExternalOptions {
+                output_base: ob_legacy.clone(),
+                workspace_root: ws.clone(),
+                incompatible_no_implicit_watch_label: false,
+                ..Default::default()
+            },
+            res.clone(),
+        );
+        rt_legacy.fetch_repo("+r+probe").unwrap();
+        let marker_legacy =
+            std::fs::read_to_string(ob_legacy.join("external/@+r+probe.marker")).unwrap();
+        let v1_sha = crate::hash::sha256_hex(b"v1");
+        assert!(
+            marker_legacy.contains(&format!("FILE:@@//data.txt {v1_sha}")),
+            "expected FILE digest for //:data.txt in marker: {marker_legacy}"
+        );
+        assert!(
+            marker_legacy.contains("FILE:@@//missing.txt ENOENT"),
+            "expected ENOENT for //:missing.txt in marker: {marker_legacy}"
+        );
+        assert!(
+            marker_legacy.contains("FILE:@@//subdir DIR"),
+            "expected DIR for //:subdir in marker: {marker_legacy}"
+        );
+
+        // 3. Unix I/O errors during `maybe_watch` (symlink loop `ELOOP` and unreadable `0o000`
+        //    file) propagate as Starlark evaluation errors instead of being swallowed.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+
+            symlink("loop_b", ws.join("loop_a")).unwrap();
+            symlink("loop_a", ws.join("loop_b")).unwrap();
+            write(
+                &ws,
+                "loop.bzl",
+                concat!(
+                    "def _impl(rctx):\n",
+                    "    rctx.path(Label('//:loop_a'))\n",
+                    "    rctx.file('BUILD.bazel', '')\n",
+                    "loop_r = repository_rule(implementation = _impl)\n",
+                ),
+            );
+            write(
+                &ws,
+                "MODULE.bazel",
+                "module(name = 'root')\nloop_r = use_repo_rule('//:loop.bzl', 'loop_r')\nloop_r(name = 'lp')\n",
+            );
+            let res_loop = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+            let rt_loop = Rt::new(
+                ExternalOptions {
+                    output_base: base.join("ob_loop"),
+                    workspace_root: ws.clone(),
+                    incompatible_no_implicit_watch_label: false,
+                    ..Default::default()
+                },
+                res_loop,
+            );
+            let err_loop = rt_loop.fetch_repo("+loop_r+lp").unwrap_err();
+            assert!(
+                err_loop.contains("java.io.IOException:"),
+                "expected IOException from symlink-loop Label watch, got: {err_loop}"
+            );
+
+            // `recorded_inputs_outdated` also reports stat failure instead of matching ENOENT.
+            let outdated = crate::lockfile::recorded_inputs_outdated(
+                &["FILE:@@//loop_a ENOENT".to_string()],
+                &BTreeMap::new(),
+                &ws,
+                &base.join("ob_loop/external"),
+            );
+            assert!(
+                outdated
+                    .as_deref()
+                    .is_some_and(|s| s.starts_with("failed to stat @@//loop_a:")),
+                "expected stat failure for symlink loop, got: {outdated:?}"
+            );
+
+            // Non-root unreadable existing file (`chmod 0o000`) also propagates `IOException`
+            // from `path(Label(...))` when implicit label watching is enabled, and from `watch()`.
+            let unreadable = ws.join("secret.bin");
+            std::fs::write(&unreadable, b"top-secret").unwrap();
+            std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000)).unwrap();
+            if std::fs::read(&unreadable).is_err() {
+                write(
+                    &ws,
+                    "unreadable.bzl",
+                    concat!(
+                        "def _impl(rctx):\n",
+                        "    rctx.path(Label('//:secret.bin'))\n",
+                        "    rctx.file('BUILD.bazel', '')\n",
+                        "unreadable_r = repository_rule(implementation = _impl)\n",
+                    ),
+                );
+                write(
+                    &ws,
+                    "MODULE.bazel",
+                    "module(name = 'root')\nunreadable_r = use_repo_rule('//:unreadable.bzl', 'unreadable_r')\nunreadable_r(name = 'ur')\n",
+                );
+                let res_ur = Arc::new(resolve(&hermetic_opts(&ws, &base)).unwrap());
+                let rt_ur = Rt::new(
+                    ExternalOptions {
+                        output_base: base.join("ob_ur"),
+                        workspace_root: ws.clone(),
+                        incompatible_no_implicit_watch_label: false,
+                        ..Default::default()
+                    },
+                    res_ur,
+                );
+                let err_ur = rt_ur.fetch_repo("+unreadable_r+ur").unwrap_err();
+                assert!(
+                    err_ur.contains("java.io.IOException:"),
+                    "expected IOException when watching unreadable Label file, got: {err_ur}"
+                );
+            }
+            let _ = std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o644));
+        }
+
+        let _ = std::fs::remove_dir_all(&base);
+    }
 }

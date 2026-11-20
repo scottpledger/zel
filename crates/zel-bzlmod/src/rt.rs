@@ -34,6 +34,7 @@ pub struct ExternalOptions {
     pub verbose: bool,
     pub experimental_repository_ctx_execute_wasm: bool,
     pub experimental_sibling_repository_layout: bool,
+    pub incompatible_no_implicit_watch_label: bool,
     pub credential_helpers: Vec<(String, PathBuf)>,
 }
 
@@ -57,6 +58,7 @@ impl Default for ExternalOptions {
             verbose: false,
             experimental_repository_ctx_execute_wasm: false,
             experimental_sibling_repository_layout: false,
+            incompatible_no_implicit_watch_label: true,
             credential_helpers: Vec::new(),
         }
     }
