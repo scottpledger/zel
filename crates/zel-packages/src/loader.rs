@@ -620,8 +620,14 @@ impl PackageLoader {
                 } else if matches!(other, crate::lookup::PackageLookup::RepoNotFound(_))
                     && id.repository().is_visible()
                 {
+                    let dym = self
+                        .cfg
+                        .lookup
+                        .resolver
+                        .mapping(&RepositoryName::main())
+                        .did_you_mean(id.repository().name());
                     format!(
-                        "@@[unknown repo '{}' requested from @@]//{}",
+                        "@@[unknown repo '{}' requested from @@{dym}]//{}",
                         id.repository().name(),
                         id.package_fragment()
                     )

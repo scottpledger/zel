@@ -946,19 +946,24 @@ impl CtxData {
                         .strip_prefix("@@")
                         .unwrap()
                         .split_once("//")
-                        .unwrap_or((rest, ""));
-                    let from = repo_part
-                        .rsplit("requested from ")
-                        .next()
-                        .unwrap_or("@@]")
-                        .trim_end_matches(']');
-                    let origin = if from == "@@" {
-                        "main repository".to_string()
-                    } else {
-                        format!("repository '{from}'")
-                    };
+                        .unwrap_or((&s[2..], ""));
+                    let not_vis = zel_cmdline::RepositoryName::parse_unknown_repo_marker(repo_part)
+                        .and_then(|r| r.not_visible_error_message())
+                        .unwrap_or_else(|| {
+                            let from = repo_part
+                                .rsplit("requested from ")
+                                .next()
+                                .unwrap_or("@@]")
+                                .trim_end_matches(']');
+                            let origin = if from == "@@" {
+                                "main repository".to_string()
+                            } else {
+                                format!("repository '{from}'")
+                            };
+                            format!("No repository visible as '@{apparent}' from {origin}")
+                        });
                     return err(format!(
-                        "Unable to load package for @@{repo_part}//{tail}: The repository '@@{repo_part}' could not be resolved: No repository visible as '@{apparent}' from {origin}"
+                        "Unable to load package for @@{repo_part}//{tail}: The repository '@@{repo_part}' could not be resolved: {not_vis}"
                     ));
                 }
                 let p = Path::new(s);
@@ -970,25 +975,19 @@ impl CtxData {
             }
             Value::Host(k, id) if k == "path" => Ok(PathBuf::from(id)),
             Value::Label(l) => {
-                let repo = l.repository().name().to_string();
-                if let Some(rest) = repo.strip_prefix("[unknown repo '") {
-                    let apparent = rest.split('\'').next().unwrap_or("");
-                    let from = repo
-                        .rsplit("requested from ")
-                        .next()
-                        .unwrap_or("@@]")
-                        .trim_end_matches(']');
-                    let origin = if from == "@@" {
-                        "main repository".to_string()
-                    } else {
-                        format!("repository '{from}'")
-                    };
+                if !l.repository().is_visible() {
+                    let repo_disp = l.repository().canonical_form();
+                    let not_vis = l
+                        .repository()
+                        .not_visible_error_message()
+                        .unwrap_or_default();
                     let pkg = l.package_name();
                     return err(format!(
-                        "Unable to load package for @@{repo}//{pkg}:{}: The repository '@@{repo}' could not be resolved: No repository visible as '@{apparent}' from {origin}",
+                        "Unable to load package for {repo_disp}//{pkg}:{}: The repository '{repo_disp}' could not be resolved: {not_vis}",
                         l.name()
                     ));
                 }
+                let repo = l.repository().name().to_string();
                 let dir = s_err(rt.fetch_repo(&repo))?;
                 let pkg = l.package_name();
                 let base = if pkg.is_empty() { dir } else { dir.join(pkg) };

@@ -887,3 +887,95 @@ fn error_info_child_merging_walkable_graph_and_modified_file_set() {
         "NotComparableSkyValue must not be pruned"
     );
 }
+
+#[test]
+fn package_lookup_and_load_preserve_repo_did_you_mean_suggestion() {
+    use zel_cmdline::{RepositoryMapping, RepositoryName};
+    use zel_packages::lookup::RepoResolverSlot;
+
+    let (fs, ws) = mem_world(&[("BUILD", "filegroup(name = \"root\", srcs = [])\n")]);
+    let mut rr = SimpleRepoResolver::new(ws.clone());
+    rr.apparent.insert(String::new(), RepositoryName::main());
+    rr.apparent.insert(
+        "rules_rs".into(),
+        RepositoryName::create("rules_rs+").unwrap(),
+    );
+    let slot = RepoResolverSlot::new();
+    let rr_arc: Arc<dyn zel_packages::RepoResolver> = Arc::new(rr);
+    slot.set(Some(Arc::clone(&rr_arc)));
+
+    let exec = SkyframeExecutor::with_functions_and_resolver(
+        fs.clone() as Arc<dyn FileSystem>,
+        ws.clone(),
+        Vec::new(),
+        slot,
+    );
+
+    // 1. Non-visible repo from main repository with typo -> preserves `(did you mean 'rules_rs'?)`.
+    let main_mapping = rr_arc.mapping(&RepositoryName::main());
+    let non_vis_main = main_mapping.get("rules_r");
+    assert!(!non_vis_main.is_visible());
+    let pkg_non_vis_main =
+        PackageIdentifier::create(non_vis_main, PathFragment::create("rust")).unwrap();
+    let lookup_key_main = SkyKey::PackageLookup(pkg_non_vis_main.clone());
+    let res_main = exec
+        .evaluator
+        .evaluate(std::slice::from_ref(&lookup_key_main));
+    let err_main = res_main.errors.get(&lookup_key_main).unwrap();
+    assert_eq!(
+        err_main.message,
+        "no such package '@@[unknown repo 'rules_r' requested from @@ (did you mean 'rules_rs'?)]//rust': \
+         The repository '@@[unknown repo 'rules_r' requested from @@ (did you mean 'rules_rs'?)]' could not be resolved: \
+         No repository visible as '@rules_r' from main repository (did you mean 'rules_rs'?)"
+    );
+
+    // 2. Non-visible repo from external repository `@@helper+` -> preserves owner and suggestion.
+    let helper_owner = RepositoryName::create("helper+").unwrap();
+    let helper_mapping = RepositoryMapping::new_ordered(
+        vec![(
+            "helper_dep".to_string(),
+            RepositoryName::create("helper_dep+").unwrap(),
+        )],
+        helper_owner,
+    );
+    let non_vis_ext = helper_mapping.get("helper_deb");
+    let pkg_non_vis_ext =
+        PackageIdentifier::create(non_vis_ext, PathFragment::create("sub")).unwrap();
+    let lookup_key_ext = SkyKey::PackageLookup(pkg_non_vis_ext);
+    let res_ext = exec
+        .evaluator
+        .evaluate(std::slice::from_ref(&lookup_key_ext));
+    let err_ext = res_ext.errors.get(&lookup_key_ext).unwrap();
+    assert_eq!(
+        err_ext.message,
+        "no such package '@@[unknown repo 'helper_deb' requested from @@helper+ (did you mean 'helper_dep'?)]//sub': \
+         The repository '@@[unknown repo 'helper_deb' requested from @@helper+ (did you mean 'helper_dep'?)]' could not be resolved: \
+         No repository visible as '@helper_deb' from repository '@@helper+' (did you mean 'helper_dep'?)"
+    );
+
+    // 3. Visible-but-unresolved repo name against installed RepoResolverSlot -> computes suggestion.
+    let pkg_vis_missing = PackageIdentifier::create(
+        RepositoryName::create("rules_r").unwrap(),
+        PathFragment::create("rust"),
+    )
+    .unwrap();
+    let lookup_key_vis = SkyKey::PackageLookup(pkg_vis_missing);
+    let res_vis = exec
+        .evaluator
+        .evaluate(std::slice::from_ref(&lookup_key_vis));
+    let err_vis = res_vis.errors.get(&lookup_key_vis).unwrap();
+    assert_eq!(
+        err_vis.message,
+        "no such package '@@[unknown repo 'rules_r' requested from @@ (did you mean 'rules_rs'?)]//rust': \
+         The repository '@@[unknown repo 'rules_r' requested from @@ (did you mean 'rules_rs'?)]' could not be resolved: \
+         No repository visible as '@rules_r' from main repository (did you mean 'rules_rs'?)"
+    );
+
+    // 4. `PackageLoader::load_package` backed by `exec.package_cache()` preserves identical wording.
+    exec.sync("opts-v1");
+    let mut cfg = LoaderConfig::new(exec.recording_fs(), rr_arc);
+    cfg.package_cache = Some(exec.package_cache());
+    let loader = PackageLoader::new(cfg);
+    let load_err = loader.load_package(&pkg_non_vis_main).unwrap_err();
+    assert_eq!(load_err.message, err_main.message);
+}
