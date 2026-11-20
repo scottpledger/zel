@@ -74,6 +74,68 @@ pub fn setting_value(cfg: &BuildConfigurationKey, key: &str) -> Value {
                 to_list_value(vars.iter().map(env_var_raw).collect())
             }
             other if is_list_option(other) => {
+                if crate::build_options::find_option(other)
+                    .is_some_and(|(_, opt)| opt.java_type.contains("PerLabelOptions"))
+                {
+                    if cfg.is_exec {
+                        if other == "per_file_copt" {
+                            if let Some(raw) = cfg.options.get("per_file_copt") {
+                                return to_list_value(crate::build_options::decode_unsplit_list(
+                                    raw,
+                                ));
+                            }
+                            if cfg.has_options_override("host_per_file_copt") {
+                                let raw = cfg
+                                    .options
+                                    .get("host_per_file_copt")
+                                    .map(String::as_str)
+                                    .unwrap_or("");
+                                return to_list_value(crate::build_options::decode_unsplit_list(
+                                    raw,
+                                ));
+                            }
+                            if let Some(n) = cfg.native.get("host_per_file_copt") {
+                                if !n.raw.is_empty() {
+                                    return to_list_value(
+                                        crate::build_options::decode_unsplit_list(&n.raw),
+                                    );
+                                }
+                            }
+                        } else if other == "per_file_ltobackendopt" {
+                            if let Some(raw) = cfg.options.get("per_file_ltobackendopt") {
+                                return to_list_value(crate::build_options::decode_unsplit_list(
+                                    raw,
+                                ));
+                            }
+                        } else if cfg.has_options_override(other) {
+                            let raw = cfg.options.get(other).map(String::as_str).unwrap_or("");
+                            return to_list_value(crate::build_options::decode_unsplit_list(raw));
+                        } else if let Some(n) = cfg.native.get(other) {
+                            if !n.raw.is_empty() {
+                                return to_list_value(crate::build_options::decode_unsplit_list(
+                                    &n.raw,
+                                ));
+                            }
+                        }
+                    } else if cfg.has_options_override(other) {
+                        let raw = cfg.options.get(other).map(String::as_str).unwrap_or("");
+                        return to_list_value(crate::build_options::decode_unsplit_list(raw));
+                    } else if let Some(n) = cfg.native.get(other) {
+                        if !n.raw.is_empty() {
+                            return to_list_value(crate::build_options::decode_unsplit_list(
+                                &n.raw,
+                            ));
+                        }
+                    }
+                    return match cfg.build_options().get(other) {
+                        Some(crate::build_options::ConfigValue::List(l)) => to_list_value(
+                            l.iter()
+                                .map(|e| crate::starlark_rule::reverse_per_label_for_starlark(e))
+                                .collect(),
+                        ),
+                        _ => to_list_value(Vec::new()),
+                    };
+                }
                 if cfg.has_options_override(other) {
                     let raw = cfg.options.get(other).map(String::as_str).unwrap_or("");
                     let splits_commas =
@@ -90,17 +152,6 @@ pub fn setting_value(cfg: &BuildConfigurationKey, key: &str) -> Value {
                     };
                     to_list_value(items)
                 } else {
-                    if crate::build_options::find_option(other)
-                        .is_some_and(|(_, opt)| opt.java_type.contains("PerLabelOptions"))
-                    {
-                        if let Some(n) = cfg.native.get(other) {
-                            if !n.raw.is_empty() {
-                                return to_list_value(crate::build_options::decode_unsplit_list(
-                                    &n.raw,
-                                ));
-                            }
-                        }
-                    }
                     match cfg.build_options().get(other) {
                         Some(crate::build_options::ConfigValue::List(l)) => {
                             to_list_value(l.clone())

@@ -1353,14 +1353,26 @@ toolchain(
         r#"
 def _tr_impl(settings, attr):
     cur = settings["//command_line_option:per_file_copt"]
+    if len(cur) != 2:
+        fail("expected 2 CLI per_file_copt entries, got %r" % (cur,))
+    lto_cur = settings["//command_line_option:per_file_ltobackendopt"]
+    if len(lto_cur) != 2:
+        fail("expected 2 CLI per_file_ltobackendopt entries, got %r" % (lto_cur,))
     return {
         "//command_line_option:per_file_copt": list(cur) + ["p/main\\.cc@-DTRANSITION_PER_FILE=1"],
+        "//command_line_option:per_file_ltobackendopt": list(lto_cur) + [".*main.*\\.o@-DLTO_TRANSITION=1"],
     }
 
 _tr = transition(
     implementation = _tr_impl,
-    inputs = ["//command_line_option:per_file_copt"],
-    outputs = ["//command_line_option:per_file_copt"],
+    inputs = [
+        "//command_line_option:per_file_copt",
+        "//command_line_option:per_file_ltobackendopt",
+    ],
+    outputs = [
+        "//command_line_option:per_file_copt",
+        "//command_line_option:per_file_ltobackendopt",
+    ],
 )
 
 def _wrap_impl(ctx):
@@ -1406,7 +1418,9 @@ wrap(
         "--features=parse_headers",
         "--features=thin_lto",
         "--per_file_copt=p/.*\\.cc,-p/skip\\,me\\.cc@-DPER_FILE_HIT=1,-DCOMMA_OPT=u\\,v",
+        "--per_file_copt=p/a\\,1\\.cc@-DPER_FILE_SECOND=2",
         "--per_file_ltobackendopt=.*a\\,1.*\\.o,-.*skip\\,me.*\\.o@-DLTO_PER_FILE=1",
+        "--per_file_ltobackendopt=.*main.*\\.o@-DLTO_SECOND=2,-DLTO_COMMA=x\\,y",
         "deps(//p:wrapped_app)",
     ]);
     assert_eq!(aq.code, 0, "stdout:\n{}\nstderr:\n{}", aq.out, aq.err);
@@ -1416,8 +1430,10 @@ wrap(
         aq.out
     );
     assert!(
-        aq.out.contains("-DPER_FILE_HIT=1") && aq.out.contains("-DCOMMA_OPT=u,v"),
-        "expected CLI --per_file_copt flags in matching compile action:\n{}",
+        aq.out.contains("-DPER_FILE_HIT=1")
+            && aq.out.contains("-DCOMMA_OPT=u,v")
+            && aq.out.contains("-DPER_FILE_SECOND=2"),
+        "expected both CLI --per_file_copt flags in matching compile actions:\n{}",
         aq.out
     );
     assert!(
@@ -1426,11 +1442,18 @@ wrap(
         aq.out
     );
     assert!(
-        aq.out.contains("-DLTO_PER_FILE=1"),
-        "expected CLI --per_file_ltobackendopt flag in matching LTO backend action:\n{}",
+        aq.out.contains("-DLTO_PER_FILE=1")
+            && aq.out.contains("-DLTO_SECOND=2")
+            && aq.out.contains("-DLTO_COMMA=x,y")
+            && aq.out.contains("-DLTO_TRANSITION=1"),
+        "expected both CLI --per_file_ltobackendopt flags and transition flag in LTO backend actions:\n{}",
         aq.out
     );
 
+    let mut saw_a1_compile = false;
+    let mut saw_main_compile = false;
+    let mut saw_a1_lto = false;
+    let mut saw_main_lto = false;
     let mut saw_skip_compile = false;
     let mut saw_skip_lto = false;
     let mut saw_ipp_header = false;
@@ -1443,6 +1466,49 @@ wrap(
                 "expected CppCompileHeader for tmpl.ipp:\n{block}"
             );
         }
+        if header.contains("a,1") {
+            if header.contains("Compiling") {
+                saw_a1_compile = true;
+                assert!(
+                    block.contains("-DPER_FILE_HIT=1")
+                        && block.contains("-DCOMMA_OPT=u,v")
+                        && block.contains("-DPER_FILE_SECOND=2")
+                        && !block.contains("-DTRANSITION_PER_FILE=1"),
+                    "a,1.cc compile action got unexpected per_file_copt flags:\n{block}"
+                );
+            }
+            if header.contains("LTO Backend Compile") {
+                saw_a1_lto = true;
+                assert!(
+                    block.contains("-DLTO_PER_FILE=1")
+                        && !block.contains("-DLTO_SECOND=2")
+                        && !block.contains("-DLTO_TRANSITION=1"),
+                    "a,1.o LTO backend action got unexpected per_file_ltobackendopt flags:\n{block}"
+                );
+            }
+        }
+        if header.contains("main") {
+            if header.contains("Compiling") {
+                saw_main_compile = true;
+                assert!(
+                    block.contains("-DPER_FILE_HIT=1")
+                        && block.contains("-DCOMMA_OPT=u,v")
+                        && block.contains("-DTRANSITION_PER_FILE=1")
+                        && !block.contains("-DPER_FILE_SECOND=2"),
+                    "main.cc compile action got unexpected per_file_copt flags:\n{block}"
+                );
+            }
+            if header.contains("LTO Backend Compile") {
+                saw_main_lto = true;
+                assert!(
+                    block.contains("-DLTO_SECOND=2")
+                        && block.contains("-DLTO_COMMA=x,y")
+                        && block.contains("-DLTO_TRANSITION=1")
+                        && !block.contains("-DLTO_PER_FILE=1"),
+                    "main.o LTO backend action got unexpected per_file_ltobackendopt flags:\n{block}"
+                );
+            }
+        }
         if header.contains("skip,me") {
             if header.contains("Compiling") {
                 saw_skip_compile = true;
@@ -1452,7 +1518,10 @@ wrap(
             }
             assert!(
                 !block.contains("-DPER_FILE_HIT=1")
+                    && !block.contains("-DPER_FILE_SECOND=2")
                     && !block.contains("-DLTO_PER_FILE=1")
+                    && !block.contains("-DLTO_SECOND=2")
+                    && !block.contains("-DLTO_TRANSITION=1")
                     && !block.contains("-DTRANSITION_PER_FILE=1"),
                 "excluded file skip,me.cc must not receive per-file copt or LTO backend opt:\n{block}"
             );
@@ -1461,6 +1530,11 @@ wrap(
     assert!(
         saw_ipp_header,
         "did not find tmpl.ipp action block in:\n{}",
+        aq.out
+    );
+    assert!(
+        saw_a1_compile && saw_main_compile && saw_a1_lto && saw_main_lto,
+        "missing expected compile or LTO backend action blocks in:\n{}",
         aq.out
     );
     assert!(

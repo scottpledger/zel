@@ -183,6 +183,23 @@ fn parse_per_label_entry(entry: &str) -> (String, Vec<String>) {
     }
 }
 
+/// `PerLabelOptions.PerLabelOptionsConverter.reverseForStarlark`: reconstructs `"<filter>@<opts>"`
+/// when only the `BuildOptions`-converted `PerLabelOptions.toString()` representation is present.
+pub(crate) fn reverse_per_label_for_starlark(entry: &str) -> String {
+    if entry.contains(" Options: [") && entry.ends_with(']') {
+        let (filter_spec, opts) = parse_per_label_entry(entry);
+        if !filter_spec.is_empty() || !opts.is_empty() {
+            let escaped = opts
+                .iter()
+                .map(|o| o.replace(',', "\\,"))
+                .collect::<Vec<_>>()
+                .join(",");
+            return format!("{filter_spec}@{escaped}");
+        }
+    }
+    entry.to_string()
+}
+
 fn cc_eval_per_file_opts(
     entries: &[String],
     file: &Artifact,
@@ -391,11 +408,23 @@ fn cc_declare_other_output(st: &Arc<CtxState>, pos: &[Value], kw: &BTreeMap<Stri
 
 /// `CppCompileActionBuilder.getActionName`: determines the default action name for `source`
 /// when no explicit `action_name` is supplied.
-fn cc_default_compile_action(source: &str, fc: &FeatureConfiguration) -> Result<&'static str, StarlarkError> {
-    let is_cppmap = if cfg!(windows) {
-        source.len() >= 7 && source[source.len() - 7..].eq_ignore_ascii_case(".cppmap")
+fn cc_default_compile_action(
+    source: &str,
+    fc: &FeatureConfiguration,
+) -> Result<&'static str, StarlarkError> {
+    cc_default_compile_action_for_os(source, fc, cfg!(windows))
+}
+
+fn cc_default_compile_action_for_os(
+    source: &str,
+    fc: &FeatureConfiguration,
+    windows: bool,
+) -> Result<&'static str, StarlarkError> {
+    let bytes = source.as_bytes();
+    let is_cppmap = if windows {
+        bytes.len() >= 7 && bytes[bytes.len() - 7..].eq_ignore_ascii_case(b".cppmap")
     } else {
-        source.ends_with(".cppmap")
+        bytes.ends_with(b".cppmap")
     };
     if is_cppmap {
         return Ok("c++-module-compile");
@@ -409,7 +438,7 @@ fn cc_default_compile_action(source: &str, fc: &FeatureConfiguration) -> Result<
     // `CppFileTypes`: `C_SOURCE`, `CPP_SOURCE`, `.s`, and `.S` are always case-sensitive;
     // `FileType.of(...)` extensions (`CPP_HEADER`, `.m`, `.mm`, `.asm`, `.ipb`, `CPP_MODULE`)
     // are case-sensitive on Unix and case-insensitive on Windows (`FileType.hasExtension`).
-    let is_header = if cfg!(windows) {
+    let is_header = if windows {
         matches!(
             ext.to_ascii_lowercase().as_str(),
             "h" | "hh" | "hpp" | "ipp" | "hxx" | "h++" | "inc" | "inl" | "tlh" | "tli" | "tcc"
@@ -435,7 +464,7 @@ fn cc_default_compile_action(source: &str, fc: &FeatureConfiguration) -> Result<
         "s" => Ok("assemble"),
         "S" => Ok("preprocess-assemble"),
         _ => {
-            let norm = if cfg!(windows) {
+            let norm = if windows {
                 ext.to_ascii_lowercase()
             } else {
                 ext.to_string()
@@ -2090,23 +2119,219 @@ mod cc_native_tests {
         .unwrap();
         assert_eq!(exec_res, mk_list(vec![Value::String("-DHOST_PFC=1".into())]));
 
-        // 2. CLI `NativeSetting` with `raw` preserved also exposes original `filter@opts` to
-        // Starlark transitions (`PerLabelOptionsConverter.reverseForStarlark`).
-        let mut cli_cfg = BuildConfigurationKey::target("k8", "fastbuild");
-        cli_cfg.native.insert(
-            "per_file_copt".into(),
-            crate::NativeSetting {
-                raw: crate::build_options::encode_unsplit_list(&pfc_raw),
-                value: pfc_converted,
-            },
-        );
-        assert_eq!(
-            crate::transition::setting_value(&cli_cfg, "//command_line_option:per_file_copt"),
-            mk_list(vec![Value::String(pfc_raw[0].clone())])
-        );
+        // 2. Multiple CLI `NativeSetting` entries (including when `cfg.options` holds either
+        // `\x1f`-joined or legacy `,`-joined mirrors), Starlark transitions reading & appending
+        // entries, and `to_exec()` isolating target `per_file_copt` / `per_file_ltobackendopt`
+        // while preserving multiple `host_per_file_copt` entries.
+        let (_, pfc_opt) = crate::build_options::find_option("per_file_copt").unwrap();
+        let (_, hpfc_opt) = crate::build_options::find_option("host_per_file_copt").unwrap();
+        let (_, pflto_opt) = crate::build_options::find_option("per_file_ltobackendopt").unwrap();
+        let multi_pfc = vec![
+            r"pkg/.*\.cc,-pkg/skip\,me\.cc@-O2,-DFOO=a\,b".to_string(),
+            r"pkg/keep\,ok\.cc@-DSECOND_PFC=1".to_string(),
+        ];
+        let multi_hpfc = vec![
+            r"pkg/tool.*\.cc,-pkg/tool_skip\.cc@-DHOST_FIRST=1".to_string(),
+            r"pkg/tool\.cc@-DHOST_SECOND=a\,b".to_string(),
+        ];
+        let multi_lto = vec![
+            r".*a\,1.*\.o,-.*skip\.o@-O3".to_string(),
+            r".*a\,1.*\.o@-mllvm".to_string(),
+        ];
+        let multi_pfc_conv = crate::build_options::convert_raws(
+            pfc_opt,
+            &multi_pfc,
+            &crate::build_options::canonical_label_default,
+            "k8",
+        )
+        .unwrap();
+        let multi_hpfc_conv = crate::build_options::convert_raws(
+            hpfc_opt,
+            &multi_hpfc,
+            &crate::build_options::canonical_label_default,
+            "k8",
+        )
+        .unwrap();
+        let multi_lto_conv = crate::build_options::convert_raws(
+            pflto_opt,
+            &multi_lto,
+            &crate::build_options::canonical_label_default,
+            "k8",
+        )
+        .unwrap();
+
+        for comma_mirrored in [false, true] {
+            let mut cli_cfg = BuildConfigurationKey::target("k8", "fastbuild");
+            cli_cfg.native.insert(
+                "per_file_copt".into(),
+                crate::NativeSetting {
+                    raw: crate::build_options::encode_unsplit_list(&multi_pfc),
+                    value: multi_pfc_conv.clone(),
+                },
+            );
+            cli_cfg.native.insert(
+                "host_per_file_copt".into(),
+                crate::NativeSetting {
+                    raw: crate::build_options::encode_unsplit_list(&multi_hpfc),
+                    value: multi_hpfc_conv.clone(),
+                },
+            );
+            cli_cfg.native.insert(
+                "per_file_ltobackendopt".into(),
+                crate::NativeSetting {
+                    raw: crate::build_options::encode_unsplit_list(&multi_lto),
+                    value: multi_lto_conv.clone(),
+                },
+            );
+            if comma_mirrored {
+                cli_cfg
+                    .options
+                    .insert("per_file_copt".into(), multi_pfc.join(","));
+                cli_cfg
+                    .options
+                    .insert("host_per_file_copt".into(), multi_hpfc.join(","));
+                cli_cfg
+                    .options
+                    .insert("per_file_ltobackendopt".into(), multi_lto.join(","));
+            } else {
+                cli_cfg.options.insert(
+                    "per_file_copt".into(),
+                    crate::build_options::encode_unsplit_list(&multi_pfc),
+                );
+                cli_cfg.options.insert(
+                    "host_per_file_copt".into(),
+                    crate::build_options::encode_unsplit_list(&multi_hpfc),
+                );
+                cli_cfg.options.insert(
+                    "per_file_ltobackendopt".into(),
+                    crate::build_options::encode_unsplit_list(&multi_lto),
+                );
+            }
+            assert!(!cli_cfg.has_options_override("per_file_copt"));
+            assert!(!cli_cfg.has_options_override("host_per_file_copt"));
+            assert!(!cli_cfg.has_options_override("per_file_ltobackendopt"));
+            assert_eq!(
+                crate::transition::setting_value(&cli_cfg, "//command_line_option:per_file_copt"),
+                mk_list(vec![
+                    Value::String(multi_pfc[0].clone()),
+                    Value::String(multi_pfc[1].clone()),
+                ])
+            );
+            assert_eq!(
+                crate::transition::setting_value(
+                    &cli_cfg,
+                    "//command_line_option:per_file_ltobackendopt"
+                ),
+                mk_list(vec![
+                    Value::String(multi_lto[0].clone()),
+                    Value::String(multi_lto[1].clone()),
+                ])
+            );
+
+            let mut cli_st = Arc::try_unwrap(cc_test_ctx_state(&label)).ok().unwrap();
+            cli_st.cfg = cli_cfg.clone();
+            let cli_st = Arc::new(cli_st);
+            let cpp_frag_cli = Value::Host("fragment".into(), "cpp".into());
+            let cli_copt = cc_native(
+                &cli_st,
+                &mut ectx,
+                "cc_internal.per_file_copts",
+                &[cpp_frag_cli.clone(), file_value(&match_src), Value::None],
+                &BTreeMap::new(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                cli_copt,
+                mk_list(vec![
+                    Value::String("-O2".into()),
+                    Value::String("-DFOO=a,b".into()),
+                    Value::String("-DSECOND_PFC=1".into()),
+                ])
+            );
+            let cli_lto = cc_native(
+                &cli_st,
+                &mut ectx,
+                "cc_internal.collect_per_file_lto_backend_opts",
+                &[cpp_frag_cli.clone(), file_value(&obj_match)],
+                &BTreeMap::new(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                cli_lto,
+                mk_list(vec![
+                    Value::String("-O3".into()),
+                    Value::String("-mllvm".into()),
+                ])
+            );
+
+            // Starlark transition appends a 3rd target `per_file_copt`; `to_exec()` must NOT leak
+            // target `per_file_copt` or `per_file_ltobackendopt`, and must apply both
+            // `host_per_file_copt` entries.
+            let mut tr_cfg = cli_cfg.clone();
+            crate::transition::set_setting(
+                &mut tr_cfg,
+                "//command_line_option:per_file_copt",
+                &mk_list(vec![
+                    Value::String(multi_pfc[0].clone()),
+                    Value::String(multi_pfc[1].clone()),
+                    Value::String(r"pkg/tool\.cc@-DLEAKED_TARGET=1".into()),
+                ]),
+            )
+            .unwrap();
+            let exec_from_tr = tr_cfg.to_exec();
+            assert_eq!(
+                crate::transition::setting_value(
+                    &exec_from_tr,
+                    "//command_line_option:per_file_copt"
+                ),
+                mk_list(vec![
+                    Value::String(multi_hpfc[0].clone()),
+                    Value::String(multi_hpfc[1].clone()),
+                ])
+            );
+            assert_eq!(
+                crate::transition::setting_value(
+                    &exec_from_tr,
+                    "//command_line_option:per_file_ltobackendopt"
+                ),
+                mk_list(vec![])
+            );
+            let mut exec_tr_st = Arc::try_unwrap(cc_test_ctx_state(&label)).ok().unwrap();
+            exec_tr_st.cfg = exec_from_tr;
+            let exec_tr_st = Arc::new(exec_tr_st);
+            let exec_copt = cc_native(
+                &exec_tr_st,
+                &mut ectx,
+                "cc_internal.per_file_copts",
+                &[cpp_frag_cli.clone(), file_value(&tool_src), Value::None],
+                &BTreeMap::new(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(
+                exec_copt,
+                mk_list(vec![
+                    Value::String("-DHOST_FIRST=1".into()),
+                    Value::String("-DHOST_SECOND=a,b".into()),
+                ])
+            );
+            let exec_lto = cc_native(
+                &exec_tr_st,
+                &mut ectx,
+                "cc_internal.collect_per_file_lto_backend_opts",
+                &[cpp_frag_cli, file_value(&obj_match)],
+                &BTreeMap::new(),
+            )
+            .unwrap()
+            .unwrap();
+            assert_eq!(exec_lto, mk_list(vec![]));
+        }
 
         // 3. All 12 `CppFileTypes.CPP_HEADER` extensions (including `.ipp`) map to
-        // `c++-header-parsing` when `parse_headers` is enabled and fail cleanly when disabled.
+        // `c++-header-parsing` when `parse_headers` is enabled and fail cleanly when disabled,
+        // and multibyte UTF-8 filenames never panic on Windows `.cppmap` suffix matching.
         let tool = test_struct(vec![("path", Value::String("/usr/bin/g++".into()))]);
         let hdr_ac = test_struct(vec![
             ("action_name", Value::String("c++-header-parsing".into())),
@@ -2140,5 +2365,28 @@ mod cc_native_tests {
                 "{disabled_err:?}"
             );
         }
+
+        // Multibyte UTF-8 paths where `source.len() - 7` falls mid-codepoint (2-, 3-, and 4-byte
+        // UTF-8 sequences) must never panic under Windows case-insensitive `.cppmap` detection.
+        for (utf8_src, expected) in [
+            ("aéé.cc", "c++-compile"),
+            ("ééé.cc", "c++-compile"),
+            ("日本語.h", "c++-header-parsing"),
+            ("🦀🦀.cpp", "c++-compile"),
+            ("модуль.cppmap", "c++-module-compile"),
+        ] {
+            for win in [false, true] {
+                assert_eq!(
+                    cc_default_compile_action_for_os(utf8_src, &fc_enabled, win).unwrap(),
+                    expected,
+                    "utf8_src={utf8_src} windows={win}"
+                );
+            }
+        }
+        assert_eq!(
+            cc_default_compile_action_for_os("модуль.CPPMAP", &fc_enabled, true).unwrap(),
+            "c++-module-compile"
+        );
+        assert!(cc_default_compile_action_for_os("модуль.CPPMAP", &fc_enabled, false).is_err());
     }
 }

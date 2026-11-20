@@ -142,7 +142,7 @@ impl<'a> Opts<'a> {
         }
         if let Some(v) = self.cfg.options.get(k) {
             return v
-                .split(',')
+                .split([',', crate::build_options::MULTI_OPT_SEP])
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect();
@@ -150,12 +150,12 @@ impl<'a> Opts<'a> {
         match self.bo.get(k) {
             Some(crate::build_options::ConfigValue::List(vs)) => vs
                 .iter()
-                .flat_map(|v| v.split(','))
+                .flat_map(|v| v.split([',', crate::build_options::MULTI_OPT_SEP]))
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect(),
             Some(crate::build_options::ConfigValue::Scalar(v)) => v
-                .split(',')
+                .split([',', crate::build_options::MULTI_OPT_SEP])
                 .filter(|s| !s.is_empty())
                 .map(str::to_string)
                 .collect(),
@@ -186,6 +186,9 @@ impl<'a> Opts<'a> {
     pub(crate) fn per_label_list(&self, k: &str) -> Vec<String> {
         if self.cfg.is_exec {
             if k == "per_file_copt" {
+                if let Some(v) = self.cfg.options.get("per_file_copt") {
+                    return crate::build_options::decode_unsplit_list(v);
+                }
                 if self.cfg.has_options_override("host_per_file_copt") {
                     if let Some(v) = self.cfg.options.get("host_per_file_copt") {
                         return crate::build_options::decode_unsplit_list(v);
@@ -196,8 +199,14 @@ impl<'a> Opts<'a> {
                         return crate::build_options::decode_unsplit_list(&n.raw);
                     }
                 }
+                return self.list_unsplit(k);
             }
-            return self.list_unsplit(k);
+            if k == "per_file_ltobackendopt" {
+                if let Some(v) = self.cfg.options.get("per_file_ltobackendopt") {
+                    return crate::build_options::decode_unsplit_list(v);
+                }
+                return self.list_unsplit(k);
+            }
         }
         if self.cfg.has_options_override(k) {
             if let Some(v) = self.cfg.options.get(k) {

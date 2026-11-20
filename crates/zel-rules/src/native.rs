@@ -593,7 +593,7 @@ pub(crate) fn java_plugins_flag_alias(n: &Nctx) -> Result<ConfiguredTarget, Stri
     }
     let bo = n.cfg.build_options();
     let raw_plugins: Vec<String> = if let Some(s) = n.cfg.options.get("plugin") {
-        s.split(',')
+        s.split([',', zel_analysis::build_options::MULTI_OPT_SEP])
             .filter(|x| !x.is_empty())
             .map(str::to_string)
             .collect()
@@ -601,12 +601,12 @@ pub(crate) fn java_plugins_flag_alias(n: &Nctx) -> Result<ConfiguredTarget, Stri
         match bo.get("plugin") {
             Some(zel_analysis::build_options::ConfigValue::List(vs)) => vs
                 .iter()
-                .flat_map(|x| x.split(','))
+                .flat_map(|x| x.split([',', zel_analysis::build_options::MULTI_OPT_SEP]))
                 .filter(|x| !x.is_empty())
                 .map(str::to_string)
                 .collect(),
             Some(zel_analysis::build_options::ConfigValue::Scalar(s)) => s
-                .split(',')
+                .split([',', zel_analysis::build_options::MULTI_OPT_SEP])
                 .filter(|x| !x.is_empty())
                 .map(str::to_string)
                 .collect(),

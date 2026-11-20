@@ -64,7 +64,7 @@ pub struct BuildConfigurationKey {
     /// `config.<type>` of each Starlark flag in `flag_values` (label -> `string`/`bool`/`int`/`string_list`/...).
     pub flag_types: BTreeMap<String, String>,
     /// Other native options by name without dashes (`copt`, `cxxopt`, `platforms`, ...);
-    /// multi-valued options are comma-joined.
+    /// comma-separated options are `,`-joined and repeatable unsplit options are `\x1f`-joined.
     pub options: BTreeMap<String, String>,
     /// `--platforms` (target platform labels).
     pub platforms: Vec<String>,
@@ -178,6 +178,14 @@ impl BuildConfigurationKey {
             return true;
         };
         if n.raw != *raw {
+            let clo = format!("//command_line_option:{name}");
+            if n.raw.contains(build_options::MULTI_OPT_SEP)
+                && !self.transition_changes.contains_key(&clo)
+                && !self.post_exec.contains_key(name)
+                && n.raw.replace(build_options::MULTI_OPT_SEP, ",") == *raw
+            {
+                return false;
+            }
             return true;
         }
         raw.is_empty()
@@ -343,6 +351,21 @@ impl BuildConfigurationKey {
         // `--tool_java_{language,runtime}_version` become `--java_{language,runtime}_version`.
         out.options.remove("plugin");
         out.native.remove("plugin");
+        out.options.remove("per_file_ltobackendopt");
+        out.native.remove("per_file_ltobackendopt");
+        if self.has_options_override("host_per_file_copt") {
+            if let Some(hpfc) = self.options.get("host_per_file_copt").cloned() {
+                out.options.insert("per_file_copt".to_string(), hpfc);
+            }
+            if let Some(hpfc_nat) = self.native.get("host_per_file_copt").cloned() {
+                out.native.insert("per_file_copt".to_string(), hpfc_nat);
+            } else {
+                out.native.remove("per_file_copt");
+            }
+        } else {
+            out.options.remove("per_file_copt");
+            out.native.remove("per_file_copt");
+        }
         let host_launcher = self
             .options
             .get("host_java_launcher")
