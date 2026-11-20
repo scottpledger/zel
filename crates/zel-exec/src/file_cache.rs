@@ -132,8 +132,10 @@ impl<'a> SingleBuildFileCache<'a> {
             )));
         }
         let disk_path = match &self.source_root {
-            Some(sr) => sr.get_relative(&artifact.root_relative_path),
-            None => self.exec_root.get_relative(&artifact.exec_path),
+            Some(sr) if artifact.owner_label.repository().is_main() => {
+                sr.get_relative(&artifact.root_relative_path)
+            }
+            _ => self.exec_root.get_relative(&artifact.exec_path),
         };
         self.lookup_or_stat(&artifact.exec_path, &disk_path)
     }

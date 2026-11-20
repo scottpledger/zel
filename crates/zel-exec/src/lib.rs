@@ -1427,39 +1427,41 @@ pub fn execute_action_with(
         .filter(|a| a.is_source && !a.is_tree_artifact && !a.is_unresolved_symlink)
         .map(|a| (a.exec_path.path_string(), a))
         .collect();
-    let md_digest_of = |discovered: &[String]| -> String {
-        let mut all: Vec<(String, Option<String>)> = Vec::new();
-        for p in declared_inputs.iter().chain(discovered.iter()) {
-            let d = if constant_metadata_paths.contains(p.as_str())
-                || p == "bazel-out/volatile-status.txt"
-            {
-                let target = execroot.get_relative_str(p);
-                fs.exists(&target, true)
-                    .then(|| "CONSTANT_METADATA".to_string())
-            } else if let Some(fc) = &opts.file_cache {
-                if let Some(src_art) = source_by_exec.get(p.as_str()) {
-                    match fc.get_artifact_metadata(src_art) {
-                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                        Err(file_cache::FileCacheError::Directory(_)) => {
-                            path_digest(digest, fs, &execroot.get_relative_str(p))
-                        }
-                        Err(_) => None,
+    let input_digest_of = |p: &str| -> Option<String> {
+        if constant_metadata_paths.contains(p) || p == "bazel-out/volatile-status.txt" {
+            let target = execroot.get_relative_str(p);
+            return fs
+                .exists(&target, true)
+                .then(|| "CONSTANT_METADATA".to_string());
+        }
+        if let Some(fc) = &opts.file_cache {
+            if let Some(src_art) = source_by_exec.get(p) {
+                match fc.get_artifact_metadata(src_art) {
+                    Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                    Err(file_cache::FileCacheError::Directory(_)) => {
+                        path_digest(digest, fs, &execroot.get_relative_str(p))
                     }
-                } else if !p.starts_with("bazel-out/") {
-                    match fc.get_input_metadata(&PathFragment::create(p)) {
-                        Ok(m) => Some(zel_util::to_hex(&m.digest)),
-                        Err(file_cache::FileCacheError::Directory(_)) => {
-                            path_digest(digest, fs, &execroot.get_relative_str(p))
-                        }
-                        Err(_) => None,
+                    Err(_) => None,
+                }
+            } else if !p.starts_with("bazel-out/") {
+                match fc.get_input_metadata(&PathFragment::create(p)) {
+                    Ok(m) => Some(zel_util::to_hex(&m.digest)),
+                    Err(file_cache::FileCacheError::Directory(_)) => {
+                        path_digest(digest, fs, &execroot.get_relative_str(p))
                     }
-                } else {
-                    path_digest(digest, fs, &execroot.get_relative_str(p))
+                    Err(_) => None,
                 }
             } else {
                 path_digest(digest, fs, &execroot.get_relative_str(p))
-            };
-            all.push((p.clone(), d));
+            }
+        } else {
+            path_digest(digest, fs, &execroot.get_relative_str(p))
+        }
+    };
+    let md_digest_of = |discovered: &[String]| -> String {
+        let mut all: Vec<(String, Option<String>)> = Vec::new();
+        for p in declared_inputs.iter().chain(discovered.iter()) {
+            all.push((p.clone(), input_digest_of(p)));
         }
         all.extend(tool_rf_entries.iter().cloned());
         all.sort();
@@ -1643,7 +1645,7 @@ pub fn execute_action_with(
         .map(|p| {
             let abs_in = execroot.get_relative_str(p);
             invalidate_computed_digest(abs_in.path_string());
-            (p.clone(), path_digest(digest, fs, &abs_in))
+            (p.clone(), input_digest_of(p))
         })
         .collect();
 
@@ -2748,8 +2750,7 @@ pub fn execute_action_with(
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
             for p in &discovered {
-                let d = path_digest(digest, fs, &execroot.get_relative_str(p));
-                all.push((p.clone(), d));
+                all.push((p.clone(), input_digest_of(p)));
             }
             all.extend(tool_rf_entries.iter().cloned());
             all.sort();

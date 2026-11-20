@@ -523,8 +523,11 @@ def _ord_impl(name, visibility):
 
 ord_macro = macro(implementation = _ord_impl)
 
+def _dropped_impl(name, visibility, **kwargs):
+    native.filegroup(name = name + "_inner_lib", visibility = visibility, **kwargs)
+
 dropped_srcs_macro = macro(
-    implementation = _ord_impl,
+    implementation = _dropped_impl,
     inherit_attrs = native.filegroup,
     attrs = {"srcs": None},
 )
