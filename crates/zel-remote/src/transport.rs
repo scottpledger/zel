@@ -19,11 +19,11 @@
 
 use std::collections::VecDeque;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Shutdown, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Shutdown, SocketAddr, TcpStream, ToSocketAddrs};
 use std::path::PathBuf;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// A connected byte stream split into halves plus a shutdown hook.
 pub struct Transport {
@@ -53,6 +53,66 @@ pub struct TcpConnector {
     pub authority_override: Option<String>,
 }
 
+fn connect_addrs_with<I, F>(
+    addrs: I,
+    connect_timeout: Duration,
+    io_timeout: Option<Duration>,
+    mut dial: F,
+) -> io::Result<Transport>
+where
+    I: IntoIterator<Item = SocketAddr>,
+    F: FnMut(&SocketAddr, Option<Duration>) -> io::Result<TcpStream>,
+{
+    let mut last = io::Error::new(io::ErrorKind::NotFound, "no addresses resolved");
+    let dial_timeout = (!connect_timeout.is_zero()).then_some(connect_timeout);
+    let active_io_timeout = io_timeout.filter(|t| !t.is_zero());
+    for addr in addrs {
+        match dial(&addr, dial_timeout) {
+            Ok(s) => {
+                let _ = s.set_nodelay(true);
+                if let Some(t) = active_io_timeout {
+                    let _ = s.set_read_timeout(Some(t));
+                    let _ = s.set_write_timeout(Some(t));
+                }
+                let r = s.try_clone()?;
+                let w = s.try_clone()?;
+                if let Some(t) = active_io_timeout {
+                    let _ = r.set_read_timeout(Some(t));
+                    let _ = w.set_write_timeout(Some(t));
+                }
+                return Ok(Transport {
+                    reader: Box::new(r),
+                    writer: Box::new(w),
+                    shutdown: Box::new(move || {
+                        let _ = s.shutdown(Shutdown::Both);
+                    }),
+                });
+            }
+            Err(e) => last = e,
+        }
+    }
+    Err(last)
+}
+
+fn connect_addrs<I>(
+    addrs: I,
+    connect_timeout: Duration,
+    io_timeout: Option<Duration>,
+) -> io::Result<Transport>
+where
+    I: IntoIterator<Item = SocketAddr>,
+{
+    connect_addrs_with(
+        addrs,
+        connect_timeout,
+        io_timeout,
+        |addr, timeout| match timeout {
+            Some(dur) => TcpStream::connect_timeout(addr, dur),
+            None => TcpStream::connect(*addr),
+        },
+    )
+}
+
 impl TcpConnector {
     pub fn new(host: String, port: u16, connect_timeout: Duration) -> Self {
         Self {
@@ -68,52 +128,13 @@ impl TcpConnector {
         connect_timeout: Duration,
         io_timeout: Option<Duration>,
     ) -> io::Result<Transport> {
-        let mut last = io::Error::new(io::ErrorKind::NotFound, "no addresses resolved");
-        let deadline = if connect_timeout.is_zero() {
-            None
-        } else {
-            Some(Instant::now() + connect_timeout)
-        };
-        for addr in (self.host.as_str(), self.port).to_socket_addrs()? {
-            let attempt = match deadline {
-                Some(dl) => {
-                    let rem = dl.saturating_duration_since(Instant::now());
-                    if rem.is_zero() {
-                        return Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "connection timed out",
-                        ));
-                    }
-                    TcpStream::connect_timeout(&addr, rem)
-                }
-                None => TcpStream::connect(addr),
-            };
-            match attempt {
-                Ok(s) => {
-                    let _ = s.set_nodelay(true);
-                    let active_io_timeout = io_timeout.filter(|t| !t.is_zero());
-                    if let Some(t) = active_io_timeout {
-                        let _ = s.set_read_timeout(Some(t));
-                        let _ = s.set_write_timeout(Some(t));
-                    }
-                    let r = s.try_clone()?;
-                    let w = s.try_clone()?;
-                    if let Some(t) = active_io_timeout {
-                        let _ = r.set_read_timeout(Some(t));
-                        let _ = w.set_write_timeout(Some(t));
-                    }
-                    return Ok(Transport {
-                        reader: Box::new(r),
-                        writer: Box::new(w),
-                        shutdown: Box::new(move || {
-                            let _ = s.shutdown(Shutdown::Both);
-                        }),
-                    });
-                }
-                Err(e) => last = e,
-            }
-        }
-        Err(last)
+        let lookup_host = self
+            .host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(self.host.as_str());
+        let addrs = (lookup_host, self.port).to_socket_addrs()?;
+        connect_addrs(addrs, connect_timeout, io_timeout)
     }
 }
 
@@ -344,16 +365,28 @@ impl Connector for TlsConnector {
         if let Some(unix_path) = &self.unix_proxy {
             cmd.arg("-unix").arg(unix_path);
         } else {
-            // Ensure hostname resolves first so DNS failures surface immediately and cleanly.
-            let mut addrs = (self.host.as_str(), self.port).to_socket_addrs()?;
-            let first = addrs
-                .next()
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "no addresses resolved"))?;
-            let connect_arg = match first.ip() {
-                IpAddr::V4(v4) => format!("{v4}:{}", self.port),
-                IpAddr::V6(v6) => format!("[{v6}]:{}", self.port),
+            // Ensure hostname resolves first so DNS failures surface immediately and cleanly,
+            // while passing the host to `openssl s_client` so OpenSSL can fall back across all
+            // resolved addresses on dual-stack hosts.
+            let lookup_host = self
+                .host
+                .strip_prefix('[')
+                .and_then(|h| h.strip_suffix(']'))
+                .unwrap_or(self.host.as_str());
+            let mut addrs = (lookup_host, self.port).to_socket_addrs()?;
+            if addrs.next().is_none() {
+                return Err(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "no addresses resolved",
+                ));
+            }
+            let connect_host = if lookup_host.contains(':') {
+                format!("[{lookup_host}]")
+            } else {
+                lookup_host.to_string()
             };
-            cmd.arg("-connect").arg(connect_arg);
+            cmd.arg("-connect")
+                .arg(format!("{connect_host}:{}", self.port));
         }
 
         if let Ok(ip) = verify_peer.parse::<IpAddr>() {
@@ -596,6 +629,100 @@ mod tests {
         assert_eq!(&buf, b"yo");
         (a.shutdown)();
         assert_eq!(b.reader.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn tcp_connector_gives_each_resolved_address_full_connect_timeout_and_falls_back() {
+        let listener = match std::net::TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) if e.kind() == io::ErrorKind::PermissionDenied => return,
+            Err(e) => panic!("{e}"),
+        };
+        let live_addr = listener.local_addr().unwrap();
+
+        let accept_handle = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut s, _) = listener.accept().unwrap();
+                let mut got = [0u8; 4];
+                s.read_exact(&mut got).unwrap();
+                assert_eq!(&got, b"ping");
+                s.write_all(b"pong").unwrap();
+            }
+        });
+
+        // 1) Simulate a blackholed first address (e.g. IPv6 SYN drop) whose connect attempt
+        //    consumes the entire `connect_timeout` budget: the second address (IPv4) must still
+        //    receive its own full `connect_timeout` and succeed.
+        let blackhole_addr: SocketAddr = "[::1]:9".parse().unwrap();
+        let per_addr_timeout = Duration::from_millis(40);
+        let mut dialed = Vec::new();
+        let mut tr = connect_addrs_with(
+            [blackhole_addr, live_addr],
+            per_addr_timeout,
+            Some(Duration::from_millis(500)),
+            |addr, timeout| {
+                dialed.push((*addr, timeout));
+                if *addr == blackhole_addr {
+                    std::thread::sleep(Duration::from_millis(55));
+                    Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "simulated IPv6 SYN blackhole",
+                    ))
+                } else {
+                    TcpStream::connect_timeout(addr, timeout.unwrap())
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            dialed,
+            vec![
+                (blackhole_addr, Some(per_addr_timeout)),
+                (live_addr, Some(per_addr_timeout)),
+            ]
+        );
+        tr.writer.write_all(b"ping").unwrap();
+        tr.writer.flush().unwrap();
+        let mut reply = [0u8; 4];
+        tr.reader.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"pong");
+        (tr.shutdown)();
+
+        // 2) Real `connect_addrs` falls back from an unreachable/closed first `SocketAddr` to a
+        //    live second `SocketAddr`.
+        let closed_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed_addr = closed_listener.local_addr().unwrap();
+        drop(closed_listener);
+
+        let mut tr2 = connect_addrs(
+            [closed_addr, live_addr],
+            Duration::from_millis(500),
+            Some(Duration::from_millis(500)),
+        )
+        .unwrap();
+        tr2.writer.write_all(b"ping").unwrap();
+        tr2.writer.flush().unwrap();
+        tr2.reader.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"pong");
+        (tr2.shutdown)();
+
+        // 3) Dual-stack `localhost` resolution against an IPv4-only listener (`127.0.0.1:port`)
+        //    falls back across `[::1]` -> `127.0.0.1`.
+        let conn = TcpConnector::new(
+            "localhost".into(),
+            live_addr.port(),
+            Duration::from_millis(500),
+        );
+        let mut tr3 = conn
+            .connect_with_timeout(Duration::from_millis(500))
+            .unwrap();
+        tr3.writer.write_all(b"ping").unwrap();
+        tr3.writer.flush().unwrap();
+        tr3.reader.read_exact(&mut reply).unwrap();
+        assert_eq!(&reply, b"pong");
+        (tr3.shutdown)();
+
+        accept_handle.join().unwrap();
     }
 
     #[test]
