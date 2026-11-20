@@ -163,7 +163,7 @@ pub fn fetch_url(url: &str, timeout_secs: u64) -> Result<Option<Vec<u8>>, String
     let is_http = url.starts_with("http://") || url.starts_with("https://");
     let auth_hdrs = if is_http {
         let ctx = REGISTRY_AUTH.with(|c| c.borrow().clone());
-        crate::netrc::resolve_auth_headers(url, &ctx.helpers, &ctx.client_env).unwrap_or_default()
+        crate::netrc::resolve_auth_headers(url, &ctx.helpers, &ctx.client_env)?
     } else {
         Vec::new()
     };

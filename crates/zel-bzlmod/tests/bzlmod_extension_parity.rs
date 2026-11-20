@@ -186,6 +186,35 @@ fn netrc_and_credential_helper_auth_headers() {
             hdrs2,
             vec![("Authorization".to_string(), "Bearer TOKEN".to_string())]
         );
+
+        let empty_helper = dir.join("empty_helper.sh");
+        std::fs::write(&empty_helper, "#!/bin/sh\ncat >/dev/null\necho '{}'\n").unwrap();
+        std::fs::set_permissions(&empty_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let hdrs_empty = resolve_auth_headers(
+            "https://example.com/modules/a/1.0/MODULE.bazel",
+            &[("example.com".to_string(), empty_helper)],
+            &env,
+        )
+        .unwrap();
+        assert!(
+            hdrs_empty.is_empty(),
+            "matching helper returning empty headers must not fall back to .netrc: {hdrs_empty:?}"
+        );
+
+        let fail_helper = dir.join("fail_helper.sh");
+        std::fs::write(
+            &fail_helper,
+            "#!/bin/sh\ncat >/dev/null\necho 'denied' >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fail_helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let err = resolve_auth_headers(
+            "https://example.com/modules/a/1.0/MODULE.bazel",
+            &[("example.com".to_string(), fail_helper)],
+            &env,
+        )
+        .unwrap_err();
+        assert!(err.contains("denied"), "{err}");
     }
 
     let _ = std::fs::remove_dir_all(&dir);

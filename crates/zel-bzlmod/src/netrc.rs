@@ -319,7 +319,7 @@ fn run_credential_helper(
 
 /// Resolves headers for `url` from configured `--credential_helper` entries.
 ///
-/// Mirrors `CredentialHelperCredentials.getCredentialsFromHelper`:
+/// Mirrors `CredentialHelperCredentials.getCredentialsFromHelper` (`CredentialHelperCredentials.java:57-97`):
 /// - `Ok(Some(headers))` when a configured helper matches `url`'s host (even if
 ///   `headers` is empty `{}` or contains no `Authorization` header);
 /// - `Ok(None)` when no configured helper matches `url`;
@@ -334,6 +334,14 @@ pub fn resolve_credential_helper_headers(
         Some(helper) => run_credential_helper(helper, url, client_env).map(Some),
         None => Ok(None),
     }
+}
+
+/// Convenience wrapper for [`resolve_credential_helper_headers`] with an empty `client_env`.
+pub fn resolve_credential_helper_opt(
+    url: &str,
+    helpers: &[(String, PathBuf)],
+) -> Result<Option<Vec<(String, String)>>, String> {
+    resolve_credential_helper_headers(url, helpers, &BTreeMap::new())
 }
 
 /// Resolves fallback `.netrc` `Authorization` header for `url` (`Basic base64(login:password)`
@@ -355,11 +363,8 @@ pub fn resolve_netrc_headers(
     Vec::new()
 }
 
-/// Resolves auth headers for `url` using `--credential_helper` (highest priority) or `.netrc`.
-///
-/// Mirrors `CredentialHelperCredentials.getRequestMetadata`: when a `--credential_helper`
-/// matches `url`, its response headers are returned directly without falling back to `.netrc`
-/// (even when the helper returns `{}` or only non-`Authorization` headers).
+/// Resolves auth headers for `url` using `--credential_helper` (when a helper matches `url`) or
+/// falling back to `.netrc` only when no helper matches (`CredentialHelperCredentials.java:68-76`).
 pub fn resolve_auth_headers(
     url: &str,
     helpers: &[(String, PathBuf)],
