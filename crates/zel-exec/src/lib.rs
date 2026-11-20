@@ -2109,9 +2109,9 @@ pub fn execute_action_with(
                 .then(|| "CONSTANT_METADATA".to_string())
         } else if unresolved_symlink_inputs.contains(p) {
             let target = execroot.get_relative_str(p);
-            fs.read_symbolic_link(&target)
+            fs.read_symbolic_link_raw(&target)
                 .ok()
-                .map(|t| digest.hex(t.path_string().as_bytes()))
+                .map(|t| digest.hex(t.as_bytes()))
         } else if let Some(fc) = &opts.file_cache {
             if let Some(src_art) = source_by_exec.get(p) {
                 match fc.get_artifact_metadata(src_art) {
@@ -2180,9 +2180,9 @@ pub fn execute_action_with(
         let p = abs(&o.exec_path);
         let rel = o.exec_path.path_string();
         if o.is_unresolved_symlink {
-            fs.read_symbolic_link(&p)
+            fs.read_symbolic_link_raw(&p)
                 .ok()
-                .map(|t| digest.hex(t.path_string().as_bytes()))
+                .map(|t| digest.hex(t.as_bytes()))
         } else {
             hybrid_path_digest(digest, fs, execroot, rel, remote_runner, check_ttl)
         }
@@ -2493,9 +2493,7 @@ pub fn execute_action_with(
                         || (fs.stat(&pf, false).is_ok_and(|st| st.is_symlink)
                             && !fs.exists(&pf, true));
                     if is_unresolved {
-                        fs.read_symbolic_link(&pf)
-                            .ok()
-                            .map(|t| t.path_string().to_string())
+                        fs.read_symbolic_link_raw(&pf).ok()
                     } else {
                         None
                     }

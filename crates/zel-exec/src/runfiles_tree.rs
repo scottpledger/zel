@@ -170,12 +170,17 @@ where
             }
         }
     }
+    let exec_root_pf = PathFragment::create(&zel_vfs::strip_windows_nt_prefix(
+        &exec_root.to_string_lossy(),
+    ));
     all.into_iter()
         .map(|(k, v)| {
             let resolved = if v.is_empty() {
                 String::new()
             } else {
-                let is_abs = Path::new(&v).is_absolute() || v.starts_with('/');
+                let v_pf = PathFragment::create(&zel_vfs::strip_windows_nt_prefix(&v));
+                let is_abs =
+                    Path::new(&v).is_absolute() || v.starts_with('/') || v_pf.is_absolute();
                 let abs_path = if is_abs {
                     PathBuf::from(&v)
                 } else {
@@ -184,11 +189,11 @@ where
                 if let Some(raw_target) =
                     read_unresolved_target(&abs_path, unresolved_symlink_paths.contains(&v))
                 {
-                    raw_target
+                    zel_vfs::normalize_raw_symlink_target(&raw_target)
                 } else if is_abs {
-                    v
+                    v_pf.path_string().to_string()
                 } else {
-                    abs_path.to_string_lossy().into_owned()
+                    exec_root_pf.get_relative(&v_pf).path_string().to_string()
                 }
             };
             (k, resolved)
@@ -225,7 +230,7 @@ pub fn resolve_manifest_entries(
             if is_unresolved {
                 std::fs::read_link(abs_path)
                     .ok()
-                    .map(|t| t.to_string_lossy().into_owned())
+                    .map(|t| zel_vfs::normalize_raw_symlink_target(&t.to_string_lossy()))
             } else {
                 None
             }
@@ -292,7 +297,12 @@ pub fn build_runfiles_tree(
         let target = if v.is_empty() {
             None
         } else {
-            Some(PathFragment::create(v))
+            let pf = PathFragment::create(v);
+            if pf.is_empty() {
+                Some(PathFragment::create_already_normalized("."))
+            } else {
+                Some(pf)
+            }
         };
         symlink_map.insert(PathFragment::create(k), target);
     }
@@ -465,7 +475,7 @@ mod tests {
         }
         assert!(m.contains(&format!(
             "_main/pkg/data.txt {}",
-            root.join("pkg/data.txt").display()
+            PathFragment::create(&root.join("pkg/data.txt").to_string_lossy())
         )));
         assert!(std::path::Path::new(&format!("{}.runfiles_manifest", exe.display())).exists());
         // Stale entry removed on rebuild, and MANIFEST remains a symlink even when input_manifest exists.
